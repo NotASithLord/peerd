@@ -1661,20 +1661,28 @@ const ensureOffscreen = async () => {
   }
 };
 
+// why gate on offscreen availability: Firefox has no chrome.offscreen, so the
+// offscreen-hosted job/pdf workers can never run there. Injecting null (not a
+// live client) makes the tools' own `if (!client) return *_unavailable` guard
+// trip — so js_run/read_pdf report a clean "not supported in this build" signal
+// the agent can act on, instead of dispatching a job message no context answers
+// and surfacing an opaque "headless job failed".
+const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+
 // The headless-JS client (the js_run tool). execHeadless ensures the offscreen
 // doc, then dispatches a 'job/run' message to job-runner.js hosted there.
 // Defined after ensureOffscreen; buildToolContext reads it lazily at dispatch.
-const jsOffscreenClient = makeOffscreenJsClient({
+const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
-});
+}) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
-const pdfOffscreenClient = makeOffscreenPdfClient({
+const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
-});
+}) : null;
 
 // ── Local WebGPU runner bridge (FEATURE-LOCAL-WEBGPU B / M1) ────────────────
 // The local-webgpu adapter generates by calling generateLocalForAdapter, which

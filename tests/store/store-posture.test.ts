@@ -93,6 +93,16 @@ describe('store manifest posture', () => {
     expect(firefox.permissions ?? []).not.toContain('debugger');
     expect(firefox.optional_permissions ?? []).not.toContain('debugger');
   });
+
+  test('firefox manifest strips Chromium-only COEP/COOP keys (AMO-clean)', () => {
+    // Firefox doesn't honor these as manifest keys; left in, they're dead
+    // weight an AMO validator can flag. Chrome keeps them (cross-origin
+    // isolation for CheerpX) — assert that's still true.
+    expect(firefox.cross_origin_embedder_policy).toBeUndefined();
+    expect(firefox.cross_origin_opener_policy).toBeUndefined();
+    expect(manifest.cross_origin_embedder_policy).toBeDefined();
+    expect(manifest.cross_origin_opener_policy).toBeDefined();
+  });
 });
 
 describe('store feature flags', () => {
