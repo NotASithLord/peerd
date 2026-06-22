@@ -176,6 +176,9 @@
  * @property {SideEffect} sideEffect
  * @property {string} [actionClass]   Plan/Act action class driving the prompt
  *                                    (workspace_write | shell | external)
+ * @property {string | null} [sessionId]   chat the prompt belongs to — lets the
+ *                                    coordinator decline a session's pending
+ *                                    confirms when its turn is aborted
  */
 
 /**

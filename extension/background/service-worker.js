@@ -2136,7 +2136,10 @@ vault.subscribe(() => { pushState(); });
 // slots also back auto-memory's isBusy gate and pushState's streaming
 // flag. (Replaced the global single-slot AbortController, 2026-06-12 —
 // it killed chat A's stream the moment the user sent in chat B.)
-const turnSlots = makeTurnSlots();
+// onAbort: when a session's turn is aborted (steer-live or Stop), decline any
+// confirm it's parked on — otherwise the parked turn would run the cancelled
+// side-effect after its 120s confirm timeout and double-write the session.
+const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSession(sid) });
 
 // The agent turn driver (runAgentTurn + maybeAutoResume) lives in
 // peerd-runtime/loop/turn-driver.js now — ~530 lines of turn orchestration

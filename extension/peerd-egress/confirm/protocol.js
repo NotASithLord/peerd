@@ -120,6 +120,27 @@ export const makeConfirmCoordinator = ({
     for (const id of ids) { try { onSettled(id); } catch { /* best-effort */ } }
   };
 
+  /**
+   * Decline (settle to 'no') every pending prompt for ONE session — called when
+   * that session's turn is aborted (Stop / steer-live). why: a turn parked on
+   * ctx.confirm() when the user aborts must NOT later run the side-effecting tool
+   * the user just cancelled, and must not stay parked for the full timeout while
+   * a steered turn writes the same session. Settling to 'no' unblocks the old
+   * turn straight into its abort exit, performing nothing. First-settle-wins (the
+   * settle guard): a user 'yes' that already landed is honored and this no-ops;
+   * otherwise 'no' wins and a late 'yes' for that id is dropped. Session-scoped —
+   * a Stop in one chat never touches a pending confirm in another.
+   *
+   * @param {string | null | undefined} sessionId
+   */
+  const declineSession = (sessionId) => {
+    if (sessionId == null) return;
+    // snapshot: settle() mutates `pending` as it resolves each promise.
+    for (const { settle, prompt } of [...pending.values()]) {
+      if (prompt.sessionId === sessionId) settle('no');
+    }
+  };
+
   // The most-recently-raised un-settled prompt — replayed to a surface that
   // connects AFTER it was broadcast (DESIGN-12 late-joiner; the state snapshot
   // does NOT carry confirm state, which flows on the confirm/* channel).
@@ -130,5 +151,5 @@ export const makeConfirmCoordinator = ({
     return last;
   };
 
-  return { confirm, resolve, reset, getPending };
+  return { confirm, resolve, reset, declineSession, getPending };
 };
