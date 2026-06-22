@@ -2221,6 +2221,9 @@ button.icon:hover { background: var(--bg); }
  * state. The prompts are the menu items for now; later this surface
  * presents recipes / workflows. */
 .empty-state { width: min(100%, 360px); }
+/* Home full-tab surface: the starter grid goes 3-across (vs the panel's
+   2-across), so widen the container to keep the tiles a comfortable size. */
+.empty-state--home { width: min(100%, 560px); }
 
 .path-menu {
   display: grid;
@@ -2229,6 +2232,9 @@ button.icon:hover { background: var(--bg); }
   margin-top: 16px;
   width: 100%;
 }
+/* Home surface: 3 columns (the six prompts read as 3×2) — the panel keeps the
+   narrow 2-column default above (2×3). */
+.path-menu--home { grid-template-columns: repeat(3, 1fr); }
 .path-card {
   --path-accent: var(--accent);   /* per-type override below */
   display: flex;
