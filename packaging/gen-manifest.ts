@@ -36,7 +36,13 @@ const PREVIEW_PUBKEY_FILE = join(MANIFESTS_DIR, 'preview-chrome-key.pub');
 // Keys Chrome doesn't know (would log warnings on load) get stripped from
 // chromium manifests; keys Chrome owns get stripped from Firefox ones.
 const FIREFOX_ONLY_KEYS = ['browser_specific_settings', 'sidebar_action'];
-const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel', 'sandbox'];
+// COEP/COOP are Chromium-only MANIFEST keys (they cross-origin-isolate
+// extension pages so CheerpX gets SharedArrayBuffer). Firefox doesn't honor
+// them as manifest keys — left in, they're dead weight an AMO validator can
+// flag. (The WebVM is already non-functional on Firefox without isolation;
+// stripping the keys just keeps the manifest clean.)
+const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel', 'sandbox',
+  'cross_origin_embedder_policy', 'cross_origin_opener_policy'];
 
 // Permissions Firefox doesn't implement. Stripping them keeps AMO
 // validation clean; Firefox runtime parity is its own workstream — the
