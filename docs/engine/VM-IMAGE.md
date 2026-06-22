@@ -246,7 +246,7 @@ Consequences, stated as rules:
    in-place migration exists or should be promised.
 4. The known inefficiency stands: base blocks cache **per-VM** (each
    overlay re-downloads/re-caches the same image blocks). That's the
-   pre-existing `TODO(shared-base-cache)` in vm-tab.js / ROADMAP.md
+   pre-existing `TODO(shared-base-cache)` in vm-tab.js
    ("Shared WebVM base-image cache") — unchanged by this work, just
    slightly more annoying with a bigger custom image.
 

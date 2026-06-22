@@ -2,8 +2,8 @@
 
 Primary docs live at the **project root**, not here:
 `CLAUDE.md` (read first), `ARCHITECTURE.md`, `ARCHITECTURE-CHANGES.md`,
-`ROADMAP.md`, `STATUS.md`, `TODO.md`, `PACKAGING.md`, `SECURITY.md`,
-`DESIGN.md` (the V1 design record).
+`STATUS.md`, `TODO.md`, `PACKAGING.md`, `SECURITY.md`, `DESIGN.md` (the
+V1 design record).
 
 This folder holds supporting material — recorded decisions and
 per-feature design docs:
@@ -25,8 +25,8 @@ per-feature design docs:
 - **`skills/`** — progressive-disclosure skills (feature 07).
 - **`store/`** — Chrome Web Store posture: listing copy, permission
   justifications, privacy doc, reviewer notes, open decisions.
-- **`distributed/`** — dweb scope: `ROADMAP.md` (supersedes the root
-  roadmap's dweb phasing) and `THREAT-MODEL.md` (dweb-scoped).
+- **`distributed/`** — dweb scope: `ROADMAP.md` (the dweb phasing) and
+  `THREAT-MODEL.md` (dweb-scoped).
 - **`specs/`** — the consolidated home for feature specs and their design
   records: forward-looking designs, landed records (kept as history), and
   the research that fed them. See `specs/README.md` for the indexed list.

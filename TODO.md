@@ -5,7 +5,7 @@ items roughly ordered by sequence.
 
 Architecture is in `ARCHITECTURE.md`. Recent breaking changes in
 `ARCHITECTURE-CHANGES.md`. Per-decision rationale in `docs/DECISIONS.md`.
-Forward-looking phases in `ROADMAP.md`.
+Planned work and backlog live in GitHub Issues.
 
 ---
 
@@ -100,7 +100,7 @@ the host runs in the VM tab, and the agent drives it via
 (the tool is `vm_boot`, not the old working name `vm_run`). See Done.
 
 Current focus: the **2026-06-12 roadmap wave** — working the entire
-`ROADMAP.md` backlog top to bottom. Landed so far: trust-mode removal
+backlog (GitHub Issues) top to bottom. Landed so far: trust-mode removal
 (+ Plan URL-load carve-out, DECISIONS #16), header declutter, Ollama
 adapter + GPU-fit recommendation, audit retention cap, vault blob →
 IDB, boot-console shell restyle, DESIGN-09 (undo/redo: don't build),
@@ -181,8 +181,8 @@ stub (obviated — the skills system shipped as feature 07).
 ## 🔭 Later
 
 Versions are no longer pinned in advance (0.x until the surface
-stabilizes — see the ROADMAP header). The single source of truth for
-everything not on this board is **`ROADMAP.md` → Backlog**; the dweb
+stabilizes). The single source of truth for
+everything not on this board is **GitHub Issues**; the dweb
 research track lives in `docs/distributed/ROADMAP.md`.
 
 ## ✅ Done — recent first

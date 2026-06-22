@@ -76,7 +76,7 @@ It is canonicalized and hashed like every other field.
   TRAVELS, so an import pins the base image BEFORE first boot:
   receiver integrity is strictly stronger than a fresh local VM.
   `files` reserved for a future `/setup.sh` seed. A faithful
-  `vm-overlay` type is documented-deferred (ROADMAP backlog), not
+  `vm-overlay` type is documented-deferred (deferred / backlog), not
   designed-by-accident here.
 
 ## Size + safety rails

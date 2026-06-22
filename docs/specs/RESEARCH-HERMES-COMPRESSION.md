@@ -3,8 +3,8 @@
 > **Status:** research spike (no code changes). Maps the Hermes Agent
 > context-compression design onto peerd's existing trim/rolling-summary
 > stack, then recommends what's worth adopting and what peerd already does
-> better. Feeds the `ROADMAP.md` backlog item *"Lineage-based context
-> compression for very long sessions."*
+> better. Feeds the lineage-based context-compression work for very long
+> sessions.
 >
 > **Provenance:** built from PUBLIC descriptions only — Nous Research's
 > Hermes Agent docs/wiki, a public GitHub issue (`NousResearch/hermes-agent#499`),

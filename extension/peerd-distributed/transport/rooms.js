@@ -313,13 +313,17 @@ export const joinRoom = async ({
   let reconnectTimer = null;
   let backoffMs = 2_000;
   const RECONNECT_MAX_MS = 30_000;
-  // Consecutive failed reconnects. The first couple are the EXPECTED transient —
-  // a CF Worker cold start / Durable-Object eviction race / edge reset that the
-  // backoff rides through — so they log at debug. A PERSISTENT outage (the node
-  // actually down) escalates to a warning with the streak count, so a real
-  // problem is loud while the normal cold-start blip stays quiet.
-  let reconnectFailures = 0;
-  const QUIET_RECONNECTS = 2;
+  // A failed reconnect is almost always the EXPECTED transient — a CF Worker
+  // cold start / Durable-Object eviction race / edge reset that the backoff
+  // rides through — so each attempt only logs at debug. We escalate to a
+  // WARNING only when the outage PERSISTS past OUTAGE_WARN_MS (the node is
+  // genuinely down, not a blip), and only once per outage — a transient that
+  // recovers never warns. On recovery after a warned outage we log that it's
+  // back, so the warning isn't left dangling.
+  const OUTAGE_WARN_MS = 60_000;
+  let reconnectFailures = 0;   // attempts in the current streak (for the debug line)
+  let outageSince = 0;         // ms timestamp of the streak's first failure (0 = connected)
+  let outageWarned = false;    // already warned about the current outage?
 
   const connectRendezvous = async () => {
     if (left) return;
@@ -330,7 +334,11 @@ export const joinRoom = async ({
     session = s;
     setStatus('up');
     backoffMs = 2_000;                                  // reset on a clean connect
+    // If we'd warned this was a real outage, close the loop now that it's back.
+    if (outageWarned) dlog('room', `rendezvous recovered after ${Math.round((Date.now() - outageSince) / 1000)}s`);
     reconnectFailures = 0;                              // clean connect — forget the streak
+    outageSince = 0;
+    outageWarned = false;
     const { dial } = attachSession(session);
     if (session.members.length === 0) dlog('room', 'first one here — waiting for others to join and offer');
     else dlog('room', `${session.members.length} member(s) here — dialing each:`, session.members);
@@ -344,9 +352,17 @@ export const joinRoom = async ({
       reconnectTimer = null;
       connectRendezvous().catch((e) => {
         reconnectFailures += 1;
-        // Quiet the expected transient, surface a persistent outage (with the count).
-        const log = reconnectFailures <= QUIET_RECONNECTS ? dlog : dwarn;
-        log('room', `rendezvous reconnect failed (attempt ${reconnectFailures}): ${e?.message ?? e} — retrying`);
+        if (!outageSince) outageSince = Date.now();
+        const downMs = Date.now() - outageSince;
+        // Stay quiet while the backoff rides out the expected transient; warn
+        // once the outage has truly persisted, and only once per outage — a
+        // blip that recovers before OUTAGE_WARN_MS never surfaces a warning.
+        if (!outageWarned && downMs >= OUTAGE_WARN_MS) {
+          outageWarned = true;
+          dwarn('room', `rendezvous unreachable for ${Math.round(downMs / 1000)}s (${reconnectFailures} attempts): ${e?.message ?? e} — still retrying`);
+        } else {
+          dlog('room', `rendezvous reconnect failed (attempt ${reconnectFailures}): ${e?.message ?? e} — retrying`);
+        }
         backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS); // grow only on a real failed attempt
         scheduleReconnect();
       });

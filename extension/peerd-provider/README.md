@@ -147,7 +147,7 @@ the `Authorization` header, and never handed to any sandbox. See
 
 ## TODO / backlog
 
-These come from [`ROADMAP.md`](../../ROADMAP.md) and
+These come from GitHub Issues and
 [`docs/LOCAL-INFERENCE.md`](../../docs/LOCAL-INFERENCE.md); they are not
 version-pinned.
 

@@ -11,7 +11,7 @@
 > 0.x with no "V1"/"V2" commitment; and `peerd-distributed` is now a live
 > offscreen mesh + DHT + p2p app store, not "mostly empty".
 >
-> **Companion to:** `DESIGN.md` (V1 architecture) and `ROADMAP.md` (V1.1+).
+> **Companion to:** `DESIGN.md` (V1 architecture).
 > **Audience:** Claude Code. This doc supersedes the file-layout sections of
 > the V1 design doc — wherever this and the V1 doc disagree on directory
 > structure or module organization, this doc wins. Behavioral and security
@@ -456,7 +456,7 @@ peerd-runtime/
 │   ├── modes.js             # Read | Act definitions and policies
 │   └── policy.js            # decideAction — pure function: persona + tool → allow|deny
 ├── tools/
-│   ├── registry.js          # tool registration (Layer 1 of §2.3 in V1.1 ROADMAP)
+│   ├── registry.js          # tool registration (Layer 1 of §2.3)
 │   ├── exposure.js          # tool exposure manifest per session (V1.3)
 │   ├── dispatcher.js        # the security middleware composition
 │   ├── prompt-wrap.js       # <untrusted_web_content> wrapping for web tools

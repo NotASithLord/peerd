@@ -4,8 +4,8 @@
 conditions and a concrete build plan below, so the next evaluation
 starts from evidence, not memory).
 
-This is the deep study behind the ROADMAP's deferred
-"local in-browser inference" entry. Ecosystem claims were verified
+This is the deep study behind the deferred
+"local in-browser inference" entry (backlog). Ecosystem claims were verified
 against current sources in June 2026 (links at the end).
 
 ---

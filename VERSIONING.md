@@ -3,8 +3,8 @@
 > How peerd is versioned and released. Short version: **stay 0.x while
 > the surface is still moving; the minor is the progress counter; the
 > channel is an orthogonal axis you already ship.** Pair with
-> `ROADMAP.md` (what's shipped vs. backlog) and `CHANGELOG.md` (the
-> per-release record).
+> `FEATURES.md` (what's shipped), GitHub Issues (the backlog), and
+> `CHANGELOG.md` (the per-release record).
 
 peerd is **0.x — experimental preview**. The version is a single source
 of truth in `package.json`; `packaging/gen-manifest.ts` injects it into
@@ -27,8 +27,7 @@ settling. This is the same posture Bun held pre-1.0 and the Nous
 
 `1.0` is a *deliberate, earned* signal — "the surface is stable, depend
 on it." We spend it **once**, when the tool/storage/permission surface
-stops breaking under us. Until then: 0.x. `ROADMAP.md` already commits
-to this; this file is the mechanism.
+stops breaking under us. Until then: 0.x. This file is the mechanism.
 
 ### 2. Progress counter — `MINOR` = milestone, `PATCH` = fixes
 

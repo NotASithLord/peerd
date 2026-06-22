@@ -160,7 +160,7 @@ In-code TODOs:
 - `confirm/protocol.js` — a persistent, origin-scoped `tool_grants`
   store (vs. today's session-only, origin-blind grants).
 
-From [`ROADMAP.md`](../../ROADMAP.md):
+Backlog (tracked in GitHub Issues):
 
 - **Multi-profile** — per-profile vault namespacing (its own KEK),
   denylist, skills, memory, and sessions, plus encrypted profile

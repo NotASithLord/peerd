@@ -2,8 +2,7 @@
 
 > The itemized **what's shipped** list, categorized by the five brand
 > modules plus the chassis. One line per feature; the source dir is in
-> backticks. For the (version-free) backlog see `ROADMAP.md`; for
-> one-screen orientation see `MAP.md`, then `CLAUDE.md`.
+> backticks. For one-screen orientation see `MAP.md`, then `CLAUDE.md`.
 >
 > `peerd-distributed/` (the dweb) is **preview-channel only** — the store
 > package prunes the whole module, so every dweb feature below is absent

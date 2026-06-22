@@ -12,9 +12,11 @@
 // Export reuses the existing export/artifact route (a .peerd bundle —
 // the same content-addressed format the dweb transfers).
 //
-// Brand rule: monochrome — state is carried by glyph, not color (the
-// favorite star is filled ★ / outline ☆, the delete control a plain ✕).
-// Error red is the lone semantic color.
+// Brand rule: an otherwise-monochrome surface with the sanctioned splash of
+// brand color (owner direction 2026-06-22) — each app's avatar carries one of
+// the five brand hues (stable per id), and the favorite star turns amber-gold
+// when set. Everything else stays grayscale; error red is the lone semantic
+// color, and glyphs (★/☆, ⋯) still do most of the state-carrying.
 
 import m from '/vendor/mithril/mithril.js';
 
@@ -32,6 +34,18 @@ import m from '/vendor/mithril/mithril.js';
  * @property {boolean} [shared]
  * @property {any} [dweb]
  */
+
+// p·cyan e·red e·amber r·green d·magenta — each app's avatar gets ONE brand
+// hue. why deterministic (hash of id) rather than the per-session-random peer
+// colors: an app sits still in the grid, so its color should be stable across
+// refreshes and reloads — a quiet identity, not a flicker.
+const BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
+/** @param {string} [key] */
+const colorOf = (key) => {
+  let h = 0;
+  for (const ch of String(key || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return BRAND[h % BRAND.length];
+};
 
 /** @param {number} [ms] */
 const fmtWhen = (ms) => {
@@ -114,12 +128,29 @@ export const LibrarySection = {
     if (vnode.attrs.dweb) {
       vnode.state._updTimer = setInterval(() => { if (!document.hidden) LibrarySection.refreshUpdates(vnode); }, 8000);
     }
+    // Auto-refresh the catalog itself: it changes out from under the page —
+    // the agent builds an app, a headless job finishes, another tab renames
+    // one. Poll quietly so the grid stays live without a manual ↻. Paused when
+    // the tab's hidden (pointless) and skipped mid-interaction (an open menu /
+    // live rename / share dialog / armed delete would be clobbered by a swap).
+    vnode.state._listTimer = setInterval(() => {
+      const s = vnode.state;
+      if (document.hidden || s.menuOpenId || s.renamingId || s.shareEditId || s.armedDeleteId || s.busyId) return;
+      LibrarySection.quietRefresh(vnode);
+    }, 15000);
+    // Returning to the tab should feel current at once, not after the next tick.
+    vnode.state._onVisible = () => { if (!document.hidden) LibrarySection.quietRefresh(vnode); };
+    document.addEventListener('visibilitychange', vnode.state._onVisible);
+    window.addEventListener('focus', vnode.state._onVisible);
   },
   /** @param {{ state: any }} vnode */
   onremove(vnode) {
     document.removeEventListener('mousedown', vnode.state._onDocDown);
     window.removeEventListener('peerd:app-installed', vnode.state._onInstalled);
+    document.removeEventListener('visibilitychange', vnode.state._onVisible);
+    window.removeEventListener('focus', vnode.state._onVisible);
     if (vnode.state._updTimer) clearInterval(vnode.state._updTimer);
+    if (vnode.state._listTimer) clearInterval(vnode.state._listTimer);
   },
 
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
@@ -127,11 +158,25 @@ export const LibrarySection = {
     // why: clearing the error here is what lets the Refresh button (which
     // is the only control rendered on the error screen) recover the view.
     vnode.state.error = null;
+    vnode.state.refreshing = true;          // drives the ↻ spin until it lands
     vnode.attrs.send({ type: 'apps/list' }).then((/** @type {any} */ r) => {
       if (r?.ok) vnode.state.apps = r.apps ?? [];
       else vnode.state.error = r?.error ?? 'failed to load apps';
-      m.redraw();
-    }).catch((/** @type {unknown} */ e) => { vnode.state.error = /** @type {{ message?: string }} */ (e)?.message ?? 'failed to load apps'; m.redraw(); });
+    }).catch((/** @type {unknown} */ e) => { vnode.state.error = /** @type {{ message?: string }} */ (e)?.message ?? 'failed to load apps'; })
+      .finally(() => { vnode.state.refreshing = false; m.redraw(); });
+    LibrarySection.refreshUpdates(vnode);
+  },
+
+  // The background poll's refetch: unlike refresh(), it never blanks the grid
+  // to a spinner or clears a live mutation error — it swaps in the new list on
+  // success and stays SILENT on failure (the manual ↻ is the loud path). Skips
+  // when a manual refresh is already in flight so the two don't stack.
+  /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
+  quietRefresh(vnode) {
+    if (vnode.state.refreshing) return;
+    vnode.attrs.send({ type: 'apps/list' }).then((/** @type {any} */ r) => {
+      if (r?.ok && Array.isArray(r.apps)) { vnode.state.apps = r.apps; m.redraw(); }
+    }).catch(() => { /* quiet — best-effort background sync */ });
     LibrarySection.refreshUpdates(vnode);
   },
 
@@ -306,14 +351,20 @@ export const LibrarySection = {
       m('p.muted', { style: 'margin:0; font-size:12px;' },
         ui.apps ? `${ui.apps.length} app${ui.apps.length === 1 ? '' : 's'}` : ''),
       m('.spacer', { style: 'flex:1;' }),
-      m('button.icon', {
+      m('button.icon.library-star', {
         title: ui.favOnly ? 'Show all apps' : 'Show favorites only',
         'aria-pressed': String(ui.favOnly),
-        // Monochrome by brand rule — the filled/outline glyph carries
-        // state, not color (error red is the lone semantic color).
+        // The glyph (filled ★ / outline ☆) carries the state; the amber-gold
+        // fill when active is the sanctioned splash of brand color, not a new
+        // semantic axis.
+        class: ui.favOnly ? 'is-on' : '',
         onclick: () => { ui.favOnly = !ui.favOnly; },
       }, ui.favOnly ? '★' : '☆'),
-      m('button.icon', { title: 'Refresh', onclick: () => LibrarySection.refresh(vnode) }, '↻'),
+      m('button.icon.library-refresh', {
+        title: 'Refresh',
+        class: ui.refreshing ? 'is-spinning' : '',
+        onclick: () => LibrarySection.refresh(vnode),
+      }, '↻'),
     ]);
 
     // A LOAD failure (nothing to show) gets the full error screen; a
@@ -337,18 +388,18 @@ export const LibrarySection = {
         const hay = `${a.name} ${(a.tags || []).join(' ')}`.toLowerCase();
         return hay.includes(q);
       })
-      // Favorites float to the top; then most-recently-touched first.
-      .sort((/** @type {App} */ a, /** @type {App} */ b) => (Number(b.favorite) - Number(a.favorite))
+      // Built-in seed apps pin to the top; then favorites; then most-recently-touched.
+      .sort((/** @type {App} */ a, /** @type {App} */ b) => (Number(!!b.dweb?.seed) - Number(!!a.dweb?.seed))
+        || (Number(b.favorite) - Number(a.favorite))
         || ((b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
 
     return m('div', [
       header,
       banner,
-      m('input.log-filter-query', {
+      m('input.library-search', {
         type: 'search',
         placeholder: 'Filter apps… (name, tag)',
         'aria-label': 'Filter apps',
-        style: 'width:100%; margin:0 0 12px;',
         value: ui.query,
         oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.query = e.target.value; },
       }),
@@ -372,7 +423,7 @@ export const LibrarySection = {
 
     return m('.library-card', { key: app.id }, [
       m('.library-head', [
-        m('.library-avatar', { 'aria-hidden': 'true' }, (app.name || '?').trim().charAt(0) || '?'),
+        m('.library-avatar', { style: `background:${colorOf(app.id || app.name)}`, 'aria-hidden': 'true' }, (app.name || '?').trim().charAt(0) || '?'),
         m('div', { style: 'flex:1; min-width:0;' }, [
           renaming
             ? m('input', {
@@ -386,7 +437,17 @@ export const LibrarySection = {
                 },
                 onblur: () => LibrarySection.commitRename(vnode, app),
               })
-            : m('.library-name', { title: app.name }, app.name),
+            : m('.library-name', { title: app.name }, [
+                app.name,
+                // Built-in marker — a durable, monochrome chip driven off the
+                // immutable dweb.seed field (no new record field needed).
+                app.dweb?.seed
+                  ? m('span', {
+                      title: 'A built-in app, shipped with peerd',
+                      style: 'margin-left:6px; padding:0 5px; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; border:1px solid currentColor; border-radius:4px; opacity:.5; vertical-align:middle;',
+                    }, 'Built-in')
+                  : null,
+              ]),
           m('.muted.library-meta', [
             fmtWhen(app.updatedAt),
             app.source && app.source !== 'local' ? ` · ${app.source}` : '',
@@ -395,6 +456,7 @@ export const LibrarySection = {
         m('button.icon.library-star', {
           title: app.favorite ? 'Unfavorite' : 'Favorite',
           'aria-pressed': String(!!app.favorite),
+          class: app.favorite ? 'is-on' : '',
           onclick: () => LibrarySection.toggleFavorite(vnode, app),
         }, app.favorite ? '★' : '☆'),
       ]),
@@ -404,7 +466,7 @@ export const LibrarySection = {
       // A peer published a newer version of this installed app — flag it, the
       // Update button below pulls it.
       ui.updates[app.id]
-        ? m('.library-update-badge', { style: 'font-size:11px; margin:2px 0 0;' }, '● new version available')
+        ? m('.library-update-badge', '● new version available')
         : null,
       // One primary (Open) + a kebab for the secondary actions, so Rename/Export/
       // Delete stop competing with Open for attention. The kebab is ALWAYS shown
