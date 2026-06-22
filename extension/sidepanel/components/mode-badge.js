@@ -95,6 +95,47 @@ export const ModeSelector = {
   },
 };
 
+/**
+ * Loop arming toggle. The mode-row entry point for the Ralph persistent
+ * loop (peerd-runtime/ralph). Until now a loop could only be launched by
+ * typing the undiscoverable `/loop [goal]` slash command; this surfaces it
+ * beside Plan/Act. It is NOT a synchronous state flip like Plan/Act — a
+ * loop is "launch a background run WITH a goal" — so the toggle ARMS the
+ * next send: while ON, sending sends the draft as the loop's goal (the
+ * InputBar routes it through the same /loop path) and the toggle disarms.
+ * The running loop then surfaces in its own RalphPanel, which owns the
+ * stop/status half. Same pill family + accent-when-active as the planact
+ * controls (owner call for this row).
+ *
+ * attrs:
+ *   armed     — whether the next send is armed to launch a loop
+ *   disabled  — no API key yet (the send it arms can't fire)
+ *   onToggle  — flip handler; receives the next armed boolean
+ */
+export const LoopToggle = {
+  /**
+   * @param {{ attrs: {
+   *   armed?: boolean,
+   *   disabled?: boolean,
+   *   onToggle: (next: boolean) => void,
+   * } }} vnode
+   */
+  view: ({ attrs: { armed, disabled, onToggle } }) => {
+    const on = !!armed;
+    return m('button.loop-toggle', {
+      class: on ? 'is-on' : '',
+      disabled: !!disabled,
+      'aria-pressed': String(on),
+      title: on
+        ? 'Loop is armed — your next message starts an autonomous loop on that goal '
+          + '(plan → build → repeat). Click to disarm.'
+        : 'Loop — arm the next message to run as an autonomous loop '
+          + '(plan → build → repeat) instead of a single turn.',
+      onclick: () => onToggle(!on),
+    }, on ? 'Loop: on' : 'Loop');
+  },
+};
+
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**

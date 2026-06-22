@@ -166,7 +166,10 @@ const saveDraft = (sid, text) => {
 /**
  * @typedef {{
  *   state: InputBarState,
- *   attrs: { state: ChatState, send: Send, voiceManager?: any },
+ *   attrs: {
+ *     state: ChatState, send: Send, voiceManager?: any,
+ *     loopArmed?: boolean, onLoopSent?: () => void,
+ *   },
  * }} InputBarVnode
  */
 
@@ -203,7 +206,7 @@ export const InputBar = {
   },
 
   /** @param {InputBarVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, loopArmed, onLoopSent }, state: ui }) => {
     const streaming = !!state.streaming;
     const sid = state.session?.sessionId;
     // Switched chats → save the draft we were holding and load the new chat's.
@@ -225,6 +228,27 @@ export const InputBar = {
       e?.preventDefault?.();
       const text = ui.value.trim();
       if (!text || ui.busy) return;
+
+      // Loop-armed (mode-row toggle): this send launches a Ralph loop with
+      // the draft as its goal instead of a normal turn. Reuses the SW's
+      // `/loop` path — byte-identical to typing "/loop <goal>" — then
+      // disarms via onLoopSent. Attachments don't apply to a loop goal, so
+      // they stay staged for a later normal send.
+      if (loopArmed) {
+        ui.busy = true;
+        ui.value = '';
+        saveDraft(sid, '');
+        ui.transcriptBaseline = '';
+        closePalette(ui);
+        const reply = await send({ type: 'agent/send', text: `/loop ${text}` });
+        ui.busy = false;
+        // Disarm only on a clean launch; on failure restore the draft and
+        // stay armed so the user can retry without re-toggling.
+        if (reply?.ok) onLoopSent?.();
+        else ui.value = text;
+        m.redraw();
+        return;
+      }
 
       // why gate at send too (not just the button): staged files must
       // never ride a send the provider can't honor — e.g. the user
@@ -398,9 +422,11 @@ export const InputBar = {
 
     const placeholder = !hasKey
       ? 'Add an API key in Settings to start.'
-      : streaming
-        ? 'Type to steer the current turn…'
-        : 'Message peerd…';
+      : loopArmed
+        ? 'Describe a goal to loop on…'
+        : streaming
+          ? 'Type to steer the current turn…'
+          : 'Message peerd…';
 
     // aria-activedescendant points at the active option when the palette
     // is open, so screen readers announce the highlighted candidate.
@@ -526,10 +552,13 @@ export const InputBar = {
               m('button.send-btn', {
                 type: 'submit',
                 disabled: !hasKey || ui.busy || !ui.value.trim(),
-                'aria-label': streaming ? 'Send and steer the current turn' : 'Send',
-                title: streaming
-                  ? 'Sending will abort the current turn and continue with your new message'
-                  : 'Send (⌘/Ctrl + Enter)',
+                'aria-label': loopArmed ? 'Start a loop on this goal'
+                  : streaming ? 'Send and steer the current turn' : 'Send',
+                title: loopArmed
+                  ? 'Start an autonomous loop on this goal (plan → build → repeat)'
+                  : streaming
+                    ? 'Sending will abort the current turn and continue with your new message'
+                    : 'Send (⌘/Ctrl + Enter)',
               }, ARROW_ICON()),
             ]),
           ]),

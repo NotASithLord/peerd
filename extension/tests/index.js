@@ -84,6 +84,7 @@ import './unit/sidepanel/denylist-view.test.js';
 import './unit/sidepanel/ralph-panel.test.js';
 import './unit/sidepanel/onboarding-view.test.js';
 import './unit/sidepanel/mode-selector.test.js';
+import './unit/sidepanel/loop-toggle.test.js';
 import './unit/sidepanel/memory-suggestions.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
