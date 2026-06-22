@@ -2725,6 +2725,16 @@ vault.attemptResume().then((resumed) => {
     auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
     pushState();
     maybeStartBaseNetwork('resume');
+    // why: the SW can die MID-TURN; on respawn the DK is back from session
+    // storage but the interrupted turn stays frozen until the user re-opens
+    // the chat. Drive the SAME auto-resume the unlock + session-open routes
+    // use (routes/vault.js) for the session in view — a wake is precisely when
+    // we most want to resume the turn the eviction killed. maybeAutoResume
+    // self-gates on the setting, an interrupted-turn verdict, vault state, the
+    // not-busy slot, and a per-marker dedupe, so firing here is safe even if a
+    // later session-open fires it too.
+    sessionCache.sessionGet('currentSessionId')
+      .then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
   }
   // why: resume an in-flight Ralph run AFTER the vault is back — a run
   // needs unlocked secrets to call the model. If the SW died mid-run, the
