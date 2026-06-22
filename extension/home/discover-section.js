@@ -16,6 +16,18 @@ import m from '/vendor/mithril/mithril.js';
 /** @param {string} [did] */
 const short = (did) => (typeof did === 'string' ? did.slice(-8) : '????????');
 
+// p·cyan e·red e·amber r·green d·magenta — each shared app's avatar gets ONE
+// brand hue, hashed from its dwapp_id so it's stable across re-announces. Same
+// recipe as the Library (library-section.js) so the two home tabs read as one
+// surface — the sanctioned splash of color on a monochrome page.
+const BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
+/** @param {string} [key] */
+const colorOf = (key) => {
+  let h = 0;
+  for (const ch of String(key || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return BRAND[h % BRAND.length];
+};
+
 // Latest record per dwapp_id (re-announcements refresh it).
 /** @param {DwebApp[]} apps */
 const dedupe = (apps) => {
@@ -35,6 +47,10 @@ export const DiscoverSection = () => {
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;
+  let query = '';          // client-side filter over the heard list (name / peer)
+  let refreshing = false;  // drives the manual ↻ spin (the 4s poll stays silent)
+  /** @type {(() => void) | null} */
+  let onVisible = null;    // focus/visibility re-sync handler (removed on teardown)
   /** @type {Record<string, string>} */
   const busy = {};         // dwapp_id -> 'installing' | 'installed' | <error string>
   /** @type {Record<string, string | null>} */
@@ -146,67 +162,128 @@ export const DiscoverSection = () => {
     try { await send({ type: 'apps/open', appId }); } catch { /* surfaced elsewhere */ }
   };
 
+  // The manual ↻: spin while a one-shot re-sync runs. The background 4s poll
+  // stays silent (it would flicker the spinner every tick), so only this path
+  // toggles `refreshing`.
+  /** @param {Send} send */
+  const manualRefresh = async (send) => {
+    refreshing = true; if (!dead) m.redraw();
+    await Promise.allSettled([loadLocal(send), refresh(send)]);
+    refreshing = false; if (!dead) m.redraw();
+  };
+
+  // One heard app as a card — same chrome as a Library card (avatar + name +
+  // meta + a single trailing action), so Discover and the Library read as one
+  // surface. All the install/update/open/mine logic is unchanged from the old
+  // row; only the layout moved into a card.
+  /**
+   * @param {Send} send
+   * @param {DwebApp} app
+   */
+  const card = (send, app) => {
+    const id = app.dwapp_id;
+    if (!id) return null;
+    const state = busy[id];
+    const mine = !!myDid && (app.publisher === myDid || app.from === myDid);
+    const tracked = installedByDwappId.get(id);
+    const localId = installedId[id] || (app.uri ? installedByUri.get(app.uri) : null) || tracked?.appId || null;
+    const installed = state === 'installed' || !!localId;
+    const updatable = !!tracked && !!app.version_id
+      && app.version_id !== tracked.version_id && (app.seq ?? 0) > (tracked.seq ?? 0);
+    const failed = typeof state === 'string' && !['installing', 'installed', 'updating'].includes(state);
+    const label = app.name || id.slice(0, 12);
+
+    // the single trailing action (mirrors the prior row's branch ladder)
+    let action;
+    if (mine) action = m('span.peerd-disc-done', 'in your Library');
+    else if (installed && updatable) action = m('button.disc-open', {
+      disabled: state === 'updating',
+      onclick: () => update(send, app, /** @type {string} */ (localId)),
+    }, state === 'updating' ? 'Updating…' : failed ? 'Retry update' : 'Update');
+    else if (installed) action = localId
+      ? m('button.disc-open', { onclick: () => open(send, localId) }, 'Open ↗')
+      : m('span.peerd-disc-done', 'installed ✓');
+    else action = m('button.disc-open', {
+      disabled: state === 'installing' || !app.uri,
+      onclick: () => install(send, app),
+    }, state === 'installing' ? 'Installing…' : failed ? 'Retry' : 'Install');
+
+    return m('.disc-card', { key: id }, [
+      m('.disc-head', [
+        m('.disc-avatar', { style: `background:${colorOf(id)}`, 'aria-hidden': 'true' }, label.trim().charAt(0) || '?'),
+        m('div', { style: 'flex:1; min-width:0;' }, [
+          m('.disc-name', { title: label }, label),
+          m('.disc-meta', mine ? 'by you' : `from …${short(app.publisher || app.from)}`),
+        ]),
+      ]),
+      updatable && !failed ? m('.disc-update-badge', { title: 'A newer version is available' }, '● update available') : null,
+      failed ? m('p.peerd-disc-err', { style: 'margin:0;' }, state) : null,
+      m('.disc-actions', [action]),
+    ]);
+  };
+
   return {
     /** @param {{ attrs: { send: Send } }} vnode */
     oninit(vnode) { loadLocal(vnode.attrs.send); refresh(vnode.attrs.send); },
     /** @param {{ attrs: { send: Send } }} vnode */
     oncreate(vnode) {
       timer = setInterval(() => { if (!document.hidden) { loadLocal(vnode.attrs.send); refresh(vnode.attrs.send); } }, 4000);
+      // Returning to the tab should re-sync at once, not after the next 4s tick.
+      onVisible = () => { if (!document.hidden) { loadLocal(vnode.attrs.send); refresh(vnode.attrs.send); } };
+      document.addEventListener('visibilitychange', onVisible);
+      window.addEventListener('focus', onVisible);
     },
-    onremove() { dead = true; if (timer) clearInterval(timer); },
+    onremove() {
+      dead = true;
+      if (timer) clearInterval(timer);
+      if (onVisible) { document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('focus', onVisible); }
+    },
     /** @param {{ attrs: { send: Send } }} vnode */
     view(vnode) {
       const send = vnode.attrs.send;
-      if (loading && !apps.length) return m('.peerd-disc', m('.peerd-net-empty', 'Listening for apps your peers are running…'));
-      if (!apps.length) {
-        return m('.peerd-disc', m('.peerd-net-empty',
-          'Nothing shared yet. Share an app from your Library, or ask the agent to build and '
-          + 'share one, and it spreads to your peers. Or wait for one of theirs to arrive.'));
+
+      // Header mirrors the Library: a live count + a manual ↻ (spins while a
+      // re-sync runs). The list also auto-polls every 4s underneath.
+      const header = m('div', { style: 'display:flex; align-items:center; gap:8px; margin:0 0 12px;' }, [
+        m('p.muted', { style: 'margin:0; font-size:12px;' },
+          apps.length ? `${apps.length} shared by peers` : 'Discover'),
+        m('.spacer', { style: 'flex:1;' }),
+        m('button.icon.disc-refresh', {
+          title: 'Refresh',
+          class: refreshing ? 'is-spinning' : '',
+          onclick: () => manualRefresh(send),
+        }, '↻'),
+      ]);
+
+      if (loading && !apps.length) {
+        return m('.peerd-disc', [header, m('.peerd-net-empty', 'Listening for apps your peers are running…')]);
       }
-      return m('ul.peerd-disc-list', apps.map((app) => {
-        // dedupe guarantees every heard app carries a dwapp_id; this keeps that
-        // invariant explicit (it keys the maps + the row) without behavior change.
-        const id = app.dwapp_id;
-        if (!id) return null;
-        const state = busy[id];
-        // mine = WE published it (it's already in our Library, above) — never offer
-        // to install your own app, and credit it to "you", not your did suffix.
-        const mine = !!myDid && (app.publisher === myDid || app.from === myDid);
-        // localId: the Library app this card maps to — this session's install, or
-        // a prior install matched by content uri (survives a hard refresh).
-        const tracked = installedByDwappId.get(id);
-        const localId = installedId[id] || (app.uri ? installedByUri.get(app.uri) : null) || tracked?.appId || null;
-        const installed = state === 'installed' || !!localId;
-        // An update is a newer announce of an app we already installed: a higher seq
-        // pointing at a different version_id than the copy we hold.
-        const updatable = !!tracked && !!app.version_id
-          && app.version_id !== tracked.version_id && (app.seq ?? 0) > (tracked.seq ?? 0);
-        const failed = typeof state === 'string' && !['installing', 'installed', 'updating'].includes(state);
-        return m('li.peerd-disc-row', { key: id }, [
-          m('.peerd-disc-meta', [
-            m('span.peerd-disc-name', app.name || id.slice(0, 12)),
-            m('span.peerd-disc-pub', mine ? 'by you' : `from …${short(app.publisher || app.from)}`),
-            updatable && !failed ? m('span.peerd-disc-badge', { title: 'A newer version is available' }, 'update available') : null,
-            failed ? m('span.peerd-disc-err', state) : null,
-          ]),
-          mine
-            ? m('span.peerd-disc-done', 'in your Library')
-            : installed && updatable
-              ? m('button.peerd-net-btn', {
-                disabled: state === 'updating',
-                // localId is non-null in this branch (updatable ⇒ tracked ⇒ tracked.appId).
-                onclick: () => update(send, app, /** @type {string} */ (localId)),
-              }, state === 'updating' ? 'Updating…' : failed ? 'Retry update' : 'Update')
-              : installed
-                ? (localId
-                  ? m('button.peerd-net-btn', { onclick: () => open(send, localId) }, 'Open ↗')
-                  : m('span.peerd-disc-done', 'installed ✓ — in your Library'))
-                : m('button.peerd-net-btn', {
-                  disabled: state === 'installing' || !app.uri,
-                  onclick: () => install(send, app),
-                }, state === 'installing' ? 'Installing…' : failed ? 'Retry' : 'Install'),
-        ]);
-      }));
+      if (!apps.length) {
+        return m('.peerd-disc', [header, m('.peerd-net-empty',
+          'Nothing shared yet. Share an app from your Library, or ask the agent to build and '
+          + 'share one, and it spreads to your peers. Or wait for one of theirs to arrive.')]);
+      }
+
+      const q = query.trim().toLowerCase();
+      const shown = apps.filter((app) => {
+        if (!q) return true;
+        const hay = `${app.name || ''} ${short(app.publisher || app.from)} ${app.slug || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+
+      return m('.peerd-disc', [
+        header,
+        m('input.disc-search', {
+          type: 'search',
+          placeholder: 'Filter shared apps… (name, peer)',
+          'aria-label': 'Filter shared apps',
+          value: query,
+          oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { query = e.target.value; },
+        }),
+        shown.length === 0
+          ? m('p.muted', 'Nothing matches.')
+          : m('.disc-grid', shown.map((app) => card(send, app))),
+      ]);
     },
   };
 };

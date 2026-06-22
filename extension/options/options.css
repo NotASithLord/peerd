@@ -208,6 +208,38 @@
 .library-menu-item.is-danger { color: var(--danger); }
 .library-menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
 
+/* ── Discover (the dweb app store) — shares the Library's card skeleton ───────
+   so the two home tabs read as one surface: same grid, card, avatar (one brand
+   hue per app, set inline), and update badge. Discover-specific bits: a
+   monospace publisher line and a single trailing install/update/open action.
+   (The flat .peerd-disc-row list below is now Contacts-only.) */
+.disc-search { width: 100%; margin: 0 0 14px; font-size: 13px; }
+.disc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.disc-card {
+  display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 13px 14px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+  transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
+}
+.disc-card:hover { border-color: var(--fg-muted); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
+.disc-head { display: flex; align-items: flex-start; gap: 9px; }
+.disc-avatar {
+  width: 32px; height: 32px; flex: 0 0 auto; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: #0a0a0a; font-weight: 700; text-transform: uppercase; font-size: 14px;
+}
+.disc-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.disc-meta { font-size: 11px; color: var(--fg-muted); font-family: var(--font-mono); }
+.disc-update-badge { font-size: 11px; margin: 2px 0 0; color: var(--accent); display: flex; align-items: center; gap: 5px; }
+.disc-actions { display: flex; align-items: center; gap: 6px; margin-top: auto; }
+.disc-refresh.is-spinning { animation: library-spin 0.85s linear infinite; }
+/* Primary ghost action (Install / Update / Open ↗) — the Library-open recipe. */
+.disc-open {
+  font: inherit; font-size: 12.5px; line-height: 1; padding: 6px 13px; border-radius: var(--radius);
+  border: 1px solid var(--fg-muted); background: transparent; color: var(--fg); font-weight: 600; cursor: pointer;
+}
+.disc-open:hover { background: var(--bg-elev); }
+.disc-open:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ── The Network section (home page, dweb preview only) ──────────────────────
    The peers/network-info view + the animated radial peer graph. Peer dots carry
    their per-did brand color (set inline); everything else is monochrome but for
@@ -309,9 +341,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .pn-self-ring, .pn-edge--connecting, .pn-intro-edge { animation: none; }
-  .library-card { transition: none; }
-  .library-card:hover { transform: none; }
-  .library-refresh.is-spinning { animation: none; }
+  .library-card, .disc-card { transition: none; }
+  .library-card:hover, .disc-card:hover { transform: none; }
+  .library-refresh.is-spinning, .disc-refresh.is-spinning { animation: none; }
 }
 
 /* --- Local models (WebGPU) — rendered inside the Providers & models page -- */
