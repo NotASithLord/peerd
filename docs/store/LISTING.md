@@ -37,10 +37,10 @@ YOUR DATA STAYS YOURS
 
 peerd is local-first and has no backend:
 
-• Bring your own API key (Anthropic in this release). Your key is
-  stored in an encrypted vault on your device — unlocked with a
-  passphrase or Touch ID / Windows Hello — and is only ever sent to
-  your provider.
+• Bring your own AI provider key, or use a configured local provider
+  where supported. Keys are stored in an encrypted vault on your device
+  — unlocked with a passphrase or Touch ID / Windows Hello — and are
+  only ever sent to the provider you selected.
 • Conversations, settings, and history live in your browser's local
   storage. No account, no sync, no analytics, no telemetry.
 • A built-in audit log shows every network request the assistant made,
@@ -51,7 +51,8 @@ GUARDRAILS ON BY DEFAULT
 • peerd refuses to operate on sensitive sites out of the box: banks,
   brokerages, crypto exchanges and wallets, health portals, government
   services, password managers, and identity providers.
-• It cannot reach localhost or your local network.
+• It blocks arbitrary localhost and local-network web access. The local
+  AI-provider path is opt-in and separate from open-web browsing tools.
 • Risky actions ask for your confirmation first.
 
 You'll need an API key from your AI provider to use peerd. peerd is

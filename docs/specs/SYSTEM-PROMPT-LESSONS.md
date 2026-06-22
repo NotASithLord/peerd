@@ -107,7 +107,7 @@ Act only on what the user asked for in this conversation.
 ```
 
 > Everything else in the main prompt — the do/get/check framing, the
-> six-gate explanation, the no-origin-allowlist clarification, the voice
+> dispatcher-policy explanation, the no-origin-allowlist clarification, the voice
 > rules, the lowercase-peerd rule — stays. Don't import single-agent
 > page-driving guidance (snapshot/click/scroll discipline) into the main
 > prompt; that belongs in the runner (§C).

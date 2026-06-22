@@ -112,7 +112,7 @@ shared utilities.
 
 ## `r` peerd-runtime — the agent brain
 
-The streaming tool-using agent loop, the 6-gate dispatcher + tool
+The streaming tool-using agent loop, the policy-gated dispatcher + tool
 inventory, the do/get/check browser runner, sessions, subagents,
 permissions, memory, edit, skills, review, composer, cost, clock, voice,
 transfer, ralph, profiles — pure-core/injected-IO so the SW stays thin.
@@ -124,7 +124,7 @@ transfer, ralph, profiles — pure-core/injected-IO so the SW stays thin.
 - **Long-session context compression** — rolling trim-summary core + post-turn enrichment shell (cheap-call) + lineage body compaction. `loop/trim.js`, `rolling-summary.js`, `summary-enrichment.js`, `lineage-compaction.js`
 - **System prompt + temporal grounding render** — templated assembly with `MEMORY_BLOCK` + clock temporal block. `loop/system-prompt.js`, `clock/context.js`
 - **File attachments (image + PDF)** — pure classify/validate/strip core with size+count caps, shared by SW/side panel/loop, fail-closed. `loop/attachments.js`
-- **Six-gate tool dispatcher** — fixed-order persona→exposure→origin→confirmation→egress→audit; persona/exposure/origin enforce, confirmation async, egress a chain no-op (teeth in hook+`safeFetch`), audit logs all; full lineage on every result. `tools/dispatcher.js`, `gates.js`
+- **Policy-gated tool dispatcher** — runs tool calls through the policy checks and hook chain defined in code; confirmation is async, audit logs all, and every result carries lineage. `tools/dispatcher.js`, `gates.js`, `tools/hooks/`
 - **Tool registry** — register/get/list/clear surface; `index.js` is the module public API. `tools/registry.js`
 - **Built-in tool inventory** — `BUILTIN_TOOLS`: inspect, DOM/page/tab, VM, Notebook (`js_*`), App (`app_*`), `edit_file`, `spawn_subagent`, do/get/check, memory, `request_review`, `read_pdf`, dweb; + clock + web + `load_skill`. `tools/defs/index.js`
 - **Tool exposure split (main vs runner-only)** — main-agent-hidden / instance-gated / dweb-gated descriptor filtering; low-level DOM tools runner-only, dweb tools preview-gated. `tools/exposure.js`
@@ -299,28 +299,14 @@ helpers/stubs/vendored deps.
 
 ---
 
-## Tool counts (verified from code)
+## Tool inventory source of truth
 
-Counted from the source, not the docs:
+Do not pin registered-tool or exposed-tool counts in prose. They change as
+tool definitions, channel flags, and exposure rules evolve.
 
-- **67 tools registered** = 59 `BUILTIN_TOOLS` + 2 clock + 5 web + 1 `load_skill`.
-- **54 reach the main agent on preview** (67 − 13 runner-only DOM/page tools).
-- **47 reach the main agent on store** (54 − 7 dweb tools, which are pruned/exposure-gated where `DWEB_ENABLED` is false).
-
-The 13 runner-only tools (`read_page`, `snapshot`, `read_state`,
-`watch_changes`, `query_dom`, `page_eval`, `page_exec`, `page_keys`,
-`navigate`, `type`, `click`, `submit_form`, `read_pdf`) are hidden from
-the main agent — it reaches the page through `do`/`get`/`check`, which
-dispatch to the disposable browser-runner subagent. (`capture` is not
-hidden; its image is redacted to a sentinel.)
-
-> This is the canonical count. `README.md` no longer pins its own figure
-> and `MAP.md` / `STATUS.md` defer here; `CLAUDE.md` keeps the same
-> 67 / 59 / 54 / 47 inline for context. (Earlier docs had drifted —
-> README once said 66, MAP "~52 BUILTIN" — both reconciled against the
-> code.)
->
-> Refs: `peerd-runtime/tools/defs/index.js` (`BUILTIN_TOOLS`=59),
-> `tools/exposure.js` (13 hidden + dweb gating), `tools/web/index.js`
-> (5), `clock/tools.js` (2), `background/service-worker.js` (assembly +
-> `load_skill`).
+The current inventory is assembled from `peerd-runtime/tools/defs/index.js`,
+`tools/web/index.js`, `clock/tools.js`, and the service-worker wiring that
+adds `load_skill`. Main-agent exposure is decided by `tools/exposure.js` and
+the active channel config. The invariant to preserve is qualitative: low-level
+DOM/page tools stay runner-only, the main agent reaches pages through
+`do`/`get`/`check`, and dweb tools are invisible where `DWEB_ENABLED` is false.

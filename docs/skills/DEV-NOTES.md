@@ -102,8 +102,8 @@ list the `skills/meta/` prefix.
 
 ## Tests
 
-`bun test ./tests` — full suite green (168 pass). Skills-specific:
-`bun test ./tests/peerd-runtime/skills` (27 pass) covers frontmatter+body
-parse, Claude-Code/Codex format, registry lists descriptions only, body on
-invocation, git-URL resolution, manifest fan-out via a fake `webFetch`,
-and the `load_skill` tool.
+Run `bun test ./tests` for the full suite. The skills-specific suite at
+`tests/peerd-runtime/skills` covers frontmatter+body parse,
+Claude-Code/Codex format, registry lists descriptions only, body on
+invocation, git-URL resolution, manifest fan-out via a fake `webFetch`, and
+the `load_skill` tool.

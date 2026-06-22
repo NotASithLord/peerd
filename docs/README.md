@@ -2,8 +2,8 @@
 
 Primary docs live at the **project root**, not here:
 `CLAUDE.md` (read first), `ARCHITECTURE.md`, `ARCHITECTURE-CHANGES.md`,
-`ROADMAP.md`, `STATUS.md`, `TODO.md`, `PACKAGING.md`, `DESIGN.md` (the
-V1 design record).
+`ROADMAP.md`, `STATUS.md`, `TODO.md`, `PACKAGING.md`, `SECURITY.md`,
+`DESIGN.md` (the V1 design record).
 
 This folder holds supporting material — recorded decisions and
 per-feature design docs:
@@ -35,5 +35,4 @@ Future:
 
 - A product-wide `THREAT_MODEL.md` (the dweb-scoped one exists at
   `distributed/THREAT-MODEL.md`; the product-wide model is implicit in
-  `DECISIONS.md` + the six-gate dispatcher + the audit log).
-- `SECURITY.md` — disclosure process. Pre-V0.1, just file an issue.
+  `DECISIONS.md` + the tool dispatcher + the audit log).

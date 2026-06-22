@@ -7,7 +7,7 @@ eventually dwapps ofc."
 
 ## The one decision that matters
 
-peerd-distribution already defines the right primitives (Phase 0, real
+peerd-distributed already defines the right primitives (Phase 0, real
 code): `packBundle({entry, files})` → canonical-JSON payload → 256KiB
 chunks → a manifest `{v, type, mime, size, entry?, chunks:[{hash,
 size}], created, publisher?, sig?}` whose canonical hash IS the
@@ -25,13 +25,13 @@ hash never changes. No second format, no migration.
 
 ## Boundary constraint (load-bearing)
 
-Store packages PRUNE `peerd-distribution/` entirely (structural channel
+Store packages PRUNE `peerd-distributed/` entirely (structural channel
 boundary, PACKAGING.md), and the dweb-boundary gate forbids references
 into it from outside. Export must work in store packages. Therefore the
 pure bundle primitives (canonicalize, packBundle/unpackBundle,
 chunkBytes/hashes, manifest build/hash/verify) MOVE to
 `shared/bundle/` (plain pure JS, no identity, no transport), and
-peerd-distribution imports them from there — the legal direction.
+peerd-distributed imports them from there — the legal direction.
 Signing stays distribution-side: identity (Ed25519/did:key) is the
 dweb wedge, and Phase 0 identities are ephemeral — baking throwaway
 DIDs into user files would be noise. **v1 exports are UNSIGNED**

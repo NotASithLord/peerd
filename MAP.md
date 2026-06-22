@@ -56,9 +56,9 @@ extension/
 │
 ├── peerd-runtime/       [r] the orchestrator — most of the agent lives here
 │   ├── loop/            the agent loop (turns, streaming, tool dispatch)
-│   ├── tools/           tool inventory + the six-gate dispatcher
-│   │     defs/            BUILTIN_TOOLS, one file each (counts in FEATURES.md)
-│   │     dispatcher.js    persona → exposure → origin → confirmation → egress → audit
+│   ├── tools/           tool inventory + policy-gated dispatcher
+│   │     defs/            BUILTIN_TOOLS, one file each
+│   │     dispatcher.js    dispatch, lineage, hooks, audit
 │   │     exposure.js      registration vs exposure split (runner-only vs main-agent)
 │   │     manifests.js     per-session tool manifests (capability presets as data)
 │   │     hooks/           pre/post tool-use (fail-closed; egress rides the pre-hook)
@@ -101,19 +101,21 @@ consolidated in `docs/specs/`).
 ## When does it act on its own?
 
 Almost everything in peerd is **synchronous with an attended browser** — a
-turn runs because the user sent a message. The exceptions, today and
-soon, are worth knowing because they carry the most safety design:
+turn runs because the user sent a message. The shipped exception and the
+planned unattended surface are worth knowing because they carry the most
+safety design:
 
 | Surface | Trigger | Attended? | Where |
 |---|---|---|---|
 | A turn | user sends a message | yes | `peerd-runtime/loop/` |
-| **Ralph `/loop`** | a persistent goal, re-entered each SW cold start | runs unattended, but **started** attended; commits via gates | `peerd-runtime/ralph/` |
-| **Scheduled tasks** | a `chrome.alarms` wake at/after time T | **fully unattended** — `ctx.unattended` fail-closed; preview/read-only by default | `peerd-runtime/schedule/` *(spec'd, see `docs/specs/FEATURE-SCHEDULED-TASKS.md`)* |
+| **Ralph `/loop`** | a persistent goal, re-entered each SW cold start | runs unattended, but **started** attended; commits only after configured checks pass | `peerd-runtime/ralph/` |
+| **Scheduled tasks** *(planned)* | a `chrome.alarms` wake at/after time T | design target: fail-closed unattended runs, preview/read-only by default | spec only: `docs/specs/FEATURE-SCHEDULED-TASKS.md` |
 
 The rule for anything that acts unattended: it can never widen its own
 permissions, every byte it reads from the web is `wrapUntrusted`-fenced,
-and it routes through the same egress chokepoint (`safeFetch`) as an
-attended turn. No backend, no new egress path — that's what makes the
+and it routes through the same egress policy (`safeFetch` for provider/API
+traffic, `webFetch` for open-web reads) as an attended turn. No backend, no
+new egress path — that's what makes the
 chokepoint a real boundary.
 
 ---

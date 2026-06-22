@@ -14,11 +14,9 @@ commitment — see `ROADMAP.md`). The initial feature buildout is
   feature 01 already implemented its spec, and the `feature/09-automem`
   branch was deleted; don't hunt for it.
 
-Current gates: Bun suite **1045 pass / 0 fail** (`bun test ./tests`);
-in-browser suite **549 pass / 0 fail** headless via the CDP harness
-(`scripts/cdp/`); strict typecheck of the bun suite (`bun run typecheck`)
-clean; ESLint, dweb-boundary, and generated-file drift checks clean;
-all four channel/browser artifacts package (Firefox preview unsigned —
-AMO creds are a user-only item).
+Verification is intentionally not mirrored here as pass counts or a gate
+matrix. Treat `package.json`, `packaging/preflight.ts`, and the CI jobs as
+the source of truth; run them before release rather than updating numbers in
+this status note by hand.
 
 Live work board: `TODO.md`.

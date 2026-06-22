@@ -404,7 +404,7 @@ the feature's risk and the bulk of its design.
 ### 7.1 The `ctx.unattended` flag (fail-closed)
 
 The waker stamps **`ctx.unattended = true`** on every fired turn. **An
-absent flag is treated as unattended.** All six gates read it.
+absent flag is treated as unattended.** Dispatcher policy checks read it.
 
 - **Unattended turns can never widen themselves.** `schedule_task`,
   `schedule_cancel`, `wait_for`, and any grant/tier edit are
@@ -535,7 +535,7 @@ What schedules *do* participate in:
   could eventually execute each other's *watches* while one side is
   offline ("watch this page for me while I'm away"). That is a
   dwapp-layer experiment for the preview channel, sequenced in
-  `docs/distribution/ROADMAP.md`, and explicitly out of V1.x/V2 scope
+  `docs/distributed/ROADMAP.md`, and explicitly out of V1.x/V2 scope
   here. If it is ever built, watched bytes crossing a peer boundary are
   untrusted and `wrapUntrusted`-fenced exactly as local watches are.
 

@@ -5,7 +5,7 @@
 > 15 local-bridge taken). Depends on the shipped subagent orchestrator
 > (`peerd-runtime/subagent/`, DESIGN-11), the headless `js_run` worker
 > substrate (`offscreen/job-runner.js`, `notebook-tab/worker-source.js`),
-> skills + composer, and the six-gate dispatcher. Read `docs/SUBAGENTS.md`
+> skills + composer, and the policy-gated dispatcher. Read `docs/SUBAGENTS.md`
 > and `DESIGN-11-async-subagents.md` FIRST — this design lives or dies on
 > not violating their doctrine.
 >
@@ -104,7 +104,7 @@ forbids precisely this shape, twice:
 The reasons are load-bearing, not stylistic:
 
 1. **Visibility/audit is peerd's identity.** Every `spawn_subagent` is a
-   visible chip, runs the six gates, and is audited with `parentSessionId`
+   visible chip, runs policy checks, and is audited with `parentSessionId`
    + depth (`subagent/spawn.js:305-310`). `runAgent`-from-sandbox "buys
    no isolation… it just hides the delegation." A workflow that fans out
    through `runAgent` would be invisible and unaudited — the exact
@@ -137,9 +137,9 @@ Concretely:
 - The script's **agent-spawning calls route through the SAME
   orchestrator** the `spawn_subagent` tool uses — `makeSpawnSubagent`
   (`subagent/spawn.js:174`) — NOT a relaxed `runAgent`. So **audit,
-  the six gates, parentage, depth, tool-narrowing, and trust-mode
+  policy checks, parentage, depth, tool-narrowing, and permission
   inheritance all still hold** for every agent a workflow spawns. We move
-  the *loop* into code without relaxing the *gate chain*. That is the
+  the *loop* into code without relaxing policy. That is the
   entire reconciliation: the thing `runAgent`-fan-out strips (visibility +
   gates), the workflow primitive keeps.
 
@@ -166,7 +166,7 @@ labels, gates, and visibility that make the capability shippable.
    │   peerd.workflow.spawn({ task, tools, model, ... })   ← the ONE bridge
    │        │   (NOT runAgent; a distinct, workflow-only host call)
    ▼        ▼
- host (SW)  ──►  makeSpawnSubagent(...)  ──►  six gates · audit · parentage
+ host (SW)  ──►  makeSpawnSubagent(...)  ──►  policy checks · audit · parentage
    │                                          (one child session per spawn)
    │   child results return to the SCRIPT, not the parent context
    ▼

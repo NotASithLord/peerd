@@ -47,8 +47,8 @@ Understanding the boundaries helps you scope a report:
   subagent that holds no key, no memory, and no egress tools, and wraps
   page text as untrusted data. This is the core prompt-injection /
   "lethal trifecta" defense.
-- **Six-gate tool dispatch** (persona → exposure → origin → confirmation
-  → egress → audit) with a local, append-only audit log.
+- **Policy-gated tool dispatch** with a local, append-only audit log. The
+  current policy checks and hooks live in `peerd-runtime/tools/`.
 - **Sandboxed execution.** WebVM (CheerpX, network only via the egress
   wrappers), JS Sandbox (realm-sealed Web Worker), App (opaque-origin
   sandboxed iframe).
@@ -71,7 +71,7 @@ Understanding the boundaries helps you scope a report:
   extension installed alongside peerd.
 - The **dweb / `peerd-distributed` preview** is explicitly research-grade
   and ships only in the preview channel — see
-  `docs/distribution/THREAT-MODEL.md`. Report issues, but understand the
+  `docs/distributed/THREAT-MODEL.md`. Report issues, but understand the
   protocol is pre-hardening.
 - Self-inflicted config (e.g. removing your own denylist entries).
 - Social engineering, spam, missing best-practice headers without a

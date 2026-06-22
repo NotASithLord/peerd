@@ -18,7 +18,7 @@ Run from the worktree root:
 bun run typecheck          # JSDoc contracts (CI gate)
 bun run lint               # ESLint (CI gate)
 bun packaging/check-dweb-boundary.ts   # no module refs outside peerd-distributed/
-bun test ./tests           # 1097 pass — incl. the new dweb suites:
+bun test ./tests           # full suite, incl. the dweb suites:
                            #   signaling.test.ts        (room reducer)
                            #   identity.test.ts         (persistent identity)
                            #   mesh-rooms.test.ts       (mesh, rooms, KILL-THE-SERVER,

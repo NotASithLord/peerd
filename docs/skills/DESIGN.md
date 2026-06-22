@@ -48,8 +48,8 @@ allowedTools, extra, body }`.
   verbatim under `extra` and **never interpreted as behaviour** — a skill
   cannot set a key that peerd acts on.
 - **`allowed-tools` is advisory.** Parsed and surfaced for display, but
-  peerd never auto-grants anything from it. The dispatcher's six gates
-  remain the sole authority.
+  peerd never auto-grants anything from it. The dispatcher policy remains
+  the sole authority.
 - **Validation:** missing fence / missing `name` / missing `description`
   throw `SkillParseError`. Body is capped at 64 KiB (≈16k tokens) by
   byte length so one giant SKILL.md can't blow context or memory.

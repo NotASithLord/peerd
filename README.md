@@ -48,17 +48,18 @@ see [`FEATURES.md`](FEATURES.md). For the (version-free) backlog, see
 
 ## Install
 
-**Chrome / Edge / Brave:**
-Chrome Web Store → *(submission pending — the first store listing ships
-with an early 0.x beta; until then, load from source below)*
+**Developer preview:**
+Load the source tree unpacked using the steps below. This is the current
+source-of-truth install path for contributors and early testers.
 
-**Firefox:**
-Firefox Add-ons → *(submission pending — the first store listing ships
-with an early 0.x beta; until then, load from source below)*
+**Store packages:**
+Chrome Web Store / Firefox Add-ons listings will be linked here once they
+are approved. Store packages omit preview-only dweb pieces and the
+preview/dev advanced automation path.
 
 **Dweb preview (research package):**
-GitHub Releases → *(first preview release pending — until then, load
-from source below)*
+GitHub Releases may include signed preview artifacts. If there is no
+release attached yet, use the source install path below.
 
 The preview package includes the decentralized web (dweb) layer —
 peer-to-peer dwapps between peerd instances. It's intended for
@@ -68,8 +69,7 @@ above. The preview installs alongside the store package as a separate
 extension ("peerd preview") with its own isolated storage; move state
 between them explicitly via **Settings → Export & import**.
 
-Preview install paths, once the first release exists (Firefox is the
-smoother of the two):
+Preview package install paths (Firefox is the smoother of the two):
 
 - **Firefox:** click `peerd-preview-firefox.xpi` on the release page —
   it's AMO-signed, installs like any extension, and auto-updates.
@@ -94,7 +94,7 @@ smoother of the two):
 
 | package | id |
 |---|---|
-| peerd (Chrome store) | *assigned by Chrome Web Store on first submission* |
+| peerd (Chrome store) | verify from the store listing or `chrome://extensions` after install |
 | peerd (Firefox store) | `peerd@peerd.ai` |
 | peerd preview (Chrome) | `lpdkhfeldihoejbbfonnbekpjclkknoc` *(CRX installs only — an unpacked load gets a machine-specific ID)* |
 | peerd preview (Firefox) | `peerd-preview@peerd.ai` |
@@ -323,8 +323,8 @@ Two surfaces, different jobs (see `CLAUDE.md`):
 **In-browser** — things that need a real browser (DOM, `chrome.*`, IDB,
 side-panel components, the SW). Open
 `chrome-extension://<ext-id>/tests/runner.html` in a tab and refresh to
-re-run. Tiny custom framework covering the vault, the six-gate
-dispatcher, introspection tools, provider streaming + tool_use, the
+re-run. Tiny custom framework covering the vault, the tool dispatcher,
+introspection tools, provider streaming + tool_use, the
 session store, agent loop, denylist matcher, egress, and more. The same
 suite runs headless in CI via the CDP harness
 (`scripts/cdp/run-inbrowser-tests.mjs` — headless Chrome over the

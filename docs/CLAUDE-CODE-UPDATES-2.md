@@ -240,9 +240,9 @@ For web tools:
 ## What is NOT changing
 
 - The five-module brand mapping
-- The trust-mode model (Open/Scoped/Paranoid)
+- The permission model defined in code
 - The persona model (Read/Act — V1.1)
-- The dispatcher gate stack
+- The dispatcher policy checks
 - The vault / WebAuthn unlock
 - The WebVM integration
 

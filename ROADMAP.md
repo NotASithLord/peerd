@@ -112,10 +112,10 @@ What's real on `main` today, ordered by the dependency stack
   `decideAction`), exposure (real runner-only enforcement at dispatch),
   origin (denylist), confirmation (async, policy-driven), egress
   (allowlist pre-hook + safeFetch), audit. Pre/post **tool-use hooks**.
-- **67 registered tools / 54 reach the main agent on preview, 47 on
-  store** (itemized in `FEATURES.md`): introspection, DOM/page
-  tools, sessions, VM/JS/App families, web tools, memory, edit, review,
-  skills, `spawn_subagent`.
+- **Tool inventory and exposure split** (itemized in `FEATURES.md`;
+  live counts come from the source): introspection, DOM/page tools,
+  sessions, VM/JS/App families, web tools, memory, edit, review, skills,
+  `spawn_subagent`.
 - **do/get/check** two-layer browser runner — a clean-context subagent
   holds the low-level DOM tools and returns a fenced, untrusted summary,
   keeping page content out of the main context. Speed work landed:

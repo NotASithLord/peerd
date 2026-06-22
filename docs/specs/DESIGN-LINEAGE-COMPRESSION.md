@@ -58,7 +58,7 @@ replace them:
 
 | Piece | Where | What it gives us |
 |---|---|---|
-| **Lineage on every result** | `tools/dispatcher.js` attaches `meta` = `{ toolName, primitive, dispatch, gates[], hooks[], durationMs }` to every `ToolResult`. | The spine. `gates[]` is the six-gate chain (`persona → exposure → origin → confirmation → egress → audit`), each `{ name, allowed, reason }`. |
+| **Lineage on every result** | `tools/dispatcher.js` attaches `meta` = `{ toolName, primitive, dispatch, gates[], hooks[], durationMs }` to every `ToolResult`. | The spine. `gates[]` is the policy-check sequence emitted by the dispatcher; the live check list belongs in code. |
 | **Lineage persisted on the block** | `agent-loop.js` builds each tool-result block as `{ tool_use_id, content, is_error, meta }` and stores it on `message.toolResults`. The format converter drops `meta` before the wire. | The lineage is **already in storage at zero token cost** — it just isn't *used* for compression yet. |
 | **Destructive body redaction** | `loop/redact.js` (`redactToolResult`) strips `data:image` base64 → sentinel and truncates bodies to ~8000 chars *at persist time*. | Bodies are already bounded (~2k tokens each). Lineage compaction takes that 2k → ~30 tokens. |
 
@@ -271,7 +271,7 @@ instead of clearing opaquely.
   sees a normal `tool_result` whose `content` is the spine string.
 - **Audit honesty.** The spine is *derived from* the same lineage the audit
   log records — compaction can't misrepresent what happened, because it's
-  rendering the recorded gate chain, not a model's paraphrase.
+  rendering recorded policy metadata, not a model's paraphrase.
 
 ---
 

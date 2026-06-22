@@ -173,7 +173,7 @@ code, no in-app camera permission, no install step.
 
 The remote inlet is the highest-stakes surface in the product — it can
 drive tabs, run shell in the WebVM, and spend the API budget. It
-composes cleanly onto the existing six-gate dispatcher + Plan/Act +
+composes cleanly onto the existing policy-gated dispatcher, Plan/Act, and
 spend cap:
 
 - **Paired devices only.** The phone's did:key is on a "my devices"

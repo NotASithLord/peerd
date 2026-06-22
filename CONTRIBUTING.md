@@ -16,8 +16,7 @@ how to land a change.
 1. **Open an issue first** for anything beyond a small fix — so we can
    confirm it fits and isn't already in flight.
 2. Fork, branch, make the change in **vanilla JS (no build step)**.
-3. Make the gates pass: `bun run preflight` (or the individual gates
-   below).
+3. Make the checks pass: `bun run preflight`.
 4. **Sign off your commits** (`git commit -s`) — we use the DCO.
 5. Open a PR against `main` and fill in the template.
 
@@ -55,24 +54,17 @@ provider.
 
 See `README.md` → *Getting started* and `PACKAGING.md` for more.
 
-## The gates (your PR must pass all of them)
+## Required checks
 
-CI runs these on every PR; run them locally first. The one-shot:
+CI runs the release checks on every PR; run them locally first:
 
 ```bash
 bun run preflight
 ```
 
-Or individually:
-
-| Gate | Command | What it checks |
-|---|---|---|
-| Unit tests (Bun) | `bun test ./tests` | pure logic, registries, helpers |
-| Typecheck | `bun run typecheck` | strict `tsc` over the Bun suite + JSDoc typedefs |
-| Lint | `bun run lint` | ESLint (incl. the module-boundary rule) |
-| Dweb boundary | `bun run check:boundary` | nothing outside `peerd-distribution/` imports it |
-| Generated-file drift | `bun run gen:dev` then no diff | `manifest.json` / `channel-config.js` are generated |
-| In-browser tests | `CHROME_PATH=<chrome> bun scripts/cdp/run-inbrowser-tests.mjs` | real DOM / `chrome.*` / IDB / components, headless |
+For the current check list, read `package.json`, `packaging/preflight.ts`,
+and the CI workflow. Do not copy the full check list into docs; it changes as
+the project changes.
 
 **Two test surfaces, two jobs:** put pure value-in/value-out logic in
 `tests/**/*.test.ts` (Bun); put anything needing a real browser (DOM,
@@ -97,6 +89,11 @@ These keep the codebase coherent (the full list is in `CLAUDE.md` /
 - **Third-party code is vendored** under `extension/vendor/` with a
   `SOURCE.txt` (origin + version) and SHA/SRI pinning — never an npm
   runtime import. Audit before vendoring.
+- **Docs defer to code and CI for live state.** Do not hard-code dynamic
+  facts such as test counts, tool counts, gate matrices, release artifacts,
+  generated-file contents, extension IDs, channel behavior, or provider/model
+  inventories. Link to the source file, script, generated artifact, release,
+  or CI/preflight command that computes the current answer.
 
 ## Licensing of contributions
 
@@ -134,12 +131,12 @@ PRs only, and expect maintainer review:
 
 - `extension/peerd-egress/` — vault, `safeFetch`/`webFetch`, the denylist,
   audit (the egress chokepoint).
-- `extension/peerd-runtime/tools/gates.js` + the six-gate dispatcher; the
-  `do`/`get`/`check` runner boundary (`tools/exposure.js`, `runner/`).
+- `extension/peerd-runtime/tools/gates.js` + the policy-gated dispatcher;
+  the `do`/`get`/`check` runner boundary (`tools/exposure.js`, `runner/`).
 - `extension/js-tab/sandbox-neutralizers.js` and the sandbox-sealing code
   — **do not "modernize" or refactor for style**; the exact shape is the
   security boundary.
-- The **dweb boundary**: nothing outside `peerd-distribution/` may import
+- The **dweb boundary**: nothing outside `peerd-distributed/` may import
   it; core uses `shared/dweb-interface.js` + `shared/dweb-loader.js`.
 - The agent loop (`peerd-runtime/loop/`), the manifest/CSP, and
   `packaging/`.

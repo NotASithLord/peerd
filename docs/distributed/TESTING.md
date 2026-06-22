@@ -1,4 +1,4 @@
-# Testing what's landed (current branch: dweb/phase1-merged)
+# Testing what's landed
 
 > What you can verify **right now**, and how. Two halves: the **automated**
 > suites (run in seconds, cover all pure logic incl. the DHT) and the **manual
@@ -11,13 +11,13 @@
 
 ## A. Automated — run these first (seconds)
 
-From the worktree root (`Desktop/peerd-dweb-rebase`):
+From the worktree root:
 
 ```bash
 bun run typecheck                       # strict JSDoc contracts (CI gate)
 bun run lint                            # ESLint (CI gate)
 bun packaging/check-dweb-boundary.ts    # no module refs leak outside peerd-distributed/
-bun test ./tests                        # 1191 pass — full suite
+bun test ./tests                        # full suite
 ```
 
 The dweb-specific suites and what each proves:

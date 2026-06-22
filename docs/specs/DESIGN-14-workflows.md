@@ -2,7 +2,7 @@
 
 > Status: DESIGN. Nothing here is implemented. Feature number 14.
 > Depends on shipped systems (skills/DESIGN, composer, sessions, the
-> six-gate dispatcher, per-session toolManifest) and on DESIGN-08
+> policy-gated dispatcher, per-session toolManifest) and on DESIGN-08
 > (schedule) for the rerun primitive. Read those first.
 
 ## Motivation
@@ -24,8 +24,8 @@ re-runnable artifact:
   is unmistakably clear.
 
 The good news from the codebase survey: **every primitive already
-exists.** The dispatcher records full lineage (gates, origins, hooks,
-duration) on every tool result. Sessions persist the complete turn-log.
+exists.** The dispatcher records policy lineage, origins, hooks, and
+duration on every tool result. Sessions persist the complete turn-log.
 Skills are just text and already surface as `/<name>` commands through
 `composer/command-sources.js`. Sessions already carry a `toolManifest`
 for per-session tool narrowing. DESIGN-08 already specs durable timers.
@@ -156,9 +156,9 @@ A rerun is a normal agent turn, pre-loaded and pre-constrained:
    `envelope.origins ∩ (not denylisted)`** installed for the run.
 3. Inject the playbook (the `load_skill` body) with params substituted as
    the opening instruction.
-4. Run. Every tool call still passes the full six-gate dispatcher — the
+4. Run. Every tool call still passes the policy-gated dispatcher — the
    recipe envelope *narrows* what's permitted; it never *widens* it or
-   bypasses a gate. A recipe cannot grant itself an origin the denylist
+   bypasses policy. A recipe cannot grant itself an origin the denylist
    blocks, nor a tool the channel doesn't expose.
 
 The origin scoping is the new enforcement bit. Options, cheapest first:

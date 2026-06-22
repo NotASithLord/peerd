@@ -33,7 +33,7 @@ and messages, and the integrity/availability of the mesh for honest peers.
 
 Tiers are keyed on `did:key` and enforced at the offscreen network host,
 with policy decided by pure functions in the SW (mirrors the egress
-trust-mode split).
+policy split).
 
 ---
 

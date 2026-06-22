@@ -247,10 +247,9 @@ exactly what it needs to continue." Pure prompt change in
 ## 5. The peerd-only angle: compress *along lineage*
 
 The ROADMAP item is "**lineage**-based context compression," and that's a
-lever Hermes doesn't have. peerd's six-gate dispatcher attaches full
-lineage (`persona → exposure → origin → confirmation → egress → audit`) to
-every tool result. That gives a *structured axis* to compress along that's
-better than head/middle/tail:
+lever Hermes doesn't have. peerd's policy-gated dispatcher attaches
+structured lineage to every tool result. That gives a *structured axis* to
+compress along that's better than head/middle/tail:
 
 - **Tool-result bodies are the bulk and the most compressible** — the
   lineage/audit spine (what tool ran, on what origin, with what outcome)

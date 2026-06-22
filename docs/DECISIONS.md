@@ -193,18 +193,18 @@ busy. The SW was dying at the 30s idle timer despite the port being
 open. Active bidirectional traffic on the port flips that behavior
 reliably. Tested against Chrome 148+; lower bounds unverified.
 
-## 15. Tool dispatcher uses six fixed gates, two stubbed
+## 15. Tool dispatcher uses a fixed policy pipeline
 
-The dispatcher composes: `persona → exposure → origin → confirmation →
-egress → audit`. persona and exposure are stubs in V1 (return
-`allowed:true` with a "V1 has no X gate (lands V1.X)" reason). The
-other four are active. *(commit `1e23b48`)*
+The dispatcher composes named policy checks and records their results for
+tool-call lineage. At the time of this decision, some checks were still
+stubs; the live check list is defined in `peerd-runtime/tools/gates.js` and
+the default tool hooks. *(commit `1e23b48`)*
 
 **Why.** Two reasons:
-1. The gate-result data is what the UI's tool-call lineage display
-   reads. Wiring all six from day one means the rendering doesn't
-   have to differentiate between "real gate" and "future gate" — every
-   gate yields a `{ allowed, reason }` and the row renders.
+1. The policy-result data is what the UI's tool-call lineage display
+   reads. Wiring named checks from day one means the rendering doesn't
+   have to differentiate between "real check" and "future check" — every
+   check yields a `{ allowed, reason }` and the row renders.
 **Addendum (2026-06-12).** Both stubs are now REAL, ahead of their
 planned slots: feature 03 made `personaGate` live Plan/Act enforcement
 (calls `decideAction`; Plan blocks non-read at the gate), and the
@@ -215,14 +215,13 @@ no-op — its real teeth are the egress-allowlist pre-tool-use hook plus
 `safeFetch`. The numbered rationale below is kept as the original
 record.
 
-2. Subsequent V1.x features (persona at V1.1, exposure at V1.3) turn
-   stubs into active checks WITHOUT changing the dispatcher's
-   composition. The architecture is in place; just edit the gate
-   function.
+2. Subsequent features can turn stubs into active checks WITHOUT changing
+   the dispatcher's composition. The architecture is in place; edit the
+   policy function, not the docs, and treat code as definitive.
 
 ## 16. Plan mode permits pure URL loads — and nothing else non-read
 
-Resolved 2026-06-12 (the open decision recorded in the trust-mode
+Resolved 2026-06-12 (the open decision recorded in the legacy permission-mode
 removal spec). The owner wanted Plan to support navigation, "including
 clicking hyperlinks"; the spec's counter-argument stood: at the tool
 layer `click` is `click` — "click a hyperlink" is indistinguishable

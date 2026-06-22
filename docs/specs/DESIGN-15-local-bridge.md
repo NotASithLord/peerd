@@ -58,7 +58,7 @@ Client Protocol) is JSON-RPC between an *editor* and an *agent process*:
 the agent runs its own loop on the far side and streams back results plus
 *its own* tool-call requests. If peerd spoke raw ACP, peerd would be
 delegating the agent loop to the external agent for that turn — and
-peerd's six-gate dispatcher, denylist, and confirm prompts would **not
+    peerd's policy-gated dispatcher, denylist, and confirm prompts would **not
 see** the intermediate tool calls the far-side agent makes. That guts the
 security model. So:
 
@@ -152,10 +152,10 @@ the gap MCP was invented for. A *narrow* carve-out earns its place:
   to MCP servers the user explicitly installs and that run on their
   machine. No remote MCP, no hosted gateway — the thesis's actual red
   line ("entangle a hosted gateway or sidecar") stays intact.
-- **Tools flow through the full six-gate dispatcher.** An MCP tool is
-  registered like any other tool def; it passes persona/exposure/origin/
-  confirmation/egress/audit. MCP does *not* get a side door around the
-  gates — that is the whole point of routing it through the dispatcher.
+- **Tools flow through the policy-gated dispatcher.** An MCP tool is
+  registered like any other tool def and receives the current policy checks.
+  MCP does *not* get a side door around policy — that is the whole point of
+  routing it through the dispatcher.
 - **Explicit per-server install, preview channel only.** Like remote
   skill install (`REMOTE_SKILL_INSTALL`), gate it behind a flag that is
   OFF for the store build. CI continues to verify the store package is
@@ -200,8 +200,8 @@ subscription-transport work; they only *sound* like one feature.
   the far side is a *model*, never an agent that acts behind the gates.
 - Subscription credentials never enter peerd; they live in the user's
   local bridge process. peerd holds no key for a keyless provider.
-- Any MCP work routes every tool through the six-gate dispatcher + the
-  denylist + audit, ships preview-only behind a flag, and is stripped +
+- Any MCP work routes every tool through the policy-gated dispatcher, the
+  denylist, and audit; ships preview-only behind a flag; and is stripped +
   CI-verified-absent from the store build.
 - The ToS risk of subscription piggybacking is the user's to take, but
   must be stated plainly in the provider UI — not hidden.
