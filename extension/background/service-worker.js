@@ -2733,7 +2733,14 @@ vault.attemptResume().then((resumed) => {
     // self-gates on the setting, an interrupted-turn verdict, vault state, the
     // not-busy slot, and a per-marker dedupe, so firing here is safe even if a
     // later session-open fires it too.
-    sessionCache.sessionGet('currentSessionId')
+    // why settingsStore.load() first: loadSettings() runs un-awaited at boot, so
+    // the autoResumeInterruptedTurns gate inside maybeAutoResume could read the
+    // channel default (ON) before the user's stored value hydrates — resuming a
+    // user who explicitly DISABLED it, once, in the cold-start window. load() is
+    // idempotent (re-reads kv, recomputes the merged view), so gating on it here
+    // just guarantees the setting is hydrated before the gate consults it.
+    settingsStore.load()
+      .then(() => sessionCache.sessionGet('currentSessionId'))
       .then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
   }
   // why: resume an in-flight Ralph run AFTER the vault is back — a run
