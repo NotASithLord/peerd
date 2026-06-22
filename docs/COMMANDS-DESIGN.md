@@ -162,12 +162,11 @@ Deterministic + stable for ties.
 ## 5. Command sources + the feature-07 (skills) adapter
 
 `commandSources` is a `{ list() → [{name, body, description?}] }` contract
-(`command-sources.js`). V1 wires one source: `localStoreSource(store)`
-over the `.peerd/commands/` KV store. The slash-parser, @-resolver, and
+(`command-sources.js`). It wires two sources over the `.peerd/commands/`
+KV store and the skill registry. The slash-parser, @-resolver, and
 palette depend on the **contract**, not on 07.
 
-Feature 07 (skills, built in parallel) can EXPOSE commands. The integrator
-adds a second source and merges:
+Feature 07 (skills) EXPOSES commands. The SW merges both sources:
 
 ```js
 import { mergeSources, localStoreSource, skillRegistrySource } from '/peerd-runtime/index.js';
@@ -181,8 +180,8 @@ const commandSources = mergeSources([
 `{ name, body, description? }` — if 07 names it differently, change the
 single call site, nothing else moves. `mergeSources` dedupes by name
 (earlier source wins, so a user can always shadow a skill command),
-sorts, and **tolerates a throwing source** (07 not yet wired → that
-source degrades to `[]`, the palette still works).
+sorts, and **tolerates a throwing source** (a failing source degrades to
+`[]`, the palette still works).
 
 ## 6. Cross-cutting checklist
 

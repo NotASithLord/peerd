@@ -25,8 +25,6 @@ Integrator-facing notes. Pairs with `docs/COMMANDS-DESIGN.md`.
 | type               | returns                                              |
 | ------------------ | --------------------------------------------------- |
 | `commands/list`    | `{ commands: [{name, description}] }` (all sources) |
-| `commands/put`     | author/overwrite a LOCAL command                    |
-| `commands/delete`  | remove a local command (idempotent)                 |
 | `composer/tabs`    | `{ tabs: [{id,title,origin,active,blocked}] }` — `blocked` = denylisted/unsupported |
 | `composer/files`   | `{ files: [path] }` — current chat's App files      |
 
@@ -61,17 +59,10 @@ inline raw page text without the `<untrusted_web_content>` fence.
 ## The feature-07 (skills) adapter — wiring
 
 The composer depends on a thin `commandSources` contract, not on 07.
-Today the SW wires only the local store:
+The SW now merges the local store with the skill registry:
 
 ```js
 // background/service-worker.js
-const commandStore = createCommandStore({ kv });
-const commandSources = localStoreSource(commandStore);
-```
-
-When 07's skill registry exists, change those two lines to:
-
-```js
 import { mergeSources, localStoreSource, skillRegistrySource } from '/peerd-runtime/index.js';
 const commandStore = createCommandStore({ kv });
 const commandSources = mergeSources([
@@ -116,5 +107,6 @@ collision (user shadows skill), dedup + sort, throwing source → `[]`.
   refresh. Cheap to make reactive later.
 - **No fuzzy match on command DESCRIPTIONS** — filtering matches the
   name/label only; description is display-only.
-- **Skill commands are read-only here** — `commands/put`/`delete` only
-  touch the local store. 07 owns skill-command lifecycle.
+- **Skill commands are read-only here** — the local `commandStore`
+  (`put`/`remove`) is not exposed over an SW route; only `commands/list`
+  is. 07 owns skill-command lifecycle.

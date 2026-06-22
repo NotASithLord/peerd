@@ -28,10 +28,14 @@ duration (restored on end). UI is `GoalToggle` plus a `GoalBar`
 ## EARLIER: dweb Phase 1 — rooms, gossip, the dwapp bridge, the commons (2026-06-13, branch `dweb/phase1`)
 
 > Preview-channel only; the store build prunes `peerd-distributed/`
-> entirely (unchanged boundary). On a dedicated branch, **not merged** —
-> awaiting manual testing. Reframed by `docs/distributed/NORTH-STAR.md`
-> (D-5…D-9); sequenced in `docs/distributed/ROADMAP.md` Phase 1; wire
-> formats in `PROTOCOL.md §3.4/§3.6/§6.3/§6.4/§8.1`; new threat sections
+> entirely (unchanged boundary). **LANDED — and since superseded by the
+> always-on base network:** the per-app `room-host.js` was removed in
+> favor of `peerd-distributed/base-network.js`, now hosted in the
+> offscreen doc (`offscreen/dweb-base.js`) so the network outlives any
+> tab — not the app-tab page this entry describes. Reframed by
+> `docs/distributed/NORTH-STAR.md` (D-5…D-9); sequenced in
+> `docs/distributed/ROADMAP.md` Phase 1; wire formats in
+> `PROTOCOL.md §3.4/§3.6/§6.3/§6.4/§8.1`; new threat sections
 > `THREAT-MODEL.md §12/§13`; placement in `ARCHITECTURE.md §8.1`.
 
 - **Rooms replace the 2-peer dance.** `transport/signaling.js` reducer:
@@ -156,7 +160,7 @@ duration (restored on end). UI is `GoalToggle` plus a `GoalBar`
   Anywhere ARCHITECTURE.md still narrates trust modes (personas
   rationale, migration table), read it as historical. New in its
   place: **Plan permits pure URL loads** — `PLAN_NAVIGATION_TOOLS =
-  {navigate, open_tab}` in `permissions/policy.js`, never clicks
+  {navigate, open_tab}` in `peerd-runtime/permissions/policy.js`, never clicks
   (`docs/DECISIONS.md` #16).
 - **`peerd-runtime/loop/undo.js` (listed below as V1.1) will NOT be
   built** — generalized turn rollback failed feasibility
@@ -262,7 +266,12 @@ Move files if you've already created them in old paths. Update imports. Public A
 
 ## peerd-distributed V1 state
 
-Essentially empty:
+> Historical (original migration notice). **Superseded** — see the dweb
+> entry at the top of this file: `peerd-distributed/` is now a ~46-file
+> shipped module (identity, codec, content addressing, the always-on
+> base network), no longer the placeholder this snippet describes.
+
+Essentially empty (as originally reserved):
 
     // peerd-distributed/index.js  (V1)
     export const VERSION = 'unimplemented — dweb surface reserved for V2+';

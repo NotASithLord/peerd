@@ -151,7 +151,7 @@ transfer, goal mode, profiles — pure-core/injected-IO so the SW stays thin.
 - **PDF reading (`read_pdf`)** — pdf.js text-layer extraction with opt-in SRI-pinned OCR engine + page assembly. `pdf/`, `tools/defs/read-pdf.js`
 - **Contacts (per-peer overlay)** — did-keyed contacts store (name/notes/tags) + read-time known-peers + activity aggregation from App catalog + audit log. `contacts/`
 - **Sandbox tools (VM / Notebook / App / `js_run`)** — `vm_*`, `js_*` (Notebook sealed worker + headless `js_run`), `app_*` (opaque-iframe dwapps) families dispatched through gates. `tools/defs/`
-- **dweb tools** *(preview-channel only)* — `dweb_share`/`discover`/`install`/`peers`/`block` + guide; exposure-gated to `DWEB_ENABLED` channels, invisible to the agent on a store build. `tools/defs/`, `tools/exposure.js`
+- **dweb tools** *(preview-channel only)* — `dweb_share`/`discover`/`discovery`/`install`/`peers`/`block` + guide; exposure-gated to `DWEB_ENABLED` channels, invisible to the agent on a store build. `tools/defs/`, `tools/exposure.js`
 
 **Not yet**
 

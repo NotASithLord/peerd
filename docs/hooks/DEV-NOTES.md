@@ -10,7 +10,7 @@ Integrator-facing notes. Read DESIGN.md first for the model.
 | Registry (register/list/load/save/remove/export) | `extension/peerd-runtime/tools/hooks/registry.js` |
 | Compiler (record → Hook; markdown parser) | `extension/peerd-runtime/tools/hooks/compile.js` |
 | Default egress-allowlist hook | `extension/peerd-runtime/tools/hooks/defaults/egress-allowlist.js` |
-| Browser-native active-tab-guard hook | `extension/peerd-runtime/tools/hooks/defaults/active-tab-guard.js` |
+| Hooks settings UI | `extension/sidepanel/components/hooks-view.js`, mounted as the `'hooks'` section of `extension/options/components/options-app.js` |
 | Module barrel | `extension/peerd-runtime/tools/hooks/index.js` |
 | Public re-export | `extension/peerd-runtime/index.js` |
 | Dispatcher wiring | `extension/peerd-runtime/tools/dispatcher.js` |
@@ -51,7 +51,7 @@ In `dispatcher.js`:
   ...userEndpoints]` (egress hook input) and `now: Date.now`
   (provenance).
 - Message handlers added: `hooks/list`, `hooks/save`, `hooks/remove`,
-  `hooks/export`, `hooks/clear`.
+  `hooks/toggle`.
 
 ## How a feature registers a hook (03 plan/act, …)
 
@@ -134,16 +134,17 @@ raw markdown to the `hooks/save` SW handler (`{ markdown }`).
   default wins a tie (you can't out-prioritize the egress floor with an
   equal order — use a lower number deliberately if you mean to).
 
+## Shipped UI
+
+- **Settings UI.** The Hooks section (`hooks-view.js`, mounted as the
+  `'hooks'` section of the options page) lists/edits hooks over the SW
+  `hooks/*` handlers, with per-hook enable/disable via the `hooks/toggle`
+  route (the `enabled` field is honored by `selectHooks`).
+
 ## V1.x gaps (deliberately not built)
 
-- **No settings UI.** The SW `hooks/*` handlers exist; the Mithril panel
-  to list/edit/toggle/export hooks (with a11y + reduced-motion) is V1.x.
-  Wiring point: add a Hooks section that round-trips through those
-  handlers.
 - **Shell / WebVM body kind.** `compile.js` reserves the seam; a hook
   body could run as a shell script in the sandboxed Linux VM. Not in V1.
-- **Per-hook enable/disable toggle from UI.** The `enabled` field is
-  honored by `selectHooks`; no UI surface yet.
 - **More events.** Only `pre-tool-use` / `post-tool-use` ship. Adding
   `session-start` etc. is a new event string + a runner call at the new
   site; the registry/compile layers don't change.
@@ -157,8 +158,7 @@ raw markdown to the `hooks/save` SW handler (`{ markdown }`).
 The Bun suite covers the pure core. Add an in-browser case at
 `extension/tests/runner.html` that dispatches a `mutate_external` tool
 with an off-allowlist origin through the REAL `dispatchToolCall` and
-asserts `hook_blocked:pre-tool-use:egress-allowlist`, plus one that
-asserts `meta.hooks` carries the active-tab-guard `_browserContext`
-annotation. These need the browser (chrome.*, the egress absolute
-import), which is exactly the in-browser suite's job.
+asserts `hook_blocked:pre-tool-use:egress-allowlist`. This needs the
+browser (chrome.*, the egress absolute import), which is exactly the
+in-browser suite's job.
 ```
