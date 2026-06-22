@@ -214,6 +214,14 @@ export const InputBar = {
       saveDraft(ui._sid, ui.value);
       ui.value = loadDraft(sid);
       ui.transcriptBaseline = '';
+      // why: staged files belong to the chat they were attached in — InputBar
+      // isn't remounted on an in-place switch, so without this the chips (and
+      // their base64 bytes) ride into the switched-to chat and upload with ITS
+      // next send: a private file into the wrong conversation. Drafts persist
+      // text per-chat; attachment bytes don't, so clear them (the user
+      // re-stages in the new chat if they meant to).
+      ui.attachments = [];
+      ui.attachError = null;
       ui._sid = sid;
     }
     const hasKey = state.providers?.hasKey;
@@ -243,9 +251,12 @@ export const InputBar = {
         const reply = await send({ type: 'agent/send', text, goal: true });
         ui.busy = false;
         // Disarm only on a clean launch; on failure restore the draft and
-        // stay armed so the user can retry without re-toggling.
+        // stay armed so the user can retry without re-toggling. Guard the
+        // restore on sid (same reason as the normal send below): a chat switch
+        // during the await must not dump this goal text into another chat.
         if (reply?.ok) onGoalSent?.();
-        else ui.value = text;
+        else if (ui._sid === sid) ui.value = text;
+        else saveDraft(sid, text);
         m.redraw();
         return;
       }
@@ -267,12 +278,22 @@ export const InputBar = {
       });
       ui.busy = false;
       if (!reply?.ok) {
-        // Put the draft back so the user can retry — files included.
-        ui.value = text;
-        if (attachments) ui.attachments = attachments;
-        // Surface the SW's fail-closed refusal (e.g. an over-cap file)
-        // where the chips are; turn-level errors render in the chat.
-        if (attachments && reply?.error) ui.attachError = reply.error;
+        // why guard on sid: the user may have switched chats during the await.
+        // Restoring into the shared `ui` would dump THIS send's text / files /
+        // error into whatever chat is now in view. Same chat → restore inline
+        // for an immediate retry (files included). Switched away → put the text
+        // back on the ORIGINAL chat's draft (attachment bytes can't ride a
+        // draft, so they drop — re-staging is the cost of a failed send + a
+        // switch).
+        if (ui._sid === sid) {
+          ui.value = text;
+          if (attachments) ui.attachments = attachments;
+          // Surface the SW's fail-closed refusal (e.g. an over-cap file)
+          // where the chips are; turn-level errors render in the chat.
+          if (attachments && reply?.error) ui.attachError = reply.error;
+        } else {
+          saveDraft(sid, text);
+        }
       }
       m.redraw();
     };
@@ -374,6 +395,11 @@ export const InputBar = {
 
     /** @param {KeyboardEvent} e */
     const onKeydown = (e) => {
+      // During IME (CJK/kana/pinyin) composition, Enter confirms the IME
+      // candidate — never hijack it to send or to commit a palette pick, or the
+      // user loses their half-composed text. isComposing + the legacy keyCode
+      // 229 both mark an in-progress composition.
+      const composing = e.isComposing || e.keyCode === 229;
       // Palette is open: intercept navigation keys so they drive the
       // popup, not the textarea.
       if (ui.trigger) {
@@ -389,12 +415,17 @@ export const InputBar = {
             ui.paletteIndex = (ui.paletteIndex - 1 + cands.length) % cands.length;
             return;
           }
-          if (e.key === 'Enter' || e.key === 'Tab') {
+          if ((e.key === 'Enter' || e.key === 'Tab') && !composing) {
             // Plain Enter/Tab commits the candidate; Shift+Enter (newline) and
-            // Cmd/Ctrl+Enter (send) fall through. Skip disabled options.
+            // Cmd/Ctrl+Enter (send) fall through. ALWAYS consume a plain
+            // Enter/Tab here — even when the active candidate is disabled (it
+            // commits nothing) — so it never falls through to submit() and
+            // sends the literal trigger text (e.g. "@tab:").
             if (!(e.metaKey || e.ctrlKey) && !e.shiftKey) {
+              e.preventDefault();
               const pick = cands[Math.min(ui.paletteIndex, cands.length - 1)];
-              if (pick && !pick.disabled) { e.preventDefault(); commit(pick); return; }
+              if (pick && !pick.disabled) commit(pick);
+              return;
             }
           }
           if (e.key === 'Escape') {
@@ -405,8 +436,8 @@ export const InputBar = {
         }
       }
       // Enter sends; Shift+Enter inserts a newline (textarea default).
-      // Cmd/Ctrl+Enter also sends, for muscle memory.
-      if (e.key === 'Enter' && !e.shiftKey) {
+      // Cmd/Ctrl+Enter also sends, for muscle memory. Never while composing.
+      if (e.key === 'Enter' && !e.shiftKey && !composing) {
         e.preventDefault();
         submit();
       }

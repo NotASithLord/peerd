@@ -147,6 +147,40 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  it('staged attachments do NOT bleed into another chat on switch', async () => {
+    // Cross-session leak: a file staged in chat A must not ride chat B's send.
+    /** @type {Msg[]} */
+    const sent = [];
+    /** @param {Msg} msg */
+    const send = async (msg) => { sent.push(msg); return { ok: true }; };
+    const state = baseState();
+    state.session = { sessionId: 'A' };
+    const { root, unmount } = await mountInputBar(state, send);
+    try {
+      pasteImage(need(root, 'textarea'));
+      await until(() => root.querySelector('.attach-chip'));
+      expect(root.querySelector('.attach-chip')).toBeTruthy();
+
+      // Switch to chat B (InputBar is not remounted — same component instance).
+      state.session = { sessionId: 'B' };
+      m.redraw.sync();
+      await flush();
+      // The chip — and its bytes — must be gone in chat B.
+      expect(root.querySelector('.attach-chip')).toBeFalsy();
+
+      // And B's send carries no attachments inherited from A.
+      const ta = need(root, 'textarea', HTMLTextAreaElement);
+      ta.value = 'hi from B';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      m.redraw.sync();
+      need(root, 'form.input-bar')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await until(() => sent.length > 0);
+      expect(sent[0].text).toBe('hi from B');
+      expect(sent[0].attachments).toBe(undefined);
+    } finally { unmount(); }
+  });
+
   it('user messages render attachment chips from stripped records', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);
