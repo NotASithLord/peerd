@@ -246,7 +246,7 @@ helpers/stubs/vendored deps.
 - **Denylist editor view** — in-panel denylist add/remove with format helpers (user overlay over seed). `extension/sidepanel/components/denylist-view.js`
 - **Hooks view** — in-panel surface for pre/post tool-use hooks state. `extension/sidepanel/components/hooks-view.js`
 - **Ralph loop panel** — renders persistent fresh-context loop state pushed over `ralph/*` events; halt button. `extension/sidepanel/components/ralph-panel.js`
-- **Loop arming toggle** — mode-row pill (beside Plan/Act) that arms the next send to launch a Ralph loop on the draft as its goal, via the existing `/loop` path; the in-chat entry point the loop previously lacked. `extension/sidepanel/components/mode-badge.js` (`LoopToggle`)
+- **Goal toggle** — mode-row pill (beside Plan/Act) that arms the next send to launch a Ralph autonomous goal run on the draft, via the existing `/loop` path; the in-chat entry point the loop previously lacked. `extension/sidepanel/components/mode-badge.js` (`GoalToggle`)
 - **Async subagent status bar** — self-hiding bar pinning in-flight async `spawn_subagent` tasks (DESIGN-11). `extension/sidepanel/components/async-tasks-bar.js`
 - **Injection-safe Markdown renderer** — hand-rolled MD→HTML (no third-party lib) for assistant replies, hardened against untrusted-web-content influence. `extension/shared/markdown.js`
 

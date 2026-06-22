@@ -1,14 +1,14 @@
 // @ts-check
-// LoopToggle — the mode-row entry point for the Ralph persistent loop. Until
-// this control, a loop could only be launched via the undiscoverable `/loop`
-// command; the toggle ARMS the next send to run as a loop (the InputBar then
-// rewrites it onto the same /loop path and disarms). These tests pin the arm
-// contract: an off pill, a click that reports the next armed boolean, the
-// armed look (accent + aria-pressed), and the no-key disabled state.
+// GoalToggle — the mode-row entry point for the Ralph persistent loop. Until
+// this control, a goal run could only be launched via the undiscoverable
+// `/loop` command; the toggle ARMS the next send to run as an autonomous goal
+// (the InputBar then rewrites it onto the same /loop path and disarms). These
+// tests pin the arm contract: an off pill, a click that reports the next armed
+// boolean, the armed look (accent + aria-pressed), and the no-key disabled state.
 
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
-import { LoopToggle } from '/sidepanel/components/mode-badge.js';
+import { GoalToggle } from '/sidepanel/components/mode-badge.js';
 
 /**
  * Fake onToggle(): records the next-armed booleans the component reports.
@@ -26,7 +26,7 @@ const makeToggle = () => {
 const mount = (attrs) => {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  m.mount(root, { view: () => m(LoopToggle, attrs) });
+  m.mount(root, { view: () => m(GoalToggle, attrs) });
   m.redraw.sync();
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
 };
@@ -36,17 +36,17 @@ const mount = (attrs) => {
  * @returns {HTMLButtonElement}
  */
 const needToggle = (root) => {
-  const el = root.querySelector('.loop-toggle');
-  if (!el) throw new Error('missing element: .loop-toggle');
+  const el = root.querySelector('.goal-toggle');
+  if (!el) throw new Error('missing element: .goal-toggle');
   return /** @type {HTMLButtonElement} */ (el);
 };
 
-describe('LoopToggle (mode-row loop arming)', () => {
+describe('GoalToggle (mode-row goal arming)', () => {
   it('renders an unarmed pill', () => {
     const { root, unmount } = mount({ onToggle: makeToggle() });
     try {
       const btn = needToggle(root);
-      expect(btn.textContent).toBe('Loop');
+      expect(btn.textContent).toBe('Goal');
       expect(btn.getAttribute('aria-pressed')).toBe('false');
       expect(btn.className.includes('is-on')).toBe(false);
       expect(btn.disabled).toBe(false);
@@ -67,7 +67,7 @@ describe('LoopToggle (mode-row loop arming)', () => {
     const { root, unmount } = mount({ armed: true, onToggle });
     try {
       const btn = needToggle(root);
-      expect(btn.textContent).toBe('Loop: on');
+      expect(btn.textContent).toBe('Goal: on');
       expect(btn.getAttribute('aria-pressed')).toBe('true');
       expect(btn.className.includes('is-on')).toBe(true);
       btn.click();

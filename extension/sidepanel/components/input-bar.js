@@ -168,7 +168,7 @@ const saveDraft = (sid, text) => {
  *   state: InputBarState,
  *   attrs: {
  *     state: ChatState, send: Send, voiceManager?: any,
- *     loopArmed?: boolean, onLoopSent?: () => void,
+ *     goalArmed?: boolean, onGoalSent?: () => void,
  *   },
  * }} InputBarVnode
  */
@@ -206,7 +206,7 @@ export const InputBar = {
   },
 
   /** @param {InputBarVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager, loopArmed, onLoopSent }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, goalArmed, onGoalSent }, state: ui }) => {
     const streaming = !!state.streaming;
     const sid = state.session?.sessionId;
     // Switched chats → save the draft we were holding and load the new chat's.
@@ -229,12 +229,12 @@ export const InputBar = {
       const text = ui.value.trim();
       if (!text || ui.busy) return;
 
-      // Loop-armed (mode-row toggle): this send launches a Ralph loop with
-      // the draft as its goal instead of a normal turn. Reuses the SW's
-      // `/loop` path — byte-identical to typing "/loop <goal>" — then
-      // disarms via onLoopSent. Attachments don't apply to a loop goal, so
-      // they stay staged for a later normal send.
-      if (loopArmed) {
+      // Goal-armed (mode-row toggle): this send launches a Ralph goal run
+      // with the draft as its goal instead of a normal turn. Reuses the
+      // SW's `/loop` path — byte-identical to typing "/loop <goal>" — then
+      // disarms via onGoalSent. Attachments don't apply to a goal, so they
+      // stay staged for a later normal send.
+      if (goalArmed) {
         ui.busy = true;
         ui.value = '';
         saveDraft(sid, '');
@@ -244,7 +244,7 @@ export const InputBar = {
         ui.busy = false;
         // Disarm only on a clean launch; on failure restore the draft and
         // stay armed so the user can retry without re-toggling.
-        if (reply?.ok) onLoopSent?.();
+        if (reply?.ok) onGoalSent?.();
         else ui.value = text;
         m.redraw();
         return;
@@ -422,8 +422,8 @@ export const InputBar = {
 
     const placeholder = !hasKey
       ? 'Add an API key in Settings to start.'
-      : loopArmed
-        ? 'Describe a goal to loop on…'
+      : goalArmed
+        ? 'Describe a goal to run autonomously…'
         : streaming
           ? 'Type to steer the current turn…'
           : 'Message peerd…';
@@ -552,10 +552,10 @@ export const InputBar = {
               m('button.send-btn', {
                 type: 'submit',
                 disabled: !hasKey || ui.busy || !ui.value.trim(),
-                'aria-label': loopArmed ? 'Start a loop on this goal'
+                'aria-label': goalArmed ? 'Start an autonomous run on this goal'
                   : streaming ? 'Send and steer the current turn' : 'Send',
-                title: loopArmed
-                  ? 'Start an autonomous loop on this goal (plan → build → repeat)'
+                title: goalArmed
+                  ? 'Start an autonomous run on this goal (plan → build → repeat)'
                   : streaming
                     ? 'Sending will abort the current turn and continue with your new message'
                     : 'Send (⌘/Ctrl + Enter)',
