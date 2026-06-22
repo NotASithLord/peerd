@@ -33,9 +33,11 @@ const CHROME = process.env.CHROME_PATH || process.env.CHROME
       '/Applications/Chromium.app/Contents/MacOS/Chromium'].find(existsSync)
   || ['chrome', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].map(onPath).find(Boolean);
 
-// ICE on the loopback is near-instant, but two contexts spinning up + the
-// rendezvous + a couple gossip rounds want headroom on a slow CI runner.
-const RESULT_BUDGET_MS = 60_000;
+// A healthy loopback connect is ~1-2s; two contexts spinning up + the rendezvous
+// + a couple gossip rounds still finish well inside 30s. If the peers haven't
+// paired by then it's a hard transient, not slowness — so fail fast and let the
+// CI retry re-run it (a longer budget only burns wall-clock before the retry).
+const RESULT_BUDGET_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
