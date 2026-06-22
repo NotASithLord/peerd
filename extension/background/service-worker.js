@@ -823,6 +823,19 @@ const denylistReady = loadDenylist();
  * @returns {Promise<{ mode: string, confirmActions: boolean }>}
  */
 const resolvePermission = async (activeSession) => {
+  // Goal mode runs UNATTENDED: while a goal run is active for this session, the
+  // effective permission is Act + confirm-off — COMPUTED here, never written to
+  // the record. Because every consumer (the turn's tool context, the dispatch
+  // gates, the state-snapshot the Plan/Act pill reads) resolves through this one
+  // function, the autonomy applies everywhere AND reverts the instant the run
+  // ends or pauses (isActive flips false) — nothing to restore, nothing to
+  // strand if the SW dies mid-run. why not store it: a stored flip needs a
+  // restore, and a restore that depends on an in-memory run surviving an
+  // auto-lock/eviction is exactly the bug class this avoids.
+  const goalSid = /** @type {any} */ (activeSession)?.sessionId;
+  if (goalSid && goalRunner?.isActive(goalSid)) {
+    return { mode: PERMISSION_MODES.ACT, confirmActions: false };
+  }
   // Product default for a fresh install: ACT with confirmations OFF —
   // peerd acts on the browser without nagging. (A corrupted record still
   // fails safe via the normalizers.) The "Confirm before actions" Settings
@@ -2154,33 +2167,14 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
 // hidden synthetic continuations), so the work streams into the chat like any
 // session. The complete_goal tool ends it; goal/state events drive the panel's
 // Goal bar (iteration + Stop).
-// Set ONE session's Plan/Act permission on its record (mirrors permission/set,
-// minus the global cache keys — this is a per-session flip, so a concurrent chat
-// is untouched) and push the new state so the Plan/Act pill reflects it. Goal
-// mode flips a run to Act + confirm-off for its duration and restores on end.
-const setSessionPermission = async (/** @type {string} */ sid, /** @type {{ mode: string, confirmActions: boolean }} */ perm) => {
-  const patch = { permissionMode: perm.mode, confirmActions: perm.confirmActions };
-  try {
-    await sessions.update(/** @type {any} */ (sid), patch);
-    if (sessionState.current()?.sessionId === sid) {
-      sessionState.set({ ...sessionState.current(), ...patch });
-    }
-    pushState();
-  } catch (e) {
-    if (!(e instanceof SessionNotFoundError)) console.warn('[sw] goal permission set failed', e);
-  }
-};
-
 goalRunner = makeGoalRunner({
   runTurn: (/** @type {any} */ args) => runAgentTurn(args),
   onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
-  // Terminal side-effects: restore the permission the run flipped, and post a
-  // note when the run ended WITHOUT a complete_goal result already in the
-  // transcript (cap / halt). 'done' needs no note — complete_goal's tool result
-  // is the visible record.
-  onRunEnd: (/** @type {any} */ sid, /** @type {any} */ info) => {
-    const prior = info?.meta?.priorPermission;
-    if (prior) setSessionPermission(sid, { mode: prior.mode, confirmActions: prior.confirmActions });
+  // Terminal note when a run ends WITHOUT a complete_goal result already in the
+  // transcript (cap / halt). 'done' needs none — complete_goal's tool result is
+  // the visible record. (Permission needs no restore: resolvePermission computes
+  // the autonomy from the live run, so it reverts on its own when the run ends.)
+  onRunEnd: (/** @type {any} */ _sid, /** @type {any} */ info) => {
     if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
     else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
   },
@@ -2462,25 +2456,12 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
 // is built above; ensureSession is the same lazy session-create the model turn
 // uses, so a Goal send on a fresh chat gets a session (like /system and /tools).
-const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ req) => {
-  if (!goalRunner) return { ok: false, error: 'goal-mode-unavailable' };
-  const sid = req?.sessionId;
-  // Goal mode runs UNATTENDED, so flip the session to Act + confirm-off for the
-  // run's duration (restored by onRunEnd when it ends). Otherwise confirm-on
-  // would pause on every action and Plan mode would block all writes — neither
-  // is "keep going until done". The flip is visible (the Plan/Act pill moves).
-  let priorPermission = null;
-  if (sid) {
-    try {
-      const session = await sessions.get(/** @type {any} */ (sid));
-      const resolved = await resolvePermission(/** @type {any} */ (session));
-      priorPermission = { mode: resolved.mode, confirmActions: resolved.confirmActions };
-      await setSessionPermission(sid, { mode: PERMISSION_MODES.ACT, confirmActions: false });
-    } catch (e) { console.warn('[sw] goal autonomy setup failed', e); }
-  }
-  return goalRunner.start({ sessionId: sid, goal: req?.goal, meta: { priorPermission } });
-};
+// Goal mode (the Goal toggle). Autonomy is NOT a stored flip — resolvePermission
+// computes Act+confirm-off from the live run — so start/halt are just the runner
+// surface. resumeGoalRuns re-drives persisted runs after an interactive unlock.
+const startGoalRun = (/** @type {{ sessionId: string, goal: string }} */ req) => /** @type {any} */ (goalRunner)?.start(req);
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.halt(sid);
+const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
 const ensureSession = ensureCurrentSession;
 
 // Message routes live in background/routes/*.js as import-free, deps-injected
@@ -2499,7 +2480,7 @@ const ensureSession = ensureCurrentSession;
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume,
+    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -2788,3 +2769,11 @@ vault.attemptResume().then((resumed) => {
   // run state lets us re-drive the next turn. A no-op if nothing is active.
   goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
 }).catch((e) => console.error('[sw] attemptResume failed', e));
+
+// One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote
+// its plan + loop state to these storage.local keys; nothing reads them now, so
+// delete them so an upgraded install doesn't carry dead state forever. Cheap
+// no-op once gone; safe to run every boot.
+for (const deadKey of ['ralph.plan.v1', 'ralph.loop.v1']) {
+  Promise.resolve(kv.delete(deadKey)).catch(() => {});
+}

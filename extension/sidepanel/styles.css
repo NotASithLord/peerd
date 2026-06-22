@@ -599,8 +599,8 @@ html, body, #app {
   outline-offset: -2px;
 }
 
-/* Goal toggle (mode row) — arms the next send to launch a Ralph autonomous
-   goal run instead of a single turn. Same pill family as the planact
+/* Goal toggle (mode row) — arms the next send to start an autonomous goal
+   run instead of a single turn. Same pill family as the planact
    controls; the ARMED state wears the shared accent (consistency with the
    active Act / Confirm pills — owner call for this row). */
 .goal-toggle {

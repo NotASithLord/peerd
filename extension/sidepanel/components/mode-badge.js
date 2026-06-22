@@ -126,10 +126,11 @@ export const GoalToggle = {
       disabled: !!disabled,
       'aria-pressed': String(on),
       title: on
-        ? 'Goal is armed — your next message starts an autonomous run on that goal '
-          + '(plan → build → repeat). Click to disarm.'
-        : 'Goal — arm the next message to run as an autonomous goal '
-          + '(plan → build → repeat) instead of a single turn.',
+        ? 'Goal is armed — your next message starts an autonomous run: the agent '
+          + 'keeps taking turns, acting WITHOUT per-action confirmation, until the '
+          + 'goal is met or you Stop. Click to disarm.'
+        : 'Goal — arm the next message to run as an autonomous goal: the agent keeps '
+          + 'taking turns, acting without per-action confirmation, until it\'s done or you Stop.',
       onclick: () => onToggle(!on),
     }, on ? 'Goal: on' : 'Goal');
   },

@@ -39,10 +39,10 @@ import { AsyncTasksBar } from './async-tasks-bar.js';
 export const ChatView = {
   /** @param {ChatViewVnode} vnode */
   oninit(vnode) {
-    // Goal arming is pure composer intent (it just rewrites the next send
-    // into the existing /loop path), so it lives here as UI-only state —
-    // no SW round-trip. Reset when the chat changes (each chat owns its
-    // own loop), mirroring the InputBar's per-session draft swap.
+    // Goal arming is pure composer intent (it just flags the next send as
+    // goal:true), so it lives here as UI-only state — no SW round-trip. Reset
+    // when the chat changes (each chat owns its own run), mirroring the
+    // InputBar's per-session draft swap.
     vnode.state.goalArmed = false;
     vnode.state._sid = vnode.attrs.state?.session?.sessionId;
   },

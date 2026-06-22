@@ -212,20 +212,20 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     expect(calls.length).toBe(1);
   });
 
-  it('fires onRunEnd once on a terminal phase, carrying phase/summary/meta', async () => {
+  it('fires onRunEnd once on a terminal phase, carrying phase/summary', async () => {
     const ends: any[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
     runner = makeGoalRunner({
       runTurn: async () => { runner.complete('s', 'shipped'); },
       onRunEnd: (sid, info) => ends.push({ sid, ...info }),
     });
-    await runner.start({ sessionId: 's', goal: 'g', meta: { priorPermission: { mode: 'plan' } } });
+    await runner.start({ sessionId: 's', goal: 'g' });
     await settle(() => !runner.isActive('s'));
     expect(ends).toHaveLength(1);
-    expect(ends[0]).toMatchObject({ sid: 's', phase: 'done', summary: 'shipped', meta: { priorPermission: { mode: 'plan' } } });
+    expect(ends[0]).toMatchObject({ sid: 's', phase: 'done', summary: 'shipped' });
   });
 
-  it('a VaultLockedError pauses (keeps kv + meta, no onRunEnd) so resume() re-drives', async () => {
+  it('a VaultLockedError pauses (keeps kv, no onRunEnd) so resume() re-drives', async () => {
     const kv = makeKv();
     const ends: any[] = [];
     let throwOnce = true;
@@ -238,11 +238,11 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
       onRunEnd: (_sid, info) => ends.push(info),
       kv,
     });
-    await runner.start({ sessionId: 's', goal: 'keep going', meta: { priorPermission: { mode: 'plan' } } });
+    await runner.start({ sessionId: 's', goal: 'keep going' });
     await settle(() => !runner.isActive('s'));
-    // Paused, NOT terminal: no onRunEnd, and the record + its meta survive in kv.
+    // Paused, NOT terminal: no onRunEnd, and the record survives in kv for resume.
     expect(ends).toHaveLength(0);
-    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going', meta: { priorPermission: { mode: 'plan' } } });
+    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
     // resume() re-drives; this time it completes → terminal, onRunEnd, kv cleared.
     await runner.resume();
     await settle(() => !runner.isActive('s'));

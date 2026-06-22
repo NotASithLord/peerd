@@ -58,8 +58,6 @@ export const goalContinuationPrompt = (goal) => [
  *   persisted record so resume() re-drives after unlock; not terminal
  * @property {string|null} summary  complete_goal's summary, if any
  * @property {string|null} [lastError]  why it halted (for the terminal note)
- * @property {any} [meta]           opaque caller blob (the SW stows the prior
- *   permission here so it can be restored when the run ends — persisted too)
  * @property {number} startedAt
  */
 
@@ -69,10 +67,10 @@ export const goalContinuationPrompt = (goal) => [
  *   One full agent turn (runAgentTurn). Returns the turn outcome so the loop can
  *   stop on a failed/aborted turn instead of re-driving a broken condition.
  *   complete()/halt() may also fire DURING it (the complete_goal tool, or Stop).
- * @param {(sessionId: string, info: { phase: string, summary: string|null, reason: string|null, meta: any }) => void} [deps.onRunEnd]
+ * @param {(sessionId: string, info: { phase: string, summary: string|null, reason: string|null }) => void} [deps.onRunEnd]
  *   Fired once when a run reaches a TERMINAL phase (done/halted/capped) — the SW
- *   uses it to restore the pre-run permission and post a terminal note. Not
- *   fired on a pause (vault-lock), which is resumable.
+ *   uses it to post a terminal note. Not fired on a pause (vault-lock), which is
+ *   resumable.
  * @param {(ev: object) => void} [deps.onEvent]   goal/* status → the side panel
  * @param {{ get(k:string):Promise<any>, set(k:string,v:any):Promise<void>, delete(k:string):Promise<void> }} [deps.kv]
  *   Durable mirror of the active runs (storage.local). Omit for pure in-memory
@@ -90,11 +88,11 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
   // means that run won't resume, not that the live run breaks.
   const persist = () => {
     if (!kv) return;
-    /** @type {Record<string, { goal: string, iteration: number, startedAt: number, meta?: any }>} */
+    /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
     const out = {};
     for (const [sid, r] of runs) {
       if (r.completed || r.halted) continue;
-      out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt, ...(r.meta != null ? { meta: r.meta } : {}) };
+      out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
     }
     Promise.resolve(kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
   };
@@ -181,7 +179,7 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
           const phase = run.completed ? 'done' : run.halted ? 'halted'
             : run.iteration >= maxIterations ? 'capped' : 'done';
           emit(sid, phase);
-          try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null, meta: run.meta ?? null }); }
+          try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
           catch (e) { console.error('[goal] onRunEnd threw', e); }
           runs.delete(sid);
           persist();  // terminal — clear it from the durable mirror
@@ -192,19 +190,17 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
 
   /**
    * Start (or supersede) a goal run for a session. Fire-and-forget — returns
-   * immediately; the turns stream over the port like any chat. `meta` is an
-   * opaque blob persisted with the run and handed back to onRunEnd (the SW
-   * stows the pre-run permission there to restore on end).
-   * @param {{ sessionId: string, goal: string, meta?: any }} req
+   * immediately; the turns stream over the port like any chat.
+   * @param {{ sessionId: string, goal: string }} req
    */
-  const start = async ({ sessionId, goal, meta = null }) => {
+  const start = async ({ sessionId, goal }) => {
     if (!sessionId || typeof goal !== 'string' || !goal.trim()) {
       return { ok: false, error: 'goal-required' };
     }
     if (runs.has(sessionId)) halt(sessionId);  // supersede any prior run
     runs.set(sessionId, {
       goal: goal.trim(), iteration: 0, completed: false, halted: false,
-      summary: null, lastError: null, meta, startedAt: now(),
+      summary: null, lastError: null, startedAt: now(),
     });
     persist();
     drive(sessionId).catch((e) => {
@@ -230,13 +226,12 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
     let resumed = 0;
     for (const [sid, raw] of Object.entries(stored)) {
       if (!sid || runs.has(sid)) continue;
-      const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown, meta?: unknown }} */ (raw);
+      const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
       if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
       runs.set(sid, {
         goal: rec.goal,
         iteration: Number(rec.iteration) || 0,
         completed: false, halted: false, summary: null, lastError: null,
-        meta: rec.meta ?? null,
         startedAt: Number(rec.startedAt) || now(),
       });
       drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
