@@ -1,10 +1,9 @@
 // @ts-check
-// GoalToggle — the mode-row entry point for the Ralph persistent loop. Until
-// this control, a goal run could only be launched via the undiscoverable
-// `/loop` command; the toggle ARMS the next send to run as an autonomous goal
-// (the InputBar then rewrites it onto the same /loop path and disarms). These
-// tests pin the arm contract: an off pill, a click that reports the next armed
-// boolean, the armed look (accent + aria-pressed), and the no-key disabled state.
+// GoalToggle — the mode-row entry point for goal mode. The toggle ARMS the next
+// send to run as an autonomous goal (the InputBar sends agent/send with goal:true
+// and disarms). These tests pin the arm contract: an off pill, a click that
+// reports the next armed boolean, the armed look (accent + aria-pressed), and the
+// no-key disabled state.
 
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';

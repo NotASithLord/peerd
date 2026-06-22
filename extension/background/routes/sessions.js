@@ -17,7 +17,7 @@ export const makeSessionRoutes = (deps) => {
   const {
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel,
     buildToolContext, applyComposer, commandSources, prepareUserAttachments,
-    runAgentTurn, runInit, ralphDriver, handleSystemCommand, handleToolsCommand,
+    runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     startGoalRun, haltGoalRun, ensureSession,
@@ -79,18 +79,9 @@ export const makeSessionRoutes = (deps) => {
         });
         return { ok: true, handled: 'init' };
       }
-      // /loop [goal] — start (or resume) a Ralph persistent loop for this
-      // chat (feature 05). SW-handled; not sent to the model directly.
-      if (trimmed === '/loop' || trimmed.startsWith('/loop ')) {
-        ralphDriver.startRalphLoop(trimmed.slice('/loop'.length).trim()).catch((/** @type {unknown} */ e) => {
-          console.error('[sw] /loop threw', e);
-          postChatNote(`/loop failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
-        });
-        return { ok: true, handled: 'loop' };
-      }
       // /system [text|clear] — set/show/clear this chat's custom system-
-      // prompt augmentation. SW-handled like /init and /loop; never reaches
-      // the model as user text (it CHANGES what the model is told instead).
+      // prompt augmentation. SW-handled like /init; never reaches the model
+      // as user text (it CHANGES what the model is told instead).
       if (trimmed === '/system' || trimmed.startsWith('/system ')) {
         handleSystemCommand(trimmed.slice('/system'.length).trim()).catch((/** @type {unknown} */ e) => {
           console.error('[sw] /system threw', e);

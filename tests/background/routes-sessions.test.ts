@@ -6,7 +6,7 @@ import { makeSessionRoutes } from '../../extension/background/routes/sessions.js
 // the no-active-session guards.
 
 const baseDeps = (over: any = {}) => {
-  const calls: any = { runInit: 0, loop: [], system: [], tools: [], turns: [] };
+  const calls: any = { runInit: 0, goal: [], halted: [], system: [], tools: [], turns: [] };
   return {
     calls,
     deps: {
@@ -28,7 +28,9 @@ const baseDeps = (over: any = {}) => {
       prepareUserAttachments: ({ text }: any) => ({ text, attachments: [] }),
       runAgentTurn: async (a: any) => { calls.turns.push(a); },
       runInit: async () => { calls.runInit += 1; },
-      ralphDriver: { startRalphLoop: async (g: string) => { calls.loop.push(g); } },
+      startGoalRun: async (req: any) => { calls.goal.push(req); },
+      haltGoalRun: (sid: string) => { calls.halted.push(sid); },
+      ensureSession: async () => 'a',
       handleSystemCommand: async (a: string) => { calls.system.push(a); },
       handleToolsCommand: async (a: string) => { calls.tools.push(a); },
       postChatNote: () => {},
@@ -59,10 +61,17 @@ describe('agent/send slash-command routing', () => {
     expect(calls.runInit).toBe(1);
     expect(calls.turns.length).toBe(0);
   });
-  test('/loop forwards the goal', async () => {
+  test('goal:true starts an autonomous goal run (no model turn)', async () => {
     const { deps, calls } = baseDeps();
-    expect(await makeSessionRoutes(deps)['agent/send']({ text: '/loop fix bugs' })).toEqual({ ok: true, handled: 'loop' });
-    expect(calls.loop).toEqual(['fix bugs']);
+    expect(await makeSessionRoutes(deps)['agent/send']({ text: 'build a drum machine', goal: true }))
+      .toEqual({ ok: true, handled: 'goal' });
+    expect(calls.goal).toEqual([{ sessionId: 'a', goal: 'build a drum machine' }]);
+    expect(calls.turns.length).toBe(0);
+  });
+  test('a plain message halts an active goal run (steer-takeover)', async () => {
+    const { deps, calls } = baseDeps();
+    await makeSessionRoutes(deps)['agent/send']({ text: 'hello' });
+    expect(calls.halted).toEqual(['a']);
   });
   test('/system and /tools route to their handlers', async () => {
     const { deps, calls } = baseDeps();

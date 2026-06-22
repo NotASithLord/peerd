@@ -209,10 +209,6 @@ import {
   SkillExistsError,
   SkillInstallError,
   SkillParseError,
-  // ralph (persistent fresh-context loop) — plan store + the SW-side
-  // driver factory (fresh runner, gates, checkpoint, drive/halt/resume)
-  createPlanStore,
-  makeRalphDriver,
   // voice: the settings normalizers — the SW validates voiceVariant +
   // voiceEngine on settings/update (coerce unknowns).
   normalizeVariant, normalizeEngine,
@@ -269,7 +265,6 @@ import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
-import { makeRalphRoutes } from './routes/ralph.js';
 import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
 import { makeMemoryRoutes } from './routes/memory.js';
@@ -855,7 +850,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, subagents, Ralph) routes through here, so all are covered.
+  // dispatch, subagents) routes through here, so all are covered.
   await denylistReady;
   // why: the override lets the subagent orchestrator build a context
   // bound to a CHILD session id instead of the chat's current one. With
@@ -872,7 +867,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // Per-session tool manifest → the exposure gate's dispatch-time check.
   // Resolved from the session RECORD (main chat, or a child that inherited
   // the manifest at spawn), so every dispatch path that builds a context
-  // here — main turn, direct dispatch, subagents, Ralph — enforces it.
+  // here — main turn, direct dispatch, subagents — enforces it.
   // null = no manifest = everything stays exposed.
   const toolAllow = resolveManifestAllow(activeSession?.toolManifest);
   // why: key presence is per-PROVIDER. A session created on OpenRouter
@@ -1445,43 +1440,6 @@ const computeMainInstanceState = async (/** @type {string} */ sid) => {
 const dwebEngagedSessions = new Set();
 const markDwebEngaged = (/** @type {string} */ sid) => { if (sid) dwebEngagedSessions.add(sid); };
 
-// Ralph loop (feature 05): orchestration lives in peerd-runtime/ralph/
-// driver.js (makeRalphDriver); the SW binds the IO singletons. The plan
-// store stays SW-visible for the ralph/getPlan + ralph/setPlan routes.
-// Late-declared deps (postChatNote, resolvePermission's session read) are
-// referenced through arrow closures, so they dereference at CALL time —
-// no TDZ at construction.
-const ralphPlanStore = createPlanStore({ kv });
-const ralphDriver = makeRalphDriver({
-  planStore: ralphPlanStore,
-  kv,
-  spawnSubagent: (req) => spawnSubagent(req),
-  getCurrentSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
-  vmClient,
-  buildToolContext,
-  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
-  // Feature-03 permissions adapter: Ralph commits unattended, so it
-  // requires Act mode with confirmActions OFF — the REAL Plan/Act axis
-  // (same protection the old full-auto tier gate gave, simpler words).
-  // Resolved per call against the current session record so a mid-run
-  // mode change takes effect on the next iteration.
-  resolveCanRunUnattended: async () => {
-    const sessionId = await sessionCache.sessionGet('currentSessionId');
-    let session = null;
-    if (sessionId && !vault.isLocked()) {
-      try { session = await sessions.get(/** @type {any} */ (sessionId)); }
-      catch { session = null; }
-    }
-    const { mode, confirmActions } = await resolvePermission(/** @type {any} */ (session));
-    return mode === PERMISSION_MODES.ACT && confirmActions === false;
-  },
-  forwardEvent: (ev) => {
-    if (!uiConnected()) return;
-    try { uiPorts.broadcast({ ...ev, channel: 'ralph' }); } catch { /* port closed */ }
-  },
-  postChatNote: (text) => postChatNote(text),
-});
-
 // Composer commands store + sources. The `.peerd/commands/` workspace
 // lives in KV; enabled skills surface as /<skill-name> commands via the
 // registry's listCommands(). Earlier source wins on a name collision, so
@@ -1873,7 +1831,7 @@ const sessionState = makeSessionState();
  * see pushState below) and the options page (pulled via the one-shot
  * 'state/get' route + refetch-on-focus; it holds no port on purpose —
  * the uiPorts registry is load-bearing for confirm routing and the
- * voice/vm/ralph forwarders).
+ * voice/vm/goal forwarders).
  *
  * why a closure, not an extracted module: this is snapshot ASSEMBLY whose
  * one load-bearing invariant — no key material in the snapshot — is already
@@ -2198,6 +2156,11 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
 goalRunner = makeGoalRunner({
   runTurn: (/** @type {any} */ args) => runAgentTurn(args),
   onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
+  // why kv: a goal run must survive an SW restart and keep going while the user
+  // is in another chat — the runner mirrors active runs to storage.local and
+  // resume() (on vault unlock) re-drives them. Without it the run is in-memory
+  // only and an MV3 recycle would silently drop it.
+  kv,
 });
 
 // ---------------------------------------------------------------------------
@@ -2501,7 +2464,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     OPENROUTER_POPULAR, callModel, getSecret, safeFetch, secretNameForProvider, maskKey,
     buildModelOptions, ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   }),
-  ...makeRalphRoutes({ vault, ralphDriver, ralphPlanStore }),
   ...makeHooksRoutes({
     auditLog, kv, listHooks, DEFAULT_HOOKS, parseHookMarkdown, saveUserHook, removeHook, exportHooks,
   }),
@@ -2517,7 +2479,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
-    applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit, ralphDriver,
+    applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit,
     handleSystemCommand, handleToolsCommand, postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
@@ -2775,10 +2737,9 @@ vault.attemptResume().then((resumed) => {
     pushState();
     maybeStartBaseNetwork('resume');
   }
-  // why: resume an in-flight Ralph run AFTER the vault is back — a run
-  // needs unlocked secrets to call the model. If the SW died mid-run, the
-  // persisted LoopState + plan file let us pick up at the next iteration
-  // with NO carried context. A no-op if there's no active run. The driver
-  // logs the resume + kicks its own burst loop.
-  ralphDriver.resume().catch((e) => console.error('[sw] ralph resume failed', e));
+  // why: resume any in-flight Goal run AFTER the vault is back — a run needs
+  // unlocked secrets to call the model. If the SW died mid-run (or the user is
+  // returning to a run that kept going while they were elsewhere), the persisted
+  // run state lets us re-drive the next turn. A no-op if nothing is active.
+  goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
 }).catch((e) => console.error('[sw] attemptResume failed', e));

@@ -1,9 +1,9 @@
 // @ts-check
 // Denylist editor helpers — pure values-in/values-out, so they live on
 // the bun test surface (the Mithril component itself is covered by the
-// in-browser tests at extension/tests/unit/sidepanel/). Same split as
-// ralph-format.js: keep this module import-free so `bun test ./tests`
-// can exercise the filter/provenance logic without a browser.
+// in-browser tests at extension/tests/unit/sidepanel/). The pure/component
+// split keeps this module import-free so `bun test ./tests` can exercise the
+// filter/provenance logic without a browser.
 
 /**
  * Case-insensitive substring filter over pattern text. Blank queries

@@ -3,9 +3,8 @@
 // turns in the MAIN session until the agent declares the goal met (the
 // complete_goal tool), or a safety cap / the user's Stop ends it.
 //
-// This is the SIMPLE loop the mode-row Goal toggle drives — NOT a hidden
-// subagent or a plan file (that was the Ralph misread). It just re-enters the
-// ordinary agent turn:
+// This is the loop the mode-row Goal toggle drives — just the ordinary agent
+// turn, re-entered:
 //   - turn 1 is the user's goal text (a REAL, visible message);
 //   - every later turn is a hidden `synthetic` continuation nudge, so the
 //     chat reads like a normal session that simply doesn't stop to wait for
@@ -14,16 +13,21 @@
 // is active — see tools/exposure.js). A hard iteration cap and the Stop
 // button are the backstops behind "until it's done".
 //
-// Run state is in-memory, keyed by session id. A goal run surviving an SW
-// restart is a deliberate non-goal for v1: the cap + Stop carry the safety,
-// and a restart simply ends the run (the user re-arms). Functional-core /
-// imperative-shell: `runTurn` (runAgentTurn) and `onEvent` are injected, so
-// the control logic is otherwise pure and unit-testable with fakes.
+// Run state is keyed by session id and MIRRORED to storage (the injected kv),
+// so a run survives an SW restart and keeps going while the user is in another
+// chat: resume() (called on vault unlock) re-drives any persisted active run.
+// Each chat owns at most one run. Functional-core / imperative-shell: `runTurn`
+// (runAgentTurn), `onEvent`, and `kv` are injected, so the control logic is
+// otherwise pure and unit-testable with fakes (kv optional → pure in-memory).
 
 // Hard backstop on autonomous turns — generous for real multi-step work,
 // still a wall against a run that never calls complete_goal. The Stop button
 // and complete_goal are the normal exits; this only catches a stuck agent.
 export const GOAL_MAX_ITERATIONS = 40;
+
+// storage.local key holding the active runs map ({ [sessionId]: persisted run }),
+// the durable mirror resume() reads on SW boot.
+export const GOAL_RUNS_KEY = 'goal.runs.v1';
 
 /**
  * The hidden continuation nudge sent as turns 2..N. Frames the autonomy
@@ -60,12 +64,30 @@ export const goalContinuationPrompt = (goal) => [
  *   One full agent turn (runAgentTurn). complete()/halt() may fire DURING it
  *   (the complete_goal tool, or a Stop), which the loop checks after it returns.
  * @param {(ev: object) => void} [deps.onEvent]   goal/* status → the side panel
+ * @param {{ get(k:string):Promise<any>, set(k:string,v:any):Promise<void>, delete(k:string):Promise<void> }} [deps.kv]
+ *   Durable mirror of the active runs (storage.local). Omit for pure in-memory
+ *   (tests): persistence + resume become no-ops.
  * @param {number} [deps.maxIterations]
  * @param {() => number} [deps.now]
  */
-export const makeGoalRunner = ({ runTurn, onEvent = () => {}, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now }) => {
+export const makeGoalRunner = ({ runTurn, onEvent = () => {}, kv, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
+
+  // Mirror the live (non-terminal) runs to storage. Fire-and-forget: the
+  // in-memory map is authoritative within an SW lifetime; this is the seam that
+  // lets resume() pick up after a restart. Best-effort — a write failure just
+  // means that run won't resume, not that the live run breaks.
+  const persist = () => {
+    if (!kv) return;
+    /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
+    const out = {};
+    for (const [sid, r] of runs) {
+      if (r.completed || r.halted) continue;
+      out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
+    }
+    Promise.resolve(kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
+  };
 
   /** @param {string} sid @returns {GoalRun | null} */
   const get = (sid) => runs.get(sid) ?? null;
@@ -82,10 +104,11 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, maxIterations = GO
     if (!r || r.completed || r.halted) return false;
     r.completed = true;
     r.summary = typeof summary === 'string' && summary ? summary : null;
+    persist();  // drop it from the durable mirror so it won't resume
     return true;
   };
   /** Stop / steer-takeover: end the run without declaring success. @param {string} sid */
-  const halt = (sid) => { const r = runs.get(sid); if (r) r.halted = true; };
+  const halt = (sid) => { const r = runs.get(sid); if (r) { r.halted = true; persist(); } };
 
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
   const emit = (sid, phase) => {
@@ -110,6 +133,7 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, maxIterations = GO
       while (alive() && run.iteration < maxIterations) {
         const first = run.iteration === 0;
         run.iteration += 1;
+        persist();  // record the iteration about to run, so a crash resumes here
         emit(sid, 'running');
         await runTurn({
           sessionId: sid,
@@ -124,6 +148,7 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, maxIterations = GO
           : run.iteration >= maxIterations ? 'capped' : 'done';
         emit(sid, phase);
         runs.delete(sid);
+        persist();  // terminal — clear it from the durable mirror
       }
     }
   };
@@ -142,6 +167,7 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, maxIterations = GO
       goal: goal.trim(), iteration: 0, completed: false, halted: false,
       summary: null, startedAt: now(),
     });
+    persist();
     drive(sessionId).catch((e) => {
       console.error('[goal] drive threw', e);
       halt(sessionId);
@@ -149,5 +175,35 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, maxIterations = GO
     return { ok: true };
   };
 
-  return Object.freeze({ start, halt, complete, isActive, get, drive });
+  /**
+   * Re-drive any persisted active runs after an SW restart (called once the
+   * vault is unlocked — a turn needs the key). Each rehydrated run continues
+   * from its persisted iteration (so it sends a synthetic continuation, not a
+   * fresh goal). A no-op without kv or with nothing stored. Idempotent: skips a
+   * session that already has a live run.
+   * @returns {Promise<{ resumed: number }>}
+   */
+  const resume = async () => {
+    if (!kv) return { resumed: 0 };
+    let stored;
+    try { stored = await kv.get(GOAL_RUNS_KEY); } catch { return { resumed: 0 }; }
+    if (!stored || typeof stored !== 'object') return { resumed: 0 };
+    let resumed = 0;
+    for (const [sid, raw] of Object.entries(stored)) {
+      if (!sid || runs.has(sid)) continue;
+      const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
+      if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
+      runs.set(sid, {
+        goal: rec.goal,
+        iteration: Number(rec.iteration) || 0,
+        completed: false, halted: false, summary: null,
+        startedAt: Number(rec.startedAt) || now(),
+      });
+      drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
+      resumed += 1;
+    }
+    return { resumed };
+  };
+
+  return Object.freeze({ start, halt, complete, isActive, get, drive, resume });
 };

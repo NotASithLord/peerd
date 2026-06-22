@@ -12,7 +12,7 @@
 // and never steals focus (role=status / aria-live=polite, DECISIONS #20).
 //
 // Monochrome per the brand rule — the spinning orb (.peerd-spinner) is the
-// only color, exactly like RalphPanel.
+// only color, exactly like the Goal bar.
 
 import m from '/vendor/mithril/mithril.js';
 

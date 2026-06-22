@@ -15,8 +15,6 @@
 // complement the state push already carries, or an unhandled/voice type) — so
 // a surface can skip its redraw on `next === state`.
 
-export const RALPH_LOG_MAX = 50;
-
 /**
  * One transcript message (user or assistant). Loosely typed — the SW owns
  * the authoritative shape; the reducer only patches a few fields.
@@ -96,8 +94,7 @@ export const RALPH_LOG_MAX = 50;
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
  * @property {Readonly<Record<string, unknown>>} asyncTasks
- * @property {{ state: any, summary: any, log: any[] }} ralph
- * @property {{ active: boolean, sessionId: string|null, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null } | null} goal
+ * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
 
 /**
@@ -182,11 +179,10 @@ export const INITIAL_STATE = Object.freeze({
   subagents: Object.freeze({ byToolUse: {}, sessions: {} }),
   // In-flight async subagents (DESIGN-11), keyed by PARENT session id.
   asyncTasks: Object.freeze({}),
-  // Ralph persistent-loop status surface (channel: 'ralph').
-  ralph: Object.freeze({ state: null, summary: null, log: [] }),
-  // Goal mode (the mode-row Goal toggle) — null when no run is active; the
-  // goal/state push sets it, the terminal push clears it.
-  goal: null,
+  // Goal mode (the mode-row Goal toggle) — active runs keyed by sessionId, so
+  // a run continuing in a background chat tracks independently of the one in
+  // view. goal/state pushes set/clear each entry.
+  goalRuns: Object.freeze({}),
 });
 
 // ---- streaming reducers (patch one message in place) ----------------------
@@ -287,31 +283,28 @@ const patchSubagentMessages = (state, sessionId, mapFn) => {
 export const reduceChat = (state, msg) => {
   if (!msg || typeof msg.type !== 'string') return state;
 
-  // Ralph loop events ride a dedicated channel: fold the authoritative
-  // LoopState/summary + a bounded log line.
-  if (msg.channel === 'ralph') {
-    const prev = state.ralph ?? { state: null, summary: null, log: [] };
-    // why: ...msg already carries `type`, so don't restate it (the spread
-    // would just overwrite an explicit key with the same value).
-    const log = [...prev.log, { t: Date.now(), ...msg }].slice(-RALPH_LOG_MAX);
-    return { ...state, ralph: { state: msg.state ?? prev.state, summary: msg.summary ?? prev.summary, log } };
-  }
-
   switch (msg.type) {
     case 'goal/state': {
-      // Goal mode (loop/goal-runner.js): a 'running' push keeps the Goal bar
-      // live with the iteration count; any terminal phase clears it.
-      const active = msg.phase === 'running';
-      if (!active) return { ...state, goal: null };
-      return { ...state, goal: {
-        active: true,
-        sessionId: /** @type {string|null} */ (msg.sessionId ?? null),
-        iteration: /** @type {number} */ (msg.iteration ?? 0),
-        maxIterations: /** @type {number} */ (msg.maxIterations ?? 0),
-        goal: /** @type {string} */ (msg.goal ?? ''),
-        phase: /** @type {string} */ (msg.phase ?? 'running'),
-        summary: /** @type {string|null} */ (msg.summary ?? null),
-      } };
+      // Goal mode (loop/goal-runner.js), keyed by sessionId: a 'running' push
+      // keeps that chat's Goal bar live with the iteration count; any terminal
+      // phase removes the entry (the bar self-hides).
+      const sid = /** @type {string} */ (msg.sessionId ?? '');
+      if (!sid) return state;
+      const next = { ...state.goalRuns };
+      if (msg.phase === 'running') {
+        next[sid] = {
+          active: true,
+          sessionId: sid,
+          iteration: /** @type {number} */ (msg.iteration ?? 0),
+          maxIterations: /** @type {number} */ (msg.maxIterations ?? 0),
+          goal: /** @type {string} */ (msg.goal ?? ''),
+          phase: 'running',
+          summary: /** @type {string|null} */ (msg.summary ?? null),
+        };
+      } else {
+        delete next[sid];
+      }
+      return { ...state, goalRuns: next };
     }
     case 'turn/subagent-start': {
       // why these casts: a subagent-start message always carries a string

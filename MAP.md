@@ -77,7 +77,7 @@ extension/
 │   ├── clock/           temporal grounding (now, wait_until)
 │   ├── voice/           local transcription (Moonshine WASM + Web Speech fallback)
 │   ├── transfer/        session export/import (.peerd)
-│   ├── ralph/           /loop — SW-restart-resumable goal loop (acts on its own ⟵)
+│   ├── loop/goal-runner.js  Goal mode — autonomous turns until complete_goal (acts on its own ⟵)
 │   └── profiles/        per-profile namespacing (partly backlog)
 │
 └── peerd-distributed/   [d] the dweb (preview channel only)
@@ -108,7 +108,7 @@ safety design:
 | Surface | Trigger | Attended? | Where |
 |---|---|---|---|
 | A turn | user sends a message | yes | `peerd-runtime/loop/` |
-| **Ralph `/loop`** | a persistent goal, re-entered each SW cold start | runs unattended, but **started** attended; commits only after configured checks pass | `peerd-runtime/ralph/` |
+| **Goal mode** | the Goal toggle — autonomous turns toward a goal, re-driven each SW cold start, until the agent calls `complete_goal` (or Stop / a cap) | **started** attended, then runs unattended in the main chat | `peerd-runtime/loop/goal-runner.js` |
 | **Scheduled tasks** *(planned)* | a `chrome.alarms` wake at/after time T | design target: fail-closed unattended runs, preview/read-only by default | spec only: `docs/specs/FEATURE-SCHEDULED-TASKS.md` |
 
 The rule for anything that acts unattended: it can never widen its own

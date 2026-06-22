@@ -15,7 +15,6 @@ import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
 import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
-import { RalphPanel } from './ralph-panel.js';
 import { GoalBar } from './goal-bar.js';
 import { AsyncTasksBar } from './async-tasks-bar.js';
 
@@ -105,14 +104,11 @@ export const ChatView = {
           + 'your provider account may be over its usage or credit limit.'),
       ]) : null,
 
-      // Ralph persistent-loop status (peerd-runtime/ralph). The driver
-      // was already pushing loop state to the panel; this renders it.
-      // Self-hides unless a run is live (or just ended this lifetime).
-      m(RalphPanel, { ralph: state.ralph, send }),
-
       // Goal mode (the mode-row Goal toggle) — a persistent "running · turn N ·
-      // Stop" bar while an autonomous goal run is live. Self-hides otherwise.
-      m(GoalBar, { goal: state.goal, send }),
+      // Stop" bar while THIS chat's autonomous goal run is live (each chat owns
+      // its own run; a run in another chat shows its bar there). Self-hides
+      // otherwise.
+      m(GoalBar, { goal: state.goalRuns?.[state.session?.sessionId ?? ''], send }),
 
       // In-flight async subagents (DESIGN-11). Pinned + self-hiding: the agent
       // can fire background subagents whose results land later as wake turns,
@@ -161,11 +157,9 @@ export const ChatView = {
             && (state.session?.provider ?? state.providers?.current) === 'anthropic'
           ? m(EffortDial, { settings: state.settings, send })
           : null,
-        // Goal arming — the first in-chat entry point for the Ralph loop
-        // (it was previously reachable only via the hidden `/loop` command).
-        // Arms the NEXT send to launch an autonomous goal run; the InputBar
-        // consumes the arm and disarms. Greyed until there's a key (the send
-        // it arms needs one).
+        // Goal arming — the in-chat entry point for goal mode. Arms the NEXT
+        // send to launch an autonomous goal run; the InputBar consumes the arm
+        // and disarms. Greyed until there's a key (the send it arms needs one).
         m(GoalToggle, {
           armed: ui.goalArmed,
           disabled: !hasKey,

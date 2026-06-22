@@ -173,7 +173,7 @@ ones; never the reverse.
 
 > **File trees below are illustrative, not exhaustive.** They date from
 > the V1 design and lag the directories (the V1-buildout subsystems —
-> permissions/, edit/, cost/, composer/, ralph/, review/, runner/,
+> permissions/, edit/, cost/, composer/, review/, runner/,
 > clock/, tools/hooks/ and friends — live under `peerd-runtime/` today).
 > Treat each module's PROSE as the contract and the directory itself as
 > the truth; `CLAUDE.md` carries the current per-module one-liners.

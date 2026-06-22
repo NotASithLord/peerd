@@ -186,8 +186,8 @@ export { createSuggestionStore, SUGGESTIONS_KEY } from './memory/suggestions.js'
 export { makeAutoMemory, EXTRACTION_MAX_OUTPUT_TOKENS } from './memory/auto-memory-orchestrator.js';
 
 // --- hooks (pre/post-tool-use lifecycle) --------------------------------
-// Foundational: features 03 (plan/act), 05 (Ralph), and others register
-// hooks here; the dispatcher runs them around execute(). The egress
+// Foundational: features like plan/act and others register hooks here; the
+// dispatcher runs them around execute(). The egress
 // allowlist ships as a DEFAULT pre-tool-use hook (see DESIGN §10).
 export {
   registerHook, listHooks, exportHooks,
@@ -225,15 +225,6 @@ export {
   installFromLocal, installFromGit, installFromManifest, resolveGitRawUrl, SkillInstallError,
   loadSkillTool,
 } from './skills/index.js';
-// --- ralph (persistent fresh-context loop; see DESIGN.md §Ralph) ---------
-export {
-  createRalphLoop, decideNext, initLoopState, MAX_ITERATIONS, LOOP_STATE_KEY,
-  createPlanStore, parsePlan, serializePlan, pickNextTask, completeTask,
-  failTask, isPlanExhausted, planSummary, EMPTY_PLAN, PLAN_KEY,
-  createGateRunner, lintGate, testGate, buildGate,
-  consoleCleanGate, domContainsGate,
-  makeRalphDriver,
-} from './ralph/index.js';
 
 // --- clock (temporal grounding) -----------------------------------------
 export {

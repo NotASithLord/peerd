@@ -1815,47 +1815,10 @@ button.icon:hover { background: var(--bg); }
 .hook-x { font-size: 13px; line-height: 1; padding: 0 3px; }
 .hook-confirm { display: inline-flex; align-items: center; gap: 4px; }
 
-/* --- Ralph loop status panel (chat view) -------------------------------- */
-/* Quiet status widget: gray-bordered and monochrome; the spinner orb is
-   the only color while a run is live (brand rule). */
-.ralph-panel {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-  padding: 8px 10px;
-  /* why no margin: .chat-view is a flex column with its own 8px gap —
-     the banners above this panel rely on the same spacing. */
-  font-size: 12px;
-}
-.ralph-head { display: flex; align-items: center; gap: 8px; }
-.ralph-title { font-weight: 600; }
-.ralph-status { color: var(--fg-muted); }
-.ralph-status.is-error { color: var(--danger); }
-.ralph-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); flex: 0 0 auto; }
-.ralph-dot.is-error { background: var(--danger); }
-.ralph-stop { font-size: 11px; padding: 2px 10px; }
-.ralph-dismiss { font-size: 14px; line-height: 1; padding: 0 3px; }
-.ralph-goal {
-  margin-top: 4px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ralph-meta {
-  display: flex; gap: 10px; flex-wrap: wrap;
-  margin-top: 2px; color: var(--fg-muted);
-  font-variant-numeric: tabular-nums;
-}
-.ralph-note {
-  margin-top: 4px;
-  font-family: var(--font-mono);
-  font-size: 11px; color: var(--fg-muted);
-  word-break: break-word;
-}
-.ralph-note.is-error { color: var(--danger); }
-
 /* Goal bar (the mode-row Goal toggle → loop/goal-runner.js) — a calm
    "running · turn N · Stop" strip while an autonomous goal run is live.
-   Mirrors .ralph-panel: bordered elevated card, grayscale, the brand spinner
-   the only color. The work itself renders in the transcript above. */
+   Bordered elevated card, grayscale, the brand spinner the only color while a
+   run is live (brand rule). The work itself renders in the transcript above. */
 .goal-bar {
   display: flex; align-items: center; gap: 8px;
   border: 1px solid var(--border);
@@ -1873,7 +1836,7 @@ button.icon:hover { background: var(--bg); }
 }
 .goal-bar-stop { font-size: 11px; padding: 2px 10px; }
 
-/* In-flight async-subagent status bar (DESIGN-11) — mirrors .ralph-panel:
+/* In-flight async-subagent status bar (DESIGN-11) — mirrors .goal-bar:
    a bordered elevated card, grayscale, the brand spinner the only color. */
 .async-task-bar {
   border: 1px solid var(--border);

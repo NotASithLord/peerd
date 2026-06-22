@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
-  makeGoalRunner, goalContinuationPrompt, GOAL_MAX_ITERATIONS,
+  makeGoalRunner, goalContinuationPrompt, GOAL_MAX_ITERATIONS, GOAL_RUNS_KEY,
 } from '../../extension/peerd-runtime/loop/goal-runner.js';
 import { filterByGoalActive } from '../../extension/peerd-runtime/tools/exposure.js';
 
@@ -132,5 +132,59 @@ describe('filterByGoalActive — complete_goal exposure', () => {
     const names = filterByGoalActive(tools, true).map((t) => t.name);
     expect(names).toContain('complete_goal');
     expect(names.length).toBe(3);
+  });
+});
+
+const makeKv = () => {
+  const store = new Map<string, any>();
+  return {
+    store,
+    get: async (k: string) => store.get(k),
+    set: async (k: string, v: any) => { store.set(k, v); },
+    delete: async (k: string) => { store.delete(k); },
+  };
+};
+
+describe('makeGoalRunner — persistence + resume (survives SW restart / other chats)', () => {
+  it('mirrors a live run to kv while running and clears it on a terminal phase', async () => {
+    const kv = makeKv();
+    let seenWhileLive: any = null;
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async () => { seenWhileLive = kv.store.get(GOAL_RUNS_KEY); runner.halt('s1'); },
+      kv,
+    });
+    await runner.start({ sessionId: 's1', goal: 'do it' });
+    await settle(() => !runner.isActive('s1'));
+    // Was mirrored to storage while the run was live (so an SW restart finds it).
+    expect(seenWhileLive?.s1).toMatchObject({ goal: 'do it' });
+    // Cleared once the run ends — a terminal run must not resume.
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+
+  it('resume() rehydrates a persisted run and continues it as a synthetic continuation', async () => {
+    const kv = makeKv();
+    // Seed storage as if the SW died mid-run at iteration 2.
+    kv.store.set(GOAL_RUNS_KEY, { sBoot: { goal: 'keep building', iteration: 2, startedAt: 1 } });
+    const calls: TurnArgs[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); runner.complete('sBoot', 'done'); },
+      kv,
+    });
+    const res = await runner.resume();
+    expect(res.resumed).toBe(1);
+    await settle(() => !runner.isActive('sBoot'));
+    // Continues from the persisted iteration → a HIDDEN continuation that still
+    // carries the goal, NOT the goal replayed as a fresh visible message.
+    expect(calls[0].synthetic).toBe(true);
+    expect(calls[0].userText).toContain('keep building');
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+
+  it('resume() is a no-op with no kv or nothing stored', async () => {
+    expect((await makeGoalRunner({ runTurn: async () => {} }).resume())).toEqual({ resumed: 0 });
+    const kv = makeKv();
+    expect((await makeGoalRunner({ runTurn: async () => {}, kv }).resume())).toEqual({ resumed: 0 });
   });
 });
