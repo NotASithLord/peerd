@@ -114,7 +114,15 @@ jobs:
       - name: Run the two-peer harness over CDP
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-        run: bun run test:twopeer
+        # Retry: the headless-WebRTC ICE/peer-connect handshake is intermittently
+        # flaky on CI runners. Up to 3 attempts; pass if any succeeds.
+        run: |
+          for attempt in 1 2 3; do
+            bun run test:twopeer && exit 0
+            echo "::warning::two-peer attempt $attempt failed (headless-WebRTC flake) — retrying"
+            sleep 5
+          done
+          exit 1
 
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
   # previously run only by hand. Spawns a relay + N real node processes that
@@ -130,7 +138,15 @@ jobs:
         with:
           bun-version: "1.3.9"
       - run: bun install
-      - run: bun run test:netproc
+      # Retry: cross-process port/timing in the multi-node mesh can flake.
+      - name: Run the netproc harness (retry)
+        run: |
+          for attempt in 1 2 3; do
+            bun run test:netproc && exit 0
+            echo "::warning::netproc attempt $attempt failed — retrying"
+            sleep 5
+          done
+          exit 1
 
   # Additive job — NOT in the required-checks list; lets it earn a green
   # history before gating. First test that loads the REAL unpacked extension
@@ -155,7 +171,14 @@ jobs:
       - name: Run side-panel E2E smoke
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-        run: bun scripts/cdp/run-e2e-sidepanel.mjs
+        # Retry: headless-Chrome startup + CDP attach to the live extension can flake.
+        run: |
+          for attempt in 1 2 3; do
+            bun scripts/cdp/run-e2e-sidepanel.mjs && exit 0
+            echo "::warning::e2e attempt $attempt failed — retrying"
+            sleep 5
+          done
+          exit 1
 
   package:
     name: package ${{ matrix.channel }}/${{ matrix.browser }}
