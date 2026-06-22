@@ -130,6 +130,7 @@ import {
   filterByDwebActive,
   filterByGoalActive,
   makeGoalRunner,
+  GOAL_MAX_ITERATIONS,
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
@@ -2153,9 +2154,36 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
 // hidden synthetic continuations), so the work streams into the chat like any
 // session. The complete_goal tool ends it; goal/state events drive the panel's
 // Goal bar (iteration + Stop).
+// Set ONE session's Plan/Act permission on its record (mirrors permission/set,
+// minus the global cache keys — this is a per-session flip, so a concurrent chat
+// is untouched) and push the new state so the Plan/Act pill reflects it. Goal
+// mode flips a run to Act + confirm-off for its duration and restores on end.
+const setSessionPermission = async (/** @type {string} */ sid, /** @type {{ mode: string, confirmActions: boolean }} */ perm) => {
+  const patch = { permissionMode: perm.mode, confirmActions: perm.confirmActions };
+  try {
+    await sessions.update(/** @type {any} */ (sid), patch);
+    if (sessionState.current()?.sessionId === sid) {
+      sessionState.set({ ...sessionState.current(), ...patch });
+    }
+    pushState();
+  } catch (e) {
+    if (!(e instanceof SessionNotFoundError)) console.warn('[sw] goal permission set failed', e);
+  }
+};
+
 goalRunner = makeGoalRunner({
   runTurn: (/** @type {any} */ args) => runAgentTurn(args),
   onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
+  // Terminal side-effects: restore the permission the run flipped, and post a
+  // note when the run ended WITHOUT a complete_goal result already in the
+  // transcript (cap / halt). 'done' needs no note — complete_goal's tool result
+  // is the visible record.
+  onRunEnd: (/** @type {any} */ sid, /** @type {any} */ info) => {
+    const prior = info?.meta?.priorPermission;
+    if (prior) setSessionPermission(sid, { mode: prior.mode, confirmActions: prior.confirmActions });
+    if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
+    else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+  },
   // why kv: a goal run must survive an SW restart and keep going while the user
   // is in another chat — the runner mirrors active runs to storage.local and
   // resume() (on vault unlock) re-drives them. Without it the run is in-memory
@@ -2434,7 +2462,24 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
 // is built above; ensureSession is the same lazy session-create the model turn
 // uses, so a Goal send on a fresh chat gets a session (like /system and /tools).
-const startGoalRun = (/** @type {any} */ req) => /** @type {any} */ (goalRunner)?.start(req);
+const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ req) => {
+  if (!goalRunner) return { ok: false, error: 'goal-mode-unavailable' };
+  const sid = req?.sessionId;
+  // Goal mode runs UNATTENDED, so flip the session to Act + confirm-off for the
+  // run's duration (restored by onRunEnd when it ends). Otherwise confirm-on
+  // would pause on every action and Plan mode would block all writes — neither
+  // is "keep going until done". The flip is visible (the Plan/Act pill moves).
+  let priorPermission = null;
+  if (sid) {
+    try {
+      const session = await sessions.get(/** @type {any} */ (sid));
+      const resolved = await resolvePermission(/** @type {any} */ (session));
+      priorPermission = { mode: resolved.mode, confirmActions: resolved.confirmActions };
+      await setSessionPermission(sid, { mode: PERMISSION_MODES.ACT, confirmActions: false });
+    } catch (e) { console.warn('[sw] goal autonomy setup failed', e); }
+  }
+  return goalRunner.start({ sessionId: sid, goal: req?.goal, meta: { priorPermission } });
+};
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.halt(sid);
 const ensureSession = ensureCurrentSession;
 

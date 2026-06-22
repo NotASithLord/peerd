@@ -188,3 +188,65 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     expect((await makeGoalRunner({ runTurn: async () => {}, kv }).resume())).toEqual({ resumed: 0 });
   });
 });
+
+describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
+  it('stops after ONE turn when the turn reports failure (not the whole cap)', async () => {
+    const calls: TurnArgs[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); return { ok: false }; },
+      maxIterations: 20,
+    });
+    await runner.start({ sessionId: 's', goal: 'g' });
+    await settle(() => !runner.isActive('s'));
+    expect(calls.length).toBe(1);
+  });
+
+  it('stops when a turn is aborted (Stop / steer / spend limit)', async () => {
+    const calls: TurnArgs[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); return { stopReason: 'aborted' }; },
+      maxIterations: 20,
+    });
+    await runner.start({ sessionId: 's', goal: 'g' });
+    await settle(() => !runner.isActive('s'));
+    expect(calls.length).toBe(1);
+  });
+
+  it('fires onRunEnd once on a terminal phase, carrying phase/summary/meta', async () => {
+    const ends: any[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async () => { runner.complete('s', 'shipped'); },
+      onRunEnd: (sid, info) => ends.push({ sid, ...info }),
+    });
+    await runner.start({ sessionId: 's', goal: 'g', meta: { priorPermission: { mode: 'plan' } } });
+    await settle(() => !runner.isActive('s'));
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({ sid: 's', phase: 'done', summary: 'shipped', meta: { priorPermission: { mode: 'plan' } } });
+  });
+
+  it('a VaultLockedError pauses (keeps kv + meta, no onRunEnd) so resume() re-drives', async () => {
+    const kv = makeKv();
+    const ends: any[] = [];
+    let throwOnce = true;
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async () => {
+        if (throwOnce) { throwOnce = false; const e: any = new Error('locked'); e.name = 'VaultLockedError'; throw e; }
+        runner.complete('s', 'ok');
+      },
+      onRunEnd: (_sid, info) => ends.push(info),
+      kv,
+    });
+    await runner.start({ sessionId: 's', goal: 'keep going', meta: { priorPermission: { mode: 'plan' } } });
+    await settle(() => !runner.isActive('s'));
+    // Paused, NOT terminal: no onRunEnd, and the record + its meta survive in kv.
+    expect(ends).toHaveLength(0);
+    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going', meta: { priorPermission: { mode: 'plan' } } });
+    // resume() re-drives; this time it completes → terminal, onRunEnd, kv cleared.
+    await runner.resume();
+    await settle(() => !runner.isActive('s'));
+    expect(ends).toHaveLength(1);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+});

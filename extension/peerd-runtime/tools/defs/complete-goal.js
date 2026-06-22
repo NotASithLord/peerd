@@ -3,10 +3,13 @@
 //
 // Goal mode (the mode-row Goal toggle, loop/goal-runner.js) keeps re-entering
 // the agent turn until the agent decides the goal is met. THIS tool is how it
-// decides: calling it stops the loop. It is revealed to the model ONLY while a
-// goal run is active (tools/exposure.js GOAL_ONLY_TOOLS) — outside a run it
-// isn't in the descriptor list and the exposure gate refuses it by name, so it
-// can't be used to no-op a normal chat.
+// decides: calling it stops the loop. It is REVEALED to the model only while a
+// goal run is active (tools/exposure.js GOAL_ONLY_TOOLS drops it from the main
+// descriptor list otherwise), so a normal chat never sees it. NOTE the gate is
+// the descriptor filter, NOT the dispatcher: complete_goal is a normal
+// main-agent tool, so a stray call outside a run still reaches execute() — which
+// is why execute() below no-ops (returns no_active_goal_run) when there's no run
+// to end. Two layers: hidden from the model, harmless if called anyway.
 //
 // Read-class + no egress: it touches no external surface, just signals the
 // SW-side run controller via ctx.completeGoalRun (injected in buildToolContext,
