@@ -16,6 +16,62 @@ codebase, in ideal weeks. They are sizing, not commitments.
 Legend for risk: 🟢 routine · 🟡 real risk, mitigable · 🔴 the part that
 can sink the schedule.
 
+> **Status (2026-06-22) — most of this ladder is built; it needs polish,
+> not invention.** Phase 0 and nearly all of Phase 1 shipped (preview
+> channel): persistent `did`, N-peer rooms, the authenticated room mesh
+> with mesh-assisted signaling, topic gossip + presence + late-join
+> sync, the dwapp bridge, the app loader, and the commons seed app —
+> plus two things that postdate this plan: a **peer-to-peer app store**
+> (Share / Discover / Install) and an **always-on base network** in the
+> offscreen doc. The Phase 3 🔴 **Kademlia DHT core also landed** (signed
+> records, iterative lookup, providers). What's left is *polish* across
+> all of it, the Phase 2 resilience work, Phase 4 sealed/async messaging,
+> Phase 5 curation — and the one step that turns this from human-P2P into
+> real **agent-to-agent** (next section). Keep the phase labels below for
+> their design rationale; read them as the *why*, not the live status.
+
+---
+
+## A2A — expose messaging & dwapps to the agent (the missing last mile)
+
+Today the dweb is reachable by the **human**: a person joins rooms, runs
+dwapps, and sends/reads messages through the dwapp bridge and the UI. The
+**agent's** dweb surface stops one step short — it has `dweb_share` /
+`dweb_discover` / `dweb_install` / `dweb_peers` / `dweb_block`, so it can
+publish, find, and install apps and see who's around, but it **cannot
+itself send a direct message to a peer or act inside a dwapp's pub/sub.**
+That gap is the whole distance between "P2P apps a human drives" and
+**real agent-to-agent**: one user's agent talking, peer-to-peer, to
+another user's agent.
+
+**Scope.**
+- **Agent messaging tools.** Expose `messaging/direct.js` to the agent:
+  send/receive signed direct messages to a peer `did`, gated and audited
+  like every other tool — Plan blocks sends, confirmation + denylist on
+  the recipient, `wrapUntrusted` on everything inbound. The transport
+  already exists; this is the tool surface + policy around it.
+- **Agent dwapp participation.** Let the agent join a dwapp's topic and
+  publish / subscribe / retain through the same `apps/bridge.js` contract
+  the dwapp uses, so an agent is a *participant* in a shared app, not
+  just its installer. Same per-(app, permission) grants and D-8 domain
+  separation as the human bridge; same audit.
+- **Inbound as a turn.** A message (or dwapp event) addressed to the
+  agent re-enters as a synthetic wake turn (the async-subagent /
+  scheduled-task pattern) — fail-closed, never able to widen its own
+  permissions.
+
+**Why now.** The hard parts are done — the mesh, signed envelopes, the
+bridge, direct messaging, and the agent tool/gate framework all exist.
+This is wiring the existing transport into the agent's exposed tool set
+with the right policy, not new protocol; it is the highest-leverage dweb
+work left, and what finally makes "agent-to-agent over the mesh" true.
+
+**Risk.** 🟡 — a new privilege surface (the agent acting on the network,
+possibly unattended). *Mitigation:* reuse the egress / confirm / denylist
+/ audit model 1:1, exposure-gate to the preview channel (as the dweb
+tools already are), and give the agent-messaging boundary the same
+dedicated security review the human bridge got (Phase 1 item 6).
+
 ---
 
 ## Phase 0 — The wedge ✅ SHIPPED (preview channel)
@@ -43,7 +99,7 @@ persistent identity, the dwapp bridge.
 
 ---
 
-## Phase 1 — Rooms & live collaboration: **the demo** (next)
+## Phase 1 — Rooms & live collaboration: the demo ✅ SHIPPED (polish needed)
 
 **Goal.** The `NORTH-STAR.md §2` demo, end to end: N peers in a room
 behind one `peerd://` link, co-editing a document and sharing a post
@@ -140,7 +196,7 @@ this phase (no sealing yet).
 
 ---
 
-## Phase 2 — Field resilience: server-optional maturity
+## Phase 2 — Field resilience: server-optional maturity (partial — base network shipped; resilience polish remaining)
 
 **Goal.** The Phase 1 network stops being a demo and starts being
 dependable: multiple bootstrap nodes, remembered peers, rooms that
@@ -171,7 +227,7 @@ abuse surface (room-scoped mitigates).
 
 ---
 
-## Phase 3 — Discovery: the DHT chapter (+ persistent-identity maturity)
+## Phase 3 — Discovery: the DHT chapter (DHT core ✅ SHIPPED; discovery + identity-maturity remaining)
 
 **Goal.** Stranger-to-stranger discovery without a directory — global
 feeds, finding content and peers you don't share a room with. The
@@ -213,7 +269,7 @@ documented fallback).
 
 ---
 
-## Phase 4 — Async messaging & social-graph relays
+## Phase 4 — Async messaging & social-graph relays (planned — live-link direct messaging shipped; sealed/store-and-forward not yet)
 
 **Goal.** Messages survive recipient offline. Relays drawn from the
 social graph, sealed, capped, abuse-resistant. (Unchanged in content
@@ -234,7 +290,7 @@ policy.
 
 ---
 
-## Phase 5 — Curation, the social graph, and abuse maturity
+## Phase 5 — Curation, the social graph, and abuse maturity (planned)
 
 **Goal.** Discovery as a graph, and the standing adversarial track.
 (The old Phase 4 social app shrank: the commons — shipped back in
@@ -273,6 +329,12 @@ Phase 1 — *is* the seed app; this phase grows it into curation.)
 
 ## Supersession record
 
+- **2026-06-22 — de-staled + A2A added.** Marked Phase 0/1 and the Phase 3
+  DHT core as shipped (status only — the phase designs are unchanged),
+  noted the p2p app store + always-on base network that postdate the
+  2026-06-12 plan, and added the top **A2A** section (expose messaging +
+  dwapps to the agent) as the live next step. The root `ROADMAP.md` was
+  removed; backlog now lives in GitHub Issues.
 - **2026-06-12 — resequenced against `NORTH-STAR.md`.** TURN deleted
   (D-5: was old-Phase-1 "ICE tiering" scope and `PROTOCOL §3.5`
   turnREST); DHT moved behind the demo (D-6: old Phase 2 → Phase 3);
