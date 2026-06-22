@@ -4,7 +4,7 @@ import { makeSessionMutationRoutes } from '../../extension/background/routes/ses
 class SessionNotFoundError extends Error {}
 
 const baseDeps = (over: any = {}) => {
-  const calls: any = { extract: [], updated: [], cacheSet: null, cacheCleared: false };
+  const calls: any = { extract: [], updated: [], cacheSet: null, cacheCleared: false, halted: [] };
   const cache: any = { current: { sessionId: 'cur', model: 'old' } };
   const deps = {
     vault: { isLocked: () => false },
@@ -28,6 +28,7 @@ const baseDeps = (over: any = {}) => {
     },
     autoMemory: { maybeExtract: async (id: string, reason: string) => { calls.extract.push([id, reason]); } },
     maybeAutoResume: () => {},
+    haltGoalRun: (sid: string) => { calls.halted.push(sid); },
     resolvePermission: async (s: any) => ({ mode: s ? 'act' : 'plan', confirmActions: false }),
     normalizeMode: (m: string) => (m === 'plan' ? 'plan' : 'act'),
     normalizeConfirmActions: (c: any) => c === true,
@@ -73,6 +74,19 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 's2' });
     expect(calls.cacheSet).toEqual({ sessionId: 's2' });
     expect(calls.extract).toEqual([['cur', 'switch']]);
+  });
+  test('reset + archive halt the chat\'s goal run; switch does NOT', async () => {
+    const reset = baseDeps();
+    await makeSessionMutationRoutes(reset.deps)['session/reset']();
+    expect(reset.calls.halted).toEqual(['cur']);   // new chat abandons the run
+
+    const archive = baseDeps();
+    await makeSessionMutationRoutes(archive.deps)['session/archive']({ sessionId: 's2' });
+    expect(archive.calls.halted).toEqual(['s2']);  // archiving wraps it up
+
+    const sw = baseDeps();
+    await makeSessionMutationRoutes(sw.deps)['session/switch']({ sessionId: 's2' });
+    expect(sw.calls.halted).toEqual([]);           // switching keeps it running
   });
   test('switch to the SAME (current) session does NOT re-extract', async () => {
     const { deps, calls } = baseDeps();

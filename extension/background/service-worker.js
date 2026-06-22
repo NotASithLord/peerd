@@ -2554,7 +2554,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume,
+    maybeAutoResume, haltGoalRun,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
