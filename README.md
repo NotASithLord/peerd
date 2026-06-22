@@ -30,8 +30,10 @@ vault, WebAuthn passkeys to unlock it, opaque-origin iframes, Subresource
 Integrity — and writes zero lines of its own cryptographic or
 process-isolation code. The agent that holds your keys never reads a raw
 page; a disposable runner with no keys and no network does, and its
-output comes back fenced as untrusted. (More at
-[peerd.ai](https://peerd.ai).)
+output comes back fenced as untrusted. And the agent never takes its own
+word for success: every action it drives is verified against the live page
+before it counts as done — the model proposes, the browser decides. (More
+at [peerd.ai](https://peerd.ai).)
 
 The name is always lowercase: `peerd`.
 
@@ -211,6 +213,29 @@ The brand IS the architecture: cross-module imports go through each
 module's `index.js`, never deep paths; nothing outside
 `peerd-distributed/` imports it at all. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for the dependency graph.
+
+## Trust boundaries
+
+peerd's safety is *who is allowed to do what* — small, legible boundaries
+enforced by the browser platform, not by peerd's own crypto. Two
+principles run through all of it: **the agent that holds your keys never
+touches a raw page or runs untrusted code**, and **the agent never gets the
+final word on correctness — every action is verified against the live page
+before it counts as done.**
+
+| Actor | Trusted with | Never |
+|---|---|---|
+| **The vault** (`peerd-egress/vault`) | your API keys + secrets, decrypted only after Touch ID / passkey / passphrase unlock; idle auto-lock | leaving the device — keys go only to the provider you chose |
+| **The main agent** (`peerd-runtime/loop`) | the conversation, planning, tool dispatch | reading raw page bytes or running untrusted code directly |
+| **The disposable runner** (`peerd-runtime/runner`) | driving + reading the page via do/get/check | holding keys or its own network; its output returns `wrapUntrusted`-fenced |
+| **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
+| **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
+| **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
+
+The shape is *proposes vs. decides*: the AI proposes and drives; the
+browser platform (WebCrypto vault, WebAuthn unlock, V8 isolates, SRI) and
+the live DOM are what actually decide. Full detail in
+[`SECURITY.md`](SECURITY.md) and `DESIGN.md`.
 
 ## Documentation
 
