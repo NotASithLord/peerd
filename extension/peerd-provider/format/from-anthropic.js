@@ -200,6 +200,14 @@ export async function* fromAnthropicStream(body) {
       }
       case 'error': {
         const message = payload.error?.message ?? 'unknown server error';
+        // why: flush captured usage before the error. Anthropic billed the
+        // prompt the moment message_start arrived (input + cache tokens, with
+        // usageSeen=true), so a mid-stream `error` event must still report it —
+        // exactly the rationale the message_stop case and the truncated-stream
+        // fallback below act on. Without this, a turn that errors after a large
+        // (cached) prompt silently undercounts in the cost meter.
+        const ue = emitUsage();
+        if (ue) yield ue;
         yield { type: 'error', error: message };
         return;
       }
