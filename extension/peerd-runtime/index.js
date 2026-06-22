@@ -18,6 +18,9 @@ export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 // Per-session turn slots — steer-live aborts stay inside one chat;
 // streams in other conversations survive navigation + new sends.
 export { makeTurnSlots } from './loop/turn-slots.js';
+// The agent turn driver — runAgentTurn + maybeAutoResume, extracted from the
+// SW with all IO injected (background/service-worker.js wires it).
+export { makeTurnDriver } from './loop/turn-driver.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.
