@@ -16,6 +16,7 @@ import { MessageList } from './message-list.js';
 import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { RalphPanel } from './ralph-panel.js';
+import { GoalBar } from './goal-bar.js';
 import { AsyncTasksBar } from './async-tasks-bar.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
@@ -108,6 +109,10 @@ export const ChatView = {
       // was already pushing loop state to the panel; this renders it.
       // Self-hides unless a run is live (or just ended this lifetime).
       m(RalphPanel, { ralph: state.ralph, send }),
+
+      // Goal mode (the mode-row Goal toggle) — a persistent "running · turn N ·
+      // Stop" bar while an autonomous goal run is live. Self-hides otherwise.
+      m(GoalBar, { goal: state.goal, send }),
 
       // In-flight async subagents (DESIGN-11). Pinned + self-hiding: the agent
       // can fire background subagents whose results land later as wake turns,

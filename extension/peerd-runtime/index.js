@@ -21,6 +21,9 @@ export { makeTurnSlots } from './loop/turn-slots.js';
 // The agent turn driver — runAgentTurn + maybeAutoResume, extracted from the
 // SW with all IO injected (background/service-worker.js wires it).
 export { makeTurnDriver } from './loop/turn-driver.js';
+// Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
+// agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
+export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.
@@ -132,6 +135,7 @@ export {
   filterByInstanceState, isInstanceGatedOut, instanceGateKind, INSTANCE_GATED_TOOLS,
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
+  filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.

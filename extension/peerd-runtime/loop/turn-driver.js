@@ -31,6 +31,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
+    filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
     decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
     resolveFailoverChain, shouldFailover, callModel, postChatNote, runUserTurn, getSecret,
@@ -192,15 +193,21 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // FIFTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
     // hidden until this session has CALLED a dweb tool — engagement, not the
     // always-on network's peer presence. Composes after the dweb-enabled gate.
-    const descriptors = filterByDwebActive(
-      filterByDwebEnabled(
-        filterByInstanceState(
-          filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
-          instanceState,
+    // SIXTH cut: goal mode. complete_goal is registered always but revealed to
+    // the model ONLY while a goal run is live for this session (goalActiveFor),
+    // so a normal chat never sees it. Outermost so it composes over the rest.
+    const descriptors = filterByGoalActive(
+      filterByDwebActive(
+        filterByDwebEnabled(
+          filterByInstanceState(
+            filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
+            instanceState,
+          ),
+          DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
         ),
-        DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
+        dwebEngagedSessions.has(sessionId),
       ),
-      dwebEngagedSessions.has(sessionId),
+      !!goalActiveFor?.(sessionId),
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     toolContext.instanceState = instanceState;
     return descriptors;

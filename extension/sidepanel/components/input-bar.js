@@ -229,18 +229,18 @@ export const InputBar = {
       const text = ui.value.trim();
       if (!text || ui.busy) return;
 
-      // Goal-armed (mode-row toggle): this send launches a Ralph goal run
-      // with the draft as its goal instead of a normal turn. Reuses the
-      // SW's `/loop` path — byte-identical to typing "/loop <goal>" — then
-      // disarms via onGoalSent. Attachments don't apply to a goal, so they
-      // stay staged for a later normal send.
+      // Goal-armed (mode-row toggle): this send starts an autonomous goal run
+      // in THIS chat — the agent keeps taking turns toward the goal until it
+      // calls complete_goal (or the cap / Stop). The work streams inline like a
+      // normal session. The draft is the (visible) goal; attachments don't
+      // apply to a goal, so they stay staged for a later normal send.
       if (goalArmed) {
         ui.busy = true;
         ui.value = '';
         saveDraft(sid, '');
         ui.transcriptBaseline = '';
         closePalette(ui);
-        const reply = await send({ type: 'agent/send', text: `/loop ${text}` });
+        const reply = await send({ type: 'agent/send', text, goal: true });
         ui.busy = false;
         // Disarm only on a clean launch; on failure restore the draft and
         // stay armed so the user can retry without re-toggling.

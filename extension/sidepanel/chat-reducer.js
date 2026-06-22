@@ -97,6 +97,7 @@ export const RALPH_LOG_MAX = 50;
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {{ state: any, summary: any, log: any[] }} ralph
+ * @property {{ active: boolean, sessionId: string|null, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null } | null} goal
  */
 
 /**
@@ -183,6 +184,9 @@ export const INITIAL_STATE = Object.freeze({
   asyncTasks: Object.freeze({}),
   // Ralph persistent-loop status surface (channel: 'ralph').
   ralph: Object.freeze({ state: null, summary: null, log: [] }),
+  // Goal mode (the mode-row Goal toggle) — null when no run is active; the
+  // goal/state push sets it, the terminal push clears it.
+  goal: null,
 });
 
 // ---- streaming reducers (patch one message in place) ----------------------
@@ -294,6 +298,21 @@ export const reduceChat = (state, msg) => {
   }
 
   switch (msg.type) {
+    case 'goal/state': {
+      // Goal mode (loop/goal-runner.js): a 'running' push keeps the Goal bar
+      // live with the iteration count; any terminal phase clears it.
+      const active = msg.phase === 'running';
+      if (!active) return { ...state, goal: null };
+      return { ...state, goal: {
+        active: true,
+        sessionId: /** @type {string|null} */ (msg.sessionId ?? null),
+        iteration: /** @type {number} */ (msg.iteration ?? 0),
+        maxIterations: /** @type {number} */ (msg.maxIterations ?? 0),
+        goal: /** @type {string} */ (msg.goal ?? ''),
+        phase: /** @type {string} */ (msg.phase ?? 'running'),
+        summary: /** @type {string|null} */ (msg.summary ?? null),
+      } };
+    }
     case 'turn/subagent-start': {
       // why these casts: a subagent-start message always carries a string
       // sessionId (and parentToolUseId when present) by contract — the

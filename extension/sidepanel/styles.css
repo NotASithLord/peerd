@@ -1852,6 +1852,27 @@ button.icon:hover { background: var(--bg); }
 }
 .ralph-note.is-error { color: var(--danger); }
 
+/* Goal bar (the mode-row Goal toggle → loop/goal-runner.js) — a calm
+   "running · turn N · Stop" strip while an autonomous goal run is live.
+   Mirrors .ralph-panel: bordered elevated card, grayscale, the brand spinner
+   the only color. The work itself renders in the transcript above. */
+.goal-bar {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.goal-bar-label { font-weight: 600; }
+.goal-bar-meta { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.goal-bar-text {
+  color: var(--fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 16ch;
+}
+.goal-bar-stop { font-size: 11px; padding: 2px 10px; }
+
 /* In-flight async-subagent status bar (DESIGN-11) — mirrors .ralph-panel:
    a bordered elevated card, grayscale, the brand spinner the only color. */
 .async-task-bar {

@@ -128,6 +128,8 @@ import {
   filterByInstanceState,
   filterByDwebEnabled,
   filterByDwebActive,
+  filterByGoalActive,
+  makeGoalRunner,
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
@@ -958,6 +960,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // clean-context READ-ONLY reviewer over a diff and get a structured
     // summary back. Bound below; see makeRequestReview. Feature 08.
     requestReview,
+    // why: the complete_goal tool calls ctx.completeGoalRun(summary) to end the
+    // autonomous goal run for THIS session (loop/goal-runner.js). Resolves at
+    // call time (goalRunner is built after this fn is defined). Returns false
+    // outside an active run, which the tool surfaces as a harmless no-op.
+    completeGoalRun: sessionId
+      ? (/** @type {string} */ summary) => goalRunner?.complete(/** @type {string} */ (sessionId), summary) ?? false
+      : undefined,
     dom: undefined,
     // why: vm is a SW-side client that proxies vm/run + vm/write-file
     // messages via chrome.tabs.sendMessage to the discrete VM tab.
@@ -2156,12 +2165,20 @@ const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSe
 // and pushState, so it stays SW-scoped and is injected like everything else.
 // The error CLASSES are imported inside the driver (instanceof narrowing), not
 // passed here.
+// Goal mode (the mode-row Goal toggle): keeps re-entering the agent turn until
+// the agent calls complete_goal. Forward-declared so makeTurnDriver can read
+// goalActiveFor (which tool list to show) at CALL time — the runner itself is
+// built just below, once runAgentTurn exists (the same late-dep dance the
+// orchestrator wiring uses). filterByGoalActive is a pure descriptor filter.
+/** @type {ReturnType<typeof makeGoalRunner> | null} */
+let goalRunner = null;
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, resolveActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
   computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
   filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
+  filterByGoalActive, goalActiveFor: (/** @type {string} */ sid) => goalRunner?.isActive(sid) ?? false,
   dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
   decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
@@ -2171,6 +2188,16 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
   postChatNote: (/** @type {any} */ text, /** @type {any} */ action) => postChatNote(text, action),
+});
+
+// Build the goal runner now that runAgentTurn exists. Each goal turn is a
+// normal runAgentTurn on the MAIN session (turn 1 = the goal, later turns =
+// hidden synthetic continuations), so the work streams into the chat like any
+// session. The complete_goal tool ends it; goal/state events drive the panel's
+// Goal bar (iteration + Stop).
+goalRunner = makeGoalRunner({
+  runTurn: (/** @type {any} */ args) => runAgentTurn(args),
+  onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
 });
 
 // ---------------------------------------------------------------------------
@@ -2440,6 +2467,14 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // 6. Message handlers — one-shot sendMessage routes
 // ---------------------------------------------------------------------------
 
+// Goal-mode handles for the session routes, defined here so they wire as plain
+// SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
+// is built above; ensureSession is the same lazy session-create the model turn
+// uses, so a Goal send on a fresh chat gets a session (like /system and /tools).
+const startGoalRun = (/** @type {any} */ req) => /** @type {any} */ (goalRunner)?.start(req);
+const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.halt(sid);
+const ensureSession = ensureCurrentSession;
+
 // Message routes live in background/routes/*.js as import-free, deps-injected
 // factories. Each is wired with an EXPLICIT per-module deps object naming
 // exactly the stable collaborators that module needs — so the coupling is
@@ -2485,6 +2520,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit, ralphDriver,
     handleSystemCommand, handleToolsCommand, postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
+    // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
+    // any active one when the user stops or steers with a fresh message.
+    startGoalRun, haltGoalRun, ensureSession,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
