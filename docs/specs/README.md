@@ -8,8 +8,8 @@
 
 A spec lands here when a feature has a clear enough shape to write down
 but hasn't been built. When it ships, the spec stays as the design
-record (cross-linked from `ROADMAP.md` and, for the catalog of shipped
-features, `FEATURES.md`) — specs are not deleted on landing, they become
+record (cross-linked, for the catalog of shipped
+features, from `FEATURES.md`) — specs are not deleted on landing, they become
 history.
 
 > Two design records live at the **repo root**, not here: `DESIGN.md`

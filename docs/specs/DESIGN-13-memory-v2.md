@@ -190,7 +190,7 @@ when docs get large:
   the agent can then `read_memory` or `memory_update` them by id. Pure
   matcher in `memory.js`; no embeddings in v1 (no model dependency, no
   egress, deterministic, Bun-testable). Semantic recall is a later,
-  flagged option — note it in ROADMAP, don't front-run it.
+  flagged option — leave it as backlog (GitHub Issues), don't front-run it.
 - **Budget overflow → summarize-and-link.** When a doc exceeds budget,
   the always-loaded block shows a generated *summary head* plus the
   existing "load on demand" marker, instead of a hard truncation. The

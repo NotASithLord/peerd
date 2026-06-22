@@ -75,4 +75,4 @@ package. Current state and the open hardening decisions:
 Not a relay for app traffic, not a TURN server, not a coordinator for the
 conversation. Once two peers connect, the node is out of the path entirely.
 After the mesh exists, peer-assisted signaling + DHT-published bootstrap
-mean it matters only for the very first contact (ROADMAP / ARCHITECTURE §1).
+mean it matters only for the very first contact (ARCHITECTURE §1).

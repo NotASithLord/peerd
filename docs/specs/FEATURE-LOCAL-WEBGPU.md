@@ -386,7 +386,7 @@ Tests:
 
 Docs (prose — update, not blocking):
 - `CLAUDE.md`, `ARCHITECTURE.md`, `ARCHITECTURE-CHANGES.md`, `DESIGN.md`,
-  `README.md`, `ROADMAP.md`, `STATUS.md`, `TODO.md`, `docs/DECISIONS.md`
+  `README.md`, `STATUS.md`, `TODO.md`, `docs/DECISIONS.md`
   (record the removal), `docs/store/OPEN-DECISIONS.md`,
   `docs/DO-GET-CHECK-DEV-NOTES.md`.
 - `docs/LOCAL-INFERENCE.md` — strike re-trigger #1 (Ollama prerequisite)

@@ -43,8 +43,7 @@ care. There is no "V1" commitment; versions stay in the 0.x range until
 the surface stabilizes.
 
 For the full, itemized list of what's shipped — categorized by module —
-see [`FEATURES.md`](FEATURES.md). For the (version-free) backlog, see
-`ROADMAP.md`.
+see [`FEATURES.md`](FEATURES.md).
 
 ## Install
 
@@ -217,8 +216,8 @@ module's `index.js`, never deep paths; nothing outside
 
 Read `CLAUDE.md` for quick orientation, `ARCHITECTURE.md` for the
 five-module organization, `ARCHITECTURE-CHANGES.md` if you're picking
-up work from a previous session, `ROADMAP.md` for what's shipped and
-the (version-free) backlog, `PACKAGING.md` for the dual-distribution
+up work from a previous session, `FEATURES.md` for what's shipped,
+`PACKAGING.md` for the dual-distribution
 packaging system, and
 `docs/DECISIONS.md` for the recorded design tradeoffs.
 

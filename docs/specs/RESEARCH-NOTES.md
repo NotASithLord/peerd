@@ -112,7 +112,7 @@ carried no inline header; a top-level `LICENSE` governs the repo.
   (category taxonomy).
 
 ### 2.4 peerd internal (the design baseline)
-`CLAUDE.md`, `ARCHITECTURE.md`, `ROADMAP.md`, **`FEATURE-SCHEDULED-TASKS.md`**
+`CLAUDE.md`, `ARCHITECTURE.md`, **`FEATURE-SCHEDULED-TASKS.md`**
 (the locked, unbuilt schedule design these specs implement),
 `docs/DO-GET-CHECK-DESIGN.md`, `peerd-provider/system-prompt.txt`,
 `peerd-runtime/{loop/system-prompt.js, tools/exposure.js,

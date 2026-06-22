@@ -3,8 +3,8 @@
 > **Status:** research spike (no code changes). Maps the Hermes Agent
 > context-compression design onto peerd's existing trim/rolling-summary
 > stack, then recommends what's worth adopting and what peerd already does
-> better. Feeds the `ROADMAP.md` backlog item *"Lineage-based context
-> compression for very long sessions."*
+> better. Feeds the lineage-based context-compression work for very long
+> sessions.
 >
 > **Provenance:** built from PUBLIC descriptions only — Nous Research's
 > Hermes Agent docs/wiki, a public GitHub issue (`NousResearch/hermes-agent#499`),
@@ -246,7 +246,7 @@ exactly what it needs to continue." Pure prompt change in
 
 ## 5. The peerd-only angle: compress *along lineage*
 
-The ROADMAP item is "**lineage**-based context compression," and that's a
+The planned work is "**lineage**-based context compression," and that's a
 lever Hermes doesn't have. peerd's six-gate dispatcher attaches full
 lineage (`persona → exposure → origin → confirmation → egress → audit`) to
 every tool result. That gives a *structured axis* to compress along that's

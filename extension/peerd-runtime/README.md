@@ -189,7 +189,7 @@ tool-manifest presets and default hooks.
 ## TODO / backlog
 
 In-code TODOs are light (labelled slots in `memory/initializer.js`). The
-runtime-facing backlog from [`ROADMAP.md`](../../ROADMAP.md):
+runtime-facing backlog (tracked in GitHub Issues):
 
 - **Multi-profile namespacing** — the full per-profile isolation story.
 - **Lineage-based context compression** for very long sessions (beyond

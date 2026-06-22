@@ -70,9 +70,6 @@ top-level peerd-* directory, stop and reconsider.
    implementation details: vault crypto, denylist matcher, agent loop,
    tool dispatcher, prompt-injection defenses, the manifest, the MV3
    keepalive trick.
-5. **`ROADMAP.md`** — shipped state + the (version-free) backlog. Skim
-   it to avoid painting the current surface into corners the backlog has
-   to undo.
 
 ---
 
@@ -303,7 +300,7 @@ postures and gotchas to know going in:
   Preview-channel only (the store package prunes the module and CI
   verifies zero dweb traces). See `docs/distributed/`.
 
-**Still ahead** (backlog — not version-pinned; see `ROADMAP.md`;
+**Still ahead** (backlog — not version-pinned;
 forward-looking specs live in `docs/specs/`. Don't front-run; let each
 land with deliberate design work):
 

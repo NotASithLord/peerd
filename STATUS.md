@@ -1,13 +1,13 @@
 # peerd — STATUS
 
 **peerd is 0.x — experimental beta** (breaking changes likely; no "V1"
-commitment — see `ROADMAP.md`). The initial feature buildout is
+commitment). The initial feature buildout is
 **COMPLETE and integrated on `main`**.
 
 - **What's shipped** — the itemized, module-categorized catalog is
   `FEATURES.md` (the canonical list; don't re-derive it here).
-- **What's still ahead** — the (version-free) backlog is `ROADMAP.md`;
-  forward-looking feature specs live in `docs/specs/`.
+- **What's still ahead** — the (version-free) backlog is tracked in
+  GitHub Issues; forward-looking feature specs live in `docs/specs/`.
 - **How the integration happened** — `v1-deliverables/INTEGRATION-LOG.md`
   records the per-feature landing and the four-wave 2026-06-12 roadmap
   sweep. Note: feature **09 auto-memory was never shipped separately** —

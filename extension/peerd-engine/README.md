@@ -154,7 +154,7 @@ instead of a chain of tool calls — not a workspace you watch. Capped at
 
 ## TODO / backlog
 
-From [`ROADMAP.md`](../../ROADMAP.md) ("Engine robustness — residuals")
+Backlog — engine robustness residuals (GitHub Issues)
 and [`docs/engine/VM-IMAGE.md`](../../docs/engine/VM-IMAGE.md):
 
 - **Shared read-only WebVM base-image cache** to dedupe per-VM copies —

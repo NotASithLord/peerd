@@ -7,8 +7,8 @@
 > `planTrim`. No body store, no re-expansion tool (see §8). Fleshes out §5 of
 > `RESEARCH-HERMES-COMPRESSION.md` — the peerd-native compression axis
 > that Hermes/Claude-Code don't have. Companion to the dynamic-trigger work
-> already shipped on this branch. Feeds the `ROADMAP.md` item *"lineage-based
-> context compression for very long sessions."*
+> already shipped on this branch. Delivers lineage-based context compression
+> for very long sessions.
 
 ---
 
@@ -181,9 +181,8 @@ signal** — it's already on `meta`, so the classifier reads it for free. This
 is what lets us drop the re-expansion tool (§8): the only results worth a
 recovery affordance are exactly the ones the classifier keeps verbatim.
 Position-based schemes (head/middle/tail) can't make any of these
-distinctions; summarization throws them away. This is the ROADMAP's
-"lineage-based" in its strongest sense: **compress along the provenance
-axis, not the time axis.**
+distinctions; summarization throws them away. This is "lineage-based" compaction in its
+strongest sense: **compress along the provenance axis, not the time axis.**
 
 ---
 
