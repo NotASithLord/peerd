@@ -12,6 +12,12 @@
 // fetches go through ctx.webFetch (denylist-gated) NOT ctx.safeFetch
 // (provider-allowlist-locked).
 
+// Deep imports of the PURE host guards (not the /peerd-egress barrel, which
+// pulls in vault/storage + the polyfill and would break the bun test runner —
+// same reason as tools/gates.js). Used to re-validate where a tab LANDED.
+import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
+import { isPrivateOrLocalHost } from '../../../peerd-egress/fetch/private-network.js';
+
 const PAGE_LOAD_TIMEOUT_MS = 30_000;
 const FETCH_TIMEOUT_MS = 20_000;
 
@@ -25,6 +31,29 @@ const FETCH_TIMEOUT_MS = 20_000;
 const tabsOf = (ctx) => /** @type {typeof chrome.tabs} */ (/** @type {unknown} */ (ctx.tabs));
 /** @param {ToolContext} ctx @returns {typeof chrome.scripting} */
 const scriptingOf = (ctx) => /** @type {typeof chrome.scripting} */ (/** @type {unknown} */ (ctx.scripting));
+
+/**
+ * Re-validate the host a tab ACTUALLY landed on — after it natively followed
+ * any HTTP redirect / meta-refresh / JS navigation the dispatcher's origin
+ * gate never saw — against the denylist + the private-network (SSRF) guard.
+ * A real tab follows redirects client-side, so the landed host can differ from
+ * the requested one and MUST face the same guards before its content is read
+ * back into the agent. Returns a denial, or null when the landing is allowed.
+ *
+ * @param {string} finalUrl
+ * @param {ToolContext} ctx
+ * @returns {{ host: string, reason: string } | null}
+ */
+export const landedHostDenial = (finalUrl, ctx) => {
+  let host;
+  try { host = new URL(finalUrl).hostname; }
+  catch { return null; }  // unparseable landing — nothing readable anyway
+  const patterns = /** @type {readonly string[]} */ (ctx?.denylist ?? []);
+  const match = findDenylistMatch(host, patterns);
+  if (match) return { host, reason: `denylist:${match}` };
+  if (isPrivateOrLocalHost(host)) return { host, reason: 'private_network' };
+  return null;
+};
 
 /**
  * Fetch a URL through the SW's webFetch (denylist-gated + audited)
