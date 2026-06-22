@@ -82,8 +82,8 @@ The manifest is the new part:
     "origins": ["https://billing.example.com"]               // captured from lineage
   },
   "playbook": "<the SKILL.md body: NL steps + tool sequence, with {{week_of}} placeholders>",
-  "hints": {                             // optional deterministic accelerators (model C)
-    "selectors": { "...": "..." },
+  "hints": {                             // optional deterministic accelerators (model C); see "Durable selectors"
+    "selectors": { "...": [ "<ranked, live-verified candidates>" ] },  // per target: ranked list, not one string
     "recordedArgs": [ /* per-step arg snapshots */ ]
   },
   "source": { "sessionId": "01ARZ...", "capturedAt": 1718700000000 }
@@ -167,6 +167,57 @@ enforcement seam) installed for the run that rejects tool calls whose
 origins fall outside the recipe envelope. This reuses existing
 machinery and keeps the envelope as a *hook-level* constraint layered on
 top of the global denylist.
+
+## Durable selectors (the `hints.selectors` design)
+
+Model (C) only holds up if the hints are *durable*. A hint that records the
+one brittle selector that happened to resolve during capture re-imports
+model (A)'s failure mode through the side door: it rots the first time the
+DOM shifts. The fix is to treat hint capture and hint use as a closed loop
+against the live DOM — the same discipline as do/get/check itself.
+
+Prior art worth lifting: **selector-forge** (Intuned,
+`github.com/Intuned/selector-forge`) does exactly this for a single element —
+the AI proposes and ranks candidate selectors, the extension re-verifies
+*every* candidate against the live DOM, and the browser, never the model,
+gets the final word on correctness. A recipe hint is the persisted,
+replayable version of that loop.
+
+**At capture (per browser step):**
+
+- Do not store the raw selector that fired. Generate a *ranked list* of
+  candidate selectors for the target — prefer stable identity (test ids,
+  `aria-*`, stable attributes, accessible name) over positional/structural
+  paths; carry both a CSS and an XPath form where they differ.
+- Verify each candidate against the captured DOM and keep only those that
+  resolve to **exactly** the intended target. Store the survivors in rank
+  order, not a single string.
+- For a **list step** (one that acts on a repeating set — "every open
+  invoice row"), capture the intended **cardinality** alongside the
+  selector, and keep only selectors that match that set exactly. Over-match
+  (extra rows) and under-match (missed rows) both disqualify a candidate —
+  this is selector-forge's list mode, persisted.
+
+**At replay (before a hint is used):**
+
+- Re-verify the top candidate against the **live** DOM: exactly-one for a
+  single step, exact-cardinality for a list step. The walk's `walkId`
+  remains the unit of truth for the resolved element(s); the hint only
+  accelerates finding it.
+- On a miss, walk down the ranked candidates; if none verify, **drop the
+  hint and fall back to the adaptive playbook** — the agent re-finds the
+  target through normal do/get/check, exactly as a hint-less recipe would.
+  A stale hint can never cause a wrong-element action; it can only fail to
+  accelerate. Surface a drift signal (feeds the "update recipe from this
+  run" action under Open questions).
+
+The replay-time check is the same deterministic match-cardinality guard
+tracked for the runner in
+[#36](https://github.com/NotASithLord/peerd/issues/36): build it once in the
+do/get/check layer, reuse it here at hint-verify time. This keeps the
+invariant the whole feature rests on — **hints are accelerators, the live
+DOM is the authority** — so recipes degrade to the robust adaptive path
+instead of breaking when sites change.
 
 ## Slash command
 
