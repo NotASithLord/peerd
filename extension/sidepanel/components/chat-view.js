@@ -14,7 +14,7 @@ import { openOptions } from '/shared/open-options.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
 import { InputBar } from './input-bar.js';
-import { ModeSelector, EffortDial } from './mode-badge.js';
+import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { RalphPanel } from './ralph-panel.js';
 import { AsyncTasksBar } from './async-tasks-bar.js';
 
@@ -22,14 +22,35 @@ import { AsyncTasksBar } from './async-tasks-bar.js';
 /** @typedef {(msg: object) => Promise<any>} Send */
 /** @typedef {Record<string, ((...args: any[]) => any) | undefined>} UiActions */
 
+/**
+ * Component-local state for ChatView.
+ * @typedef {Object} ChatViewState
+ * @property {boolean} goalArmed             the Goal toggle's arm state (UI-only)
+ * @property {string|null|undefined} _sid    which chat the arm state belongs to
+ */
+
+/**
+ * @typedef {{ state: ChatViewState, attrs: {
+ *   state: ChatState, send: Send, voiceManager: any, uiActions?: UiActions,
+ *   surface?: string, activeTabIsWeb?: boolean,
+ * } }} ChatViewVnode
+ */
+
 export const ChatView = {
-  /**
-   * @param {{ attrs: {
-   *   state: ChatState, send: Send, voiceManager: any, uiActions?: UiActions,
-   *   surface?: string, activeTabIsWeb?: boolean,
-   * } }} vnode
-   */
-  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb } }) => {
+  /** @param {ChatViewVnode} vnode */
+  oninit(vnode) {
+    // Goal arming is pure composer intent (it just rewrites the next send
+    // into the existing /loop path), so it lives here as UI-only state —
+    // no SW round-trip. Reset when the chat changes (each chat owns its
+    // own loop), mirroring the InputBar's per-session draft swap.
+    vnode.state.goalArmed = false;
+    vnode.state._sid = vnode.attrs.state?.session?.sessionId;
+  },
+
+  /** @param {ChatViewVnode} vnode */
+  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb }, state: ui }) => {
+    const sid = state.session?.sessionId;
+    if (sid !== ui._sid) { ui._sid = sid; ui.goalArmed = false; }
     const messages = state.session?.messages ?? [];
     const hasKey = state.providers?.hasKey;
     // Fingerprint of the settings that shape the model-picker options. The
@@ -135,6 +156,16 @@ export const ChatView = {
             && (state.session?.provider ?? state.providers?.current) === 'anthropic'
           ? m(EffortDial, { settings: state.settings, send })
           : null,
+        // Goal arming — the first in-chat entry point for the Ralph loop
+        // (it was previously reachable only via the hidden `/loop` command).
+        // Arms the NEXT send to launch an autonomous goal run; the InputBar
+        // consumes the arm and disarms. Greyed until there's a key (the send
+        // it arms needs one).
+        m(GoalToggle, {
+          armed: ui.goalArmed,
+          disabled: !hasKey,
+          onToggle: (/** @type {boolean} */ next) => { ui.goalArmed = next; },
+        }),
         m('.spacer'),
         // /system presence chip — the session's custom instructions
         // silently change every turn's system prompt, so their existence
@@ -153,7 +184,11 @@ export const ChatView = {
 
       // (The per-chat usage chip lives inside the InputBar action row,
       // next to the mic/Send buttons — feature 06.)
-      m(InputBar, { state, send, voiceManager }),
+      m(InputBar, {
+        state, send, voiceManager,
+        goalArmed: ui.goalArmed,
+        onGoalSent: () => { ui.goalArmed = false; },
+      }),
     ]);
   },
 };

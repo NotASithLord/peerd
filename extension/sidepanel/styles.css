@@ -258,6 +258,7 @@ html, body, #app {
   .channel-badge { transition: none; }
   /* Feature 03: kill the Plan/Act pill transition for reduced-motion. */
   .planact-mode { transition: none; }
+  .goal-toggle { transition: none; }
 }
 
 /* Hero size — the big "manifest" wordmark on the lock / sign-up screen.
@@ -597,6 +598,32 @@ html, body, #app {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+
+/* Goal toggle (mode row) — arms the next send to launch a Ralph autonomous
+   goal run instead of a single turn. Same pill family as the planact
+   controls; the ARMED state wears the shared accent (consistency with the
+   active Act / Confirm pills — owner call for this row). */
+.goal-toggle {
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 9px;
+  margin-left: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.goal-toggle.is-on {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.goal-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.goal-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .body { flex: 1; padding: 14px; overflow-y: auto; }
 
