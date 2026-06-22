@@ -85,6 +85,32 @@ describe('from-anthropic usage extraction', () => {
     const stop = events.find((e) => e.type === 'message-stop');
     expect(stop.stopReason).toBe('incomplete');
   });
+
+  test('mid-stream error after message_start still reports the usage already billed', async () => {
+    // Anthropic billed the prompt at message_start; a mid-stream `error` event
+    // must flush that captured usage before the error so the cost meter records
+    // it (mirrors the message_stop + truncated-stream paths). Without the flush,
+    // a turn that errors after a large cached prompt silently undercounts.
+    const events = await drain(fromAnthropicStream(streamOf([
+      sse('message_start', {
+        type: 'message_start',
+        message: { usage: { input_tokens: 12, output_tokens: 1, cache_read_input_tokens: 40000 } },
+      }),
+      sse('error', { type: 'error', error: { type: 'overloaded_error', message: 'overloaded' } }),
+    ])));
+
+    const usage = events.find((e) => e.type === 'usage');
+    expect(usage).toBeTruthy();
+    expect(usage.usage.inputTokens).toBe(12);
+    expect(usage.usage.cacheReadTokens).toBe(40000);
+
+    // usage MUST precede the error so it is attributed before the turn ends.
+    const usageIdx = events.findIndex((e) => e.type === 'usage');
+    const errIdx = events.findIndex((e) => e.type === 'error');
+    expect(usageIdx).toBeGreaterThan(-1);
+    expect(errIdx).toBeGreaterThan(usageIdx);
+    expect(events[errIdx].error).toBe('overloaded');
+  });
 });
 
 describe('from-openai/openrouter usage extraction', () => {
