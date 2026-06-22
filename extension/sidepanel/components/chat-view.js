@@ -25,9 +25,10 @@ export const ChatView = {
   /**
    * @param {{ attrs: {
    *   state: ChatState, send: Send, voiceManager: any, uiActions?: UiActions,
+   *   surface?: string, activeTabIsWeb?: boolean,
    * } }} vnode
    */
-  view: ({ attrs: { state, send, voiceManager, uiActions } }) => {
+  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb } }) => {
     const messages = state.session?.messages ?? [];
     const hasKey = state.providers?.hasKey;
     // Fingerprint of the settings that shape the model-picker options. The
@@ -88,7 +89,7 @@ export const ChatView = {
 
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
-      messages.length === 0 ? m(EmptyState, { hasKey, send })
+      messages.length === 0 ? m(EmptyState, { hasKey, send, surface, activeTabIsWeb })
         : m(MessageList, {
             messages,
             vmStreams: state.vmStreams,
@@ -284,6 +285,19 @@ const STARTER_PROMPTS = [
   { type: 'app', label: 'App', text: 'Build me a Mandelbrot set explorer I can zoom and pan.' },
 ];
 
+// The starter set is page-aware in the SIDE PANEL: when the panel sits next to
+// a real web page (an http(s) tab, not peerd's own home/options page), the
+// Browse path offers to summarize THAT page — the thing you're looking at —
+// instead of the generic Hacker News demo. On the home full-tab surface (no
+// "page next to you") it always shows the Hacker News prompt. Kept a pure fn of
+// attrs so armReveal + view agree on the exact text they animate/render.
+/** @param {{ surface?: string, activeTabIsWeb?: boolean }} attrs */
+const promptsFor = (attrs) => (attrs.surface !== 'home' && attrs.activeTabIsWeb
+  ? STARTER_PROMPTS.map((p) => (p.type === 'web'
+      ? { ...p, label: 'Summarize', text: 'Summarize the current page.' }
+      : p))
+  : STARTER_PROMPTS);
+
 // Action-type glyphs for the path cards. Two voices, both monochrome
 // (currentColor): conceptual paths (ask / web) are stroked LINE icons in
 // the same voice as the composer's send/clip glyphs; the three engine
@@ -361,7 +375,7 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabIsWeb?: boolean } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
@@ -371,11 +385,15 @@ const armReveal = (vnode) => {
   const ui = vnode.state;
   if (ui.armed || reducedMotion() || !vnode.attrs.hasKey) return;
   ui.armed = true;
-  STARTER_PROMPTS.forEach((p, i) => {
+  promptsFor(vnode.attrs).forEach((p, i) => {
     const text = p.text;
     const tick = () => {
       ui.shown[i] += 1;
       if (ui.shown[i] < text.length) ui.timers.push(setTimeout(tick, PATH_TYPE.ms));
+      // why Infinity (not text.length): once a card has settled, render its
+      // FULL text even if the prompt later swaps (a side-panel tab switch can
+      // change the Browse prompt) — a shorter `shown` would truncate it.
+      else ui.shown[i] = Infinity;
       m.redraw();
     };
     // why the started flip: the cursor must not show until THIS tile's
@@ -417,13 +435,20 @@ const EmptyState = {
     vnode.state.timers.forEach((t) => clearTimeout(t));
   },
   /** @param {EmptyStateVnode} vnode */
-  view: ({ attrs: { hasKey, send }, state: ui }) => m('.placeholder', m('.empty-state', [
+  view: ({ attrs, state: ui }) => {
+    const { hasKey, send } = attrs;
+    // The home full-tab surface has room for a wider 3-across grid; the side
+    // panel stays 2-across (its column is narrow). One flag drives both the
+    // wider container and the 3-column track (CSS owns the actual widths).
+    const isHome = attrs.surface === 'home';
+    const prompts = promptsFor(attrs);
+    return m('.placeholder', m('.empty-state', { class: isHome ? 'empty-state--home' : '' }, [
     m('p', 'peerd is ready.'),
     m('p.muted', hasKey
       ? 'Ask anything — or pick a path:'
       : 'Add your Anthropic or OpenRouter API key in Settings to start chatting.'),
     hasKey
-      ? m('.path-menu', STARTER_PROMPTS.map((p, i) => {
+      ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;
           // cursor shows only once this tile has STARTED typing and isn't done
@@ -452,7 +477,8 @@ const EmptyState = {
           ]);
         }))
       : m('button', { onclick: () => openOptions('providers') }, 'Open settings'),
-  ])),
+    ]));
+  },
 };
 
 // Map an error code OR a raw provider message into a clear, human line.

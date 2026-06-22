@@ -24,10 +24,11 @@ export const App = {
    * @param {{ attrs: {
    *   state: ChatState, send: Send, voiceManager: any,
    *   uiActions: UiActions, view: string, optionsActive: boolean,
+   *   activeTabIsWeb?: boolean,
    * } }} vnode
    */
   view: ({ attrs }) => {
-    const { state, send, voiceManager, uiActions, view, optionsActive } = attrs;
+    const { state, send, voiceManager, uiActions, view, optionsActive, activeTabIsWeb } = attrs;
     const unlocked = state.vault.initialized && !state.vault.locked;
     // First-run onboarding ('onboarding' is what the sidepanel.js route
     // gate resolves EVERY route to until the profile's latch flips). It
@@ -62,7 +63,7 @@ export const App = {
       m('.body', unlocked
         ? [
             onboarding        ? m(OnboardingView, { state, send })
-            : view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel' })
+            : view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabIsWeb })
             : view === 'chats'  ? m(SessionsView, { state, send })
             : m(PlaceholderView, { label: 'Unknown view' }),
           ]

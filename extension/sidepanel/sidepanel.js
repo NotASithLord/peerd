@@ -264,14 +264,23 @@ const FULLPAGE_URLS = (() => {
   } catch { return []; }
 })();
 let optionsActive = false;
+// Is the tab next to the panel a real, summarizable web page (an http(s) page,
+// not peerd's own home/options tab, a chrome:// page, or the new-tab page)? The
+// fresh-chat "Browse" starter uses this to offer "summarize the current page"
+// over the generic Hacker News demo — same active-tab read, so it rides the
+// same listeners below.
+let activeTabIsWeb = false;
 const refreshOptionsActive = async () => {
   if (!FULLPAGE_URLS.length || !browser.tabs?.query) return;
   try {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     const url = tab?.url;
     const next = !!(url && FULLPAGE_URLS.some((u) => url.startsWith(u)));
-    if (next !== optionsActive) { optionsActive = next; m.redraw(); }
-  } catch { /* leave optionsActive as-is — fail-safe keeps the logo present */ }
+    const nextWeb = !!(url && /^https?:\/\//i.test(url));
+    if (next !== optionsActive || nextWeb !== activeTabIsWeb) {
+      optionsActive = next; activeTabIsWeb = nextWeb; m.redraw();
+    }
+  } catch { /* leave state as-is — fail-safe keeps the logo present */ }
 };
 if (browser.tabs?.onActivated) {
   browser.tabs.onActivated.addListener(refreshOptionsActive);
@@ -284,7 +293,7 @@ if (browser.tabs?.onActivated) {
 }
 
 /** @param {string} view */
-const routeArgs = (view) => ({ state: currentState, send, voiceManager, uiActions, view, optionsActive });
+const routeArgs = (view) => ({ state: currentState, send, voiceManager, uiActions, view, optionsActive, activeTabIsWeb });
 
 // First-run route gate: after vault setup and before anything else,
 // EVERY route resolves to the onboarding screen until the default
