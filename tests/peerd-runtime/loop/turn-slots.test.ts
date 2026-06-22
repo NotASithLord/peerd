@@ -120,3 +120,45 @@ describe('makeTurnSlots', () => {
     expect(slots.isBusy('a')).toBe(false);
   });
 });
+
+describe('makeTurnSlots — onAbort (decline parked confirms on abort)', () => {
+  test('steer-live supersede fires onAbort for that session', () => {
+    const aborted: string[] = [];
+    const slots = makeTurnSlots({ onAbort: (s) => aborted.push(s) });
+    slots.claim('a');                 // first turn — nothing superseded
+    expect(aborted).toEqual([]);
+    slots.claim('a');                 // steer-live supersede → onAbort('a')
+    expect(aborted).toEqual(['a']);
+  });
+
+  test('stop fires onAbort for that session', () => {
+    const aborted: string[] = [];
+    const slots = makeTurnSlots({ onAbort: (s) => aborted.push(s) });
+    slots.claim('a');
+    expect(slots.stop('a')).toBe(true);
+    expect(aborted).toEqual(['a']);
+  });
+
+  test('claiming a DIFFERENT, fresh session does not fire onAbort', () => {
+    const aborted: string[] = [];
+    const slots = makeTurnSlots({ onAbort: (s) => aborted.push(s) });
+    slots.claim('a');
+    slots.claim('b');                 // no prior controller for b → nothing to decline
+    expect(aborted).toEqual([]);
+  });
+
+  test('stopping an idle session is a no-op (no onAbort)', () => {
+    const aborted: string[] = [];
+    const slots = makeTurnSlots({ onAbort: (s) => aborted.push(s) });
+    expect(slots.stop('a')).toBe(false);
+    expect(aborted).toEqual([]);
+  });
+
+  test('default (no onAbort) still supersedes without throwing', () => {
+    const slots = makeTurnSlots();
+    const first = slots.claim('a');
+    slots.claim('a');
+    expect(first.controller.signal.aborted).toBe(true);
+    expect(slots.isBusy('a')).toBe(true);
+  });
+});

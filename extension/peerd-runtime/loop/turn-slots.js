@@ -35,8 +35,14 @@
  *   isBusy: (sessionId: string) => boolean,
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
  * }}
+ * @param {{ onAbort?: (sessionId: string) => void }} [deps]
+ *   onAbort fires whenever a session's turn is aborted (a steer-live supersede
+ *   or Stop). The SW wires it to confirmCoordinator.declineSession, so a turn
+ *   parked on ctx.confirm() is unblocked (declined) instead of left stranded
+ *   for the full timeout while a steered turn writes the same session. Default
+ *   no-op (tests / orchestrators that don't need it).
  */
-export const makeTurnSlots = () => {
+export const makeTurnSlots = ({ onAbort } = {}) => {
   /** @type {Map<string, AbortController>} */
   const slots = new Map();
   /** @type {Map<string, Array<() => void>>} idle-wake queue per session */
@@ -63,8 +69,10 @@ export const makeTurnSlots = () => {
   return {
     claim(sessionId) {
       // Steer-live: a second send into the SAME chat supersedes the
-      // turn already streaming there.
-      slots.get(sessionId)?.abort();
+      // turn already streaming there. onAbort decline-settles the superseded
+      // turn's pending confirm (if any) so it doesn't run the cancelled action.
+      const superseded = slots.get(sessionId);
+      if (superseded) { superseded.abort(); onAbort?.(sessionId); }
       const controller = new AbortController();
       slots.set(sessionId, controller);
       return {
@@ -84,6 +92,7 @@ export const makeTurnSlots = () => {
       const controller = slots.get(sessionId);
       if (!controller) return false;
       controller.abort();
+      onAbort?.(sessionId); // decline any confirm this turn is parked on
       return true;
     },
 
