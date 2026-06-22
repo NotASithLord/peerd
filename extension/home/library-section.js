@@ -388,8 +388,9 @@ export const LibrarySection = {
         const hay = `${a.name} ${(a.tags || []).join(' ')}`.toLowerCase();
         return hay.includes(q);
       })
-      // Favorites float to the top; then most-recently-touched first.
-      .sort((/** @type {App} */ a, /** @type {App} */ b) => (Number(b.favorite) - Number(a.favorite))
+      // Built-in seed apps pin to the top; then favorites; then most-recently-touched.
+      .sort((/** @type {App} */ a, /** @type {App} */ b) => (Number(!!b.dweb?.seed) - Number(!!a.dweb?.seed))
+        || (Number(b.favorite) - Number(a.favorite))
         || ((b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
 
     return m('div', [
@@ -436,7 +437,17 @@ export const LibrarySection = {
                 },
                 onblur: () => LibrarySection.commitRename(vnode, app),
               })
-            : m('.library-name', { title: app.name }, app.name),
+            : m('.library-name', { title: app.name }, [
+                app.name,
+                // Built-in marker — a durable, monochrome chip driven off the
+                // immutable dweb.seed field (no new record field needed).
+                app.dweb?.seed
+                  ? m('span', {
+                      title: 'A built-in app, shipped with peerd',
+                      style: 'margin-left:6px; padding:0 5px; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; border:1px solid currentColor; border-radius:4px; opacity:.5; vertical-align:middle;',
+                    }, 'Built-in')
+                  : null,
+              ]),
           m('.muted.library-meta', [
             fmtWhen(app.updatedAt),
             app.source && app.source !== 'local' ? ` · ${app.source}` : '',

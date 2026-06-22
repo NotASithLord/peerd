@@ -164,6 +164,18 @@ export const makeDwebRoutes = (deps) => {
         return { ok: false, error: 'seed-required' };
       }
       try {
+        // One-time rename migration: a seed install created under the legacy
+        // display name (name === key, e.g. 'commons') is renamed to the current
+        // seed name. Gated on name === seedKey so a user's OWN rename is never
+        // clobbered; runs before the once-ever flag so already-seeded installs
+        // still pick up the new name; idempotent (won't re-fire once renamed).
+        if (typeof seed?.name === 'string' && seed.name && seed.name !== seedKey) {
+          const legacy = (await appRegistry.list()).find((/** @type {any} */ a) => a.dweb?.seed === seedKey && a.name === seedKey);
+          if (legacy) {
+            await appRegistry.update(legacy.id, { name: seed.name });
+            await auditLog.append({ type: 'dweb_seed_renamed', details: { appId: legacy.id, name: seed.name } });
+          }
+        }
         const seeded = (await kv.get('dweb.seededApps')) ?? {};
         if (seeded[seedKey]) return { ok: true, created: false }; // seeded once; respect deletion
         const apps = await appRegistry.list();

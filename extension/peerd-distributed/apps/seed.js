@@ -14,7 +14,11 @@
 
 export const COMMONS_SEED = Object.freeze({
   key: 'commons',
-  name: 'commons',
+  // Display name (shown in the Library). The dedupe key above stays 'commons'
+  // forever — it's the durable identity in dweb.seed + kv.seededApps — so the
+  // name can change freely without re-seeding. The SW route renames legacy
+  // installs (whose name still equals the key) to this on next Library open.
+  name: 'Peerd-to-Peerd Commons',
   entryFile: 'index.html',
   paths: ['index.html'],
   base: '/peerd-distributed/apps/commons/',
