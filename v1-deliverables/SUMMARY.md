@@ -1,5 +1,10 @@
 # peerd V1 feature buildout — SUMMARY
 
+> _Historical snapshot of the V1 build. Ralph (feature 05) was later
+> removed and replaced by goal mode — see
+> `peerd-runtime/loop/goal-runner.js` and `ARCHITECTURE-CHANGES.md`. The
+> Ralph references below are preserved as the record of what was built._
+
 **Integrated on local `main` (not pushed).** Ten SOTA developer-agent
 primitives, each built browser-native, all on one branch. The combined Bun
 suite is **429 pass / 0 fail / 39 files**; every non-vendor extension JS file
@@ -81,6 +86,9 @@ before AND after capture, redirect-safe). **Interactions:** command sources
 can merge with 07's skills (adapter present; wiring noted as a follow-up).
 
 ### 05 — Ralph persistent loop
+_(Ralph was later removed and replaced by goal mode — see
+`peerd-runtime/loop/goal-runner.js`.)_
+
 A loop that spawns fresh-context iterations against a plan file: read plan →
 pick one task → do it (a clean-session subagent) → run backpressure gates →
 commit → discard context. Planning + building modes; survives SW restarts.

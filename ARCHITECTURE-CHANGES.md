@@ -2,7 +2,30 @@
 
 > Pairs with `ARCHITECTURE.md`.
 
-## NEWEST: dweb Phase 1 — rooms, gossip, the dwapp bridge, the commons (2026-06-13, branch `dweb/phase1`)
+## NEWEST: Ralph removed; goal mode is the autonomous loop now (2026-06-22)
+
+> Supersedes every "Ralph" reference below. The autonomous-loop story is
+> now **goal mode** (`peerd-runtime/loop/goal-runner.js`).
+
+The persistent fresh-context Ralph loop is **deleted in full** — the
+`peerd-runtime/ralph/` module, the `ralph/*` SW routes, the RalphPanel /
+ralph-format side-panel components, the `/loop` slash command, and
+`docs/RALPH.md` / `docs/RALPH-DEV-NOTES.md`. In its place, the mode-row
+**Goal toggle** (`sidepanel/components/mode-badge.js` `GoalToggle`) arms
+the next message to start an autonomous run: the agent keeps taking
+NORMAL turns in the MAIN chat (turn 1 is the user's goal as a visible
+message; later turns are hidden `synthetic` continuation nudges) until it
+calls the **`complete_goal`** tool (`tools/defs/complete-goal.js`,
+exposed to the model only while a run is active via `tools/exposure.js`
+`filterByGoalActive`), the user hits **Stop**, or a 40-turn safety cap is
+reached. The work streams into the chat like a normal session — no hidden
+per-iteration subagent, no backpressure gates, no plan file. Runs persist
+to storage and resume on SW restart, keep running while the user is in
+another chat, and auto-flip the session to Act + confirm-off for their
+duration (restored on end). UI is `GoalToggle` plus a `GoalBar`
+(`sidepanel/components/goal-bar.js`).
+
+## EARLIER: dweb Phase 1 — rooms, gossip, the dwapp bridge, the commons (2026-06-13, branch `dweb/phase1`)
 
 > Preview-channel only; the store build prunes `peerd-distributed/`
 > entirely (unchanged boundary). On a dedicated branch, **not merged** —
@@ -175,8 +198,9 @@ One integration day, four structural changes:
   CSP, pruned host permissions). Manifest changes live in
   `manifests/*.json` — the branch's direct `extension/manifest.json`
   edits were re-expressed for the generated-manifest system.
-- **The SW sheds orchestration.** Ralph driving (`makeRalphDriver`,
-  peerd-runtime/ralph/driver.js), per-turn cost tracking
+- **The SW sheds orchestration.** Autonomous-loop driving (then Ralph's
+  `makeRalphDriver`; since 2026-06-22 the goal runner,
+  `peerd-runtime/loop/goal-runner.js`), per-turn cost tracking
   (`makeTurnCostTracker`, peerd-runtime/cost/turn-tracker.js), and the
   /init flow (`makeInitOrchestrator`, peerd-runtime/memory/) are
   factories with injected IO; the SW constructs them once and routes

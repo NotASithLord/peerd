@@ -107,7 +107,7 @@ IDB, boot-console shell restyle, DESIGN-09 (undo/redo: don't build),
 VM-IMAGE scoping, LOCAL-INFERENCE deferral. In flight: engine
 robustness, JS-sandbox sealing, loop features (concurrent dispatch,
 custom system prompts, auto-memory, context compression), per-session
-tool manifests, onboarding/default profile, hooks + Ralph UIs,
+tool manifests, onboarding/default profile, hooks + goal-mode UI,
 Firefox parity, Argon2id.
 
 ## ⏭ Next — V1 critical path

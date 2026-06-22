@@ -204,7 +204,7 @@ works today, its public API, known limitations, and TODOs:
 | **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/README.md) | Model adapters — Anthropic, OpenRouter, Ollama (streaming, caching, cost, retries) |
 | **`e`** · red | [`peerd-egress`](extension/peerd-egress/README.md) | Security — the vault, the egress chokepoint, the denylist, the audit log |
 | **`e`** · amber | [`peerd-engine`](extension/peerd-engine/README.md) | Sandboxes — WebVMs, Notebooks, Apps, and the headless worker |
-| **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/README.md) | The agent — loop, tools, do/get/check, memory, skills, review, ralph, voice |
+| **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/README.md) | The agent — loop, tools, do/get/check, memory, skills, review, goal mode, voice |
 | **`d`** · magenta | [`peerd-distributed`](extension/peerd-distributed/README.md) | The dweb — the peer-to-peer network (preview channel only) |
 
 The brand IS the architecture: cross-module imports go through each
@@ -233,7 +233,7 @@ peerd/
 │   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
 │   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless js_run worker in offscreen/.
-│   ├── peerd-runtime/        # r · green   — agent loop, tools + do/get/check runner, sessions, permissions, composer, skills, memory, review, ralph, cost, transfer, subagent, voice, clock, dom, edit
+│   ├── peerd-runtime/        # r · green   — agent loop, tools + do/get/check runner, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, subagent, voice, clock, dom, edit
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
 │   ├── offscreen/            # chassis: SW keepalive + voice host

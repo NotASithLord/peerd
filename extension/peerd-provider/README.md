@@ -20,7 +20,7 @@ and will drift against vendor price changes between releases.
 
 `peerd-provider` is the only place in the codebase that knows how to
 talk to a model API. Everything above it (the agent loop, subagents,
-the review and ralph loops) speaks one provider-agnostic message shape;
+the review subagent, goal mode) speaks one provider-agnostic message shape;
 this module translates that shape to and from each vendor's wire format,
 handles streaming, retries, prompt caching, extended thinking, and turns
 token usage into a dollar figure for the cost meter.

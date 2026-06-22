@@ -290,7 +290,7 @@ carrying `actTier` are read forever and normalized at the edge
 (`confirmActionsFromRecord`: full-auto→off; suggest AND auto-edit→on —
 conservative: a migration must never widen authority, so auto-edit
 users now confirm workspace writes they previously auto-ran); new
-records only write `confirmActions`. The Ralph /loop unattended gate
+records only write `confirmActions`. The goal-mode autonomous-run gate
 is unchanged in force, restated as Act + confirmations off. The
 ModeSelector's tier picker became a confirm toggle wired to the same
 state as the Settings confirm toggle — one source of truth.

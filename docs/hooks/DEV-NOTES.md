@@ -53,13 +53,13 @@ In `dispatcher.js`:
 - Message handlers added: `hooks/list`, `hooks/save`, `hooks/remove`,
   `hooks/export`, `hooks/clear`.
 
-## How a feature registers a hook (03 plan/act, 05 Ralph, …)
+## How a feature registers a hook (03 plan/act, …)
 
 ```js
 import { registerHook } from '/peerd-runtime/index.js';
 
 registerHook({
-  id: 'ralph-budget-guard',
+  id: 'step-budget-guard',
   event: 'pre-tool-use',
   order: 30,
   match: '*',

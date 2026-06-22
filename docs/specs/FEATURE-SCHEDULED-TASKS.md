@@ -31,9 +31,12 @@ What peerd has today that is adjacent but **not** this feature:
   `wait_until` blocks *inside a single turn* until a time/duration. It
   burns tokens against a browser that may close, and dies with the SW.
   It is in-turn temporal grounding, not durable scheduling.
-- **Ralph (`/loop`, shipped):** a persistent goal loop, but it runs only
-  while attended and journals plan state; it has no way to be *re-entered*
-  after the browser closed without the user retyping "continue."
+- **Goal mode (the Goal toggle, shipped):** an autonomous run that keeps
+  taking normal turns in the main chat until the agent calls
+  `complete_goal` (or Stop / a turn cap). Its runs persist and resume on
+  SW restart *within the same browser session*, but there is no way to
+  *re-enter* a goal after the browser closed without the user starting it
+  again (`peerd-runtime/loop/goal-runner.js`).
 
 The primitive this feature adds is **a durable task that wakes the agent
 and re-enters a session with context** — "an alarm that resumes a
@@ -41,8 +44,8 @@ conversation." Three user-visible shapes, one mechanism:
 
 1. **Timers** — run X at a time, or every N hours/minutes/days.
 2. **Watches** *(Phase B)* — poll a condition until it changes, then resume.
-3. **Continuations** *(Phase C)* — re-enter a long Ralph plan after the
-   browser was closed.
+3. **Continuations** *(Phase C)* — re-enter a long autonomous goal run
+   after the browser was closed.
 
 ---
 
@@ -89,7 +92,7 @@ permission-warning copy before the submission that includes it.
 |---|---|---|
 | **A** (V1.x) | Manifest perms; `schedule_tasks` IDB store; the waker (boot-scan-first, single pinned alarm); **timers + recurring** (daily / every-N-hours / every-N-minutes / optional cron); the Scheduled side-panel section; `schedule_task` / `schedule_list` / `schedule_cancel`; the `ctx.unattended` flag + the unattended read-only tool allow-list (this is where the exposure gate becomes real for unattended turns); **dry-run default**; per-fire + cumulative budgets; generic notifications; export/import field. | **~1 week** |
 | **B** (V1.x+) | **Watches:** pinned-host GET-only polling through `webFetch`, hardened declarative matchers, backoff; `wait_for` sugar; system-prompt hand-off guidance; `wrapUntrusted` on every watched byte. | ~1 week |
-| **C** (V2) | **Acting unattended:** the hashed grant flow (act tier + pinned tools + budgets + instruction binding); pause-don't-replay redelivery for acting fires; **continuations** that re-enter Ralph plans. | ~1–1.5 weeks |
+| **C** (V2) | **Acting unattended:** the hashed grant flow (act tier + pinned tools + budgets + instruction binding); pause-don't-replay redelivery for acting fires; **continuations** that re-enter goal runs. | ~1–1.5 weeks |
 
 Phases are independently shippable. Phase A alone is a complete,
 useful, safe feature (read-only recurring tasks with preview).
@@ -382,7 +385,7 @@ the task and notifies** — never silently drops:
   trip a session-global limit forever; fresh sessions would reset it
   forever — both wrong.)
 - `totalUsd` is cumulative across all fires of the task.
-- `maxFires` is a hard backstop, mirroring Ralph's `MAX_ITERATIONS`.
+- `maxFires` is a hard backstop, mirroring goal mode's 40-turn safety cap.
 - A **per-fire wall-clock cap** (default 10 min) doubles as the
   interrupted-fire `STALE_MS`. A run still `running` past it is marked
   `interrupted` and the offscreen turn is aborted via its `AbortSignal`.
@@ -573,8 +576,8 @@ What schedules *do* participate in:
    the session-global spend limit (needed for `perFireUsd`). If not, tag
    fire cost via the audit lineage and sum there.
 4. **Continuation re-entry (Phase C).** Exactly how a continuation re-arms
-   a Ralph plan — re-enter the Ralph loop with its journaled state, or
-   start a fresh turn that reads the plan? Decide with the Ralph owner.
+   a goal run — re-enter goal mode with its persisted state, or start a
+   fresh turn that re-states the goal? Decide with the goal-mode owner.
 
 ---
 

@@ -12,8 +12,6 @@ per-feature design docs:
   when one is reopened. Read before reopening anything it covers.
 - **`SUBAGENTS.md`** — depth-bounded subagent orchestration.
 - **`REVIEW.md`** — the clean-context review subagent (feature 08).
-- **`RALPH.md`** / **`RALPH-DEV-NOTES.md`** — the persistent
-  fresh-context loop (feature 05).
 - **`COMMANDS-DESIGN.md`** / **`COMMANDS-DEV-NOTES.md`** — composer
   slash commands + @-refs (feature 04).
 - **`DO-GET-CHECK-DESIGN.md`** / **`DO-GET-CHECK-DEV-NOTES.md`** — the

@@ -1,5 +1,10 @@
 # peerd V1 buildout — MANUAL TEST PLAN
 
+> _Historical test plan for the V1 build. Ralph (feature 05) and its
+> `/loop` command were later removed and replaced by goal mode (the Goal
+> toggle) — see `peerd-runtime/loop/goal-runner.js`. The Ralph/`/loop`
+> steps below describe the build as it was then._
+
 End-to-end scenarios for a human reviewer. Automated coverage is unit-level
 (`bun test ./tests` → 429 pass); this exercises the integrated build in a real
 browser, which has **not** been done by the build process.
@@ -105,6 +110,9 @@ browser, which has **not** been done by the build process.
 - **Verify:** Logs shows the block with the hook name.
 
 ### 9. Ralph loop (feature 05)
+_(Ralph and `/loop` were later removed and replaced by goal mode — see
+`peerd-runtime/loop/goal-runner.js`.)_
+
 - **Do:** In a chat, set the Plan/Act tier to **full-auto** (the loop commits
   unattended), then send **`/loop <goal>`** (e.g. `/loop make the tip app
   handle split bills`).
@@ -137,6 +145,9 @@ any `remember` it proposes still hits the confirmation modal; the egress hook
 blocks the exfil fetch. Verifies 07 + 04 + 09/01 + 10 security composition.
 
 ### X3. Memory-driven Ralph run
+_(Ralph was later removed and replaced by goal mode — see
+`peerd-runtime/loop/goal-runner.js`.)_
+
 `/init` a workspace, hand-edit the drafted plan in the Ralph view, run the loop
 full-auto, and confirm each iteration's commit + that memory the agent learns
 mid-run still requires confirmation. Verifies 01 + 05 + 02 + 03 + 09.
