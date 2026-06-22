@@ -1858,14 +1858,20 @@ const sessionState = makeSessionState();
  * the uiPorts registry is load-bearing for confirm routing and the
  * voice/vm/ralph forwarders).
  *
- * why a closure, not an extracted module: it closes over ~10 SW
- * singletons (vault, sessions, sessionCache, resolvePermission,
- * getDefaultProfile, resolveActiveProvider, settings, turnSlots,
- * normalizeTally); an injected-deps extraction would be a large refactor
- * for zero runtime win.
+ * why a closure, not an extracted module: this is snapshot ASSEMBLY whose
+ * one load-bearing invariant — no key material in the snapshot — is already
+ * pinned END-TO-END against the real SW by the in-browser
+ * extension/tests/unit/background/state-get.test.js (it walks the live
+ * snapshot for secret-named string values). That's STRONGER than a faked
+ * bun unit would be, since a fake vault can drift from what the real one
+ * emits. Extracting to an injected-deps module (it closes over ~10 SW
+ * singletons) would trade real deps-wiring for redundant, weaker coverage —
+ * net-negative. Contrast the turn driver (turn-driver.js): dense
+ * orchestration with NO unit coverage, so THERE extraction unlocked real
+ * tests. The yardstick is new testability, not runtime or line count.
  *
- * Invariant (pinned by tests/unit/background/state-get.test.js): the
- * snapshot never carries key material — providers.hasKey is a boolean
+ * Invariant (pinned by extension/tests/unit/background/state-get.test.js):
+ * the snapshot never carries key material — providers.hasKey is a boolean
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = async () => {
