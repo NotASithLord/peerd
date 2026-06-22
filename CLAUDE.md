@@ -306,7 +306,7 @@ land with deliberate design work):
   `tools/manifest-command.js`, enforced in `gates.js`), on top of the
   registration/exposure split. What's still ahead is binding a manifest to
   a *profile* (rides the Profiles item above). Note: the do/get/check
-  browser-runner is already trimmed to a 4–9-tool allow-list by
+  browser-runner is already trimmed to a tight allow-list by
   construction (`runner/index.js` READ_TOOLSET / DO_TOOLSET) — it never
   sees the full surface.
 - OpenAI provider adapter — the file doesn't exist yet (OpenRouter

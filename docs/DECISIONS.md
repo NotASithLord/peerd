@@ -139,8 +139,9 @@ and tool definitions are stable across all turns of a conversation;
 re-billing them on every turn was the biggest contributor to hitting
 the 30k-input-tokens-per-minute tier limit during real agentic work.
 
-Two of four allowed cache breakpoints used. The other two are reserved
-for message-history pinning when we add it.
+Three of four allowed cache breakpoints used (system prompt, tool
+definitions, and the message-history pin). The fourth is reserved for a
+deeper sliding-window anchor if we add it.
 
 ## 11. `anthropic-dangerous-direct-browser-access: true` header
 
