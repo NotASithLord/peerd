@@ -35,7 +35,6 @@ peerd-runtime/tools/hooks/
   compile.js             UserHookRecord → runnable Hook. declarative + js body kinds. markdown parser.
   defaults/
     egress-allowlist.js  The flagship: the egress allowlist AS a pre-tool-use hook.
-    active-tab-guard.js   The browser-native example: inspects ctx.activeTab.
     index.js             DEFAULT_HOOKS (trusted, code, always-on).
   index.js               module barrel → re-exported from peerd-runtime/index.js
 ```
@@ -146,23 +145,7 @@ is a real policy chokepoint — if the allowlist can be a hook, hooks are
 load-bearing. The egress hook is **code, not config**: it can't be
 exported away or disabled through the user-hook surface.
 
-## 6. Browser-native angle (the mandate)
-
-`defaults/active-tab-guard.js` is the browser-native example. Where the
-egress hook reasons about a declared network origin, this one reaches
-into **the live browser context** — `ctx.activeTab` (the tab the agent is
-driving) — and, for DOM-write tools (`type`, `click`, `page_exec`,
-`page_keys`, `navigate`), stamps a `_browserContext` provenance field
-onto the call (origin, path, a credential-sensitive heuristic, a
-timestamp). This is the `modify` decision path firing on a
-browser-native signal: a pre-hook is the only layer that can see "the
-model wants to TYPE, and the page it will type into is a login form."
-
-V1 annotates rather than blocks (the denylist + origin gate own hard
-origin blocks); a user can ship a lower-`order` pre-hook to hard-block
-instead — hooks compose.
-
-## 7. Storage model — `.peerd/hooks/` without a filesystem
+## 6. Storage model — `.peerd/hooks/` without a filesystem
 
 peerd's workspace is logical: there is no real FS. A user authors hooks
 as markdown-with-frontmatter at the logical path `.peerd/hooks/<id>.md`,
@@ -187,7 +170,7 @@ into a runnable Hook. Two body kinds:
 V1.x reserves a **shell/WebVM body kind** (run a hook as a shell script
 in the sandboxed Linux VM) — the compile seam is where it lands.
 
-## 8. Reversibility (hard constraint)
+## 7. Reversibility (hard constraint)
 
 User hooks are plain serializable records — nothing hidden in opaque
 state:
@@ -196,10 +179,10 @@ state:
 - `saveUserHook` / `removeHook` / `clearUserHooks` — full CRUD; the SW is
   the single writer (single-threaded writes).
 - SW message handlers: `hooks/list`, `hooks/save`, `hooks/remove`,
-  `hooks/export`, `hooks/clear`. Default hooks appear in `hooks/list`
+  `hooks/toggle`. Default hooks appear in `hooks/list`
   with `isDefault: true` and are refused by `hooks/remove`.
 
-## 9. MV3 / persistence
+## 8. MV3 / persistence
 
 Default hooks register synchronously at SW boot (idempotent — safe across
 the 30s idle restart). User hooks load async from storage on each boot;
@@ -207,17 +190,17 @@ the dispatcher reads the live registry per call, so a load completing
 after the SW wakes is picked up immediately. A load failure leaves only
 the defaults installed — the safe degraded state.
 
-## 10. Public API (`peerd-runtime/index.js`)
+## 9. Public API (`peerd-runtime/index.js`)
 
 ```
 registerHook, unregisterHook, listHooks, exportHooks,
 loadUserHooks, saveUserHook, removeHook, clearUserHooks, HOOKS_STORAGE_KEY,
 runPreToolUse, runPostToolUse, selectHooks, hookMatches,
 compileUserHook, parseHookMarkdown,
-DEFAULT_HOOKS, egressAllowlistHook, activeTabGuardHook
+DEFAULT_HOOKS, egressAllowlistHook
 ```
 
-## 11. Cross-cutting checklist
+## 10. Cross-cutting checklist
 
 - [x] **Lethal-trifecta**: pre-hook is the last veto; this feature is central to it.
 - [x] **Fail-closed**: throw/garbage/timeout/malformed-modify → block. Post-hooks intentionally observe-only.
@@ -228,7 +211,6 @@ DEFAULT_HOOKS, egressAllowlistHook, activeTabGuardHook
 - [x] **No telemetry.** Hook outcomes stay in `meta` + the local audit log.
 - [x] **Reversibility.** export / remove / clear; records are plain JSON.
 - [x] **Bare fetch forbidden.** Egress hook reuses egress `originOf`; no fetch here.
-- [x] **a11y / reduced-motion.** No UI shipped in this slice (settings UI is V1.x — see DEV-NOTES); the SW handlers it will call are in place.
-- [x] **Browser-native.** active-tab-guard inspects `ctx.activeTab`.
+- [x] **a11y / reduced-motion.** The Hooks settings UI (`hooks-view.js`, the `'hooks'` section of the options page) is shipped, calling the `hooks/*` SW handlers.
 - [x] **index.js public API.** Module barrel re-exported from runtime index.
 - [x] **Comments say WHY.**

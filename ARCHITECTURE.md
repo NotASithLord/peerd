@@ -250,8 +250,8 @@ handling, fake-fetch integration tests.
 
 **Purpose.** The security layer. Every defense and storage primitive the
 extension relies on lives here: the vault (encrypted secrets), the
-egress allowlist (`safeFetch`), the denylist matcher, the trust-mode
-policy, the confirmation gate protocol, and the audit log.
+egress allowlist (`safeFetch`), the denylist matcher, the confirmation
+gate protocol, and the audit log.
 
 Named "egress" because the load-bearing security primitive is the egress
 allowlist (`safeFetch`) — for the **credentialed provider path**, that's

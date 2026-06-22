@@ -190,7 +190,7 @@ mockable interfaces:
 |---------|-----------------------------------|----------------------|
 | 01 plan/persistence | `planStore` over `kv` (`load/save/loadText/saveText`) | `createPlanStore({ kv })` |
 | 02 checkpoint/commit | `checkpoint(msg) → { ok, ref }` | git commit in the session's WebVM |
-| 03 permissions tier  | `isFullAuto() → bool` (refuse start otherwise) | session mode = full-auto/open |
+| 03 permissions tier  | `canRunUnattended() → bool` (refuse start otherwise) | `resolveCanRunUnattended`: Act mode + confirmActions OFF |
 | 10 hooks for gates   | `gateRunner.run(ctx) → { pass, results }` | `createGateRunner([...gates])` |
 
 Each is a one-liner to mock, which is exactly why the loop runs
@@ -203,7 +203,7 @@ standalone in the Bun test.
   commits. The panel's event log is a bounded ring (50 lines). The SW
   holds only a tiny `LoopState`, never conversation history.
 - **Single-threaded writes** — at most one `[~]` task; `pickNextTask` is
-  the lock; `driveRalph` is re-entrancy-guarded (`ralphDriving`) so two
+  the lock; `driveRalph` is re-entrancy-guarded (`driving`) so two
   drives can't run concurrently.
 - **Browser-native** — at least one browser gate (console-clean) ships in
   the default set, run via peerd's own tools, NO MCP.

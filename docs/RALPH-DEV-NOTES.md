@@ -10,8 +10,10 @@ Integrator-facing notes. Design rationale lives in `docs/RALPH.md`.
 | `extension/peerd-runtime/ralph/plan-store.js` | plan-file format (pure `parsePlan`/`serializePlan` + reducers) and `createPlanStore({ kv })`. |
 | `extension/peerd-runtime/ralph/gates.js` | gate factories + `createGateRunner(gates)` (`gates.run() → {pass,results}`). |
 | `extension/peerd-runtime/ralph/index.js` | module surface; re-exported from `peerd-runtime/index.js`. |
-| `extension/background/service-worker.js` §2b | SW wiring: `ralph` instance, adapters, `driveRalph`, routes, boot resume. |
-| `extension/sidepanel/components/ralph-view.js` | start/stop/status UI (route `/ralph`, `∞` nav button). |
+| `extension/peerd-runtime/ralph/driver.js` | `makeRalphDriver(deps)` — driver, adapters, and `driveRalph` (the guarded drive loop + boot resume). |
+| `extension/background/routes/ralph.js` | `makeRalphRoutes(deps)` — the SW message routes. |
+| `extension/background/service-worker.js` | SW wiring only: binds the IO singletons into `makeRalphDriver`/`makeRalphRoutes`. |
+| `extension/sidepanel/components/ralph-panel.js` (+ `ralph-format.js`) | start/stop/status UI — `RalphPanel`, rendered inline within `chat-view.js`. |
 
 ## Storage keys
 
@@ -54,7 +56,7 @@ createRalphLoop({
   gateRunner,                // 10: pluggable gates
   gateContext,               //     () => { vmExec, inspect } per iteration
   checkpoint,                // 02: (msg) => { ok, ref }  — git commit in WebVM
-  isFullAuto,                // 03: () => bool — refuse start unless full-auto
+  canRunUnattended,          // 03: () => bool — refuse start unless Act + confirmActions OFF
   onEvent, shouldHalt, now, maxAttempts,
 });
 ```
@@ -64,8 +66,8 @@ createRalphLoop({
 - **02** — `checkpoint` is best-effort `git add -A && git commit` in the
   session's WebVM (`vmClient.run`). Swap for feature-02's checkpoint
   store by returning `{ ok, ref }`. Called ONLY after gates pass.
-- **03** — `ralphIsFullAuto` currently proxies the session trust mode
-  (`full-auto`/`open`). Replace with the real permissions tier query.
+- **03** — `resolveCanRunUnattended` is the SW adapter: it returns true
+  only when the session is in Act mode with confirmActions OFF.
 - **10** — `ralphGateRunner` is a fixed default list. A hook system can
   build the list per-plan; just pass a different `createGateRunner([...])`.
 
@@ -73,7 +75,7 @@ createRalphLoop({
 
 | Route | Effect |
 |-------|--------|
-| `ralph/start {maxIterations?, mode?}` | refuse unless full-auto; `start()` then `driveRalph()` |
+| `ralph/start {maxIterations?, mode?}` | refuse unless `canRunUnattended`; `start()` then `driveRalph()` |
 | `ralph/halt` | set halt flag + persist `halted` |
 | `ralph/status` | `{ state, plan, summary }` |
 | `ralph/getPlan` / `ralph/setPlan {text}` | read/write the plan file (planning surface) |
@@ -106,7 +108,7 @@ Loop events are pushed to the side panel on the port with
 - **Planning quality**: the planning pass trusts the subagent's returned
   markdown verbatim. A schema-validation gate on the produced plan would
   harden it.
-- **Concurrency**: single-writer is enforced by `[~]` + `ralphDriving`.
+- **Concurrency**: single-writer is enforced by `[~]` + `driving`.
   Multi-plan / parallel-lane runs are explicitly out of scope (would
   break the single-threaded-writes constraint).
 

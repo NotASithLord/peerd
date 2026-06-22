@@ -71,7 +71,7 @@ Coverage key: **✅ covered** · **🟡 partial** · **❌ not covered** ·
 | **Personality** (SOUL.md, soul_read/update) | 🟡 | peerd has per-session `/system` (`<session_instructions>`) + a frugally-expanded USER memory doc + strong built-in voice rules. **peerd deliberately rejects a self-rewriting identity file** — see `SYSTEM-PROMPT-LESSONS.md` §personality. |
 | **MCP app integrations** (47 apps via Klavis Strata cloud) | ❌ (thesis divergence) | peerd reaches the **same apps by driving their real web UIs** with `do`/`get`/`check`, plus `call_api` for public/JSON APIs. No MCP, no cloud gateway. Real trade-off discussed in §2/§3. |
 | **Scheduling** | 🟡 planned | `FEATURE-SCHEDULED-TASKS.md` sketches the hardened version: durable IDB truth, single pinned waker, Firefox boot-scan, budgets, unattended clamps, dry-run. |
-| **Proactive suggestions** | ✅ (landing) | `FEATURE-SMART-NUDGES.md` (reactive, opt-in, no surveillance). |
+| **Proactive suggestions** | 🟡 planned | `FEATURE-SMART-NUDGES.md` (reactive, opt-in, no surveillance). |
 | **Network / console observation** | ⭐ / N/A | BrowserOS lists these "coming soon" (not shipped). peerd has `read_state` + `page_exec` (CDP preview). Not a gap. |
 | **Sub-agents / multi-agent** | ⭐ | `spawn_subagent` (real parallel dispatch, depth-bounded, tool-narrowed, audit lineage) + `request_review`. Ahead of BrowserOS's "Agent Per Tab." |
 | **Code execution** | ⭐ | **WebVM (real Linux), JS Sandbox, Apps** — sandboxed by construction. BrowserOS's "code execution" is host `bash` via Cowork (unsafe). peerd is both safer and more capable here. |

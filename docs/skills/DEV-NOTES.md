@@ -15,7 +15,7 @@ Quick map for the integrator. Everything ships behind
 | Public surface | `extension/peerd-runtime/skills/index.js` → `peerd-runtime/index.js` |
 | SW wiring | `extension/background/service-worker.js` |
 | System-prompt placeholder | `extension/peerd-provider/system-prompt.txt` (`{{SKILLS_BLOCK}}`) + `extension/peerd-runtime/loop/system-prompt.js` |
-| UI | `extension/sidepanel/components/skills-view.js` (route `/skills`, app.js + sidepanel.js) |
+| UI | `extension/sidepanel/components/skills-view.js`, mounted as the `'skills'` section of `extension/options/components/options-app.js` (the full-tab options page) |
 | Tests | `tests/peerd-runtime/skills/{parse,registry,install}.test.ts` |
 
 ## Storage keys

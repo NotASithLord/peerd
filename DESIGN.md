@@ -305,7 +305,7 @@ denylist is checked before any per-tool authorization. A denylist hit:
 3. Logs to the audit log.
 4. Surfaces in the UI as a security event.
 
-Default denylist (seed data, in `/assets/denylist-default.json`) covers:
+Default denylist (seed data, in `peerd-egress/denylist/default.json`) covers:
 
 - Major US banks: Chase, BofA, Wells Fargo, Citi, Capital One, US Bank, PNC,
   TD, Truist, Schwab, Fidelity, Vanguard, E*TRADE, Robinhood, Coinbase,
@@ -316,8 +316,7 @@ Default denylist (seed data, in `/assets/denylist-default.json`) covers:
   domains (state by state via wildcard pattern).
 - Password managers: 1password.com, bitwarden.com, lastpass.com, dashlane.com,
   keepersecurity.com, nordpass.com, *.proton.me.
-- Identity: accounts.google.com, login.microsoftonline.com, login.live.com,
-  appleid.apple.com, okta.com (wildcard), auth0.com.
+- Identity: appleid.apple.com, okta.com (wildcard), auth0.com.
 
 The denylist is editable by the user — they can add to it or remove defaults.
 Default state on install: all defaults active. Removing a default requires a
@@ -1324,101 +1323,82 @@ Stored in `/background/agent-loop/system-prompt.txt`. Key points:
 ## 10.5. Temporal grounding (clock)
 
 Terminal-hosted agents have only the timestamp the harness chooses to
-inject. Peerd has more: it lives in the browser, which continuously
-observes real things — tab focus, idle state, system sleep, navigation,
-network state. This is the basis for genuine temporal grounding rather
-than just static timestamps.
+inject. Peerd injects a compact temporal block per turn so the model is
+grounded in real wall-clock time and in how much of it passed since the
+user last spoke.
 
 The cost concern is real: anything injected per-turn adds context every
-turn. The design is deliberately spartan. Default cost is ~15 tokens.
-Notable events expand the block conditionally, capped at ~50 tokens.
+turn. The design is deliberately spartan (owner direction, 2026-06-12):
+the block carries the absolute clock plus, at most, one coarse "time
+since the user's previous message" clause — nothing else.
 
 ### 10.5.1 Per-turn temporal block — default
 
-A single line, ~15-20 tokens, injected by `loop/system-prompt.js`
-immediately before the latest user message in each turn:
+A single line, injected by `loop/system-prompt.js` immediately before
+the latest user message in each turn. On the first turn or a fast
+follow-up (gap < 60s) it is just the absolute clock:
 
 ```
-<time>2026-06-05T14:34:21Z · t+47s</time>
+<time>now 2026-06-05T14:34:21Z</time>
 ```
 
-`now` is the absolute timestamp (compact ISO, no fractional seconds).
-`t+` is the delta since the previous turn boundary. That's it. This is
-what's injected every turn when nothing notable has happened.
+`now` is the absolute timestamp (compact ISO, seconds precision, no
+fractional seconds). That's it when the user is in the same sitting.
 
-### 10.5.2 Conditional expansion — only when notable
+### 10.5.2 The elapsed clause — only on a real gap
 
-If the user was idle > 30s during the gap, an `idle` field appears:
-
-```
-<time>2026-06-05T14:34:21Z · t+22m · idle 18m</time>
-```
-
-If notable events occurred between turns (tab navigation in the focused
-window, system sleep/wake, network state transition), they appear as
-arrow-style markers in compact form:
+When more than 60s passed since the user's previous message, one coarse,
+self-describing clause is appended:
 
 ```
-<time>2026-06-05T14:34:21Z · t+5m · tab→github.com, sleep 3m</time>
+<time>now 2026-06-05T14:34:21Z · 2h 1m since the user's previous message</time>
 ```
 
-**Expansion rules:**
+The elapsed value is deliberately lossy — "minutes vs hours vs days",
+not precision (`90s → 1m`, `47m → 47m`, `2h 1m → 2h 1m`, `3d 7h → 3
+days`). It is plain words, not notation, so the model never has to infer
+what a marker means. The block carries exactly this one thing beyond the
+clock; the old `t+`/idle/event-marker forms and the background event
+recorder that fed them were removed (owner direction, 2026-06-12) as
+bloat that confused models in the field.
 
-- Idle line: only if user idle > 30s during inter-turn gap
-- Events line: only if events recorded AND classified notable
-- Notable events: active-tab navigation, system sleep/wake (>1min),
-  network online/offline transition, session pause/resume,
-  extension reload (SW restart)
-- Non-notable events (filtered out): pointer movement, scroll, key
-  presses, inactive-tab loads, ordinary network requests, idle <30s
+### 10.5.3 Cost
 
-### 10.5.3 Token budget
-
-| Scenario | Approx tokens |
-|---|---|
-| Default (nothing notable) | ~15 |
-| With idle marker | ~22 |
-| With 1-2 events | ~25-30 |
-| Long pause with multiple events | ~40 |
-
-Hard cap: 50 tokens. If the block would exceed 50 tokens, the event
-list is truncated and replaced with `… +N more`. Defaults are designed
-to be cheap; the cap prevents pathological cases.
+The block is a single short line — the clock plus, at most, the one
+elapsed clause. There is no conditional event expansion and no token
+cap to manage. When the model needs exact arithmetic it calls `now()`.
 
 ### 10.5.4 Clock tools (on-demand precision)
 
-For when the agent needs more than the block provides, three on-demand
+For when the agent needs more than the block provides, two on-demand
 tools — registered like any other tool, called only when the agent
 asks:
 
-- `now()` → returns full ISO timestamp + timezone + day-of-week
-- `time_since(checkpoint_id)` → returns delta since a saved checkpoint
-  (the agent saves checkpoints by passing a label into `now()`)
-- `wait_until(when_or_duration)` → blocks the agent for N seconds or
-  until an absolute time; subject to trust mode (Paranoid requires
-  confirmation for waits >1min)
+- `now()` → returns full ISO timestamp + timezone + day-of-week. To
+  measure an interval, the model calls `now()` twice and subtracts.
+- `wait_until(when_or_duration)` → blocks the agent for a duration or
+  until an absolute ISO time; hard-capped at 10 minutes.
 
-V1.1+ adds event-aware variants:
-
-- `wait_for_event(type, timeout)` → blocks until a notable event of
-  the named type fires (tab-navigation, idle-end, network-online, …)
+(A `now()`-checkpoint + `time_since` pair used to live here; it was
+removed 2026-06-12 — the checkpoint store was an in-memory Map in an
+MV3 service worker that restarts constantly, so checkpoints silently
+evaporated.)
 
 ### 10.5.5 Module layout
 
 ```
 peerd-runtime/clock/
-├── now.js         # primitives: now, since, formatDelta
-├── events.js      # background event recorder + classification
+├── now.js         # primitives: isoSecondsZ, formatDelta, parseDuration
 ├── context.js     # temporal block formatter (the prompt injection)
-└── tools.js       # registered clock tool definitions
+├── tools.js       # registered clock tool definitions (now, wait_until)
+└── index.js       # module barrel
 ```
 
-The block is built by `context.js` (pure function from the event
-buffer + current time + previous turn boundary → string), and inserted
-by `loop/system-prompt.js`. `events.js` runs in the service worker and
-maintains a rolling buffer of recent events, classifying notable vs
-filtered as they arrive. The buffer is bounded (last 24h, capped at
-1000 entries) and persists across SW restarts via `chrome.storage`.
+The block is built by `buildTemporalBlock` in `context.js` (a pure
+function from `{ lastTurnAt, nowMs }` → string), and inserted by
+`loop/system-prompt.js`. There is no background event recorder — the
+block needs only the current time and the timestamp of the user's
+previous message.
 
 ---
 
@@ -1802,7 +1782,7 @@ export const MessageList = {
 
 ## 15. Default denylist seed
 
-`/assets/denylist-default.json` ships with the following. Patterns use
+`peerd-egress/denylist/default.json` ships with the following. Patterns use
 glob with `*` only at subdomain position.
 
 ```json
@@ -1825,8 +1805,7 @@ glob with `*` only at subdomain position.
       "amex.com", "*.amex.com",
       "regions.com", "*.regions.com",
       "fifththird.com", "*.fifththird.com", "53.com", "*.53.com",
-      "huntington.com", "*.huntington.com",
-      "kindred.com", "*.kindred.com"
+      "huntington.com", "*.huntington.com"
     ],
     "brokers": [
       "schwab.com", "*.schwab.com",
@@ -1900,10 +1879,6 @@ glob with `*` only at subdomain position.
       "tutanota.com", "*.tutanota.com"
     ],
     "identity": [
-      "accounts.google.com",
-      "myaccount.google.com",
-      "login.microsoftonline.com",
-      "login.live.com",
       "appleid.apple.com",
       "*.okta.com",
       "*.auth0.com",
