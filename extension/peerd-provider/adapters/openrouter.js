@@ -92,11 +92,14 @@ export async function* callOpenRouter(args) {
     headers: {
       'content-type': 'application/json',
       'authorization': `Bearer ${apiKey}`,
-      // why: OpenRouter uses these for its app-attribution leaderboard.
-      // Harmless, optional, and they make peerd traffic legible to the
-      // user's OpenRouter dashboard.
-      'http-referer': 'https://peerd.local',
-      'x-title': 'peerd',
+      // why: OpenRouter attributes usage to an app by HTTP-Referer (the
+      // app's URL — the ranking key) + X-Title (display name), with
+      // X-OpenRouter-Categories placing it on the right leaderboard. Every
+      // user's BYOK request carries the same referer, so it all rolls up to
+      // one "peerd.ai" app entry on openrouter.ai/apps.
+      'http-referer': 'https://peerd.ai',
+      'x-title': 'peerd.ai',
+      'x-openrouter-categories': 'personal-agent',
     },
     body: JSON.stringify(body),
     signal,
@@ -214,8 +217,9 @@ export const OPENROUTER_POPULAR = Object.freeze([
 export const listOpenRouterModels = async ({ safeFetch, getSecret, signal } = /** @type {any} */ ({})) => {
   /** @type {Record<string, string>} */
   const headers = {
-    'http-referer': 'https://peerd.local',
-    'x-title': 'peerd',
+    'http-referer': 'https://peerd.ai',
+    'x-title': 'peerd.ai',
+    'x-openrouter-categories': 'personal-agent',
   };
   // why: send the key when we have one (some accounts get a scoped list), but
   // don't require it — /models is public, so the picker can preview models
@@ -276,8 +280,9 @@ export const fetchOpenRouterContextWindow = async ({ model, getSecret, safeFetch
   const headers = { 'content-type': 'application/json' };
   if (apiKey) {
     headers.authorization = `Bearer ${apiKey}`;
-    headers['http-referer'] = 'https://peerd.local';
-    headers['x-title'] = 'peerd';
+    headers['http-referer'] = 'https://peerd.ai';
+    headers['x-title'] = 'peerd.ai';
+    headers['x-openrouter-categories'] = 'personal-agent';
   }
   return fetchModelWindow({
     safeFetch,
