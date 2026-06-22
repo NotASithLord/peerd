@@ -31,6 +31,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
+    filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
     decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
     resolveFailoverChain, shouldFailover, callModel, postChatNote, runUserTurn, getSecret,
@@ -192,15 +193,21 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // FIFTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
     // hidden until this session has CALLED a dweb tool — engagement, not the
     // always-on network's peer presence. Composes after the dweb-enabled gate.
-    const descriptors = filterByDwebActive(
-      filterByDwebEnabled(
-        filterByInstanceState(
-          filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
-          instanceState,
+    // SIXTH cut: goal mode. complete_goal is registered always but revealed to
+    // the model ONLY while a goal run is live for this session (goalActiveFor),
+    // so a normal chat never sees it. Outermost so it composes over the rest.
+    const descriptors = filterByGoalActive(
+      filterByDwebActive(
+        filterByDwebEnabled(
+          filterByInstanceState(
+            filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
+            instanceState,
+          ),
+          DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
         ),
-        DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
+        dwebEngagedSessions.has(sessionId),
       ),
-      dwebEngagedSessions.has(sessionId),
+      !!goalActiveFor?.(sessionId),
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     toolContext.instanceState = instanceState;
     return descriptors;
@@ -236,6 +243,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   };
 
   let lastSession = null;
+  // Turn outcome, returned so an outer driver (goal mode — loop/goal-runner.js)
+  // can tell a clean turn from a failed/aborted one instead of blindly
+  // re-entering. lastStopReason is captured BEFORE the panel guard below (the
+  // 'stop' case in the switch only runs when the UI is connected).
+  let lastStopReason = null;
+  let turnOk = true;
   // Cost/usage accumulation for this turn (feature 06) — the fold/persist/
   // push/halt logic lives in makeTurnCostTracker (peerd-runtime/cost); the
   // SW supplies the IO: persist via sessions.setCost, the live meter via
@@ -405,6 +418,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         costTracker.maybeHalt(ev);
         continue;
       }
+      // Capture the final stop reason for the return value BEFORE the panel
+      // guard (the switch's 'stop' case is panel-only). 'aborted' here = Stop /
+      // steer / a spend-limit halt — an outer goal loop must not re-drive it.
+      if (ev.type === 'stop') lastStopReason = ev.stopReason;
       if (!uiConnected()) continue;
       switch (ev.type) {
         case 'state':
@@ -486,6 +503,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       : e instanceof UnknownProviderError ? 'unknown-provider'
       : e instanceof SessionNotFoundError ? 'session-not-found'
       : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error';
+    turnOk = false;
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/error', sessionId, error });
     }
@@ -522,6 +540,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       && (await sessionCache.sessionGet('currentSessionId')) === lastSession.sessionId) {
     sessionState.set(lastSession);
   }
+  // why: the outcome lets goal mode stop on a failed/aborted turn rather than
+  // re-driving a broken condition up to the cap. Normal sends ignore it.
+  return { ok: turnOk, stopReason: lastStopReason };
 };
 
 // Per-SW-lifetime dedupe for auto-resume: the interrupted message id we've

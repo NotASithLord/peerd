@@ -1,40 +1,9 @@
 import { describe, test, expect } from 'bun:test';
-import { makeRalphRoutes } from '../../extension/background/routes/ralph.js';
 import { makeHooksRoutes } from '../../extension/background/routes/hooks.js';
 import { makeSkillsRoutes } from '../../extension/background/routes/skills.js';
 
-// ralph / hooks / skills route groups — moved verbatim. These pin the
-// branching that matters: the vault-lock gate, default-hook protection, and
-// remote-skill-install gating + typed-error mapping.
-
-describe('ralph routes', () => {
-  const deps = (over: any = {}) => ({
-    vault: { isLocked: () => false },
-    ralphDriver: { start: async () => ({ ok: true, started: true }), halt: async () => ({ ok: true }), status: async () => ({ running: false }), reset: async () => {} },
-    ralphPlanStore: { loadText: async () => 'plan', saveText: async () => {} },
-    ...over,
-  });
-  test('start refused when vault locked', async () => {
-    const r = makeRalphRoutes(deps({ vault: { isLocked: () => true } }));
-    expect(await r['ralph/start']({})).toEqual({ ok: false, error: 'locked' });
-  });
-  test('start delegates to driver when unlocked', async () => {
-    const r = makeRalphRoutes(deps());
-    expect(await r['ralph/start']({ maxIterations: 3 })).toEqual({ ok: true, started: true });
-  });
-  test('status spreads driver status under ok', async () => {
-    const r = makeRalphRoutes(deps());
-    expect(await r['ralph/status']()).toEqual({ ok: true, running: false });
-  });
-  test('setPlan rejects non-string', async () => {
-    const r = makeRalphRoutes(deps());
-    expect(await r['ralph/setPlan']({ text: 5 })).toEqual({ ok: false, error: 'text-required' });
-  });
-  test('getPlan returns stored text', async () => {
-    const r = makeRalphRoutes(deps());
-    expect(await r['ralph/getPlan']()).toEqual({ ok: true, text: 'plan' });
-  });
-});
+// hooks / skills route groups. These pin the branching that matters:
+// default-hook protection, and remote-skill-install gating + typed-error mapping.
 
 describe('hooks routes', () => {
   const DEFAULT_HOOKS = [{ id: 'egress-allowlist' }];

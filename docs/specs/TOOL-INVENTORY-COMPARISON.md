@@ -75,7 +75,7 @@ Coverage key: **✅ covered** · **🟡 partial** · **❌ not covered** ·
 | **Network / console observation** | ⭐ / N/A | BrowserOS lists these "coming soon" (not shipped). peerd has `read_state` + `page_exec` (CDP preview). Not a gap. |
 | **Sub-agents / multi-agent** | ⭐ | `spawn_subagent` (real parallel dispatch, depth-bounded, tool-narrowed, audit lineage) + `request_review`. Ahead of BrowserOS's "Agent Per Tab." |
 | **Code execution** | ⭐ | **WebVM (real Linux), JS Sandbox, Apps** — sandboxed by construction. BrowserOS's "code execution" is host `bash` via Cowork (unsafe). peerd is both safer and more capable here. |
-| **Workflows / Graph Mode** (NL→codegen→TS, viz graph) | 🟡 | Covered in spirit by **Ralph** (`/loop`) + **skills** + planned scheduled tasks. No visual graph or code-gen workflow builder. Low priority. |
+| **Workflows / Graph Mode** (NL→codegen→TS, viz graph) | 🟡 | Covered in spirit by **goal mode** (the Goal toggle) + **skills** + planned scheduled tasks. No visual graph or code-gen workflow builder. Low priority. |
 | **Info** (browseros_info) | ✅ | `inspect_provider_config` / `inspect_*` cover "what am I / what can I see." |
 
 ---
@@ -183,7 +183,7 @@ For each genuine gap: add or not, where it lives, security, thesis fit.
 | **MCP / Klavis cloud gateway** (the 47 integrations) | Cloud dependency + third party in the data path; violates no-backend / no-MCP / egress-chokepoint / no-telemetry. Use web-app driving + API-recipe skills instead (§2.6). |
 | **Hidden/visible window choreography** (`create_window`, `create_hidden_window`, `activate_window`) | Conflicts with the owner rule **never steal focus**. peerd uses background tabs + the offscreen doc; it does not open or raise windows on the user. |
 | **Self-rewriting SOUL.md** | (See `SYSTEM-PROMPT-LESSONS.md` §personality.) An agent that silently rewrites its own persona file conflicts with peerd's confirm-gated memory and "never store inferences" rules. peerd offers user-chosen persona presets layered like `/system`, not autonomous self-evolution. |
-| **NL→codegen→`eval` Workflows that strip imports and dynamic-import generated TS** | Generating code and dynamically importing it server-side is a code-exec pattern peerd doesn't need and shouldn't host outside its sandboxes. peerd's deterministic-repeat story is **skills + Ralph + planned scheduled tasks**; if visual workflows are ever wanted, build them on the sandboxes, not on host `eval`. |
+| **NL→codegen→`eval` Workflows that strip imports and dynamic-import generated TS** | Generating code and dynamically importing it server-side is a code-exec pattern peerd doesn't need and shouldn't host outside its sandboxes. peerd's deterministic-repeat story is **skills + goal mode + planned scheduled tasks**; if visual workflows are ever wanted, build them on the sandboxes, not on host `eval`. |
 
 ---
 

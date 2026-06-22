@@ -16,7 +16,7 @@ export const makeSessionMutationRoutes = (deps) => {
   const {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume,
+    maybeAutoResume, haltGoalRun,
   } = deps;
 
   return {
@@ -43,6 +43,11 @@ export const makeSessionMutationRoutes = (deps) => {
       // why read BEFORE delete: "new chat" is a switch-away from the
       // current session — one of auto-memory's two lifecycle seams.
       const previousId = await sessionCache.sessionGet('currentSessionId');
+      // why: a "new chat" abandons the current one — end its goal run (if any)
+      // so it doesn't keep driving the orphaned session in the background.
+      // (A plain session/switch does NOT halt — that's the "keep running while
+      // I'm in another chat" case.)
+      if (previousId) haltGoalRun?.(previousId);
       await sessionCache.sessionDelete('currentSessionId');
       sessionState.clear();
       pushState();
@@ -79,6 +84,9 @@ export const makeSessionMutationRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       try {
         await sessions.archive(sessionId);
+        // Archiving wraps the chat up — end its goal run (if any) so it can't
+        // keep running on a put-away session.
+        haltGoalRun?.(sessionId);
         // If the archived session was the active one, drop the cache so
         // the next agent/send creates a fresh session.
         const currentId = await sessionCache.sessionGet('currentSessionId');

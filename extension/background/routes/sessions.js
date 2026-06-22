@@ -17,9 +17,10 @@ export const makeSessionRoutes = (deps) => {
   const {
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel,
     buildToolContext, applyComposer, commandSources, prepareUserAttachments,
-    runAgentTurn, runInit, ralphDriver, handleSystemCommand, handleToolsCommand,
+    runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
+    startGoalRun, haltGoalRun, ensureSession,
   } = deps;
 
   return {
@@ -29,6 +30,9 @@ export const makeSessionRoutes = (deps) => {
       // CURRENT chat: Stop must never reach across conversations and kill
       // a turn streaming elsewhere (turn slots are per-session).
       const sessionId = await sessionCache.sessionGet('currentSessionId');
+      // Stop ends the whole goal run (not just the in-flight turn) so it can't
+      // auto-continue after the abort.
+      if (sessionId && haltGoalRun) haltGoalRun(/** @type {any} */ (sessionId));
       if (sessionId && turnSlots.stop(sessionId)) {
         auditLog.append({ type: 'session_ended', details: { reason: 'user_stop' } })
           .catch(() => {});
@@ -36,9 +40,33 @@ export const makeSessionRoutes = (deps) => {
       return { ok: true };
     },
 
-    'agent/send': async ({ text, attachments, activeTabId = null }) => {
+    'agent/send': async ({ text, attachments, activeTabId = null, goal = false }) => {
       if (typeof text !== 'string' || !text.trim()) {
         return { ok: false, error: 'empty-message' };
+      }
+      const trimmedGoal = text.trim();
+      // Goal mode (the mode-row Goal toggle): run autonomous turns in THIS chat
+      // until the agent calls complete_goal (or the cap / Stop). The goal is the
+      // first, visible message; continuations are hidden synthetic turns, so the
+      // work streams into the chat like a normal session. Ensure a session up
+      // front (a fresh chat has none yet — same lazy-create the model turn does).
+      if (goal === true) {
+        if (!startGoalRun || !ensureSession) return { ok: false, error: 'goal-mode-unavailable' };
+        try {
+          const sessionId = await ensureSession();
+          await startGoalRun({ sessionId, goal: trimmedGoal });
+        } catch (e) {
+          console.error('[sw] goal start threw', e);
+          postChatNote(`Goal couldn't start: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+        }
+        return { ok: true, handled: 'goal' };
+      }
+      // A normal (non-goal) user message while a goal run is live means the user
+      // is steering / taking over — halt the run so it doesn't auto-continue on
+      // top of the new message.
+      if (haltGoalRun) {
+        const curSid = await sessionCache.sessionGet('currentSessionId');
+        if (curSid) haltGoalRun(/** @type {any} */ (curSid));
       }
       // /init is handled in the SW, not sent to the model (feature 01) —
       // check it BEFORE composer expansion so the slash command short-
@@ -51,18 +79,9 @@ export const makeSessionRoutes = (deps) => {
         });
         return { ok: true, handled: 'init' };
       }
-      // /loop [goal] — start (or resume) a Ralph persistent loop for this
-      // chat (feature 05). SW-handled; not sent to the model directly.
-      if (trimmed === '/loop' || trimmed.startsWith('/loop ')) {
-        ralphDriver.startRalphLoop(trimmed.slice('/loop'.length).trim()).catch((/** @type {unknown} */ e) => {
-          console.error('[sw] /loop threw', e);
-          postChatNote(`/loop failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
-        });
-        return { ok: true, handled: 'loop' };
-      }
       // /system [text|clear] — set/show/clear this chat's custom system-
-      // prompt augmentation. SW-handled like /init and /loop; never reaches
-      // the model as user text (it CHANGES what the model is told instead).
+      // prompt augmentation. SW-handled like /init; never reaches the model
+      // as user text (it CHANGES what the model is told instead).
       if (trimmed === '/system' || trimmed.startsWith('/system ')) {
         handleSystemCommand(trimmed.slice('/system'.length).trim()).catch((/** @type {unknown} */ e) => {
           console.error('[sw] /system threw', e);

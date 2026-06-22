@@ -114,7 +114,7 @@ shared utilities.
 The streaming tool-using agent loop, the policy-gated dispatcher + tool
 inventory, the do/get/check browser runner, sessions, subagents,
 permissions, memory, edit, skills, review, composer, cost, clock, voice,
-transfer, ralph, profiles — pure-core/injected-IO so the SW stays thin.
+transfer, goal mode, profiles — pure-core/injected-IO so the SW stays thin.
 
 - **Streaming agent loop (orchestrator)** — async-generator turn loop: assistant stub → stream text/reasoning/tool-use deltas → dispatch → tool_result round, capped at `MAX_STEPS=100`. `loop/agent-loop.js`
 - **Concurrent multi-tool batching** — consecutive READ-class calls (+ `spawn_subagent`) run in parallel, everything else stays serial single-writer. `loop/tool-batch.js`
@@ -145,7 +145,7 @@ transfer, ralph, profiles — pure-core/injected-IO so the SW stays thin.
 - **Clock (temporal grounding + tools)** — `buildTemporalBlock` for the prompt + `now` / `wait_until` tools. `clock/`
 - **Voice (local transcription)** — voice manager + model store + engine picker (Moonshine WASM, Web Speech fallback) + MicButton; offscreen-hosted. `voice/`
 - **Transfer (settings export/import)** — pure build/inspect/apply export shaping + passphrase encrypt/decrypt for cross-install migration. `transfer/`
-- **Ralph persistent fresh-context loop** — read plan → pick one task → spawn fresh-context iteration → backpressure gates (lint/test/build/console/dom) → commit; resumable via plan+LoopState. `ralph/`
+- **Goal mode (autonomous loop)** — the agent keeps taking normal turns in the main chat (turn 1 = the goal, later turns = hidden synthetic continuations) until it calls `complete_goal`, the user Stops, or a turn cap is hit; the `complete_goal` tool is exposed only while a run is active; runs persist to storage and resume on SW restart, and keep running while the user is in another chat. `loop/goal-runner.js`
 - **Skills (progressive disclosure)** — parse `SKILL.md`, store+registry, install from local/git/manifest, `load_skill` tool. Remote install flag-gated off for store. `skills/`
 - **Web tool policy** — `WEB_TOOLS` (`call_api`, `read_article`, `web_search`, `submit_form`, `capture`) with fetch-vs-tab escalation heuristics. `tools/web/`
 - **PDF reading (`read_pdf`)** — pdf.js text-layer extraction with opt-in SRI-pinned OCR engine + page assembly. `pdf/`, `tools/defs/read-pdf.js`
@@ -217,7 +217,7 @@ helpers/stubs/vendored deps.
 ### Service worker + routing
 
 - **Service-worker wiring + DI assembly** — single SW entry imports every `peerd-*` barrel, builds concrete instances + per-call tool/state contexts, drives the agent turn. `extension/background/service-worker.js`
-- **Message dispatcher + route modules** — `makeDispatcher` fans one `runtime.onMessage` surface to ~80 deps-injected route handlers (vault, providers, sessions, settings, skills, memory, denylist, engine, hooks, ralph, contacts, dweb, system, local-model). `extension/background/routes/`, `shared/messaging.js`
+- **Message dispatcher + route modules** — `makeDispatcher` fans one `runtime.onMessage` surface to ~80 deps-injected route handlers (vault, providers, sessions, settings, skills, memory, denylist, engine, hooks, contacts, dweb, system, local-model). `extension/background/routes/`, `shared/messaging.js`
 - **Sender-trust guard on the privileged RPC surface** — `isTrustedSender` gates the dispatcher so only extension-origin senders reach privileged routes. `extension/shared/sender-trust.js`
 - **MV3 keepalive via offscreen port + heartbeat** — offscreen doc holds an `sw-keepalive` port with a heartbeat so the SW survives the 30s idle timer during active sessions. `extension/offscreen/offscreen.js`
 - **Per-lifetime SW state stores** — settings/session/ui-ports/local-model/profile held behind tiny deps-injectable stores instead of module-level `let`s. `extension/background/settings-store.js`, `session-state.js`, `local-model-state.js`, `profile-state.js`, `ui-ports.js`
@@ -245,8 +245,7 @@ helpers/stubs/vendored deps.
 - **Skills management view** — list/install/remove skills; remote sources gated behind `REMOTE_SKILL_INSTALL` (paste-only when off). `extension/sidepanel/components/skills-view.js`
 - **Denylist editor view** — in-panel denylist add/remove with format helpers (user overlay over seed). `extension/sidepanel/components/denylist-view.js`
 - **Hooks view** — in-panel surface for pre/post tool-use hooks state. `extension/sidepanel/components/hooks-view.js`
-- **Ralph loop panel** — renders persistent fresh-context loop state pushed over `ralph/*` events; halt button. `extension/sidepanel/components/ralph-panel.js`
-- **Goal toggle** — mode-row pill (beside Plan/Act) that arms the next send to launch a Ralph autonomous goal run on the draft, via the existing `/loop` path; the in-chat entry point the loop previously lacked. `extension/sidepanel/components/mode-badge.js` (`GoalToggle`)
+- **Goal toggle + bar** — mode-row pill (beside Plan/Act) that arms the next send to start an autonomous goal run; a self-hiding GoalBar shows "running · turn N · Stop" for the current chat's run. `extension/sidepanel/components/mode-badge.js` (`GoalToggle`), `extension/sidepanel/components/goal-bar.js`
 - **Async subagent status bar** — self-hiding bar pinning in-flight async `spawn_subagent` tasks (DESIGN-11). `extension/sidepanel/components/async-tasks-bar.js`
 - **Injection-safe Markdown renderer** — hand-rolled MD→HTML (no third-party lib) for assistant replies, hardened against untrusted-web-content influence. `extension/shared/markdown.js`
 

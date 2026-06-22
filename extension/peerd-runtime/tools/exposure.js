@@ -176,3 +176,27 @@ export const isDwebSecondaryTool = (name) => DWEB_SECONDARY_TOOLS.has(name);
  */
 export const filterByDwebActive = (descriptors, dwebActive) =>
   dwebActive ? [...descriptors] : descriptors.filter((t) => !DWEB_SECONDARY_TOOLS.has(t.name));
+
+// ── goal mode: complete_goal revealed only during an active run ─────────────
+// Goal mode (loop/goal-runner.js) re-enters the agent turn until the agent
+// calls complete_goal. That tool is a normal main-agent tool, so this filter
+// (the DESCRIPTOR list, not the dispatcher) is what keeps it INVISIBLE outside
+// a run — otherwise a normal chat would see a "complete the goal" tool with no
+// goal. It's dropped unless the session has a live run; a stray call when it's
+// hidden still dispatches, but the tool's execute() no-ops (see complete-goal.js).
+export const GOAL_ONLY_TOOLS = Object.freeze(new Set(['complete_goal']));
+
+/** Is this a tool that should appear ONLY during an active goal run? Pure. @param {string} name */
+export const isGoalOnlyTool = (name) => GOAL_ONLY_TOOLS.has(name);
+
+/**
+ * Drop the goal-only tools unless a goal run is active for this session.
+ * Composes after the other main-agent filters. Pure.
+ *
+ * @template {{ name: string }} T
+ * @param {ReadonlyArray<T>} descriptors
+ * @param {boolean} goalActive  is a goal run live for the session
+ * @returns {T[]}
+ */
+export const filterByGoalActive = (descriptors, goalActive) =>
+  goalActive ? [...descriptors] : descriptors.filter((t) => !GOAL_ONLY_TOOLS.has(t.name));

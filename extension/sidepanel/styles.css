@@ -599,8 +599,8 @@ html, body, #app {
   outline-offset: -2px;
 }
 
-/* Goal toggle (mode row) — arms the next send to launch a Ralph autonomous
-   goal run instead of a single turn. Same pill family as the planact
+/* Goal toggle (mode row) — arms the next send to start an autonomous goal
+   run instead of a single turn. Same pill family as the planact
    controls; the ARMED state wears the shared accent (consistency with the
    active Act / Confirm pills — owner call for this row). */
 .goal-toggle {
@@ -1815,44 +1815,28 @@ button.icon:hover { background: var(--bg); }
 .hook-x { font-size: 13px; line-height: 1; padding: 0 3px; }
 .hook-confirm { display: inline-flex; align-items: center; gap: 4px; }
 
-/* --- Ralph loop status panel (chat view) -------------------------------- */
-/* Quiet status widget: gray-bordered and monochrome; the spinner orb is
-   the only color while a run is live (brand rule). */
-.ralph-panel {
+/* Goal bar (the mode-row Goal toggle → loop/goal-runner.js) — a calm
+   "running · turn N · Stop" strip while an autonomous goal run is live.
+   Bordered elevated card, grayscale, the brand spinner the only color while a
+   run is live (brand rule). The work itself renders in the transcript above. */
+.goal-bar {
+  display: flex; align-items: center; gap: 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-elev);
-  padding: 8px 10px;
-  /* why no margin: .chat-view is a flex column with its own 8px gap —
-     the banners above this panel rely on the same spacing. */
+  padding: 6px 10px;
   font-size: 12px;
 }
-.ralph-head { display: flex; align-items: center; gap: 8px; }
-.ralph-title { font-weight: 600; }
-.ralph-status { color: var(--fg-muted); }
-.ralph-status.is-error { color: var(--danger); }
-.ralph-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); flex: 0 0 auto; }
-.ralph-dot.is-error { background: var(--danger); }
-.ralph-stop { font-size: 11px; padding: 2px 10px; }
-.ralph-dismiss { font-size: 14px; line-height: 1; padding: 0 3px; }
-.ralph-goal {
-  margin-top: 4px;
+.goal-bar-label { font-weight: 600; }
+.goal-bar-meta { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.goal-bar-text {
+  color: var(--fg-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 16ch;
 }
-.ralph-meta {
-  display: flex; gap: 10px; flex-wrap: wrap;
-  margin-top: 2px; color: var(--fg-muted);
-  font-variant-numeric: tabular-nums;
-}
-.ralph-note {
-  margin-top: 4px;
-  font-family: var(--font-mono);
-  font-size: 11px; color: var(--fg-muted);
-  word-break: break-word;
-}
-.ralph-note.is-error { color: var(--danger); }
+.goal-bar-stop { font-size: 11px; padding: 2px 10px; }
 
-/* In-flight async-subagent status bar (DESIGN-11) — mirrors .ralph-panel:
+/* In-flight async-subagent status bar (DESIGN-11) — mirrors .goal-bar:
    a bordered elevated card, grayscale, the brand spinner the only color. */
 .async-task-bar {
   border: 1px solid var(--border);

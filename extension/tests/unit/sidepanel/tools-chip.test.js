@@ -11,10 +11,8 @@ import { ChatView } from '/sidepanel/components/chat-view.js';
 
 /** @typedef {{ type: string } & Record<string, any>} Msg */
 
-// Generic fake send() covering every route ChatView's children hit at
-// init (RalphPanel → ralph/status).
+// Generic fake send() covering every route ChatView's children hit at init.
 const makeSend = () => /** @param {Msg} msg */ async (msg) => {
-  if (msg.type === 'ralph/status') return { ok: true, state: null, plan: { goal: '' }, summary: null };
   if (msg.type === 'models/options') return { ok: true, options: [], selected: null };
   return { ok: true };
 };

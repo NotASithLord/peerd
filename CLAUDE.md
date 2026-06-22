@@ -32,7 +32,7 @@ Each maps to one letter and color in the brand wordmark:
 | `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic + OpenRouter + Ollama shipped; OpenAI later; local WebGPU deferred — `docs/LOCAL-INFERENCE.md`) |
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
 | `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. Three kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). A fourth, the **headless worker** (`js_run`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute. The sandbox is the isolate; a tab is one way to host it (DECISIONS #25; full taxonomy in DESIGN.md §8.5). |
-| `r` | green   | `peerd-runtime/`      | Agent loop, tools + do/get/check runner, sessions, profiles, skills, memory, permissions (Plan/Act), review, ralph, composer, cost, transfer, voice, clock, web tool policy |
+| `r` | green   | `peerd-runtime/`      | Agent loop, tools + do/get/check runner, sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
 
 The extension *chassis* lives outside these modules: `background/`,
@@ -273,7 +273,7 @@ postures and gotchas to know going in:
   2026-06-12 — Plan/Act + the denylist carry the safety weight; Plan
   permits pure URL loads only, never clicks (`docs/DECISIONS.md` #16).
 - The ten-feature buildout — memory, edit + checkpoints, Plan/Act,
-  composer (slash commands + @-refs), Ralph loop, cost telemetry, skills,
+  composer (slash commands + @-refs), goal mode (autonomous loop), cost telemetry, skills,
   review subagent, hooks, and do/get/check — all integrated. Per-feature
   detail is in `FEATURES.md`; the landing record is
   `v1-deliverables/INTEGRATION-LOG.md`.

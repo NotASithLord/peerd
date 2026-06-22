@@ -20,8 +20,8 @@ defense. The compile/runner seams are built so later events (e.g. a
 `session-start` or a WebVM/shell body kind) land without touching the
 dispatcher.
 
-This feature is **foundational**: features 03 (plan/act), 05 (Ralph) and
-others register hooks through the public API. It is also **central to the
+This feature is **foundational**: feature 03 (plan/act) and others
+register hooks through the public API. It is also **central to the
 security model** — a pre-tool-use hook is the last programmable veto
 before a side effect runs.
 

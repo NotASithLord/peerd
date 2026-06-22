@@ -3,7 +3,7 @@
 //
 // State strategy — deliberately NOT the side panel's long-lived port:
 // the singleton sidepanel port is load-bearing in the SW (confirm
-// coordinator, voice/vm chunk forwarders, ralph events all assume THE
+// coordinator, voice/vm chunk forwarders, goal events all assume THE
 // panel owns it), and nothing on this page needs live pushes — every
 // management pane self-fetches. So this page:
 //   1. fetches one snapshot via the `state/get` route on load,

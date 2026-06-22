@@ -21,7 +21,7 @@ export const makeVaultRoutes = (deps) => {
   const {
     vault, auditLog, kv, idb, base64ToBytes,
     ensureOffscreen, maybeStartBaseNetwork, pushState, purgeVaultBlob,
-    confirmCoordinator, sessionCache, maybeAutoResume,
+    confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -56,6 +56,11 @@ export const makeVaultRoutes = (deps) => {
         // cold SW wake unlocks here; this is the moment to finish what the
         // eviction cut off). Fire-and-forget; gated + deduped in the helper.
         sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
+        // Re-drive any goal run that paused on a mid-run auto-lock — an
+        // interactive unlock is when secrets are back, so the run can continue.
+        // Idempotent (skips sessions with a live run); resumes ALL, not just the
+        // current chat (a goal can run in the background).
+        resumeGoalRuns?.()?.catch?.(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof WrongPassphraseError) return { ok: false, error: 'wrong-passphrase' };
@@ -185,6 +190,11 @@ export const makeVaultRoutes = (deps) => {
         // #72: auto-resume the current chat if its last turn was interrupted
         // (see the passphrase unlock path above). Fire-and-forget; gated in helper.
         sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
+        // Re-drive any goal run that paused on a mid-run auto-lock — an
+        // interactive unlock is when secrets are back, so the run can continue.
+        // Idempotent (skips sessions with a live run); resumes ALL, not just the
+        // current chat (a goal can run in the background).
+        resumeGoalRuns?.()?.catch?.(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof PrfNotEnrolledError) return { ok: false, error: 'prf-not-enrolled' };

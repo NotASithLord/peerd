@@ -1,5 +1,10 @@
 # peerd V1 buildout — INTEGRATION LOG
 
+> _Historical record of the V1 integration. Ralph (feature 05) was later
+> removed and replaced by goal mode — see
+> `peerd-runtime/loop/goal-runner.js` and `ARCHITECTURE-CHANGES.md`. The
+> Ralph entries below are kept as the record of what landed then._
+
 Branch: local **`main`** (head `d2b08f1`), based on `65fbd3c`. **Not pushed.**
 Final gate: `bun test ./tests` → **429 pass / 0 fail / 39 files**; full
 `node --check` sweep of non-vendor extension JS → clean.

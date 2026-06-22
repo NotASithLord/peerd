@@ -81,10 +81,10 @@ import './unit/background/state-get.test.js';
 // send(). They need a live DOM, so they belong on this surface, not bun.
 import './unit/sidepanel/hooks-view.test.js';
 import './unit/sidepanel/denylist-view.test.js';
-import './unit/sidepanel/ralph-panel.test.js';
 import './unit/sidepanel/onboarding-view.test.js';
 import './unit/sidepanel/mode-selector.test.js';
 import './unit/sidepanel/goal-toggle.test.js';
+import './unit/sidepanel/goal-bar.test.js';
 import './unit/sidepanel/memory-suggestions.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';

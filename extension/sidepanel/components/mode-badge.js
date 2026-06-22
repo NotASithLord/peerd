@@ -96,17 +96,15 @@ export const ModeSelector = {
 };
 
 /**
- * Goal toggle. The mode-row entry point for the Ralph persistent loop
- * (peerd-runtime/ralph). Labeled "Goal" — it arms the NEXT message to be
- * the goal of an autonomous run (plan → build → repeat) rather than a
- * single turn; the InputBar routes that send through the engine's `/loop`
- * path and the toggle disarms (one launch per arm). Before this, the loop
- * could only be launched via the undiscoverable `/loop [goal]` command.
- * The running run then surfaces in its own RalphPanel, which owns the
- * stop/status half. why "Goal" not "Loop": the control is a one-shot
- * launch-with-a-goal, not a sticky mode — the word matches the behavior.
- * Same pill family + accent-when-armed as the planact controls (owner
- * call for this row).
+ * Goal toggle. The mode-row entry point for goal mode (loop/goal-runner.js):
+ * it arms the NEXT message to be the goal of an autonomous run — the agent
+ * keeps taking turns toward it, visibly in the chat, until it calls
+ * complete_goal (or Stop / a cap). The InputBar consumes the arm (sending
+ * `agent/send` with goal:true) and disarms — one launch per arm. While a run
+ * is live it shows in the GoalBar. why "Goal" not "Loop": the control is a
+ * one-shot launch-with-a-goal, not a sticky mode — the word matches the
+ * behavior. Same pill family + accent-when-armed as the planact controls
+ * (owner call for this row).
  *
  * attrs:
  *   armed     — whether the next send is armed to launch a goal run
@@ -128,10 +126,11 @@ export const GoalToggle = {
       disabled: !!disabled,
       'aria-pressed': String(on),
       title: on
-        ? 'Goal is armed — your next message starts an autonomous run on that goal '
-          + '(plan → build → repeat). Click to disarm.'
-        : 'Goal — arm the next message to run as an autonomous goal '
-          + '(plan → build → repeat) instead of a single turn.',
+        ? 'Goal is armed — your next message starts an autonomous run: the agent '
+          + 'keeps taking turns, acting WITHOUT per-action confirmation, until the '
+          + 'goal is met or you Stop. Click to disarm.'
+        : 'Goal — arm the next message to run as an autonomous goal: the agent keeps '
+          + 'taking turns, acting without per-action confirmation, until it\'s done or you Stop.',
       onclick: () => onToggle(!on),
     }, on ? 'Goal: on' : 'Goal');
   },

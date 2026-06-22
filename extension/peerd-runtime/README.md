@@ -2,8 +2,8 @@
 
 > The **`r`** (green) in the peerd wordmark — the agent.
 > The loop, the tool dispatcher and its six gates, the do/get/check
-> browser runner, subagents, sessions, memory, skills, review, the
-> ralph loop, cost telemetry, the composer, voice, and the clock. This
+> browser runner, subagents, sessions, memory, skills, review, goal
+> mode, cost telemetry, the composer, voice, and the clock. This
 > is the biggest module and the one the user actually talks to. Part of
 > [peerd](../../README.md); read the root README first, then
 > [`ARCHITECTURE.md`](../../ARCHITECTURE.md) and
@@ -24,8 +24,8 @@ the system prompt, streams the model, dispatches the tools the model
 calls (through six security gates), and loops until the task is done or
 stopped. On top of that loop it layers the features that make peerd a
 harness rather than a chat box: a disposable page-reading runner,
-subagents, file-based memory, skills, a review subagent, an unattended
-ralph loop, cost metering with a hard spend limit, slash commands,
+subagents, file-based memory, skills, a review subagent, an autonomous
+goal mode, cost metering with a hard spend limit, slash commands,
 voice, and temporal grounding.
 
 The defining design choice lives here: **the main agent never reads a
@@ -143,9 +143,12 @@ channel-agnostic `debugger_unavailable` error elsewhere.
 - **Review** (`review/`) — `request_review` spawns a clean-context,
   read-only reviewer over a diff (the policy-side read-only tool
   intersection is real). See [`docs/REVIEW.md`](../../docs/REVIEW.md).
-- **Ralph** (`ralph/`) — `/loop <goal>`, a persistent fresh-context loop
-  (read plan → one task → fresh subagent → run lint/test/build gates →
-  commit or block → repeat). See [`docs/RALPH.md`](../../docs/RALPH.md).
+- **Goal mode** (`loop/goal-runner.js`) — the Goal toggle arms the next
+  message to start an autonomous run: the agent keeps taking normal turns
+  in the main chat (later turns are hidden `synthetic` continuation
+  nudges) until it calls `complete_goal`, the user hits Stop, or a 40-turn
+  cap is hit. Runs persist and resume on SW restart, and auto-flip the
+  session to Act + confirm-off for their duration.
 - **Cost** (`cost/`) — per-turn/per-session token + dollar metering and
   a hard `spendLimitUsd` ceiling.
 - **Composer** (`composer/`) — slash commands + @-refs (tabs, files).
@@ -167,7 +170,7 @@ A large surface (~250 exports). The entry points core code wires:
 `dispatchToolCall` (the dispatcher), `BUILTIN_TOOLS` / `CLOCK_TOOLS` /
 `WEB_TOOLS` / `loadSkillTool`, `mainAgentDescriptors` and the exposure
 filters, the session store, `makeSpawnSubagent`, `createMemoryStore`,
-`createSkillRegistry`, `makeRequestReview`, the ralph loop, the cost
+`createSkillRegistry`, `makeRequestReview`, the goal runner, the cost
 tracker, the composer parser, and the permission classifiers, plus the
 tool-manifest presets and default hooks.
 
@@ -207,7 +210,6 @@ here: the runtime is provider-agnostic.)
   runner layer.
 - [`docs/SUBAGENTS.md`](../../docs/SUBAGENTS.md),
   [`docs/REVIEW.md`](../../docs/REVIEW.md),
-  [`docs/RALPH.md`](../../docs/RALPH.md),
   [`docs/skills/`](../../docs/skills/),
   [`docs/hooks/`](../../docs/hooks/),
   [`docs/COMMANDS-DESIGN.md`](../../docs/COMMANDS-DESIGN.md),

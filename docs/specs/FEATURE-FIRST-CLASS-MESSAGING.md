@@ -451,8 +451,10 @@ Phase-A flag in `FEATURE-SCHEDULED-TASKS.md §7.1`, not yet built. And
 `decideAction` (`policy.js:195-229`) has signature `{ mode, confirmActions, tool }`
 with **no origin/unattended/inbound parameter**. So §7.1 is a real
 argument-threading change at two call sites, not a flag read at an existing seam.
-The only `unattended` machinery shipping is Ralph's `resolveCanRunUnattended()`
-boolean (`service-worker.js:1459`), which is unrelated. This is a genuine
+The closest shipping autonomous-run machinery is goal mode
+(`peerd-runtime/loop/goal-runner.js`), which just auto-flips the session to
+Act + confirm-off for the run's duration rather than reading any
+`unattended` flag — unrelated to this clamp. This is a genuine
 **cross-spec dependency**: §7.1 and scheduled-tasks §7.1/§7.2 must converge on
 one clamp; whichever lands first builds the threading, the second reuses it.
 

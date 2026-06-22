@@ -187,7 +187,8 @@ Hard gates, all required for an *unattended* scheduled run:
 - The recipe must have a saved, user-reviewed envelope (you cannot
   schedule a recipe you never opened the permission editor for).
 - Unattended runs require **Act + confirmActions OFF**, which is the
-  full-auto tier — already a real, gated capability (Ralph reuses it).
+  full-auto tier — already a real, gated capability (goal mode reuses it,
+  `peerd-runtime/loop/goal-runner.js`).
   Attended scheduled runs (confirm each side effect) need only Act.
 - Honest semantics inherited from DESIGN-08: **runs only while the
   browser is running**; the UI says so in those words.

@@ -128,6 +128,9 @@ import {
   filterByInstanceState,
   filterByDwebEnabled,
   filterByDwebActive,
+  filterByGoalActive,
+  makeGoalRunner,
+  GOAL_MAX_ITERATIONS,
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
@@ -207,10 +210,6 @@ import {
   SkillExistsError,
   SkillInstallError,
   SkillParseError,
-  // ralph (persistent fresh-context loop) — plan store + the SW-side
-  // driver factory (fresh runner, gates, checkpoint, drive/halt/resume)
-  createPlanStore,
-  makeRalphDriver,
   // voice: the settings normalizers — the SW validates voiceVariant +
   // voiceEngine on settings/update (coerce unknowns).
   normalizeVariant, normalizeEngine,
@@ -267,7 +266,6 @@ import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
-import { makeRalphRoutes } from './routes/ralph.js';
 import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
 import { makeMemoryRoutes } from './routes/memory.js';
@@ -825,6 +823,19 @@ const denylistReady = loadDenylist();
  * @returns {Promise<{ mode: string, confirmActions: boolean }>}
  */
 const resolvePermission = async (activeSession) => {
+  // Goal mode runs UNATTENDED: while a goal run is active for this session, the
+  // effective permission is Act + confirm-off — COMPUTED here, never written to
+  // the record. Because every consumer (the turn's tool context, the dispatch
+  // gates, the state-snapshot the Plan/Act pill reads) resolves through this one
+  // function, the autonomy applies everywhere AND reverts the instant the run
+  // ends or pauses (isActive flips false) — nothing to restore, nothing to
+  // strand if the SW dies mid-run. why not store it: a stored flip needs a
+  // restore, and a restore that depends on an in-memory run surviving an
+  // auto-lock/eviction is exactly the bug class this avoids.
+  const goalSid = /** @type {any} */ (activeSession)?.sessionId;
+  if (goalSid && goalRunner?.isActive(goalSid)) {
+    return { mode: PERMISSION_MODES.ACT, confirmActions: false };
+  }
   // Product default for a fresh install: ACT with confirmations OFF —
   // peerd acts on the browser without nagging. (A corrupted record still
   // fails safe via the normalizers.) The "Confirm before actions" Settings
@@ -853,7 +864,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, subagents, Ralph) routes through here, so all are covered.
+  // dispatch, subagents) routes through here, so all are covered.
   await denylistReady;
   // why: the override lets the subagent orchestrator build a context
   // bound to a CHILD session id instead of the chat's current one. With
@@ -870,7 +881,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // Per-session tool manifest → the exposure gate's dispatch-time check.
   // Resolved from the session RECORD (main chat, or a child that inherited
   // the manifest at spawn), so every dispatch path that builds a context
-  // here — main turn, direct dispatch, subagents, Ralph — enforces it.
+  // here — main turn, direct dispatch, subagents — enforces it.
   // null = no manifest = everything stays exposed.
   const toolAllow = resolveManifestAllow(activeSession?.toolManifest);
   // why: key presence is per-PROVIDER. A session created on OpenRouter
@@ -958,6 +969,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // clean-context READ-ONLY reviewer over a diff and get a structured
     // summary back. Bound below; see makeRequestReview. Feature 08.
     requestReview,
+    // why: the complete_goal tool calls ctx.completeGoalRun(summary) to end the
+    // autonomous goal run for THIS session (loop/goal-runner.js). Resolves at
+    // call time (goalRunner is built after this fn is defined). Returns false
+    // outside an active run, which the tool surfaces as a harmless no-op.
+    completeGoalRun: sessionId
+      ? (/** @type {string} */ summary) => goalRunner?.complete(/** @type {string} */ (sessionId), summary) ?? false
+      : undefined,
     dom: undefined,
     // why: vm is a SW-side client that proxies vm/run + vm/write-file
     // messages via chrome.tabs.sendMessage to the discrete VM tab.
@@ -1436,43 +1454,6 @@ const computeMainInstanceState = async (/** @type {string} */ sid) => {
 const dwebEngagedSessions = new Set();
 const markDwebEngaged = (/** @type {string} */ sid) => { if (sid) dwebEngagedSessions.add(sid); };
 
-// Ralph loop (feature 05): orchestration lives in peerd-runtime/ralph/
-// driver.js (makeRalphDriver); the SW binds the IO singletons. The plan
-// store stays SW-visible for the ralph/getPlan + ralph/setPlan routes.
-// Late-declared deps (postChatNote, resolvePermission's session read) are
-// referenced through arrow closures, so they dereference at CALL time —
-// no TDZ at construction.
-const ralphPlanStore = createPlanStore({ kv });
-const ralphDriver = makeRalphDriver({
-  planStore: ralphPlanStore,
-  kv,
-  spawnSubagent: (req) => spawnSubagent(req),
-  getCurrentSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
-  vmClient,
-  buildToolContext,
-  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
-  // Feature-03 permissions adapter: Ralph commits unattended, so it
-  // requires Act mode with confirmActions OFF — the REAL Plan/Act axis
-  // (same protection the old full-auto tier gate gave, simpler words).
-  // Resolved per call against the current session record so a mid-run
-  // mode change takes effect on the next iteration.
-  resolveCanRunUnattended: async () => {
-    const sessionId = await sessionCache.sessionGet('currentSessionId');
-    let session = null;
-    if (sessionId && !vault.isLocked()) {
-      try { session = await sessions.get(/** @type {any} */ (sessionId)); }
-      catch { session = null; }
-    }
-    const { mode, confirmActions } = await resolvePermission(/** @type {any} */ (session));
-    return mode === PERMISSION_MODES.ACT && confirmActions === false;
-  },
-  forwardEvent: (ev) => {
-    if (!uiConnected()) return;
-    try { uiPorts.broadcast({ ...ev, channel: 'ralph' }); } catch { /* port closed */ }
-  },
-  postChatNote: (text) => postChatNote(text),
-});
-
 // Composer commands store + sources. The `.peerd/commands/` workspace
 // lives in KV; enabled skills surface as /<skill-name> commands via the
 // registry's listCommands(). Earlier source wins on a name collision, so
@@ -1864,7 +1845,7 @@ const sessionState = makeSessionState();
  * see pushState below) and the options page (pulled via the one-shot
  * 'state/get' route + refetch-on-focus; it holds no port on purpose —
  * the uiPorts registry is load-bearing for confirm routing and the
- * voice/vm/ralph forwarders).
+ * voice/vm/goal forwarders).
  *
  * why a closure, not an extracted module: this is snapshot ASSEMBLY whose
  * one load-bearing invariant — no key material in the snapshot — is already
@@ -2156,12 +2137,20 @@ const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSe
 // and pushState, so it stays SW-scoped and is injected like everything else.
 // The error CLASSES are imported inside the driver (instanceof narrowing), not
 // passed here.
+// Goal mode (the mode-row Goal toggle): keeps re-entering the agent turn until
+// the agent calls complete_goal. Forward-declared so makeTurnDriver can read
+// goalActiveFor (which tool list to show) at CALL time — the runner itself is
+// built just below, once runAgentTurn exists (the same late-dep dance the
+// orchestrator wiring uses). filterByGoalActive is a pure descriptor filter.
+/** @type {ReturnType<typeof makeGoalRunner> | null} */
+let goalRunner = null;
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, resolveActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
   computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
   filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
+  filterByGoalActive, goalActiveFor: (/** @type {string} */ sid) => goalRunner?.isActive(sid) ?? false,
   dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
   decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
@@ -2171,6 +2160,29 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
   postChatNote: (/** @type {any} */ text, /** @type {any} */ action) => postChatNote(text, action),
+});
+
+// Build the goal runner now that runAgentTurn exists. Each goal turn is a
+// normal runAgentTurn on the MAIN session (turn 1 = the goal, later turns =
+// hidden synthetic continuations), so the work streams into the chat like any
+// session. The complete_goal tool ends it; goal/state events drive the panel's
+// Goal bar (iteration + Stop).
+goalRunner = makeGoalRunner({
+  runTurn: (/** @type {any} */ args) => runAgentTurn(args),
+  onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
+  // Terminal note when a run ends WITHOUT a complete_goal result already in the
+  // transcript (cap / halt). 'done' needs none — complete_goal's tool result is
+  // the visible record. (Permission needs no restore: resolvePermission computes
+  // the autonomy from the live run, so it reverts on its own when the run ends.)
+  onRunEnd: (/** @type {any} */ _sid, /** @type {any} */ info) => {
+    if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
+    else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+  },
+  // why kv: a goal run must survive an SW restart and keep going while the user
+  // is in another chat — the runner mirrors active runs to storage.local and
+  // resume() (on vault unlock) re-drives them. Without it the run is in-memory
+  // only and an MV3 recycle would silently drop it.
+  kv,
 });
 
 // ---------------------------------------------------------------------------
@@ -2440,6 +2452,18 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // 6. Message handlers — one-shot sendMessage routes
 // ---------------------------------------------------------------------------
 
+// Goal-mode handles for the session routes, defined here so they wire as plain
+// SHORTHAND below (the route-wiring guard requires it — no key:value). goalRunner
+// is built above; ensureSession is the same lazy session-create the model turn
+// uses, so a Goal send on a fresh chat gets a session (like /system and /tools).
+// Goal mode (the Goal toggle). Autonomy is NOT a stored flip — resolvePermission
+// computes Act+confirm-off from the live run — so start/halt are just the runner
+// surface. resumeGoalRuns re-drives persisted runs after an interactive unlock.
+const startGoalRun = (/** @type {{ sessionId: string, goal: string }} */ req) => /** @type {any} */ (goalRunner)?.start(req);
+const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.halt(sid);
+const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
+const ensureSession = ensureCurrentSession;
+
 // Message routes live in background/routes/*.js as import-free, deps-injected
 // factories. Each is wired with an EXPLICIT per-module deps object naming
 // exactly the stable collaborators that module needs — so the coupling is
@@ -2456,7 +2480,7 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume,
+    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -2466,7 +2490,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     OPENROUTER_POPULAR, callModel, getSecret, safeFetch, secretNameForProvider, maskKey,
     buildModelOptions, ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   }),
-  ...makeRalphRoutes({ vault, ralphDriver, ralphPlanStore }),
   ...makeHooksRoutes({
     auditLog, kv, listHooks, DEFAULT_HOOKS, parseHookMarkdown, saveUserHook, removeHook, exportHooks,
   }),
@@ -2482,9 +2505,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
-    applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit, ralphDriver,
+    applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit,
     handleSystemCommand, handleToolsCommand, postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
+    // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
+    // any active one when the user stops or steers with a fresh message.
+    startGoalRun, haltGoalRun, ensureSession,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
@@ -2509,7 +2535,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume,
+    maybeAutoResume, haltGoalRun,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
@@ -2737,10 +2763,17 @@ vault.attemptResume().then((resumed) => {
     pushState();
     maybeStartBaseNetwork('resume');
   }
-  // why: resume an in-flight Ralph run AFTER the vault is back — a run
-  // needs unlocked secrets to call the model. If the SW died mid-run, the
-  // persisted LoopState + plan file let us pick up at the next iteration
-  // with NO carried context. A no-op if there's no active run. The driver
-  // logs the resume + kicks its own burst loop.
-  ralphDriver.resume().catch((e) => console.error('[sw] ralph resume failed', e));
+  // why: resume any in-flight Goal run AFTER the vault is back — a run needs
+  // unlocked secrets to call the model. If the SW died mid-run (or the user is
+  // returning to a run that kept going while they were elsewhere), the persisted
+  // run state lets us re-drive the next turn. A no-op if nothing is active.
+  goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
 }).catch((e) => console.error('[sw] attemptResume failed', e));
+
+// One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote
+// its plan + loop state to these storage.local keys; nothing reads them now, so
+// delete them so an upgraded install doesn't carry dead state forever. Cheap
+// no-op once gone; safe to run every boot.
+for (const deadKey of ['ralph.plan.v1', 'ralph.loop.v1']) {
+  Promise.resolve(kv.delete(deadKey)).catch(() => {});
+}

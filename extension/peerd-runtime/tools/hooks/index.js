@@ -2,7 +2,7 @@
 // Hooks — the lifecycle hook system's internal barrel.
 //
 // This is re-exported from peerd-runtime/index.js as the module's public
-// surface. Features 03 (plan/act), 05 (Ralph), and others register hooks
+// surface. Features like plan/act and others register hooks
 // through registerHook(); the dispatcher runs them through
 // runPreToolUse / runPostToolUse.
 

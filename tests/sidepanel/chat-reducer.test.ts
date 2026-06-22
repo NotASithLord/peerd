@@ -79,10 +79,19 @@ describe('reduceChat', () => {
     expect(folded.subagents.sessions.c1.messages).toHaveLength(1);
   });
 
-  test('ralph channel folds LoopState + a bounded log line', () => {
-    const s1: any = reduceChat(INITIAL_STATE, { channel: 'ralph', type: 'ralph/tick', state: { status: 'running', iteration: 2 }, summary: { done: 1 } });
-    expect(s1.ralph.state.iteration).toBe(2);
-    expect(s1.ralph.summary.done).toBe(1);
-    expect(s1.ralph.log).toHaveLength(1);
+  test('goal/state tracks a run per session, and a terminal phase clears it', () => {
+    const running: any = reduceChat(INITIAL_STATE, {
+      type: 'goal/state', sessionId: 's1', phase: 'running', iteration: 3, maxIterations: 40, goal: 'ship it', summary: null,
+    });
+    expect(running.goalRuns.s1).toMatchObject({ active: true, iteration: 3, goal: 'ship it' });
+    // A different session's run is independent.
+    const two: any = reduceChat(running, {
+      type: 'goal/state', sessionId: 's2', phase: 'running', iteration: 1, maxIterations: 40, goal: 'other', summary: null,
+    });
+    expect(Object.keys(two.goalRuns).sort()).toEqual(['s1', 's2']);
+    // Terminal phase removes only that session's entry.
+    const done: any = reduceChat(two, { type: 'goal/state', sessionId: 's1', phase: 'done', summary: 'shipped' });
+    expect(done.goalRuns.s1).toBeUndefined();
+    expect(done.goalRuns.s2).toBeDefined();
   });
 });
