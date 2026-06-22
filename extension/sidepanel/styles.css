@@ -1061,6 +1061,10 @@ button.icon:hover { background: var(--bg); }
   background: var(--ok);
   animation: peerd-dot-pulse 1.2s ease-in-out infinite;
 }
+/* aborted-turn tool: a static, muted dot — no pulse, a terminal resting state. */
+.tool-call.tool-cancelled { opacity: 0.6; }
+.tool-status-dot.dot-cancelled { background: var(--fg-muted); }
+.tool-cancelled { color: var(--fg-muted); font-size: 11px; font-style: italic; flex-shrink: 0; }
 @keyframes peerd-dot-pulse {
   0%, 100% { opacity: 0.35; }
   50%      { opacity: 1; }

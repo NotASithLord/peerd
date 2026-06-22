@@ -67,6 +67,20 @@ describe('reduceChat', () => {
     expect(after.session.sessionId).toBe('s1');                       // snapshot still applied
   });
 
+  // A 'state' snapshot (session switch / settings push) must clear the previous
+  // chat's transient rate-limit banner — the snapshot carries no rateLimit
+  // field, so an omitted reset bleeds the "⏳ Rate limited" banner into the
+  // switched-to (idle) chat.
+  test('a state snapshot clears a stale rate-limit banner (no cross-session bleed)', () => {
+    const paused = reduceChat(withSession('A'), {
+      type: 'turn/rate-limit-pause', sessionId: 'A', attempt: 2, retryAfterMs: 5000,
+    });
+    expect(paused.rateLimit).toEqual({ attempt: 2, retryAfterMs: 5000 });
+    const switched = reduceChat(paused, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } });
+    expect(switched.session.sessionId).toBe('B');
+    expect(switched.rateLimit).toBe(null);
+  });
+
   test('async-tasks/update keys the snapshot by parent session', () => {
     const s1 = reduceChat(INITIAL_STATE, { type: 'async-tasks/update', parentSessionId: 'p1', tasks: [{ taskId: 'as-1' }] });
     expect(s1.asyncTasks.p1).toEqual([{ taskId: 'as-1' }]);

@@ -348,8 +348,13 @@ export const reduceChat = (state, msg) => {
       // job — see the module header.) why preserve pendingConfirm: confirm
       // state is owned by the confirm/request|resolved channel, NOT the
       // snapshot (it carries null) — folding ...msg.state must never wipe a
-      // live prompt a 'state' push races with (DESIGN-12).
-      return { ...state, ...msg.state, pendingConfirm: state.pendingConfirm, lastError: null, cost: { ...state.cost,
+      // live prompt a 'state' push races with (DESIGN-12). why rateLimit:null:
+      // the snapshot carries no rateLimit field, so without an explicit reset
+      // the previous chat's retry banner survives the fold and paints on the
+      // switched-to (idle) chat — a stale "⏳ Rate limited" control in the wrong
+      // conversation. A switched-to chat is never mid-retry from the previous
+      // one; an active retry in THIS chat re-asserts via the next pause/delta.
+      return { ...state, ...msg.state, pendingConfirm: state.pendingConfirm, lastError: null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
         limitReached: false } };

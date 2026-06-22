@@ -323,7 +323,9 @@ const AssistantMessage = {
             : '⚠ output limit reached — response may be cut short')
         : message.stopReason === 'max_steps'
           ? m('.stop-chip', '⚠ step cap reached — send a message to continue')
-          : null,
+          : message.stopReason === 'aborted'
+            ? m('.stop-chip', '⏹ stopped')
+            : null,
       // Tool calls render below the text bubble (or alone if there's
       // no text).
       hasToolUses
@@ -332,6 +334,9 @@ const AssistantMessage = {
               key: toolUse.id,
               toolUse,
               toolResult,
+              // an aborted turn never produced this tool's result — render it
+              // 'cancelled', not a perpetual 'running…' (see ToolCall).
+              interrupted: message.stopReason === 'aborted',
               liveStream: vmStreams?.[toolUse.id] ?? null,
               subagents,
               loadSubagent,
@@ -435,6 +440,7 @@ const ToolCall = {
    * @param {{
    *   attrs: {
    *     toolUse: ToolUse, toolResult: ToolResult|null,
+   *     interrupted?: boolean,
    *     liveStream?: { stdout: string, stderr: string }|null,
    *     subagents?: TranscriptArgs['subagents'],
    *     loadSubagent?: (sessionId: string) => void,
@@ -443,16 +449,20 @@ const ToolCall = {
    *   state: ToolCallState,
    * }} vnode
    */
-  view: ({ attrs: { toolUse, toolResult, liveStream, subagents, loadSubagent, peerName, depth }, state: ui }) => {
+  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, loadSubagent, peerName, depth }, state: ui }) => {
     // spawn_subagent gets its own card: the expanded body is the child's
     // full transcript rendered inline (recursively), not a result blob.
     if (toolUse.name === 'spawn_subagent') {
-      return renderSubagentCard({ toolUse, toolResult, subagents, loadSubagent, peerName, depth: depth ?? 0, ui });
+      return renderSubagentCard({ toolUse, toolResult, interrupted, subagents, loadSubagent, peerName, depth: depth ?? 0, ui });
     }
     const meta = toolResult?.meta ?? null;
+    // why 'cancelled': a tool_use with no result on an ABORTED turn (Stop /
+    // spend-limit / steer) is NOT still running — without this it shows
+    // "running…" with a pulsing dot forever, and persists that way across a
+    // reload. 'cancelled' gives the card a terminal, honest resting state.
     const status = toolResult
       ? (toolResult.is_error ? 'failed' : 'ok')
-      : 'pending';
+      : (interrupted ? 'cancelled' : 'pending');
     const showLiveStream = toolUse.name === 'vm_boot' && !toolResult
       && liveStream && (liveStream.stdout || liveStream.stderr);
     // why: a single compact line is the resting state — a status dot,
@@ -466,11 +476,12 @@ const ToolCall = {
       }, [
         m('span.disclosure', ui.expanded ? '▼' : '▶'),
         m(`span.tool-status-dot.dot-${status}`,
-          { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : 'ok' }),
+          { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
         m('.spacer'),
         status === 'pending' ? m('span.tool-pending', 'running…')
+          : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
           : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
       ]),
       // why: a vm_boot can take many seconds to finish (pip install,
@@ -522,7 +533,7 @@ const ToolCall = {
         m('.tool-result', [
           toolResult
             ? m('pre.tool-result-content', formatResultContent(toolResult))
-            : m('p.muted', 'Result pending…'),
+            : m('p.muted', interrupted ? 'Cancelled — the turn was stopped before this tool ran.' : 'Result pending…'),
         ]),
       ]) : null,
     ]);
@@ -538,15 +549,15 @@ const ToolCall = {
 // MAX_NESTED_DEPTH visually; deeper runs are still inspectable.
 /**
  * @param {{
- *   toolUse: ToolUse, toolResult: ToolResult|null,
+ *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
  *   subagents?: TranscriptArgs['subagents'],
  *   loadSubagent?: (sessionId: string) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
  * }} args
  */
-const renderSubagentCard = ({ toolUse, toolResult, subagents, loadSubagent, peerName, depth, ui }) => {
+const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, loadSubagent, peerName, depth, ui }) => {
   const meta = toolResult?.meta ?? null;
-  const status = toolResult ? (toolResult.is_error ? 'failed' : 'ok') : 'pending';
+  const status = toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending');
   const childId = resolveChildSessionId(toolUse, toolResult, subagents);
   const childSession = childId ? subagents?.sessions?.[childId] : null;
   const task = childSession?.task ?? toolUse.input?.task ?? '';
@@ -563,11 +574,12 @@ const renderSubagentCard = ({ toolUse, toolResult, subagents, loadSubagent, peer
     m('.tool-call-header', { onclick: onToggle }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
-        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : 'ok' }),
+        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'spawn_subagent'),
       m('span.tool-args', `"${truncate(String(task), 48)}"`),
       m('.spacer'),
       status === 'pending' ? m('span.tool-pending', 'running…')
+        : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
         : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
     ]),
     ui.expanded ? m('.subagent-body', [
@@ -580,7 +592,7 @@ const renderSubagentCard = ({ toolUse, toolResult, subagents, loadSubagent, peer
           ? m('.subagent-transcript',
               renderTranscript({ messages: childSession.messages, subagents, loadSubagent, peerName, depth: depth + 1 }))
           : childId
-            ? m('p.muted', status === 'pending' ? 'subagent running…' : 'loading transcript…')
+            ? m('p.muted', status === 'pending' ? 'subagent running…' : status === 'cancelled' ? 'subagent cancelled' : 'loading transcript…')
             : m('p.muted', 'no child transcript recorded'),
     ]) : null,
   ]);
