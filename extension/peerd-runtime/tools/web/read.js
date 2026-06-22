@@ -9,7 +9,7 @@
 // background — flashing a tab the user can't even reach would just yank
 // them. Tabs the user should SEE go through open_tab (which takes focus).
 
-import { fetchUrl, openWebTab, readTabContent, closeTab } from './primitives.js';
+import { fetchUrl, openWebTab, readTabContent, closeTab, landedHostDenial } from './primitives.js';
 import { shouldEscalate } from './policy.js';
 import { originOfUrl } from '../defs/dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
@@ -62,8 +62,16 @@ export const readArticleTool = {
     try {
       fetched = await fetchUrl(args.url, { method: 'GET' }, ctx);
     } catch (e) {
-      // safeFetch failure (network, abort, allowlist miss) — fall
-      // through to tab escalation.
+      // why: a webFetch redirect refusal is an egress DECISION, not a
+      // transient failure — escalating it would just have the tab follow the
+      // same redirect natively, past the guard. Treat it as terminal (parity
+      // with call_api); the landed-host re-check in escalate() backstops any
+      // redirect a tab still follows for the genuinely-transient paths below.
+      if (/** @type {{ reason?: string }} */ (e)?.reason === 'redirect_blocked') {
+        return { ok: false, error: `redirected: ${args.url} issued an HTTP redirect to a host that is not permitted; not following it.` };
+      }
+      // Genuine transient failure (network, abort, anti-bot) — fall through
+      // to tab escalation.
       return await escalate(args, ctx, { reason: `fetch_failed:${/** @type {{ message?: string }} */ (e)?.message ?? 'unknown'}` });
     }
 
@@ -100,6 +108,16 @@ const escalate = async (args, ctx, { reason }) => {
   try {
     const opened = await openWebTab(args.url, ctx);
     tabId = opened.tabId;
+    // A real tab natively follows redirects (HTTP 3xx, meta-refresh, JS) the
+    // origin gate never saw — so the host it LANDED on can differ from the one
+    // that was gate-checked. Re-validate it against the denylist + private-
+    // network guard BEFORE reading any content back into the agent; a denied
+    // landing is refused (and audited for visibility), not read.
+    const denial = landedHostDenial(opened.finalUrl, ctx);
+    if (denial) {
+      ctx.audit?.({ type: 'egress_denied', details: { origin: denial.host, reason: `landed:${denial.reason}` } })?.catch?.(() => {});
+      return { ok: false, error: `egress_denied: the page redirected to ${denial.host}, which is not permitted.` };
+    }
     const page = await readTabContent(tabId, ctx);
     return ok({
       via: 'background_tab',

@@ -10,7 +10,7 @@
 // V1 ships with Google as the default. The engine is configurable
 // later via settings; the engine URL is just a template with `{q}`.
 
-import { openWebTab, readTabContent, closeTab } from './primitives.js';
+import { openWebTab, readTabContent, closeTab, landedHostDenial } from './primitives.js';
 import { originOfUrl } from '../defs/dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
@@ -53,6 +53,15 @@ export const webSearchTool = {
     try {
       const opened = await openWebTab(url, ctx);
       tabId = opened.tabId;
+      // Defense-in-depth: a results page can meta-refresh / JS-redirect into a
+      // denylisted or private host. Re-validate the landed host before reading
+      // (the query is agent-controlled, the destination is not — but the same
+      // one-line guard read_article uses applies here too).
+      const denial = landedHostDenial(opened.finalUrl, ctx);
+      if (denial) {
+        ctx.audit?.({ type: 'egress_denied', details: { origin: denial.host, reason: `landed:${denial.reason}` } })?.catch?.(() => {});
+        return { ok: false, error: `egress_denied: the results page redirected to ${denial.host}, which is not permitted.` };
+      }
       const page = await readTabContent(tabId, ctx);
       // why: results-page text is untrusted web content — fence it as
       // data, not instructions, like read_page. web_search is a main-agent
