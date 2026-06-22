@@ -50,6 +50,15 @@ kept as the design history.
 - **`DESIGN-15-local-bridge.md`** *(planned)* — a subscription transport
   (ACP) and the MCP question for a local bridge.
 
+### Messaging & A2A
+
+- **`FEATURE-FIRST-CLASS-MESSAGING.md`** *(spec, build-ready)* — expose the
+  already-shipped room/direct messaging layer beyond the dwapp to the **agent
+  loop** and a **native Contacts chat UI**. Covers the inbound→unattended-action
+  security model (the crux), the propose/accept handshake, a user-controlled
+  network kill switch, and the deferred sealing/offline tranche. The detail-spec
+  for the dweb roadmap's A2A section.
+
 ### Scheduling & proactivity
 
 - **`FEATURE-SCHEDULED-TASKS.md`** *(planned)* — durable timers, waits, and

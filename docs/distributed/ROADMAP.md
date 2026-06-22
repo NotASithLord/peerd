@@ -44,6 +44,11 @@ That gap is the whole distance between "P2P apps a human drives" and
 **real agent-to-agent**: one user's agent talking, peer-to-peer, to
 another user's agent.
 
+**Detail spec:** [`docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md`](../specs/FEATURE-FIRST-CLASS-MESSAGING.md)
+— the file-anchored work breakdown (agent send/receive, native Contacts chat, the
+inbound→unattended-action security model, and a user-controlled network kill
+switch to shut all dweb networking down).
+
 **Scope.**
 - **Agent messaging tools.** Expose `messaging/direct.js` to the agent:
   send/receive signed direct messages to a peer `did`, gated and audited
