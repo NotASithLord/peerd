@@ -53,8 +53,15 @@ lifetime spend/usage for the conversation. Absent on pre-feature sessions;
 The halt reuses `activeAbortController` in `runAgentTurn` — the same controller
 the Stop button (`agent/stop`) and steer-live mid-turn send use. On
 `limitExceeded(sessionTally.cost, limitUsd)` the SW calls
-`abortController.abort()`; the agent loop's existing AbortError branch persists
-the partial message and yields `stopReason:'aborted'`. No new cancellation path.
+`abortController.abort()`. The agent loop catches it at TWO points, both
+persisting the partial message as `stopReason:'aborted'`: the mid-stream
+AbortError branch (abort while the stream is still open) AND an explicit
+pre-dispatch check after the stream ends, before the tool-dispatch waves. The
+pre-dispatch check is load-bearing for the SPEND limit specifically: adapters
+emit `usage` (where the limit fires) one event before `message-stop`, so the
+abort lands in the stream-end→dispatch gap — which the AbortError branch alone
+would miss, running the already-emitted `tool_use` blocks before the next
+loop-top check caught it.
 
 The side panel surfaces it via `turn/spend-limit-reached` → `cost.limitReached`
 → the meter's halt banner + a `spend-limit-reached` entry in the error mapper.
