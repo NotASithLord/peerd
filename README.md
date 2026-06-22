@@ -40,26 +40,11 @@ buildout is complete and integrated (see `STATUS.md`), but the surface
 is still moving: **breaking changes are likely**, storage formats may
 shift, and it drives your browser and holds your API keys — use it with
 care. There is no "V1" commitment; versions stay in the 0.x range until
-the surface stabilizes. Shipped: the vault (WebAuthn PRF / Touch ID + passphrase,
-idle auto-lock), the six-gate tool dispatcher with real Plan/Act and
-exposure enforcement, the full tool layer (66 registered tools, of
-which 54 reach the main agent on the preview build / 47 on the store
-build — the low-level DOM tools are runner-only and reached through the
-do/get/check runner), skills with
-progressive disclosure, file-based AGENTS.md memory + `/init`, slash
-commands + @-refs, the review subagent, the Ralph loop, cost telemetry
-with a hard spend limit, voice in/out (Moonshine or Web Speech),
-streaming from Anthropic, OpenRouter (OpenAI-compatible gateway to many
-vendors), or local Ollama (keyless), with a per-chat model picker, and
-Sandboxes — execution kinds in discrete browser tabs
-(WebVM / Notebook / App) plus a headless worker (`js_run`) for the
-agent's own quick compute. The dweb layer ships its base network (mesh +
-gossip + DHT scaffolding) in the preview channel only. On-device WebGPU
-inference is **early but proven** — one model (Gemma-4-E2B, via
-Transformers.js / ORT-Web in the offscreen doc) ships behind an opt-in
-download; broader model support is staged. Outstanding: a native OpenAI
-adapter, full multi-profile isolation, and the dweb beyond its current
-phase. See `ROADMAP.md`.
+the surface stabilizes.
+
+For the full, itemized list of what's shipped — categorized by module —
+see [`FEATURES.md`](FEATURES.md). For the (version-free) backlog, see
+`ROADMAP.md`.
 
 ## Install
 

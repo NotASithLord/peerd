@@ -57,7 +57,7 @@ extension/
 ├── peerd-runtime/       [r] the orchestrator — most of the agent lives here
 │   ├── loop/            the agent loop (turns, streaming, tool dispatch)
 │   ├── tools/           tool inventory + the six-gate dispatcher
-│   │     defs/            ~52 BUILTIN_TOOLS, one file each
+│   │     defs/            BUILTIN_TOOLS, one file each (counts in FEATURES.md)
 │   │     dispatcher.js    persona → exposure → origin → confirmation → egress → audit
 │   │     exposure.js      registration vs exposure split (runner-only vs main-agent)
 │   │     manifests.js     per-session tool manifests (capability presets as data)
@@ -93,7 +93,8 @@ Outside `extension/`: `signaling-node/` (dweb
 rendezvous), `manifests/` + `packaging/` (the dual-distribution build —
 store vs preview; `bun run gen:dev` generates `manifest.json` +
 `channel-config.js`), `tests/` (Bun, pure logic), `scripts/`, and the
-design-record docs (`DESIGN-*.md`, `docs/`, `specs/`).
+design-record docs (`DESIGN.md` at root; `docs/`, with feature specs
+consolidated in `docs/specs/`).
 
 ---
 
@@ -107,7 +108,7 @@ soon, are worth knowing because they carry the most safety design:
 |---|---|---|---|
 | A turn | user sends a message | yes | `peerd-runtime/loop/` |
 | **Ralph `/loop`** | a persistent goal, re-entered each SW cold start | runs unattended, but **started** attended; commits via gates | `peerd-runtime/ralph/` |
-| **Scheduled tasks** | a `chrome.alarms` wake at/after time T | **fully unattended** — `ctx.unattended` fail-closed; preview/read-only by default | `peerd-runtime/schedule/` *(spec'd, see `specs/FEATURE-SCHEDULED-TASKS.md`)* |
+| **Scheduled tasks** | a `chrome.alarms` wake at/after time T | **fully unattended** — `ctx.unattended` fail-closed; preview/read-only by default | `peerd-runtime/schedule/` *(spec'd, see `docs/specs/FEATURE-SCHEDULED-TASKS.md`)* |
 
 The rule for anything that acts unattended: it can never widen its own
 permissions, every byte it reads from the web is `wrapUntrusted`-fenced,

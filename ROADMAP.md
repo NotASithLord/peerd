@@ -112,8 +112,8 @@ What's real on `main` today, ordered by the dependency stack
   `decideAction`), exposure (real runner-only enforcement at dispatch),
   origin (denylist), confirmation (async, policy-driven), egress
   (allowlist pre-hook + safeFetch), audit. Pre/post **tool-use hooks**.
-- **66 registered tools / 54 reach the main agent on preview, 47 on
-  store**: introspection, DOM/page
+- **67 registered tools / 54 reach the main agent on preview, 47 on
+  store** (itemized in `FEATURES.md`): introspection, DOM/page
   tools, sessions, VM/JS/App families, web tools, memory, edit, review,
   skills, `spawn_subagent`.
 - **do/get/check** two-layer browser runner — a clean-context subagent

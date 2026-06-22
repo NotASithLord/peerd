@@ -1,6 +1,8 @@
 # DESIGN-11 — async subagents (non-blocking delegation, push-back-as-a-turn)
 
-> Status: DESIGN, building Phase 1. Prior art studied: Hermes Agent
+> Status: SHIPPED — Phase 1, 2026-06-16. Landed with a rate-based +
+> lifetime runaway cap (re-spawn guard). Kept as the landed design
+> record. Prior art studied: Hermes Agent
 > `async_delegation`, LangChain deepagents async middleware, Kiro task graphs,
 > OpenAI Codex, Vercel ai-sdk (2026-06-15 study). The cross-harness lesson:
 > sync stays the *structural* default for "fan out and synthesise this turn";

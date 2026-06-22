@@ -30,7 +30,7 @@
   (one streamable-HTTP endpoint; OAuth handled by Klavis), plus custom MCP.
 - **Skills** (SKILL.md) and **Workflows/Graph Mode** (NL→codegen→TS).
 
-**peerd** exposes ~56 registered tools, **44 to the main agent**:
+**peerd** exposes 67 registered tools, **54 to the main agent on preview** (47 on store):
 - **Main browser surface:** `do`, `get`, `check`, `list_tabs`,
   `open_tab`, `capture`. (The low-level DOM tools — `snapshot`,
   `read_page`, `click`, `type`, `navigate`, `page_eval`/`page_exec`, etc.
@@ -186,7 +186,7 @@ For each genuine gap: add or not, where it lives, security, thesis fit.
 
 ---
 
-## 4. Ranked recommendations — highest-value additions for V1.x
+## 4. Ranked recommendations — highest-value additions for 0.x
 
 1. **File upload through `do()`, sandbox-sourced** — *~1 week.* Closes the
    biggest concrete agentic hole (any flow with a file input). Security

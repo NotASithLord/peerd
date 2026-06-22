@@ -5,7 +5,7 @@
 > **version-history substrate** for peerd-generated Apps (CORE, store channel)
 > and the **verifiable update stream** for dwapps (dweb, preview).
 >
-> **Read first:** `specs/FEATURE-APP-PERSISTENCE-DWAPPS.md` (the unified
+> **Read first:** `FEATURE-APP-PERSISTENCE-DWAPPS.md` (the unified
 > persistence/bundle model this lands on), `docs/distributed/PROPAGATION.md`
 > ("App identity & versioning" — `dwapp_id`/`version_id`/signed-`head`),
 > `extension/peerd-runtime/edit/snapshot-store.js` (today's "git object model in

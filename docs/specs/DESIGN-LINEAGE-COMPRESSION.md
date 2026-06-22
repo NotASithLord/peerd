@@ -5,7 +5,7 @@
 > `peerd-runtime/loop/lineage-compaction.js` (`renderLineageLine`,
 > `defaultClassify`, `planBodyCompaction`); wired in `agent-loop.js` before
 > `planTrim`. No body store, no re-expansion tool (see §8). Fleshes out §5 of
-> `specs/RESEARCH-HERMES-COMPRESSION.md` — the peerd-native compression axis
+> `RESEARCH-HERMES-COMPRESSION.md` — the peerd-native compression axis
 > that Hermes/Claude-Code don't have. Companion to the dynamic-trigger work
 > already shipped on this branch. Feeds the `ROADMAP.md` item *"lineage-based
 > context compression for very long sessions."*

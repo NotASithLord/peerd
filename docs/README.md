@@ -27,9 +27,9 @@ per-feature design docs:
   justifications, privacy doc, reviewer notes, open decisions.
 - **`distributed/`** — dweb scope: `ROADMAP.md` (supersedes the root
   roadmap's dweb phasing) and `THREAT-MODEL.md` (dweb-scoped).
-- **`specs/`** — forward-looking feature specs (designs not yet built).
-  The rest of this folder records features that already shipped; specs
-  go here until they land, then stay as the design record.
+- **`specs/`** — the consolidated home for feature specs and their design
+  records: forward-looking designs, landed records (kept as history), and
+  the research that fed them. See `specs/README.md` for the indexed list.
 
 Future:
 

@@ -1,11 +1,12 @@
 # FEATURE — Scheduled Tasks
 
-> **Status:** SPEC, build-ready. Implements and supersedes the design in
-> `DESIGN-08-schedule.md` (which is locked but unbuilt). This document is
-> the version an engineer builds from: it carries DESIGN-08's
-> adversarially-reviewed decisions forward, fills in the concrete schema,
-> execution path, and phasing, and is scoped so **Phase A is one
-> engineer-week**.
+> **Status:** SPEC, build-ready. Absorbs and supersedes the original
+> DESIGN-08 schedule design (now carried as the `## Appendix — original
+> design (DESIGN-08, merged)` below; the standalone `DESIGN-08-schedule.md`
+> file is retired). This document is the version an engineer builds from:
+> it carries DESIGN-08's adversarially-reviewed decisions forward, fills in
+> the concrete schema, execution path, and phasing, and is scoped so
+> **Phase A is one engineer-week**.
 >
 > **Module:** `peerd-runtime/schedule/` — a new sibling of `clock/`. No
 > sixth `peerd-*` module is created; this lives inside `peerd-runtime`
@@ -435,11 +436,13 @@ child runner):
 A new preset key `scheduled-preview` may be added to `manifests.js` if
 `browse-only` needs trimming for the unattended case (e.g. dropping
 `open_tab` so a zero-window fire can't try to spawn a tab-driving runner);
-this is a one-line data edit. **This is where the V1.3 `exposureGate`
-stub (`gates.js`, today always-allows) becomes real for unattended
-turns** — the manifest's allow-list is enforced by name at dispatch, so a
-hallucinated or injected off-list call still fails closed with the reason
-in the lineage.
+this is a one-line data edit. **The `exposureGate` (`gates.js`) is already
+real and enforced** — it refuses any runner-only tool to a `ctx.exposure
+=== 'main'` turn at dispatch, and it enforces the per-session tool manifest
+by name (a hallucinated or injected off-list call fails closed with the
+reason in the lineage). The unattended tier reuses this same dispatch-time
+manifest enforcement; it adds the `ctx.unattended` clamp on top, it does
+not make a stub real.
 
 ### 7.3 Acting unattended requires a hashed grant (Phase C)
 
@@ -522,7 +525,7 @@ new egress" constraint.
 
 What schedules *do* participate in:
 
-- **Export / import (`docs/DESIGN-10-export.md`):** schedules ride the
+- **Export / import (`DESIGN-10-export.md`):** schedules ride the
   `.peerd` export payload as a new `schedule` field, like every other
   piece of durable state. **Grants do NOT survive import** — an imported
   acting task lands as `preview` and re-prompts for a grant. (You cannot
@@ -584,3 +587,91 @@ What schedules *do* participate in:
   over-the-response escape hatch is explicitly deferred).
 - No auto-opening a window for a tab-driving fire on an absent user.
 - No silent acting under a stale or imported grant.
+
+---
+
+## Appendix — original design (DESIGN-08, merged)
+
+This feature carries forward the decisions of the older locked design note
+`DESIGN-08-schedule.md` (now retired into this section). The decisions in
+§§1–12 above already incorporate it; what follows is the residue not
+restated elsewhere.
+
+### Provenance — the adversarial panel
+
+DESIGN-08 was reviewed by an **adversarial panel (platform-truth + security
+lenses)**; its must-fixes are the load-bearing constraints above and are
+LOCKED, not open for casual relitigation during the build:
+
+- **The IDB store is the single durable truth; `chrome.alarms` is a wake
+  hint, not state** — recompute and re-arm from the store unconditionally
+  on every boot (Firefox clears alarms at session end, so the boot scan is
+  the only missed-fire delivery path there). *(platform-truth)*
+- **Trust boundary:** the wake frame + user-authored `instructions` are
+  trusted; anything derived from a watched response (matched value, body,
+  "what changed") is untrusted and enters context only via `wrapUntrusted`.
+  *(security)*
+- **Unattended turns can never widen themselves** — `schedule_task` /
+  `schedule_cancel` / `wait_for` / any grant edit are HARD-DENIED at the
+  gate before confirmation is consulted, killing the "schedule a new
+  full-auto task for me" injection pivot. *(security)*
+- **Default unattended capability is an explicit allow-list of tool names,
+  not "the read families"** — `read_api`/`call_api` can POST arbitrary
+  bodies to non-denylisted hosts (an exfil channel) and primitive tab tools
+  bypass the egress-allowlist hook, so both are OUT of the unattended set
+  by name. *(security)*
+- **Notifications are generic by rule** — task title + fired/needs-attention
+  only, never result values or watched content (OS notification centers and
+  lock screens are a leak surface). *(security)*
+- **Budgets bind to a fresh, fire-scoped cost tally**, not the session-global
+  spend limit, and are checked BEFORE a fire starts; hitting a limit pauses
+  and notifies, never silently drops. *(should-fix, adopted)*
+- **Module placement is deliberate:** `peerd-runtime/schedule/` is a sibling
+  of `clock/`, not inside it — clock *observes* time, schedule *acts* on it.
+  Nothing depends on schedule.
+
+### Async-subagent continuations — the durable variant of DESIGN-11
+
+(DESIGN-08 §4, not yet folded into the phasing above; sequenced after
+DESIGN-11's in-session slice and Phase A's store/waker exist.)
+
+`DESIGN-11` ships **in-session** async subagents: a non-blocking
+`spawn_subagent` whose child runs in the live SW and pushes its result back
+as a synthetic wake turn when done. That slice deliberately does NOT survive
+the SW being killed — a child lost to SW death is reported `interrupted` on
+the parent's next turn. This is the **durable upgrade**: make a long async
+child survive a browser restart by routing its completion through the waker
+instead of a live-SW callback. It needs no new agent-facing surface — durable
+is a `mode` on the spawn, not a new tool. See
+`docs/specs/DESIGN-11-async-subagents.md` §"Phasing" Phase 3.
+
+Mechanism, reusing everything above:
+
+- A child spawned in "durable" mode registers a `kind:'continuation'` task
+  whose `action.sessionId = parentSessionId`, carrying `{childSessionId,
+  caps}`. The child session is just a session with durable history, so it is
+  independently recoverable.
+- Two completion paths converge on the **same** re-entry: (a) the child
+  finishes while the SW is alive → enqueue the continuation, which fires the
+  parent wake turn; (b) the SW died mid-child → the boot scan finds the
+  `running`-with-stale-heartbeat child, re-enters the **child** session to
+  finish it (a normal resumed turn), then enqueues the parent continuation.
+  One durable path, not two regimes.
+- The parent wake carries the child's `finalAssistantText` as the
+  **untrusted** portion via `wrapUntrusted`; only the one-line "subagent X
+  finished" framing is trusted temporal text. Reintegration is **idempotent**
+  (a `reintegrated` flag flipped atomically on first commit; a redelivered
+  fire is a no-op) and **coalesces** sibling completions into one wake.
+- **Vault-locked is first-class:** a child that finishes while the vault is
+  locked cannot run the parent turn (the model key is gated). Mark the task
+  `paused`, fire the generic notification, badge the session row, and
+  re-drain on the next unlock (`vault.subscribe`) — never run the model
+  locked, never silently drop.
+- Heartbeat: the live driver bumps `task.heartbeatAt` every N seconds so the
+  boot scan can distinguish "still running in this SW" from "died mid-run"
+  (older than ~2N ⇒ interrupted, then resume).
+
+This was DESIGN-08's phase **08d**: durable async subagents — a long async
+child survives SW death via a `continuation` task + heartbeat + boot-scan
+resume, with vault-locked-on-completion as a first-class `paused` state that
+re-drains on unlock.

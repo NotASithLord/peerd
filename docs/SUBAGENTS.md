@@ -21,9 +21,10 @@ turn (DECISIONS #20). The wake framing is trusted; the child's result is
 in-turn) for "I need it to answer THIS turn"; the do/get/check runner (the
 `subagent/spawn` route) stays synchronous regardless. In-session only — a
 child lost to SW death is reported `interrupted` on the next drain; the
-durable variant (survive a browser restart) is DESIGN-08 §4 / phase 08d.
+durable variant (survive a browser restart) is the DESIGN-08 appendix in
+`specs/FEATURE-SCHEDULED-TASKS.md`.
 Per-parent cap: 4 outstanding (`subagent_tasks` to peek, `subagent_cancel`
-to drop one). Full design: `DESIGN-11-async-subagents.md`.
+to drop one). Full design: `specs/DESIGN-11-async-subagents.md`.
 
 ## Why a subagent isn't an engine kind
 

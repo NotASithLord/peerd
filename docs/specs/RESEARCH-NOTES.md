@@ -36,7 +36,7 @@ documents that change so the posture is unambiguous.
   patterns from scratch — no prompt strings were copied.
 - The reading was for **verification and understanding**; the designs are
   derived from peerd's own architecture and its existing, locked
-  `DESIGN-08-schedule.md`, not transliterated from BrowserOS.
+  `FEATURE-SCHEDULED-TASKS.md`, not transliterated from BrowserOS.
 
 **Net result:** the deliverables are clean. Reading source improved the
 *accuracy* of the behavioral descriptions and the inventory; it did not
@@ -112,7 +112,7 @@ carried no inline header; a top-level `LICENSE` governs the repo.
   (category taxonomy).
 
 ### 2.4 peerd internal (the design baseline)
-`CLAUDE.md`, `ARCHITECTURE.md`, `ROADMAP.md`, **`DESIGN-08-schedule.md`**
+`CLAUDE.md`, `ARCHITECTURE.md`, `ROADMAP.md`, **`FEATURE-SCHEDULED-TASKS.md`**
 (the locked, unbuilt schedule design these specs implement),
 `docs/DO-GET-CHECK-DESIGN.md`, `peerd-provider/system-prompt.txt`,
 `peerd-runtime/{loop/system-prompt.js, tools/exposure.js,
@@ -129,7 +129,8 @@ read of the egress / IDB / clock / memory / offscreen / engine subsystems.
   persistence + a coarse 24h boot "missed jobs" scan (would not survive
   Firefox's session-end alarm clearing). 15-run history and a 10-min stale
   cleanup confirmed. **No budgets, grants, dry-run, unattended clamps, or
-  watches.** → peerd's `DESIGN-08` already exceeds this; our spec builds
+  watches.** → peerd's `DESIGN-08` (now folded into
+  `FEATURE-SCHEDULED-TASKS.md`) already exceeds this; our spec builds
   DESIGN-08 and merely *borrows the pragmatic bits* (run-history cap, boot
   missed-run scan, the simple daily/hourly/minutes UX).
 - **Scheduled execution runs against a server.** The extension POSTs the
@@ -183,7 +184,7 @@ read of the egress / IDB / clock / memory / offscreen / engine subsystems.
 
 | Spec idea | Source |
 |---|---|
-| Durable "alarm that resumes a conversation"; IDB-as-truth; single pinned waker; Firefox boot-scan; unattended clamps; budgets; dry-run; watches; grants | **peerd's own `DESIGN-08-schedule.md`** (pre-existing, locked). Our spec implements it. |
+| Durable "alarm that resumes a conversation"; IDB-as-truth; single pinned waker; Firefox boot-scan; unattended clamps; budgets; dry-run; watches; grants | **peerd's own `FEATURE-SCHEDULED-TASKS.md`** (pre-existing, locked). Our spec implements it. |
 | chrome.alarms floor (30s/1min), Firefox no-persistence, offscreen-doc lifetime, cron-to-timestamp pattern | Chrome/MDN docs + croner-class libs |
 | Run-history cap (15→our 20), stale-run cleanup, boot missed-run scan, simple daily/hourly/minutes UX, "needs browser open" honesty | BrowserOS source (pragmatic bits worth borrowing) |
 | Nudge = agent-emitted tool rendered as inline card; once-per-conversation; emit-with-no-prose | BrowserOS source (verified), aligned with peerd's never-steal-focus rule |

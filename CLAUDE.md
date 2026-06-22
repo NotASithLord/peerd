@@ -216,7 +216,10 @@ exists today:
 
 ## What's shipped vs what's still ahead
 
-**Already shipped** (don't re-implement; extend instead):
+**Already shipped** (don't re-implement; extend instead). The full
+itemized, module-categorized catalog is `FEATURES.md` (canonical) — read
+it before assuming something isn't built; the bullets here are the
+postures and gotchas to know going in:
 
 - Anthropic provider with streaming, adaptive extended thinking on
   4.6+ models, 3-of-4 prompt-cache breakpoints, 429/500/503/529 retry,
@@ -277,31 +280,11 @@ exists today:
   REMOVED 2026-06-12 — Plan/Act + the denylist carry the safety
   weight; Plan permits pure URL loads (`navigate`/`open_tab` only,
   never clicks — `docs/DECISIONS.md` #16).
-- The ten-feature buildout, all integrated (see
-  `v1-deliverables/INTEGRATION-LOG.md`):
-    - **Memory** — file-based AGENTS.md memory (`peerd-runtime/memory/`),
-      `{{MEMORY_BLOCK}}` prompt loading, `/init` workspace scanner,
-      confirm-gated `remember`; editable from the Logs/Context view.
-    - **Edit + checkpoints** — `edit_file` SEARCH/REPLACE, checkpoint
-      `diffSince` (wired into review's since-path).
-    - **Plan/Act + permission tiers** — `decideAction`, ModeSelector
-      mounted in the chat above the composer. Plan = reads + pure URL
-      loads (`navigate`/`open_tab` via `PLAN_NAVIGATION_TOOLS`), never
-      clicks (`docs/DECISIONS.md` #16).
-    - **Composer** — slash commands + @-refs; enabled skills surface
-      as `/<name>` commands via `load_skill`.
-    - **Ralph loop** — `/loop <goal>` SW-handled persistent loop; the
-      full-auto tier gate is real.
-    - **Cost telemetry** — per-turn/per-session token + cost metering
-      (CostChip), hard spend limit (`spendLimitUsd`).
-    - **Skills** — progressive disclosure via `load_skill`; remote
-      install OFF for the store channel (`REMOTE_SKILL_INSTALL` flag).
-    - **Review subagent** — `request_review`, clean-context read-only
-      reviewer (policy-side read-only tool intersection).
-    - **Hooks** — pre/post tool-use (`peerd-runtime/tools/hooks/`),
-      fail-closed; the egress allowlist rides the pre-hook.
-    - **do/get/check** — the runner layer: the main agent's only
-      browser surface; low-level DOM tools are runner-only.
+- The ten-feature buildout — memory, edit + checkpoints, Plan/Act,
+  composer (slash commands + @-refs), Ralph loop, cost telemetry, skills,
+  review subagent, hooks, and do/get/check — all integrated. Per-feature
+  detail is in `FEATURES.md`; the landing record is
+  `v1-deliverables/INTEGRATION-LOG.md`.
 - Dual distribution: store (no dweb) + preview channels, generated
   `manifest.json` / `channel-config.js` (`bun run gen:dev`), CI gates
   (bun + typecheck + ESLint + boundary + drift + in-browser CDP job +
@@ -320,8 +303,9 @@ exists today:
   Preview-channel only (the store package prunes the module and CI
   verifies zero dweb traces). See `docs/distributed/`.
 
-**Still ahead** (backlog — not version-pinned; see `ROADMAP.md`. Don't
-front-run; let each land with deliberate design work):
+**Still ahead** (backlog — not version-pinned; see `ROADMAP.md`;
+forward-looking specs live in `docs/specs/`. Don't front-run; let each
+land with deliberate design work):
 
 - Profiles — per-profile vault namespacing, denylist, skills, memory,
   sessions; the default profile uses the same shape.
@@ -340,7 +324,6 @@ front-run; let each land with deliberate design work):
   hosts for unshipped adapters (store policy: never request what the
   shipped version doesn't use); `<all_urls>` already covers HTTPS API
   hosts.
-- Lineage-based context compression for very long sessions.
 - The dweb's next reach — agent-to-agent over the mesh (one agent's
   peer talking p2p to another's), richer dwapps, global discovery — per
   `docs/distributed/ROADMAP.md`. The base network + signed direct

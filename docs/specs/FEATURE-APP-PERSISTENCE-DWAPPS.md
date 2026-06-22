@@ -1,17 +1,38 @@
 # FEATURE — Instance persistence, the App Library, and the dwapp substrate
 
-> **Status:** SPEC — **finalization/consolidation**, not greenfield. Much
-> of this already exists; this doc states the unified model, closes the
-> genuine gaps, and confirms the seams so the dweb Phase-1 work can land on
-> a settled foundation. **This is the doc to finalize before pushing
-> further on the dweb branch.**
+> **Status:** PARTIAL — most of the unified model has LANDED; what's left
+> is a short, named tail. The big pieces this doc set out to consolidate
+> are shipped: **Phase-1 persistence** (instances survive restart),
+> the **dwapp substrate** ("Step 2"), and the **App Library** front door.
+> The doc is no longer "finalize before the dweb branch" — it's the record
+> of what shipped plus the three remaining gaps below.
+>
+> **Shipped:**
+> - **Phase-1 persistence.** Instances persist and survive restart via the
+>   IDB catalog stores (`apps` / `notebooks` / `vms`, on `peerd` IDB —
+>   moved off `chrome.storage.local` at schema v5/v6) + OPFS file trees
+>   (`peerd-apps/<id>/`, `peerd-sandboxes/<id>/`) + per-VM IndexedDB block
+>   devices (`peerd-vm-<id>`). See §0.
+> - **The dwapp model ("Step 2").** `installAppBundle` / `createAppBridge`
+>   / base-network `publishApp`/`fetchApp` / the `commons` dwapp all live
+>   in `peerd-distributed/` (`apps/loader.js`, `apps/bridge.js`,
+>   `base-network.js`).
+> - **The App Library.** Landed as the home SPA's **Library view**
+>   (`extension/home/library-section.js`, routed in `home/home.js` via
+>   `activeView === 'library'`) — NOT the standalone side-panel page §3.A
+>   originally drafted (that section predates DESIGN-12). Catalog metadata
+>   only; Open/Delete/Export route through the SW's `appClient`.
+>
+> **Remaining gaps** (the only open work): **(B)** content-addressing
+> on save, **(C)** a durable IDB content tier, **(D)** share-time signing
+> identity for locally-saved apps. See the revised gap list at the end of §0.
 >
 > **Modules:** persistence + Library + content-addressing = **CORE**
-> (`peerd-engine`, `app-tab`/sidepanel, `peerd-egress/storage`,
+> (`peerd-engine`, `home`/sidepanel, `peerd-egress/storage`,
 > `shared/bundle`) — ships in the store channel, no `peerd-distributed`
 > import. Signing + bridge + sharing = **dweb** (`peerd-distributed`,
-> preview-only via the boundary seam) — mostly **already built** in the
-> dweb worktree (Phase 1).
+> preview-only via the boundary seam) — **already built** (Phase 1, on
+> main).
 
 ---
 
@@ -21,11 +42,12 @@ The premise "apps/sandboxes/VMs are purely ephemeral" is **not accurate**;
 correcting it changes the work:
 
 - **Instances already persist and survive restart.** The three registries
-  are backed by `chrome.storage.local` (`apps.v1` / `jssandboxes.v1` /
-  `webvms.v1`) via `peerd-engine/registry-factory.js`; App/sandbox files
-  live in OPFS (`peerd-apps/<id>/`, `peerd-sandboxes/<id>/`); VM disks live
-  in **per-VM IndexedDB block devices** (`IDBDevice.create(diskOverlayKey)`,
-  key `peerd-vm-<id>`). All of it survives SW restart and browser restart.
+  are backed by the `peerd` IndexedDB (`apps` / `notebooks` / `vms` catalog
+  stores — moved off `chrome.storage.local` at schema v5/v6, idb.js) via
+  `peerd-engine/registry-factory.js`; App/sandbox files live in OPFS
+  (`peerd-apps/<id>/`, `peerd-sandboxes/<id>/`); VM disks live in **per-VM
+  IndexedDB block devices** (`diskOverlayKey`, key `peerd-vm-<id>`,
+  `vm-registry.js`). All of it survives SW restart and browser restart.
   `app_list`/`app_open`/`app_delete` already work for the **agent**.
 - **The "saved app = content-addressed bundle" format already exists.**
   `extension/shared/bundle/` (`packBundle`/`unpackBundle`/`canonical`/
@@ -37,16 +59,34 @@ correcting it changes the work:
 - **The persistence record already has the dwapp slot.** `AppRecord.dweb =
   {uri, publisher, hash, seed?}` exists; its presence is what flips an App
   into a dwapp and unlocks the app-tab bridge.
-- **The dwapp model is already built (dweb worktree, Phase 1, awaiting
-  merge/test):** `installAppBundle` (verified bundle → engine App),
-  `createAppBridge` (bridge v0), `room-host` `publishApp`/`fetchApp`, the
-  `commons` dwapp.
+- **The dwapp model is already built (Phase 1, on main):**
+  `installAppBundle` (verified bundle → engine App), `createAppBridge`
+  (bridge v0), base-network `publishApp`/`fetchApp`, the `commons` dwapp.
 
-So the genuine gaps are narrow: **(A)** no user-facing Library; **(B)** the
-catalog record isn't content-addressed on save; **(C)** the content store
-isn't durably backed (OPFS/IDB); **(D)** the signing-identity decision for
-locally-saved apps is open; **(E)** small hygiene (dead `vm_state` store,
-`sizeBytes` read-but-never-set, one-directional catalog↔OPFS binding).
+**Gap (A) — the user-facing Library — has since SHIPPED**, but not as the
+standalone side-panel page §3.A drafted: it landed as the **home SPA's
+Library view** (`extension/home/library-section.js`, routed in `home/home.js`
+under `activeView === 'library'`) when DESIGN-12 collapsed the surfaces.
+Read §3.A as built-but-relocated; the data layer it describes is unchanged.
+
+So the genuine **remaining** gaps are narrow: **(B)** the catalog record
+isn't content-addressed on save (`AppRecord` carries no `contentHash`; a
+hash is computed only at *export* time, in `buildAppExport`/`manifestHash`,
+not on save); **(C)** the content store isn't durably backed (OPFS/IDB) —
+the `app_content` IDB store is named only in the v5 schema-history comment
+and is deliberately **not created yet** (idb.js: "added with its first
+writer, not reserved empty"); **(D)** the signing-identity decision for
+locally-saved apps is open; **(E)** small hygiene (dead `vm_state` store —
+still declared, "no live writers"; `sizeBytes` read-but-never-set;
+one-directional catalog↔OPFS binding).
+
+> **Not-yet / needs re-justification (verified absent in `extension/` as of
+> 2026-06-21):** `AppRecord.contentHash` and the durable `app_content`
+> content tier do NOT exist in code — they are part of gaps (B)/(C) above,
+> not shipped surface. `vm_state` exists as a store but is vestigial (no
+> writers). `buildAppExport`'s `peerd://<hash>` is real but lives on the
+> *export envelope*, not on the persisted record. Re-confirm these before
+> citing them as available primitives.
 
 ---
 

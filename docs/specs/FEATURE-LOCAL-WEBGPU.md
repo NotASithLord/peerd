@@ -17,6 +17,14 @@
 > `peerd-runtime/<inference>/` in the offscreen doc (the WebGPU engine).
 > No sixth `peerd-*` module.
 
+> **STATUS (2026-06-21) — SHIPPED.** The core feature is live: Gemma-4-E2B
+> on-device WebGPU behind an **opt-in download**, hosted in the offscreen
+> doc (`offscreen/local-model.js`) and exposed via the `local-webgpu`
+> adapter (`peerd-provider/adapters/local-webgpu.js`). Broader model
+> support is **staged** (one resident model today). The §2.4 structured
+> `{ mode, id }` runner-model selector is **still open** — `runnerModel`
+> stays a bare string + resolver for now.
+
 ---
 
 ## Build log
@@ -296,7 +304,16 @@ M0 gates the rest. (Deliverable A is independent of all of this.)
 
 ---
 
-## 4. Removal — rip out the Ollama adapter
+## 4. Removal — rip out the Ollama adapter ~~[REVERSED]~~
+
+> **REVERSED (2026-06-21).** The removal below was **NOT carried out** —
+> the owner decision to rip out Ollama was reversed. **Ollama is
+> retained.** Both adapters ship side by side:
+> `peerd-provider/adapters/ollama.js` (local daemon, keyless BYOK) AND
+> `peerd-provider/adapters/local-webgpu.js` (on-device WebGPU, no daemon).
+> The two local paths are complementary, not exclusive. Everything in §4
+> below is **superseded** — kept for history only; do **not** execute the
+> delete/edit checklist.
 
 Owner decision (2026-06-14): Ollama is removed from peerd. It's a native
 daemon outside the browser that the user installs and runs — it breaks the

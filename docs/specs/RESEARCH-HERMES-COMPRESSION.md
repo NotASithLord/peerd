@@ -11,7 +11,7 @@
 > and third-party write-ups. No Hermes source was copied; this doc is
 > behavioral description + peerd-native advice. Hermes is Apache-2.0
 > (no copyleft concern), but the no-source-in-deliverable posture from
-> `specs/RESEARCH-NOTES.md` is honored anyway.
+> `RESEARCH-NOTES.md` is honored anyway.
 
 ---
 
@@ -53,10 +53,13 @@ The spike's first four adoptions are now **implemented** on this branch
 - **Handoff framing** ✅ — `buildSummarizationTask` is reframed as a
   resume-handoff (Codex/Hermes lesson).
 
-Still **staged** (deliberately, per §6): **compress along lineage** (§5).
-It needs the in-flight message shape to carry tool-result origin/audit ids
-so bodies can be pointer-ized against the dispatcher's lineage spine —
-a real schema change, not a quick edit. Tracked as the next step.
+Now **shipped** too: **compress along lineage** (§5). The dispatcher
+stamps each tool result with its lineage spine, so old verbose bodies are
+shrunk to that spine (what tool ran, on what primitive, touching what
+origin, with what outcome) before the rolling summary even fires. The pure
+core is `peerd-runtime/loop/lineage-compaction.js`, wired into the agent
+loop ahead of `planTrim`; the full design record is
+[`DESIGN-LINEAGE-COMPRESSION.md`](./DESIGN-LINEAGE-COMPRESSION.md).
 
 The numbers (`TRIGGER_FRACTION`/`TARGET_FRACTION`, the window table) are
 tunable constants; see §4.1 for the cache-cost reasoning behind the deep
@@ -270,7 +273,9 @@ better than head/middle/tail:
 3. **`goal` + `artifacts/handles` template fields** (§4.3) + **handoff
    prompt** (§4.4) — one coherent change to the enrichment schema/prompt.
 4. **Lineage-aware folding of tool bodies** (§5) — the larger, peerd-native
-   design; do it deliberately, last.
+   design. **Shipped** as `peerd-runtime/loop/lineage-compaction.js`,
+   running ahead of `planTrim`; design record in
+   [`DESIGN-LINEAGE-COMPRESSION.md`](./DESIGN-LINEAGE-COMPRESSION.md).
 
 All four stay inside the existing functional core (`trim.js` /
 `rolling-summary.js` pure; IO injected in `summary-enrichment.js`) and the
