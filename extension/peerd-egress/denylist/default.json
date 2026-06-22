@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "categories": {
+    "banks_us": [
+      "chase.com", "*.chase.com",
+      "bankofamerica.com", "*.bankofamerica.com",
+      "wellsfargo.com", "*.wellsfargo.com",
+      "citi.com", "*.citi.com", "citibank.com", "*.citibank.com",
+      "capitalone.com", "*.capitalone.com",
+      "usbank.com", "*.usbank.com",
+      "pnc.com", "*.pnc.com",
+      "td.com", "*.td.com", "tdbank.com", "*.tdbank.com",
+      "truist.com", "*.truist.com",
+      "ally.com", "*.ally.com",
+      "discover.com", "*.discover.com",
+      "americanexpress.com", "*.americanexpress.com",
+      "amex.com", "*.amex.com",
+      "regions.com", "*.regions.com",
+      "fifththird.com", "*.fifththird.com", "53.com", "*.53.com",
+      "huntington.com", "*.huntington.com"
+    ],
+    "brokers": [
+      "schwab.com", "*.schwab.com",
+      "fidelity.com", "*.fidelity.com",
+      "vanguard.com", "*.vanguard.com",
+      "etrade.com", "*.etrade.com",
+      "tdameritrade.com", "*.tdameritrade.com",
+      "robinhood.com", "*.robinhood.com",
+      "ibkr.com", "*.ibkr.com",
+      "interactivebrokers.com", "*.interactivebrokers.com",
+      "merrilledge.com", "*.merrilledge.com",
+      "wealthfront.com", "*.wealthfront.com",
+      "betterment.com", "*.betterment.com"
+    ],
+    "crypto_exchanges": [
+      "coinbase.com", "*.coinbase.com",
+      "kraken.com", "*.kraken.com",
+      "gemini.com", "*.gemini.com",
+      "binance.us", "*.binance.us",
+      "binance.com", "*.binance.com",
+      "bitstamp.net", "*.bitstamp.net",
+      "crypto.com", "*.crypto.com",
+      "okx.com", "*.okx.com",
+      "bybit.com", "*.bybit.com"
+    ],
+    "wallets": [
+      "metamask.io", "*.metamask.io",
+      "trezor.io", "*.trezor.io",
+      "ledger.com", "*.ledger.com",
+      "phantom.app", "*.phantom.app",
+      "rabby.io", "*.rabby.io"
+    ],
+    "health_us": [
+      "mychart.com", "*.mychart.com",
+      "epic.com", "*.epic.com",
+      "kp.org", "*.kp.org",
+      "kaiserpermanente.org", "*.kaiserpermanente.org",
+      "uhc.com", "*.uhc.com",
+      "myuhc.com", "*.myuhc.com",
+      "anthem.com", "*.anthem.com",
+      "aetna.com", "*.aetna.com",
+      "cigna.com", "*.cigna.com",
+      "humana.com", "*.humana.com",
+      "bcbs.com", "*.bcbs.com",
+      "cvs.com", "*.cvs.com",
+      "walgreens.com", "*.walgreens.com",
+      "questdiagnostics.com", "*.questdiagnostics.com",
+      "labcorp.com", "*.labcorp.com",
+      "goodrx.com", "*.goodrx.com",
+      "23andme.com", "*.23andme.com",
+      "ancestry.com", "*.ancestry.com"
+    ],
+    "government": [
+      "irs.gov", "*.irs.gov",
+      "ssa.gov", "*.ssa.gov",
+      "uscis.gov", "*.uscis.gov",
+      "usps.com", "*.usps.com",
+      "state.gov", "*.state.gov",
+      "treasury.gov", "*.treasury.gov",
+      "*.dmv.org",
+      "login.gov", "*.login.gov",
+      "id.me", "*.id.me"
+    ],
+    "password_managers": [
+      "1password.com", "*.1password.com",
+      "bitwarden.com", "*.bitwarden.com",
+      "lastpass.com", "*.lastpass.com",
+      "dashlane.com", "*.dashlane.com",
+      "keepersecurity.com", "*.keepersecurity.com",
+      "nordpass.com", "*.nordpass.com",
+      "*.proton.me",
+      "protonmail.com", "*.protonmail.com",
+      "tutanota.com", "*.tutanota.com"
+    ],
+    "identity": [
+      "appleid.apple.com",
+      "*.okta.com",
+      "*.auth0.com",
+      "*.duosecurity.com",
+      "*.onelogin.com",
+      "*.pingidentity.com"
+    ]
+  },
+  "_notes": [
+    "Removed from identity[] on 2026-06-05: accounts.google.com,",
+    "myaccount.google.com, login.microsoftonline.com, login.live.com.",
+    "Reason: these are the consumer auth redirects every Google/Microsoft",
+    "service routes through (Gmail, Drive, Outlook, OneDrive, etc.),",
+    "so they blocked normal personal-account use by the agent. Apple ID",
+    "portal stays because it's rarely hit during normal Mac/iOS use.",
+    "Enterprise SSO providers (*.okta.com etc.) stay because they are",
+    "less commonly hit on personal browsing AND because compromising",
+    "an Okta tenant is a much bigger blast radius."
+  ]
+}

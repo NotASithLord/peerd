@@ -1,0 +1,2426 @@
+/* peerd side panel — minimal V1 styling.
+ *
+ * Design notes:
+ *  - Brand fonts (JetBrains Mono + Geist Mono) vendored locally to match
+ *    peerd.ai; see /shared/fonts.css. Local-only, no tracking surface.
+ *  - Auto-respect prefers-color-scheme; manual override comes later
+ *  - Layout is a single column: header / body / input
+ */
+
+@import url('/shared/fonts.css');
+
+:root {
+  /* --- brand palette (locked per peerd.ai) ---
+   * These map 1:1 to the five wordmark blocks AND the five module colors:
+   *   cyan    → p / peerd-provider
+   *   red     → e / peerd-egress
+   *   amber   → e / peerd-engine
+   *   green   → r / peerd-runtime
+   *   magenta → d / the dweb module (preview packages)
+   * Treat as immutable. Semantic tokens below reference them; nothing
+   * else in the file should hardcode these hex values.
+   */
+  --cyan:    #00B7EB;
+  --red:     #EF4444;
+  --amber:   #F59E0B;
+  --green:   #22C55E;
+  --magenta: #D946EF;
+  --white:   #FAFAFA;
+
+  /* --- surfaces (light) --- */
+  --bg:           #ffffff;
+  --bg-elev:      #f7f7f7;
+  --fg:           #1a1a1a;
+  --fg-muted:     #6b6b6b;
+  --border:       #e0e0e0;
+
+  /* --- semantic tokens point at brand colors --- */
+  --accent:       var(--cyan);
+  --accent-fg:    var(--white);
+  --danger:       var(--red);
+  --warn:         var(--amber);
+  --ok:           var(--green);
+
+  --radius:       6px;
+  --gap:          12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Surfaces synced to peerd.ai base/panel/paper. The brand color
+     * tokens above (cyan / red / amber / green / magenta) are saturated
+     * enough to render against either background; no per-mode overrides
+     * needed for them. */
+    --bg:        #0B0D0E;
+    --bg-elev:   #15181A;
+    --fg:        #E8E6E1;
+    --fg-muted:  #9a9a9a;
+    --border:    #353535;
+    --accent-fg: #0B0D0E;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+#app { display: flex; flex-direction: column; min-height: 100%; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.topbar .title {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Brand cluster — wordmark with the preview badge inline to its right,
+ * vertically centered (keeps the top bar thin). The badge's base rule
+ * already sets align-self:center + a left margin, so it sits flush to the
+ * right of the wordmark; the hand-off animation slides it out together
+ * with the wordmark when entering options. */
+.topbar-brand {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+/* --- wordmark (five-block brand mark) ----------------------------------- */
+/* Same five-block construction as peerd.ai — abutting blocks, white
+ * letters, outer corners rounded, inner edges square. Sized for the
+ * side-panel top bar at 22px height; scales via the --wm-size custom
+ * property if reused elsewhere (e.g. larger in the vault gate). */
+.wordmark {
+  --wm-size: 22px;
+  display: inline-flex;
+  gap: 0;
+  user-select: none;
+  /* why: prevent the wordmark from being selected when the user is
+   * trying to triple-click a message above it. */
+  -webkit-user-select: none;
+}
+.wordmark .block {
+  width: var(--wm-size);
+  height: var(--wm-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* why: the wordmark's display face. Geist Mono, vendored to match
+   * peerd.ai's five-block mark; see /shared/fonts.css. */
+  font-family: var(--font-display);
+  font-weight: 700;
+  /* why: 1.05 matches peerd.ai's wordmark exactly, the em-box runs
+   * slightly larger than the block so the letters fill it edge-to-edge
+   * (Geist Mono, overflow clipped). Was 0.82, which read visibly smaller
+   * in the squares than the site. */
+  font-size: calc(var(--wm-size) * 1.05);
+  line-height: 1;
+  color: var(--white);
+  letter-spacing: -0.02em;
+  overflow: hidden;
+}
+.wordmark .block:first-child {
+  border-top-left-radius: 3px;
+  border-bottom-left-radius: 3px;
+}
+.wordmark .block:last-child {
+  border-top-right-radius: 3px;
+  border-bottom-right-radius: 3px;
+}
+.wordmark .b-p  { background: var(--cyan); }
+.wordmark .b-e  { background: var(--red); }
+.wordmark .b-e2 { background: var(--amber); }
+.wordmark .b-r  { background: var(--green); }
+.wordmark .b-d  { background: var(--magenta); }
+
+/* --- wordmark "manifest" intro (plays once on panel load) --------------- */
+/* Two phases, mirroring peerd.ai's hero: phase 1 types the letters out
+ * left-to-right behind a terminal cursor on an empty dark rail; phase 2
+ * colorizes the blocks left-to-right in silence. Pure CSS, `forwards` so
+ * it settles on the final colored wordmark. Mithril patches this node
+ * across redraws so it never restarts. */
+.wordmark--intro, .wordmark--enter, .wordmark--exit, .wordmark--gone { position: relative; }
+/* Empty rail behind the (initially transparent) blocks during phase 1.
+ * Intro-only: the "render back in" (--enter) is a quieter re-materialize
+ * without the terminal rail/cursor. */
+.wordmark--intro::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  z-index: 0;
+}
+/* The render-IN (type → colorize) is shared by the first-mount intro AND the
+ * "render back in" when returning from the options page (--enter). */
+.wordmark--intro .block, .wordmark--enter .block {
+  position: relative;
+  z-index: 1;
+  background-color: transparent;
+  color: transparent;
+}
+.wordmark--intro .b-p, .wordmark--enter .b-p {
+  animation: wmType 1ms 300ms forwards, wmColorCyan 1ms 1000ms forwards;
+}
+.wordmark--intro .b-e, .wordmark--enter .b-e {
+  animation: wmType 1ms 420ms forwards, wmColorRed 1ms 1120ms forwards;
+}
+.wordmark--intro .b-e2, .wordmark--enter .b-e2 {
+  animation: wmType 1ms 540ms forwards, wmColorAmber 1ms 1240ms forwards;
+}
+.wordmark--intro .b-r, .wordmark--enter .b-r {
+  animation: wmType 1ms 660ms forwards, wmColorGreen 1ms 1360ms forwards;
+}
+.wordmark--intro .b-d, .wordmark--enter .b-d {
+  animation: wmType 1ms 780ms forwards, wmColorMagenta 1ms 1480ms forwards;
+}
+@keyframes wmType        { to { color: var(--white); } }
+@keyframes wmColorCyan   { to { background-color: var(--cyan); } }
+@keyframes wmColorRed    { to { background-color: var(--red); } }
+@keyframes wmColorAmber  { to { background-color: var(--amber); } }
+@keyframes wmColorGreen  { to { background-color: var(--green); } }
+@keyframes wmColorMagenta{ to { background-color: var(--magenta); } }
+
+/* --- wordmark "self-delete" exit (hands off to the options page) --------- */
+/* Reverse of the intro: blocks DE-colorize then UN-type in reverse order
+ * (d→p, the same stepped terminal feel), then the whole mark fades + slides
+ * a hair left — so the brand reads as shifting to the full-tab options page
+ * rather than being duplicated. Driven by the panel's optionsActive state. */
+.wordmark--exit .b-d  { animation: wmUnColor 1ms 0ms   forwards, wmUnType 1ms 300ms forwards; }
+.wordmark--exit .b-r  { animation: wmUnColor 1ms 80ms  forwards, wmUnType 1ms 380ms forwards; }
+.wordmark--exit .b-e2 { animation: wmUnColor 1ms 160ms forwards, wmUnType 1ms 460ms forwards; }
+.wordmark--exit .b-e  { animation: wmUnColor 1ms 240ms forwards, wmUnType 1ms 540ms forwards; }
+.wordmark--exit .b-p  { animation: wmUnColor 1ms 320ms forwards, wmUnType 1ms 620ms forwards; }
+.wordmark--exit { animation: wmShiftOut 220ms 640ms forwards; }
+@keyframes wmUnColor  { to { background-color: transparent; } }
+@keyframes wmUnType   { to { color: transparent; } }
+@keyframes wmShiftOut { to { opacity: 0; transform: translateX(-6px); } }
+
+/* Settled-hidden: mounted while options is already the active tab — no
+ * animation, just absent (the hand-off already happened). */
+.wordmark--gone { opacity: 0; }
+.wordmark--gone .block { background-color: transparent; color: transparent; }
+
+.wordmark-cursor {
+  position: absolute;
+  top: 8%;
+  bottom: 8%;
+  left: 0;
+  width: 2px;
+  background: var(--white);
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  animation:
+    wmCursorAppear 1ms   300ms forwards,
+    wmCursorStep   480ms  300ms steps(5, start) forwards,
+    wmCursorBlink  0.4s   300ms steps(2, end) infinite,
+    wmCursorFade   200ms  900ms forwards;
+}
+@keyframes wmCursorAppear { to { opacity: 1; } }
+@keyframes wmCursorStep {
+  from { transform: translateX(0); }
+  to   { transform: translateX(calc(var(--wm-size, 22px) * 5)); }
+}
+@keyframes wmCursorBlink {
+  0%, 50%      { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+@keyframes wmCursorFade { to { opacity: 0; visibility: hidden; } }
+
+/* Reduced motion: skip the intro entirely — final colored state at once. */
+@media (prefers-reduced-motion: reduce) {
+  .wordmark--intro::before { display: none; }
+  .wordmark--intro .block, .wordmark--enter .block { color: var(--white); animation: none; }
+  .wordmark--intro .b-p,  .wordmark--enter .b-p  { background-color: var(--cyan); }
+  .wordmark--intro .b-e,  .wordmark--enter .b-e  { background-color: var(--red); }
+  .wordmark--intro .b-e2, .wordmark--enter .b-e2 { background-color: var(--amber); }
+  .wordmark--intro .b-r,  .wordmark--enter .b-r  { background-color: var(--green); }
+  .wordmark--intro .b-d,  .wordmark--enter .b-d  { background-color: var(--magenta); }
+  .wordmark-cursor { display: none; }
+  /* Brand hand-off with no motion: exit/gone simply hide (no reverse anim). */
+  .wordmark--exit, .wordmark--gone { opacity: 0; animation: none; }
+  .wordmark--exit .block { animation: none; background-color: transparent; color: transparent; }
+  .channel-badge { transition: none; }
+  /* Feature 03: kill the Plan/Act pill transition for reduced-motion. */
+  .planact-mode { transition: none; }
+}
+
+/* Hero size — the big "manifest" wordmark on the lock / sign-up screen.
+ * Same five-block + intro construction, scaled up via --wm-size so the
+ * brand lands on first impression. The intro keyframes are size-agnostic
+ * (the cursor step reads --wm-size) so this just works at any size. */
+.wordmark--hero { --wm-size: 52px; }
+.wordmark--hero .block:first-child {
+  border-top-left-radius: 5px; border-bottom-left-radius: 5px;
+}
+.wordmark--hero .block:last-child {
+  border-top-right-radius: 5px; border-bottom-right-radius: 5px;
+}
+.wordmark--hero.wordmark--intro::before { border-radius: 6px; }
+
+/* --- onboarding (first-run "Hello, I'm peerd") --------------------------- */
+/* The greeting carries the peerd.ai terminal feel: mono type plus the
+ * site's blinking cursor (same cadence as the h2 cycle cursor on the
+ * site, 0.6s steps(2)). Color budget (owner call 2026-06-12): the peer
+ * name's LETTERFORMS wear the five brand colors — the name is the
+ * wordmark concept here — while the cursor stays --fg and everything
+ * else monochrome (plus the standard accent button). No TopBar here
+ * (hero screen, like the vault gate), so the wordmark's typing intro
+ * plays fresh right after completion. */
+.onboarding-view { display: flex; justify-content: center; }
+.onboarding-card { width: 100%; max-width: 420px; }
+.onboarding-hello {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 4px 0 12px;
+  /* why nowrap-free: "Hello, I'm" and the name block reflow at side-
+   * panel widths. The NAME itself is a single unbreakable line (input
+   * over mirror) — long names scale the type down instead (.is-mid /
+   * .is-long, set from the component by length). */
+  overflow-wrap: anywhere;
+}
+.onboarding-hello.is-mid { font-size: 22px; }
+.onboarding-hello.is-long { font-size: 16px; }
+/* The inline-editable peer name: a real <input> with TRANSPARENT text
+ * (it owns the caret) under an absolutely-positioned mirror that paints
+ * the same string as per-letter brand-colored spans — monospace makes
+ * the two coincide exactly (see onboarding-view.js EDITING MECHANICS).
+ * Affordance is layered: dashed underline at rest (+ the type-and-
+ * delete tease), elevated tint on hover, solid underline + caret on
+ * focus. */
+.peer-name-wrap {
+  position: relative;
+  display: inline-block;
+  cursor: text;
+  padding: 0 2px;
+  /* why 5ch: the tease deletes down to nothing — keep a clickable,
+     underlined slot under the pointer the whole time. */
+  min-width: 5ch;
+  border-bottom: 2px dashed var(--fg-muted);
+}
+.peer-name-wrap:hover { background: var(--bg-elev); }
+.peer-name-wrap:focus-within {
+  background: transparent;
+  border-bottom-style: solid;
+  border-bottom-color: var(--fg);
+}
+/* Layer order (see onboarding-view.js EDITING MECHANICS): the MIRROR
+   is in-flow and sizes the wrap from real glyphs; the input stretches
+   over it. Both paint the same string in the same font, so the caret
+   lands between the letters the user sees — for any charset. */
+.peer-name-mirror {
+  display: block;
+  white-space: pre;
+  /* why: the h2's overflow-wrap:anywhere INHERITS here and would break
+     the name mid-word; the name never soft-wraps — long names shrink
+     via .is-mid/.is-long instead. */
+  overflow-wrap: normal;
+  min-height: 1.2em;  /* keep the line box when the tease empties it */
+}
+.onboarding-card .peer-name-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  font: inherit;
+  letter-spacing: inherit;
+  background: transparent;
+  border: 0;
+  outline: none;
+  padding: 0 0 0 2px;  /* = wrap's left padding, so caret aligns with mirror */
+  margin: 0;
+  color: transparent;
+  caret-color: var(--fg);
+}
+/* The blinking terminal cursor, trailing the editable name — same feel
+ * as peerd.ai's hero/h2 cursors, rendered monochrome. Decorative. */
+.onboarding-cursor {
+  display: inline-block;
+  width: 3px;
+  height: 0.85em;
+  background: var(--fg);
+  margin-left: 3px;
+  vertical-align: baseline;
+  position: relative;
+  top: 0.05em;
+  animation: onbCursorBlink 0.6s steps(2, end) infinite;
+}
+@keyframes onbCursorBlink {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.onboarding-edit-hint { font-size: 12px; }
+/* The basic-facts fields wear the composer's one-box treatment (same
+ * border/radius/elevation/focus ring as .composer) — the form is the
+ * first input surface anyone touches, so it must feel like the chat
+ * box it leads into. Labels sit OUTSIDE the box, small and muted. */
+.onb-field { margin: 14px 0; }
+.onb-field label {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin: 0 0 6px;
+}
+.onb-field label em { font-style: italic; }
+.onb-box {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  padding: 10px;
+  transition: border-color 0.15s ease;
+}
+.onb-box:focus-within { border-color: var(--fg-muted); }
+.onboarding-card .onb-box input,
+.onboarding-card .onb-box textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  resize: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+}
+.onboarding-card .onb-box input:focus,
+.onboarding-card .onb-box textarea:focus { outline: none; }
+.onboarding-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
+}
+/* --- the three-step funnel (owner call 2026-06-12) --- */
+/* Step container slides between questions: out drops + fades, in rises
+   + fades. Monochrome motion; reduced-motion swaps instantly (the JS
+   also skips the out-phase entirely there). */
+.onb-step { opacity: 1; transform: none; }
+.onb-step.is-out {
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.17s ease, transform 0.17s ease;
+}
+.onb-step.is-in {
+  animation: onbStepIn 0.22s ease;
+}
+@keyframes onbStepIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+/* Typed question heading — same mono terminal voice as the greeting. */
+.onb-ask {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--fg);
+  margin: 10px 0 12px;
+  min-height: 1.4em;   /* heading height holds while the prompt types */
+}
+.onb-ask-box { margin: 0; }
+.onb-hint-line { font-size: 11px; margin: 6px 0 0; }
+/* Monochrome progress dots: filled = current, dimmed-filled = done. */
+.onb-dots {
+  display: flex;
+  gap: 7px;
+  justify-content: center;
+  margin-top: 18px;
+}
+.onb-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  border: 1px solid var(--fg-muted);
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.onb-dot.is-on { background: var(--fg); border-color: var(--fg); }
+.onb-dot.is-done { background: var(--fg-muted); }
+@media (prefers-reduced-motion: reduce) {
+  .onb-step.is-out, .onb-step.is-in { transition: none; animation: none; opacity: 1; transform: none; }
+
+  /* Match the site + wordmark intros: no blink, no cursor at all.
+   * (The type-and-delete tease never starts under reduced motion —
+   * onboarding-view.js checks the same media query.) */
+  .onboarding-cursor { display: none; }
+}
+
+.topbar .spacer { flex: 1; }
+
+/* Channel indicator (§12). Worn only by the preview package — a quiet
+   magenta-tinted pill next to the wordmark (magenta = the d block / the
+   dweb module). Store packages never render it. */
+.channel-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  margin-left: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--magenta);
+  color: var(--magenta);
+  background: color-mix(in srgb, var(--magenta) 12%, transparent);
+  align-self: center;
+  user-select: none;
+  /* Shifts/fades out with the wordmark during the options hand-off (the
+   * panel toggles .is-exiting from optionsActive). A transition handles
+   * both directions, so it slides back in when you return. */
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+.channel-badge.is-exiting { opacity: 0; transform: translateX(-8px); }
+
+/* --- vault-gate action stacks ------------------------------------------- */
+/* The first-run passkey/security-key choices and the unlock buttons. A
+ * capped, centered column reads better than edge-to-edge buttons in the
+ * narrow panel; the --row variant centers a short button pair (unlock). */
+.auth-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(100%, 300px);
+  margin: 4px auto 0;
+}
+.auth-actions--row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  width: auto;
+}
+
+/* Vault gate = a centered hero: the logo, heading, copy, and action buttons
+ * all center as one cohesive unit (the logo was already centered, so a
+ * left-aligned heading + centered button looked orphaned). Form fields reset
+ * to left so labelled inputs still read normally. Scoped via .gate-card so
+ * the generic .card (provider cards, etc.) is untouched. */
+.gate-card { text-align: center; }
+.gate-card .input-row { text-align: left; }
+.gate-card .input-row input { text-align: left; }
+
+/* Plan/Act permission selector (Feature 03). Mode toggle + confirm-actions
+   toggle; transitions are gated by the prefers-reduced-motion block. */
+.planact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+}
+.planact-modes {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.planact-mode {
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 9px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.planact-mode.is-active {
+  /* Act = accent (warm action); Plan inherits the muted look. The active
+     pill reads as "this is what the agent can do right now." */
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.planact-mode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* The confirm-actions toggle. Sits in the same control row as the Plan/Act
+   pills, so its ON state wears the SAME accent as the active Act pill —
+   consistency over the strict monochrome rule here (owner call). */
+.planact-confirm {
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.planact-confirm.is-on {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.planact-confirm:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.planact-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Reasoning-effort dial — same pill family as the planact controls
+   (monochrome by the brand rule; the value text carries the state).
+   appearance:none drops the native select chrome so it reads as a pill;
+   it's still a real <select>, so keyboard/AT behavior is native. */
+.effort-dial {
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg-muted);
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+.effort-dial:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.body { flex: 1; padding: 14px; overflow-y: auto; }
+
+.card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.card p {
+  margin: 0 0 12px;
+  color: var(--fg-muted);
+}
+
+.input-row { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+
+label {
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+input[type="password"],
+input[type="text"],
+textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+}
+
+input:focus, textarea:focus { border-color: var(--accent); }
+
+button {
+  font: inherit;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.secondary {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+/* Quiet text-link button — used for the "use a passphrase instead"
+ * fallback on the passkey sign-up screen. Reads as a link, not a CTA,
+ * so the passkey button stays the obvious primary. */
+button.linklike {
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 4px 0;
+  font-size: 13px;
+  align-self: center;
+  cursor: pointer;
+}
+button.linklike:hover { color: var(--fg); }
+
+.error  { color: var(--danger); font-size: 13px; margin: 6px 0 0; }
+.muted  { color: var(--fg-muted); }
+
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--fg-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* --- top bar actions --- */
+.topbar-actions { display: flex; gap: 4px; }
+button.icon {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+button.icon:hover { background: var(--bg); }
+
+/* --- chat view layout --- */
+.app-shell { display: flex; flex-direction: column; min-height: 100%; }
+.app-shell .body { display: flex; flex-direction: column; min-height: 0; }
+
+.chat-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+  /* Cap the reading width and center it so the chat doesn't sprawl edge-to-edge
+     on the full-page home / a wide popped-out window. No effect in the side panel
+     (already narrower than this cap). */
+  width: 100%;
+  max-width: 768px;
+  margin-inline: auto;
+}
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(196, 48, 48, 0.08);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.error-banner button { padding: 4px 10px; font-size: 12px; }
+
+/* Rate-limit retry indicator — amber, calmer than the error banner. */
+.rate-limit-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.rate-limit-banner .rl-spinner {
+  animation: peerd-spin 1.02s linear infinite;
+  display: inline-block;
+}
+@keyframes peerd-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .rate-limit-banner .rl-spinner { animation: none; }
+}
+
+/* --- messages --- */
+.message-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.message .role {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.message .bubble {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.message-user .bubble {
+  background: rgba(74, 95, 208, 0.08);
+  border-color: rgba(74, 95, 208, 0.35);
+}
+.message.streaming .bubble::after {
+  content: '▍';
+  margin-left: 2px;
+  animation: peerd-blink 1.1s infinite;
+  color: var(--fg-muted);
+}
+/* While waiting on the first token the bubble shows the spinner instead —
+   no blinking caret on top of it. */
+
+/* peerd beachball — the classic-Mac rainbow wheel in the brand palette.
+   One conic sweep through all five brand colors, each melding into the
+   next, under a soft hub highlight; the whole disc spins. Sized by --size.
+   why: stops are hue-ordered and interpolated in HSL so neighbours blend
+   through the in-between hues like the old glassy beachball — default
+   sRGB interpolation would cut gray through the wheel's complements. */
+.peerd-spinner {
+  --size: 17px;
+  display: inline-block; vertical-align: middle;
+  width: var(--size); height: var(--size);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle,
+      rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.2) 25%,
+      transparent 55%),
+    conic-gradient(in hsl, var(--red), var(--amber), var(--green),
+      var(--cyan), var(--magenta), var(--red));
+  animation: peerd-spin 0.85s linear infinite;
+}
+.peerd-spinner--sm { --size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .peerd-spinner { animation: none; }
+}
+.message.failed .bubble { border-color: var(--danger); }
+.message .error-line {
+  color: var(--danger);
+  font-size: 12px;
+  margin-top: 6px;
+}
+/* Bare error bubble: a turn that failed before any text streamed (e.g. a
+   usage-limit on send) — the error-line is the only child, so it carries no
+   top margin. */
+.message .bubble-error .error-line { margin-top: 0; }
+.message.tools-only .bubble { display: none; }
+/* ...but a provider error on an otherwise tools-only turn must still show —
+   the error bubble is the only place that failure surfaces inline. */
+.message.tools-only .bubble-error { display: block; }
+
+/* --- rendered Markdown (assistant replies) ------------------------------ */
+/* The .md wrapper holds HTML from shared/markdown.js. Reset the bubble's
+   pre-wrap (block elements lay themselves out) and give the common
+   constructs tight, chat-appropriate spacing. */
+.md { white-space: normal; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 8px; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  margin: 12px 0 6px;
+  line-height: 1.25;
+}
+.md h1 { font-size: 1.25em; }
+.md h2 { font-size: 1.15em; }
+.md h3 { font-size: 1.05em; }
+.md h4, .md h5, .md h6 { font-size: 1em; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+.md li { margin: 2px 0; }
+.md a { color: var(--accent, #4a5fd0); text-decoration: underline; }
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: rgba(127, 127, 127, 0.15);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.md pre {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+.md pre code { background: none; padding: 0; font-size: 0.85em; }
+.md blockquote {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+  color: var(--fg-muted);
+}
+
+/* --- reasoning (extended-thinking) section ------------------------------ */
+/* A quiet collapsible block above the answer. Left rail in the cyan
+ * provider color (reasoning comes from the model/provider). Muted,
+ * italic body so it reads as "internal monologue", not the answer. */
+.reasoning {
+  border-left: 2px solid var(--cyan);
+  background: rgba(0, 183, 235, 0.05);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.reasoning-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.reasoning-header:hover { background: rgba(0, 183, 235, 0.08); }
+.reasoning-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.reasoning-spinner {
+  color: var(--cyan);
+  animation: peerd-blink 1.1s infinite;
+}
+.reasoning-body {
+  padding: 2px 12px 10px 21px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* --- tool calls --------------------------------------------------------- */
+/* Primitive badges are colored by the OWNING peerd module (the same five
+ * brand colors as the wordmark). The module is named in full next to the
+ * badge, so color is labelled rather than decoded. The primitive→module
+ * map is the single source of truth in message-list.js (PRIMITIVE_MODULE);
+ * these classes just paint each module its brand color:
+ *   egress       → red     (inspect, web)
+ *   runtime      → green   (tab, time, subagent)
+ *   engine       → amber   (webvm, notebook, app)
+ *   provider     → cyan    (no V1 tool primitive — model calls aren't tools)
+ *   distributed → magenta (no V1 tool primitive — the dweb is V2+)
+ *   unknown      → muted gray
+ */
+:root {
+  --mod-provider:     var(--cyan);
+  --mod-egress:       var(--red);
+  --mod-engine:       var(--amber);
+  --mod-runtime:      var(--green);
+  --mod-distributed: var(--magenta);
+  --prim-unknown:     #6b6b6b;
+  --gate-pass:        var(--green);
+  --gate-fail:        var(--red);
+}
+
+.tool-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.tool-call {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font-size: 12.5px;
+  overflow: hidden;
+}
+.tool-call.tool-failed {
+  border-color: var(--danger);
+}
+.tool-call.tool-pending { opacity: 0.85; }
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+  user-select: none;
+  background: transparent;
+  font-family: var(--font-mono);
+  line-height: 1.4;
+  min-width: 0;
+}
+.tool-call-header:hover { background: rgba(127, 127, 127, 0.06); }
+
+.disclosure { color: var(--fg-muted); font-size: 9px; width: 10px; flex-shrink: 0; }
+
+/* Compact status indicator replacing the always-on lineage/gate rows.
+ * Green ok / red failed / pulsing amber pending — the whole gate ledger
+ * is one click away in the expanded body. */
+.tool-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--prim-unknown);
+}
+/* completed-ok reads as a green check, not a dot: a dot only says "in
+ * flight, going fine"; the check says "done, returned successfully".
+ * Drawn centered in a dot-sized box so the row barely shifts when the
+ * pending dot flips to ok. */
+.tool-status-dot.dot-ok {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: 0;
+  background: none;
+  color: var(--ok);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.tool-status-dot.dot-ok::before {
+  content: '\2713';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tool-status-dot.dot-failed  { background: var(--danger); }
+.tool-status-dot.dot-pending {
+  background: var(--ok);
+  animation: peerd-dot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes peerd-dot-pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+
+.tool-name { font-weight: 600; color: var(--fg); flex-shrink: 0; }
+.tool-args {
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.tool-call-header .spacer { flex: 1; min-width: 8px; }
+.tool-duration { color: var(--fg-muted); font-size: 11px; flex-shrink: 0; }
+.tool-pending { color: var(--accent); font-size: 11px; font-style: italic; flex-shrink: 0; }
+
+/* Expanded detail body — the §02 lineage + result live here now, so the
+ * collapsed chip stays a single quiet line. */
+.tool-detail { border-top: 1px dashed var(--border); }
+
+.tool-lineage {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.lineage-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lineage-label {
+  color: var(--fg-muted);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  min-width: 64px;
+  flex-shrink: 0;
+}
+
+.primitive-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: white;
+  letter-spacing: 0.04em;
+}
+/* Module-colored badge backgrounds. One class per peerd module; the
+ * primitive→module mapping lives in message-list.js. */
+.pmod-provider     { background: var(--mod-provider); }
+.pmod-egress       { background: var(--mod-egress); }
+.pmod-engine       { background: var(--mod-engine); }
+.pmod-runtime      { background: var(--mod-runtime); }
+.pmod-distributed { background: var(--mod-distributed); }
+.pmod-unknown      { background: var(--prim-unknown); }
+
+/* Explicit module name shown right after the badge ("peerd-engine"). */
+.primitive-module {
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+}
+
+/* dispatch badge — the EXECUTION mechanism (e.g. "via runner"), distinct from
+   the resource primitive. Muted/outlined so it reads as a qualifier, not a
+   second primitive. */
+.dispatch-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  border-radius: 4px;
+  padding: 0 5px;
+  line-height: 16px;
+}
+
+.gate-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.gate {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  cursor: help;
+}
+.gate-name { color: var(--fg-muted); }
+.gate-mark { font-weight: 700; }
+.gate-pass .gate-mark { color: var(--gate-pass); }
+.gate-fail .gate-mark { color: var(--gate-fail); }
+.gate-fail .gate-name { color: var(--gate-fail); }
+
+.tool-result {
+  padding: 0 10px 10px;
+  border-top: 1px dashed var(--border);
+}
+.tool-result-content {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* --- VM live stream (terminal output while vm_boot is in flight) --- */
+.vm-live-stream {
+  border-top: 1px dashed var(--border);
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.vm-stream-stdout, .vm-stream-stderr {
+  margin: 0;
+  padding: 8px 10px;
+  background: #0d1117;
+  color: #e6edf3;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.vm-stream-stderr { color: #ffb4a8; }
+
+/* --- Subagent card (spawn_subagent → inline child transcript) --- */
+/* subagent is a peerd-runtime orchestration primitive → runtime green. */
+.tool-subagent { border-left: 2px solid var(--mod-runtime); }
+.subagent-body {
+  padding: 8px 10px 10px;
+  border-top: 1px dashed var(--border);
+}
+/* The nested transcript is indented from the card edge so depth reads
+   visually. Each deeper level nests another .subagent-body inside, so the
+   indentation compounds naturally with recursion. */
+.subagent-transcript {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+/* Tighten the recursive message rows so nested transcripts stay compact
+   and don't read like full-width chat bubbles. */
+.subagent-transcript .message { margin: 4px 0; }
+.subagent-transcript .role { font-size: 10px; }
+.subagent-transcript .bubble { font-size: 12px; }
+
+/* VM-terminal CSS removed — the terminal lives in the VM tab now,
+   so the side panel only needs the chip + dropdown styles below. */
+
+/* --- VM status chip (post-ready compact form) ---
+   Visual logic: the chip is a STATUS/LOG widget — quiet, gray-bordered,
+   monospace label. The terminal is the LIVE/INTERACTIVE surface — keeps
+   the amber accent + dark BG. Side-by-side you can tell instantly which
+   is the log surface and which is the shell.
+*/
+/* (VM chip + boot-card CSS removed. VM management is the Chrome
+   tab strip + agent vm_* tools; the chip was redundant. The per-
+   tool-use vm_boot streaming output styles below are still used
+   inside the ToolCall lineage rendering.) */
+
+@keyframes peerd-blink {
+  0%, 100% { opacity: 0; }
+  50%      { opacity: 1; }
+}
+
+/* --- input bar / composer ------------------------------------------- */
+/* One unified field (2026-06-12 redesign): the textarea and its action
+   row share a single rounded boundary — no control inside carries its
+   own border. The mic lives IN the field; the moment a draft exists it
+   morphs into the send disc (.composer-slot below), which draws ONE
+   random brand color per draft — the panel chrome's single color
+   accent (owner experiment; see SEND_ACCENTS in input-bar.js). */
+.input-bar {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.composer {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  padding: 10px 10px 6px;
+  transition: border-color 0.15s ease;
+}
+.composer:focus-within { border-color: var(--fg-muted); }
+.composer textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  resize: none;
+  min-height: 44px;
+  max-height: 240px;
+  padding: 0;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+}
+.composer textarea:focus { outline: none; }
+.composer textarea::placeholder { color: var(--fg-muted); }
+.composer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
+.composer-row .spacer { flex: 1; }
+.composer-row .stop {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+}
+.composer-row .stop:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+
+/* The mic→send morph slot. Both controls are stacked in a fixed 32px
+   square; .is-armed crossfades + rotates the send disc in and the mic
+   out. pointer-events tracks visibility so the hidden control can
+   never be clicked mid-animation. */
+.composer-slot {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+}
+.composer-slot .mic-button,
+.composer-slot .send-btn {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
+}
+.composer-slot .mic-button { background: transparent; border-radius: 8px; }
+.composer-slot .send-btn {
+  border-radius: 9px;
+  /* fallback accent before the first draft pick lands */
+  background: var(--send-accent, var(--accent));
+  /* dark glyph on a bright disc — reads on all five brand colors */
+  color: #0a0d10;
+  opacity: 0;
+  transform: scale(0.55) rotate(-90deg);
+  pointer-events: none;
+  cursor: pointer;
+}
+.composer-slot.is-armed .send-btn {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.composer-slot.is-armed .send-btn:disabled { opacity: 0.55; cursor: default; }
+.composer-slot.is-armed .mic-button {
+  opacity: 0;
+  transform: scale(0.55);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-slot .mic-button,
+  .composer-slot .send-btn,
+  .composer { transition: none; }
+}
+
+/* --- file attachments (composer staging + message chips) ------------- */
+/* Monochrome chips per the brand rule: gray borders, no accent. The
+   composer's staging chips (.attach-chip, removable) and the message
+   bubble's record chips (.attachment-chip, name + size only) share the
+   same quiet pill voice. The paperclip is a ghost control like every
+   other button inside the composer field. */
+.attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.attach-btn:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0 2px;
+}
+.attach-chip,
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: var(--bg);
+  max-width: 100%;
+}
+.attach-chip-name,
+.attachment-chip-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.attach-chip-size,
+.attachment-chip-size { color: var(--fg-muted); }
+.attach-chip-remove {
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+}
+.attach-chip-remove:hover { color: var(--danger); }
+.attach-error {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--danger);
+  padding-top: 2px;
+}
+/* In message bubbles the chips sit above the text. */
+.message .attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+/* --- composer palette (slash commands + @-references) --- */
+/* why: relative wrapper so the popup anchors above the textarea. */
+.composer-wrap { position: relative; }
+.command-palette {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+  padding: 4px;
+}
+.palette-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.palette-option {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  /* gated below on prefers-reduced-motion */
+  transition: background 0.1s ease;
+}
+.palette-option.active { background: var(--accent); color: var(--accent-fg); }
+.palette-option.active .palette-detail { color: var(--accent-fg); opacity: 0.85; }
+.palette-option.disabled { opacity: 0.45; cursor: not-allowed; }
+.palette-label { font-size: 13px; display: flex; gap: 6px; align-items: baseline; }
+.palette-sigil { color: var(--accent); font-weight: 600; }
+.palette-option.active .palette-sigil { color: var(--accent-fg); }
+.palette-detail {
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (prefers-reduced-motion: reduce) {
+  .palette-option { transition: none; }
+}
+
+/* --- sessions view --- */
+.sessions-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 12px;
+}
+
+.sessions-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sessions-toolbar h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.sessions-toolbar .spacer { flex: 1; }
+.sessions-toolbar button { padding: 4px 10px; font-size: 13px; }
+
+.sessions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.session-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.session-row.active {
+  border-color: var(--accent);
+  background: rgba(74, 95, 208, 0.08);
+}
+
+.session-main {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-radius: 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  min-width: 0;
+}
+.session-main:hover { background: rgba(127, 127, 127, 0.06); }
+
+.session-title {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-meta {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.session-meta code {
+  background: transparent;
+  font-size: 10px;
+}
+
+/* /system + /tools presence badges — monochrome chip (sessions list
+   rows + the chat's mode row). The brand color rule applies: no accent
+   here. */
+.session-sys-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+
+.session-archive {
+  background: transparent;
+  color: var(--fg-muted);
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 12px;
+  font-size: 16px;
+  cursor: pointer;
+}
+.session-archive:hover { color: var(--danger); background: rgba(196, 48, 48, 0.05); }
+
+/* --- mic button (voice input) --- */
+.mic-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+/* flex-shrink:0 so the icon can never be squeezed by an unexpected
+ * padding/width win from an ancestor rule (belt-and-suspenders).
+ * ~15px (another ~20% down from 19px) so the icon reads as a small,
+ * unobtrusive glyph centered in the 36px button. */
+.mic-button svg { display: block; width: 15px; height: 15px; flex-shrink: 0; }
+.mic-button:hover { color: var(--fg); background: var(--bg-elev); }
+.mic-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mic-button.is-disabled, .mic-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mic-button.is-active {
+  color: var(--accent-fg);
+  background: var(--danger);
+  border-color: var(--danger);
+  animation: peerd-mic-pulse 1.4s ease-in-out infinite;
+}
+.mic-button.is-permission-needed {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+@keyframes peerd-mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(196, 48, 48, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(196, 48, 48, 0); }
+}
+
+/* --- voice settings section --- */
+.voice-section .voice-progress {
+  height: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-top: 8px;
+}
+.voice-section .voice-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 80ms linear;
+}
+.voice-section .voice-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.voice-section .voice-status.is-ok { color: var(--ok); }
+.voice-section .voice-status.is-err { color: var(--danger); }
+
+/* --- confirmation modal (voice enrollment) --- */
+.peerd-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.peerd-modal {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 18px 14px;
+  width: min(420px, calc(100vw - 32px));
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.peerd-modal h3 { margin: 0 0 8px; font-size: 16px; }
+.peerd-modal ul { margin: 6px 0 14px; padding-left: 18px; font-size: 13px; }
+.peerd-modal ul li { margin-bottom: 2px; }
+.peerd-modal .peerd-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* --- first-run extras (voice onboarding) --- */
+.onboarding-card {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  margin: 12px 0 16px;
+}
+.onboarding-card h3 { margin: 0 0 6px; font-size: 14px; }
+.onboarding-card p.muted { font-size: 12px; }
+.onboarding-card .onboarding-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* --- Logs view --------------------------------------------------------- */
+.logs-view .logs-header { display: flex; align-items: center; gap: 8px; }
+.log-tabs { display: flex; gap: 4px; margin: 10px 0 12px; }
+.log-tab {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.log-tab.is-active { color: var(--fg); border-color: var(--fg-muted); background: var(--bg-elev); }
+.log-list { display: flex; flex-direction: column; gap: 2px; }
+.log-row { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+.log-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
+.log-ok { background: var(--ok); }
+.log-warn { background: var(--warn); }
+.log-danger { background: var(--danger); }
+.log-info { background: var(--fg-muted); }
+.log-main { flex: 1 1 auto; min-width: 0; }
+.log-line { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.log-label { font-weight: 600; font-size: 13px; }
+.log-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  word-break: break-word;
+}
+.log-time { font-size: 11px; color: var(--fg-muted); margin-top: 2px; }
+.denylist-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+.denylist-item {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border);
+}
+.denylist-item.is-user { border-color: var(--accent, #4a9eff); }
+.denylist-item.is-disabled { opacity: 0.55; text-decoration: line-through; }
+.denylist-item-row { display: inline-flex; align-items: center; gap: 2px; }
+.denylist-x { font-size: 13px; line-height: 1; padding: 0 3px; }
+.denylist-confirm { display: inline-flex; align-items: center; gap: 4px; }
+.denylist-add { display: flex; gap: 6px; margin: 0 0 10px; }
+.denylist-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.denylist-disabled { margin-top: 6px; }
+/* Denylist search — live substring filter with the n-of-N count. */
+.denylist-search { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
+.denylist-search-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.denylist-count { font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
+/* Provenance pill — same recipe as .hook-badge so built-in/user reads
+   the same way across Context tabs. */
+.denylist-badge {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  flex: 0 0 auto;
+}
+/* why full-width: the armed remove/disable confirm carries consequence
+   copy a chip-width row would truncate — give it its own line. */
+.denylist-item-row.is-arming { flex-basis: 100%; flex-wrap: wrap; gap: 6px; }
+.denylist-consequence { font-size: 11px; color: var(--fg-muted); }
+
+/* Activity-tab filters */
+.log-filters { display: flex; gap: 6px; margin: 0 0 8px; }
+.log-filter-level { font-size: 12px; max-width: 46%; }
+.log-filter-query { flex: 1; min-width: 0; font-size: 12px; }
+
+/* --- Hooks pane (Context tab) ------------------------------------------ */
+.hooks-pane { display: flex; flex-direction: column; }
+.hooks-actions { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.hook-add { display: flex; flex-direction: column; gap: 6px; margin: 0 0 10px; }
+.hook-add-editor {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 12px; line-height: 1.5;
+  resize: vertical; min-height: 90px;
+}
+.hook-add button[type="submit"] { align-self: flex-start; }
+.hook-list { display: flex; flex-direction: column; gap: 6px; }
+.hook-row {
+  display: flex; gap: 8px; align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px 10px;
+}
+.hook-row.is-off .hook-name,
+.hook-row.is-off .hook-doc { opacity: 0.5; }
+.hook-main { flex: 1 1 auto; min-width: 0; }
+.hook-line { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.hook-name { font-size: 12px; font-weight: 600; }
+.hook-badge {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.hook-match {
+  font-family: var(--font-mono);
+  font-size: 11px; color: var(--fg-muted);
+}
+.hook-doc { margin: 4px 0 0; font-size: 11px; color: var(--fg-muted); }
+.hook-controls { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+/* why a dashed pill + help cursor: built-ins must read as deliberately
+   un-disableable (the egress floor), not as a missing control. */
+.hook-lock {
+  font-size: 11px; color: var(--fg-muted); white-space: nowrap;
+  border: 1px dashed var(--border); border-radius: 3px;
+  padding: 1px 6px; cursor: help;
+}
+.hook-toggle {
+  font-size: 11px; display: flex; gap: 4px; align-items: center;
+  color: var(--fg-muted);
+}
+.hook-x { font-size: 13px; line-height: 1; padding: 0 3px; }
+.hook-confirm { display: inline-flex; align-items: center; gap: 4px; }
+
+/* --- Ralph loop status panel (chat view) -------------------------------- */
+/* Quiet status widget: gray-bordered and monochrome; the spinner orb is
+   the only color while a run is live (brand rule). */
+.ralph-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 8px 10px;
+  /* why no margin: .chat-view is a flex column with its own 8px gap —
+     the banners above this panel rely on the same spacing. */
+  font-size: 12px;
+}
+.ralph-head { display: flex; align-items: center; gap: 8px; }
+.ralph-title { font-weight: 600; }
+.ralph-status { color: var(--fg-muted); }
+.ralph-status.is-error { color: var(--danger); }
+.ralph-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); flex: 0 0 auto; }
+.ralph-dot.is-error { background: var(--danger); }
+.ralph-stop { font-size: 11px; padding: 2px 10px; }
+.ralph-dismiss { font-size: 14px; line-height: 1; padding: 0 3px; }
+.ralph-goal {
+  margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ralph-meta {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  margin-top: 2px; color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ralph-note {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px; color: var(--fg-muted);
+  word-break: break-word;
+}
+.ralph-note.is-error { color: var(--danger); }
+
+/* In-flight async-subagent status bar (DESIGN-11) — mirrors .ralph-panel:
+   a bordered elevated card, grayscale, the brand spinner the only color. */
+.async-task-bar {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.async-task-head { display: flex; align-items: center; gap: 8px; }
+.async-task-title { font-weight: 600; }
+.async-task-rows { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.async-task-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.async-task-name {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.async-task-status { color: var(--fg-muted); flex: 0 0 auto; }
+.async-task-tail {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Plan/Act selector row above the input bar */
+.chat-mode-row { display: flex; align-items: center; padding: 4px 0 0; }
+
+/* --- Memory pane (Context tab) ---------------------------------------- */
+.memory-pane { display: flex; flex-direction: column; gap: 10px; }
+.memory-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.memory-empty { padding: 8px 0; }
+.memory-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 10px 12px;
+}
+.memory-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.memory-scope { font-weight: 600; font-size: 12px; }
+.memory-lines {
+  font-size: 11px; color: var(--fg-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.memory-lines.is-over { color: var(--danger); font-weight: 600; }
+.memory-editor {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 12px; line-height: 1.5;
+  resize: vertical; min-height: 90px;
+}
+.memory-warn { color: var(--danger); font-size: 12px; margin: 6px 0 0; }
+.memory-card-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+/* Auto-memory suggestions: monochrome chips per the brand rule — the
+   pending count + cards stay grayscale, no new accent colors. */
+.mem-badge {
+  display: inline-block; margin-left: 6px; padding: 0 6px;
+  border-radius: 999px; font-size: 10px; font-weight: 700; line-height: 16px;
+  background: var(--fg-muted); color: var(--bg);
+  font-variant-numeric: tabular-nums;
+}
+.memory-suggestions {
+  border: 1px dashed var(--fg-muted);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 10px 12px;
+}
+.memory-suggestion { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.memory-suggestion:last-child { border-bottom: none; padding-bottom: 0; }
+.memory-suggestion-text { font-size: 13px; line-height: 1.4; }
+.memory-suggestion-meta {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  font-size: 11px;
+}
+.memory-confirm { display: inline-flex; align-items: center; gap: 8px; }
+/* why: beat .linkish's accent color (equal specificity, defined later in
+   the file) by raising specificity with the combined selector. */
+.danger-text, .linkish.danger-text { color: var(--danger); }
+.linkish.danger-text:hover { color: var(--danger); }
+
+/* --- Confirm modal ----------------------------------------------------- */
+.confirm-summary {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.confirm-modal .peerd-modal-actions { flex-wrap: wrap; }
+
+/* --- system notice banner (e.g. /init progress) ---------------------- */
+.notice-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px 0;
+}
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.notice-text { flex: 1; }
+.notice-action {
+  flex: none;
+  align-self: center;
+  background: var(--accent);
+  color: var(--accent-fg, #fff);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+.notice-action:hover { filter: brightness(1.08); }
+.notice-dismiss {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--muted, currentColor);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.notice-dismiss:hover { color: var(--accent); }
+
+/* "peerd opened a tab" — an INLINE notice anchored in the transcript at the turn
+   it happened, so it recedes into the backlog as the chat continues (replaces the
+   old bright, sticky accent card; DECISIONS #26). Quiet by default; only the
+   current turn's notice gets a subtle, NON-accent highlight, then it mutes. */
+.agent-tab-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Shrink to its content — a compact pill, not a full-width bar. */
+  width: fit-content;
+  max-width: 100%;
+  margin: 2px 0;
+  padding: 3px 6px;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  opacity: 0.72;
+}
+.agent-tab-notice-icon { flex: none; opacity: 0.7; }
+.agent-tab-notice-text {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agent-tab-notice-label { color: var(--fg); }
+/* The "Go" affordance wears the peerd accent (cyan) — square, word, and arrow —
+   so it reads as the obvious thing to click, even on the muted notice. */
+.agent-tab-notice-go {
+  flex: none;
+  background: none;
+  border: 1px solid rgba(0, 183, 235, 0.5);
+  border-radius: 6px;
+  color: var(--accent);
+  font: inherit; font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.agent-tab-notice-go:hover { border-color: var(--accent); background: rgba(0, 183, 235, 0.12); }
+/* Current turn: a quiet elevated chip with a one-shot entrance — the surface
+   stays monochrome (only the Go button carries the accent). Mutes to the row
+   above once the user speaks again (the --fresh class drops). */
+.agent-tab-notice--fresh {
+  opacity: 1;
+  margin: 6px 0;
+  padding: 7px 10px;
+  background: var(--bg-elev, rgba(127, 127, 127, 0.06));
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  animation: agentTabNoticeIn 0.3s ease;
+}
+@keyframes agentTabNoticeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .agent-tab-notice--fresh { animation: none; }
+}
+
+/* --- per-chat model picker -------------------------------------------- */
+.model-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.model-picker-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+}
+.model-picker-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* --- Settings: collapsible sections ----------------------------------- */
+.settings-view { display: flex; flex-direction: column; gap: 10px; }
+.settings-topbar { display: flex; align-items: center; gap: 8px; }
+.settings-topbar h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.settings-footer { font-size: 12px; margin-top: 4px; }
+
+.settings-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.settings-section-head {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  background: none !important; border: none; box-shadow: none; border-radius: 0;
+  color: var(--fg); font: inherit; font-weight: 600; font-size: 14px;
+  text-align: left; cursor: pointer;
+}
+.settings-section-head:hover { background: var(--bg) !important; }
+.settings-section-caret {
+  color: var(--fg-muted); font-size: 10px; width: 10px; flex: 0 0 10px;
+  transition: transform 120ms ease;
+}
+.settings-section.is-open .settings-section-caret { transform: rotate(90deg); }
+.settings-section-title { flex: 0 0 auto; }
+.settings-section-summary {
+  margin-left: auto; color: var(--fg-muted);
+  font-weight: 400; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-section-body {
+  padding: 6px 14px 16px;
+  border-top: 1px solid var(--border);
+}
+.settings-section-body h3 { font-size: 13px; font-weight: 600; margin: 16px 0 4px; }
+.settings-section-body h3:first-child { margin-top: 10px; }
+.settings-section-body p { margin: 0 0 10px; color: var(--fg-muted); font-size: 13px; }
+.settings-section-body p.error { color: var(--danger); }
+.settings-section-body .hint { font-size: 12px; margin-top: 4px; }
+.settings-divider { height: 1px; background: var(--border); opacity: 0.6; margin: 16px 0; }
+
+/* Dweb preview banner (§12) — persistent, not a popup: always
+   visible in the Settings → Decentralized web section, never interrupts. */
+.dweb-banner {
+  border: 1px solid var(--magenta);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--magenta) 10%, transparent);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+/* Import pre-flight summary (§10) — what an import will overwrite,
+   shown before the user confirms. */
+.import-summary {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 10px 12px;
+  margin-top: 12px;
+}
+.import-summary ul { margin: 6px 0; padding-left: 18px; }
+.import-summary li { margin: 3px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-section-caret { transition: none; }
+}
+
+/* --- Provider cards (logo + slick inline key entry) ------------------- */
+.provider-cards { display: flex; flex-direction: column; gap: 8px; }
+.provider-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--bg);
+}
+.provider-card-main { display: flex; align-items: center; gap: 10px; }
+.provider-logo {
+  width: 26px; height: 26px; flex: 0 0 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.provider-logo svg { display: block; }
+.provider-logo.logo-generic {
+  background: var(--border); color: var(--fg);
+  border-radius: 7px; font-weight: 700; font-size: 13px;
+}
+.provider-card-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.provider-card-name { font-weight: 600; font-size: 13px; }
+.key-badge {
+  align-self: flex-start; max-width: 100%;
+  font-size: 11px; padding: 1px 8px;
+  border-radius: 999px; border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.key-badge.key-set   { color: var(--ok); border-color: var(--ok); }
+.key-badge.key-unset { color: var(--fg-muted); }
+.provider-card-form { margin-top: 10px; }
+/* why: flex-direction:row is REQUIRED — the generic `.input-row` sets
+   column, so without this the input + Save stack vertically (and centered
+   by align-items). Row keeps the field and a compact Save on one line. */
+.provider-card-form .input-row {
+  display: flex; flex-direction: row; gap: 6px; align-items: center; margin: 0;
+}
+.provider-card-form .input-row input { flex: 1 1 auto; min-width: 0; }
+.provider-card-form .input-row button { flex: 0 0 auto; white-space: nowrap; padding: 8px 16px; }
+.linkish {
+  background: none !important; border: none; box-shadow: none; border-radius: 0;
+  color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 4px;
+}
+.linkish:hover { text-decoration: underline; }
+.key-msg { font-size: 12px; margin: 6px 0 0; }
+.key-msg.ok  { color: var(--ok); }
+.key-msg.err { color: var(--danger); }
+
+/* --- OpenRouter model curation (Settings → Providers) ----------------- */
+.or-models { margin-top: 4px; }
+.or-search {
+  width: 100%;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.or-model-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.or-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.or-model-row:last-child { border-bottom: none; }
+.or-model-row:hover { background: var(--bg-elev); }
+.or-model-row input { flex: 0 0 auto; }
+.or-model-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.or-model-id {
+  flex: 1 1 auto;
+  text-align: right;
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- starter "path" menu (empty chat state) --------------------------- *
+ * A 2x3 grid of action tiles — a "select your path" menu, not a generic
+ * chat box. Each tile carries a uniform per-type glyph (ask / web /
+ * notebook / vm / app), permanently tinted to that path's MODULE accent
+ * (the glyph + label carry color; the tile background + outline stay
+ * monochrome grey). On load each tile reveals in THREE staggered steps —
+ * (1) the container box FLICKERS in, (2) then its glyph + label FLICKER in,
+ * (3) then the prompt text TYPES itself in behind the brand terminal cursor
+ * — the boot-console feel of the wordmark intro. All three cascade per tile
+ * at the same step. Reduced motion collapses everything to the finished
+ * state. The prompts are the menu items for now; later this surface
+ * presents recipes / workflows. */
+.empty-state { width: min(100%, 360px); }
+
+.path-menu {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 16px;
+  width: 100%;
+}
+.path-card {
+  --path-accent: var(--accent);   /* per-type override below */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 10px 12px;
+  min-height: 104px;
+  cursor: pointer;
+  color: var(--fg);
+  text-align: center;
+  transition: border-color 0.12s ease, background 0.12s ease;
+  /* STEP 1 of the reveal: the container box flickers in (staggered per
+     tile below). `both` holds the final opacity:1 frame, so a redraw
+     mid-type never resets a tile that already settled. */
+  opacity: 0;
+  animation: pathFlickerIn 500ms ease-out both;
+}
+.path-card:hover {
+  /* outline stays monochrome — color lives on the glyph + label */
+  background: var(--bg);
+}
+/* Per-tile cascade = 90ms. Step 1 (container) starts at 40ms + i*90ms. */
+.path-card:nth-child(1) { animation-delay: 40ms; }
+.path-card:nth-child(2) { animation-delay: 130ms; }
+.path-card:nth-child(3) { animation-delay: 220ms; }
+.path-card:nth-child(4) { animation-delay: 310ms; }
+.path-card:nth-child(5) { animation-delay: 400ms; }
+.path-card:nth-child(6) { animation-delay: 490ms; }
+@keyframes pathFlickerIn {
+  0%   { opacity: 0; }
+  8%   { opacity: 0.55; }
+  13%  { opacity: 0.12; }
+  22%  { opacity: 0.85; }
+  28%  { opacity: 0.25; }
+  42%  { opacity: 1; }
+  52%  { opacity: 0.5; }
+  64%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+/* STEP 2 of the reveal: the glyph + label flicker in AFTER their container
+   settles (delay = 540ms + i*90ms — i.e. step 1's delay + its 500ms). They
+   reuse the same flicker keyframe at a shorter duration. (Step 3, the text
+   type-in, is JS-driven from PATH_TYPE in chat-view.js, cascaded to match.) */
+.path-card-icon,
+.path-card-label {
+  opacity: 0;
+  animation: pathFlickerIn 380ms ease-out both;
+}
+.path-card:nth-child(1) .path-card-icon, .path-card:nth-child(1) .path-card-label { animation-delay: 540ms; }
+.path-card:nth-child(2) .path-card-icon, .path-card:nth-child(2) .path-card-label { animation-delay: 630ms; }
+.path-card:nth-child(3) .path-card-icon, .path-card:nth-child(3) .path-card-label { animation-delay: 720ms; }
+.path-card:nth-child(4) .path-card-icon, .path-card:nth-child(4) .path-card-label { animation-delay: 810ms; }
+.path-card:nth-child(5) .path-card-icon, .path-card:nth-child(5) .path-card-label { animation-delay: 900ms; }
+.path-card:nth-child(6) .path-card-icon, .path-card:nth-child(6) .path-card-label { animation-delay: 990ms; }
+.path-card-icon {
+  color: var(--path-accent);
+  line-height: 0;
+}
+.path-card-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--path-accent);
+}
+.path-card-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--fg);
+  /* clamp long prompts so the tiles stay tidy */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Per-type accent (glyph + label, shown PERMANENTLY — owner override of the
+ * one-accent brand rule, 2026-06-21). The three engine sandboxes wear engine
+ * amber (their honest module color); ask + web take the two remaining
+ * non-reserved hues (cyan, green) to stay distinct — red is reserved for
+ * errors, magenta for the dweb (absent from these starters). */
+.path-card[data-path="ask"]      { --path-accent: var(--cyan); }
+.path-card[data-path="web"]      { --path-accent: var(--green); }
+.path-card[data-path="notebook"] { --path-accent: var(--amber); }
+.path-card[data-path="vm"]       { --path-accent: var(--amber); }
+.path-card[data-path="app"]      { --path-accent: var(--amber); }
+
+/* Light theme: the locked brand hues are too light for AA text/icon contrast
+ * on the grey tile (e.g. amber ~2:1 on #f7f7f7), so darken the per-tile
+ * accent HERE only — the hue is preserved and dark theme keeps the full
+ * brand color. (color-mix is widely supported; where it isn't, this rule is
+ * dropped and the accent simply falls back to the brand hue above.) */
+@media (prefers-color-scheme: light) {
+  .path-card[data-path="ask"]      { --path-accent: color-mix(in srgb, var(--cyan)  55%, #000); }
+  .path-card[data-path="web"]      { --path-accent: color-mix(in srgb, var(--green) 55%, #000); }
+  .path-card[data-path="notebook"],
+  .path-card[data-path="vm"],
+  .path-card[data-path="app"]      { --path-accent: color-mix(in srgb, var(--amber) 50%, #000); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* no flicker, no type-in (the JS skips typing too) — final state at once */
+  .path-card,
+  .path-card-icon,
+  .path-card-label { opacity: 1; animation: none; }
+}
+
+/* ---- cost/usage meter (feature 06) -------------------------------------
+ * Always-visible spend surface directly under the top bar. Compact by
+ * design so it never competes with the transcript for vertical space.
+ */
+.cost-meter {
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cost-meter--idle { opacity: 0.7; }
+.cost-meter-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cost-meter-session { color: var(--fg); white-space: nowrap; }
+.cost-meter-dollars { font-weight: 600; font-variant-numeric: tabular-nums; }
+.cost-meter-tokens { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.cost-meter-turn {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Live "this turn" delta pulses gently while streaming. Decorative —
+ * disabled under reduced-motion below. */
+.cost-meter-turn--live { color: var(--accent); animation: cost-pulse 1.2s ease-in-out infinite; }
+@keyframes cost-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+.cost-meter-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.cost-meter-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.cost-meter--warn  .cost-meter-bar-fill { background: var(--warn); }
+.cost-meter--danger .cost-meter-bar-fill { background: var(--danger); }
+
+.cost-meter-halt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--danger);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.cost-meter-halt-icon { color: var(--danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .cost-meter-turn--live { animation: none; }
+  .cost-meter-bar-fill { transition: none; }
+}
+
+/* --- per-chat cost chip (collapsed, tucked above the composer) ---------- */
+.chat-cost-row { display: flex; justify-content: flex-end; padding: 2px 14px 0; }
+/* Small text usage indicator that sits in the composer's action row,
+   pushed to the left while mic/Send stay right. */
+/* Plain tiny muted text — a <span>, not a button, so it can't inherit the
+   accent-button fill. Half the old size; just the running dollar total. */
+.cost-chip {
+  margin-right: auto;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cost-chip-dollars { font-variant-numeric: tabular-nums; }
+.cost-chip-live { color: var(--accent, #00B7EB); }
+.cost-chip--halt { color: var(--danger); }
+
+/* --- Logs: cumulative usage line --------------------------------------- */
+.logs-usage {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 8px 10px; margin: 4px 0 8px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+.logs-usage-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); }
+.logs-usage-value { font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* Stop-reason chip — quiet but visible: a turn must never end silently
+   (field bug 2026-06-12: thinking-only max_tokens truncation looked
+   like a hang). Muted monochrome per the brand rule. */
+.stop-chip {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+/* The pre-first-token beachball, sitting bare where the bubble will
+   appear — same left rhythm as a bubble, none of its chrome. */
+.thinking-solo { padding: 6px 2px; }

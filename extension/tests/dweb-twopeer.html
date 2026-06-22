@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd dweb two-peer harness</title>
+</head>
+<body>
+  <!-- Headless integration harness: ONE real peer per browser context. The
+       driver (scripts/cdp/run-dweb-twopeer.mjs) opens two of these against a
+       local signaling node and asserts they form a real WebRTC mesh and
+       exchange gossip. Not a UI — state lives on window.__DWEB__. -->
+  <pre id="out">booting…</pre>
+  <script type="module" src="./dweb-twopeer.js"></script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!--
+    Sandboxed page (declared in manifest.json sandbox.pages). MV3
+    strips ALL chrome.* APIs from sandboxed pages, but we get:
+      - opaque origin
+      - the default sandbox CSP, which allows inline <script>
+      - postMessage with the parent window
+
+    This page lives inside an iframe in app-tab/index.html. Its only
+    job is to wait for the parent to postMessage the agent's HTML body
+    and then document.write it -- replacing this page entirely with
+    the agent's content. Inline <script> tags in the body execute
+    because the sandbox CSP permits them.
+  -->
+</head>
+<body>
+<script>
+  (() => {
+    let received = false;
+
+    window.addEventListener('message', (e) => {
+      if (received) return;
+      const msg = e.data;
+      if (!msg || msg.type !== 'app-body') return;
+      received = true;
+
+      const html = typeof msg.html === 'string'
+        ? msg.html
+        : '<p style="padding:40px;font-family:sans-serif">empty app</p>';
+
+      // Replace this entire document with the agent's HTML. document.
+      // write + close runs the new doc's <script> tags inline; the
+      // current script-frame stays alive until it returns, which is
+      // fine (we're about to return anyway).
+      document.open();
+      document.write(html);
+      document.close();
+
+      // Keep the app INSIDE its sandbox. A <form> submit (the classic dwapp
+      // "Join" button) navigates this opaque-origin frame — which reloads it,
+      // loses all app state, and tears down the dweb bridge. preventDefault at
+      // the CAPTURE phase so the navigation is cancelled but the app's own
+      // submit handlers still fire (they read the form + do the JS work).
+      // `document` here is the app's document (document.write replaced ours),
+      // and the listener outlives this script.
+      try {
+        document.addEventListener('submit', (e) => { e.preventDefault(); }, true);
+      } catch (_e) { /* no document — nothing to guard */ }
+
+      // form.submit() bypasses the submit EVENT entirely (by spec) and navigates
+      // unconditionally, so the capture guard above never sees it. Redirect it
+      // through a real, cancelable submit event: the guard cancels the navigation
+      // and the app's own submit handler still fires. (requestSubmit() already
+      // dispatches the event, so the guard covers it; only legacy submit() leaks.)
+      try {
+        const Form = (document.defaultView || window).HTMLFormElement;
+        if (Form && Form.prototype) {
+          Form.prototype.submit = function () {
+            this.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          };
+        }
+      } catch (_e) { /* prototype frozen / no form interface — leave default */ }
+    });
+
+    // Announce readiness to the parent so it knows it can postMessage
+    // the body. targetOrigin '*' because we don't know the parent's
+    // origin from inside an opaque-origin sandbox (the parent will
+    // gate by e.source equality).
+    window.parent.postMessage({ type: 'runner-ready' }, '*');
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>peerd — network graph sim</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 28px; background: #0B0D0E; color: #E8E6E1;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 15px; font-weight: 500; color: #9a9a9a; margin: 0 0 4px; }
+  p.note { font-size: 12px; color: #6b6b6b; margin: 0 0 16px; max-width: 620px; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 18px; font-size: 13px; }
+  .controls button {
+    background: #15181A; color: #E8E6E1; border: 1px solid #353535; border-radius: 6px;
+    padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  .controls button:hover { background: #1d2124; }
+  .controls label { color: #9a9a9a; display: flex; align-items: center; gap: 6px; }
+  .count { color: #9a9a9a; font-variant-numeric: tabular-nums; }
+  /* The graph sits on the page background — NO box. */
+  #graph { display: block; width: 100%; max-width: 640px; height: auto; }
+  .pn-self { fill: #0B0D0E; stroke: #D946EF; stroke-width: 2; }
+  .pn-self-ring { fill: none; stroke: #D946EF; stroke-width: 1.5; }
+  .pn-self-label { fill: #E8E6E1; font-size: 13px; font-weight: 500; }
+  .pn-dot { stroke: #0B0D0E; stroke-width: 1.5; }
+  .pn-dot--faint { opacity: 0.5; }
+  .pn-label { fill: #E8E6E1; font-size: 10px; text-anchor: middle; }
+  .pn-edge { fill: none; stroke-width: 1.4; opacity: 0.6; }
+  .pn-edge--direct { stroke: #22C55E; }
+  .pn-edge--stun { stroke: #00B7EB; }
+  .pn-edge--relay { stroke: #F59E0B; stroke-dasharray: 5 4; }
+  .pn-edge--gossip { stroke: #444441; stroke-dasharray: 2 4; opacity: 0.5; }
+  .pn-edge--bootstrap { stroke: #9a9a9a; opacity: 0.6; }
+  .pn-intro-edge { stroke-width: 2; fill: none; stroke-dasharray: 5 6; animation: pn-flow 0.55s linear infinite; }
+  @keyframes pn-flow { to { stroke-dashoffset: -11; } }
+  .pn-edge--connecting { stroke: #6b6b6b; stroke-dasharray: 2 4; opacity: 0.4; }
+</style>
+</head>
+<body>
+  <h1>peerd — network graph sim</h1>
+  <p class="note">Standalone test rig for the home-page radial peer graph. The physics block below is the
+  exact code ported into extension/home/network-section.js. Use the controls to stress it: 0, 1, many peers;
+  joins/leaves; reduced motion.</p>
+
+  <div class="controls">
+    <button id="add">+ peer</button>
+    <button id="remove">− peer</button>
+    <button id="auto">auto: on</button>
+    <label><input type="checkbox" id="reduce"> simulate prefers-reduced-motion</label>
+    <span class="count" id="count">0 peers</span>
+  </div>
+
+  <svg id="graph" viewBox="0 0 600 380" role="img" aria-label="network graph sim">
+    <g class="pn-layer"></g>
+    <circle class="pn-self-ring" cx="300" cy="190" r="17"></circle>
+    <circle class="pn-self" cx="300" cy="190" r="11"></circle>
+    <text class="pn-self-label" x="300" y="222" text-anchor="middle">You</text>
+  </svg>
+
+<script>
+(function () {
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  // ── PHYSICS (verbatim with network-section.js PeerGraph) ───────────────────
+  var W = 600, H = 380, CX = W / 2, CY = H / 2, RING = Math.min(W, H) * 0.36, MAX = 40;
+  var SPRING = 0.02, DAMP = 0.86, ROTV = 0.0011, SPAWN = 0.82, TAU = Math.PI * 2;
+  var INTRO_FRAMES = 110;  // the introduction handoff window (~1.8s @ 60fps)
+  var phys = new Map();   // did -> { x, y, vx, vy }
+  var nodes = new Map();  // did -> { g, line, dot, label }
+  var peers = [];         // sorted by did, sliced to MAX
+  var layer = document.querySelector('.pn-layer');
+  var ring = document.querySelector('.pn-self-ring');
+  var raf = 0, rot = 0, reduced = false;
+
+  function slot(i, n) {
+    var a = -Math.PI / 2 + (i / Math.max(1, n)) * TAU + rot;
+    return { x: CX + Math.cos(a) * RING, y: CY + Math.sin(a) * RING };
+  }
+  function mk(tag, attrs) {
+    var e = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function pathKind(p) {
+    if (p.kind === 'bootstrap') return p.linked ? 'bootstrap' : 'connecting';
+    if (!p.linked) return 'gossip';
+    if (!p.path || p.path === 'unknown') return 'connecting';
+    if (p.path.indexOf('srflx') >= 0) return 'stun';
+    if (p.path.indexOf('relay') >= 0) return 'relay';
+    return 'direct';
+  }
+  function writeGeom(ref, x, y) {
+    ref.dot.setAttribute('cx', x); ref.dot.setAttribute('cy', y);
+    ref.line.setAttribute('x2', x); ref.line.setAttribute('y2', y);
+    ref.label.setAttribute('x', x); ref.label.setAttribute('y', y + 20);
+  }
+  function sync(list) {
+    peers = list.slice().sort(function (a, b) { return a.did < b.did ? -1 : a.did > b.did ? 1 : 0; }).slice(0, MAX);
+    var live = {}; peers.forEach(function (p) { live[p.did] = 1; });
+    nodes.forEach(function (n, did) {
+      if (!live[did]) { n.g.remove(); nodes.delete(did); phys.delete(did); }
+    });
+    peers.forEach(function (p, i) {
+      var kind = pathKind(p), faint = kind === 'gossip' || kind === 'connecting';
+      var n = nodes.get(p.did);
+      if (!n) {
+        var s = slot(i, peers.length);
+        // Introduction handoff: if we know WHO introduced this peer (p.via — the
+        // bootstrap, or another peer in the mesh-assisted case), spawn AT the
+        // introducer and trail an intro edge as the peer springs out to its slot.
+        var via = phys.get(p.via);
+        var spawn = via ? { x: via.x, y: via.y } : { x: CX + (s.x - CX) * SPAWN, y: CY + (s.y - CY) * SPAWN };
+        phys.set(p.did, { x: spawn.x, y: spawn.y, vx: 0, vy: 0 });
+        var g = mk('g', {});
+        var line = mk('line', { x1: CX, y1: CY, x2: spawn.x, y2: spawn.y });
+        var dot = mk('circle', { r: 9, cx: spawn.x, cy: spawn.y });
+        var label = mk('text', { class: 'pn-label', x: spawn.x, y: spawn.y });
+        g.appendChild(line); g.appendChild(dot); g.appendChild(label);
+        layer.appendChild(g);
+        n = { g: g, line: line, dot: dot, label: label, intro: 0, via: null, introEdge: null };
+        nodes.set(p.did, n);
+        if (via) {
+          var vp = peers.filter(function (x) { return x.did === p.via; })[0];
+          n.intro = INTRO_FRAMES; n.via = p.via;
+          n.introEdge = mk('line', { class: 'pn-intro-edge', x1: spawn.x, y1: spawn.y, x2: spawn.x, y2: spawn.y, stroke: (vp && vp.color) || '#9a9a9a' });
+          g.insertBefore(n.introEdge, g.firstChild); // in the node's group → removed with it on leave
+        }
+      }
+      n.line.setAttribute('class', 'pn-edge pn-edge--' + kind);
+      n.dot.setAttribute('class', 'pn-dot' + (faint ? ' pn-dot--faint' : ''));
+      n.dot.setAttribute('fill', p.color);
+      n.label.textContent = p.name || p.did;
+    });
+    if (reduced) place();
+  }
+  function place() {
+    peers.forEach(function (p, i) {
+      var st = phys.get(p.did), ref = nodes.get(p.did);
+      if (!st || !ref) return;
+      var s = slot(i, peers.length); st.x = s.x; st.y = s.y; writeGeom(ref, s.x, s.y);
+    });
+  }
+  function stepOnce() {
+    rot += ROTV;
+    var n = peers.length;
+    peers.forEach(function (p, i) {
+      var st = phys.get(p.did), ref = nodes.get(p.did);
+      if (!st || !ref) return;
+      var t = slot(i, n);
+      st.vx += (t.x - st.x) * SPRING; st.vy += (t.y - st.y) * SPRING;
+      st.vx *= DAMP; st.vy *= DAMP; st.x += st.vx; st.y += st.vy;
+      writeGeom(ref, st.x, st.y);
+      // The handoff: the intro edge (introducer→peer) fades out as the direct
+      // edge (You→peer) fades in; then the introducer steps out of the path.
+      if (ref.intro > 0) {
+        ref.intro -= 1;
+        var prog = ref.intro / INTRO_FRAMES; // 1 → 0
+        var via = phys.get(ref.via);
+        if (ref.introEdge && via) {
+          ref.introEdge.setAttribute('x1', via.x); ref.introEdge.setAttribute('y1', via.y);
+          ref.introEdge.setAttribute('x2', st.x); ref.introEdge.setAttribute('y2', st.y);
+          ref.introEdge.setAttribute('opacity', (prog * 0.9).toFixed(3));
+        }
+        ref.line.setAttribute('opacity', ((1 - prog) * 0.6).toFixed(3));
+        if (ref.intro === 0) {
+          if (ref.introEdge) { ref.introEdge.remove(); ref.introEdge = null; }
+          ref.line.removeAttribute('opacity'); // back to the CSS default
+        }
+      }
+    });
+    var pulse = (Math.sin(Date.now() / 1100) + 1) / 2;
+    ring.setAttribute('opacity', (0.18 + pulse * 0.42).toFixed(3));
+    ring.setAttribute('stroke-width', (1 + pulse * 1.6).toFixed(2));
+  }
+  function tick() { stepOnce(); raf = requestAnimationFrame(tick); }
+  // Test hook: drive frames synchronously when rAF is paused (hidden preview).
+  window.__step = function (frames) { for (var k = 0; k < (frames || 1); k++) stepOnce(); };
+  function applyMotion() {
+    if (reduced) { if (raf) { cancelAnimationFrame(raf); raf = 0; } place(); }
+    else if (!raf) raf = requestAnimationFrame(tick);
+  }
+  // ── END PHYSICS ────────────────────────────────────────────────────────────
+
+  // sim driver — mock peers, joins/leaves, manual controls
+  var BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
+  var NAMES = ['ada', 'kai', 'mira', 'noor', 'rey', 'zane', 'iris', 'omar', 'lux', 'vee', 'pax', 'wynn'];
+  var PATHS = ['direct-ipv6', 'direct-ipv4-srflx', 'relay', 'unknown', 'direct-ipv6'];
+  var B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  var pool = [];
+  function rnd(a) { return a[Math.floor(Math.random() * a.length)]; }
+  function makePeer() {
+    var did = ''; for (var i = 0; i < 8; i++) did += B58[Math.floor(Math.random() * B58.length)];
+    var linked = Math.random() > 0.2;
+    return { did: did, name: Math.random() > 0.4 ? rnd(NAMES) : null, color: rnd(BRAND),
+      linked: linked, path: linked ? rnd(PATHS) : null };
+  }
+  // The bootstrap node rides the graph as a normal node, labelled by domain.
+  var BOOTSTRAP = { did: '__bootstrap__', name: 'bootstrap.peerd.ai', color: '#D946EF', linked: true, kind: 'bootstrap' };
+  function render() {
+    sync([BOOTSTRAP].concat(pool));
+    document.getElementById('count').textContent = pool.length + ' peer' + (pool.length === 1 ? '' : 's');
+  }
+  function add() {
+    if (pool.length >= 12) return;
+    var p = makePeer();
+    // Who introduced us? The bootstrap most of the time; sometimes an existing
+    // peer (the mesh-assisted path — the "kill the server" beat).
+    p.via = (pool.length && Math.random() < 0.45) ? pool[Math.floor(Math.random() * pool.length)].did : '__bootstrap__';
+    pool.push(p);
+    render();
+  }
+  function remove() { if (pool.length) { pool.splice(Math.floor(Math.random() * pool.length), 1); render(); } }
+
+  document.getElementById('add').onclick = add;
+  document.getElementById('remove').onclick = remove;
+  var autoOn = true, autoTimer = setInterval(autoStep, 2200);
+  function autoStep() { (Math.random() > 0.45 && pool.length < 9) || pool.length === 0 ? add() : remove(); }
+  document.getElementById('auto').onclick = function () {
+    autoOn = !autoOn; this.textContent = 'auto: ' + (autoOn ? 'on' : 'off');
+    clearInterval(autoTimer); if (autoOn) autoTimer = setInterval(autoStep, 2200);
+  };
+  document.getElementById('reduce').onchange = function () { reduced = this.checked; applyMotion(); };
+
+  render();
+  applyMotion();
+  add(); add(); add();   // start with a few
+})();
+</script>
+</body>
+</html>

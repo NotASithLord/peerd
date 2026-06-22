@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd</title>
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; object-src 'self'">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!-- Mithril mounts here. The page shell is a single named slot; we do
+       NOT m.mount against document.body (see §13.2). -->
+  <div id="app"></div>
+  <script type="module" src="./sidepanel.js"></script>
+</body>
+</html>

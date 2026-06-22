@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd tests</title>
+  <!-- worker-src blob: lets tests spawn the real blob-URL sealed worker (what
+       runEval / the headless job runner do in the extension) — the runner is
+       served over http where it would otherwise be blocked. Scoped to workers,
+       so blob SCRIPTS in the page stay blocked. -->
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'self'">
+  <!-- Inline data: icon suppresses the favicon 404 when served outside
+       the extension origin (e.g. via dev-server.sh). -->
+  <link rel="icon" href="data:,">
+  <!-- bootstrap is a classic script (no type=module) so it runs
+       synchronously, before the runner module's import chain begins.
+       It synthesizes globalThis.chrome.runtime.id so the
+       webextension-polyfill doesn't throw when loaded from http://
+       origins. See bootstrap.js for full reasoning. -->
+  <script src="./bootstrap.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff; --fg: #1a1a1a; --pass: #1a7a1a; --fail: #c43030;
+      --border: #e0e0e0; --muted: #6b6b6b; --bg-fail: #fff0f0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1a1a1a; --fg: #e6e6e6; --pass: #6ac76a; --fail: #ec6464;
+              --border: #353535; --muted: #9a9a9a; --bg-fail: #2a1a1a; }
+    }
+    body {
+      margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    .summary { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; }
+    .summary.fail { background: var(--bg-fail); border-color: var(--fail); }
+    ul { list-style: none; padding-left: 16px; margin: 4px 0; }
+    li { padding: 2px 0; }
+    .suite-name { font-weight: 600; }
+    .test { display: flex; gap: 6px; align-items: baseline; }
+    .test .icon { width: 16px; }
+    .test.pass .icon { color: var(--pass); }
+    .test.fail .icon { color: var(--fail); }
+    .test .ms { color: var(--muted); font-size: 12px; }
+    details { margin-top: 4px; }
+    summary { cursor: pointer; color: var(--fail); font-family: ui-monospace, monospace; font-size: 12px; }
+    pre {
+      background: #0001; padding: 8px; border-radius: 4px;
+      font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+      white-space: pre-wrap; word-break: break-all;
+      margin: 4px 0 0;
+    }
+    .ci-marker { display: none; }
+  </style>
+</head>
+<body>
+  <h1>peerd tests</h1>
+  <div id="summary" class="summary">Loading…</div>
+  <div id="results"></div>
+  <pre id="ci-marker" class="ci-marker"></pre>
+  <script type="module" src="./runner.js"></script>
+</body>
+</html>

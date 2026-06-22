@@ -1,0 +1,61 @@
+name: Bug report
+description: Something broke. Help us reproduce it.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying peerd — it's **0.x experimental**, so rough edges are expected.
+        Please do **not** paste API keys, vault contents, or full page text from private sites.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+      placeholder: I asked the agent to … and instead …
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser
+      options:
+        - Chrome (store)
+        - Chrome (preview/dev, unpacked)
+        - Firefox
+        - Other (note in description)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: peerd version
+      description: Shown in Settings / the extension's manifest.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Model provider
+      options:
+        - Anthropic
+        - OpenRouter
+        - Ollama (local)
+        - Local WebGPU (Gemma)
+        - Not relevant
+  - type: textarea
+    id: console
+    attributes:
+      label: Relevant console output
+      description: From the side panel / offscreen / tab DevTools, if any. Redact anything sensitive.
+      render: shell

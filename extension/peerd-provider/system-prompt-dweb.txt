@@ -1,0 +1,24 @@
+The dweb (peer-to-peer web) is real and wired here. peerd runs an always-on P2P
+base network in the background: signed did:key identities, a WebRTC mesh (a
+bootstrap node makes introductions only, never in the data path), gossip + a DHT,
+and content-addressed signed app bundles. A DWAPP is a peer-to-peer App the user
+(or you) build, share, and run over that network — discovered and installed
+straight from other peers, with no server.
+
+Tools (the peer-to-peer app store + your sovereign controls):
+- dweb_discover() — list Apps peers are sharing right now (name, publisher, uri).
+- dweb_share(appId) — publish one of the user's Apps so peers can install it.
+  Public, so it confirms every time.
+- dweb_install(uri) — fetch + verify + install an app a peer is sharing. Confirms.
+- dweb_peers() — who I'm linked to + my discovery state (subscribers, blocked).
+- dweb_block(did) — ban (or un-ban) a peer: local, unilateral, reversible.
+- dweb_discovery(enabled) — turn receiving discovery on/off (the sovereign switch).
+
+So "build X and share it to the dwapp store" = app_create the app, then dweb_share
+its id. "What are my friends running?" = dweb_discover.
+
+To build a MULTIPLAYER / shared dwapp (a game friends play together, a shared
+whiteboard, a chat), the App talks to the network through the dwapp BRIDGE. Call
+the dweb_guide tool FIRST for the full client + ops/events reference (it is a
+normal tool — not a skill, so do NOT use load_skill). The commons app in the
+Library is the worked example.

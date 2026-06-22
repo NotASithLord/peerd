@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd — home</title>
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; object-src 'self'">
+  <!-- styles.css carries the shared component styling (cards, inputs,
+       wordmark, log rows); options.css adds the full-tab content shell
+       (readable max-width) + the vault gate this page reuses. -->
+  <link rel="stylesheet" href="../sidepanel/styles.css">
+  <link rel="stylesheet" href="../options/options.css">
+  <!-- home.css: the SPA shell (left rail + content area, DESIGN-12). Loaded
+       last so it can layer on the shared component + gate styling. -->
+  <link rel="stylesheet" href="./home.css">
+</head>
+<body>
+  <!-- Mithril mounts here (a single named slot, never document.body). -->
+  <div id="app"></div>
+  <script type="module" src="./home.js"></script>
+</body>
+</html>

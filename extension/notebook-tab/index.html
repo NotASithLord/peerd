@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!--
+    Notebook egress backstop. This page hosts the js_notebook Web Worker, which
+    runs agent-authored code. The worker's ONLY sanctioned network path is
+    the postMessage bridge to this page → the SW's audited webFetch (SSRF
+    block + denylist + audit) — runtime.sendMessage, which no CSP governs.
+    The first fence is the realm seal (notebook-neutralizers.js, evaluated
+    as the worker entry's first import): bridged fetch pinned
+    non-configurable, natives deleted off the prototype chain, every raw
+    network primitive (XHR/WebSocket/WebSocketStream/EventSource/
+    WebTransport/sendBeacon/importScripts/nested Worker) hard-blocked.
+    connect-src 'none' is the second fence, exactly as tight as the seal:
+    neither this page, nor the blob worker (which inherits this policy),
+    nor any realm that somehow escaped the seal can open a connection-class
+    request to ANY host — ours included. Script loads (CDN module imports,
+    a documented js_notebook feature) are script-src territory and unaffected.
+    The SW keeps its own (manifest) CSP with https:, so webFetch still works.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="connect-src 'none'">
+  <title>peerd · Notebook</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='3' width='12' height='10' rx='1.5' fill='%2334d399'/%3E%3Ctext x='8' y='11' text-anchor='middle' font-size='8' font-family='monospace' font-weight='700' fill='%230d1117'%3Ejs%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/shared/brand.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="notebook-boot" class="boot-card">
+    <div class="boot-spinner" aria-hidden="true"></div>
+    <h2>Starting Notebook…</h2>
+    <p class="muted">A fresh JS realm with OPFS scratch.</p>
+  </div>
+
+  <main id="notebook-app" hidden>
+    <header id="notebook-toolbar">
+      <span class="peerd-brand" aria-hidden="true"><span class="b-p">p</span><span class="b-e">e</span><span class="b-e2">e</span><span class="b-r">r</span><span class="b-d">d</span></span>
+      <span class="brand-sep" aria-hidden="true">·</span>
+      <span class="js-dot" aria-hidden="true">js</span>
+      <span class="notebook-id-chip" id="notebook-id-chip"></span>
+      <span class="spacer"></span>
+      <span class="run-hint" id="save-status">saved</span>
+      <button class="export-btn" id="export-btn" title="Download this Notebook as a .peerd file">Export ⤓</button>
+      <button class="run-btn" id="run-btn" title="Runs notebook.js (Cmd-Enter / Ctrl-Enter)">Run notebook.js ▶</button>
+    </header>
+
+    <!-- peerd-engine/editor mounts here: file tree + CodeMirror. -->
+    <div id="editor-mount"></div>
+
+    <!-- Draggable boundary between the editor and the output pane. -->
+    <div id="pane-resizer" role="separator" aria-orientation="horizontal" tabindex="0"
+         title="Drag to resize (↑/↓ to nudge)" aria-label="Resize editor and output"></div>
+
+    <div id="output-pane">
+      <div id="console-output"></div>
+    </div>
+  </main>
+
+  <script type="module" src="/notebook-tab/notebook-tab.js"></script>
+</body>
+</html>

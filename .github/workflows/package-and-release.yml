@@ -1,0 +1,324 @@
+# Dual-distribution CI (PACKAGING.md):
+#
+#   every push/PR   → tests, lint, dweb-boundary check, generated-
+#                     file drift check, then the FULL 2-channel × 2-browser
+#                     artifact matrix (store artifacts are verified to
+#                     contain zero dweb traces as part of packaging).
+#   tag push v*     → additionally: signed preview artifacts, a GitHub
+#                     Release titled peerd-preview-v<X.Y.Z> with the
+#                     preview artifacts + update feeds attached, and the
+#                     regenerated update-feeds/ committed back to main.
+#
+# Store uploads (Chrome Web Store / AMO) stay MANUAL — download the
+# verified store artifacts from the release run and submit them after QA.
+#
+# Secrets used by the release job (Settings → Secrets → Actions):
+#   CRX_PRIVATE_KEY   contents of key.pem (the CRX preview signing key —
+#                     same key forever, or every preview install breaks)
+#   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
+#   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
+
+name: package-and-release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+# why these pins: every action below runs on the Node 24 JS-action runtime
+# (checkout@v5, upload-artifact@v6, setup-chrome@v2, setup-bun@v2 — the first
+# major of each that targets node24). That clears GitHub's Node-20 deprecation
+# warnings at the source; no FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 shim needed.
+# (This is GitHub's *action* runtime — peerd's own tooling is 100% Bun.)
+jobs:
+  test:
+    # Keep this job's display name stable — it predates the packaging matrix
+    # and may be referenced by branch-protection required checks.
+    name: bun test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - run: bun install
+      - run: bun test ./tests
+
+  checks:
+    name: lint + boundary + drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - run: bun install
+      - name: ESLint
+        run: bun run lint
+      - name: Typecheck (bun suite + // @ts-check extension files)
+        run: bun run typecheck
+      - name: Typecheck coverage floor (no regressions)
+        run: bun run check:tscheck
+      - name: Dweb import boundary
+        run: bun run check:boundary
+      - name: Generated-file drift (dev manifest + channel-config + tscheck badge)
+        run: |
+          bun run gen:dev
+          git diff --exit-code extension/manifest.json extension/shared/channel-config.js badges/tscheck.json || {
+            echo '::error::A generated file (manifest.json, channel-config.js, or badges/tscheck.json) is out of sync with its generator — run `bun run gen:dev` and commit.'
+            exit 1
+          }
+
+  # Additive job — existing job names above/below are referenced by
+  # branch-protection required checks; this one can be added to that
+  # list once it has a green history.
+  inbrowser:
+    name: in-browser tests (headless Chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: stable
+      - name: Run in-browser suite over CDP
+        # why bun, not node: the CDP harness imports only node:* builtins and
+        # uses global WebSocket/fetch — all provided by bun — so the whole
+        # toolchain stays Bun (no Node install). Verified 586/0 under bun.
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: bun scripts/cdp/run-inbrowser-tests.mjs
+
+  # Additive job — the headless TWO-PEER dweb integration test (TESTING.md
+  # §B–F), previously a manual two-Chrome-profile checklist. Stands up the local
+  # signaling node and opens two real browser contexts that must form a WebRTC
+  # mesh and exchange gossip — the live peer-to-peer seam no other job covers.
+  twopeer:
+    name: dweb two-peer (headless WebRTC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: stable
+      - run: bun install
+      - name: Run the two-peer harness over CDP
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: bun run test:twopeer
+
+  # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
+  # previously run only by hand. Spawns a relay + N real node processes that
+  # form an authenticated mesh and self-test gossip/direct/DHT/presence across
+  # process boundaries — the tier `bun test` (in-memory pipes) and the
+  # in-browser suite (no dweb live path) both miss. Pure Bun, no Chrome.
+  netproc:
+    name: dweb netproc (multi-process nodes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - run: bun install
+      - run: bun run test:netproc
+
+  # Additive job — NOT in the required-checks list; lets it earn a green
+  # history before gating. First test that loads the REAL unpacked extension
+  # and drives the live side panel through one full agent turn.
+  e2e:
+    name: e2e (side panel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      # why setup-chrome: it installs the system libraries headless Chrome
+      # needs. We then run against Chrome for Testing (branded Chrome ignores
+      # --load-extension), which reuses those libs.
+      - uses: browser-actions/setup-chrome@v2
+      - name: Generate dev manifest
+        run: bun run gen:dev
+      - name: Provision Chrome for Testing
+        id: cft
+        run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Run side-panel E2E smoke
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        run: bun scripts/cdp/run-e2e-sidepanel.mjs
+
+  package:
+    name: package ${{ matrix.channel }}/${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    needs: [test, checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [store, preview]
+        browser: [chrome, firefox]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - run: bun install
+      # --no-sign: matrix packages prove packageability + boundary on every
+      # push (store artifacts are verified inside package.ts); signing
+      # happens only in the release job, where the secrets live.
+      - run: bun packaging/package.ts --channel=${{ matrix.channel }} --browser=${{ matrix.browser }} --no-sign
+      # why upload only off PRs: a PR build's job is to prove the package
+      # COMPILES and passes the dweb-trace verify — both run in package.ts above,
+      # BEFORE this step — and nobody downloads a PR's artifact. Uploading every
+      # PR's four packages burns the Actions artifact-storage quota; once that's
+      # hit the upload step itself errors and reds the whole matrix on changes
+      # that built + verified fine. Keep uploads for main + tags (the release/QA
+      # inputs); cap retention so they can't pile up indefinitely.
+      - uses: actions/upload-artifact@v6
+        if: github.event_name != 'pull_request'
+        with:
+          name: peerd-${{ matrix.channel }}-${{ matrix.browser }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.xpi
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release (preview channel)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [test, checks, package]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - run: bun install
+
+      - name: Check tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(bun -e 'console.log(JSON.parse(require("fs").readFileSync("package.json","utf8")).version)')"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Require signing credentials
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          # Releases never ship unsigned preview packages (spec §15) — fail
+          # fast here rather than attaching artifacts that scare users.
+          [ -n "$CRX_PRIVATE_KEY" ] || { echo '::error::CRX_PRIVATE_KEY secret not set'; exit 1; }
+          [ -n "$AMO_JWT_ISSUER" ] || { echo '::error::AMO_JWT_ISSUER secret not set'; exit 1; }
+          [ -n "$AMO_JWT_SECRET" ] || { echo '::error::AMO_JWT_SECRET secret not set'; exit 1; }
+          printf '%s' "$CRX_PRIVATE_KEY" > key.pem
+
+      - name: Package + sign all four artifacts
+        shell: bash
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          # why pipefail: without it `bun … | tee` reports tee's exit code,
+          # so a failed packaging run would sail through and the release could ship
+          # partially-packaged artifacts. (`shell: bash` also enables pipefail,
+          # but be explicit — this step is the release gate.)
+          set -euo pipefail
+          bun run package:all 2>&1 | tee package.log
+          if grep -q 'UNSIGNED' package.log; then
+            echo '::error::a preview artifact was left unsigned — aborting release'
+            exit 1
+          fi
+
+      - name: Assert preview artifacts are actually signed
+        shell: bash
+        run: |
+          # Positive proof of signing, not just absence of the UNSIGNED
+          # marker (a packaging run that died before sign.ts ran prints no marker
+          # at all): the CRX must carry the CRX3 magic, and the .xpi must
+          # contain AMO's signature block.
+          set -euo pipefail
+          CRX=artifacts/peerd-preview-chrome.crx
+          XPI=artifacts/peerd-preview-firefox.xpi
+          [ -f "$CRX" ] || { echo "::error::$CRX missing — CRX signing did not run"; exit 1; }
+          [ "$(head -c4 "$CRX")" = "Cr24" ] || { echo "::error::$CRX lacks the Cr24 CRX3 magic — not a signed CRX"; exit 1; }
+          [ -f "$XPI" ] || { echo "::error::$XPI missing — Firefox preview was not built"; exit 1; }
+          unzip -l "$XPI" META-INF/mozilla.rsa >/dev/null \
+            || { echo "::error::$XPI has no META-INF/mozilla.rsa — AMO signing did not run"; exit 1; }
+
+      - name: Regenerate update feeds for this release
+        run: bun packaging/gen-update-feeds.ts --version="${GITHUB_REF_NAME#v}" --repo="$GITHUB_REPOSITORY"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Idempotent: when Actions billing is down, releases are cut from
+          # a dev machine (bun run release) which also creates this release.
+          # If CI later runs the same tag, view-or-create + upload --clobber
+          # makes the second run a harmless no-op instead of a duplicate
+          # "release already exists" failure.
+          ASSETS=(
+            artifacts/peerd-preview-chrome.crx
+            artifacts/peerd-preview-firefox.xpi
+            update-feeds/chrome-preview.xml
+            update-feeds/firefox-preview.json
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists — re-uploading assets"
+            gh release upload "$GITHUB_REF_NAME" --clobber "${ASSETS[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "peerd-preview-$GITHUB_REF_NAME" \
+              --notes "peerd preview $GITHUB_REF_NAME — peerd with the decentralized web (dweb) preview enabled.
+
+          The dweb protocol is research-grade and may change. Most users want the store packages (see the README's Install section).
+
+          | artifact | install |
+          |---|---|
+          | peerd-preview-firefox.xpi | Firefox — click to install (recommended path) |
+          | peerd-preview-chrome.crx | Chrome — drag into chrome://extensions (developer mode) |
+
+          Store-channel artifacts for this version are produced by the same CI run and submitted to Chrome Web Store / AMO separately; store review lag is expected." \
+              "${ASSETS[@]}"
+          fi
+
+      # The feeds are committed so the repo (and the peerd.ai site deploy,
+      # which serves update-feeds/ at /updates/) always reflects the
+      # latest release. See PACKAGING.md §"Update feeds".
+      - name: Commit regenerated update feeds to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The tag checkout has the freshly generated feeds in its
+          # working tree; park them, move to main, then restore — a plain
+          # `git checkout main` would refuse to clobber modified files.
+          TMP="$(mktemp -d)"
+          cp update-feeds/chrome-preview.xml update-feeds/firefox-preview.json "$TMP/"
+          git checkout -- update-feeds/ || true
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          cp "$TMP"/chrome-preview.xml "$TMP"/firefox-preview.json update-feeds/
+          if ! git diff --quiet -- update-feeds/; then
+            git add update-feeds/
+            git commit -m "chore(release): update feeds for $GITHUB_REF_NAME"
+            git push origin main
+          else
+            echo "feeds unchanged"
+          fi

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd — settings</title>
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; object-src 'self'">
+  <!-- styles.css carries the component styling shared with the side
+       panel (cards, inputs, provider cards, memory editors, log rows);
+       options.css adds only what a full tab needs — the two-column
+       shell, a readable content max-width, and the vault gate. -->
+  <link rel="stylesheet" href="../sidepanel/styles.css">
+  <link rel="stylesheet" href="./options.css">
+</head>
+<body>
+  <!-- Mithril mounts here. The page shell is a single named slot; we do
+       NOT m.mount against document.body (see DESIGN.md §13.2). -->
+  <div id="app"></div>
+  <script type="module" src="./options.js"></script>
+</body>
+</html>

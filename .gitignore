@@ -1,0 +1,68 @@
+# macOS / iCloud
+.DS_Store
+.AppleDouble
+.LSOverride
+# Finder custom-icon file: its on-disk name is "Icon" + a trailing CR.
+# The line below ends in TWO raw CRs because git strips one CR before
+# the newline when parsing; a bare "Icon" line matches the wrong thing.
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# iCloud conflict-copy dupes. When iCloud detects a sync conflict
+# between two devices it creates a sibling named "<file> N.<ext>" or
+# "<dir> N/" — N starts at 2 and keeps incrementing on repeated
+# conflicts ("<file> 3.<ext>", "<file> 4.<ext>", …). These should
+# never end up in the repo.
+* [0-9].*
+* [0-9]
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# Node (only used by /e2e/ — not the extension proper)
+node_modules/
+.npm
+npm-debug.log*
+
+# Build artifacts (we have no build step for the extension, but Chrome's
+# `pack` produces these and we never commit them).
+*.crx
+*.pem
+web-ext-artifacts/
+# Channel artifacts staged + zipped by packaging/package.ts (see PACKAGING.md).
+# key.pem (matched by *.pem above) is the CRX preview signing key: NEVER
+# commit it; back it up offline and mirror it into the CRX_PRIVATE_KEY
+# GitHub Actions secret.
+/artifacts/
+
+# Local dev / test artifacts
+/scratch/
+/tmp/
+*.log
+
+# Claude Code harness state — session worktrees (.claude/worktrees/),
+# launch configs, etc. Local/transient; never source. Un-ignore a
+# specific file if shared agent config is ever wanted.
+.claude/
+
+# Headless test output
+/test-output/
+
+# Marketing / landing-page build output. The site SOURCE is tracked in
+# /site/; scripts/deploy-site.sh assembles it (plus update-feeds/ and
+# the vendored CheerpX/xterm assets kept directly in dist/) into /dist/
+# for Cloudflare Pages.
+/dist/

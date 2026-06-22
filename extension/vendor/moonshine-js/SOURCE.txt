@@ -1,0 +1,56 @@
+moonshine-js — vendored
+========================
+
+Upstream:   https://github.com/moonshine-ai/moonshine
+Package:    @moonshine-ai/moonshine-js
+License:    MIT
+
+Status
+------
+VENDORED — @moonshine-ai/moonshine-js@0.1.29 (see VERSION). Pulled +
+SHA-verified by scripts/vendor-moonshine.sh (EXPECTED_DIST_SHA256 is
+pinned there). Re-run that script to bump; do not pull "@latest".
+
+What's here
+-----------
+  - moonshine.js           (the npm dist/moonshine.min.js verbatim, PLUS a
+                            one-line `export const VENDORED = true;` sentinel
+                            appended at the end — peerd's transcriber.js imports
+                            { MicrophoneTranscriber, VENDORED }, and the upstream
+                            dist doesn't provide VENDORED. The appended line is
+                            the only modification to the upstream bytes.)
+  - moonshine.js.SHA256    (the UPSTREAM dist hash, pre-append — tamper floor)
+  - VERSION                (the pinned npm release the bytes came from)
+
+Why vendored, not lazy-imported from CDN
+----------------------------------------
+MV3 CSP forbids remote script execution
+(script-src 'self' 'wasm-unsafe-eval'). The moonshine JS itself must
+live in the extension package. So must its ORT runtime + the Silero
+VAD: Moonshine ships those pointing at jsdelivr
+(Settings.BASE_ASSET_PATH.{ONNX_RUNTIME,SILERO_VAD}), and ORT's
+cross-origin loader re-wraps the remote script as a blob:, which the
+CSP blocks — voice then silently dies ("not supported"). peerd vendors
+ORT 1.22 + vad-web 0.0.24 locally (../onnxruntime-web, ../vad-web) and
+redirects those two Settings paths to same-origin in
+peerd-runtime/voice/transcriber.js (init). ONLY the model .onnx bytes
+(which are DATA, not script) are fetched at runtime from the configured
+CDN — see peerd-runtime/voice/model-store.js for that path.
+
+The model bytes are ~250MB for the shipped `base` variant and don't
+need to ship with the extension — they're cached in IndexedDB on
+first activation and reused thereafter.
+
+Update procedure
+----------------
+1. Edit scripts/vendor-moonshine.sh to bump the pinned commit / tag.
+2. Run the script. It downloads, verifies the upstream hash, writes
+   moonshine.js + SHA256 + VERSION.
+3. Commit the new bytes. The .SHA256 file is the tamper-detection
+   floor — anything that disagrees with it on disk is a red flag.
+4. Test locally (load unpacked, enable voice, transcribe a test phrase)
+   before tagging a release.
+
+For model .onnx file integrity (separate concern), see
+peerd-runtime/voice/model-store.js. SRI hashes there pin specific
+Hugging Face commits of UsefulSensors/moonshine.

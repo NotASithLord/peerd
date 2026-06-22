@@ -1,0 +1,313 @@
+/* peerd options page — full-tab settings surface.
+ *
+ * styles.css (linked first) was written for the ~400px side panel and
+ * carries all the component styling this page reuses (provider cards,
+ * inputs, memory editors, log rows, modals). This sheet adds ONLY what
+ * a full browser tab needs: the two-column shell (nav rail + content
+ * column), a readable content max-width, and the locked-vault gate.
+ *
+ * Brand rule holds here exactly as in the panel: monochrome surfaces,
+ * the wordmark is the ONLY color carrier, and failure/error red is the
+ * lone semantic exception. No new accent colors.
+ */
+
+.options-shell {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+}
+
+/* --- nav rail ----------------------------------------------------------- */
+
+.options-nav {
+  flex: 0 0 220px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev);
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* why sticky: the content column scrolls long (Activity, pricing
+   * table); the nav should stay reachable without scrolling back up. */
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  max-height: 100vh;
+  overflow-y: auto;
+}
+
+/* align-self:flex-start keeps the wordmark CONTENT width in the nav column —
+ * otherwise the flex column stretches it to the full rail and the intro's
+ * terminal rail (::before, inset:0) becomes a long bar right of the blocks. */
+.options-nav .wordmark { margin: 0 0 6px 4px; align-self: flex-start; }
+/* Preview badge sits left-aligned directly under the wordmark (the nav is a
+ * column, so styles.css's align-self:center would float it to the middle of
+ * the rail). There's room at 220px without widening — just left-align it and
+ * match the wordmark's 4px inset. */
+.options-nav .channel-badge { align-self: flex-start; margin: 0 0 14px 4px; }
+/* Preview badge fades in alongside the wordmark's render-in (first open + each
+ * time you switch back to the tab — the Wordmark component restarts this by
+ * toggling the class). */
+.channel-badge--in { animation: channelBadgeIn 300ms 220ms both; }
+@keyframes channelBadgeIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .channel-badge--in { animation: none; }
+}
+
+.options-nav-group {
+  margin: 14px 4px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.options-nav-group:first-of-type { margin-top: 2px; }
+
+.options-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--fg-muted);
+  text-decoration: none;
+}
+.options-nav-item:hover { background: var(--bg); color: var(--fg); }
+/* Active state stays monochrome — weight + surface, never a color. */
+.options-nav-item.is-active {
+  background: var(--bg);
+  color: var(--fg);
+  font-weight: 600;
+}
+.options-nav-item .mem-badge { margin-left: auto; }
+
+/* --- content column ------------------------------------------------------ */
+
+.options-content {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 28px 56px;
+}
+
+/* why the max-width: styles.css assumed a ~400px panel where lines
+ * could never run long; a full tab needs an explicit readable column. */
+.options-page { max-width: 760px; }
+
+.options-page > h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+/* Typography parity with the panel's .settings-section-body — the
+ * disclosure Section wrapper is gone, so re-scope its body rules here. */
+.options-page h3 { font-size: 13px; font-weight: 600; margin: 16px 0 4px; }
+.options-page h3:first-of-type { margin-top: 10px; }
+.options-page p { margin: 0 0 10px; color: var(--fg-muted); font-size: 13px; }
+.options-page p.error { color: var(--danger); }
+.options-page .hint { font-size: 12px; margin-top: 4px; }
+
+/* --- vault gate ----------------------------------------------------------- */
+
+.options-gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 40px 16px;
+}
+.options-gate-card {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+}
+.options-gate-card .wordmark { --wm-size: 36px; }
+.options-gate-card h2 { margin: 6px 0 0; font-size: 17px; font-weight: 600; }
+.options-gate-card p { margin: 0; color: var(--fg-muted); font-size: 13px; }
+
+/* ── Home page: section rhythm + the Library card grid ───────────────────────
+   Monochrome by the brand rule. The primary action (Open) is weight + border,
+   never fill/color (mirrors .options-nav-item.is-active); depth is neutral black
+   alpha, not color; the lone semantic color is --danger TEXT on the delete item. */
+.home-topbar { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+.home-section + .home-section { margin-top: 28px; }
+.home-section-head { margin: 0 0 12px; }
+.home-section-head h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.home-section-sub { margin: 4px 0 0; font-size: 12.5px; color: var(--fg-muted); }
+
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.library-card {
+  display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg);
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.library-card:hover { border-color: var(--fg-muted); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10); }
+.library-head { display: flex; align-items: flex-start; gap: 8px; }
+.library-avatar {
+  width: 30px; height: 30px; flex: 0 0 auto; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  color: var(--fg-muted); font-weight: 600; text-transform: uppercase; font-size: 13px;
+}
+.library-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-meta { font-size: 11px; color: var(--fg-muted); }
+.library-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.library-tag { font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--fg-muted); }
+
+/* Buttons: override the inherited filled-cyan default (styles.css button) on
+   these surfaces — quiet monochrome ghosts; Open is the lone weight-primary. */
+.library-btn, .library-open {
+  font: inherit; font-size: 12.5px; line-height: 1; padding: 5px 11px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer;
+}
+.library-btn:hover, .library-open:hover { background: var(--bg-elev); }
+.library-open { border-color: var(--fg-muted); font-weight: 600; }
+.library-btn:disabled, .library-open:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.library-actions { position: relative; display: flex; align-items: center; gap: 6px; margin-top: auto; }
+.library-actions .spacer { flex: 1; }
+.library-kebab, .library-star { line-height: 1; }
+
+.library-menu {
+  position: absolute; right: 0; bottom: calc(100% + 4px); z-index: 5; min-width: 140px;
+  display: flex; flex-direction: column; padding: 4px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.library-menu-item {
+  text-align: left; font: inherit; font-size: 12.5px; padding: 6px 9px;
+  border: none; border-radius: 4px; background: transparent; color: var(--fg); cursor: pointer;
+}
+.library-menu-item:hover { background: var(--bg); }
+.library-menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.library-menu-item.is-danger { color: var(--danger); }
+.library-menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+
+/* ── The Network section (home page, dweb preview only) ──────────────────────
+   The peers/network-info view + the animated radial peer graph. Peer dots carry
+   their per-did brand color (set inline); everything else is monochrome but for
+   the honest path-colored edges + the magenta (d·distributed) "You" hub. */
+.peerd-net { display: flex; flex-direction: column; gap: 14px; }
+
+.peerd-net-facts {
+  display: flex; flex-wrap: wrap; gap: 8px 18px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-elev); font-size: 12.5px;
+}
+.peerd-net-fact { display: flex; align-items: baseline; gap: 6px; }
+.peerd-net-fact-k { color: var(--fg-muted); }
+.peerd-net-fact-v { font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+.peerd-net-badge {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-muted);
+}
+.peerd-net-badge--up   { color: var(--ok);    border-color: var(--ok); }
+.peerd-net-badge--wait { color: var(--warn);  border-color: var(--warn); }
+.peerd-net-badge--down { color: var(--danger); border-color: var(--danger); }
+
+/* The graph sits directly on the page background — no box. Centered: it's
+   capped at max-width, so `auto` side margins keep the hub mid-column instead
+   of pinned to the left. */
+.peerd-net-graph { display: block; width: 100%; max-width: 560px; height: auto; margin: 4px auto; }
+
+/* The "You" hub — neutral fill, a pulsing distributed-magenta ring. */
+.pn-self { fill: var(--bg); stroke: var(--magenta); stroke-width: 2; }
+.pn-self-ring { fill: none; stroke: var(--magenta); stroke-width: 1.5; opacity: 0.5; animation: pn-pulse 2.4s ease-in-out infinite; }
+.pn-self-label { fill: var(--fg); font-size: 12px; font-weight: 600; }
+@keyframes pn-pulse { 0%, 100% { opacity: 0.18; stroke-width: 1; } 50% { opacity: 0.6; stroke-width: 2.5; } }
+
+/* Peer dots + labels. Dot fill is set inline (per-did brand color). */
+.pn-dot { stroke: var(--bg); stroke-width: 1.5; }
+.pn-dot--faint { opacity: 0.45; }
+.pn-label { fill: var(--fg); font-size: 10px; text-anchor: middle; }
+
+/* Edges colored by the REAL ICE path — the honest-infrastructure beat. */
+.pn-edge { stroke-width: 1.4; opacity: 0.55; fill: none; }
+.pn-edge--direct     { stroke: var(--green); }
+.pn-edge--stun       { stroke: var(--cyan); }
+.pn-edge--relay      { stroke: var(--amber); stroke-dasharray: 5 4; }
+.pn-edge--gossip     { stroke: var(--border); stroke-dasharray: 2 4; opacity: 0.5; }
+.pn-edge--bootstrap  { stroke: var(--fg-muted); opacity: 0.6; }
+.pn-edge--connecting { stroke: var(--fg-muted); stroke-dasharray: 2 4; opacity: 0.4; animation: pn-blink 1.3s ease-in-out infinite; }
+/* The introduction handoff: a flowing line from the introducer to a new peer
+   (its stroke is set inline to the introducer's color), fading as the direct
+   edge forms — the WebRTC signaling story, on screen. */
+.pn-intro-edge { stroke-width: 2; fill: none; stroke-dasharray: 5 6; animation: pn-flow 0.9s linear infinite; }
+@keyframes pn-flow { to { stroke-dashoffset: -11; } }
+@keyframes pn-blink { 0%, 100% { opacity: 0.18; } 50% { opacity: 0.5; } }
+
+.peerd-net-empty {
+  padding: 16px; text-align: center; color: var(--fg-muted); font-size: 13px;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+}
+.peerd-net-offline {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 22px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev);
+}
+.peerd-net-offline p { margin: 0; color: var(--fg-muted); font-size: 13px; }
+.peerd-net-btn {
+  padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: transparent; color: var(--fg); font-size: 12.5px; cursor: pointer;
+}
+.peerd-net-btn:hover { background: var(--bg-elev); }
+.peerd-net-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* The peer roster (list mirror of the graph — also the a11y fallback). */
+.peerd-net-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.peerd-net-row {
+  display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: 10px;
+  padding: 7px 10px; border-radius: var(--radius); font-size: 13px;
+}
+.peerd-net-row:hover { background: var(--bg-elev); }
+.peerd-net-swatch { width: 10px; height: 10px; border-radius: 50%; }
+.peerd-net-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peerd-net-did { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; }
+.peerd-net-path { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--fg-muted); white-space: nowrap; }
+.peerd-net-path--direct { color: var(--ok); border-color: var(--ok); }
+.peerd-net-path--stun   { color: var(--cyan); border-color: var(--cyan); }
+.peerd-net-path--relay  { color: var(--warn); border-color: var(--warn); }
+.peerd-net-path--bootstrap { color: var(--fg-muted); border-color: var(--border); }
+
+/* Discover — the dweb app store list (apps peers are sharing). Mirrors the
+   roster's row rhythm: a meta column (name + publisher) + a trailing action. */
+.peerd-disc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.peerd-disc-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 11px; border-radius: var(--radius); border: 1px solid var(--border);
+}
+.peerd-disc-row:hover { background: var(--bg-elev); }
+.peerd-disc-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.peerd-disc-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peerd-disc-pub { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; }
+.peerd-disc-err { color: var(--danger); font-size: 11px; }
+.peerd-disc-done { color: var(--ok); font-size: 13px; white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pn-self-ring, .pn-edge--connecting, .pn-intro-edge { animation: none; }
+  .library-card { transition: none; }
+}
+
+/* --- Local models (WebGPU) — rendered inside the Providers & models page -- */
+.providers-subhead { font-size: 14px; margin: 6px 0 10px; color: var(--fg); }
+.local-models > .muted { max-width: 64ch; margin: 0 0 16px; }
+.lm-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); padding: 14px 16px; max-width: 620px; }
+.lm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.lm-name-group { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.lm-name { font-weight: 600; font-size: 15px; color: var(--fg); }
+.lm-link { font-size: 11px; color: var(--fg-muted); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.lm-link:hover { color: var(--fg); }
+.lm-meta { font-size: 11px; color: var(--fg-muted); }
+.lm-state { font-size: 13px; margin: 10px 0; color: var(--fg-muted); }
+.lm-state.ok { color: var(--green); }
+.lm-state.bad { color: var(--danger); }
+.lm-actions { display: flex; gap: 8px; }

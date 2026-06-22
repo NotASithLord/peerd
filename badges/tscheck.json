@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "label": "types",
+  "message": "100% // @ts-check",
+  "color": "brightgreen"
+}

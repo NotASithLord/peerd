@@ -1,0 +1,173 @@
+// @ts-check
+// Internal message shape → OpenAI-compatible /chat/completions body.
+//
+// Used by the OpenRouter adapter (and any future OpenAI / Ollama
+// adapter — they share this wire format). The internal union is the same
+// one to-anthropic.js consumes; only the target shape differs.
+//
+// OpenAI message shapes:
+//   - system:    { role:'system', content }
+//   - user text: { role:'user', content }
+//   - assistant: { role:'assistant', content: string|null,
+//                  tool_calls?: [{ id, type:'function',
+//                                  function:{ name, arguments:<JSON string> } }] }
+//   - tool result: { role:'tool', tool_call_id, content }   (ONE per result)
+//
+// Unlike Anthropic, OpenAI carries tool results as their OWN top-level
+// messages (role:'tool'), not as blocks inside a user message. Every
+// assistant tool_call id MUST be followed by a matching tool message or
+// the API 400s — same orphan hazard as Anthropic, repaired below.
+
+/** @typedef {import('../types.js').InternalMessage} InternalMessage */
+/** @typedef {import('../types.js').ToolUseBlock} ToolUseBlock */
+
+/**
+ * @typedef {Object} OpenAiToolCall
+ * @property {string} id
+ * @property {'function'} type
+ * @property {{ name: string, arguments: string }} function
+ */
+
+/**
+ * One OpenAI /chat/completions wire message. The shape varies by role —
+ * `tool_calls` rides assistant turns, `tool_call_id` rides tool results.
+ * @typedef {Object} OpenAiMessage
+ * @property {'system'|'user'|'assistant'|'tool'} role
+ * @property {string | null} [content]
+ * @property {OpenAiToolCall[]} [tool_calls]
+ * @property {string} [tool_call_id]
+ */
+
+/**
+ * @param {ToolUseBlock[]} toolUses
+ * @returns {OpenAiToolCall[]}
+ */
+const toToolCalls = (toolUses) =>
+  toolUses.map((tu) => ({
+    id: tu.id,
+    type: 'function',
+    function: {
+      name: tu.name,
+      arguments: JSON.stringify(tu.input ?? {}),
+    },
+  }));
+
+/**
+ * Map internal messages to the OpenAI messages array. The `system`
+ * prompt is prepended as a system message (OpenAI has no separate
+ * system field the way Anthropic does).
+ *
+ * @param {string} system
+ * @param {readonly InternalMessage[]} messages
+ * @returns {OpenAiMessage[]}
+ */
+const toOpenAiMessages = (system, messages) => {
+  /** @type {OpenAiMessage[]} */
+  const out = [];
+  if (typeof system === 'string' && system.length > 0) {
+    out.push({ role: 'system', content: system });
+  }
+  for (const m of messages) {
+    if (m.role === 'assistant') {
+      const hasTools = Array.isArray(m.toolUses) && m.toolUses.length > 0;
+      const hasText = typeof m.content === 'string' && m.content.length > 0;
+      if (!hasTools && !hasText) continue;  // empty assistant — drop
+      /** @type {OpenAiMessage} */
+      const msg = { role: 'assistant', content: hasText ? m.content : null };
+      if (hasTools && m.toolUses) msg.tool_calls = toToolCalls(m.toolUses);
+      out.push(msg);
+    } else if (m.role === 'user') {
+      if (Array.isArray(m.toolResults) && m.toolResults.length > 0) {
+        for (const tr of m.toolResults) {
+          out.push({
+            role: 'tool',
+            tool_call_id: tr.tool_use_id,
+            content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+          });
+        }
+      } else if (typeof m.content === 'string') {
+        out.push({ role: 'user', content: m.content });
+      }
+    }
+  }
+  return repairOrphanToolCalls(out);
+};
+
+/**
+ * Ensure every assistant tool_call id is immediately followed by a
+ * matching tool message. If a turn ended mid-dispatch (SW restart,
+ * abort) the history can carry tool_calls with no results; OpenAI 400s
+ * on that. We synthesize an error tool message for each orphan. Wire-
+ * format-only — the persisted session is untouched.
+ *
+ * @param {OpenAiMessage[]} msgs
+ * @returns {OpenAiMessage[]}
+ */
+const repairOrphanToolCalls = (msgs) => {
+  /** @type {OpenAiMessage[]} */
+  const out = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    out.push(m);
+    if (m.role !== 'assistant' || !Array.isArray(m.tool_calls)) continue;
+    // Collect the tool ids already satisfied by the following run of
+    // tool messages.
+    const satisfied = new Set();
+    let j = i + 1;
+    while (j < msgs.length && msgs[j].role === 'tool') {
+      satisfied.add(msgs[j].tool_call_id);
+      j++;
+    }
+    for (const tc of m.tool_calls) {
+      if (!satisfied.has(tc.id)) {
+        out.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: 'tool dispatch did not complete. Treat as failed and retry if needed.',
+        });
+      }
+    }
+  }
+  return out;
+};
+
+/**
+ * Build the /chat/completions request body. Pure.
+ *
+ * @param {Object} args
+ * @param {string} args.model
+ * @param {string} args.system
+ * @param {readonly InternalMessage[]} args.messages
+ * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
+ * @param {number} [args.maxTokens]
+ * @returns {object}
+ */
+export const toOpenAiBody = ({ model, system, messages, tools, maxTokens = 4096 }) => {
+  /** @type {Record<string, any>} */
+  const body = {
+    model,
+    messages: toOpenAiMessages(system, messages),
+    max_tokens: maxTokens,
+    stream: true,
+    // why: opt into the final usage chunk so from-openai.js can emit a
+    // `usage` event for cost telemetry (feature 06). Without this,
+    // OpenAI/OpenRouter streams carry NO token counts at all and the
+    // meter would read zero for every OpenRouter turn.
+    stream_options: { include_usage: true },
+  };
+  if (Array.isArray(tools) && tools.length > 0) {
+    body.tools = tools.map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.schema ?? { type: 'object', properties: {} },
+      },
+    }));
+    body.tool_choice = 'auto';
+  }
+  return body;
+};
+
+// Test seam — exercise the message mapper + orphan repair directly.
+export const _toOpenAiMessagesForTests = toOpenAiMessages;

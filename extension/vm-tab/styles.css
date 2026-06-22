@@ -1,0 +1,238 @@
+/* vm-tab — transparent shell. The xterm IS the page.
+   Identification comes from the tab title + amber favicon; reboot is
+   native Cmd-R (which reloads the page and remounts the same IDB
+   overlay — disk state preserved). */
+
+:root {
+  /* why: deeper black than the old #0d1117 — the boot console and xterm
+     share one phosphor-dark surface so boot→shell is a single continuous
+     terminal (the xterm theme in vm-tab.js mirrors these values). */
+  --bg: #0a0d10;
+  --fg: #e6edf3;
+  --fg-muted: #8b949e;
+  --amber: #f59e0b;
+  --fail: #c43030;
+  /* why: the boot orb mirrors the side panel's thinking spinner —
+     same five brand colors as sidepanel/styles.css :root. The orb is
+     deliberately the ONLY color on this screen: one rainbow accent on
+     monochrome is the peerd theme rule across surfaces. */
+  --cyan:    #00B7EB;
+  --red:     #EF4444;
+  --green:   #22C55E;
+  --magenta: #D946EF;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  width: 100vw;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ---- Boot console — shown until CheerpX is ready -------------------- */
+/* why: the loader IS a shell from the first frame — dmesg-style log
+   flowing top-left, the live stage as a prompt line with a block caret.
+   Monochrome phosphor + scanlines carry the look; the spinning orb is
+   the prompt glyph and the only color present. */
+
+.boot-card {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 14px 18px;
+  background-color: var(--bg);
+  /* faint phosphor bloom at the top of the tube */
+  background-image: radial-gradient(140% 90% at 50% 0%,
+    rgba(230, 237, 243, 0.03), transparent 55%);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  z-index: 10;
+}
+/* why: .boot-card sets display: flex above, which has the same
+   specificity as the UA's [hidden] { display: none } and wins by
+   source order -- meaning DOM.bootCard.hidden = true was a silent
+   no-op and the boot card stayed pinned over a working xterm. This
+   rule reinstates hidden-attribute semantics for this element. */
+.boot-card[hidden] { display: none; }
+
+/* CRT pass: scanlines + edge vignette. Pointer-events off so the (rare)
+   text selection during boot still works. */
+.boot-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg,
+    rgba(255, 255, 255, 0.028) 0 1px, transparent 1px 3px);
+  box-shadow: inset 0 0 140px rgba(0, 0, 0, 0.55);
+}
+
+.boot-banner {
+  color: var(--fg-muted);
+  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+  text-shadow: 0 0 6px rgba(230, 237, 243, 0.12);
+}
+
+/* The wordmark letters come from /shared/brand.css (one source of truth
+   for the letter→color mapping across all three engine tabs); only the
+   CRT glow is local — it belongs to this page's phosphor look, not to
+   the brand itself. */
+.boot-banner .peerd-brand span {
+  text-shadow: 0 0 8px color-mix(in srgb, currentColor 45%, transparent);
+}
+
+.boot-log {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--fg-muted);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  /* long image URLs / vm ids wrap mid-token like a real console */
+  word-break: break-all;
+  text-shadow: 0 0 6px rgba(230, 237, 243, 0.12);
+}
+
+.boot-log:empty { display: none; }
+
+/* The stage line, rendered as the active prompt. */
+.boot-prompt {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--fg);
+  text-shadow: 0 0 7px rgba(230, 237, 243, 0.18);
+}
+
+.boot-prompt h2 {
+  display: inline;
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  /* shell case, even though the JS strings stay human-cased */
+  text-transform: lowercase;
+}
+
+#boot-detail { color: var(--fg-muted); }
+#boot-detail:not(:empty)::before { content: ' — '; }
+
+/* The peerd beachball — mirrors .peerd-spinner in sidepanel/styles.css
+   (the chat "thinking" spinner): one conic sweep melding the five brand
+   colors, soft hub highlight, whole disc spinning. Here it sits inline
+   as the prompt glyph.
+   why: stops are hue-ordered and interpolated in HSL so neighbours blend
+   through the in-between hues like the old glassy Mac beachball — default
+   sRGB interpolation would cut gray through the wheel's complements. */
+.boot-spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  margin-right: 9px;
+  vertical-align: -3px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle,
+      rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.2) 25%,
+      transparent 55%),
+    conic-gradient(in hsl, var(--red), var(--amber), var(--green),
+      var(--cyan), var(--magenta), var(--red));
+  /* why 0.85s: brand-wide spinner cadence — 15% faster than the original
+     1s feels alive without strobing; keep all peerd spinners in step. */
+  animation: spin 0.85s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Block caret blinking at the end of the prompt, like the shell it is
+   about to become. steps(1) = hard on/off, no fade. */
+.boot-caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 7px;
+  vertical-align: -2px;
+  background: var(--fg);
+  animation: caret-blink 1.1s steps(1) infinite;
+}
+@keyframes caret-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-spinner { animation: none; }
+  .boot-caret { animation: none; }
+}
+
+.boot-card.is-failed .boot-spinner {
+  background: none;
+  border: 2px solid color-mix(in srgb, var(--fail) 50%, transparent);
+  border-top-color: var(--fail);
+  animation: none;
+}
+/* a dead shell has no live cursor */
+.boot-card.is-failed .boot-caret { animation: none; opacity: 0; }
+
+/* ---- Terminal mount — fills the viewport ---------------------------- */
+
+#vm-terminal {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+}
+
+/* Same CRT pass as the boot console — boot→shell is one tube. xterm
+   paints to canvas, so this is an overlay (text-shadow can't reach
+   canvas glyphs); pointer-events:none keeps selection + clicks live. */
+#vm-terminal::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: repeating-linear-gradient(0deg,
+    rgba(255, 255, 255, 0.028) 0 1px, transparent 1px 3px);
+  box-shadow: inset 0 0 140px rgba(0, 0, 0, 0.55);
+}
+
+#vm-terminal .xterm {
+  height: 100%;
+  width: 100%;
+  padding: 6px 10px;
+}
+
+/* ---- Floating export (top-right) ------------------------------------ */
+/* Monochrome ghost over the terminal (the boot orb keeps the page's one
+   color); faint until hovered so it never competes with the shell. */
+#export-btn {
+  position: fixed;
+  top: 6px;
+  right: 8px;
+  z-index: 2;                 /* above the CRT overlay (z-index 1) */
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid rgba(139, 148, 158, 0.35);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+#export-btn:hover { opacity: 1; color: var(--fg); border-color: var(--fg-muted); }
+#export-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+#export-btn[hidden] { display: none; }

@@ -1,0 +1,18 @@
+{
+  "name": "peerd preview",
+  "description": "Browser-native AI agent harness with the decentralized web (dweb) preview enabled — local-first, BYOK, sovereign by construction. The dweb protocol is research-grade and may change.",
+  "update_url": "https://peerd.ai/updates/chrome-preview.xml",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "peerd-preview@peerd.ai",
+      "strict_min_version": "121.0",
+      "update_url": "https://peerd.ai/updates/firefox-preview.json"
+    }
+  },
+  "action": {
+    "default_title": "peerd preview"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: wss://disks.webvm.io wss://bootstrap.peerd.ai http://localhost:11434"
+  }
+}

@@ -1,0 +1,38 @@
+webextension-polyfill — vendored
+=================================
+
+Upstream:   https://github.com/mozilla/webextension-polyfill
+Version:    0.12.0
+Source URL: https://unpkg.com/webextension-polyfill@0.12.0/dist/browser-polyfill.js
+Reviewed:   2026-06-04
+License:    MPL-2.0
+
+Upstream SHA-256:
+  cfc53c3525587467c783ef1c6fdefbaf1d60ed197ea2fe0d45899b18069cf496
+
+Vendored SHA-256 (browser-polyfill.js as committed):
+  d42e49ea624d66450a3d7cacba5b2478e1f20551285e7656d4c8a01b0ab5dea8
+
+Modification
+------------
+A small ESM adapter is appended after the upstream UMD bytes. The IIFE
+sets `globalThis.browser` in non-AMD/CommonJS environments; the appendix
+re-exports it as the module default so feature code can write:
+
+  import browser from '../vendor/browser-polyfill.js';
+
+The upstream bytes above the appendix are byte-identical to the release.
+
+Why the polyfill (and not raw chrome.*)
+---------------------------------------
+Firefox MV3 ships `browser.*` (promise-based) natively but `chrome.*` only
+in callback form. Chrome ships `chrome.*` in both callback and (for many
+APIs) promise form. The polyfill gives us one promise-based surface across
+both. We pay 30KB in code size for ~zero per-call ceremony in feature code.
+
+Update procedure
+----------------
+1. Curl new file from the upstream release URL above.
+2. Compare diff against upstream-recorded SHA; verify what changed.
+3. Re-append the ESM adapter (`export default globalThis.browser;`).
+4. Record the new SHA-256s and date here.

@@ -1,0 +1,43 @@
+onnxruntime-web — vendored (voice)
+==================================
+
+Upstream:   https://www.npmjs.com/package/onnxruntime-web
+Version:    1.22.0  (pinned to match what @moonshine-ai/moonshine-js@0.1.29
+            fetches — Settings.BASE_ASSET_PATH.ONNX_RUNTIME)
+License:    MIT
+Source URL: https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/
+
+Files
+-----
+  ort-wasm-simd-threaded.jsep.mjs    ORT wasm loader (ESM). Builds its
+                                     worker + .wasm URLs from import.meta.url.
+  ort-wasm-simd-threaded.jsep.wasm   the wasm backend (SIMD + threads + JSEP
+                                     WebGPU). ~21MB.
+  SHA256SUMS                         checksums of the above (tamper floor).
+
+Why these ship in-package
+-------------------------
+Moonshine bundles the ORT *JS* but fetches the wasm-side loader + binary
+at runtime from jsdelivr. Under the MV3 extension_pages CSP
+(script-src 'self' 'wasm-unsafe-eval'), ORT cannot import()/new Worker()
+a CROSS-ORIGIN script, so it fetches the source and re-wraps it as a
+blob: — which the same CSP then blocks (no blob: in script-src, and
+Chrome refuses to let extension_pages add one). The wasm backend never
+loads and voice dies ("not supported").
+
+Serving ORT SAME-ORIGIN from the package fixes it: the loader resolves
+its worker + wasm from import.meta.url, so with a same-origin base every
+import()/new Worker()/new URL(...wasm) is same-origin — allowed by
+'self', no blob, no network. peerd points Moonshine here via
+Settings.BASE_ASSET_PATH.ONNX_RUNTIME in
+peerd-runtime/voice/transcriber.js (init). crossOriginIsolated is true
+(manifest COEP require-corp + COOP same-origin), so ORT threads with
+same-origin pthread workers; proxy defaults false.
+
+Update procedure
+----------------
+Bump only in lockstep with the ORT version Moonshine references (grep
+the moonshine bundle for `onnxruntime-web@`). Re-download the jsep
+.mjs + .wasm pair for that version, refresh SHA256SUMS, and smoke-test
+(load unpacked → enable voice → transcribe — needs a real mic, can't be
+verified headlessly).

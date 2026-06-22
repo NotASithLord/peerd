@@ -1,0 +1,633 @@
+<!doctype html>
+<!--
+  commons — the peerd dweb demo dwapp (NORTH-STAR §2).
+
+  One room behind one link: a global chat for everyone in the room, plus
+  GENUINELY PRIVATE one-to-one chats between any two participants — all
+  peer-to-peer through the dwapp bridge (peerd-distributed/apps/bridge.js).
+  This file runs SANDBOXED (opaque origin, no extension access, no storage):
+  everything it knows arrives over postMessage from the trusted app-tab
+  parent.
+
+  Two chats, two transports — the point of the demo:
+    - GLOBAL chat is the `feed` gossip topic: signed, room-wide flood,
+      retained so late joiners backfill. Everyone in the room sees it.
+    - PRIVATE chat is a DIRECT send (bridge `dm-send`, ch=3, PROTOCOL §6.1):
+      the message goes over ONLY the recipient's direct mesh link and is
+      never flooded or relayed. No third peer ever receives the bytes, and
+      the WebRTC link is DTLS-encrypted in transit — so an online 1:1 chat
+      is private at the ROUTING layer with no end-to-end seal. (E2E sealing
+      earns its keep only for store-and-forward to OFFLINE peers, §6.2 — a
+      deliberate next step; this demo is the both-online case.) The signed
+      envelope authenticates the sender, so `from` is unforgeable.
+
+  Consent: you send a chat REQUEST; the other side accepts or declines
+  before either of you can message. An unsolicited message from someone you
+  never asked is treated as a request (its content stays hidden until you
+  accept), and a decline cannot be overridden.
+
+  Ships as the preview seed app AND travels peer-to-peer like any signed
+  bundle.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>commons</title>
+<style>
+  /* peerd theme: monochrome surfaces, the five brand colours as the only
+     accents — here each participant wears one (cyan/red/amber/green/magenta,
+     the wordmark palette), plus the d-magenta dweb mark. */
+  :root {
+    color-scheme: dark;
+    --bg:#0d0d0d; --ink:#e8e8e8; --muted:#9a9a9a; --hair:#1f1f1f; --line:#262626;
+    --d-magenta:#c4319b; --fail:#b33;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif; }
+  button { font:inherit; color:var(--ink); background:#1c1c1c; border:1px solid #3a3a3a;
+           border-radius:5px; padding:5px 12px; cursor:pointer; }
+  button:hover { background:#262626; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.primary { background:var(--ink); color:#111; border-color:var(--ink); }
+  button.primary:hover { background:#fff; }
+  button.small { padding:1px 8px; font-size:12px; }
+  input, textarea { font:inherit; color:var(--ink); background:#161616; border:1px solid #333;
+                    border-radius:5px; padding:6px 9px; width:100%; }
+  textarea { resize:none; }
+  h1 { font-size:16px; font-weight:600; margin:0; letter-spacing:.02em; }
+  h1 .dot { color:var(--d-magenta); } /* the d-magenta dweb mark */
+  h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em;
+       color:#7d7d7d; margin:0; }
+  .muted { color:var(--muted); font-size:12px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size:12px; }
+
+  header { display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  header .spacer { flex:1; }
+
+  #join { max-width:430px; margin:7vh auto; padding:0 16px; display:flex; flex-direction:column; gap:11px; }
+  #join label { font-size:12px; color:var(--muted); display:block; margin-bottom:3px; }
+
+  /* two panes: channel rail + the active conversation */
+  #main { display:none; grid-template-columns:248px 1fr; height:calc(100vh - 49px); }
+  #main.active { display:grid; }
+  @media (max-width: 760px) { #main { grid-template-columns:1fr; height:auto; }
+    .side { max-height:42vh; } .conv { height:58vh; } }
+
+  /* --- left rail --- */
+  .side { display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--hair); }
+  .side .me { padding:11px 14px; border-bottom:1px solid var(--hair); display:flex; align-items:center; gap:8px; }
+  .side .me .nm { font-weight:600; }
+  .chans { flex:1; overflow-y:auto; padding:8px 8px 4px; }
+  .chans .grouphdr { padding:10px 7px 4px; }
+  .chan { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; cursor:pointer; }
+  .chan:hover { background:#171717; }
+  .chan.on { background:#202020; }
+  .ava { width:9px; height:9px; border-radius:50%; background:#5a5a5a; flex:none; }
+  .chan .txt { flex:1; min-width:0; }
+  .chan .ttl { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chan .sub { font-size:11px; color:#8a8a8a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chan .sub.alert { color:var(--d-magenta); }
+  .chan .badge { background:var(--d-magenta); color:#fff; font-size:10px; font-weight:600; min-width:17px;
+                 text-align:center; border-radius:9px; padding:1px 5px; flex:none; }
+  .rail-empty { padding:8px 9px; }
+
+  .hud { border-top:1px solid var(--hair); padding:9px 13px; display:flex; flex-direction:column; gap:3px; }
+  .hudrow { display:flex; gap:7px; align-items:center; font-size:12px; }
+  .dot-s { width:7px; height:7px; border-radius:50%; flex:none; background:#444; }
+  .dot-s.up { background:var(--ink); } .dot-s.down { background:var(--fail); }
+
+  /* --- right pane (conversation) --- */
+  .conv { display:flex; flex-direction:column; min-height:0; }
+  .conv-head { padding:11px 18px; border-bottom:1px solid var(--hair); display:flex; flex-direction:column; gap:1px; }
+  .conv-head .ttl { font-weight:600; }
+  .msgs { flex:1; overflow-y:auto; padding:14px 18px; display:flex; flex-direction:column; gap:11px; }
+  .msg .who { font-size:11px; color:#8a8a8a; margin-bottom:1px; }
+  .msg .body { white-space:pre-wrap; word-break:break-word; }
+  .msg.system { align-self:center; color:#7d7d7d; font-size:12px; text-align:center; }
+  .msgs .empty { margin:auto; color:#7d7d7d; text-align:center; max-width:300px; }
+
+  .foot { border-top:1px solid var(--hair); padding:12px 18px; }
+  .composer { display:flex; gap:8px; align-items:flex-end; }
+  .composer textarea { max-height:120px; }
+  .req { display:flex; flex-direction:column; gap:9px; }
+  .req .row { display:flex; gap:8px; }
+
+  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:#1c1c1c;
+           border:1px solid #3a3a3a; border-radius:6px; padding:8px 16px; display:none; z-index:9; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>commons<span class="dot">·</span></h1>
+  <span id="hdr-room" class="muted"></span>
+  <span class="spacer"></span>
+  <span id="hdr-me" class="muted mono"></span>
+  <button id="btn-leave" class="small" style="display:none">leave</button>
+</header>
+
+<section id="join">
+  <p class="muted">A shared space with a chat for everyone, plus genuinely
+  private one-to-one chats with anyone here, all peer-to-peer over the dweb. No
+  server holds any of it.</p>
+  <div><label>your name</label><input id="j-name" maxlength="40" placeholder="ada"></div>
+  <div><label>room</label><input id="j-room" maxlength="64" value="peerd-global" placeholder="peerd-global"></div>
+  <div class="hint muted">everyone on <code>peerd-global</code> is together. Pick any other name for a private room.</div>
+  <button id="btn-join" class="primary">enter</button>
+  <div class="muted" id="j-status"></div>
+</section>
+
+<main id="main">
+  <aside class="side">
+    <div class="me" id="me-row"></div>
+    <div class="chans" id="chans"></div>
+    <div class="hud">
+      <div class="hudrow"><span id="rv-dot" class="dot-s up"></span><span id="rv-label">dweb</span></div>
+      <div class="muted" id="hud-note"></div>
+    </div>
+  </aside>
+
+  <section class="conv">
+    <div class="conv-head" id="conv-head"></div>
+    <div class="msgs" id="msgs"></div>
+    <div class="foot" id="foot"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  // --- bridge client -------------------------------------------------------
+  let seq = 0;
+  const pending = new Map();
+  const listeners = new Map();
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (!m) return;
+    if (m.peerd === 'dweb:result') {
+      const p = pending.get(m.id);
+      if (p) { pending.delete(m.id); m.ok ? p.res(m.value) : p.rej(new Error(m.error)); }
+    } else if (m.peerd === 'dweb:event') {
+      (listeners.get(m.event) || []).forEach((cb) => cb(m.data));
+    }
+  });
+  const dweb = (op, args) => new Promise((res, rej) => {
+    const id = ++seq;
+    pending.set(id, { res, rej });
+    window.parent.postMessage({ peerd: 'dweb', id, op, args }, '*');
+  });
+  const on = (event, cb) => {
+    if (!listeners.has(event)) listeners.set(event, []);
+    listeners.get(event).push(cb);
+  };
+
+  // --- state ---------------------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  let me = null;             // my did
+  let roomId = null;
+  let myName = '';
+  const names = new Map();    // did -> display name
+  const present = new Map();  // did -> {}  (members currently in the room, via presence)
+  let active = 'global';      // current channel key: 'global' or a peer did
+
+  // One conversation per channel. status only meaningful for dm:
+  //   none | outgoing (we asked) | incoming (they asked) | open | declined
+  // `pending` holds messages received before we accept (so an unsolicited
+  // line's content stays hidden until consent).
+  const convos = new Map();
+  convos.set('global', { kind: 'global', messages: [], seen: new Set(), unread: 0, status: 'open' });
+  const getConvo = (key) => {
+    let c = convos.get(key);
+    if (!c) { c = { kind: 'dm', peer: key, messages: [], seen: new Set(), unread: 0, status: 'none', pending: [] }; convos.set(key, c); }
+    return c;
+  };
+
+  // The five brand colours (wordmark palette). Each participant is assigned
+  // one at random the first time we see them, stable for the session — the
+  // peerd identity accent. why random-in-client (not hashed): the owner
+  // wants the colour chosen locally, not derived/announced.
+  const BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
+  const colors = new Map();
+  const colorOf = (did) => {
+    if (!did) return 'var(--ink)';
+    if (!colors.has(did)) colors.set(did, BRAND[Math.floor(Math.random() * BRAND.length)]);
+    return colors.get(did);
+  };
+
+  const short = (did) => (did || '').slice(-7);
+  const nameOf = (did) => did === me ? (myName || 'me') : (names.get(did) || short(did));
+  const when = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Membership rides the base network's presence; the per-member ICE path isn't
+  // a room-level fact anymore (the connection is the shared base mesh), so a
+  // member is simply "here on the dweb".
+  const pathLabel = (did) => (present.has(did) ? 'on the dweb' : 'connecting…');
+  const toast = (msg) => {
+    const t = $('toast');
+    t.textContent = msg; t.style.display = 'block';
+    clearTimeout(toast._h); toast._h = setTimeout(() => { t.style.display = 'none'; }, 3200);
+  };
+
+  // --- messages ------------------------------------------------------------
+  const addMessage = (key, msg) => {
+    const c = getConvo(key);
+    if (msg.id) { if (c.seen.has(msg.id)) return; c.seen.add(msg.id); }
+    c.messages.push(msg);
+    c.messages.sort((a, b) => a.ts - b.ts || (String(a.id) < String(b.id) ? -1 : 1));
+    if (key !== active) c.unread += 1;
+    renderSidebar();
+    if (key === active) renderMessages();
+  };
+  const systemLine = (key, text) =>
+    addMessage(key, { id: null, from: null, ts: Date.now(), text, system: true });
+
+  // --- private chat: directed sends (bridge `dm-send`, ch=3) ---------------
+  // No `to` field and no topic: the send IS addressed to one peer, and an
+  // inbound `direct` event is, by construction, for us.
+  const sendDm = (to, payload) => dweb('dm-send', { to, data: payload });
+
+  const requestChat = (did) => {
+    const c = getConvo(did);
+    c.status = 'outgoing';
+    systemLine(did, `chat request sent to ${nameOf(did)} — waiting for them to accept.`);
+    sendDm(did, { kind: 'request', name: myName }).catch((e) => toast(reachMsg(did, e)));
+    renderActive(); renderSidebar();
+  };
+  const acceptChat = (did) => {
+    const c = getConvo(did);
+    c.status = 'open';
+    sendDm(did, { kind: 'accept' }).catch((e) => toast(reachMsg(did, e)));
+    if (c.pending?.length) { const buf = c.pending; c.pending = []; for (const p of buf) addMessage(did, p); }
+    systemLine(did, `you're now in a private chat with ${nameOf(did)}.`);
+    renderActive(); renderSidebar();
+  };
+  const declineChat = (did) => {
+    const c = getConvo(did);
+    c.status = 'declined'; c.pending = [];
+    sendDm(did, { kind: 'decline' }).catch(() => {});
+    renderActive(); renderSidebar();
+  };
+
+  const reachMsg = (did, e) =>
+    /no direct link/.test(e?.message || '') ? `can't reach ${nameOf(did)} directly — they may have left` : e.message;
+
+  // An inbound direct message. `from` is authenticated by the signed
+  // envelope (the bridge surfaces only verified directs).
+  const handleDirect = (m) => {
+    const from = m.from;
+    const d = m.data || {};
+    if (typeof d.name === 'string' && d.name) names.set(from, d.name);
+    const c = getConvo(from);
+    const wasActive = from === active;
+
+    if (d.kind === 'request') {
+      if (c.status === 'open') return;
+      if (c.status === 'outgoing') {            // mutual invite → open both sides
+        c.status = 'open';
+        systemLine(from, `you're now in a private chat with ${nameOf(from)}.`);
+        sendDm(from, { kind: 'accept' }).catch(() => {});
+      } else {
+        c.status = 'incoming';
+      }
+    } else if (d.kind === 'accept') {
+      if (c.status !== 'open') { c.status = 'open'; systemLine(from, `${nameOf(from)} accepted — say hi.`); }
+    } else if (d.kind === 'decline') {
+      c.status = 'declined'; c.pending = [];
+      systemLine(from, `${nameOf(from)} declined the chat request.`);
+    } else if (d.kind === 'msg') {
+      const line = { id: m.id, from, ts: m.ts, text: String(d.text ?? '') };
+      if (c.status === 'open' || c.status === 'outgoing') {
+        if (c.status === 'outgoing') c.status = 'open'; // they answered by messaging
+        addMessage(from, line);                          // renders sidebar + (if active) messages
+        if (wasActive) renderFoot();                     // foot may need to flip to the composer
+        return;
+      }
+      if (c.status === 'declined') return;               // a decline cannot be overridden
+      c.status = 'incoming';                             // a message from someone who never asked = a request
+      (c.pending ??= []).push(line);                     // hide its content until we accept
+    }
+    renderSidebar();
+    if (wasActive) renderActive();
+  };
+
+  // --- sending (the one shared composer) -----------------------------------
+  const sendActive = async (text) => {
+    if (active === 'global') {
+      try {
+        const r = await dweb('publish', { topic: 'feed', data: { text }, retain: true });
+        addMessage('global', { id: r.id, from: me, ts: r.ts, text });
+      } catch (e) { toast(e.message); }
+      return;
+    }
+    const c = getConvo(active);
+    if (c.status !== 'open') return;
+    try {
+      const r = await sendDm(active, { kind: 'msg', text });
+      addMessage(active, { id: r.id, from: me, ts: r.ts, text });
+    } catch (e) { toast(reachMsg(active, e)); }
+  };
+
+  // A single persistent composer node — never rebuilt on incoming messages,
+  // so a half-typed line survives the redraws.
+  const composer = (() => {
+    const wrap = document.createElement('div');
+    wrap.className = 'composer';
+    const ta = document.createElement('textarea');
+    ta.rows = 1;
+    const btn = document.createElement('button');
+    btn.className = 'primary'; btn.textContent = 'send';
+    wrap.append(ta, btn);
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(120, ta.scrollHeight) + 'px'; };
+    const fire = async () => {
+      const text = ta.value.trim();
+      if (!text) return;
+      ta.value = ''; grow();
+      await sendActive(text);
+    };
+    btn.addEventListener('click', fire);
+    ta.addEventListener('input', grow);
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); fire(); }
+    });
+    return { wrap, ta, focus: () => ta.focus(), setPlaceholder: (p) => { ta.placeholder = p; } };
+  })();
+
+  // --- rendering: left rail ------------------------------------------------
+  const chanRow = (key, title, sub, { unread = 0, color = '#5a5a5a', online = true, alert = false } = {}) => {
+    const row = document.createElement('div');
+    row.className = 'chan' + (key === active ? ' on' : '');
+    const ava = document.createElement('span');
+    ava.className = 'ava';
+    ava.style.background = color; ava.style.opacity = online ? '1' : '0.3';
+    const txt = document.createElement('div'); txt.className = 'txt';
+    const ttl = document.createElement('div'); ttl.className = 'ttl'; ttl.textContent = title;
+    const sb = document.createElement('div'); sb.className = 'sub' + (alert ? ' alert' : ''); sb.textContent = sub;
+    txt.append(ttl, sb);
+    row.append(ava, txt);
+    if (unread) {
+      const b = document.createElement('span'); b.className = 'badge'; b.textContent = unread > 9 ? '9+' : String(unread);
+      row.appendChild(b);
+    }
+    row.addEventListener('click', () => selectChannel(key));
+    return row;
+  };
+
+  const renderMe = () => {
+    const root = $('me-row'); root.textContent = '';
+    const ava = document.createElement('span'); ava.className = 'ava'; ava.style.background = colorOf(me);
+    const wrap = document.createElement('div'); wrap.className = 'txt';
+    const nm = document.createElement('div'); nm.className = 'nm';
+    nm.append(Object.assign(document.createElement('span'), { textContent: (myName || 'me') + ' ' }),
+              Object.assign(document.createElement('span'), { className: 'muted', textContent: '(you)' }));
+    const id = document.createElement('div'); id.className = 'muted mono'; id.textContent = short(me);
+    wrap.append(nm, id);
+    root.append(ava, wrap);
+  };
+
+  const dmSub = (c, did) => {
+    if (c?.status === 'incoming') return 'wants to chat';
+    if (c?.status === 'outgoing') return 'invited — waiting';
+    if (c?.status === 'open') return 'private chat';
+    if (c?.status === 'declined') return 'declined';
+    return present.has(did) ? pathLabel(did) : 'offline';
+  };
+
+  const renderSidebar = () => {
+    renderMe();
+    const root = $('chans'); root.textContent = '';
+    const g = convos.get('global');
+    root.appendChild(chanRow('global', '✦  everyone', 'the whole room',
+      { unread: active === 'global' ? 0 : g.unread, color: 'var(--ink)' }));
+
+    const hdr = document.createElement('div'); hdr.className = 'grouphdr';
+    hdr.appendChild(Object.assign(document.createElement('h2'), { textContent: 'here now' }));
+    root.appendChild(hdr);
+
+    // Union of who's present and who we have a thread with (so an open chat
+    // doesn't vanish the instant someone briefly drops).
+    const dids = new Set([...present.keys()]);
+    for (const k of convos.keys()) if (k !== 'global') dids.add(k);
+    dids.delete(me);
+
+    if (!dids.size) {
+      const p = document.createElement('p'); p.className = 'muted rail-empty'; p.textContent = 'just you so far.';
+      root.appendChild(p);
+      return;
+    }
+    for (const did of dids) {
+      const c = convos.get(did);
+      root.appendChild(chanRow(did, nameOf(did), dmSub(c, did), {
+        unread: active === did ? 0 : (c?.unread ?? 0),
+        color: colorOf(did),
+        online: present.has(did),
+        alert: c?.status === 'incoming',
+      }));
+    }
+  };
+
+  // --- rendering: conversation ---------------------------------------------
+  const renderHead = () => {
+    const head = $('conv-head'); head.textContent = '';
+    const ttl = document.createElement('div'); ttl.className = 'ttl';
+    const sub = document.createElement('div'); sub.className = 'muted';
+    if (active === 'global') {
+      ttl.textContent = 'everyone';
+      sub.textContent = `${present.size + 1} here · room ${roomId}`;
+    } else {
+      ttl.textContent = nameOf(active); ttl.style.color = colorOf(active);
+      const where = present.has(active) ? pathLabel(active) : 'offline';
+      sub.textContent = `direct · only ${nameOf(active)} receives this · ${where}`;
+    }
+    head.append(ttl, sub);
+  };
+
+  const renderMessages = () => {
+    const root = $('msgs'); root.textContent = '';
+    const c = getConvo(active);
+    if (!c.messages.length) {
+      const e = document.createElement('div'); e.className = 'empty';
+      e.textContent = active === 'global'
+        ? 'No messages yet. Say something to everyone in the room.'
+        : c.status === 'open' ? `This is the start of your private chat with ${nameOf(active)}. Only the two of you can read it.`
+        : `No messages yet with ${nameOf(active)}.`;
+      root.appendChild(e);
+      return;
+    }
+    for (const msg of c.messages) {
+      const el = document.createElement('div');
+      if (msg.system) {
+        el.className = 'msg system'; el.textContent = msg.text;
+        root.appendChild(el); continue;
+      }
+      el.className = 'msg';
+      const who = document.createElement('div'); who.className = 'who';
+      who.textContent = `${nameOf(msg.from)} · ${when(msg.ts)}`;
+      who.style.color = colorOf(msg.from);
+      const body = document.createElement('div'); body.className = 'body'; body.textContent = msg.text;
+      el.append(who, body);
+      root.appendChild(el);
+    }
+    root.scrollTop = root.scrollHeight;
+  };
+
+  const renderFoot = () => {
+    const foot = $('foot'); foot.textContent = '';
+    const c = getConvo(active);
+
+    if (active === 'global' || c.status === 'open') {
+      composer.setPlaceholder(active === 'global' ? 'message everyone' : `message ${nameOf(active)} privately`);
+      foot.appendChild(composer.wrap);
+      return;
+    }
+    const box = document.createElement('div'); box.className = 'req';
+    if (c.status === 'incoming') {
+      box.appendChild(Object.assign(document.createElement('div'),
+        { textContent: `${nameOf(active)} wants to start a private chat.` }));
+      const row = document.createElement('div'); row.className = 'row';
+      const acc = document.createElement('button'); acc.className = 'primary'; acc.textContent = 'accept';
+      acc.addEventListener('click', () => acceptChat(active));
+      const dec = document.createElement('button'); dec.textContent = 'decline';
+      dec.addEventListener('click', () => declineChat(active));
+      row.append(acc, dec); box.appendChild(row);
+    } else if (c.status === 'outgoing') {
+      box.appendChild(Object.assign(document.createElement('div'),
+        { className: 'muted', textContent: `Chat request sent — waiting for ${nameOf(active)} to accept.` }));
+    } else if (c.status === 'declined') {
+      box.appendChild(Object.assign(document.createElement('div'),
+        { className: 'muted', textContent: `${nameOf(active)} declined. You can ask again.` }));
+      const btn = document.createElement('button'); btn.textContent = 'send chat request';
+      btn.disabled = !present.has(active);
+      btn.addEventListener('click', () => requestChat(active));
+      box.appendChild(btn);
+    } else { // none
+      box.appendChild(Object.assign(document.createElement('div'),
+        { textContent: `Start a private chat with ${nameOf(active)}.` }));
+      box.appendChild(Object.assign(document.createElement('div'),
+        { className: 'muted', textContent: 'Sent directly to them, peer-to-peer — nobody else in the room sees it. They accept before either of you can message.' }));
+      const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = 'send chat request';
+      btn.disabled = !present.has(active);
+      btn.addEventListener('click', () => requestChat(active));
+      box.appendChild(btn);
+    }
+    foot.appendChild(box);
+  };
+
+  // Full redraw of the right pane (head + messages + foot). Only called for
+  // the ACTIVE channel — a background DM never yanks the pane you're reading.
+  const renderActive = () => { renderHead(); renderMessages(); renderFoot(); };
+
+  const selectChannel = (key) => {
+    active = key;
+    getConvo(key).unread = 0;
+    renderSidebar();
+    renderActive();
+    const c = getConvo(key);
+    if (key === 'global' || c.status === 'open') composer.focus();
+  };
+
+  // --- connection HUD ------------------------------------------------------
+  // No rendezvous/bootstrap status: connectivity is the always-on base network,
+  // under the covers. The HUD just reflects that you're on the dweb + who's here.
+  const renderHud = () => {
+    $('rv-dot').className = 'dot-s up';
+    const here = present.size + 1;
+    $('rv-label').textContent = `on the dweb · ${here} here`;
+    $('hud-note').textContent = 'peer-to-peer over the base network, no server holds the room';
+  };
+
+  const refreshStatus = async () => {
+    if (!roomId) return;
+    try {
+      const here = await dweb('presence');     // the room's members (over the base mesh)
+      present.clear();
+      for (const e of (here ?? [])) {
+        if (e?.meta?.name && e.did) names.set(e.did, e.meta.name);
+        if (e?.did && e.did !== me) present.set(e.did, {});
+      }
+      renderSidebar();
+      if (active !== 'global') renderHead();
+      renderHud();
+    } catch { /* parent gone */ }
+  };
+
+  // --- join + lifecycle ----------------------------------------------------
+  const enterRoom = async (result) => {
+    me = result.did ?? result.joined?.did ?? null;
+    $('hdr-room').textContent = `room ${roomId}`;
+    $('hdr-me').textContent = short(me);
+    $('btn-leave').style.display = '';
+    $('join').style.display = 'none';
+    $('main').classList.add('active');
+
+    await dweb('retain', { topic: 'feed' });      // global chat backfills late joiners
+    await dweb('subscribe', { topic: 'feed' });
+    await dweb('announce', { meta: { name: myName } }).catch(() => {});
+
+    for (const p of (await dweb('history', { topic: 'feed' })))
+      addMessage('global', { id: p.id, from: p.from, ts: p.ts, text: String(p.data?.text ?? '') });
+    try {
+      for (const e of (await dweb('presence'))) {
+        if (e?.meta?.name && e.did) names.set(e.did, e.meta.name);
+        if (e?.did && e.did !== me) present.set(e.did, {});
+      }
+    } catch { /* presence shape optional */ }
+
+    selectChannel('global');
+    refreshStatus();
+    setInterval(refreshStatus, 2500);
+  };
+
+  $('btn-join').addEventListener('click', async () => {
+    myName = $('j-name').value.trim();
+    roomId = ($('j-room').value.trim() || 'peerd-global').slice(0, 64);
+    $('j-status').textContent = 'connecting…';
+    try {
+      // No signaler: the room is a sub-protocol on the always-on base network.
+      const r = await dweb('join', { roomId, name: myName });
+      await enterRoom(r);
+    } catch (e) {
+      $('j-status').textContent = e.message;
+    }
+  });
+
+  // why await leave first: the room lives on the base network in the offscreen
+  // doc, not this iframe — reloading the iframe alone would leave us joined and
+  // visibly present to everyone. `leave` tears presence down cleanly.
+  $('btn-leave').addEventListener('click', async () => {
+    try { await dweb('leave'); } catch { /* already gone */ }
+    location.reload();
+  });
+
+  // --- events --------------------------------------------------------------
+  on('message', (m) => { if (m.topic === 'feed') addMessage('global', { id: m.id, from: m.from, ts: m.ts, text: String(m.data?.text ?? '') }); });
+  on('direct', (m) => handleDirect(m));
+  on('presence-join', ({ did, meta }) => {
+    if (meta?.name) names.set(did, meta.name);
+    if (did && did !== me && !present.has(did)) present.set(did, {});
+    renderSidebar();
+    if (active !== 'global') renderHead();
+    renderHud();
+  });
+  on('presence-leave', ({ did }) => { present.delete(did); renderSidebar(); if (active !== 'global') renderHead(); renderHud(); });
+
+  // --- boot ----------------------------------------------------------------
+  (async () => {
+    try {
+      const h = await Promise.race([
+        dweb('hello'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('no dweb bridge')), 2500)),
+      ]);
+      // Default to the global commons; a launch param or the user can override.
+      $('j-room').value = h.launch?.room || $('j-room').value || 'peerd-global';
+    } catch {
+      $('join').innerHTML = '<p class="muted">the dweb bridge is not available here — '
+        + 'commons needs a peerd preview build with the dweb enabled.</p>';
+    }
+  })();
+})();
+</script>
+</body>
+</html>

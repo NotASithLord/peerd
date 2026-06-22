@@ -1,0 +1,259 @@
+/* js-tab — page chrome only. The editor + file tree + CodeMirror
+   styles live in peerd-engine/editor.js (injected at createEditor
+   time via a <style> tag) so any tab that mounts the editor module
+   gets them automatically. */
+
+:root {
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-editor: #11161d;
+  --fg: #e6edf3;
+  --fg-muted: #9ba3ad;
+  --border: #30363d;
+  --accent: #34d399;          /* the editor reads this via var(--accent) */
+  --green: #34d399;
+  --ok: #22c55e;
+  --fail: #c43030;
+  --warn: #f59e0b;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  height: 100vh; width: 100vw;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ---- Boot card -- shown until OPFS init finishes -------------------- */
+
+.boot-card {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 40px;
+  text-align: center;
+  font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  z-index: 10;
+}
+.boot-card[hidden] { display: none; }
+.boot-card h2 { margin: 0 0 6px; font-size: 16px; font-weight: 500; }
+.boot-card .muted { color: var(--fg-muted); font-size: 12px; margin: 0; max-width: 360px; }
+
+.boot-spinner {
+  width: 28px; height: 28px;
+  border: 2px solid color-mix(in srgb, var(--green) 25%, transparent);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  margin-bottom: 16px;
+  animation: spin 0.68s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.boot-card.is-failed .boot-spinner {
+  border-color: color-mix(in srgb, var(--fail) 50%, transparent);
+  border-top-color: var(--fail);
+  animation: none;
+}
+
+/* ---- Notebook app layout --------------------------------------------- */
+
+#notebook-app {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column;
+}
+#notebook-app[hidden] { display: none; }
+
+/* ---- Toolbar -------------------------------------------------------- */
+
+#notebook-toolbar {
+  flex: 0 0 auto;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.js-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  border-radius: 4px;
+  background: var(--green);
+  color: #0d1117;
+  font-weight: 700;
+  font-size: 10px;
+}
+
+.notebook-id-chip {
+  color: var(--fg-muted);
+  font-size: 10px;
+  opacity: 0.7;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.spacer { flex: 1 1 auto; }
+
+.run-hint {
+  color: var(--fg-muted);
+  font-size: 10px;
+  opacity: 0.7;
+  transition: opacity 200ms ease;
+}
+.run-hint.is-dirty { color: var(--warn); opacity: 1; }
+
+/* Monochrome ghost button — the green Run button is this toolbar's one
+   accent; export stays grayscale (brand color rule). */
+.export-btn {
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.export-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+.export-btn:active { transform: translateY(1px); }
+.export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.run-btn {
+  background: var(--green); color: #0d1117;
+  border: 0;
+  font: inherit;
+  font-size: 11px; font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.run-btn:hover { background: color-mix(in srgb, var(--green) 80%, white); }
+.run-btn:active { transform: translateY(1px); }
+.run-btn:disabled {
+  background: var(--bg); color: var(--fg-muted); cursor: not-allowed;
+}
+
+/* ---- Editor mount (peerd-engine/editor owns its internals) ---------- */
+/* flex-grow is the split ratio (default 6:4); notebook-tab.js's resizer
+   overrides flexGrow on both panes as you drag, persisted to localStorage. */
+
+#editor-mount {
+  flex: 6 1 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ---- Resizer (draggable editor/output boundary) --------------------- */
+
+#pane-resizer {
+  flex: 0 0 auto;
+  height: 7px;
+  cursor: row-resize;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  touch-action: none;       /* let pointermove drive the drag, not scroll */
+}
+#pane-resizer::after {       /* the grip */
+  content: '';
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px; height: 2px; border-radius: 2px;
+  background: var(--fg-muted); opacity: 0.4;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+#pane-resizer:hover::after,
+#pane-resizer.is-dragging::after { opacity: 1; background: var(--green); }
+#pane-resizer:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
+
+/* ---- Output pane ---------------------------------------------------- */
+
+#output-pane {
+  flex: 4 1 0;
+  min-height: 0;
+  background: var(--bg);
+  overflow: auto;
+  padding: 10px 14px;
+}
+#console-output {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-line {
+  display: block;
+  padding: 1px 0;
+  border-left: 2px solid transparent;
+  padding-left: 8px;
+  margin-left: -8px;
+}
+.log-line.log-info   { color: var(--fg); }
+.log-line.log-warn   { color: var(--warn); border-left-color: color-mix(in srgb, var(--warn) 60%, transparent); }
+.log-line.log-error  { color: var(--fail); border-left-color: color-mix(in srgb, var(--fail) 60%, transparent); }
+.log-line.log-eval   { color: var(--green); opacity: 0.85; }
+.log-line.log-return { color: var(--ok); }
+
+/* ---- Rich return-value output (tables / JSON) ----------------------- */
+/* why: a Notebook reads as a notebook when DATA renders as data. These nodes
+   are built from the returned value with textContent only (the output pane is
+   the privileged extension origin — never innerHTML agent strings here). */
+.nb-table {
+  border-collapse: collapse;
+  margin: 6px 0 10px;
+  font-size: 12px;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.nb-table th, .nb-table td {
+  border: 1px solid var(--border);
+  padding: 3px 9px;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  vertical-align: top;
+}
+.nb-table th {
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 600;
+}
+.nb-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg-elev) 45%, transparent); }
+.nb-table-note { color: var(--fg-muted); font-size: 10px; padding: 2px 0 8px; }
+.nb-json {
+  margin: 2px 0 8px;
+  color: var(--ok);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Charts (SVG built by output-render.js) ------------------------- */
+/* Monochrome frame; the data series carries the ONE green accent (brand rule).
+   Colors live here, never in agent-supplied strings. */
+.nb-chart { margin: 4px 0 12px; max-width: 560px; }
+.nb-chart-title { color: var(--fg); font-size: 12px; font-weight: 600; margin: 2px 0 4px; }
+.nb-chart-svg { width: 100%; height: auto; display: block; }
+.nb-chart-svg .nb-axis { stroke: var(--fg-muted); stroke-width: 1; }
+.nb-chart-svg .nb-grid { stroke: color-mix(in srgb, var(--border) 70%, transparent); stroke-width: 1; }
+.nb-chart-svg .nb-tick { fill: var(--fg-muted); font-size: 9px; font-family: var(--font-mono); }
+.nb-chart-svg .nb-series-fill { fill: var(--green); }
+.nb-chart-svg .nb-series-stroke { stroke: var(--green); stroke-width: 1.5; }
+
+/* dim separator between the wordmark and the js chip in the toolbar */
+#notebook-toolbar .brand-sep { color: var(--fg-muted); }

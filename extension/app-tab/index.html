@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd · App</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' rx='2' fill='%23a78bfa'/%3E%3Crect x='4' y='4' width='8' height='2' fill='%230d1117'/%3E%3Crect x='4' y='7' width='5' height='1' fill='%230d1117'/%3E%3Crect x='4' y='9' width='6' height='1' fill='%230d1117'/%3E%3C/svg%3E">
+  <!--
+    Trusted parent shell. Multi-file apps live in OPFS at
+    peerd-apps/<appId>/. This page reads + composes them into a
+    single HTML body and posts it to the sandboxed runner iframe.
+    A toggle in the corner swaps to edit mode (peerd-engine/editor).
+  -->
+  <link rel="stylesheet" href="/shared/brand.css">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-elev: #161b22;
+      --bg-editor: #11161d;
+      --fg: #e6edf3;
+      --fg-muted: #9ba3ad;
+      --border: #30363d;
+      --accent: #a78bfa;
+      --fail: #c43030;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100vh; width: 100vw; overflow: hidden; background: #fff; }
+    body.mode-edit { background: var(--bg); }
+
+    .frame-host { position: fixed; inset: 0; }
+    #app-frame {
+      width: 100%; height: 100%; border: 0; background: #fff; display: block;
+    }
+
+    /* Edit-mode panel — covers the iframe, full viewport. */
+    #editor-panel {
+      position: fixed; inset: 32px 0 0 0;
+      background: var(--bg);
+      display: flex; flex-direction: column;
+      z-index: 20;
+    }
+    #editor-panel[hidden] { display: none; }
+    #editor-mount { flex: 1 1 auto; display: flex; overflow: hidden; }
+
+    /* Toolbar visible only in edit mode (the toggle button persists). */
+    .edit-toolbar {
+      position: fixed; top: 0; left: 0; right: 0;
+      height: 32px;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      display: none; align-items: center; gap: 8px;
+      padding: 0 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--fg-muted);
+      z-index: 21;
+    }
+    body.mode-edit .edit-toolbar { display: flex; }
+    .edit-toolbar .app-dot {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 4px;
+      background: var(--accent); color: var(--bg);
+      font-weight: 700; font-size: 10px;
+    }
+
+    /* Floating mode toggle (+ export) in the top-right corner. */
+    #mode-toggle, #export-btn {
+      position: fixed; top: 6px; right: 8px;
+      z-index: 30;
+      background: var(--bg-elev);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      opacity: 0.8;
+    }
+    #mode-toggle:hover { opacity: 1; border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+    /* Export sits left of the toggle; monochrome on hover too (the
+       accent stays the toggle's). */
+    #export-btn { right: 88px; }
+    #export-btn:hover { opacity: 1; border-color: var(--fg-muted); }
+    #export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Boot overlay. */
+    .boot {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px;
+      background: var(--bg); color: var(--fg);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 13px;
+      z-index: 999;
+      transition: opacity 200ms ease-out;
+    }
+    .boot.is-hidden { opacity: 0; pointer-events: none; }
+    .boot.is-failed { background: #1a0e0e; }
+    .spinner {
+      width: 28px; height: 28px;
+      border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.68s linear infinite;
+    }
+    .boot.is-failed .spinner {
+      border-color: rgba(196, 48, 48, 0.5);
+      border-top-color: var(--fail);
+      animation: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .muted { color: var(--fg-muted); margin: 0; max-width: 360px; text-align: center; padding: 0 20px; }
+  </style>
+</head>
+<body class="mode-render">
+  <div class="boot" id="boot">
+    <div class="spinner"></div>
+    <p class="muted" id="boot-msg">Loading…</p>
+  </div>
+
+  <div class="frame-host">
+    <iframe id="app-frame" title="peerd app"></iframe>
+  </div>
+
+  <div class="edit-toolbar">
+    <span class="peerd-brand" aria-hidden="true"><span class="b-p">p</span><span class="b-e">e</span><span class="b-e2">e</span><span class="b-r">r</span><span class="b-d">d</span></span>
+    <span aria-hidden="true">·</span>
+    <span class="app-dot" aria-hidden="true">◇</span>
+    <span>app editor</span>
+  </div>
+
+  <div id="editor-panel" hidden>
+    <div id="editor-mount"></div>
+  </div>
+
+  <button id="export-btn" title="Download this app as a .peerd file">Export ⤓</button>
+  <button id="mode-toggle" title="Toggle render / edit">Edit ✎</button>
+
+  <script src="/app-tab/app-tab.js" type="module"></script>
+</body>
+</html>

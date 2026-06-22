@@ -1,0 +1,9 @@
+@huggingface/transformers@4.2.0  (universal self-contained build: transformers.js)
+onnxruntime-web@1.26.0-dev.20260416-b7804b056c           (WebGPU runtime: ort-wasm-simd-threaded.asyncify.{mjs,wasm})
+  for the local WebGPU runner (extension/offscreen/local-model.js).
+  from: https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0/dist + https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260416-b7804b056c/dist
+
+files + SHA-256:
+83ac4bdf2e9fa3c9fc02b9a39e4abee74efc45396e5f34e5da4d7ed20b8364cb  transformers.js
+5959c6733039619c9af710d8e1bae8d6e84402787990637be987c2b1bd6c5fa9  ort-wasm-simd-threaded.asyncify.mjs
+e0c0c6d3e73d43b8a249972f8358f845b08cc16fec3c80efafdf8bed40366786  ort-wasm-simd-threaded.asyncify.wasm

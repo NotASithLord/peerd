@@ -1,0 +1,44 @@
+xterm.js
+========
+
+In-browser terminal emulator. Used by the vm-tab page to render the
+WebVM's PTY as a real terminal (cursor positioning, ANSI colors,
+scrollback, copy-paste).
+
+Upstream
+--------
+Project:   https://xtermjs.org/
+Source:    https://github.com/xtermjs/xterm.js
+Package:   @xterm/xterm (formerly `xterm` on npm)
+CDN base:  https://cdn.jsdelivr.net/npm/
+
+Pinned versions
+---------------
+@xterm/xterm:      5.5.0
+@xterm/addon-fit:  0.10.0
+
+xterm.js sha256:      1f991ac3b4b283ebf96e60ae23a00a52765dd3a2e46fa6fdda9f1aab032f7495
+addon-fit.js sha256:  bdaefa370b1bfc42ee88d46fe6072400902a4d4b2d45cd93438dda9b23c97089
+
+Vendored files
+--------------
+  xterm.js       UMD bundle (~290 KB) — exposes Terminal on globalThis
+  xterm.css      stylesheet for the renderer's canvas + scrollbar
+  addon-fit.js   FitAddon — sizes the terminal to its container
+
+Loading model
+-------------
+The vm-tab page loads these as classic scripts in its index.html, so
+they attach Terminal/FitAddon to globalThis before the vm-tab.js ESM
+module runs.
+
+License
+-------
+MIT.
+
+Updating
+--------
+1. Bump XTERM_VERSION and/or ADDON_FIT_VERSION in scripts/vendor-xterm.sh
+2. Run scripts/vendor-xterm.sh from the repo root
+3. Update this file's version + sha lines
+4. Smoke test by opening a VM tab (chip → + Create new WebVM)

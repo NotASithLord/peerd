@@ -1,0 +1,61 @@
+pdf.js (pdfjs-dist) — vendored
+==============================
+Upstream:   https://github.com/mozilla/pdf.js
+Package:    https://www.npmjs.com/package/pdfjs-dist
+Version:    6.0.227
+Source URL: https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.0.227.tgz
+Reviewed:   2026-06-19
+License:    Apache-2.0 (see LICENSE in the upstream package)
+
+Why vendored
+------------
+peerd reads PDFs the agent encounters in a tab (the read_pdf runner tool,
+peerd-runtime/tools/defs/read-pdf.js). pdf.js is Mozilla's browser-native
+PDF engine; its text layer extraction is the DEFAULT, always-available
+reader (no download). Extraction runs in the OFFSCREEN document
+(offscreen/pdf-extract.js) — pdf.js needs a Worker, which a service worker
+cannot host. The heavier OCR path for scanned PDFs is a separate, opt-in
+runtime download (peerd-runtime/pdf/ocr-store.js), the Moonshine-voice
+pattern.
+
+Files committed (the npm `build/` minified ESM build)
+-----------------------------------------------------
+  pdf.min.mjs           — the main API (getDocument, getTextContent, …)
+  pdf.worker.min.mjs    — the parser worker; loaded via GlobalWorkerOptions
+                          .workerSrc as an extension URL ('self' under the
+                          offscreen CSP). Module worker (type:'module').
+
+We commit ONLY these two minified files (mirrors moonshine-js: the runtime
+JS is committed, large optional assets are not). The .map files, the
+unminified builds, pdf.sandbox.* (form-scripting; unused), the viewer, and
+the cmaps/standard_fonts asset dirs are intentionally omitted — text
+extraction needs none of them. CJK cmaps / non-embedded standard fonts are
+a known follow-up if a PDF needs them (getDocument cMapUrl/standardFontDataUrl).
+
+Subresource Integrity (SHA-384, as committed)
+---------------------------------------------
+  pdf.min.mjs         sha384-lBfr/FNW1mXKELYviKVk014iBHkr5qVisfo70s4UlFayazfihJ53HIsFh+haYlPV
+  pdf.worker.min.mjs  sha384-BINwIY89cgeAzLWGw817ZEBG52TiK/0x8q453MGZowyzHvxL/sYlC5V34FcZR8vy
+
+SHA-256 (as committed)
+----------------------
+  pdf.min.mjs         71ab6d3ace0b285cc1feaf88f943b84238bf875f7a005674ac448a78940913bd
+  pdf.worker.min.mjs  9e3b3b7da0760e8468f4b20490cceab481a96b700803a96c46b0bb00d2e3741e
+
+Upstream tarball SHA-256
+------------------------
+  pdfjs-dist-6.0.227.tgz  b627567486f3738b17794c3e0bf455849aa4770e7e326e2ee7b501392ffd32d6
+
+Modification: none. Files are the upstream build/ outputs verbatim.
+
+Update procedure
+----------------
+  1. Pick the target version V from https://registry.npmjs.org/pdfjs-dist
+  2. curl -sSL "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-V.tgz" -o pdfjs.tgz
+  3. tar -xzf pdfjs.tgz
+  4. cp package/build/pdf.min.mjs package/build/pdf.worker.min.mjs \
+       extension/vendor/pdfjs/
+  5. Recompute SHA-384/256 and paste them above:
+       openssl dgst -sha384 -binary FILE | openssl base64 -A
+  6. Update the Version / Source URL / tarball SHA lines.
+  7. Smoke-test read_pdf on a born-digital PDF and a scanned one.

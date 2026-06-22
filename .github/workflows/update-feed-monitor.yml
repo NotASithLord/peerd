@@ -1,0 +1,46 @@
+# Update-feed freshness monitor (spec §8). If peerd.ai serves a stale or
+# broken feed, preview installs silently stop updating — there is no
+# user-visible error anywhere. This daily probe fetches both live feeds
+# and fails (→ GitHub failure notification) when the version they
+# advertise doesn't match the latest GitHub Release tag.
+
+name: update-feed-monitor
+
+on:
+  schedule:
+    - cron: '17 9 * * *'   # daily; odd minute to dodge the cron stampede
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare live feeds against the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          LATEST_TAG="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ -z "$LATEST_TAG" ]; then
+            echo "no releases yet — nothing to monitor"
+            exit 0
+          fi
+          EXPECTED="${LATEST_TAG#v}"
+          echo "latest release: $EXPECTED"
+
+          CHROME_FEED="$(curl -fsSL --max-time 30 https://peerd.ai/updates/chrome-preview.xml)" \
+            || { echo '::error::chrome-preview.xml unreachable at peerd.ai/updates/'; exit 1; }
+          # Match the version attr ON the <updatecheck> element — a bare
+          # version=" grep grabs <?xml version="1.0"?> first and would
+          # report the feed stale forever.
+          CHROME_VER="$(printf '%s' "$CHROME_FEED" | grep -o '<updatecheck[^>]*version="[0-9.]*"' | grep -o 'version="[0-9.]*"' | tail -1 | cut -d'"' -f2)"
+          echo "chrome feed advertises: $CHROME_VER"
+
+          FIREFOX_VER="$(curl -fsSL --max-time 30 https://peerd.ai/updates/firefox-preview.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(list(d["addons"].values())[0]["updates"][-1]["version"])')" \
+            || { echo '::error::firefox-preview.json unreachable or malformed at peerd.ai/updates/'; exit 1; }
+          echo "firefox feed advertises: $FIREFOX_VER"
+
+          FAIL=0
+          [ "$CHROME_VER" = "$EXPECTED" ] || { echo "::error::chrome feed is stale ($CHROME_VER, expected $EXPECTED) — preview installs are not updating"; FAIL=1; }
+          [ "$FIREFOX_VER" = "$EXPECTED" ] || { echo "::error::firefox feed is stale ($FIREFOX_VER, expected $EXPECTED) — preview installs are not updating"; FAIL=1; }
+          exit $FAIL

@@ -1,0 +1,21 @@
+peerd brand fonts — vendored to match peerd.ai (JetBrains Mono + Geist Mono).
+
+These are static font assets (no runtime code). The site (site/index.html)
+loads the same families from Google Fonts; under the MV3 CSP the extension
+cannot pull remote fonts, so they are vendored here and served from the
+extension origin via shared/fonts.css.
+
+Both are variable woff2 (one file per family, full 100–900 weight axis),
+latin subset, fetched 2026-06-16:
+
+JetBrainsMono.woff2
+  JetBrains Mono — variable weight.
+  Source:   https://cdn.jsdelivr.net/fontsource/fonts/jetbrains-mono:vf@latest/latin-wght-normal.woff2
+  Upstream: https://github.com/JetBrains/JetBrainsMono
+  License:  SIL Open Font License 1.1
+
+GeistMono.woff2
+  Geist Mono — variable weight.
+  Source:   https://cdn.jsdelivr.net/fontsource/fonts/geist-mono:vf@latest/latin-wght-normal.woff2
+  Upstream: https://github.com/vercel/geist-font
+  License:  SIL Open Font License 1.1

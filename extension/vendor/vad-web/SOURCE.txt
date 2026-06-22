@@ -1,0 +1,34 @@
+@ricky0123/vad-web — vendored (voice)
+=====================================
+
+Upstream:   https://www.npmjs.com/package/@ricky0123/vad-web
+Version:    0.0.24  (pinned to match @moonshine-ai/moonshine-js@0.1.29 —
+            Settings.BASE_ASSET_PATH.SILERO_VAD)
+License:    MIT
+Source URL: https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.24/dist/
+
+Files
+-----
+  vad.worklet.bundle.min.js   the AudioWorklet processor (loaded via
+                              audioWorklet.addModule).
+  silero_vad_v5.onnx          Silero VAD model (current). DATA, not script.
+  silero_vad_legacy.onnx      the legacy model (kept — the bundle can ask
+                              for either depending on its config path).
+  SHA256SUMS                  checksums (tamper floor).
+
+Why these ship in-package
+-------------------------
+Moonshine's MicrophoneTranscriber uses this VAD for speech endpointing.
+Like ORT (see ../onnxruntime-web/SOURCE.txt), it defaults to fetching
+its worklet + model from jsdelivr — same MV3 CSP problem. Served
+same-origin from the package, the worklet and the model load under
+'self' (script-src / connect-src). The VAD shares peerd's vendored ORT
+(its onnxWASMBasePath is set to Settings.BASE_ASSET_PATH.ONNX_RUNTIME).
+peerd points Moonshine here via Settings.BASE_ASSET_PATH.SILERO_VAD in
+peerd-runtime/voice/transcriber.js (init).
+
+Update procedure
+----------------
+Bump only with the vad-web version Moonshine references (grep the
+moonshine bundle for `vad-web@`). Re-download the worklet + both silero
+.onnx models, refresh SHA256SUMS, smoke-test with a real mic.

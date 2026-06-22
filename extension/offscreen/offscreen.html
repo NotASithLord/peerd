@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>peerd offscreen</title>
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: wss:">
+</head>
+<body>
+  <!-- This page is never visible to the user. It hosts the SW keepalive
+       port, the WebVM (CheerpX) runtime, the DOM sanitizer (DOMParser
+       is not available in service workers), and the Moonshine voice
+       transcriber (needs WebGPU + WebAudio + getUserMedia, all
+       unavailable in the SW). -->
+  <script type="module" src="./offscreen.js"></script>
+</body>
+</html>

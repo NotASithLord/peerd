@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>peerd · eval</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; background: #0d1117; color: #e6edf3; margin: 0; padding: 18px; }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    p { color: #9ba3ad; margin: 0 0 12px; max-width: 70ch; }
+    button { font: inherit; padding: 7px 16px; background: #00B7EB; color: #001016; border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #21262d; color: #e6edf3; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .cfg { font: inherit; padding: 6px 9px; background: #15181A; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; min-width: 200px; }
+    #abresults { color: #e6edf3; }
+    #warn { color: #F59E0B; margin: 8px 0; min-height: 1em; }
+    #summary { margin: 12px 0; font-weight: 700; color: #22C55E; min-height: 1em; }
+    #delta { margin: 4px 0 12px; white-space: pre-wrap; color: #9ba3ad; font-weight: 600; min-height: 1em; }
+    #delta.regress { color: #F87171; }
+    #delta.ok { color: #22C55E; }
+    pre { background: #15181A; border: 1px solid #30363d; border-radius: 6px; padding: 12px; white-space: pre-wrap; word-break: break-word; max-height: 68vh; overflow: auto; margin: 8px 0 0; }
+  </style>
+</head>
+<body>
+  <h1>peerd · eval harness</h1>
+  <p>Runs the task suite against the live agent and scores the end state.
+     <strong>Unlock the vault in the side panel first</strong> (the loop needs the provider key),
+     and don't touch the side panel while a run is in flight — this page takes over the SW port.</p>
+  <div id="warn"></div>
+  <div class="controls">
+    <select id="suite" class="cfg" title="Simple = the fast 30-task suite. Robust = +25 check/get/do precision probes (longer).">
+      <option value="simple">Simple suite (30 tasks)</option>
+      <option value="robust">Robust suite (55 tasks)</option>
+    </select>
+    <button id="run">Run all tasks</button>
+    <button id="pin" class="secondary" disabled>Pin as baseline</button>
+    <button id="clearBaseline" class="secondary" disabled>Clear baseline</button>
+    <label style="color:#9ba3ad; display:inline-flex; align-items:center; gap:6px; margin-left:4px" title="Off (default): a hidden, minimized window. On: a visible window (its own tab bar) you can watch — never takes focus either way. Set before starting a run.">
+      <input type="checkbox" id="showtabs"> show eval tabs
+    </label>
+  </div>
+  <!-- Runner A/B (FEATURE-LOCAL-WEBGPU §3.1 M0 gate): run the WHOLE suite under
+       runner model A, then B, and score them head-to-head on the same tasks.
+       Each field is one of your configured models; the on-device model joins the
+       list BY NAME once it's downloaded (the button below). -->
+  <div class="controls" style="margin-top:10px">
+    <strong style="color:#9ba3ad">A/B runners:</strong>
+    <select id="cfgA" class="cfg" title="runner A — one of your configured models (or the local model, once downloaded)"></select>
+    <span style="color:#9ba3ad">vs</span>
+    <select id="cfgB" class="cfg" title="runner B — one of your configured models (or the local model, once downloaded)"></select>
+    <button id="ab" class="secondary">Run A/B</button>
+  </div>
+  <div class="controls" style="margin-top:6px">
+    <button id="dl" class="secondary">⬇ Download local model (Gemma 4 E2B)</button>
+    <progress id="dlbar" max="100" value="0" style="display:none; width:280px; height:14px; accent-color:#00B7EB"></progress>
+    <span id="dlstatus" style="color:#9ba3ad"></span>
+  </div>
+  <div id="summary"></div>
+  <div id="delta"></div>
+  <pre id="abresults" style="display:none"></pre>
+  <pre id="log"></pre>
+  <script type="module" src="./runner.js"></script>
+</body>
+</html>

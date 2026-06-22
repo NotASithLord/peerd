@@ -1,0 +1,35 @@
+/* The peerd wordmark in module colors, on the LETTERFORMS.
+ *
+ * Brand rule (CLAUDE.md, stylistic shorthand): one rainbow accent on
+ * monochrome — the wordmark and the spinning orb are the only color
+ * carriers. This is the engine-tab variant: terminal-adjacent surfaces
+ * (vm-tab, js-tab, app-tab) color the glyphs themselves; background
+ * BLOCKS belong to the side panel's .wordmark only.
+ *
+ * One source of truth for the letter→color mapping across every page
+ * that links this sheet. Markup:
+ *
+ *   <span class="peerd-brand" aria-hidden="true"><span class="b-p">p</span><span
+ *     class="b-e">e</span><span class="b-e2">e</span><span
+ *     class="b-r">r</span><span class="b-d">d</span></span>
+ *
+ * (aria-hidden because it's decorative branding — the tab <title>
+ * already says "peerd"; class names match the side panel's block ids.)
+ * Pages may override the five custom props; the fallbacks ARE the
+ * brand palette. */
+
+@import url('/shared/fonts.css');
+
+.peerd-brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.peerd-brand .b-p  { color: var(--cyan,    #00B7EB); }
+.peerd-brand .b-e  { color: var(--red,     #EF4444); }
+.peerd-brand .b-e2 { color: var(--amber,   #F59E0B); }
+.peerd-brand .b-r  { color: var(--green,   #22C55E); }
+.peerd-brand .b-d  { color: var(--magenta, #D946EF); }

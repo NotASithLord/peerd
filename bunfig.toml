@@ -1,0 +1,9 @@
+# Bun test runner config.
+#
+# Tests live under tests/ (NOT extension/tests — that's the in-browser
+# surface, a PEER of this one, not legacy: it covers DOM/chrome.*/IDB
+# integration and runs headless via scripts/cdp/run-inbrowser-tests.mjs).
+# Bun walks recursively for *.test.{ts,js}.
+
+[test]
+preload = ["./tests/setup.ts"]

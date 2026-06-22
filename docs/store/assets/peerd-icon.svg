@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+  <defs>
+    <style>@font-face{font-family:'Geist Mono';font-style:normal;font-weight:700;src:url(data:font/woff2;base64,d09GMgABAAAAAASkABQAAAAAChQAAAQ6AAGzMwAAAAAAAAAAAAAAAAAAAAAAAAAAGhQbIBwqP0hWQVIwP01WQVI8BmA/U1RBVIE4ADQvfhEICnCBBjCBPgE2AiQDCAsGAAQgBYhEByAMBxvMCFGUUM6PKL46sIPB+R2gWUIwX5rTkG7Ex4knfBRftDRB0dvM73m7utK9k3mFYACEiCjI/DFCjIgNCPpnIIvWdEKoI88GUAKxfYb9gq8WpR7+RrPvB0AJ5QXOd/nPWRj+LShh893nOWa8tQ4s/9ZUzJnWttbpKJpGPI0OO9zzCxwd2PHREeHB1/XbEXtfm8hJnpGV01crEBAAAJSPgSUhRd16HJ/I4gK8AQCIU0MtprryvMnkoEK/CyAAPFDn5i8GEFCZAAMAGIQA8GNIvBS4AKx6VAKQTQi9haCTKRhAUGJxzSjt5QOzfaMAfad/SU2gVwcYUQoAgAAAAEbciyP+ebxz93cS3E7aDgRgqu5HIKMEIfwYwGOBArNypkYxYPbHW7HqhCejnlZ6eeJYfvwRgKqZBghAQT8DAlC4esABDEZ7Yb4BAlC8IhCAkhsFEIDSENmTASN/tik7CKMamIEBHMDjIAm7ZIBLUGDRX8q82YcAulVmEJ5S7LJJkEB70fR8hKqBaSCvIPgZFCoM1YMiRaG9UKw4VIQSJWFGAaVKa5YyZeFkoFx5De9IBUJvUAkAA4ALGKAAmgEAFwAwyaGKw31lw0MfHy/bcfQom44csduP/ZsKm5E7jmvzMbv9yBE2HT068NC7A1r5aftxHdsPnNa/4frevU+qadzA2j3i2vyt/9DJ7gNmjh+vR7s36FK3MLJz5/zIrnUBQIAAiGFE4MwhmwyV6bWJH6DvJjohb+2xYydPXnt07dL1ve3l68Xb546fPHLkZSAdzLLnD3/krIuPtzK//Hxxi2sDFMsVatahLX/+eZtgk1gn6ePF5T+35k+caNS0SdNaDbIhL9qGsg3qNW5ap0GD8rPfBPNsuc01ODdvt24KWOu6Pmtt5Uq+l8/1SraULl3Cvsc/x/NPFH2hJl22IkAfN41UbDx+YqV2//sd5wbA1VHvjwSuFis/m8wrtvvKgRIMAIIf4TKjCP3VNxo3dYsZFTUhQa5iV+JP1TFb8VEAAHAQkGgECeSWAm8jITxvw1CRr+DQys9wKQR8xCpwS8jVQUoQ0CRU49c8eBItQ5DXXoTU6jDCrH5HRKpj7qhXVSrWSIhTikjIDCRVXgYphTVCmt8MQ0Zi45BVdauQU2PbkWfNByhI7StUFzAnzDXg17liweX5FdCpNIRpopEmmskYRiNjepLpQoQZJOAyyESE6SxCNK5AiKllFkI8ob6GGppJz90jgpapXLa2FWQBkcySoWdQ0wwuB2n5pdVXWPsTVRHuP6WKWHiBrgZaaqSRtka4Wzga2MYs01Tm58ux4X+TF7TqyM005tpC+Bi+N/6k0SuTawSxlR9UwDvKaGXEuZRRL3Uik+gi9khFhMcrbbo5l0Wy0sKsDaOMS2TtZKK1z1l4IrOM5LeyQ3gWnejOZeM5EgDwZpoAcSR+0Zs+cHcB) format('woff2');}</style>
+    <clipPath id="r"><rect width="96" height="96" rx="8" ry="8"/></clipPath>
+  </defs>
+  <g clip-path="url(#r)">
+    <rect y="0"    width="96" height="19.2" fill="#00BCE5"/>
+    <rect y="19.2" width="96" height="19.2" fill="#EF4444"/>
+    <rect y="38.4" width="96" height="19.2" fill="#F59E0B"/>
+    <rect y="57.6" width="96" height="19.2" fill="#22C55E"/>
+    <rect y="76.8" width="96" height="19.2" fill="#DB2777"/>
+  </g>
+  <text x="48" y="66" text-anchor="middle" fill="#FFFFFF" font-family="'Geist Mono'" font-size="100" font-weight="700" letter-spacing="-0.02">p</text>
+</svg>

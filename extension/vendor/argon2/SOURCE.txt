@@ -1,0 +1,81 @@
+argon2 (hash-wasm) — vendored
+==============================
+
+Upstream:   https://github.com/Daninet/hash-wasm
+Package:    hash-wasm (per-algorithm Argon2 bundle, dist/argon2.umd.min.js)
+License:    MIT
+
+Status
+------
+VENDORED — hash-wasm@4.12.0 (see VERSION). Pulled + SHA-verified by
+scripts/vendor-argon2.sh (EXPECTED_DIST_SHA256 is pinned there). The
+pinned hash was additionally cross-checked against the npm registry
+tarball (registry.npmjs.org/hash-wasm/-/hash-wasm-4.12.0.tgz →
+package/dist/argon2.umd.min.js) on 2026-06-12 — CDN and registry bytes
+are identical. Re-run that script to bump; do not pull "@latest".
+
+What's here
+-----------
+  - argon2.js          (the npm dist/argon2.umd.min.js verbatim, PLUS an
+                        appended ESM adapter: the upstream dist is
+                        UMD-only, and in ES-module scope its factory
+                        takes the globalThis branch — the append
+                        re-exports `argon2id` from the global it
+                        populated and adds the `VENDORED` sentinel.
+                        The appended lines are the only modification to
+                        the upstream bytes.)
+  - argon2.js.SHA256   (the UPSTREAM dist hash, pre-append — tamper floor)
+  - VERSION            (the pinned npm release the bytes came from)
+
+Why this implementation (and not antelle/argon2-browser)
+--------------------------------------------------------
+Both candidates are MIT. hash-wasm won on fit for the MV3 service
+worker:
+
+  - Single self-contained ~29 KB file: the Argon2 WASM binary (a small,
+    audited, hand-tuned C compile) is base64-embedded in the JS, so
+    there is no separate .wasm asset to locate/fetch — no
+    URL-resolution or instantiateStreaming path-sniffing to patch for
+    the SW context. antelle/argon2-browser's loader sniffs its
+    environment (document/process/importScripts) and resolves the
+    .wasm by URL, which needs patching to run cleanly as an extension
+    ES module.
+  - No DOM, no SharedArrayBuffer, no worker spawning: hash-wasm's
+    argon2id runs the lanes sequentially in-process. peerd uses
+    parallelism=1 anyway (single-lane, lean on memory), so the missing
+    thread pool costs nothing.
+  - Per-algorithm bundle: we vendor ONLY Argon2 (+ its internal
+    BLAKE2b dependency, which Argon2's H0/H' functions require), not
+    the whole multi-hash library.
+  - Actively maintained, widely used (~1M weekly downloads), with an
+    extensive test-vector suite (RFC 9106 vectors included upstream).
+
+Why vendored, not lazy-imported from CDN
+----------------------------------------
+MV3 CSP forbids remote script execution
+(script-src 'self' 'wasm-unsafe-eval'). The Argon2 implementation
+derives the vault's key-encryption key from the user's passphrase —
+the most security-sensitive code path in the extension — so it must be
+pinned, hash-verified bytes in the extension package, never a network
+fetch. `wasm-unsafe-eval` (already in the manifest CSP for CheerpX/
+Moonshine) is what allows WebAssembly.instantiate of the embedded
+binary inside the service worker.
+
+Where it's used
+---------------
+extension/peerd-egress/vault/argon2.js — the thin wrapper that adapts
+hash-wasm's option names to the vault's KDF descriptor shape
+({ memKiB, iters, parallelism, salt }). The vault core never imports
+this file directly; the wrapper is injected as the `argon2` dep by the
+service worker (functional core / imperative shell).
+
+Update procedure
+----------------
+1. Edit scripts/vendor-argon2.sh to bump HASH_WASM_VERSION.
+2. Pull the registry tarball for the new version, extract
+   package/dist/argon2.umd.min.js, shasum -a 256 it, and set
+   EXPECTED_DIST_SHA256 to that value (registry and CDN must agree).
+3. Run the script. It downloads, verifies, re-appends the ESM adapter,
+   and rewrites argon2.js.SHA256 + VERSION.
+4. Re-run the vault test suites (bun + in-browser) and update this
+   file's Status block with the new version + date.

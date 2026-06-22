@@ -1,0 +1,60 @@
+{
+  // One typecheck program, two jobs (run: bun run typecheck):
+  //
+  //   1. The Bun test suite (tests/**) and everything it imports —
+  //      checked STRICT. Bun strips types without checking, so this
+  //      gate is what makes the test annotations real.
+  //   2. The extension itself (extension/**/*.js) — a no-build vanilla
+  //      JS codebase adopting types incrementally. checkJs stays OFF at
+  //      the config level, so a file is only type-checked once it opts
+  //      in with a `// @ts-check` directive at the top. Unannotated
+  //      files are still parsed (their JSDoc typedefs feed the check as
+  //      drift detectors via allowJs) but their bodies are not checked.
+  //
+  // why opt-in (not global checkJs:true): the extension was never
+  // typechecked, so flipping checkJs on surfaces thousands of errors at
+  // once. The `// @ts-check` ratchet lets coverage grow file-by-file
+  // with a hard gate that can't regress (packaging/check-tscheck.ts
+  // enforces a floor on the number of checked files). No build step is
+  // touched — `// @ts-check` is a comment the browser ignores.
+  //
+  // Platform globals: `chrome` comes from @types/chrome; `browser`
+  // (the vendored webextension-polyfill) is typed by the sidecar
+  // extension/vendor/browser-polyfill.d.ts. Both are dev-only, type-only.
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": ["bun", "chrome"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    // Browser-style root-relative specifiers (`/shared/x.js`) used by
+    // extension modules; mirrors the resolver plugin in tests/setup.ts.
+    "paths": {
+      "/shared/*": ["./extension/shared/*"],
+      "/peerd-runtime/*": ["./extension/peerd-runtime/*"],
+      "/peerd-engine/*": ["./extension/peerd-engine/*"],
+      "/peerd-egress/*": ["./extension/peerd-egress/*"],
+      "/peerd-provider/*": ["./extension/peerd-provider/*"],
+      "/peerd-distributed/*": ["./extension/peerd-distributed/*"],
+      "/vendor/*": ["./extension/vendor/*"],
+      "/background/*": ["./extension/background/*"],
+      "/sidepanel/*": ["./extension/sidepanel/*"],
+      "/options/*": ["./extension/options/*"],
+      "/home/*": ["./extension/home/*"],
+      "/offscreen/*": ["./extension/offscreen/*"],
+      "/notebook-tab/*": ["./extension/notebook-tab/*"]
+    }
+  },
+  // Vendor is third-party (own SOURCE.txt, never // @ts-check'd); its
+  // .d.ts sidecars still load when imported. The deliberately-ES5
+  // injected-into-page bodies are never annotated, so checkJs:false
+  // already leaves them untouched.
+  "include": ["tests/**/*.ts", "extension/**/*.js"],
+  "exclude": ["extension/vendor/**"]
+}

@@ -1,0 +1,28 @@
+name: Idea / feature request
+description: Suggest a capability or improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        peerd's direction lives in `ROADMAP.md` and `docs/DECISIONS.md` — a quick skim
+        there may show your idea is already planned (or deliberately out of scope).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem / use case
+      description: What are you trying to do that peerd can't (or makes hard) today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you'd like
+      description: The capability or change, as concretely as you can put it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or other approaches.

@@ -1,0 +1,21 @@
+{
+  "name": "peerd (dev)",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "peerd-dev@peerd.ai",
+      "strict_min_version": "121.0"
+    }
+  },
+  "action": {
+    "default_title": "peerd (dev)"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: wss: http://localhost:11434"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["tests/runner.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  // peerd signaling node — Cloudflare Worker + Durable Object.
+  // Deploy needs your own Cloudflare account (BYOC). Local: `wrangler dev`.
+  "name": "peerd-signaling",
+  "main": "worker.js",
+  "compatibility_date": "2025-06-01",
+  // Permanent URL on peerd.ai. REQUIRES peerd.ai to be a zone on the
+  // deploying Cloudflare account (DNS managed by CF) and a token with
+  // Workers Routes + DNS edit; wrangler then provisions the DNS record and
+  // TLS cert. The hardcoded seed (DEFAULT_SIGNALING in signaling-client.js)
+  // points at wss://bootstrap.peerd.ai/rendezvous. Remove this block for a
+  // workers.dev-only deploy (the seed must then be repointed).
+  "routes": [
+    { "pattern": "bootstrap.peerd.ai", "custom_domain": true }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "SIGNAL_ROOM", "class_name": "SignalingRoom" }
+    ]
+  },
+  "migrations": [
+    // SQLite-backed DO: deploys on the Workers Free plan too, and this
+    // node persists nothing, so the SQLite backend is the right default.
+    { "tag": "v1", "new_sqlite_classes": ["SignalingRoom"] }
+  ],
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,69 @@
+CheerpX
+=======
+
+x86 Linux in WebAssembly. Used by peerd-engine as the sandboxed VM
+runtime for vm_boot / vm_import / vm_write_file.
+
+Upstream
+--------
+Project:   https://leaningtech.com/cheerpx/
+Docs:      https://cheerpx.io/docs
+CDN base:  https://cxrtnc.leaningtech.com/<version>/
+Disk:      wss://disks.webvm.io/debian_large_20230522_5044875331.ext2
+           (CheerpX's stock Debian image, streaming)
+
+Version pinned to: 1.2.8
+
+cx.esm.js sha256: 87b0809f469286a11efdec01dc5873205d50fd0dea710dd6eaa72434de760899
+
+Vendoring model
+---------------
+MV3 extension_pages CSP forbids BOTH `script-src https://<external>`
+AND `blob:` (we tried both — Chrome rejects the manifest in either
+case). The only legitimate path is to commit the runtime bytes
+locally. `scripts/vendor-cheerpx.sh` is the reproducible step:
+
+  1. Edit CHEERPX_VERSION in the script.
+  2. Run it from the repo root. It curls the pinned files into
+     this directory and prints the sha of the entry file.
+  3. Update this SOURCE.txt with the new version + sha.
+  4. Commit.
+
+Vendored files
+--------------
+  cx.esm.js                    — entry; thin wrapper around cx_esm.js
+  cx_esm.js                    — main bundle
+  cxcore.js / cxcore.wasm      — Wasm core + JS shim
+  cxcore-no-return-call.{js,wasm} — variant for browsers without
+                                    WebAssembly return_call support
+  cxbridge.js                  — host bridge
+  cheerpOS.js                  — minimal OS layer
+  workerclock.js               — worker-side clock for emulated time
+  tun/direct.js                — network: direct (passthrough)
+  tun/tailscale_tun_auto.js    — network: tailscale (unused in V1
+                                  since VM is sandboxed)
+
+License
+-------
+Non-commercial free tier. peerd V1 use confirmed in scope with
+Leaning Tech (2026). Commercial peerd deployments will need a
+separate license — flag before that ship.
+
+CSP impact
+----------
+Only connect-src is relaxed for the disk-image stream (we still need
+that — the image isn't vendored, it streams lazily over WebSocket):
+
+  connect-src 'self' https://disks.webvm.io wss://disks.webvm.io
+
+script-src stays 'self' 'wasm-unsafe-eval' — the strictest MV3
+allows. No external script origins, no blob:.
+
+Updating
+--------
+1. Bump CHEERPX_VERSION in scripts/vendor-cheerpx.sh.
+2. Run the script.
+3. Update this file's version + sha lines.
+4. Smoke test in the side panel: `vm_boot("uname -a")`.
+5. If the API has shifted, cheerpx-adapter.js is the only file
+   that needs updating.

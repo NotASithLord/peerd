@@ -1,0 +1,9 @@
+{
+  "name": "peerd",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "peerd@peerd.ai",
+      "strict_min_version": "121.0"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+simple-icons — vendored (brand glyphs for the new-chat path menu)
+================================================================
+
+Upstream:   https://www.npmjs.com/package/simple-icons
+Version:    16.23.0
+License:    CC0-1.0 (the icon SVG path data). Brand names/logos remain
+            trademarks of their respective owners; used here NOMINATIVELY
+            to label the technology each engine sandbox runs.
+Source URL: https://github.com/simple-icons/simple-icons
+
+Files
+-----
+  brand-paths.js   Two `d` path strings (24x24 viewBox, designed to be
+                   FILLED with a single color), extracted from the package
+                   and re-exported as ES module constants:
+                     LINUX_PATH  → si.siLinux.path   (Tux)
+                     HTML5_PATH  → si.siHtml5.path   (HTML5 shield)
+                   DATA, not executable third-party code.
+
+Why these ship in-package
+-------------------------
+The fresh-chat "select your path" tiles (sidepanel/components/chat-view.js)
+give each engine sandbox a uniform glyph of the tech it runs: the Notebook
+is a sealed JS worker (hand-drawn "JS" mark, inline), the VM is CheerpX
+Linux (Tux), the App is an opaque-origin HTML iframe (HTML5 shield). Rather
+than inline a ~5KB Tux path in the component, the two simple-icons paths
+live here and are imported via /vendor/simple-icons/brand-paths.js. No npm
+runtime — just the path data.
+
+Update procedure
+----------------
+Re-extract from the pinned simple-icons version:
+  node -e 'const s=require("simple-icons");console.log(s.siLinux.path)'
+Only the icons actually used are vendored (not the whole package). If you
+add another, document it here and keep the export name <TECH>_PATH.

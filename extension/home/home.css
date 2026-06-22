@@ -1,0 +1,329 @@
+/* home.css — the full-tab SPA shell (DESIGN-12). A left rail switches between
+   the agent Chat and the Library / Discover / Network sections; the content
+   area swaps per selection. Monochrome per the brand rule — the only color is
+   the wordmark in the rail and the brand spinner inside the chat. Base
+   component styling (cards, inputs, the chat surface) comes from styles.css;
+   the locked-vault gate comes from options.css. */
+
+.home-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---- left rail ---------------------------------------------------------- */
+.home-rail {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.home-rail-mark { padding: 4px 8px 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+/* The home variant of the preview badge sits flush-left under the wordmark (the
+   shared .channel-badge centers itself + adds a left margin for the inline
+   side-panel layout — undo both here so it aligns with the wordmark). */
+.channel-badge--in { margin-left: 0; align-self: flex-start; }
+
+.home-nav { display: flex; flex-direction: column; gap: 2px; margin-top: 12px; }
+.home-nav-item {
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+.home-nav-item:hover { background: var(--bg); }
+.home-nav-item.is-active { background: var(--bg); font-weight: 600; }
+
+/* ---- content area ------------------------------------------------------- */
+.home-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+/* Section views read as a centered, readable column. */
+.home-content:not(.home-content--chat) { padding: 24px 28px; }
+
+/* Chat fills the content area as a centered column the full height (the notice
+   bar, when present, spans full width above it). */
+.home-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  min-height: 0;
+}
+.home-chat-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 4px;
+}
+.home-chat-title { font-weight: 600; font-size: 15px; }
+.home-popout {
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.home-popout:hover { color: var(--fg); border-color: var(--fg-muted); }
+
+/* The shared ChatView (.chat-view) is a flex:1 column; let it fill the chat
+   region and own its own scroll (the message list scrolls, the input pins). */
+.home-content--chat .chat-view {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 16px 16px;
+}
+
+/* --- Contacts (home/contacts-section.js) --------------------------------- *
+ * Rides the shared .peerd-disc-row skeleton (options.css). contact-row adds
+ * an avatar + an inline-editable name + an expandable activity panel; the
+ * panel takes a full row via flex-wrap so it drops BELOW the row contents. */
+.contact-row { flex-wrap: wrap; align-items: center; }
+.contact-avatar {
+  width: 30px; height: 30px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600; color: #0a0a0a;
+}
+.contact-name-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.contact-fav { color: var(--fg-muted); font-size: 11px; }
+.contact-status {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border);
+  color: var(--fg-muted); white-space: nowrap;
+}
+.contact-status.is-direct { color: var(--ok); border-color: var(--ok); }
+.contact-status.is-stun { color: var(--fg); }
+.contact-status.is-relay,
+.contact-status.is-connecting,
+.contact-status.is-gossip { color: var(--fg-muted); }
+.contact-row-actions { display: flex; gap: 6px; flex: none; margin-left: auto; }
+.contact-name-input {
+  width: 100%; font-size: 14px; padding: 3px 6px;
+  background: var(--bg-elev); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.contact-detail {
+  flex-basis: 100%; margin-top: 8px; padding: 10px 11px;
+  border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px;
+}
+.contact-did { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); word-break: break-all; }
+.contact-activity { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.contact-stat-label { color: var(--fg); }
+.contact-app { color: var(--fg-muted); }
+.contact-counts { font-size: 11px; }
+.contact-detail-actions { display: flex; gap: 6px; }
+
+/* The vault gate (locked / set-up / loading) sits in the UPPER THIRD of the
+   tall full-tab page rather than dead-center — the wordmark + unlock read
+   better high (owner direction). Scoped to home: home.css loads after
+   options.css and only on this page, so the options page gate is untouched. */
+.options-gate { align-items: flex-start; padding-top: 22vh; }
+
+/* "Chat is in the side panel · Bring it here" — shown when the panel owns chat
+   (single-homed), so home (now showing tools) has an obvious way back. */
+.home-panel-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.home-panel-bar button { margin-left: auto; }
+
+/* ChatGPT-style chat page: a recent-chats list column on the left, off the rail,
+   with the live chat filling the rest. */
+.home-content--chat { padding: 0; }
+.home-chat-layout { display: flex; flex: 1; min-height: 0; }
+.home-chat-layout > .home-chat { max-width: none; margin: 0; }
+.chat-list {
+  flex: 0 0 248px;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev);
+  padding: 12px 10px;
+  overflow: hidden;
+}
+.chat-list-new {
+  flex: none;
+  text-align: left;
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--fg);
+  font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.chat-list-new:hover { border-color: var(--fg-muted); }
+.chat-list-items { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.chat-list-item {
+  position: relative;
+  display: flex; align-items: baseline; gap: 8px;
+  width: 100%; text-align: left;
+  padding: 9px 11px; border: none; border-radius: 7px;
+  background: none; color: var(--fg);
+  font-size: 13px; cursor: pointer;
+  max-height: 52px;   /* so the delete animation can collapse it to 0 */
+}
+.chat-list-item:hover { background: var(--bg); }
+.chat-list-item.is-active { background: var(--bg); font-weight: 600; }
+.chat-list-item-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-list-item-meta { flex: none; color: var(--fg-muted); font-size: 11px; }
+.chat-list-empty { padding: 10px 11px; font-size: 13px; }
+
+/* Delete affordance: a 3-dot revealed on row hover that turns into a red trash. */
+.chat-item-del {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  opacity: 0;
+  background: none; border: none; cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 4px 6px; border-radius: 5px;
+  color: var(--fg-muted);
+}
+.chat-item-del::before { content: '⋯'; }
+.chat-list-item:hover .chat-item-del { opacity: 1; }
+.chat-list-item:hover .chat-list-item-meta { opacity: 0; }   /* make room for the trash */
+.chat-item-del:hover { color: var(--danger); background: var(--bg-elev); }
+.chat-item-del:hover::before { content: '🗑'; }
+
+/* "Reverse-type" deletion — mirrors the wordmark's self-delete (wmUnType): the
+   title BACKSPACES away right→left in stepped, terminal fashion (NOT a fade),
+   then the emptied row collapses its height. The meta + trash blink out at once
+   (visibility, not opacity) so nothing lingers mid-backspace. Quick on purpose. */
+.chat-list-item.is-deleting { animation: chat-del-row 130ms ease 190ms forwards; pointer-events: none; overflow: hidden; }
+.chat-list-item.is-deleting .chat-list-item-title { animation: chat-del-text 190ms steps(16, end) forwards; }
+.chat-list-item.is-deleting .chat-list-item-meta,
+.chat-list-item.is-deleting .chat-item-del { visibility: hidden; }
+@keyframes chat-del-text { from { clip-path: inset(0 0 0 0); } to { clip-path: inset(0 100% 0 0); } }
+@keyframes chat-del-row {
+  to { max-height: 0; padding-top: 0; padding-bottom: 0; margin-top: 0; border-width: 0; }
+}
+
+/* peerd notifications — rail bell (count + dropdown) and an in-chat banner. */
+.notif { position: relative; }
+.notif-bell { display: flex; align-items: center; gap: 8px; }
+.notif-badge {
+  margin-left: auto;
+  background: var(--accent); color: var(--accent-fg, #fff);
+  font-size: 11px; font-weight: 700;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.notif-menu {
+  position: absolute; bottom: 100%; left: 0; right: 0; z-index: 30;
+  margin-bottom: 6px; padding: 4px;
+  max-height: 50vh; overflow-y: auto;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.notif-item {
+  text-align: left; width: 100%;
+  background: none; border: none; color: var(--fg);
+  padding: 8px 10px; border-radius: 6px; cursor: pointer;
+}
+.notif-item:hover { background: var(--bg); }
+.notif-item-title { font-size: 13px; font-weight: 600; }
+.notif-item-body { font-size: 12px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notif-empty { padding: 10px; font-size: 12px; }
+.notif-banner {
+  display: flex; align-items: center; gap: 10px;
+  margin: 6px 16px 0; padding: 8px 12px;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 13px;
+}
+.notif-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notif-banner-x { background: none; border: none; color: var(--fg-muted); cursor: pointer; font-size: 15px; padding: 0 4px; flex: none; }
+.notif-banner-x:hover { color: var(--fg); }
+
+/* Chat-list collapse: a header toggle, and a thin strip when hidden. */
+.chat-list-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 0 2px; }
+.chat-list-head-title { flex: 1; font-size: 11px; font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.chat-list-toggle {
+  flex: none;
+  background: none; border: none; color: var(--fg-muted);
+  font-size: 16px; cursor: pointer; padding: 4px 9px; border-radius: 6px;
+}
+.chat-list-toggle:hover { background: var(--bg); color: var(--fg); }
+.chat-list.is-collapsed {
+  flex: 0 0 auto; width: 46px;
+  align-items: center; padding: 12px 6px; gap: 6px;
+  overflow: visible;
+}
+/* Smoother collapse/expand: toggling swaps the full panel ↔ the thin strip
+   (different DOM, so a width transition can't bridge them) — instead each side
+   EASES IN on mount, sliding a hair from the rail edge so the swap reads as a
+   motion, not a hard cut. Both states share the .chat-list root, so one rule
+   covers them; it replays only when the panel is recreated, i.e. on toggle. */
+.chat-list { animation: chat-list-in 170ms ease; }
+@keyframes chat-list-in { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+
+/* "Pop to side" gets a brand accent so it reads as the affordance it is. */
+.home-popout--pop { color: var(--accent); border-color: var(--accent); }
+.home-popout--pop:hover { background: var(--accent); color: var(--accent-fg, #fff); border-color: var(--accent); }
+
+/* Honor reduced-motion: drop the chat-list entry + delete choreography (the
+   row still leaves — JS archives it after the timeout — just without the
+   stepped backspace / slide). */
+@media (prefers-reduced-motion: reduce) {
+  .chat-list,
+  .chat-list-item.is-deleting,
+  .chat-list-item.is-deleting .chat-list-item-title { animation: none; }
+}
+
+/* --- Lab (eval) section: monochrome bench; pass/fail by glyph + red ------- */
+.eval-lab h2 { margin: 0 0 4px; }
+.eval-lab > .muted { max-width: 70ch; margin: 0 0 12px; }
+.eval-note { color: var(--fg-muted); font-size: 12px; border-left: 2px solid var(--border); padding-left: 10px; margin: 0 0 16px; max-width: 70ch; }
+.eval-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 16px; }
+.eval-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.eval-field select { font: 13px/1.4 inherit; padding: 6px 8px; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius); min-width: 190px; text-transform: none; letter-spacing: 0; }
+.eval-controls > .muted { align-self: center; padding-bottom: 7px; }
+.eval-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-muted); align-self: center; }
+.eval-btn { font: 13px/1 inherit; font-weight: 600; padding: 8px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); color: var(--fg); cursor: pointer; }
+.eval-btn:hover:not(:disabled) { border-color: var(--fg-muted); }
+.eval-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.eval-btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.eval-running { font-size: 13px; color: var(--fg-muted); margin: 0 0 12px; }
+.eval-board { display: grid; grid-template-columns: 130px 1fr 1fr 90px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin: 0 0 8px; max-width: 760px; }
+.eval-row { display: contents; }
+.eval-cell { padding: 8px 12px; font-size: 13px; border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.eval-row.head .eval-cell { border-top: 0; background: var(--bg-elev); font-weight: 600; font-size: 12px; }
+.eval-cell.lab { color: var(--fg-muted); }
+.eval-cell.delta { color: var(--fg-muted); }
+.eval-verdict { font-size: 13px; margin: 8px 0 0; }
+.eval-ok { color: var(--ok); }
+.eval-log { font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; color: var(--fg-muted); background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; }
+.eval-link { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; white-space: nowrap; }
+.eval-link:hover { color: var(--fg-muted); }
+.eval-disclosure { background: none; border: 0; color: var(--fg-muted); font: inherit; font-size: 12px; cursor: pointer; padding: 0; margin: 0 0 8px; }
+.eval-disclosure:hover { color: var(--fg); }
+.eval-tasks { border: 1px solid var(--border); border-radius: var(--radius); max-height: 340px; overflow: auto; margin: 0 0 16px; max-width: 760px; }
+.eval-task { display: flex; flex-direction: column; gap: 2px; padding: 9px 12px; border-top: 1px solid var(--border); }
+.eval-task:first-child { border-top: 0; }
+.eval-task-title { font-size: 13px; font-weight: 600; color: var(--fg); }
+.eval-task-prompt { font-size: 12px; color: var(--fg-muted); }
+.eval-task-url { font-size: 11px; color: var(--fg-muted); font-family: var(--font-mono); opacity: 0.75; }
+.eval-pairs { display: flex; align-items: stretch; gap: 14px; margin: 0 0 14px; flex-wrap: wrap; }
+.eval-pair { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); min-width: 240px; }
+.eval-pair-head { font-weight: 700; font-size: 13px; color: var(--fg); }
+.eval-pair-vs { align-self: center; color: var(--fg-muted); font-size: 12px; }
+.eval-pair .eval-field select { min-width: 220px; }
