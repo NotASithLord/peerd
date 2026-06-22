@@ -11,6 +11,7 @@ import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
 import { manifestLabel } from '/peerd-runtime/index.js';
 import { openOptions } from '/shared/open-options.js';
+import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
 import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial } from './mode-badge.js';
@@ -58,11 +59,17 @@ export const ChatView = {
       // state push).
       state.lastError ? m('.error-banner', [
         m('span', mapError(state.lastError)),
-        m('button.secondary', {
-          // why 'providers': chat errors are overwhelmingly key/model
-          // problems — land the user on the page that fixes them.
-          onclick: () => openOptions('providers'),
-        }, 'Open settings'),
+        // why conditional: only offer "Open settings" when Settings can
+        // actually fix it (key/auth → providers, spend limit → costs). A
+        // 429/529 throttle, a network blip, or an external billing cap aren't
+        // fixable here, so the banner shows the guidance copy alone instead of
+        // misdirecting the user into a page that can't help (errorSettingsTarget).
+        (() => {
+          const target = errorSettingsTarget(state.lastError);
+          return target
+            ? m('button.secondary', { onclick: () => openOptions(target.section) }, 'Open settings')
+            : null;
+        })(),
       ]) : null,
 
       // Rate-limit retry indicator. Without this the retry is a blank
@@ -481,48 +488,7 @@ const EmptyState = {
   },
 };
 
-// Map an error code OR a raw provider message into a clear, human line.
-// why: errors reach here two ways — the SW's typed mapping ("provider-
-// http-429") AND the loop's raw throw message ("Provider 'anthropic' HTTP
-// 429: {…}"). The old version only matched the codes, so a real
-// rate-limit / account-limit surfaced as a raw JSON dump (or, mid-retry,
-// nothing). Match both, and name the likely cause + the fix.
-/** @param {unknown} e */
-const mapError = (e) => {
-  if (typeof e !== 'string' || e.length === 0) return 'Something went wrong.';
-  if (e === 'provider-key-missing') return 'No API key yet — add one in Settings.';
-  if (e === 'unknown-provider') return 'No provider registered yet.';
-  if (e === 'session-not-found') return 'Session was reset mid-turn.';
-  if (e === 'spend-limit-reached') return 'Spend limit reached — the agent was halted. Raise the limit in Settings to continue.';
-
-  // Hard account limit (out of credit / over a spend or usage cap). The SW's
-  // typed mapping emits `provider-usage-limit[:detail]`; the loop's raw throw
-  // is the self-explanatory ProviderUsageLimitError message — both land here.
-  if (e.startsWith('provider-usage-limit')) {
-    const detail = e.slice('provider-usage-limit'.length).replace(/^[:\s]+/, '').trim();
-    const suffix = detail ? ` (${detail})` : '';
-    return `Usage/credit limit reached — your provider account is out of credit or over a spend/usage cap. Check your Anthropic / OpenRouter billing & limits, then retry.${suffix}`;
-  }
-
-  const s = e.toLowerCase();
-  /** @param {...string} needles */
-  const has = (...needles) => needles.some((n) => s.includes(n));
-
-  if (e.startsWith('provider-http-401') || has('http 401', 'authentication_error', 'invalid x-api-key')) {
-    return 'API key rejected (401). Check or update it in Settings.';
-  }
-  // Account/credit/quota limits often arrive as 400/403 with a message,
-  // not 429 — catch them by content before the generic HTTP fallback.
-  if (has('credit balance', 'billing', 'quota', 'insufficient_quota', 'usage limit', 'plan limit')) {
-    return 'Provider account limit — out of credit or over a usage cap. Check your Anthropic / OpenRouter billing, then retry.';
-  }
-  if (e.startsWith('provider-http-429') || has('http 429', 'rate_limit', 'rate limit')) {
-    return 'Rate limited (429) — your provider is throttling, or your account hit a usage/credit limit. Wait a moment and retry; if it persists, check your provider account.';
-  }
-  if (e.startsWith('provider-http-529') || has('http 529', 'overloaded')) {
-    return 'Provider overloaded — try again in a moment.';
-  }
-  if (e.startsWith('provider-http-')) return `Provider returned an error (${e.slice('provider-http-'.length)}).`;
-  if (has('http 4', 'http 5')) return `Provider error — ${e}`;
-  return e;
-};
+// mapError + errorSettingsTarget moved to ../error-display.js (pure, Bun-tested)
+// — a component should hold no business logic, and that mapping is worth a
+// test of its own (it matches both the SW's typed codes and the loop's raw
+// throw text).
