@@ -135,7 +135,14 @@ export async function* callOpenRouter(args) {
         detail: apiErrorMessage(bodyText),
       });
     }
-    const retryable = res.status === 429 || res.status === 503 || res.status === 529;
+    // why include 500: OpenRouter is a gateway proxying upstream providers, so
+    // a transient upstream blip commonly surfaces as a one-off 500 (api_error).
+    // The Anthropic adapter already retries 500 for the same reason (anthropic.js)
+    // — without it here, a single transient 500 killed the whole turn even though
+    // an immediate retry almost always succeeds. The hard-limit fast-fail above
+    // (isUsageLimitResponse) already caught a 500 carrying a billing needle.
+    const retryable = res.status === 429 || res.status === 500
+      || res.status === 503 || res.status === 529;
     if (retryable && attempt <= MAX_RATE_LIMIT_RETRIES) {
       const waitMs = computeBackoffMs(res.headers, attempt);
       yield { type: 'rate-limit-pause', retryAfterMs: waitMs, attempt };
