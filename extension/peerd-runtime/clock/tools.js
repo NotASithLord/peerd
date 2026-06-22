@@ -17,10 +17,13 @@ import { formatDelta, isoSecondsZ, parseDuration } from './now.js';
 
 /**
  * Hard cap on wait duration. We don't let the agent freeze a turn for
- * longer than this — the user may want to step in. 10 minutes is
- * generous but bounded.
+ * longer than this — the user may want to step in, and the SW must stay
+ * alive (offscreen keepalive) for the whole blocking sleep, with no
+ * persist/resume if it's evicted mid-wait. 1 hour is the ceiling; for
+ * "wait then check" patterns the agent can still chain shorter waits
+ * across turns (more resilient than one long block).
  */
-const WAIT_MAX_MS = 10 * 60 * 1000;
+const WAIT_MAX_MS = 60 * 60 * 1000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const nowTool = {
@@ -55,7 +58,7 @@ export const waitUntilTool = {
   primitive: 'time',
   description: [
     'Block the agent for a duration ("47s", "5m", "1h30m") or until an',
-    'absolute ISO timestamp ("2026-06-05T14:34:21Z"). Hard cap: 10 minutes.',
+    'absolute ISO timestamp ("2026-06-05T14:34:21Z"). Hard cap: 1 hour.',
     'Use for "wait then check again" patterns (rate-limit cool-down, ',
     'monitoring an external state that updates on its own).',
   ].join(' '),
