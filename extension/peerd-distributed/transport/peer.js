@@ -141,7 +141,19 @@ export const createPeer = ({
     dc.binaryType = 'arraybuffer';
     const channel = /** @type {ReturnType<typeof createBufferedChannel> & { pc?: RTCPeerConnection }} */ (
       createBufferedChannel({
-        send: (obj) => dc.send(JSON.stringify(obj)),
+        // why guard readyState: the RTCDataChannel can be 'connecting' (a
+        // send racing ahead of onopen) or 'closing'/'closed' (the remote
+        // vanished — a closed tab rarely sends a clean DC close — before
+        // onclose / the connection-state handlers flip the buffered channel
+        // shut). dc.send() in any non-'open' state throws InvalidStateError,
+        // which surfaced as an uncaught rejection in the offscreen doc.
+        // Drop the datagram instead: this is best-effort mesh traffic
+        // (gossip / presence / DHT) that re-gossips and multi-hops, so a
+        // frame lost to a dying peer is recoverable — the throw was not.
+        send: (obj) => {
+          if (dc.readyState === 'open') dc.send(JSON.stringify(obj));
+          else dlog('webrtc', `drop send — data channel is '${dc.readyState}', not open`);
+        },
         close: () => {
           try { dc.close(); } catch { /* already closed */ }
           try { pc.close(); } catch { /* already closed */ }
