@@ -669,6 +669,28 @@ export async function* runUserTurn(ctx) {
       return;
     }
 
+    // Re-check abort AFTER the stream ended, BEFORE any side-effecting dispatch.
+    // why: a hard spend-limit halt / Stop / steer can abort() in the GAP between
+    // the stream finishing and dispatch — the limit's abort() rides the `usage`
+    // event, which adapters emit one event BEFORE `message-stop`, so the
+    // for-await ends normally and the mid-stream AbortError branch (:563) never
+    // sees it. Without this guard the loop would run every already-emitted
+    // tool_use this step (writes / call_api / vm / edit / app side effects) and
+    // persist their results before the next loop-top check (:303) finally
+    // catches the abort. Mark the turn aborted — so detectInterruptedTurn treats
+    // it as a deliberate stop, NOT a resumable tools-pending interruption — and
+    // short-circuit before the dispatch waves.
+    if (wasAborted()) {
+      await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
+        stopReason: 'aborted',
+      });
+      yield {
+        type: 'stop', sessionId,
+        messageId: assistantStub.id, stopReason: 'aborted',
+      };
+      return;
+    }
+
     // ---- Dispatch tool calls --------------------------------------------
     // Dispatch ONE call and build its persisted result block. Never throws
     // — a failure (including a thrown dispatcher) becomes an error result,

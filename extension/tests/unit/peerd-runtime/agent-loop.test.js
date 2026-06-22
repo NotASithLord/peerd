@@ -329,6 +329,53 @@ describe('agent loop — runUserTurn', () => {
       expect(resultMsg.toolResults[0].content.includes('denylist')).toBe(true);
     });
 
+    it('aborts in the stream-end → dispatch gap WITHOUT running the pending tools', async () => {
+      // The hard spend-limit halt (and Stop / steer) abort() the controller as
+      // the stream ends: adapters emit `usage` — where the limit check rides —
+      // one event BEFORE `message-stop`, so the for-await ends normally and the
+      // mid-stream AbortError branch never fires. The loop must re-check abort
+      // before dispatch, or it runs every already-emitted tool_use anyway.
+      const controller = new AbortController();
+      const callModel = () => (async function* () {
+        yield { type: 'text-delta', text: 'working' };
+        yield { type: 'tool-use-start', id: 't_A', name: 'inspect_storage' };
+        yield { type: 'tool-use-delta', id: 't_A', partialJson: '{}' };
+        yield { type: 'tool-use-stop', id: 't_A' };
+        controller.abort();                 // limit / Stop lands here, pre message-stop
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      })();
+      const { sessions, ctx } = buildCtx({ callModel, signal: controller.signal });
+      /** @type {any[]} */
+      const dispatched = [];
+      ctx.tools = [{ name: 'inspect_storage', description: '', schema: {} }];
+      ctx.toolDispatch = async (/** @type {any} */ call) => {
+        dispatched.push(call);
+        return { ok: true, content: 'should not run',
+          meta: { toolName: call.name, primitive: 'inspect', gates: [], durationMs: 0 } };
+      };
+      const session = await sessions.create();
+      ctx.sessionId = session.sessionId;
+
+      const events = await drain(runUserTurn(asRunCtx(ctx)));
+
+      // The pending tool_use never ran — no side effect, no tool-result event.
+      expect(dispatched.length).toBe(0);
+      expect(events.some((e) => e.type === 'tool-result')).toBe(false);
+
+      const stored = present(await sessions.get(session.sessionId));
+      // No tool_result message was appended (user -> assistant only).
+      expect(stored.messages.some((m) =>
+        m.role === 'user' && Array.isArray(msg(m).toolResults))).toBe(false);
+      // The turn is marked aborted — so detectInterruptedTurn treats it as a
+      // deliberate stop, NOT a resumable tools-pending interruption.
+      const assistant = msg(stored.messages.find((m) => m.role === 'assistant'));
+      expect(assistant.stopReason).toBe('aborted');
+      expect(Array.isArray(assistant.toolUses)).toBe(true); // the tool_use is still recorded
+      // The final stop reports aborted.
+      const stops = events.filter((e) => e.type === 'stop');
+      expect(asEv(stops[stops.length - 1]).stopReason).toBe('aborted');
+    });
+
     it('runs consecutive READ-class calls concurrently when a classifier is injected', async () => {
       // Two reads in one turn + ctx.classifyToolCall → both dispatches must
       // be in flight together, results persist in EMITTED order even though
