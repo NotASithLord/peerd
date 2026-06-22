@@ -65,7 +65,14 @@ const mapStopReason = (finish) => {
   if (finish === 'tool_calls') return 'tool_use';
   if (finish === 'stop') return 'end_turn';
   if (finish === 'length') return 'max_tokens';
-  return finish ?? undefined;
+  if (finish === 'content_filter') return 'end_turn';
+  // why never leak the raw value: the agent loop branches on a FIXED internal
+  // vocabulary and treats anything it doesn't recognize as a clean final turn.
+  // A foreign finish_reason (the legacy 'function_call' — which we never
+  // trigger since we request via `tools` — or any future value) is mapped to a
+  // clean end_turn rather than passed through. null/undefined (not finished
+  // yet) stays undefined.
+  return finish ? 'end_turn' : undefined;
 };
 
 /**
@@ -155,6 +162,13 @@ export async function* fromOpenAiStream(body, { provider = 'openrouter' } = {}) 
     }
 
     if (choice.finish_reason) {
+      // why surface content_filter: the provider BLOCKED the model's output, so
+      // the delta usually carries no text — without this the turn finalizes as a
+      // silent empty assistant bubble with no explanation. Emit a visible note
+      // (the response was filtered, not a transport error) before the stop.
+      if (choice.finish_reason === 'content_filter') {
+        yield { type: 'text-delta', text: '[The provider blocked this response under its content policy.]' };
+      }
       stopReason = mapStopReason(choice.finish_reason);
       // Close out any started tool calls before the message stop. The
       // message-stop itself is deferred (see pendingUsage) so the usage

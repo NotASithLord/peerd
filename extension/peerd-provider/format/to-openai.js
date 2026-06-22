@@ -19,7 +19,9 @@
 // the API 400s — same orphan hazard as Anthropic, repaired below.
 
 /** @typedef {import('../types.js').InternalMessage} InternalMessage */
+/** @typedef {import('../types.js').UserMessage} UserMessage */
 /** @typedef {import('../types.js').ToolUseBlock} ToolUseBlock */
+/** @typedef {import('../types.js').Attachment} Attachment */
 
 /**
  * @typedef {Object} OpenAiToolCall
@@ -29,11 +31,20 @@
  */
 
 /**
+ * One content part of a multimodal user message. OpenAI carries vision input
+ * as an array of parts: text + image_url (a data: URL or https URL). There is
+ * no document part — PDFs are Anthropic-only.
+ * @typedef {{ type: 'text', text: string }
+ *        | { type: 'image_url', image_url: { url: string } }} OpenAiContentPart
+ */
+
+/**
  * One OpenAI /chat/completions wire message. The shape varies by role —
- * `tool_calls` rides assistant turns, `tool_call_id` rides tool results.
+ * `tool_calls` rides assistant turns, `tool_call_id` rides tool results,
+ * and a user message with image attachments carries a content-part ARRAY.
  * @typedef {Object} OpenAiMessage
  * @property {'system'|'user'|'assistant'|'tool'} role
- * @property {string | null} [content]
+ * @property {string | null | OpenAiContentPart[]} [content]
  * @property {OpenAiToolCall[]} [tool_calls]
  * @property {string} [tool_call_id]
  */
@@ -51,6 +62,52 @@ const toToolCalls = (toolUses) =>
       arguments: JSON.stringify(tu.input ?? {}),
     },
   }));
+
+// A one-line trace for an attachment that can't ride the OpenAI wire on THIS
+// turn — a stripped record (its bytes already shipped on the turn it was sent,
+// the send-once contract) or a PDF (OpenAI chat completions has no document
+// part; PDFs are Anthropic-only). Keeps the model aware the file existed
+// without the bytes, mirroring to-anthropic.js's stripped sentinel.
+/** @param {Attachment} a */
+const attachmentNote = (a) => {
+  const name = String(a.name ?? 'file').replace(/[<>"]/g, '');
+  return a.stripped
+    ? `<attachment "${name}" (${a.mediaType}) ${a.size}B — sent on its original turn>`
+    : `<attachment "${name}" (${a.mediaType}) — PDFs are only sent on the Anthropic provider; omitted here>`;
+};
+
+/** @param {Attachment} a */
+const isLiveImage = (a) =>
+  !a?.stripped && a.kind === 'image' && typeof a.data === 'string' && a.data.length > 0;
+
+/**
+ * Build the OpenAI `content` for a user message. Live image attachments become
+ * `image_url` parts (OpenAI vision); the text — plus a one-line note for any
+ * stripped or PDF attachment — leads as a text part. Falls back to a plain
+ * string when there are no live images, keeping the common case compact.
+ *
+ * @param {UserMessage} m
+ * @returns {string | OpenAiContentPart[]}
+ */
+const userContent = (m) => {
+  const text = typeof m.content === 'string' ? m.content : '';
+  /** @type {Attachment[]} */
+  const atts = Array.isArray(m.attachments) ? m.attachments : [];
+  const liveImages = atts.filter(isLiveImage);
+  const notes = atts
+    .filter((a) => (a?.stripped && (a.kind === 'image' || a.kind === 'pdf'))
+      || (!a?.stripped && a.kind === 'pdf' && typeof a.data === 'string' && a.data.length > 0))
+    .map(attachmentNote);
+  const fullText = [...notes, ...(text.length > 0 ? [text] : [])].join('\n');
+  if (liveImages.length === 0) return fullText;
+  /** @type {OpenAiContentPart[]} */
+  const parts = [];
+  if (fullText.length > 0) parts.push({ type: 'text', text: fullText });
+  for (const a of liveImages) {
+    parts.push({ type: 'image_url', image_url: { url: `data:${a.mediaType};base64,${a.data}` } });
+  }
+  return parts;
+};
 
 /**
  * Map internal messages to the OpenAI messages array. The `system`
@@ -85,8 +142,13 @@ const toOpenAiMessages = (system, messages) => {
             content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
           });
         }
-      } else if (typeof m.content === 'string') {
-        out.push({ role: 'user', content: m.content });
+      } else {
+        const content = userContent(m);
+        // Skip a truly empty user message (no text, no live image, no note).
+        if ((typeof content === 'string' && content.length > 0)
+            || (Array.isArray(content) && content.length > 0)) {
+          out.push({ role: 'user', content });
+        }
       }
     }
   }
