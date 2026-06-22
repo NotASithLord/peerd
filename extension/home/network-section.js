@@ -381,6 +381,7 @@ export const NetworkSection = () => {
   /** @type {string | null} */
   let error = null;
   let starting = false;
+  let stopping = false;
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;      // set on unmount — an in-flight poll must not redraw
@@ -403,6 +404,17 @@ export const NetworkSection = () => {
     starting = true; if (!dead) m.redraw();
     try { await send({ type: 'dweb/base/start' }); } catch (e) { error = /** @type {{ message?: string }} */ (e)?.message || String(e); }
     starting = false;
+    await refresh(send);
+  };
+
+  /** The kill switch: shut down ALL dweb networking + persist it off. @param {Send} send */
+  const stop = async (send) => {
+    // Destructive — drops every live connection — so confirm before the kill.
+    if (typeof confirm === 'function'
+      && !confirm('Shut down all peer-to-peer networking? This drops every live connection and keeps it off (it won’t come back on unlock) until you start it again.')) return;
+    stopping = true; if (!dead) m.redraw();
+    try { await send({ type: 'dweb/base/stop' }); } catch (e) { error = /** @type {{ message?: string }} */ (e)?.message || String(e); }
+    stopping = false;
     await refresh(send);
   };
 
@@ -460,6 +472,14 @@ export const NetworkSection = () => {
               m('span.peerd-net-path', { class: `peerd-net-path--${pi.kind}` }, pi.label),
             ]);
           })),
+        // Kill switch — symmetric to "Start the network" in the offline view.
+        // Drops every live connection and persists dweb off (won't auto-restart
+        // on unlock) — docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2.
+        m('button.peerd-net-btn', {
+          disabled: stopping,
+          style: 'margin-top:10px; font-size:12px; opacity:.75;',
+          onclick: () => stop(send),
+        }, stopping ? 'Stopping…' : 'Stop the network'),
       ]);
     },
   };

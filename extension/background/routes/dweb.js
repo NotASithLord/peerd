@@ -201,6 +201,22 @@ export const makeDwebRoutes = (deps) => {
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
     },
+    // The master OFF — the user-facing kill switch, symmetric to start
+    // (docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2). Persist the preference
+    // FIRST so it won't auto-restart on the next unlock (maybeStartBaseNetwork
+    // gates on dwebEnabled), then tear down a live host. NOT gated on dwebOn():
+    // we must be able to stop precisely as we flip the setting off. Gated only on
+    // DWEB_ENABLED — the store package prunes this module entirely.
+    'dweb/base/stop': async () => {
+      if (!DWEB_ENABLED) return { ok: false, error: 'dweb-disabled' };
+      await settingsStore.update({ dwebEnabled: false });
+      // Never SPAWN the offscreen just to stop it: if it isn't up, there is no
+      // live network to tear down. The offscreen stop handler closes every room,
+      // drops the mesh + lobby, and clears the re-sub timer (dweb-base.js).
+      const contexts = await browser.runtime.getContexts({ contextTypes: /** @type {any} */ (['OFFSCREEN_DOCUMENT']) });
+      if (contexts.length) await browser.runtime.sendMessage({ type: 'dweb/base-host/stop' });
+      return { ok: true, running: false };
+    },
     'dweb/base/status': async () => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
