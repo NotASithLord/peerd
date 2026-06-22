@@ -81,7 +81,9 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'private_network' } }).catch(() => {});
       throw new EgressDeniedError(u.origin);
     }
-    const denylisted = matchDenylist(u.host, getDenylist());
+    // u.hostname (not u.host): the denylist matches bare hostnames; u.host
+    // carries :port. (The matcher also normalizes defensively — see denylist.js.)
+    const denylisted = matchDenylist(u.hostname, getDenylist());
     if (denylisted) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'denylist', method } }).catch(() => {});
       throw new EgressDeniedError(u.origin);

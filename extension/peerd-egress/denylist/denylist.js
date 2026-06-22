@@ -20,14 +20,32 @@
 // having to decide policy.
 
 /**
- * Find which pattern (if any) a hostname matches.
+ * Reduce a host to the matcher's canonical form: lowercase, no `:port`, no
+ * trailing dot. why DEFENSIVELY here (not just "callers must pass a clean
+ * hostname"): callers pass `URL.host` (carries `:port`) and `URL.hostname`
+ * (an absolute FQDN keeps its trailing dot — `new URL('https://chase.com./')`
+ * → `'chase.com.'`). Either form silently misses the exact-match / `*.`-suffix
+ * checks below, which is a denylist BYPASS (`chase.com.` and `chase.com:8443`
+ * both slip past `chase.com`). Normalizing at the single matcher entry point
+ * closes it for every caller (webFetch, the dispatcher origin gate, and the
+ * WebVM HTTP bridge, which reaches webFetch with no other gate).
  *
- * @param {string} hostname        a fully-qualified hostname (no scheme, no port)
+ * @param {string} host
+ * @returns {string}
+ */
+const canonicalHost = (host) =>
+  String(host).toLowerCase().replace(/:\d+$/, '').replace(/\.+$/, '');
+
+/**
+ * Find which pattern (if any) a host matches. Accepts a `URL.host` /
+ * `URL.hostname` value (port and trailing dot are normalized away).
+ *
+ * @param {string} hostname        a hostname (scheme already stripped)
  * @param {readonly string[]} patterns
  * @returns {string | null}        the matched pattern, or null
  */
 export const findDenylistMatch = (hostname, patterns) => {
-  const h = hostname.toLowerCase();
+  const h = canonicalHost(hostname);
   for (const p of patterns) {
     if (matchPattern(h, p.toLowerCase())) return p;
   }
