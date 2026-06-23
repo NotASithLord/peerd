@@ -487,7 +487,7 @@ const EmptyState = {
     m('p', 'peerd is ready.'),
     m('p.muted', hasKey
       ? 'Ask anything — or pick a path:'
-      : 'Add your Anthropic or OpenRouter API key in Settings to start chatting.'),
+      : 'Connect a provider in Settings to start chatting.'),
     hasKey
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;

@@ -2486,7 +2486,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     VaultLockedError,
   }),
   ...makeProviderRoutes({
-    vault, auditLog, pushState, listProviders, listProviderModels, listOpenRouterModels,
+    vault, auditLog, pushState, settingsStore, listProviders, listProviderModels, listOpenRouterModels,
     OPENROUTER_POPULAR, callModel, getSecret, safeFetch, secretNameForProvider, maskKey,
     buildModelOptions, ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
   }),
