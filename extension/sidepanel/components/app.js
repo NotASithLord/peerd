@@ -10,7 +10,6 @@ import m from '/vendor/mithril/mithril.js';
 import { VaultGate } from './vault-gate.js';
 import { ChatView } from './chat-view.js';
 import { SessionsView } from './sessions-view.js';
-import { OnboardingView } from './onboarding-view.js';
 import { openOptions } from '/shared/open-options.js';
 import { openHome } from '/shared/open-home.js';
 import { CHANNEL } from '/shared/channel-config.js';
@@ -30,12 +29,8 @@ export const App = {
   view: ({ attrs }) => {
     const { state, send, voiceManager, uiActions, view, optionsActive, activeTabIsWeb } = attrs;
     const unlocked = state.vault.initialized && !state.vault.locked;
-    // First-run onboarding ('onboarding' is what the sidepanel.js route
-    // gate resolves EVERY route to until the profile's latch flips). It
-    // renders as a hero screen like the vault gate — no TopBar — so the
-    // TopBar wordmark mounts fresh afterwards and plays its typing
-    // intro exactly once, at the real start of use.
-    const onboarding = unlocked && view === 'onboarding';
+    // First-run onboarding is a HOME-page blocker (home.js), not a side-panel
+    // route — the panel is reached by popping it from an onboarded home.
 
     // why: ONE app-shell with a stable `.body` at position 1. The header
     // sits at position 0 and is `null` until unlocked — so the lock /
@@ -58,12 +53,11 @@ export const App = {
       : null;
 
     return m('div', { class: 'app-shell' }, [
-      unlocked && !onboarding ? m(TopBar, { state, send, optionsActive }) : null,
+      unlocked ? m(TopBar, { state, send, optionsActive }) : null,
       notices,
       m('.body', unlocked
         ? [
-            onboarding        ? m(OnboardingView, { state, send })
-            : view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabIsWeb })
+            view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabIsWeb })
             : view === 'chats'  ? m(SessionsView, { state, send })
             : m(PlaceholderView, { label: 'Unknown view' }),
           ]

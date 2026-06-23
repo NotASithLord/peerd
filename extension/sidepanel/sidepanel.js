@@ -14,7 +14,6 @@
 import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
 import { App } from './components/app.js';
-import { needsOnboarding } from './components/onboarding-view.js';
 import { createVoiceManager } from '/peerd-runtime/index.js';
 import { INITIAL_STATE, reduceChat, putSubagentSession } from './chat-reducer.js';
 
@@ -307,13 +306,10 @@ if (browser.tabs?.onActivated) {
 /** @param {string} view */
 const routeArgs = (view) => ({ state: currentState, send, voiceManager, uiActions, view, optionsActive, activeTabIsWeb });
 
-// First-run route gate: after vault setup and before anything else,
-// EVERY route resolves to the onboarding screen until the default
-// profile's onboardingComplete latch flips (persisted by the SW — it
-// never re-fires). Evaluated per redraw, so the gate lifts the moment
-// the post-onboarding state push lands, with no route change needed.
-/** @param {string} view */
-const gatedView = (view) => (needsOnboarding(currentState) ? 'onboarding' : view);
+// First-run onboarding is NOT gated here — it lives on the HOME page as a
+// blocker (home.js needsOnboarding gate). The side panel is reached by popping
+// it from an already-onboarded home, so routing it through onboarding too only
+// caused a surprise trigger when the panel opened after home use.
 
 // why only two routes: settings + context (memory/activity/denylist/
 // skills/hooks) moved to the full-tab options page — the panel is the
@@ -331,7 +327,7 @@ const gatedView = (view) => (needsOnboarding(currentState) ? 'onboarding' : view
 const Root = {
   view: () => {
     const path = m.route.get();
-    return m(App, routeArgs(gatedView(path.startsWith('/chats') ? 'chats' : 'chat')));
+    return m(App, routeArgs(path.startsWith('/chats') ? 'chats' : 'chat'));
   },
 };
 m.route(root, '/chat', { '/chat': Root, '/chats': Root });

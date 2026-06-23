@@ -1037,9 +1037,10 @@ const installWrappers = async () => {
   const encoder = new TextEncoder();
   const stagingName = `/peerdwrappers${Date.now().toString(36)}`;
   // devMode: prepend `set -x` to the sourced wrappers so the PERSISTENT shell
-  // traces every later step (curl/wget/git, pkg installs), and run the install
-  // VISIBLE (below) so the [diag]/[verify] lines reach the terminal instead of
-  // being swallowed. Off by default — extra noise.
+  // traces every later step (curl/wget/git, pkg installs). The install itself
+  // ALWAYS runs silent (below) — its [diag]/[verify] lines are captured in
+  // stdout for the verify parse, never dumped to the terminal. That boot-time
+  // wall of egress-wrapper output is just noise to the user.
   const wrappersSrc = (vmDevMode ? 'set -x\n' : '') + WRAPPERS_BASH;
   await dataDev.writeFile(stagingName, encoder.encode(wrappersSrc));
   const stagedPath = `/peerd-data${stagingName}`;
@@ -1061,7 +1062,7 @@ const installWrappers = async () => {
     'unset __f __t',
     'echo "[peerd-egress] bash function wrappers installed"',
   ].join('\n');
-  return runViaShell(script, { silent: !vmDevMode });
+  return runViaShell(script, { silent: true });
 };
 
 // ---------------------------------------------------------------------------
