@@ -1,25 +1,25 @@
-tesseract.js — vendored (OCR driver)   ⚠️ NOT YET COMMITTED — see "Status"
-=========================================================================
+tesseract.js — vendored (OCR driver)
+====================================
 Upstream:   https://github.com/naptha/tesseract.js
 Package:    https://www.npmjs.com/package/tesseract.js
-Version:    6.x  (pin the exact V when vendoring — see Update procedure)
-License:    Apache-2.0 (see LICENSE in the upstream package)
+Version:    6.0.1  (driver)
+Runtime:    tesseract.js-core 6.1.2 (core WASM) + @tesseract.js-data/eng 1.0.0
+            (English model) — NOT vendored; opt-in SRI-pinned downloads, see
+            peerd-runtime/pdf/ocr-store.js OCR_ASSETS.
+License:    Apache-2.0
 
-Status: PENDING LOCAL VENDORING
--------------------------------
-The two driver files below are NOT in the repo yet. They could not be fetched
-in the environment where the OCR pipeline was wired (the npm/jsDelivr CDN is
-network-blocked there). The recognition code in offscreen/pdf-extract.js is
-written and fail-closed: until these files are present AND the asset SRIs in
-peerd-runtime/pdf/ocr-store.js are pinned, OCR escalation silently falls back
-to the pdf.js text layer (no crash, just the honest "looks scanned" note).
+Status: VENDORED
+----------------
+The two driver files are committed and SRI-pinned (below), and the runtime
+core+lang SRIs are pinned in OCR_ASSETS (ocr-store.js) — so hasValidOcrSris()
+is true and OCR is shippable: Settings → Voice & OCR offers the opt-in
+download, and a scanned PDF (read_pdf engine:'ocr'/'auto') escalates to
+recognition. The whole path stays fail-closed: a missing driver, an SRI
+mismatch, or a recognizer error falls back to the pdf.js text layer + the
+honest "looks scanned" note (offscreen/pdf-extract.js).
 
-To finish OCR, on a machine with network access:
-  1. Vendor the two driver files (Update procedure below) and commit them.
-  2. Pin the runtime-download SRIs: run scripts/compute-ocr-sri.sh and paste
-     the results into OCR_ASSETS (peerd-runtime/pdf/ocr-store.js).
-  3. Compute + paste the driver SRIs below.
-  4. Validate in a browser (see "Validate locally").
+REMAINING: a real-browser smoke-test (see "Validate locally") — the only step
+that can't be done headless. Recommended before relying on OCR in a release.
 
 Why vendored
 ------------
@@ -32,7 +32,7 @@ peerd-runtime/pdf/ocr-store.js (the Moonshine-voice pattern). Vendoring the
 multi-MB core+lang would bloat the package for the majority of users who never
 OCR a PDF.
 
-Files to commit (the npm `dist/` minified ESM build)
+Files committed (the npm `dist/` minified ESM build)
 ----------------------------------------------------
   tesseract.esm.min.js  — the main API (createWorker, …). Lazy-imported by
                           offscreen/pdf-extract.js (loadTesseract); paid once,
@@ -42,34 +42,40 @@ Files to commit (the npm `dist/` minified ESM build)
                           the offscreen CSP).
 
 Do NOT commit the core WASM or any *.traineddata — those are the runtime
-download (ocr-store.js). Omit the .map files and the CommonJS build.
+download (ocr-store.js). The .map files and the CommonJS build are omitted.
 
-Subresource Integrity (SHA-384) — FILL IN when vendoring
---------------------------------------------------------
-  tesseract.esm.min.js  sha384-<TBD>
-  worker.min.js         sha384-<TBD>
+Subresource Integrity (SHA-384)
+-------------------------------
+  tesseract.esm.min.js  sha384-C+b3kNXqc/kbk8HRFKxpQIN52IuwyPg1zTyLFtZb3cvnSIRHL6+4p+cwjkQA/jLS
+  worker.min.js         sha384-Xz8ctHtZgH/eWwOqd6igOU/kepnilz4dowW84REE2KL9DtDbxEnd/xxYhzBhNCzd
 
-Validate locally (can't be confirmed without the driver + a browser)
---------------------------------------------------------------------
-  - corePath / langPath are passed to createWorker as blob: URLs built from the
-    IDB-cached bytes (offscreen/pdf-extract.js, blobUrlFor). Confirm the worker
-    accepts blob: URLs for both; if the language loader insists on appending
-    `<lang>.traineddata.gz` to a base path, adjust the langPath wiring there.
-  - The offscreen CSP (manifests/base.json extension_pages) is
-    `script-src 'self' 'wasm-unsafe-eval'`. Confirm the tesseract worker +
-    its blob/wasm loads pass it; a `worker-src`/`blob:` allowance may be needed.
+CSP (done)
+----------
+The offscreen page runs the tesseract worker (vendored, 'self') which loads the
+core WASM + language model from blob: URLs (ocr-store's IDB-cached bytes, via
+pdf-extract.js blobUrlFor). The extension_pages CSP now carries
+`worker-src 'self' blob:` and `blob:` in connect-src across all channels
+(manifests/base.json + dev.patch.json + preview.patch.json) so those loads pass.
+
+Validate locally (the one step that needs a browser)
+----------------------------------------------------
   - Smoke-test read_pdf with engine:'ocr' on a scanned PDF, then 'auto' on the
     same file (it should escalate), then 'auto' on a born-digital PDF (it should
-    NOT escalate).
+    NOT escalate). Confirm the worker's blob:/wasm loads pass the CSP.
+  - If the language loader insists on appending `<lang>.traineddata.gz` to a
+    base path rather than taking the blob: URL directly, adjust the langPath
+    wiring in pdf-extract.js (extractViaOcr).
 
 Update procedure
 ----------------
-  1. Pick the target version V from https://registry.npmjs.org/tesseract.js
+  1. Pick the target driver version V from https://registry.npmjs.org/tesseract.js
   2. curl -sSL "https://registry.npmjs.org/tesseract.js/-/tesseract.js-V.tgz" -o tess.tgz
   3. tar -xzf tess.tgz
   4. cp package/dist/tesseract.esm.min.js package/dist/worker.min.js \
        extension/vendor/tesseract/
   5. Recompute SHA-384 and paste above:
        openssl dgst -sha384 -binary FILE | openssl base64 -A
-  6. Update the Version line and run scripts/compute-ocr-sri.sh for the
-     core+lang URLs (those URLs are pinned in OCR_ASSETS).
+  6. Update the Version line. If the core/lang versions change, update their
+     EXACT-pinned URLs in OCR_ASSETS + compute-ocr-sri.sh and re-run
+     scripts/compute-ocr-sri.sh to repin those SRIs.
+  (scripts/vendor-tesseract.sh automates steps 2-5.)

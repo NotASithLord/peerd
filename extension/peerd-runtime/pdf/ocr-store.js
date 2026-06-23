@@ -53,9 +53,12 @@ const DB_VERSION = 1;
 // ship the one most-requested model and add a language picker later (the
 // catalog shape already supports more rows). See docs/PDF-READING.md.
 export const OCR_ASSETS = Object.freeze([
-  // sizeBytes are approximate (for the progress bar); the SRI is the gate.
-  { name: 'core-wasm', url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6/tesseract-core-simd.wasm', sri: null, sizeBytes: 4_700_000 },
-  { name: 'lang-eng',  url: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1/4.0.0_best_int/eng.traineddata.gz', sri: null, sizeBytes: 4_000_000 },
+  // sizeBytes are exact (from the pinned download); the SRI is the gate.
+  // URLs are EXACT-version-pinned (not @6/@1) so the SRI stays valid — a
+  // range URL would drift to a new upstream build and break verification.
+  // To bump: edit the version, re-run scripts/compute-ocr-sri.sh, paste both.
+  { name: 'core-wasm', url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2/tesseract-core-simd.wasm', sri: 'sha384-3KUztdriXAMWnnOO86COcQ5Zc5fInO+vnpQux5nZqGa6xgZGOv6povhaewDn1/8G', sizeBytes: 3_469_078 },
+  { name: 'lang-eng',  url: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz', sri: 'sha384-JI+fraGAoc5GBGIliuqzHRnP1nJyrukg5ggNSBv/TO+YOVj+6Te6XXQOx7ia10xq', sizeBytes: 2_952_873 },
 ]);
 
 export const OCR_TOTAL_BYTES = OCR_ASSETS.reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
@@ -81,6 +84,7 @@ export const hasValidOcrSris = () => OCR_ASSETS.some((a) => a.sri != null);
  * @param {typeof crypto} [deps.cryptoApi]
  * @param {{warn:(...a:any[])=>void}} [deps.logger]
  * @param {(entry: {url:string}) => Promise<void>} [deps.audit]
+ * @param {OcrAssetSpec[]} [deps.assets]  asset list to manage (default OCR_ASSETS)
  */
 export const createOcrStore = (deps = {}) => {
   const {
@@ -88,6 +92,9 @@ export const createOcrStore = (deps = {}) => {
     cryptoApi = (typeof crypto !== 'undefined' ? crypto : null),
     logger = console,
     audit = async () => {},
+    // The asset list to manage. Defaults to the shipped OCR_ASSETS; tests
+    // inject a fake list (own URLs/SRIs) the same way they inject idb/fetchFn.
+    assets = OCR_ASSETS,
   } = deps;
 
   let idbPromise = deps.idb !== undefined ? Promise.resolve(deps.idb) : null;
@@ -103,8 +110,8 @@ export const createOcrStore = (deps = {}) => {
    */
   const isInstalled = async ({ dev = false } = {}) => {
     // Independent IDB reads — fetch them concurrently, then check.
-    const cached = await Promise.all(OCR_ASSETS.map((a) => readAsset(a.url)));
-    return OCR_ASSETS.every((asset, i) => {
+    const cached = await Promise.all(assets.map((a) => readAsset(a.url)));
+    return assets.every((asset, i) => {
       const c = cached[i];
       return c && (c.sri === asset.sri || (asset.sri === null && dev));
     });
@@ -120,17 +127,17 @@ export const createOcrStore = (deps = {}) => {
    * @param {AbortSignal} [opts.signal]
    */
   const getEngine = async (opts = {}) => {
-    const totalBytes = OCR_TOTAL_BYTES || 1;
+    const totalBytes = assets.reduce((s, a) => s + (a.sizeBytes ?? 0), 0) || 1;
     let downloaded = 0;
     /** @type {Record<string, ArrayBuffer>} */
     const files = {};
 
     // Read every asset's cache entry up front (independent IDB reads), then walk
     // the list — only the actual downloads need to be sequential (progress).
-    const cachedAll = await Promise.all(OCR_ASSETS.map((a) => readAsset(a.url)));
+    const cachedAll = await Promise.all(assets.map((a) => readAsset(a.url)));
 
-    for (let i = 0; i < OCR_ASSETS.length; i += 1) {
-      const asset = OCR_ASSETS[i];
+    for (let i = 0; i < assets.length; i += 1) {
+      const asset = assets[i];
       const cached = cachedAll[i];
       if (cached && (cached.sri === asset.sri || (asset.sri === null && opts.dev))) {
         files[asset.name] = cached.bytes;
