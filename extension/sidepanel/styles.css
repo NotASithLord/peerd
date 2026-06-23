@@ -2197,6 +2197,9 @@ button.icon:hover { background: var(--bg); }
 }
 .key-badge.key-set   { color: var(--ok); border-color: var(--ok); }
 .key-badge.key-unset { color: var(--fg-muted); }
+/* Keyless local providers (Ollama, on-device WebGPU): neutral until proven
+   ready/connected — green (.key-set) is reserved for that, never default. */
+.key-badge.key-local { color: var(--fg-muted); }
 .provider-card-form { margin-top: 10px; }
 /* why: flex-direction:row is REQUIRED — the generic `.input-row` sets
    column, so without this the input + Save stack vertically (and centered

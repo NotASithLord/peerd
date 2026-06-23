@@ -84,7 +84,7 @@ export const DwebSection = {
           + 'peer-to-peer one-to-one chats. It ships pre-loaded in your '
           + 'Library, tagged “dweb” — open it there. To try it, open it in '
           + 'two profiles (or two machines) and join the same room code.'),
-        m('button.secondary', { type: 'button', onclick: () => openHome() }, 'Open Library'),
+        m('button.secondary', { type: 'button', onclick: () => openHome('library') }, 'Open Library'),
       ]) : null,
 
       resetRow(send, ['dwebEnabled']),

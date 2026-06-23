@@ -38,6 +38,11 @@ export const makeProviderRoutes = (deps) => {
           return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? 'unreachable' };
         }
       }
+      // A keyless provider with NO live inventory (local-webgpu) has no daemon to
+      // ping — its readiness is "is the model downloaded?", surfaced by its own
+      // card (local-model/status), not this 1-token probe. Bail cleanly instead
+      // of falling through to the key path and lying with a "no-key" error.
+      if (adapter?.keyless) return { ok: false, error: 'no-live-test' };
       let key;
       try { key = await vault.getSecret(secretNameForProvider(provider)); }
       catch { return { ok: false, error: 'locked' }; }
@@ -80,6 +85,10 @@ export const makeProviderRoutes = (deps) => {
           providers.push({
             name: p.name, label: p.label, defaultModel: p.defaultModel,
             hasKey: true, keyless: true, keyPreview: null,
+            // liveModels marks a daemon the card can probe (Ollama /api/tags) —
+            // so the badge can read "connected" only when it actually answers,
+            // never default-green.
+            liveModels: !!p.liveModels,
           });
           continue;
         }
@@ -90,6 +99,7 @@ export const makeProviderRoutes = (deps) => {
           name: p.name, label: p.label, defaultModel: p.defaultModel,
           hasKey: !!key,
           keyless: false,
+          liveModels: !!p.liveModels,
           // Masked preview so the user can verify the RIGHT key is stored and
           // isn't whitespace-padded (a frequent cause of provider 401s),
           // without exposing the secret.

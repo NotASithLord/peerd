@@ -346,10 +346,11 @@
   .library-refresh.is-spinning, .disc-refresh.is-spinning { animation: none; }
 }
 
-/* --- Local models (WebGPU) — rendered inside the Providers & models page -- */
-.providers-subhead { font-size: 14px; margin: 6px 0 10px; color: var(--fg); }
-.local-models > .muted { max-width: 64ch; margin: 0 0 16px; }
-.lm-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); padding: 14px 16px; max-width: 620px; }
+/* --- Local models (WebGPU) — the on-device provider card body ------------- */
+/* The local model now renders INSIDE its provider card: the test/download body
+   sits under the card header (logo + name + badge), separated by a hairline. */
+.provider-card-local .local-models { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.local-models > .muted { max-width: 64ch; margin: 0 0 12px; }
 .lm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .lm-name-group { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .lm-name { font-weight: 600; font-size: 15px; color: var(--fg); }
