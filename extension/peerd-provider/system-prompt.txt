@@ -221,25 +221,47 @@ work, parallel included, goes through spawn_subagent above.
 
 ──── webvm specifics ──────────────────────────────────────────────────
 
-Image: stock Debian + python3, pip, git, jq, POSIX toolchain, Python
-stdlib. Network is HTTP/HTTPS only (no TCP/UDP in the kernel — pip
-install, apt, raw sockets all fail with "no route to host").
+Image: stock Debian (32-bit i686) + python3, pip, git, jq, POSIX
+toolchain, Python stdlib. The kernel has NO raw sockets: raw Python
+sockets, ssh, scp, nc, ping, rsync, dig fail at the kernel (shimmed to a
+peerd error, exit 1). apt/apt-get is shimmed too — install/update/etc.
+print a peerd error and return 100 (no live Debian repos; use the
+package wrappers below, or `dpkg -i` a curl-fetched .deb). But HTTP/HTTPS
+DOES work, and so does package install, through bash function wrappers.
 
-HTTP/HTTPS works via four bash function wrappers installed at VM boot
-that route through peerd-egress (same denylist + audit as web tools):
+The wrappers install at VM boot and route through peerd-egress — the same
+denylist + SSRF guard + audit as the web tools. It is allowlist-free: any
+non-denylisted public host works, no per-host confirm.
 
-  curl <url>      # GET; supports -o, -O, -s
-  wget <url>      # GET; supports -O
-  git clone <url> # github.com archive download + unpack
-  peerd-fetch <url> [outfile]
+  curl <url>            # full HTTP: -X, -H, -d/--data(@file), --json, -I, -f, -A, -e, -o/-O, -w '%{http_code}'
+  wget <url>            # GET or POST: -O, --header, --post-data/--post-file, --method, --body-data
+  git clone <url> [dir] # GitHub + GitLab (+ best-effort others); -b <branch|tag|sha>; private via vault git:<host>
+  peerd-fetch <url> [outfile]   # plain GET, cached host-side
+  pip install <pkg…>    # pure-Python wheels; also -r requirements.txt
+  npm install <pkg…>    # also yarn add / pnpm add; NAMED packages only
+  gem install <name…>   # pure-Ruby gems
+
+pip/npm/gem resolve the package + its deps host-side, stage them, then
+install offline in the VM — so `pip install requests` just works.
+Gotchas: pip prefers pure py3-none-any wheels (an i686 wheel may match,
+but C-extension / native builds fail loudly naming the package); npm/
+yarn/pnpm take NAMED packages only (a bare `npm install` from package.json
+FAILS — runtime deps only, no dev/peer/optional, no install scripts, no
+native addons); gem is pure-Ruby only and needs a gem binary in the image
+(no Bundler/Gemfile). git clone is a SNAPSHOT — no .git, no history, and
+only `clone` works (pull/push/fetch/commit do not). Staging fetches over
+the network, so big installs can be slow: raise vm_boot's timeoutMs
+(default 60s, max 300s) instead of giving up.
 
 Bash checks functions before PATH, so they shadow /usr/bin/{curl,wget,
-git}. Use them directly: vm_boot("curl https://api.github.com/repos/X
-| jq ."). `bash -c '...'` inherits via `export -f`; `sh -c` (dash)
-does NOT — use bash for subshells.
+git,pip,npm,gem}. Commands run in a persistent /bin/bash --login -i
+session — use the wrappers directly: vm_boot("curl https://api.github.com/repos/X
+| jq ."). `bash -c '...'` inherits them via `export -f`; `sh -c` (dash)
+does NOT — always use bash for subshells.
 
 vm_import is the bulk alternative (runs in peerd, writes bytes to a VM
-path). Use for >1MB responses or binaries.
+path). Use it for >1MB responses, binaries, or anything the wrappers
+can't fetch — apt packages, native/C-extension wheels or sdists.
 
 If a wrapper returns "Could not resolve host" / shell-not-found, the
 wrappers FAILED to install — check the in-tab boot log; don't tell the
@@ -259,9 +281,14 @@ for binaries or >200KB use vm_import.
 
 Canonical "run a GitHub project" flow:
   vm_boot("git clone https://github.com/<user>/<repo>")
+  vm_boot("pip install -r <repo>/requirements.txt")   # Python: if pure
   vm_boot("cd <repo> && python3 -m <pkg>")
+For a JS repo there's no package.json install — name the deps explicitly
+(`npm install <pkg> <pkg>`); a bare `npm install` errors. pip's -r
+requirements.txt is the only manifest-file install supported.
 
-Look for small pure-Python projects — anything needing `pip install` won't work.
+Pure-Python projects run cleanly; projects pulling compiled/native deps
+won't (those builds need a toolchain the VM lacks).
 
 ──── trust + security ────────────────────────────────────────────────
 

@@ -785,8 +785,12 @@ Revisit if/when we ship a paid tier.
   handles this natively — pages are pulled on demand.
 - Pre-bake a handful of packages users will reach for immediately: `python3`,
   `pip`, `pandas`, `requests`, `jq`, `curl`, `git`, `ripgrep`. This is a
-  V1.1 polish — V1 ships with the stock CheerpX base and lets the agent
-  `apt install` what it needs.
+  later polish — today ships the stock CheerpX Debian image (python3 + pip +
+  git + jq + coreutils, 32-bit i686). There are no live apt repos: `apt
+  install` is shimmed to error (return 100). Packages come from the
+  host-side-resolving wrappers — pip (pure-python wheels), npm/yarn/pnpm
+  (named packages), gem (pure-ruby) — or `dpkg -i` on a curl-fetched .deb;
+  bake a custom image for native/compiled deps.
 - Persistence: CheerpX persistent block device backed by IndexedDB. State
   in `/root` and `/home/agent` survives between sessions. "Reset VM" wipes it.
 
@@ -851,10 +855,12 @@ export const run = async (cmd, opts = {}) => {
 
 The VM is hard-sandboxed by WASM. Even if the agent runs malicious code
 inside it, that code cannot escape to the browser, cannot read cookies,
-cannot make network requests outside what CheerpX's emulated network layer
-permits (which goes through the same `safeFetch` egress layer — we plumb
-its emulated socket through our allowlist). Network access from inside the
-VM is OFF by default in V1; user can enable per-session with a confirm.
+cannot make network requests except HTTP/HTTPS routed through bash-function
+wrappers (curl / wget / git clone / peerd-fetch and the pip/npm/gem shims)
+that call peerd-egress host-side, behind the denylist + SSRF/private-network
+guard. There are no raw sockets — ssh/nc/ping/etc. are stubbed to error.
+This HTTP egress path is always active (no per-session enable); it is gated
+by the denylist (allowlist-free `webFetch`) rather than an on/off switch.
 
 ---
 
@@ -2298,12 +2304,12 @@ implementation, not ones I'd make unilaterally:
    vs. a sticky banner at the top of the side panel. Inline reads
    naturally but can be scrolled past; sticky is harder to miss but
    intrusive.
-6. **VM network access default.** Off in V1 (as written above) means the
-   agent can't `pip install` without explicit per-session enable. That's
-   safer but annoying. Alternative: enabled by default with the same
-   egress allowlist applied (`pypi.org`, `github.com`, npm registry, etc.).
-   I lean toward off-by-default with a one-click enable + a curated common
-   allowlist when enabled.
+6. **VM network access default.** RESOLVED: VM HTTP egress is always-on,
+   gated by the denylist + SSRF/private-network guard (not an on/off
+   per-session toggle). `pip install` (pure-python), npm/gem install, and
+   git clone all work out of the box via the host-side-resolving wrappers;
+   no per-session enable and no curated allowlist — any non-denylisted
+   public host is reachable.
 
 ---
 

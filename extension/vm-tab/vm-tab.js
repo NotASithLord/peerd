@@ -178,14 +178,20 @@ peerd-fetch() {
   local id="\${RANDOM}\${RANDOM}\${RANDOM}$$"
   printf '___PEERD_HTTP___:%s:%s\\n' "$id" "$url"
   local n=0
+  # why: under devMode set -x this 20Hz poll loop would echo ~4 trace lines
+  # every 50ms and flood the terminal during any slow fetch. Suspend xtrace for
+  # the wait (portable to any bash version, unlike local dash), restore it after.
+  local __peerd_x=""; case $- in *x*) __peerd_x=1; set +x;; esac
   while [ ! -f "/peerd-data/peerddone\${id}" ]; do
     sleep 0.05
     n=$((n + 1))
     if [ "$n" -gt "$PEERD_HTTP_TIMEOUT_TICKS" ]; then
+      [ -n "$__peerd_x" ] && set -x
       echo "peerd-fetch: timed out after \${PEERD_HTTP_TIMEOUT}s waiting for response (id=\${id})" >&2
       return 124
     fi
   done
+  [ -n "$__peerd_x" ] && set -x
   if [ -f "/peerd-data/peerderr\${id}" ]; then
     cat "/peerd-data/peerderr\${id}" >&2
     return 1
@@ -214,14 +220,20 @@ __peerd_emit_req() {
   id="\${RANDOM}\${RANDOM}\${RANDOM}$$"
   printf '___PEERD_REQ___:%s:%s\\n' "$id" "$payload"
   n=0
+  # why: silence this 20Hz poll loop so devMode set -x does not flood the
+  # terminal during slow requests (curl/wget + every pip/npm/gem install route
+  # through here). Suspend xtrace for the wait, restore after (portable bash).
+  local __peerd_x=""; case $- in *x*) __peerd_x=1; set +x;; esac
   while [ ! -f "/peerd-data/peerddone\${id}" ]; do
     sleep 0.05
     n=$((n + 1))
     if [ "$n" -gt "$PEERD_HTTP_TIMEOUT_TICKS" ]; then
+      [ -n "$__peerd_x" ] && set -x
       echo "peerd-http: timed out after \${PEERD_HTTP_TIMEOUT}s (id=\${id})" >&2
       return 124
     fi
   done
+  [ -n "$__peerd_x" ] && set -x
   PEERD_LAST_STATUS=""
   if [ -f "/peerd-data/peerdmeta\${id}" ]; then
     PEERD_LAST_STATUS="$(grep -Eo '"status":[0-9]+' "/peerd-data/peerdmeta\${id}" | grep -Eo '[0-9]+')"

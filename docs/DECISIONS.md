@@ -55,16 +55,18 @@ small "pending confirm" banner appears at the top of the panel with a
 
 ## 6. VM network access default
 
-**Off by default.** Per-session enable via a one-click confirm; when
-enabled, an egress allowlist for common dev origins applies
-(`pypi.org`, `pythonhosted.org`, `github.com`, `raw.githubusercontent.com`,
-`registry.npmjs.org`, `repo.maven.apache.org`, `crates.io`).
-The agent can request additions; user confirms each.
+**Always-on, denylist-gated.** The VM's curl/wget/git/pip/npm/gem ride
+the same audited egress as the web tools: allowlist-free `webFetch`
+guarded by the always-on denylist, an SSRF/private-network block (no
+LAN/localhost/loopback), redirect fail-close, and the audit log. Any
+non-denylisted public HTTP(S) host works; there is no curated per-origin
+allowlist to add to, and no per-session enable gate.
 
-This is the conservative-by-default version. If we get user feedback
-that the `pip install` friction is constant, revisit with a "trusted
-sources only" mode that auto-enables the curated allowlist without a
-prompt per session.
+This supersedes the original conservative off-by-default + curated-
+allowlist proposal: in practice the denylist + SSRF guard carry the
+safety weight, and gating every `pip install` behind a per-session
+confirm was pure friction. See `docs/engine/VM-NETWORKING.md` and
+`extension/peerd-egress/README.md` for the egress model.
 
 ---
 
