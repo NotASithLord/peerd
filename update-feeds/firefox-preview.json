@@ -3,8 +3,8 @@
     "peerd-preview@peerd.ai": {
       "updates": [
         {
-          "version": "0.1.0",
-          "update_link": "https://github.com/NotASithLord/peerd/releases/download/v0.1.0/peerd-preview-firefox.xpi",
+          "version": "0.1.1",
+          "update_link": "https://github.com/NotASithLord/peerd/releases/download/v0.1.1/peerd-preview-firefox.xpi",
           "applications": {
             "gecko": {
               "strict_min_version": "121.0"
