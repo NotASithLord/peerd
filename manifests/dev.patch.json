@@ -10,7 +10,7 @@
     "default_title": "peerd (dev)"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self' blob:; connect-src 'self' blob: https: wss: http://localhost:11434"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' blob: https: wss: http://localhost:11434"
   },
   "web_accessible_resources": [
     {

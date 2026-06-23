@@ -150,8 +150,14 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
     // createWorker spins up vendor/tesseract/worker.min.js, which loads the core
     // WASM (corePath) and the language model (langPath). cacheMethod:'none' — we
     // already cache the bytes in IDB (ocr-store), no second cache layer.
+    // workerBlobURL:false — load the worker DIRECTLY from the same-origin
+    // workerPath, not via a blob: Worker. MV3's extension_pages CSP only allows
+    // 'self' in worker-src (blob: is rejected and would invalidate the whole
+    // manifest), so the worker must be a 'self' URL. The core/lang it then loads
+    // are blob: URLs, which ride connect-src 'self' blob: (a network directive,
+    // unrestricted in MV3) — see manifests/*.json.
     worker = await Tesseract.createWorker('eng', 1, {
-      corePath, langPath, workerPath, gzip: true, cacheMethod: 'none',
+      corePath, langPath, workerPath, gzip: true, cacheMethod: 'none', workerBlobURL: false,
     });
 
     const pageCount = pdf.numPages;
