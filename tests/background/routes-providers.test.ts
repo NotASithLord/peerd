@@ -12,6 +12,7 @@ const baseDeps = (over: Record<string, any> = {}) => ({
   },
   auditLog: { append: async () => {} },
   pushState: () => {},
+  settingsStore: { get: () => ({ providerName: 'anthropic', providerModel: '' }), update: async (_p: any) => {} },
   listProviders: () => [
     { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', vaultSecretName: 'anthropic.key' },
     { name: 'ollama', label: 'Ollama', defaultModel: 'llama', keyless: true, liveModels: true },
@@ -107,6 +108,43 @@ describe('provider/setKey', () => {
   test('vault locked → locked', async () => {
     const r = makeProviderRoutes(baseDeps({ vault: { setSecret: async () => { throw new VaultLockedError(); } } }));
     expect(await r['provider/setKey']({ provider: 'anthropic', plaintext: 'sk-abcdefgh' })).toEqual({ ok: false, error: 'locked' });
+  });
+
+  // Auto-activate: configuring a provider when the current selection isn't
+  // usable yet promotes the one you just keyed (fresh-install readiness),
+  // but never overrides an already-usable selection.
+  const twoCloud = () => [
+    { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', vaultSecretName: 'anthropic.key' },
+    { name: 'openrouter', label: 'OpenRouter', defaultModel: 'auto', vaultSecretName: 'openrouter.key' },
+  ];
+  test('auto-activates the keyed provider when the active one is unconfigured', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      listProviders: twoCloud,
+      vault: { setSecret: async () => {}, getSecret: async () => null }, // active anthropic has NO key
+      settingsStore: { get: () => ({ providerName: 'anthropic', providerModel: 'claude' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({ provider: 'openrouter', plaintext: 'sk-or-abcdefgh' })).toEqual({ ok: true });
+    expect(updated).toEqual({ providerName: 'openrouter', providerModel: '' });
+  });
+  test('does NOT override an already-usable active provider', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      listProviders: twoCloud,
+      vault: { setSecret: async () => {}, getSecret: async () => 'sk-abc' }, // active anthropic HAS a key
+      settingsStore: { get: () => ({ providerName: 'anthropic', providerModel: 'claude' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({ provider: 'openrouter', plaintext: 'sk-or-abcdefgh' })).toEqual({ ok: true });
+    expect(updated).toBe(null);
+  });
+  test('respects an explicit keyless (Ollama) active selection', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      vault: { setSecret: async () => {}, getSecret: async () => null },
+      settingsStore: { get: () => ({ providerName: 'ollama', providerModel: '' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({ provider: 'anthropic', plaintext: 'sk-abcdefgh' })).toEqual({ ok: true });
+    expect(updated).toBe(null);
   });
 });
 

@@ -13,7 +13,7 @@
  */
 export const makeProviderRoutes = (deps) => {
   const {
-    vault, auditLog, pushState,
+    vault, auditLog, pushState, settingsStore,
     listProviders, listProviderModels, listOpenRouterModels, OPENROUTER_POPULAR,
     callModel, getSecret, safeFetch, secretNameForProvider, maskKey, buildModelOptions,
     ProviderHttpError, ProviderKeyMissingError, VaultLockedError,
@@ -143,6 +143,23 @@ export const makeProviderRoutes = (deps) => {
         if (key.length < 8) return { ok: false, error: 'key-too-short' };
         await vault.setSecret(adapter.vaultSecretName, key);
         auditLog.append({ type: 'provider_added', details: { provider } }).catch(() => {});
+        // Auto-activate the provider you just configured if the current
+        // selection isn't usable yet — so a fresh install (default providerName
+        // 'anthropic', no key) becomes ready the moment ANY provider is keyed,
+        // with no separate "select provider" step. Never override an
+        // already-usable selection (an explicit keyless pick, or a provider that
+        // already has a key). Clear providerModel so the new provider's default
+        // model applies (mirrors the Settings provider <select>).
+        const activeName = settingsStore.get().providerName;
+        if (provider !== activeName) {
+          const active = listProviders().find((/** @type {any} */ p) => p.name === activeName);
+          let activeUsable = !!active?.keyless;
+          if (!activeUsable && active?.vaultSecretName) {
+            try { activeUsable = !!(await vault.getSecret(active.vaultSecretName)); }
+            catch { activeUsable = false; }
+          }
+          if (!activeUsable) await settingsStore.update({ providerName: provider, providerModel: '' });
+        }
         // Push fresh state so UI flips its "no key" affordance.
         pushState();
         return { ok: true };

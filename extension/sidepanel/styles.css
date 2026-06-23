@@ -703,6 +703,29 @@ textarea {
   outline: none;
 }
 
+/* A bare <select> in a labeled field (e.g. Settings → Provider) otherwise
+   renders the platform's native chrome — a white box in dark mode. Match the
+   text-input surface above and swap the native arrow for a themed chevron so
+   it reads like the rest of the form. (Same appearance-strip approach as
+   type=search below.) The open option list stays OS-native, as selects do. */
+.input-row select {
+  font: inherit;
+  padding: 8px 32px 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--bg);
+  color: var(--fg);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8a8a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px;
+}
+.input-row select:focus { border-color: var(--accent); }
+
 /* type=search renders the platform's native chrome by default — an OS pill
    that ignores our tokens (most visibly a white box in dark mode) plus a
    magnifier/clear glyph. Strip the native appearance so every filter bar
