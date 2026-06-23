@@ -548,17 +548,40 @@ pip() {
   fi
   local name version file wheels=""
   while IFS=$'\\t' read -r name version file; do [ -n "$name" ] && wheels="$wheels $file"; done < "$manifest"
-  local pipbin="" c
-  for c in /usr/bin/pip3 /usr/local/bin/pip3 /usr/bin/pip /usr/local/bin/pip; do
-    [ -x "$c" ] && { pipbin="$c"; break; }
-  done
-  if [ -z "$pipbin" ]; then
-    echo "peerd-pip: no pip binary in the VM to install the staged wheels ($wheels)" >&2
-    rm -f "$manifest" $wheels; return 1
-  fi
-  "$pipbin" install --no-index --no-deps $wheels 2>>"$errf"
+  if [ -z "$wheels" ]; then echo "peerd-pip: nothing staged to install" >&2; rm -f "$manifest" "$errf"; return 1; fi
+  # Install each pure-Python wheel by UNZIPPING it into a writable
+  # site-packages -- deliberately NOT via pip. On CheerpX pip install fails
+  # two ways: (1) its distro detection opens /dev/null for WRITE, which
+  # CheerpX denies (PermissionError); and (2) the host stages wheels as
+  # pkgstage_<id>_<name>.whl and pip derives the package name/version from the
+  # FILENAME, so the staging prefix breaks its .dist-info lookup. A
+  # py3-none-any wheel is just a zip already laid out for site-packages, so
+  # unzip == install (host-side resolution already staged every dependency,
+  # and the extracted .dist-info keeps pip list / importlib.metadata working).
+  python3 -c '
+import site, os, sys, zipfile
+cands = list(getattr(site, "getsitepackages", lambda: [])()) + [site.getusersitepackages()]
+dest = None
+for d in cands:
+    try:
+        os.makedirs(d, exist_ok=True)
+        t = os.path.join(d, ".peerd_w"); open(t, "w").close(); os.remove(t); dest = d; break
+    except Exception: pass
+if not dest:
+    print("peerd-pip: no writable site-packages dir", file=sys.stderr); sys.exit(1)
+rc = 0
+for whl in sys.argv[1:]:
+    try:
+        zipfile.ZipFile(whl).extractall(dest)
+        b = os.path.basename(whl)
+        if b.startswith("pkgstage_") and b.count("_") >= 2: b = b.split("_", 2)[2]
+        print("installed " + (b[:-4] if b.endswith(".whl") else b))
+    except Exception as e:
+        print("peerd-pip: failed to unpack", os.path.basename(whl), e, file=sys.stderr); rc = 1
+sys.exit(rc)
+' $wheels 2>>"$errf"
   local rc=$?
-  [ -f "$errf" ] && cat "$errf" >&2
+  [ -f "$errf" ] && [ "$rc" != 0 ] && cat "$errf" >&2
   rm -f "$manifest" "$errf" $wheels
   return $rc
 }
