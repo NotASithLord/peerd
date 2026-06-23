@@ -71,6 +71,7 @@ import { PEER_NAME_MAX } from '/peerd-runtime/index.js';
  * @property {number} step
  * @property {''|'out'|'in'} anim
  * @property {PromptState|null} prompt
+ * @property {ReturnType<typeof setTimeout>|null} stepTimer
  */
 
 // Same five custom props the composer's send disc draws from (sidepanel
@@ -195,6 +196,7 @@ const goToStep = (ui, next) => {
   stopTease(ui);
   stopPromptType(ui);
   const swap = () => {
+    ui.stepTimer = null;
     ui.step = next;
     ui.anim = 'in';
     startPromptType(ui);
@@ -203,7 +205,11 @@ const goToStep = (ui, next) => {
   if (reducedMotion()) { ui.anim = ''; swap(); return; }
   ui.anim = 'out';
   m.redraw();
-  setTimeout(swap, 170);
+  // Track the slide-transition timer so onremove can cancel it — otherwise an
+  // unmount within the 170ms window (e.g. a vault auto-lock) fires swap()
+  // against detached component state. Clear any prior one first.
+  if (ui.stepTimer) clearTimeout(ui.stepTimer);
+  ui.stepTimer = setTimeout(swap, 170);
 };
 
 /** @typedef {{ state: OnbState, attrs: { send: Send, state?: ChatState } }} OnbVnode */
@@ -220,6 +226,7 @@ export const OnboardingView = {
     vnode.state.step = 0;       // 0 name · 1 call-me · 2 notes
     vnode.state.anim = '';      // ''|'out'|'in' — step transition class
     vnode.state.prompt = null;  // typed question state for steps 1/2
+    vnode.state.stepTimer = null;
     if (!reducedMotion()) {
       startTease(vnode.state);
     }
@@ -229,6 +236,7 @@ export const OnboardingView = {
   onremove(vnode) {
     stopTease(vnode.state);
     stopPromptType(vnode.state);
+    if (vnode.state.stepTimer) clearTimeout(vnode.state.stepTimer);
   },
 
   /** @param {OnbVnode} vnode */
