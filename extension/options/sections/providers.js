@@ -23,7 +23,7 @@ import { resetRow } from './reset-row.js';
 import { LocalModelsSection } from './local-models.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
-/** @typedef {{ name: string, label: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
+/** @typedef {{ name: string, label: string, defaultModel?: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
 
 // ── Provider logos ──────────────────────────────────────────────────────
 // Inline SVG marks (no network, no external asset — same privacy posture
@@ -79,6 +79,10 @@ export const ProvidersSection = {
     // keyless daemon (Ollama). Drives the badge so green means "actually
     // connected", never just "no key needed".
     vnode.state.connStatus = {};
+    // Model dropdown options — fetched lazily from the view (see modelOptionsKey)
+    // using the SAME source as the chat picker (models/options).
+    vnode.state.modelOptions = null;
+    vnode.state.modelOptionsKey = '';
     ProvidersSection.loadProviderStatus(vnode);
   },
 
@@ -112,6 +116,20 @@ export const ProvidersSection = {
       vnode.state.connStatus[name] = r?.ok ? 'connected' : 'down';
       m.redraw();
     }).catch(() => { vnode.state.connStatus[name] = 'down'; m.redraw(); });
+  },
+
+  // Fetch the Model-dropdown options from the SAME source the chat picker uses
+  // (models/options -> buildModelOptions): every configured provider's curated
+  // models. Called from the view whenever the provider / curated set / key
+  // state changes, so the selector tracks what you've picked.
+  /**
+   * @param {any} state
+   * @param {Send} send
+   */
+  loadModelOptions(state, send) {
+    send({ type: 'models/options' }).then((/** @type {any} */ r) => {
+      if (r?.ok) { state.modelOptions = r.options ?? []; m.redraw(); }
+    }).catch(() => {});
   },
 
   /** @param {{ attrs: { state: any, send: Send }, state: any }} vnode */
@@ -218,6 +236,14 @@ export const ProvidersSection = {
     /** @param {string} name */
     const keyPlaceholder = (name) => `${KEY_PREFIX[name] ?? 'sk-'}...`;
     const defaultProvRow = providerRows.find((p) => p.name === provider.current);
+    // Keep the Model selector populated from the chat-picker source; re-fetch
+    // when the active provider, the curated OpenRouter set, or key-state changes.
+    const moKey = `${provider.current}|${provider.hasKey ? 1 : 0}|${(state.settings?.openrouterModels ?? []).join(',')}`;
+    if (moKey !== ui.modelOptionsKey) {
+      ui.modelOptionsKey = moKey;
+      ProvidersSection.loadModelOptions(ui, send);
+    }
+    const modelOpts = (ui.modelOptions ?? []).filter((/** @type {any} */ o) => o.provider === provider.current);
 
     // One provider per card: logo, name, key status, and a slick inline
     // key editor that stays collapsed to the masked badge until you hit
@@ -341,23 +367,28 @@ export const ProvidersSection = {
       ]),
       m('.input-row', [
         m('label', { for: 'model' }, 'Model'),
-        m('input', {
+        m('select', {
           id: 'model',
-          type: 'text',
-          spellcheck: false,
-          placeholder: provider.model ?? '',
           value: providerModel,
-          onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+          onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
             await send({ type: 'settings/update', patch: { providerModel: e.target.value } });
             m.redraw();
           },
-        }),
+        }, [
+          // Blank = the provider's own default model.
+          m('option', { value: '' }, `Default — ${defaultProvRow?.defaultModel ?? provider.model ?? 'provider default'}`),
+          ...modelOpts.map((/** @type {any} */ o) => m('option', { value: o.model }, o.label)),
+          // Keep a current custom/legacy id selectable even if it isn't curated.
+          (providerModel && !modelOpts.some((/** @type {any} */ o) => o.model === providerModel))
+            ? m('option', { value: providerModel }, `${providerModel} (custom)`)
+            : null,
+        ]),
       ]),
       m('p.hint', provider.current === 'openrouter'
-        ? ['Model id like ', m('code', 'openai/gpt-4o'), '. Leave blank for the default.']
+        ? ['Pick from the models you curated above, or ', m('strong', 'Default'), ' for the gateway default.']
         : provider.current === 'ollama'
-          ? ['Model id like ', m('code', 'qwen3:8b'), ' — it must be pulled in Ollama first. Leave blank for the default.']
-          : ['Leave blank for the default (', m('code', provider.model ?? 'claude-sonnet-4-6'), ').']),
+          ? ['Models you’ve pulled in Ollama appear here, or ', m('strong', 'Default'), ' for the provider default.']
+          : ['Choose a model, or ', m('strong', 'Default'), ' for the provider default.']),
       (defaultProvRow && !defaultProvRow.hasKey)
         ? m('p.error.hint', `No key set for ${defaultProvRow.label} yet — add one above, or new chats on it will fail.`)
         : null,
