@@ -274,6 +274,29 @@ html, body, #app {
 }
 .wordmark--hero.wordmark--intro::before { border-radius: 6px; }
 
+/* Vault-gate hero brand block: wordmark + version + tagline as one centered
+ * column. The version sits small and mono right under the wordmark; the
+ * tagline reads as the brand promise. The generous bottom margin is the
+ * breathing room between the brand and the action buttons below. */
+.vault-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 8px 0 20px;
+}
+.brand-version {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.brand-tagline {
+  margin-top: 19px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
 /* --- onboarding (first-run "Hello, I'm peerd") --------------------------- */
 /* The greeting carries the peerd.ai terminal feel: mono type plus the
  * site's blinking cursor (same cadence as the h2 cycle cursor on the
@@ -515,7 +538,20 @@ html, body, #app {
  * left-aligned heading + centered button looked orphaned). Form fields reset
  * to left so labelled inputs still read normally. Scoped via .gate-card so
  * the generic .card (provider cards, etc.) is untouched. */
-.gate-card { text-align: center; }
+/* Faint code-stream ambiance behind the gate (vault-gate.js CodeStream): a
+   full-bleed, non-interactive canvas sitting BEHIND the gate content, so the
+   card must own a higher stacking layer. Very low opacity — atmosphere, not
+   chrome — and theme-agnostic (the canvas paints with --fg/--bg). */
+.code-stream {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.29;
+}
+.gate-card { text-align: center; position: relative; z-index: 1; }
 .gate-card .input-row { text-align: left; }
 .gate-card .input-row input { text-align: left; }
 

@@ -502,7 +502,7 @@ const HomeApp = {
     // state to every open surface, and the page flips into the app the moment it
     // succeeds. Wrapped in .options-gate so it sits in the upper third (home.css).
     if (!currentState.vault?.initialized || currentState.vault.locked) {
-      return m('.options-gate', m(VaultGate, { state: currentState, send, minimal: true }));
+      return m('.options-gate', m(VaultGate, { state: currentState, send }));
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;

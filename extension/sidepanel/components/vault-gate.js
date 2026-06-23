@@ -45,6 +45,7 @@ import {
   PrfUnsupportedByAuthenticatorError,
 } from '/peerd-egress/index.js';
 import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
+import browser from '/vendor/browser-polyfill.js';
 
 // LABEL only (the enrollment flow is identical everywhere):
 // navigator.userAgentData is Chromium-only; navigator.platform is the
@@ -54,6 +55,13 @@ const PLATFORM_LABEL = platformAuthenticatorLabel(
     && (/** @type {{ userAgentData?: { platform?: string } }} */ (navigator).userAgentData?.platform
       || navigator.platform)) || '');
 
+// App version for the hero subtitle. getManifest() is synchronous and
+// always present on an extension page; guarded so a non-extension context
+// (unit tests) simply renders no version line.
+const APP_VERSION = (() => {
+  try { return browser.runtime.getManifest().version; } catch { return ''; }
+})();
+
 /**
  * Big "manifest" brand wordmark for the vault gate — the hero logo on
  * the lock / sign-up screen, and the only brand mark there (the top-bar
@@ -61,9 +69,14 @@ const PLATFORM_LABEL = platformAuthenticatorLabel(
  * intro as peerd.ai: the letters type out behind a terminal cursor,
  * then the blocks colorize. Pure CSS via .wordmark--intro/.wordmark--hero;
  * runs once on mount (Mithril patches the node across redraws).
+ *
+ * Below the wordmark sit two static brand lines: the version (small, mono)
+ * right under it, then the "Your browser. Your AI." tagline. The whole
+ * block centers as a column (.vault-brand) whose bottom margin is the
+ * breathing room before the action buttons.
  */
 const BrandHeader = {
-  view: () => m('.vault-brand', { style: 'display:flex; justify-content:center; margin: 8px 0 22px;' },
+  view: () => m('.vault-brand', [
     m('.wordmark.wordmark--intro.wordmark--hero', {
       'aria-label': 'peerd',
       role: 'img',
@@ -74,7 +87,136 @@ const BrandHeader = {
       m('.block.b-r',  'r'),
       m('.block.b-d',  'd'),
       m('.wordmark-cursor', { 'aria-hidden': 'true' }),
-    ])),
+    ]),
+    APP_VERSION ? m('.brand-version', `v${APP_VERSION}`) : null,
+    m('.brand-tagline', 'Your browser. Your AI.'),
+  ]),
+};
+
+// Short, valid DOM/JS fragments — each types out at its own random spot, like
+// the rain but horizontal. Attention to detail: real browser APIs, not lorem.
+const SNIPPETS = [
+  "document.querySelector('#peerd')",
+  "el.addEventListener('pointerdown', unlock)",
+  "await navigator.credentials.get({ publicKey })",
+  "crypto.subtle.deriveKey({ name: 'AES-GCM' })",
+  "crypto.getRandomValues(new Uint8Array(32))",
+  "cred.getClientExtensionResults().prf",
+  "document.createElement('section')",
+  "node.classList.add('peer', 'online')",
+  "el.dataset.peerId = id",
+  "root.replaceChildren(view(state))",
+  "new WebSocket('wss://peerd.ai/rendezvous')",
+  "socket.addEventListener('message', route)",
+  "for (const peer of swarm) dial(peer)",
+  "await indexedDB.open('peerd-vault', 1)",
+  "requestAnimationFrame(frame)",
+  "queueMicrotask(flush)",
+  "new TextEncoder().encode(json)",
+  "navigator.storage.persist()",
+  "structuredClone(state)",
+  "JSON.parse(event.data)",
+  "vault.open(key)",
+  "performance.now()",
+];
+
+/**
+ * Faint typing backdrop behind the gate — short DOM/JS fragments type themselves
+ * out, left-to-right, at many random spots at once, each leaving a fading trail:
+ * a horizontal take on a code rain, a hint you're entering a browser-native
+ * machine. Monochrome and very low-contrast (borrows --fg/--bg, so it themes
+ * light/dark for free) — atmosphere, not chrome. prefers-reduced-motion shows a
+ * static scatter, no typing. Mounted only while the gate is; the loop is
+ * cancelled on unmount.
+ */
+const CodeStream = {
+  /** @param {any} vnode */
+  oncreate(vnode) {
+    /** @type {HTMLCanvasElement} */
+    const canvas = vnode.dom;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const cs = getComputedStyle(document.documentElement);
+    const fg = (cs.getPropertyValue('--fg') || '#e8e6e1').trim();
+    const bg = (cs.getPropertyValue('--bg') || '#0b0d0e').trim();
+    const mono = (cs.getPropertyValue('--font-mono') || 'monospace').trim();
+    const reduce = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const ROW = 24;                         // vertical spacing between typer rows
+    /** @typedef {{ x: number, y: number, text: string, i: number, wait: number }} Writer */
+    /** @type {Writer[]} */
+    let writers = [];
+    let w = 0, h = 0, cw = 8, raf = 0, last = 0;
+
+    /** @returns {Writer} a fresh typer at a random spot */
+    const spawn = () => {
+      const text = SNIPPETS[Math.floor(Math.random() * SNIPPETS.length)] || '';
+      const maxX = Math.max(8, w - text.length * cw - 8);
+      const rowN = Math.max(1, Math.floor((h - 16) / ROW));
+      return {
+        x: 8 + Math.floor(Math.random() * Math.max(1, maxX)),
+        y: 12 + Math.floor(Math.random() * rowN) * ROW,
+        text,
+        i: 0,
+        wait: Math.floor(Math.random() * 55), // stagger so they don't move in lockstep
+      };
+    };
+
+    const layout = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      w = canvas.clientWidth;
+      h = canvas.clientHeight;
+      canvas.width = Math.max(1, Math.floor(w * dpr));
+      canvas.height = Math.max(1, Math.floor(h * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.font = `13px ${mono}`;
+      ctx.textBaseline = 'top';
+      cw = ctx.measureText('M').width || 8;
+      writers = Array.from({ length: Math.max(3, Math.round((w * h) / 57500)) }, spawn);
+    };
+
+    const frame = (/** @type {number} */ t) => {
+      raf = requestAnimationFrame(frame);
+      if (t - last < 66) return;             // type cadence (unhurried)
+      last = t;
+      ctx.globalAlpha = 0.15;                // wash the frame toward bg → fading trail (rain-like)
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = fg;
+      writers.forEach((wr, k) => {
+        if (wr.wait > 0) { wr.wait -= 1; return; }
+        if (wr.i < wr.text.length) {
+          ctx.globalAlpha = 0.8;             // bright head; the wash dims the tail behind it
+          ctx.fillText(wr.text[wr.i] || '', wr.x + wr.i * cw, wr.y);
+          wr.i += 1;
+        } else {
+          writers[k] = spawn();              // finished → respawn elsewhere; its trail fades out
+        }
+      });
+      ctx.globalAlpha = 1;
+    };
+
+    const still = () => {                     // reduced-motion: a static scatter
+      ctx.fillStyle = fg;
+      ctx.globalAlpha = 0.13;
+      writers.forEach((wr) => ctx.fillText(wr.text, wr.x, wr.y));
+      ctx.globalAlpha = 1;
+    };
+
+    // Hold the typing until the wordmark intro has fully settled (its last
+    // block colorizes at 1480ms — see styles.css wmColor*) plus a 0.7s buffer,
+    // so the gate renders calmly before the code starts.
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let startTimer;
+    const onResize = () => { layout(); if (reduce) still(); };
+    layout();
+    window.addEventListener('resize', onResize);
+    vnode.state.stop = () => { cancelAnimationFrame(raf); if (startTimer) clearTimeout(startTimer); window.removeEventListener('resize', onResize); };
+    if (reduce) still();
+    else startTimer = setTimeout(() => { raf = requestAnimationFrame(frame); }, 2180);
+  },
+  /** @param {any} vnode */
+  onremove(vnode) { vnode.state.stop?.(); },
+  view: () => m('canvas.code-stream', { 'aria-hidden': 'true' }),
 };
 
 /** @type {Record<string, string>} */
@@ -107,7 +249,7 @@ const ERROR_MESSAGES = {
  * @property {CapabilityProbe|null} probe
  */
 
-/** @typedef {{ state: VaultGateState, attrs: { state: ChatState, send: Send, minimal?: boolean } }} VaultGateVnode */
+/** @typedef {{ state: VaultGateState, attrs: { state: ChatState, send: Send } }} VaultGateVnode */
 
 export const VaultGate = {
   // Component-local UI state. The "real" vault state lives in the SW.
@@ -138,12 +280,13 @@ export const VaultGate = {
   },
 
   /** @param {VaultGateVnode} vnode */
-  view: ({ attrs: { state, send, minimal }, state: ui }) => {
-    // `minimal` (home SPA): no card box, and the unlock screen trims to just the
-    // animated wordmark + the action — home is the full-page surface, so the
-    // chrome + explanatory copy the cramped side panel needs is noise there.
+  view: ({ attrs: { state, send }, state: ui }) => {
+    // The gate is a cardless hero on every surface (home AND side panel):
+    // the wordmark/version/tagline + the action, no card box. The unlock
+    // screen also drops its heading/subtext — the action speaks for itself.
+    // The faint code-stream rides behind every gate state, then the card.
     /** @param {any} kids */
-    const shell = (kids) => m(minimal ? '.gate-card' : '.card.gate-card', kids);
+    const shell = (kids) => [m(CodeStream), m('.gate-card', kids)];
     const isFirstRun = !state.vault.initialized;
     const prfEnrolled = !!state.vault.prfEnrolled;
     const hasRecovery = !!state.vault.hasRecovery;
@@ -333,7 +476,7 @@ export const VaultGate = {
         };
         return shell([
           m(BrandHeader),
-          m('h2', 'Set up peerd'),
+          m('h2', 'Initial set up'),
           m('p.muted', leadsWithPlatform || !plan
             ? `Create your vault with a passkey — ${
               PLATFORM_LABEL ? `${PLATFORM_LABEL}, ` : 'Touch ID, Windows Hello, ' 
@@ -427,9 +570,7 @@ export const VaultGate = {
     if (usePasskeyUnlock) {
       return shell([
         m(BrandHeader),
-        // Minimal (home): the wordmark + the button say it all — no heading/subtext.
-        minimal ? null : m('h2', 'Unlock peerd'),
-        minimal ? null : m('p.muted', 'Use your passkey to unlock.'),
+        // The wordmark + tagline + the button say it all — no heading/subtext.
         m('.auth-actions.auth-actions--row', [
           m('button', {
             type: 'button',
@@ -451,10 +592,6 @@ export const VaultGate = {
     // recovery passphrase this time.
     return shell([
       m(BrandHeader),
-      minimal ? null : m('h2', 'Unlock peerd'),
-      minimal ? null : m('p.muted', prfEnrolled
-        ? 'Enter your recovery passphrase.'
-        : 'Your vault is locked. Enter your passphrase to continue.'),
       m('form', { onsubmit: unlockWithPassphrase }, [
         m('.input-row', [
           m('label', { for: 'pass' }, prfEnrolled ? 'Recovery passphrase' : 'Passphrase'),
