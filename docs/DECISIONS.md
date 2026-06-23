@@ -590,3 +590,35 @@ post-SW-respawn click focusing home instead of opening the panel. Discoverabilit
 rides a one-line shortcut hint on the prominent agent-tab card
 (`chat-view.js`, fetched live via `commands.getAll()` so a rebind is reflected
 and an unbound shortcut shows nothing).
+
+## 27. Apps get HTTPS egress — through `webFetch`, gated harder than the VM
+
+Decided 2026-06-22 (owner-initiated; SPEC stage, not yet implemented —
+`docs/specs/FEATURE-APP-EGRESS.md`). Apps (opaque-origin iframe,
+`app-tab/runner.html`) currently have no network. They will get it the same
+way the VM and Notebook do — a bridge to **`webFetch`** (the open-web
+egress door: SSRF + denylist + redirect fail-close + audit), **not**
+`safeFetch` (that's the credentialed provider allowlist, not in this path).
+The reserved slot already exists: `peerd.egress.fetch` is wired for the
+Notebook and the capability map reserves it for "Apps later"
+(`notebook-tab/worker-source.js`).
+
+Why apps are gated **harder** than the VM, not identically: the VM is
+user-booted with network off-by-default and a per-session one-click enable
+(#6). An App runs code peerd generated or that **arrived over the dweb from
+another peer** — strictly more hostile. So app egress mirrors the VM's
+consent gate AND adds the per-app **grant + quota** the capability surface
+mandates for any `peerd.*` wired into untrusted realms (#21). Concretely
+three layers in front of the unchanged `webFetch`: (1) a **per-session
+consent grant** like the VM; (2) a **per-app host allowlist** — the chosen
+posture over the VM's open `webFetch`, because it closes the open-web path's
+honest gap (no per-host allowlist → arbitrary-domain exfil) *per app*
+instead of relying on it downstream; (3) **quota** — request-rate cap,
+cumulative-byte cap, and write-method confirm (reusing
+`needsWebWriteConfirm` / `MAX_VM_FETCH_BODY` from the VM path). `webFetch`
+and `safeFetch` are not modified — the gate composes in front.
+
+This is the **first** non-`self` `peerd.*` capability wired for Apps;
+`egress` goes first because its blast radius is the most contained of the
+five modules, and the grant/quota machinery built here is the template the
+others inherit (#21).
