@@ -24,29 +24,48 @@
  * @typedef {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} SafeFetch
  */
 
+// No-op disposer for the paths that register no listeners (the AbortSignal.any
+// branch and the 0/1-signal branches). Shared so every return shape is uniform.
+const NO_DISPOSE = () => {};
+
 /**
- * Combine 1–2 abort signals into one. Pure.
+ * Combine 1–2 abort signals into one. Pure. Returns the combined signal plus a
+ * `dispose()` the caller MUST invoke when the combined signal is no longer
+ * needed — on the AbortSignal.any-less fallback path it removes the relay's
+ * `abort` listeners from the INPUT signals.
+ *
+ * why dispose: the fallback registers `{ once:true }` listeners on each input,
+ * but `{ once }` only auto-removes a listener that FIRES. On the success path
+ * (the fetch resolves, no abort) neither input ever aborts, so without dispose
+ * the listener — and the AbortController it closes over — leaks on the
+ * long-lived per-turn stopSignal for every connect. (Bounded per-turn, but real
+ * on runtimes without AbortSignal.any, e.g. Firefox < 124.)
+ *
  * @param {AbortSignal} [a]
  * @param {AbortSignal} [b]
- * @returns {AbortSignal | undefined}
+ * @returns {{ signal: AbortSignal | undefined, dispose: () => void }}
  */
 export const combineSignals = (a, b) => {
   // Typed predicate (runtime-identical to filter(Boolean) for these never-
   // falsy-when-present values) so TS narrows the result to AbortSignal[] for
   // AbortSignal.any / the fallback loop below.
   const signals = [a, b].filter(/** @returns {s is AbortSignal} */ (s) => s !== undefined);
-  if (signals.length === 0) return undefined;
-  if (signals.length === 1) return signals[0];
+  if (signals.length === 0) return { signal: undefined, dispose: NO_DISPOSE };
+  if (signals.length === 1) return { signal: signals[0], dispose: NO_DISPOSE };
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
-    return AbortSignal.any(signals);
+    return { signal: AbortSignal.any(signals), dispose: NO_DISPOSE };
   }
   // Fallback relay for runtimes without AbortSignal.any.
   const ctl = new AbortController();
+  /** @type {Array<() => void>} */
+  const cleanups = [];
   for (const s of signals) {
     if (s.aborted) { ctl.abort(s.reason); break; }
-    s.addEventListener('abort', () => ctl.abort(s.reason), { once: true });
+    const onAbort = () => ctl.abort(s.reason);
+    s.addEventListener('abort', onAbort, { once: true });
+    cleanups.push(() => s.removeEventListener('abort', onAbort));
   }
-  return ctl.signal;
+  return { signal: ctl.signal, dispose: () => { for (const c of cleanups) c(); } };
 };
 
 /**
@@ -68,14 +87,16 @@ export const combineSignals = (a, b) => {
 export const fetchInitialResponse = async (fetchFn, url, init, { stopSignal, timeoutMs, onTimeout }) => {
   const timeoutCtl = new AbortController();
   const timer = setTimeout(() => timeoutCtl.abort(), timeoutMs);
+  const { signal, dispose } = combineSignals(stopSignal, timeoutCtl.signal);
   try {
-    return await fetchFn(url, { ...init, signal: combineSignals(stopSignal, timeoutCtl.signal) });
+    return await fetchFn(url, { ...init, signal });
   } catch (e) {
     // The connect timer fired (no headers in time) and it wasn't the user's Stop.
     if (timeoutCtl.signal.aborted && !(stopSignal && stopSignal.aborted)) throw onTimeout(timeoutMs);
     throw e; // user Stop (AbortError, handled upstream as a clean stop) or other network error
   } finally {
     clearTimeout(timer); // headers arrived or threw → stop guarding; the SSE body streams untimed
+    dispose();           // unhook the fallback relay's input-signal listeners (no-op on the AbortSignal.any path)
   }
 };
 
