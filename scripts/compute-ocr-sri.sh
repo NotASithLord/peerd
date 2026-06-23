@@ -27,8 +27,8 @@ set -euo pipefail
 # Default to the URLs the code already pins, so a plain run prints exactly what
 # OCR_ASSETS needs. Override by passing URLs as arguments.
 DEFAULT_URLS=(
-  "https://cdn.jsdelivr.net/npm/tesseract.js-core@6/tesseract-core-simd.wasm"
-  "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1/4.0.0_best_int/eng.traineddata.gz"
+  "https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2/tesseract-core-simd.wasm"
+  "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz"
 )
 
 urls=("$@")

@@ -41,10 +41,22 @@ const makeFakeFetch = () => {
   return { state, fetchFn };
 };
 
-describe('OCR engine SRIs are not pinned yet (fail-closed by default)', () => {
-  test('hasValidOcrSris is false until hashes are pasted in', () => {
-    expect(hasValidOcrSris()).toBe(false);
-    for (const a of OCR_ASSETS) expect(a.sri).toBeNull();
+// Injected (fake) asset list so the store mechanics tests don't depend on the
+// real CDN bytes: unpinned (sri:null) assets the fake fetch can satisfy. The
+// store takes `assets` the same way it takes `idb`/`fetchFn`. The REAL pinned
+// OCR_ASSETS are asserted separately below.
+const FAKE_ASSETS = [
+  { name: 'core-wasm', url: 'https://example.test/core.wasm', sri: null, sizeBytes: 4 },
+  { name: 'lang-eng',  url: 'https://example.test/eng.gz',   sri: null, sizeBytes: 4 },
+];
+
+describe('OCR engine SRIs are pinned (shippable)', () => {
+  test('hasValidOcrSris is true and every asset carries a sha384 hash', () => {
+    expect(hasValidOcrSris()).toBe(true);
+    for (const a of OCR_ASSETS) {
+      expect(a.sri).toMatch(/^sha384-/);
+      expect(a.url).toMatch(/@\d+\.\d+\.\d+\//);  // exact-version-pinned URL (not @6/@1)
+    }
   });
 });
 
@@ -52,27 +64,27 @@ describe('createOcrStore', () => {
   test('production (dev:false) refuses an unpinned asset', async () => {
     const idb = makeFakeIdb();
     const { fetchFn } = makeFakeFetch();
-    const store = createOcrStore({ idb, fetchFn });
+    const store = createOcrStore({ idb, fetchFn, assets: FAKE_ASSETS });
     await expect(store.getEngine({ dev: false })).rejects.toBeInstanceOf(OcrUnavailableError);
   });
 
   test('dev mode downloads, caches, and reports installed', async () => {
     const idb = makeFakeIdb();
     const { state, fetchFn } = makeFakeFetch();
-    const store = createOcrStore({ idb, fetchFn });
+    const store = createOcrStore({ idb, fetchFn, assets: FAKE_ASSETS });
 
     expect(await store.isInstalled({ dev: true })).toBe(false);
 
     const out = await store.getEngine({ dev: true });
     expect(Object.keys(out.files).sort()).toEqual(['core-wasm', 'lang-eng']);
-    expect(state.calls).toBe(OCR_ASSETS.length);     // one fetch per asset
+    expect(state.calls).toBe(FAKE_ASSETS.length);     // one fetch per asset
     expect(await store.isInstalled({ dev: true })).toBe(true);
   });
 
   test('second run is a cache hit — no new fetches', async () => {
     const idb = makeFakeIdb();
     const { state, fetchFn } = makeFakeFetch();
-    const store = createOcrStore({ idb, fetchFn });
+    const store = createOcrStore({ idb, fetchFn, assets: FAKE_ASSETS });
 
     await store.getEngine({ dev: true });
     const after = state.calls;
@@ -83,7 +95,7 @@ describe('createOcrStore', () => {
   test('progress reaches 1 across the download', async () => {
     const idb = makeFakeIdb();
     const { fetchFn } = makeFakeFetch();
-    const store = createOcrStore({ idb, fetchFn });
+    const store = createOcrStore({ idb, fetchFn, assets: FAKE_ASSETS });
     let last = 0;
     await store.getEngine({ dev: true, onProgress: (p) => { last = p; } });
     expect(last).toBeGreaterThan(0);
