@@ -47,22 +47,26 @@ export const vmBootTool = {
     'bash, POSIX). Persistent bash — cd, exported vars, and history persist',
     'across calls; pipes/redirects/&&/|| work. No `vm` arg → the chat\'s',
     'current VM (auto-created if none); pass `vm` to target another.',
-    'NO NETWORK in the kernel: curl / wget / git clone / peerd-fetch are bash',
-    'wrappers routed through peerd-egress — use THEM for fetching. apt and',
-    'ONLINE pip do NOT work — and even `pip install local.whl` HANGS, because',
-    'pip reaches PyPI for dependency resolution. To install a Python package:',
-    'vm_import its wheel, then `pip install --no-index --no-deps <whl>` (fully',
-    'offline), or just unzip the wheel (it is a zip) onto PYTHONPATH. Raw Python',
-    'sockets do not work. Use `bash -c` (not `sh -c`) for subshells. Slow',
-    'commands (builds, large installs) — raise timeoutMs. Returns stdout,',
-    'stderr, exit code, duration. Default 60s (timeoutMs, max 300s).',
+    'No raw sockets in the kernel, but HTTP(S) AND package install work via',
+    'bash wrappers routed through peerd-egress: curl / wget / git clone /',
+    'peerd-fetch for fetching, and `pip install <pkg>` (also -r',
+    'requirements.txt), `npm install`, `gem install` for packages — peerd',
+    'stages the package + its deps offline, then installs in the VM, so',
+    '`pip install requests` just works. NOT supported: compiled/native',
+    'packages (C extensions, no toolchain), apt, raw Python sockets. Staging',
+    'fetches over the network, so big installs are slow — raise timeoutMs',
+    'rather than giving up. Use `bash -c` (not `sh -c`) for subshells.',
+    'Returns stdout, stderr, exit code, duration. Default 60s (timeoutMs,',
+    'max 300s).',
   ].join(' '),
   schema: {
     type: 'object',
     properties: {
       cmd: {
         type: 'string',
-        description: 'Shell command to run (interpreted by /bin/sh -c).',
+        description: 'Shell command to run in a persistent /bin/bash --login -i '
+          + 'session (bash semantics; the curl/wget/git/pip/npm/gem wrappers are '
+          + 'bash functions). Use `bash -c`, never `sh -c`, for subshells.',
       },
       vm: {
         type: 'string',

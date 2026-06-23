@@ -25,10 +25,12 @@ export const vmImportTool = {
   description: [
     'Download a URL and write the bytes into a VM at `path`. The fetch',
     'runs IN PEERD (through peerd-egress: denylist + audit), NOT inside',
-    'the VM. Use it to stage large or binary data, or anything apt / pip',
-    'install / raw Python sockets would need (those have no network inside',
-    'the VM). An error here is peerd-side (denylist, unreachable host, VM',
-    'not booted) — read it verbatim; the VM never tried. Max 50MB.',
+    'the VM. Use it to stage large or binary data, or anything the in-VM',
+    'wrappers cannot fetch — apt packages, native/C-extension pip wheels',
+    'or sdists, raw-socket downloads. (Pure-Python `pip install` and',
+    'npm/gem installs DO work in-VM via vm_boot; only reach for vm_import',
+    'when those cannot.) An error here is peerd-side (denylist, unreachable',
+    'host, VM not booted) — read it verbatim; the VM never tried. Max 50MB.',
     'Returns the written path and byte count.',
   ].join(' '),
   schema: {
