@@ -6,8 +6,10 @@
 #                     contain zero dweb traces as part of packaging).
 #   tag push v*     → additionally: signed preview artifacts, a GitHub
 #                     Release titled peerd-preview-v<X.Y.Z> with the
-#                     preview artifacts + update feeds attached, and the
-#                     regenerated update-feeds/ committed back to main.
+#                     preview artifacts + update feeds attached, and a
+#                     best-effort mirror commit of update-feeds/ back to main
+#                     (non-fatal if branch protection rejects the push — the
+#                     feeds are authoritative as release assets either way).
 #
 # Store uploads (Chrome Web Store / AMO) stay MANUAL — download the
 # verified store artifacts from the release run and submit them after QA.
@@ -342,7 +344,18 @@ jobs:
           if ! git diff --quiet -- update-feeds/; then
             git add update-feeds/
             git commit -m "chore(release): update feeds for $GITHUB_REF_NAME"
-            git push origin main
+            # Best-effort mirror. Branch protection may reject a direct push to
+            # main (PR required) — but the feeds are ALREADY attached to the
+            # release as assets, so this commit must NEVER fail an
+            # otherwise-published release. On rejection, surface the actionable
+            # next step instead of failing the job. (To restore auto-commit,
+            # add github-actions[bot] to the branch-protection bypass list.)
+            if git push origin main 2>push.err; then
+              echo "update-feeds pushed to main"
+            else
+              echo "::warning::could not push update-feeds to main (branch protection?). Feeds ARE attached to release $GITHUB_REF_NAME — deploy peerd-site from the release assets, or merge update-feeds/ to main via PR."
+              cat push.err || true
+            fi
           else
             echo "feeds unchanged"
           fi
