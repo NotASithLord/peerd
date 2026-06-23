@@ -3,24 +3,25 @@
 > Status: DESIGN. Nothing here is implemented. Feature number 17.
 > On branch `experimental/resident-tab-agents`.
 >
-> Design history (kept deliberately — the rejected path is load-bearing
-> context): this started as a *tab-hosted loop* design (the loop runs in the tab
-> page; the SW is a key/egress proxy — "Model B / the split"). An adversarial
-> review (`docs/SUBAGENTS.md` threat model + a code-grounded swarm) showed the
-> split's headline justification — renderer isolation as a boundary against
-> *prompt-injection* — does not hold: a text-steered loop can only call its
-> already-gated tools, identical wherever the loop runs. The split's one real
-> benefit is **JS-level heap isolation** (a code exploit of the loop reaching the
-> in-memory key / co-resident data), which is desirable but is a *different,
-> later* threat (untrusted **code**, e.g. dweb-delivered dwapps), and the split
-> introduced four SW-side regressions. **Decision: ship Model A now** (loop on
-> the SW heap, bound structurally to the tab); **stage the split as Phase 2** on
-> the *same seam*, for JS-safety, once A is battle-tested and untrusted-code use
-> cases are live. A is not a stepping stone thrown away — **A is the substrate B
-> relocates onto.**
+> Design history (kept — the rejected paths are load-bearing context):
+> (1) Explored a *tab-hosted loop* (loop in the tab page, SW as key/egress proxy
+> — "the split" / Model B). An adversarial swarm showed its headline
+> justification (renderer isolation vs *prompt-injection*) does not hold — a
+> text-steered loop calls the same gated tools wherever it runs — and that it
+> introduced four SW-side regressions. (2) Pivoted to **Model A** (loop on the SW
+> heap, bound to the tab). (3) A second swarm reviewed the Model-A spec and
+> **killed its first mutation-purity mechanism** ("purity by exposure" — the
+> exposure axis is binary main/not-main and cannot express "resident-only", so a
+> one-line `spawn_subagent({tools:['app_delete']})` mutated any instance). This
+> revision fixes that with a **resident-keyed capability tier + per-instance
+> pin**, and corrects two related over-claims (the instance↔resident *binding*
+> needs a routing pointer; the resident turn is not "zero new runtime"). The
+> kept-strong parts — the "A buys B" seam and the keyless content-threat scoping
+> — are unchanged.
 >
 > Read first: `docs/SUBAGENTS.md` (a resident is "a session with parentage" — the
-> shape reused), `docs/specs/DESIGN-11-async-subagents.md` (the wake/mailbox
+> shape reused; and the global-registry / "no owner check" decision this narrows),
+> `docs/specs/DESIGN-11-async-subagents.md` (the wake/mailbox + runaway-guard
 > reused for `tell_instance`), `DESIGN.md` §8.5 (which instances are in scope).
 
 ## Motivation
@@ -30,216 +31,264 @@ Three goals, from the owner:
 1. **Functional purity of instance access** — *"tabs as global objects any
    session can mutate bothers my functional sensibilities."*
 2. **A lean parent context that doesn't re-bloat** as instances accumulate.
-3. **Isolation** — a per-tab, secret-less agent, the do/get/check browser-runner
-   trust model generalized to every stateful tab; eventually hardened against
+3. **Isolation** — a per-tab, secret-less agent (the do/get/check browser-runner
+   trust model generalized to every stateful tab); eventually hardened against
    untrusted **code** (git repos, API responses, dweb-delivered dwapps).
 
-A ships #1 and #2 in full, and #3 against the live threat (untrusted *content*).
-The remaining slice of #3 — JS-level heap isolation against untrusted *code* — is
-Phase 2 (the split), built on A's seam.
+A delivers #2 in full, #3 against the live threat (untrusted *content*), and #1
+**by a resident-keyed capability tier** (below — *not* the binary exposure shed
+the first draft proposed). The remaining slice of #3 — JS-level heap isolation
+against untrusted *code* — is Phase 2 (the split), built on A's seam.
 
 ## What a resident IS (Model A)
 
 A **resident** is a persistent session — `kind:'resident'`, the third
-`SessionKind` member alongside `chat`/`subagent` — **one per tab-hosted instance**
-(WebVM, Notebook, App). Its agent loop runs **on the SW heap**, through the
-existing `turn-driver.js` → `runUserTurn` path, exactly like the main chat and
-every subagent today. Nothing new runs in the tab; the instance still lives in
-its tab and is driven by the existing `vm-client`/`notebook-client`/`app-client`
-RPC. Three things make it a resident:
+`SessionKind` member — **one per tab-hosted instance** (WebVM, Notebook, App).
+Its loop runs **on the SW heap**, through the existing `turn-driver.js` →
+`runUserTurn` path. The instance still lives in its tab, driven by the existing
+`vm-client`/`notebook-client`/`app-client` RPC. Three things make it a resident:
 
-1. its **lifecycle is bound 1:1 to the tab** (the tab-tracker entry);
-2. it **owns the instance's tools** — and is the only session that has them;
+1. it is **bound to its instance** by a persisted `residentSessionId` on the
+   registry record (a *routing* pointer — below);
+2. it is **the only kind of session that may hold instance-mutating tools**, and
+   then only for *its own* instance;
 3. you **reach it only by message** (`tell_instance`).
 
-`js_run` (headless, no tab, ephemeral throwaway compute) is **out** — it stays a
-parent tool. Scope is the three tab-hosted kinds (§8.5).
+`js_run` (headless, ephemeral, no instance) stays a parent tool. Scope is the
+three tab-hosted kinds (§8.5).
 
-## The three moves
+## Move 1 — the binding: an instance→resident routing pointer
 
-### 1. Structural binding — the tab-tracker entry, no pointer
+The resident is bound to its **instance**, not its **tab**. The tab is just the
+current host (reconstitutable via `ensureTab`); the binding must survive the tab
+closing (a VM persists when its tab closes). So:
 
-`tab-tracker.js` already maps `byId: Map<instanceId, {tabId, ready, …}>`, born on
-`onTabReady(id, sender.tab.id)` (`service-worker.js` ~2007) and evicted on
-`tabs.onRemoved → onTabRemoved(tabId)` (~2031). **That map is the binding.** A
-resident session is minted when its instance's tab first goes ready, and archived
-when the tab closes — riding those exact events. No `ownerSessionId` field, no
-resident registry to reconcile, no orphan bookkeeping. The earlier draft's
-imperative ownership pointer is gone: there is nothing to go stale because the
-binding *is* the tracker entry's lifecycle.
+- **The binding is a persisted `residentSessionId` field on the registry record**
+  (`registry-factory.js`), set when the resident is minted. `tell_instance`
+  resolves `instanceId → residentSessionId` from there; the `tab-tracker` is used
+  only to ensure the tab is live when the resident needs to act (`ensureTab`).
+- **This is not the ownership *gate* the earlier draft rejected.** That gate was a
+  *session→instance owner check on every mutation* (with transfer-on-settle and
+  brick-the-instance failure modes). `residentSessionId` is a *one-directional
+  routing pointer* (find the resident to deliver a `tell`); mutation is **not**
+  gated on it (it's gated by the capability tier, Move 2), so it has none of
+  those failure modes — if the resident session is gone, mint a fresh one; the
+  instance is never bricked. The honest correction to v1: there *is* a pointer;
+  it is addressing, not a per-call owner check.
+- **Minting:** lazy — on the first operation that needs a resident for an
+  instance (the create/first-`tell` path), the resident session is created and
+  its id written to the record. Archived when the **instance** is deleted
+  (`vm_delete`/`app_delete`), not when the tab closes (tab close → dormant;
+  record + `residentSessionId` persist; re-adopted on SW boot after
+  `registry.load()`).
 
-### 2. The tool-shed — purity by exposure, not enforcement
+## Move 2 — the capability tier: who may hold instance-mutating tools
 
-The instance-mutating tools (`vm_*`, `js_*` except `js_run`, `app_*`) are added to
-a hidden-set mirroring `MAIN_AGENT_HIDDEN_TOOLS` (`exposure.js`):
-`mainAgentDescriptors` drops them from the main turn and `exposureGate` refuses
-them on `exposure:'main'`. They are granted **only to resident sessions.** So the
-parent (and any normal chat) literally *cannot* mutate an instance — not because
-of a per-call owner check, but because **it doesn't have the tools.** Purity is a
-property of *where the capability lives* (exactly one place: the resident), which
-is cleaner than a gate and needs no registry lookup. The parent's only verbs are
-**create-a-tab**, **`tell_instance`**, **list**. This *is* goal #2 — and unlike
-`INSTANCE_GATED_TOOLS`' progressive disclosure (which re-bloats once a chat has one
-of each kind), a hard shed doesn't erode. The heavy engine prose
-(`system-prompt.txt` Sandboxes + WebVM blocks, ~8.7 KB) moves into each kind's
-byte-stable `*_RESIDENT_PROMPT`, where per-env toolsets can expand aggressively.
+This is goal #1's real mechanism, and it is **enforced at the dispatch gate**,
+not by descriptor hygiene alone (the v1 "purity by exposure" claim was false: the
+exposure axis only knows `main` vs not-`main`, so it cannot keep instance tools
+off a *subagent*).
 
-### 3. The message channel — `tell_instance`
+- **A new authority marker — `resident` — gates the instance-mutating set**
+  (`vm_*`, `app_*`, `js_*` except `js_run`). `exposureGate` (`tools/gates.js`)
+  is extended so these tools are **refused for every ctx whose marker is not
+  `resident`** — `main`, `subagent`, runner, review, and direct dispatch all
+  **fail closed**. The marker is set only by the resident turn path;
+  `buildToolContext` and `spawnSubagent` must **never** set it for a child.
+- **Both spawn surfaces are gated.** The `spawn_subagent` tool *and* the
+  `subagent/spawn` SW route (`routes/sessions.js`, which forwards caller-supplied
+  `tools` verbatim — reachable from a first-party `peerd.runtime.runAgent` shim)
+  must not grant the `resident` marker. A subagent requesting `tools:['app_delete']`
+  is refused at dispatch.
+- **Closures stripped by construction.** The instance clients/registries
+  (`appClient`/`appRegistry`/`vmClient`/`vmRegistry`/`jsClient`/`jsRegistry`) are
+  injected into every ctx today and are absent from `CAPABILITY_CONSUMERS`
+  (`spawn.js`). Add them so a non-resident ctx has **no closure** to call even if
+  a tool name leaked — defense in depth behind the name gate.
+- **Per-instance pin (cross-resident isolation).** Instance-mutating tools are
+  id-addressed against *singleton* registries (`app_delete(args.appId)` deletes
+  *any* app), so the 1:1 tab binding alone does **not** scope a resident to its
+  own instance. The resident's tool ctx **defaults the target to its bound
+  instance id and rejects a mismatching explicit id.** Without this, a resident
+  could mutate a *sibling* instance.
+- **Test the boundary.** A dispatcher test (mirroring `dispatcher.test.js:266`)
+  asserts a subagent spawned with `tools:['app_delete']` and no manifest is
+  refused. This is a P0 deliverable, not a nicety — it is the proof goal #1 holds.
 
-`tell_instance({ to, message, sync? })`; `to` is the instance id. The SW resolves
-`tracker.getTabId(to)` → the resident session → `turnSlots.runWhenIdle(resident,
-fn)` (the existing serializing mailbox: a `tell` runs when the resident is idle,
-**never interrupting an in-flight turn**, DECISIONS #20). The resident's turn is
-just `runAgentTurn({ sessionId: residentSessionId, synthetic, … })` — the
-async-subagent reintegration path, already shipped. The reply re-enters the
-**sender** as a `synthetic:true` wake turn, `wrapUntrusted`-fenced (mandatory for
-App residents — they render attacker content). **Sender correlation is pinned
-SW-side** (a transient `{correlationId → senderSessionId}` map, lifetime one
-round-trip — never a persisted per-message sender pointer in the resident).
+So the parent (and any non-resident session) cannot mutate an instance because the
+tool **fails closed at the gate** for them, and a resident cannot mutate a
+*sibling* because its ctx is **pinned**. Call it **purity by capability topology**
+— a resident-keyed tier + a per-instance pin, both enforced at dispatch. (Reads
+stay global and id-addressable, as `docs/SUBAGENTS.md` has them — only *mutation*
+is tiered; goal #1 is the mutation half, honestly scoped.)
+
+## Move 3 — the message channel: `tell_instance`
+
+`tell_instance({ to, message, sync? })`; `to` is the instance id → resolve
+`residentSessionId` (Move 1) → `turnSlots.runWhenIdle(residentSessionId, fn)`
+(the serializing mailbox: runs when the resident is idle, **never interrupting an
+in-flight turn**, DECISIONS #20). The resident's turn is
+`runAgentTurn({ sessionId: residentSessionId, … })`. The reply re-enters the
+**sender** as a `synthetic:true` wake, `wrapUntrusted`-fenced (mandatory for App
+residents — they render attacker content). Correlation is pinned **SW-side**
+(`{correlationId → senderSessionId}`, the async-subagents per-sender shape).
+
+- **P0 fail-closed sender gate.** The `ctx.inbound`/unattended clamp the
+  unattended path needs is **SPEC-only today (zero code)**, and *synthetic parent
+  turns already exist* (`goal-runner.js`, `async-subagents.js` re-enter with
+  `wrapUntrusted`'d page bytes) — a synthetic parent is a non-attended sender that
+  exists **now**. So P0 gates the tool edge on
+  **`!synthetic && senderSessionId === getActiveSessionId()`** (attended,
+  first-party). The unattended path (peer messages, scheduled tasks) is **blocked
+  at P0** and unlocks only when the shared clamp lands (P1+).
+- **Runaway guard.** `tell_instance` reuses the async-subagents `RATE_CAP` /
+  `OUTSTANDING_CAP` per sender (a resident↔resident or parent↔resident ping-pong
+  must be bounded — see cost, below).
 
 ## The resident-runtime boundary — why A is B's foundation
 
-This is the design's spine and the reason A is not throwaway. peerd's turn
-machinery is already split exactly where the A↔B seam needs to be:
+peerd's turn machinery is already split where the A↔B seam needs it. **Verified:**
+the `turn-driver` wrapper genuinely owns spend/clamp/scheduler/key/egress and
+calls `runUserTurn` (the inner loop) which reaches none of them by closure (it
+emits `usage` *events* the wrapper consumes).
 
 ```
 turn-driver.js  (the WRAPPER — stays SW-side in BOTH A and B)
    ├─ makeTurnCostTracker / maybeHalt / spendLimitUsd   ← spend cap
-   ├─ the inbound clamp (ctx.inbound, when it lands)     ← unattended gate
-   ├─ turnSlots (claim/release/runWhenIdle)              ← scheduler / anti-focus-theft
-   ├─ vault.getSecret + safeFetch + webFetch + audit     ← key & egress
+   ├─ ctx.inbound clamp (when it lands)                 ← unattended gate
+   ├─ turnSlots (runWhenIdle / claim / release)         ← scheduler / anti-focus-theft
+   ├─ vault.getSecret + safeFetch + webFetch + audit    ← key & egress
    └─ runUserTurn(...)   ← the INNER LOOP (the only thing B relocates)
 ```
 
-- **Model A:** the resident runs through the whole stack in the SW —
-  `runAgentTurn({ sessionId: resident })`. The wrapper enforces spend, clamp,
-  scheduling; the loop calls `callModel`/egress directly. **Zero new turn
-  runtime** — it reuses the existing driver, parameterized by session id.
-- **Model B (Phase 2):** relocate **only `runUserTurn`** into a per-tab worker.
-  The wrapper — cost meter, clamp, scheduler, key, egress — **stays in the SW**,
-  now talking to the relocated loop over a streaming proxy (`callModel` Port +
-  egress relay + a vault-`unlocked` relay + cross-boundary abort). Because the
-  enforcement never leaves the SW, B does **not** reintroduce the regressions the
-  split's first draft had (uncapped spend, an unclamped inbound path, an invisible
-  second scheduler — all were artifacts of moving the *wrapper*, which we never
-  do).
+- **Model A:** the resident runs the whole stack in the SW. **But not for free:**
+  `runAgentTurn` today hardcodes `exposure:'main'` (which would shed the very
+  tools a resident needs) and frames the turn around
+  `browser.tabs.query({active:true})` (the *user's* foreground tab, not the
+  resident's instance tab). So A needs a **kind-aware branch**: the `resident`
+  exposure marker, a resident descriptor build, the `*_RESIDENT_PROMPT`, and
+  honoring the resident's `activeTabId` instead of the foreground query. The
+  **wrapper** (spend/clamp/scheduler/egress) is reused verbatim; the inner
+  per-turn *setup* is real, bounded new work. ("Zero new turn runtime" was an
+  over-claim; the honest claim is "the enforcement wrapper is reused.")
+- **Model B (Phase 2):** relocate **only `runUserTurn`** into a per-tab worker
+  behind a streaming proxy; the wrapper stays SW-side. Because enforcement never
+  leaves the SW, B does not reintroduce the regressions the split's first draft
+  had (uncapped spend, an unclamped inbound path, an invisible second scheduler).
 
-**The design rule for A, so A supports B:** keep every key/egress/cost/clamp/
-scheduler concern in the turn-driver wrapper (where it already is), and keep the
-resident loop's IO behind the existing injected `REQUIRED_CTX` seam. Then B is the
-single, well-scoped act of filling that ctx from a worker-proxy instead of
-in-process. Spec the seam once; cross it later.
+**Design rule for A, so A supports B:** keep every key/egress/cost/clamp/scheduler
+concern in the wrapper; keep the loop's IO behind the injected `REQUIRED_CTX`
+seam. Then B is one scoped relocation. Spec the seam once; cross it later.
 
 ## What A ships vs what the split (Phase 2) adds
 
 | | Model A (ship now) | The split (Phase 2, JS-safety) |
 |---|---|---|
-| Inner loop runs | SW heap | per-tab worker (spawned by the host page) |
-| Key in the loop's realm | held for `callModel` (SW heap) | **none** — `callModel` proxied |
+| Inner loop runs | SW heap | per-tab worker |
+| Key in the loop's realm | held for `callModel` | none (proxied) |
 | Defends prompt-injection | yes (gated tools) | yes (identical) |
-| Defends a JS exploit of the loop reaching the key | **no** — shared SW heap | **yes** — the actual delta |
-| New build | deny-set + `tell_instance` + `kind:'resident'` | streaming Port + abort + vault relay + worker host |
+| Defends a JS exploit of the loop reaching the key | no (shared SW heap) | **yes — the real delta** |
 | Trigger | now | untrusted **code** live (dweb dwapps) + A battle-tested |
 
-The split's value is real and the owner wants it sooner-not-later — but it is
-precisely the JS-heap-isolation hardening, *not* the injection-boundary claim, and
-it rides A's seam. Until then, A's keyless *tool* context (`restrictCtxCapabilities`
-already strips `getSecret`/`safeFetch` from the tool ctx) is the proportionate
-mitigation for the content threat.
+## Cost model (corrected — not "native and free")
 
-## Hardenings carried from the adversarial review
+A resident is a *separate session*. `makeTurnCostTracker` (`cost/turn-tracker.js`)
+checks `limitUsd` **per session**, so **N residents = N independent caps**: the
+user's attended chat hitting its limit does not stop its residents, and a
+`tell_instance` ping-pong burns two independent caps. P0 must therefore (a) carry
+the `tell_instance` runaway guard (Move 3), and (b) **document** that residents
+multiply the cap by live-resident count. A true cross-session rollup into one
+owning-user budget does not exist today and is an open question (below), not a P0
+claim.
 
-A structurally **avoids** the split's four regressions (the loop is on the SW, so
-spend-cap, scheduler, and clamp are native; a tab discard or App `reloadTab` can't
-nuke a loop that isn't in the tab). Three findings still apply to A and are folded
-in:
+## Hardenings carried from the adversarial reviews
 
-- **Ephemeral confirm for residents.** `sessionConfirmGrants` banks a blanket
-  `yes_session` per session (`service-worker.js:1802`); a *persistent* resident
-  would turn one user approval into standing self-approval it replays every turn.
-  Residents use **per-turn** grants (no `yes_session` banking) — the runner's
-  grant-less posture.
-- **`tell_instance` inherits the inbound-clamp posture.** A `tell` from the user's
-  own attended chat is first-party. A `tell` from an **unattended/cross-trust**
-  sender (a scheduled task, a peer message) is inbound and must ride the
-  `ctx.inbound` clamp that `FEATURE-SCHEDULED-TASKS.md` /
-  `FEATURE-FIRST-CLASS-MESSAGING.md` are building. There must be **one** clamp;
-  `tell_instance`'s non-attended path gates on it.
-- **SW-side reply correlation** (above) — never a persisted sender pointer.
+A structurally avoids the split's four regressions (loop is on the SW). Folded in:
+
+- **Ephemeral resident confirm.** `sessionConfirmGrants` banks a blanket
+  `yes_session` per session; a *persistent* resident would replay one approval
+  every turn. Residents use **per-turn** grants (the runner's grant-less posture).
+- **`tell_instance` P0 fail-closed** on synthetic/unattended senders (Move 3).
+- **SW-side reply correlation** (Move 3) — never a persisted sender pointer.
 
 ## Context shedding (goal #2)
 
-Parent keeps create + `tell_instance` + list (~5 tools); the ~23 instance tools
-move onto residents (minus `js_run`). Net: ~4.5–6 k tokens off every parent turn,
-non-eroding. Recompute the per-resident prompt cost if residents go always-warm vs
-lazy (below).
+Parent keeps create + `tell_instance` + list; the ~23 instance tools move behind
+the `resident` tier (minus `js_run`). Non-eroding (unlike `INSTANCE_GATED_TOOLS`
+progressive disclosure). Net ~4.5–6 k tokens off every parent turn; the engine
+prose moves into per-kind `*_RESIDENT_PROMPT`. (Honest: the per-resident prompt
+re-incurs that prose per live resident — net positive for the parent, recompute
+for always-warm residents.)
 
 ## Lifecycle
 
-- **Binding: structural** (tracker entry). **Execution: lazy** — the resident is a
-  persistent session but its loop only *runs* on a `tell` (idle/no-tokens between).
-- **Persistence:** the resident session persists in IDB (`sessions/store.js`); the
-  instance persists via registries + OPFS + per-VM disks; on SW boot
-  `registry.load()` + `tabTracker.bootstrap()` re-adopt live tabs. A `tell` to a
-  resident whose tab is gone re-spawns it via `ensureTab` (the resident is data,
-  the tab is reconstitutable).
-- **Death:** `tabs.onRemoved` → resident sleeps (session + instance survive) or, on
-  `vm_delete`/`app_delete`, archives. Generalize `onTabClosed → queue.interrupt`
-  (VM-only today, `:2031`) to all kinds so a closing tab cancels in-flight work.
+Bound to the instance (Move 1); **lazy execution** (the loop runs only on a
+`tell`). Persists in IDB; instance persists via registries/OPFS/disks; SW boot
+re-adopts via `registry.load()` + `tabTracker.bootstrap()`; a `tell` to a
+tabless instance re-spawns the tab via `ensureTab`. Generalize
+`onTabClosed → queue.interrupt` (VM-only at `:2031`) to all kinds.
 
 ## Security / invariants
 
-- **Keyless tool context** (`restrictCtxCapabilities`) — against the content
-  threat. The **shared SW heap is the known soft spot** (`docs/SUBAGENTS.md` names
-  it); A accepts it as proportionate for untrusted *content* and Phase 2 closes it
-  for untrusted *code*.
-- **`confirm`/`audit` are SW-authoritative** (native in A; proxied in B). Residents
-  never self-approve (ephemeral grants).
-- **`webFetch` (allowlist-free, open-web) is the real exfil surface** — deny
-  open-web tools to untrusted-input residents, as the runner does.
-- **The isolate is the untrusted-code boundary** in both A and B (the loop never
-  runs in the guest/worker/iframe).
+- **Mutation is resident-tiered + per-instance-pinned** (Move 2), enforced at
+  `exposureGate` + the closure strip. The dispatcher test is the proof.
+- **Keyless tool context** (`restrictCtxCapabilities`) against the content threat;
+  the shared SW heap is the named soft spot, closed for untrusted *code* in P2.
+- **`confirm`/`audit` SW-authoritative**; residents never self-approve.
+- **`webFetch` (allowlist-free) is the real exfil surface** — deny open-web tools
+  to untrusted-input residents, as the runner does.
+- **The isolate is the untrusted-code boundary** in both A and B.
 - Reply `wrapUntrusted`; depth/trust/audit unchanged.
 
 ## Specifically NOT to do
 
-- Resurrect an `ownerSessionId` pointer — the binding is the tracker entry.
-- Build the streaming proxy now — that's Phase 2; A reuses the SW turn-driver.
-- Move the cost meter / clamp / scheduler off the SW — ever (that's what creates
-  the regressions; the wrapper stays SW-side in both models).
-- Give residents standing `yes_session` grants.
-- Treat `js_run` as an instance; run the loop in the isolate.
+- Implement the mutation shed as descriptor-hygiene only (the v1 kill) — it must
+  be a `resident`-keyed **dispatch-gate refusal** + a per-instance pin.
+- Grant the `resident` marker on either spawn surface.
+- Re-introduce a per-call *session→instance owner check* (the rejected gate). The
+  `residentSessionId` field is a *routing* pointer, not a mutation gate.
+- Build the streaming proxy now (that's P2).
+- Move cost/clamp/scheduler off the SW — ever.
+- Give residents standing `yes_session`; treat `js_run` as an instance; run the
+  loop in the isolate.
 
 ## Open questions
 
-- **Which kinds get residents by default?** WebVM has the strongest case; Apps /
-  Notebooks may not be worth the message hop — per-kind.
-- **The inbound clamp** is a shared dependency (scheduled-tasks /
-  first-class-messaging); `tell_instance`'s unattended path gates on it.
-- **The user talking to a resident** in the side panel — `kind:'resident'` is a
-  first-class session; does it appear in a switcher, or only via the tab?
-- **Phase-2 trigger criteria** — what concretely counts as "untrusted code live"
-  (the first dweb dwapp execution path?) that flips the split on.
+- **Which kinds get residents by default** (WebVM strongest; per-kind).
+- **Cross-session spend rollup** — do residents share the owning user's budget, or
+  is per-session-cap-× -tab-count acceptable? (No rollup exists today.)
+- **The inbound clamp** is the shared dependency that unlocks `tell_instance`'s
+  unattended path; P0 ships attended-only without it.
+- **The user talking to a resident** — does `kind:'resident'` appear in a switcher
+  or only via the tab?
+- **Phase-2 trigger** — what concretely flips the split on (first dweb dwapp
+  execution path?).
 
 ## Phasing
 
-1. **P0 — Model A core.** `kind:'resident'`; structural tab-tracker binding; the
-   tool-shed deny-set; `tell_instance` (SW-side correlation + mailbox); residents
-   run through the existing `runAgentTurn`. Ephemeral confirm. Behind a flag.
-   *Battle-test + release this.*
-2. **P1 — persistence + the conversational surface.** Durable resident sessions;
-   the side-panel "talk to this instance" affordance; per-kind `*_RESIDENT_PROMPT`.
+1. **P0 — Model A core.** `kind:'resident'` (a `SessionKind` union change → audit
+   kind-switches, the `/chats` filter, store-load default); the **`resident`
+   exposure tier + dispatch-gate refusal + closure strip + per-instance pin +
+   the dispatcher test** (Move 2 — the security spine); the instance→resident
+   `residentSessionId` binding; `tell_instance` (SW correlation + mailbox +
+   runaway guard + the `!synthetic && active` fail-closed gate); the kind-aware
+   resident turn branch (exposure/descriptors/`*_RESIDENT_PROMPT`/`activeTabId`);
+   ephemeral confirm; resident-spawn wired across all three trackers. Behind a
+   flag. *Battle-test + release.* (Honest build surface — this is not "zero new
+   runtime".)
+2. **P1 — persistence + the conversational surface** (durable resident sessions;
+   the side-panel "talk to this instance" affordance; the unattended `tell`
+   path once the clamp lands).
 3. **P2 — the split (Model B), for JS-safety.** Relocate `runUserTurn` into a
-   per-tab worker behind the proxy (streaming `callModel` Port, egress relay,
-   vault-`unlocked` relay, cross-boundary abort), wrapper staying SW-side.
-   Triggered by untrusted-code use cases + a battle-tested A. *Desirable
-   sooner-not-later — the seam is designed for it from P0.*
+   per-tab worker behind the proxy (streaming Port, egress relay,
+   vault-`unlocked` relay, cross-boundary abort); wrapper stays SW-side.
+   Triggered by untrusted-code use cases + a battle-tested A.
 4. **P3 — durable resume** across vault unlock / browser restart (DESIGN-08).
 
 ## The seam is the bet
 
 A ships the actor model and the lean parent now, regression-free, by reusing the
-SW turn-driver and a one-table tool-shed. The split is then **one well-scoped
-relocation** — move the inner loop into a per-tab worker, leave the enforcement
-wrapper in the SW — for the day untrusted *code* runs. **Design the seam once
+SW turn-driver wrapper and a resident-keyed capability tier. The split is then one
+well-scoped relocation — move the inner loop into a per-tab worker, leave
+enforcement in the SW — for the day untrusted *code* runs. **Design the seam once
 (P0); cross it when the threat arrives (P2).** That's why A directly buys B.
