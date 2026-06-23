@@ -179,8 +179,8 @@ export const BehaviorSection = {
       m('.settings-divider'),
       m('h3', 'Developer mode'),
       m('p', devMode
-        ? 'Verbose VM diagnostics ON: install + verify scripts are visible in the WebVM terminal, `set -x` traces every install step, marker round-trips are timed in the boot log, and the boot card auto-expands. Takes effect on the next WebVM reset.'
-        : 'Show verbose WebVM internals: install + verify scripts in the terminal, per-command bash tracing, marker timing in the boot log. Useful when curl/wget wrappers aren’t working and you need to see why. Off by default — extra noise.'),
+        ? 'Verbose VM diagnostics ON: the wrapper install + verify output is shown in the WebVM terminal at boot, and marker round-trips are timed in the boot log. Your own commands are never traced. Takes effect on the next WebVM reset.'
+        : 'Show the WebVM wrapper install + verify output in the terminal at boot, plus marker timing in the boot log. Useful when curl/wget wrappers aren’t working and you need to see why. Off by default — extra noise.'),
       m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
         m('button.secondary', {
           type: 'button',

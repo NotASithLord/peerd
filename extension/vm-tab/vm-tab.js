@@ -75,6 +75,8 @@ const DOM = {
 let vmName = '';
 let diskOverlayKey = '';
 // Verbose VM diagnostics (Settings → Behavior `devMode`); set from vm/get-meta.
+// Surfaces the one-time wrapper install/verify output at boot — it does NOT
+// trace the shell (no `set -x`), so your own commands stay clean either way.
 let vmDevMode = false;
 /** @type {string[]} */
 const bootLogLines = [];
@@ -131,7 +133,8 @@ const loadVmRecord = async () => {
   const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'vm/get-meta', vmId: hash }));
   if (!reply?.ok) throw new Error(reply?.error ?? `vm not found in registry: ${hash}`);
   // Developer mode (Settings → Behavior): verbose VM diagnostics. Read once at
-  // boot; gates `set -x` in the wrappers + visible install/verify output below.
+  // boot; gates the VISIBLE install/verify output below (no `set -x` — the
+  // persistent shell is never traced; the boot LOG carries the diagnostics).
   vmDevMode = !!reply.devMode;
   return reply.record;
 };
@@ -178,20 +181,14 @@ peerd-fetch() {
   local id="\${RANDOM}\${RANDOM}\${RANDOM}$$"
   printf '___PEERD_HTTP___:%s:%s\\n' "$id" "$url"
   local n=0
-  # why: under devMode set -x this 20Hz poll loop would echo ~4 trace lines
-  # every 50ms and flood the terminal during any slow fetch. Suspend xtrace for
-  # the wait (portable to any bash version, unlike local dash), restore it after.
-  local __peerd_x=""; case $- in *x*) __peerd_x=1; set +x;; esac
   while [ ! -f "/peerd-data/peerddone\${id}" ]; do
     sleep 0.05
     n=$((n + 1))
     if [ "$n" -gt "$PEERD_HTTP_TIMEOUT_TICKS" ]; then
-      [ -n "$__peerd_x" ] && set -x
       echo "peerd-fetch: timed out after \${PEERD_HTTP_TIMEOUT}s waiting for response (id=\${id})" >&2
       return 124
     fi
   done
-  [ -n "$__peerd_x" ] && set -x
   if [ -f "/peerd-data/peerderr\${id}" ]; then
     cat "/peerd-data/peerderr\${id}" >&2
     return 1
@@ -220,20 +217,14 @@ __peerd_emit_req() {
   id="\${RANDOM}\${RANDOM}\${RANDOM}$$"
   printf '___PEERD_REQ___:%s:%s\\n' "$id" "$payload"
   n=0
-  # why: silence this 20Hz poll loop so devMode set -x does not flood the
-  # terminal during slow requests (curl/wget + every pip/npm/gem install route
-  # through here). Suspend xtrace for the wait, restore after (portable bash).
-  local __peerd_x=""; case $- in *x*) __peerd_x=1; set +x;; esac
   while [ ! -f "/peerd-data/peerddone\${id}" ]; do
     sleep 0.05
     n=$((n + 1))
     if [ "$n" -gt "$PEERD_HTTP_TIMEOUT_TICKS" ]; then
-      [ -n "$__peerd_x" ] && set -x
       echo "peerd-http: timed out after \${PEERD_HTTP_TIMEOUT}s (id=\${id})" >&2
       return 124
     fi
   done
-  [ -n "$__peerd_x" ] && set -x
   PEERD_LAST_STATUS=""
   if [ -f "/peerd-data/peerdmeta\${id}" ]; then
     PEERD_LAST_STATUS="$(grep -Eo '"status":[0-9]+' "/peerd-data/peerdmeta\${id}" | grep -Eo '[0-9]+')"
@@ -1065,18 +1056,21 @@ const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = 
 };
 
 // ---------------------------------------------------------------------------
-// Wrapper install (silent, via DataDevice staging + source).
+// Wrapper install (via DataDevice staging + source). Silent by default;
+// devMode surfaces the [diag]/[verify] output. Never traces the shell.
 // ---------------------------------------------------------------------------
 
 const installWrappers = async () => {
   const encoder = new TextEncoder();
   const stagingName = `/peerdwrappers${Date.now().toString(36)}`;
-  // devMode: prepend `set -x` to the sourced wrappers so the PERSISTENT shell
-  // traces every later step (curl/wget/git, pkg installs). The install itself
-  // ALWAYS runs silent (below) — its [diag]/[verify] lines are captured in
-  // stdout for the verify parse, never dumped to the terminal. That boot-time
-  // wall of egress-wrapper output is just noise to the user.
-  const wrappersSrc = (vmDevMode ? 'set -x\n' : '') + WRAPPERS_BASH;
+  // why NO `set -x` prepend: it stays ON in the PERSISTENT shell and then traces
+  // EVERY later interactive command — including peerd's own ___PEERD_*___
+  // completion markers and the http/pkg-fetch bridge plumbing — so one `pip
+  // install` reads as 40 lines of `+ __peerd_emit_req …`. devMode instead just
+  // makes the one-time install/verify output VISIBLE at boot (the `silent` flag
+  // below); off by default it stays captured-but-hidden (parsed for [verify],
+  // never dumped). Your own commands are never traced either way.
+  const wrappersSrc = WRAPPERS_BASH;
   await dataDev.writeFile(stagingName, encoder.encode(wrappersSrc));
   const stagedPath = `/peerd-data${stagingName}`;
   const script = [
@@ -1097,7 +1091,7 @@ const installWrappers = async () => {
     'unset __f __t',
     'echo "[peerd-egress] bash function wrappers installed"',
   ].join('\n');
-  return runViaShell(script, { silent: true });
+  return runViaShell(script, { silent: !vmDevMode });
 };
 
 // ---------------------------------------------------------------------------

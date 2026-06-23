@@ -78,8 +78,8 @@ export const makeEngineRoutes = (deps) => {
         if (!record) return { ok: false, error: 'vm-not-found' };
         // why devMode rides along: vm-tab has no settings of its own; it reads
         // it here (once, at boot) to honour the "verbose VM diagnostics" toggle
-        // (Settings → Behavior) — `set -x` in the sourced wrappers + visible
-        // install/verify output.
+        // (Settings → Behavior) — surfaces the install/verify output in the
+        // terminal at boot (the persistent shell is never traced with `set -x`).
         return { ok: true, record, devMode: !!settingsStore.get().devMode };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };

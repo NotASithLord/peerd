@@ -60,10 +60,13 @@ export const defaults = {
   // this flag only governs the on-device OCR engine for image-only PDFs.
   ocrEnabled: { store: false, preview: false },
 
-  // The one real friction divergence today: preview users get the
-  // advanced/diagnostic surfaces (verbose WebVM boot, debug panels) on
-  // by default; store users opt in.
-  devMode: { store: false, preview: true },
+  // Verbose VM diagnostics (Settings → Behavior). OFF by default on BOTH
+  // channels — its own UI copy already calls it "extra noise". On, it surfaces
+  // the one-time wrapper install/verify output in the WebVM terminal at boot;
+  // it does NOT trace the shell (no `set -x` — that used to leak peerd's
+  // internal markers + bridge plumbing into every interactive command). The
+  // verify results reach the boot LOG regardless, so debugging keeps its signal.
+  devMode: { store: false, preview: false },
 
   // why: extended thinking renders a collapsible "Reasoning" section —
   // the premium feel. On for everyone.
@@ -180,7 +183,7 @@ export const defaults = {
   // spec §12). Preview ships to contributors and early testers; making
   // them toggle dweb on before the demo is pure friction, and the channel
   // boundary IS friction tolerance, not a safety floor (see the file
-  // header) — same posture as `devMode: { preview: true }`. NOT a safety
+  // header) — same posture as `advancedAutomationEnabled: { preview: true }`. NOT a safety
   // relaxation: the dweb module is preview-channel-only (the store package
   // prunes it and sets DWEB_ENABLED=false, so this key is absent there
   // entirely from CHANNEL_DEFAULTS), identity needs an unlocked vault, and
