@@ -25,6 +25,7 @@ import { INITIAL_STATE, reduceChat, putSubagentSession } from '../sidepanel/chat
 import { ChatView } from '../sidepanel/components/chat-view.js';
 import { ConfirmModal, NoticeBar } from '../sidepanel/components/app.js';
 import { VaultGate } from '../sidepanel/components/vault-gate.js';
+import { OnboardingView, needsOnboarding } from '../sidepanel/components/onboarding-view.js';
 import { peerNotifications } from '/shared/peer-notifications.js';
 
 /** @typedef {import('./library-section.js').Send} Send */
@@ -523,6 +524,16 @@ const HomeApp = {
     // succeeds. Wrapped in .options-gate so it sits in the upper third (home.css).
     if (!currentState.vault?.initialized || currentState.vault.locked) {
       return m('.options-gate', m(VaultGate, { state: currentState, send }));
+    }
+
+    // Onboarding is a HOME-page blocker (DESIGN-12): once the vault is unlocked,
+    // the first-run "meet your peer" funnel gates the experience right here —
+    // before any navigation — and lifts itself when the SW's onboardingComplete
+    // latch flips on the next state push. It deliberately does NOT live in the
+    // side panel (you reach the panel by popping it from an onboarded home), so
+    // it can never surprise-trigger after you've started using home.
+    if (needsOnboarding(currentState)) {
+      return m('.options-gate', m(OnboardingView, { state: currentState, send }));
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
