@@ -6,16 +6,38 @@ const onTimeout = (ms: number) => new Error(`timed out after ${ms}ms`);
 describe('combineSignals', () => {
   test('returns the single signal when only one given', () => {
     const c = new AbortController();
-    expect(combineSignals(c.signal, undefined)).toBe(c.signal);
-    expect(combineSignals(undefined, undefined)).toBeUndefined();
+    expect(combineSignals(c.signal, undefined).signal).toBe(c.signal);
+    expect(combineSignals(undefined, undefined).signal).toBeUndefined();
   });
   test('aborts the combined signal when either input aborts', () => {
     const a = new AbortController();
     const b = new AbortController();
-    const combined = combineSignals(a.signal, b.signal)!;
-    expect(combined.aborted).toBe(false);
+    const { signal } = combineSignals(a.signal, b.signal);
+    expect(signal!.aborted).toBe(false);
     b.abort();
-    expect(combined.aborted).toBe(true);
+    expect(signal!.aborted).toBe(true);
+  });
+  test('fallback relay (no AbortSignal.any): relays an abort, and dispose() unhooks it (no leak)', () => {
+    const realAny = (AbortSignal as any).any;
+    (AbortSignal as any).any = undefined; // force the AbortSignal.any-less fallback path
+    try {
+      // the relay works under the fallback
+      const a = new AbortController();
+      const live = combineSignals(a.signal, new AbortController().signal);
+      expect(live.signal!.aborted).toBe(false);
+      a.abort();
+      expect(live.signal!.aborted).toBe(true);
+
+      // dispose() removes the input listeners, so a LATER input abort no longer
+      // propagates — i.e. the listener didn't leak past the fetch's lifetime.
+      const b = new AbortController();
+      const disposed = combineSignals(b.signal, new AbortController().signal);
+      disposed.dispose();
+      b.abort();
+      expect(disposed.signal!.aborted).toBe(false);
+    } finally {
+      (AbortSignal as any).any = realAny;
+    }
   });
 });
 
