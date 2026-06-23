@@ -118,6 +118,39 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
   /** Stop / steer-takeover: end the run without declaring success. @param {string} sid */
   const halt = (sid) => { const r = runs.get(sid); if (r) { r.halted = true; persist(); } };
 
+  // Durably drop ONE session's record from the mirror (read-modify-write).
+  // why not persist(): persist() writes a snapshot of the in-memory MAP, which a
+  // PAUSED run (vault-lock) is no longer in — so it can't remove a paused run's
+  // record, and a live run's persist() is fire-and-forget. forget() is keyed by
+  // sid and reaches the record either way. Best-effort, like persist(). No kv → no-op.
+  /** @param {string} sid */
+  const forget = async (sid) => {
+    if (!kv) return;
+    try {
+      const stored = await kv.get(GOAL_RUNS_KEY);
+      if (stored && typeof stored === 'object' && Object.hasOwn(stored, sid)) {
+        const next = { ...stored };
+        delete next[sid];
+        await kv.set(GOAL_RUNS_KEY, next);
+      }
+    } catch { /* best-effort — a lost write just means it may resume once more */ }
+  };
+
+  /**
+   * Durable user-initiated Stop (Stop button, steer-takeover, new-chat, archive).
+   * Halts any live run AND awaits removal of the persisted record, so a Stop can't
+   * be silently undone by resume() on the next vault unlock. Unlike halt() (the
+   * internal supersede/error mark, in-memory only), this is keyed by sid and works
+   * even when the run was PAUSED and evicted from the map, or when a live run's
+   * fire-and-forget persist() hasn't committed yet.
+   * @param {string} sid
+   */
+  const stop = async (sid) => {
+    const r = runs.get(sid);
+    if (r) r.halted = true;  // its drive() loop sees !alive() and exits to the terminal finally
+    await forget(sid);
+  };
+
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
   const emit = (sid, phase) => {
     const r = runs.get(sid);
@@ -228,9 +261,16 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
       if (!sid || runs.has(sid)) continue;
       const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
       if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
+      // why clamp at the cap: persist() records the iteration ABOUT to run, so a
+      // crash resumes there. But if the SW died DURING the final allowed turn, the
+      // stored iteration === maxIterations and drive()'s `iteration < maxIterations`
+      // would be false immediately — declaring 'capped' for a turn that never
+      // actually ran. Rewind one so that interrupted final turn re-runs once.
+      const storedIteration = Number(rec.iteration) || 0;
+      const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
       runs.set(sid, {
         goal: rec.goal,
-        iteration: Number(rec.iteration) || 0,
+        iteration,
         completed: false, halted: false, summary: null, lastError: null,
         startedAt: Number(rec.startedAt) || now(),
       });
@@ -240,5 +280,5 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
     return { resumed };
   };
 
-  return Object.freeze({ start, halt, complete, isActive, get, drive, resume });
+  return Object.freeze({ start, halt, stop, complete, isActive, get, drive, resume });
 };

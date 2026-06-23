@@ -2460,7 +2460,11 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // computes Act+confirm-off from the live run — so start/halt are just the runner
 // surface. resumeGoalRuns re-drives persisted runs after an interactive unlock.
 const startGoalRun = (/** @type {{ sessionId: string, goal: string }} */ req) => /** @type {any} */ (goalRunner)?.start(req);
-const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.halt(sid);
+// why stop() not halt(): user-initiated cancels (Stop button, steer-takeover,
+// new-chat, archive) must DURABLY end the run — halt() only marks an in-memory
+// run, so a vault-lock-PAUSED run (evicted from the runner's map but kept in the
+// kv mirror for resume) would survive a Stop and resurrect on the next unlock.
+const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.stop(sid);
 const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
 const ensureSession = ensureCurrentSession;
 
@@ -2776,15 +2780,22 @@ vault.attemptResume().then((resumed) => {
     // user who explicitly DISABLED it, once, in the cold-start window. load() is
     // idempotent (re-reads kv, recomputes the merged view), so gating on it here
     // just guarantees the setting is hydrated before the gate consults it.
-    settingsStore.load()
+    // why goal resume BEFORE auto-resume: goalRunner.resume() synchronously
+    // re-adds a persisted run to the runner's map (isActive → true) before its
+    // drive() awaits. Sequencing it ahead of maybeAutoResume guarantees the
+    // goalActiveFor guard in maybeAutoResume sees the goal run and bails —
+    // otherwise the two could race to drive the SAME interrupted session.
+    Promise.resolve(goalRunner?.resume())
+      .catch((e) => console.error('[sw] goal resume failed', e))
+      .then(() => settingsStore.load())
       .then(() => sessionCache.sessionGet('currentSessionId'))
       .then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
+  } else {
+    // Vault not resumed (locked): still rehydrate goal runs so the Goal bar is
+    // restored; their next turn pauses on the locked vault and waits for unlock.
+    // No auto-resume here — it needs an unlocked vault to call the model.
+    goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
   }
-  // why: resume any in-flight Goal run AFTER the vault is back — a run needs
-  // unlocked secrets to call the model. If the SW died mid-run (or the user is
-  // returning to a run that kept going while they were elsewhere), the persisted
-  // run state lets us re-drive the next turn. A no-op if nothing is active.
-  goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
 }).catch((e) => console.error('[sw] attemptResume failed', e));
 
 // One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote

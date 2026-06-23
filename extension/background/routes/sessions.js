@@ -31,8 +31,10 @@ export const makeSessionRoutes = (deps) => {
       // a turn streaming elsewhere (turn slots are per-session).
       const sessionId = await sessionCache.sessionGet('currentSessionId');
       // Stop ends the whole goal run (not just the in-flight turn) so it can't
-      // auto-continue after the abort.
-      if (sessionId && haltGoalRun) haltGoalRun(/** @type {any} */ (sessionId));
+      // auto-continue after the abort. Awaited: haltGoalRun durably removes the
+      // run's persisted record, so a Stop can't be undone by a resume() on the
+      // next unlock even if the SW is torn down right after this handler returns.
+      if (sessionId && haltGoalRun) await haltGoalRun(/** @type {any} */ (sessionId));
       if (sessionId && turnSlots.stop(sessionId)) {
         auditLog.append({ type: 'session_ended', details: { reason: 'user_stop' } })
           .catch(() => {});

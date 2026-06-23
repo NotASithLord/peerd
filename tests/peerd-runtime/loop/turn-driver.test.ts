@@ -66,6 +66,18 @@ test('maybeAutoResume no-ops when the session is already streaming', async () =>
   expect(read).toBe(false);
 });
 
+test('maybeAutoResume no-ops when a Goal run owns the session (no double-drive)', async () => {
+  let read = false;
+  const d = makeTurnDriver(deps({
+    // The goal loop re-drives its own interrupted turn on resume; auto-resume
+    // must bail BEFORE reading the session so the two can't contend the slot.
+    goalActiveFor: (sid: string) => sid === 's1',
+    sessions: { get: async () => { read = true; return {}; } },
+  }));
+  await d.maybeAutoResume('s1');
+  expect(read).toBe(false);
+});
+
 test('maybeAutoResume does not resume a turn that is not resumable', async () => {
   let noted = false;
   const d = makeTurnDriver(deps({
