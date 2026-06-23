@@ -76,6 +76,18 @@ const handlePortDisconnect = () => {
     vault: { ...currentState.vault, locked: true, unlockedAt: 0 },
     providers: { ...currentState.providers, hasKey: false },
     lastError: null,
+    // why reset these: they are SW-OWNED ephemeral projections. The SW just
+    // died with its confirm coordinator, turn slots, ralph/goal drivers and
+    // notice queue — so a stale confirm modal (now UNANSWERABLE: the coordinator
+    // that owned the prompt is gone), rate-limit banner, Stop spinner, notice,
+    // or goal-run pill would linger with nothing behind it. Reset to the
+    // INITIAL_STATE defaults; a revived SW replays anything genuinely still live
+    // via getPending() + the fresh state push.
+    pendingConfirm: null,
+    rateLimit: null,
+    streaming: false,
+    notices: INITIAL_STATE.notices,
+    goalRuns: INITIAL_STATE.goalRuns,
   };
   m.redraw();
   port = null;
