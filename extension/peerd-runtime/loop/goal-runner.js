@@ -103,6 +103,28 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
   const isActive = (sid) => { const r = runs.get(sid); return !!r && !r.completed && !r.halted; };
 
   /**
+   * The 'running' goal/state payloads for every LIVE run — for replaying to a
+   * port that just (re)connected. The loop's emit() only reaches ports connected
+   * at the time it fires, and the SW state snapshot carries no goal-run field, so
+   * without this replay a panel that reopened (or reconnected after an SW respawn)
+   * shows NO Goal bar / Stop for a run still driving autonomously. Same shape the
+   * live loop emits, so it folds through the panel's existing goal/state reducer.
+   * @returns {object[]}
+   */
+  const activeStates = () => {
+    const out = [];
+    for (const sid of runs.keys()) {
+      if (!isActive(sid)) continue;
+      const r = /** @type {GoalRun} */ (runs.get(sid));
+      out.push({
+        type: 'goal/state', sessionId: sid, phase: 'running', active: true,
+        iteration: r.iteration, maxIterations, goal: r.goal, summary: r.summary ?? null,
+      });
+    }
+    return out;
+  };
+
+  /**
    * complete_goal hook: the agent declared the goal met. Returns whether there
    * was a LIVE run to end (false → the tool was called outside an active run).
    * @param {string} sid @param {string} [summary] @returns {boolean}
@@ -280,5 +302,5 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
     return { resumed };
   };
 
-  return Object.freeze({ start, halt, stop, complete, isActive, get, drive, resume });
+  return Object.freeze({ start, halt, stop, complete, isActive, get, activeStates, drive, resume });
 };

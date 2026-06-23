@@ -2071,6 +2071,14 @@ browser.runtime.onConnect.addListener((port) => {
       try { port.postMessage({ type: 'confirm/request', prompt: pendingPrompt }); }
       catch { /* port closing */ }
     }
+    // Same idea for a LIVE goal run: its goal/state events only reached ports
+    // connected when they fired, and the snapshot carries no goal-run field. So
+    // replay each active run to this fresh surface — otherwise a reopened panel
+    // (or one that reconnected after an SW respawn) shows no Goal bar / Stop for a
+    // run still driving autonomously, leaving the user without the visible stop.
+    for (const ev of (goalRunner?.activeStates?.() ?? [])) {
+      try { port.postMessage(ev); } catch { /* port closing */ }
+    }
     port.onDisconnect.addListener(() => {
       uiPorts.remove(port);
       broadcastSurfaces();

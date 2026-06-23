@@ -112,6 +112,31 @@ describe('makeGoalRunner — the goal loop', () => {
     expect(goals).toEqual(['first', 'second']);
   });
 
+  it('activeStates() yields running-run payloads for connect-time replay, and none once terminal', async () => {
+    const calls: TurnArgs[] = [];
+    let release: () => void = () => {};
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      // Hold the turn open so the run stays LIVE while we inspect activeStates().
+      runTurn: async (a: TurnArgs) => { calls.push(a); await new Promise<void>((r) => { release = r; }); },
+      maxIterations: 5,
+    });
+    await runner.start({ sessionId: 'sA', goal: 'build it' });
+    await settle(() => calls.length === 1);
+    // A live run is replayable as a 'running' goal/state event (the shape the
+    // panel's reducer folds — so a reconnecting surface restores the Goal bar).
+    const live = runner.activeStates();
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({
+      type: 'goal/state', sessionId: 'sA', phase: 'running', active: true, goal: 'build it',
+    });
+    // Once it ends, it is no longer replayed.
+    runner.complete('sA', 'done');
+    release();
+    await settle(() => !runner.isActive('sA'));
+    expect(runner.activeStates()).toEqual([]);
+  });
+
   it('the continuation prompt carries the goal and points at complete_goal', () => {
     const p = goalContinuationPrompt('build a drum machine');
     expect(p).toContain('build a drum machine');
