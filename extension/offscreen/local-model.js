@@ -121,8 +121,33 @@ export const initLocalModel = async (onProgress = () => {}) => {
     console.log(`[local-model] ${phase}`, extra);
     try { onProgress({ status: 'phase', phase, ...extra }); } catch { /* no listener */ }
   };
+  // why aggregate: Transformers.js reports progress PER FILE, and its `progress`
+  // field resets to 0 each time a new weight file starts — so surfacing a single
+  // file's % (the old behavior) makes the bar lurch backwards. Sum the latest
+  // bytes across every file and attach ONE honest total % the UI can show.
+  /** @type {Map<string, { loaded: number, total: number }>} */
+  const fileBytes = new Map();
+  /** @param {any} p @returns {any} */
+  const withOverall = (p) => {
+    if (p && p.file) {
+      if (p.status === 'done') {
+        // A 'done' event may omit total — fall back to the file's last-known size.
+        const prev = fileBytes.get(p.file);
+        const total = typeof p.total === 'number' ? p.total : prev?.total;
+        if (typeof total === 'number' && total > 0) fileBytes.set(p.file, { loaded: total, total });
+      } else if (typeof p.total === 'number' && p.total > 0) {
+        fileBytes.set(p.file, { loaded: typeof p.loaded === 'number' ? p.loaded : 0, total: p.total });
+      }
+    }
+    if (fileBytes.size === 0) return p;
+    let overallLoaded = 0;
+    let overallTotal = 0;
+    for (const { loaded, total } of fileBytes.values()) { overallLoaded += loaded; overallTotal += total; }
+    const overall = overallTotal > 0 ? Math.min(100, (overallLoaded / overallTotal) * 100) : undefined;
+    return { ...p, overall, overallLoaded, overallTotal };
+  };
   /** @param {string} label @returns {(p: object) => void} */
-  const tap = (label) => (p) => { console.log(`[local-model] ${label}`, p); onProgress(p); };
+  const tap = (label) => (p) => { console.log(`[local-model] ${label}`, p); onProgress(withOverall(p)); };
   loadingPromise = (async () => {
     report('probing WebGPU');
     const cap = await probeWebgpu();

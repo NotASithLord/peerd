@@ -23,7 +23,7 @@ import { resetRow } from './reset-row.js';
 import { LocalModelsSection } from './local-models.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
-/** @typedef {{ name: string, label: string, hasKey?: boolean, keyless?: boolean, keyPreview?: string }} ProviderRow */
+/** @typedef {{ name: string, label: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
 
 // ── Provider logos ──────────────────────────────────────────────────────
 // Inline SVG marks (no network, no external asset — same privacy posture
@@ -75,6 +75,10 @@ export const ProvidersSection = {
     vnode.state.keyMsg = {};        // name -> { ok, text }
     vnode.state.keyEditing = {};    // name -> bool (Replace revealed the field)
     vnode.state.providerStatus = null;  // [{ name, label, defaultModel, hasKey }]
+    // name -> 'checking' | 'connected' | 'down' — the LIVE reachability of a
+    // keyless daemon (Ollama). Drives the badge so green means "actually
+    // connected", never just "no key needed".
+    vnode.state.connStatus = {};
     ProvidersSection.loadProviderStatus(vnode);
   },
 
@@ -83,8 +87,31 @@ export const ProvidersSection = {
   /** @param {{ state: any, attrs: { send: Send } }} vnode */
   loadProviderStatus(vnode) {
     vnode.attrs.send({ type: 'provider/status' }).then((/** @type {any} */ r) => {
-      if (r?.ok) { vnode.state.providerStatus = r.providers; m.redraw(); }
+      if (r?.ok) {
+        vnode.state.providerStatus = r.providers;
+        m.redraw();
+        // Auto-probe keyless providers that expose a live daemon (Ollama): the
+        // badge should reflect REAL reachability, not a default-green. Quiet
+        // (no card message) so an unused provider doesn't shout a red error on
+        // mount — clicking Test still gives the full message.
+        for (const p of r.providers) {
+          if (p.keyless && p.liveModels) ProvidersSection.probeConnection(vnode, p.name);
+        }
+      }
     }).catch(() => {});
+  },
+
+  // Quietly ping a keyless daemon (provider/test) and record reachability for
+  // the badge. The explicit Test button reuses provider/test too, but also
+  // surfaces the full message; this path only moves the badge.
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {string} name */
+  probeConnection(vnode, name) {
+    vnode.state.connStatus[name] = 'checking';
+    m.redraw();
+    vnode.attrs.send({ type: 'provider/test', provider: name }).then((/** @type {any} */ r) => {
+      vnode.state.connStatus[name] = r?.ok ? 'connected' : 'down';
+      m.redraw();
+    }).catch(() => { vnode.state.connStatus[name] = 'down'; m.redraw(); });
   },
 
   /** @param {{ attrs: { state: any, send: Send }, state: any }} vnode */
@@ -160,6 +187,9 @@ export const ProvidersSection = {
       ui.keyBusy[name] = true; ui.keyMsg[name] = null; m.redraw();
       const reply = await send({ type: 'provider/test', provider: name });
       ui.keyBusy[name] = false;
+      // Keep the badge in sync with an explicit Test (keyless daemons only — the
+      // badge for keyed providers tracks hasKey, not live reachability).
+      ui.connStatus[name] = reply?.ok ? 'connected' : 'down';
       ui.keyMsg[name] = reply?.ok
         ? {
             ok: true,
@@ -207,7 +237,13 @@ export const ProvidersSection = {
           m('.provider-card-text', [
             m('span.provider-card-name', p.label),
             p.keyless
-              ? m('span.key-badge.key-set', '✓ Local — no key needed')
+              // Keyless local daemon (Ollama): green is EARNED by a live probe,
+              // not given for free. Neutral until we've confirmed it answers.
+              ? (ui.connStatus[p.name] === 'connected'
+                  ? m('span.key-badge.key-set', '✓ Connected')
+                  : ui.connStatus[p.name] === 'checking'
+                    ? m('span.key-badge.key-local', 'Checking…')
+                    : m('span.key-badge.key-local', 'Local — no key needed'))
               : p.hasKey
                 ? m('span.key-badge.key-set', p.keyPreview ? `✓ ${p.keyPreview}` : '✓ Key saved')
                 : m('span.key-badge.key-unset', 'No key set'),
@@ -268,7 +304,14 @@ export const ProvidersSection = {
         + 'independently and encrypted in the vault. OpenRouter is an '
         + 'OpenAI-compatible gateway to many vendors’ models. Ollama '
         + 'runs models on THIS machine — keyless, $0, fully local.'),
-      m('.provider-cards', providerRows.map(renderProviderCard)),
+      // The on-device WebGPU model is a full provider now — its card hosts the
+      // hardware-test → download → ready flow inline (the old split-out
+      // "On-device models" section is folded in here), with a status-driven
+      // badge instead of a meaningless key form.
+      m('.provider-cards', providerRows.map((p) =>
+        p.name === 'local-webgpu'
+          ? m(LocalModelsSection, { state, send, logo: providerLogo('local-webgpu'), label: p.label })
+          : renderProviderCard(p))),
 
       // OpenRouter model curation — only once a key is saved (the gateway has
       // hundreds of models, so the user checks which ones the chat picker
@@ -356,12 +399,6 @@ export const ProvidersSection = {
         '. All traffic goes through ', m('code', 'safeFetch'),
         ' against the hardcoded provider allowlist.',
       ]),
-
-      // On-device WebGPU models live on the SAME page as the cloud providers —
-      // one place to configure every model the agent can use, local or remote.
-      m('.settings-divider'),
-      m('h3.providers-subhead', 'On-device models (WebGPU)'),
-      m(LocalModelsSection, { state, send }),
     ]);
   },
 };

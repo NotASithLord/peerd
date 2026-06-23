@@ -47,14 +47,34 @@ let booted = false;          // first state push arrived — until then, show "L
 const VIEW_KEY = 'peerd.home.activeView';
 const DWEB_VIEWS = new Set(['discover', 'contacts', 'network']);
 const ALL_VIEWS = new Set(['chat', 'chats', 'library', 'eval', 'discover', 'contacts', 'network']);
+/** @param {string | null | undefined} v */
+const isValidView = (v) => !!v && ALL_VIEWS.has(v) && (!DWEB_VIEWS.has(v) || DWEB_ENABLED);
+// A `#view` fragment is an explicit deep-link (openHome('library') → "Open
+// Library"). It wins over the stored view; we consume it (clear the hash) so a
+// later rail click + refresh isn't dragged back to the deep-linked view.
+const viewFromHash = () => {
+  try {
+    const v = (location.hash || '').replace(/^#/, '');
+    return isValidView(v) ? v : null;
+  } catch { return null; }
+};
+// replaceState (not assigning location.hash) — strips the fragment WITHOUT
+// firing another hashchange, so consuming a deep-link doesn't loop.
+const clearHash = () => {
+  try { if (location.hash) history.replaceState(null, '', location.pathname + location.search); }
+  catch { /* history API unavailable */ }
+};
 const readView = () => {
+  const fromHash = viewFromHash();
+  if (fromHash) return fromHash;
   try {
     const v = localStorage.getItem(VIEW_KEY);
-    if (v && ALL_VIEWS.has(v) && (!DWEB_VIEWS.has(v) || DWEB_ENABLED)) return v;
+    if (isValidView(v)) return v;
   } catch { /* storage disabled / private mode */ }
   return 'chat';
 };
 let activeView = readView();  // chat | chats | library | eval | discover | contacts | network
+clearHash();                  // deep-link consumed at boot — see viewFromHash
 /** @param {string} v */
 const setView = (v) => { activeView = v; try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
 // Single-homed chat (DESIGN-12, owner 2026-06-18): when a side panel is open it
@@ -570,6 +590,14 @@ const HomeApp = {
 
 connectPort();
 document.addEventListener('visibilitychange', onVisibility);
+// A deep-link to an ALREADY-open home tab (openHome('library') focusing this
+// tab) changes only the fragment — no reload — so honor it via hashchange too,
+// then clear the fragment so it stays a one-shot jump.
+window.addEventListener('hashchange', () => {
+  const v = viewFromHash();
+  clearHash();
+  if (v && v !== activeView) { setView(v); m.redraw(); }
+});
 const root = document.getElementById('app');
 if (!root) throw new Error('home: #app missing from HTML');
 m.mount(root, HomeApp);
