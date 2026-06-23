@@ -22,7 +22,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   voiceSilenceMs: 1500,
   voiceOnboardingDismissed: false,
   ocrEnabled: false,
-  devMode: true,
+  devMode: false,
   reasoningEnabled: true,
   reasoningEffort: "medium",
   providerName: "anthropic",
