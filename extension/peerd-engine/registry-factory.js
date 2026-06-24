@@ -230,6 +230,39 @@ export const createRegistry = (config, { storage }) => {
   };
 
   /**
+   * DESIGN-17: bind an instance to its resident session (the FORWARD pointer
+   * instance → resident). A direct field write + persist — NOT via update()/
+   * applyPatch, whose per-kind allowlists deliberately don't carry it. Returns
+   * the updated record, or null if the instance is gone. Distinct from
+   * ownerSessionId (the CHAT that created the instance): a single instance can
+   * be owned by chat X yet driven by its own resident session R.
+   *
+   * @param {string} id @param {string} residentSessionId @returns {Promise<Rec | null>}
+   */
+  const setResidentSession = async (id, residentSessionId) => {
+    await load();
+    const cur = collection()[id];
+    if (!cur) return null;
+    const next = { ...cur, residentSessionId };
+    collection()[id] = next;
+    await persist();
+    return next;
+  };
+
+  /**
+   * Read the instance's bound resident session id, or null when unbound (lazy
+   * minting: the first message_resident binds it). Survives registry.load()
+   * because it rides the persisted record.
+   *
+   * @param {string} id @returns {Promise<string | null>}
+   */
+  const getResidentSession = async (id) => {
+    await load();
+    const rec = /** @type {{ residentSessionId?: string } | undefined} */ (collection()[id]);
+    return rec?.residentSessionId ?? null;
+  };
+
+  /**
    * Bulk view for the side panel + agent tools. Includes which record is
    * the current default for the given session so the UI can flag
    * "current" without a second lookup.
@@ -254,6 +287,8 @@ export const createRegistry = (config, { storage }) => {
     delete: remove,
     getDefaultForSession,
     setDefaultForSession,
+    setResidentSession,
+    getResidentSession,
     snapshot,
   };
 };
