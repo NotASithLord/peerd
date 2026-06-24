@@ -73,6 +73,14 @@ describe('agent/send slash-command routing', () => {
     await makeSessionRoutes(deps)['agent/send']({ text: 'hello' });
     expect(calls.halted).toEqual(['a']);
   });
+  test('the steer-takeover AWAITS the durable goal Stop (#60)', async () => {
+    // A late-resolving haltGoalRun: the handler must wait for the durable stop
+    // to commit (so it can't resurrect on the next unlock) before returning.
+    let done = false;
+    const { deps } = baseDeps({ haltGoalRun: async () => { await new Promise((r) => setTimeout(r, 20)); done = true; } });
+    await makeSessionRoutes(deps)['agent/send']({ text: 'hello' });
+    expect(done).toBe(true);
+  });
   test('/system and /tools route to their handlers', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionRoutes(deps)['agent/send']({ text: '/system be terse' });

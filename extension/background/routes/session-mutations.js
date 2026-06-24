@@ -46,8 +46,10 @@ export const makeSessionMutationRoutes = (deps) => {
       // why: a "new chat" abandons the current one — end its goal run (if any)
       // so it doesn't keep driving the orphaned session in the background.
       // (A plain session/switch does NOT halt — that's the "keep running while
-      // I'm in another chat" case.)
-      if (previousId) haltGoalRun?.(previousId);
+      // I'm in another chat" case.) Awaited: stop() durably forgets the run's
+      // persisted record, so a "new chat" can't be undone by a resume() on the
+      // next unlock even if the SW is torn down right after this handler (#60).
+      if (previousId) await haltGoalRun?.(previousId);
       await sessionCache.sessionDelete('currentSessionId');
       sessionState.clear();
       pushState();
@@ -85,8 +87,9 @@ export const makeSessionMutationRoutes = (deps) => {
       try {
         await sessions.archive(sessionId);
         // Archiving wraps the chat up — end its goal run (if any) so it can't
-        // keep running on a put-away session.
-        haltGoalRun?.(sessionId);
+        // keep running on a put-away session. Awaited: durably forget the run so
+        // it can't resurrect on the next unlock (#60).
+        await haltGoalRun?.(sessionId);
         // If the archived session was the active one, drop the cache so
         // the next agent/send creates a fresh session.
         const currentId = await sessionCache.sessionGet('currentSessionId');

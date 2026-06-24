@@ -146,3 +146,43 @@ describe('vault routes — payload validation', () => {
     expect(await r['vault/setRecoveryPassphrase']({ passphrase: 'short' })).toEqual({ ok: false, error: 'invalid-passphrase' });
   });
 });
+
+// #60: on an interactive unlock, goal runs must resume BEFORE auto-resume —
+// resume() re-adds a paused run to the runner's map (goalActiveFor → true)
+// before maybeAutoResume checks its guard, so the guard bails for a goal-owned
+// session instead of re-driving its interrupted turn and spuriously halting it.
+// A late-resolving resumeGoalRuns distinguishes the fix (auto-resume waits for
+// resume to settle) from the old inverted order (auto-resume fired first).
+describe('vault unlock — goal resume ordering (#60)', () => {
+  const orderingDeps = (order: string[]) => ({
+    vault: { unlock: async () => {}, unlockWithPrf: async () => {} },
+    auditLog: { append: async () => {} },
+    ensureOffscreen: async () => {},
+    maybeStartBaseNetwork: () => {},
+    base64ToBytes: () => new Uint8Array([1]),
+    sessionCache: { sessionGet: async () => 'cur' },
+    resumeGoalRuns: async () => { await new Promise((r) => setTimeout(r, 30)); order.push('resume'); },
+    maybeAutoResume: () => { order.push('autoresume'); },
+    WrongPassphraseError, VaultNotInitializedError, RecoveryPassphraseNotSetError,
+    PrfNotEnrolledError, PrfUnlockFailedError, VaultLockedError,
+  });
+  const settle = async (order: string[]) => {
+    for (let i = 0; i < 60 && order.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
+  };
+
+  test('vault/unlock awaits goal resume BEFORE auto-resume (passphrase)', async () => {
+    const order: string[] = [];
+    const r = makeVaultRoutes(orderingDeps(order) as any);
+    expect(await r['vault/unlock']({ passphrase: 'pw' })).toEqual({ ok: true });
+    await settle(order);
+    expect(order).toEqual(['resume', 'autoresume']);
+  });
+
+  test('vault/unlockPrf awaits goal resume BEFORE auto-resume (Touch ID / PRF)', async () => {
+    const order: string[] = [];
+    const r = makeVaultRoutes(orderingDeps(order) as any);
+    expect(await r['vault/unlockPrf']({ prfOutput: 'AAAA' })).toEqual({ ok: true });
+    await settle(order);
+    expect(order).toEqual(['resume', 'autoresume']);
+  });
+});
