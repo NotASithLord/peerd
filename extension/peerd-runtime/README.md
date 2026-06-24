@@ -10,10 +10,10 @@
 > [`DESIGN.md`](../../DESIGN.md).
 
 **Status: 0.x — experimental beta.** The agent loop, tools, and the
-do/get/check security boundary are real and shipped. Native in-browser
-WebGPU inference and full multi-profile isolation are not built yet; the
-Firefox/no-CDP automation path is the default but has documented
-permanent gaps. See [known limitations](#known-limitations).
+do/get/check security boundary are shipped. Native in-browser WebGPU
+inference and full multi-profile isolation are not built yet; the
+Firefox/no-CDP automation path is the default but has permanent gaps.
+See [known limitations](#known-limitations).
 
 ---
 
@@ -30,16 +30,15 @@ voice, and temporal grounding.
 
 The defining design choice lives here: **the main agent never reads a
 raw page.** A clean-context runner with no keys, no egress, and no
-spawn does the DOM work and returns a fenced, untrusted summary — so an
+spawn does the DOM work and returns a fenced, untrusted summary, so an
 injected page can't reach anything worth exfiltrating. That's the
 do/get/check layer.
 
 The runtime is **independent of the model providers.** It speaks one
 provider-agnostic message shape and dispatches through
-[`peerd-provider`](../peerd-provider/README.md)'s registry — it neither
-knows nor cares which adapters are installed. Which providers exist
-(OpenAI, native in-browser inference, …) is a provider concern, not a
-runtime one.
+[`peerd-provider`](../peerd-provider/README.md)'s registry; it neither
+knows nor cares which adapters are installed. Which providers exist is a
+provider concern, not a runtime one.
 
 ## The tool inventory (verified against source)
 
@@ -61,15 +60,14 @@ Not all 66 reach the main agent:
   (`tools/exposure.js`). The main agent reaches the page only through
   `do` / `get` / `check`.
 - **7 dweb tools** reach the main agent on the **preview** build only;
-  on the store build they're absent from the descriptor list (the
-  channel never leaks to the agent).
+  on the store build they're absent from the descriptor list.
 
 So **54 tools reach the main agent on preview, 47 on the store build.**
-On top of that, progressive disclosure trims the *visible-this-step*
-surface further: instance-gated engine ops (`vm_write_file`, …) appear
-only once the chat has an instance of that kind, and the dweb secondary
-controls (`dweb_peers`, `dweb_block`, `dweb_discovery`) appear only once
-the session has called a dweb tool.
+Progressive disclosure trims the *visible-this-step* surface further:
+instance-gated engine ops (`vm_write_file`, …) appear only once the chat
+has an instance of that kind, and the dweb secondary controls
+(`dweb_peers`, `dweb_block`, `dweb_discovery`) appear only once the
+session has called a dweb tool.
 
 ## How it works today
 
@@ -82,7 +80,7 @@ deltas), dispatch the resulting tool calls, and continue. Consecutive
 **READ-class** calls run as parallel waves (never hoisted past a write,
 confirm-gated calls never race), reassembled in emitted order. Stop and
 steer land at iteration boundaries; partial state persists. Long
-sessions get **rolling trim-summaries** — the oldest history compresses
+sessions get **rolling trim-summaries**: the oldest history compresses
 into a persisted structured summary (an optional cheap model call with a
 mechanical fallback that never blocks).
 
@@ -92,14 +90,14 @@ Every tool call passes through `persona → exposure → origin →
 confirmation → egress → audit`, with full lineage attached to the
 result:
 
-- **persona** — real Plan/Act enforcement (`decideAction`): Plan refuses
-  side-effecting tools (but permits pure URL loads).
-- **exposure** — real runner-only enforcement: the main agent is refused
-  the hidden DOM tools at dispatch.
+- **persona** — Plan/Act enforcement (`decideAction`): Plan refuses
+  side-effecting tools but permits pure URL loads.
+- **exposure** — runner-only enforcement: the main agent is refused the
+  hidden DOM tools at dispatch.
 - **origin** — the denylist (seed + user overlay).
 - **confirmation** — async, policy-driven (the one *Confirm before
   actions* toggle: on = every non-read confirms).
-- **egress** — a no-op in the chain; the real teeth are the
+- **egress** — a no-op in the chain; enforcement lives in the
   egress-allowlist **pre-tool-use hook** and `safeFetch` in
   [`peerd-egress`](../peerd-egress/README.md).
 - **audit** — records everything.
@@ -113,12 +111,12 @@ The main agent's only browser surface. `do` (act), `get` (read), and
 `check` (assert) each spawn a disposable browser-runner subagent with a
 fresh context, a narrowed DOM toolset, and a step budget. The runner
 drives one tab, wraps page content as `<untrusted_..._content>`, and
-returns a plain-text summary — itself re-wrapped untrusted on the way
+returns a plain-text summary, itself re-wrapped untrusted on the way
 back. **Scripting is the default automation path** on store-Chrome and
 Firefox (a DOM-walk pseudo-snapshot feeding the same serializer); CDP
-ships preview/dev only. Genuinely CDP-only paths (`page_exec` on
-Trusted-Types pages, trusted `page_keys` input) return a
-channel-agnostic `debugger_unavailable` error elsewhere.
+ships preview/dev only. CDP-only paths (`page_exec` on Trusted-Types
+pages, trusted `page_keys` input) return a `debugger_unavailable` error
+elsewhere.
 
 ### Everything else
 
@@ -134,15 +132,15 @@ channel-agnostic `debugger_unavailable` error elsewhere.
 - **Memory** (`memory/`) — file-based AGENTS.md memory injected as
   `{{MEMORY_BLOCK}}`, `/init` workspace scanner, confirm-gated
   `remember`, and **auto-memory** (wrap-up extraction proposes durable
-  notes as pending suggestions you approve or dismiss — never
+  notes as pending suggestions you approve or dismiss, never
   auto-written).
 - **Skills** (`skills/`) — progressive disclosure: cheap descriptions in
   the prompt, the full SKILL.md body loaded only on `load_skill`;
   enabled skills surface as `/<name>` commands. Remote install is gated
   off for the store channel.
 - **Review** (`review/`) — `request_review` spawns a clean-context,
-  read-only reviewer over a diff (the policy-side read-only tool
-  intersection is real). See [`docs/REVIEW.md`](../../docs/REVIEW.md).
+  read-only reviewer over a diff. See
+  [`docs/REVIEW.md`](../../docs/REVIEW.md).
 - **Goal mode** (`loop/goal-runner.js`) — the Goal toggle arms the next
   message to start an autonomous run: the agent keeps taking normal turns
   in the main chat (later turns are hidden `synthetic` continuation
@@ -186,7 +184,7 @@ tool-manifest presets and default hooks.
   against (2026-06-12); workspace snapshots survive only as review's
   `diffSince` substrate.
 - **Async subagents are in-session only.** A service-worker death loses
-  an outstanding child (reported interrupted on the next drain); durable
+  an outstanding child (reported interrupted on the next drain). Durable
   subagents are future work.
 
 ## TODO / backlog
@@ -200,9 +198,9 @@ runtime-facing backlog (tracked in GitHub Issues):
 - **Per-session tool-manifest residuals** — the manifest layer ships;
   finer authority/lineage work remains.
 
-(Provider coverage — the OpenAI adapter, native in-browser WebGPU
-inference — lives in [`peerd-provider`](../peerd-provider/README.md), not
-here: the runtime is provider-agnostic.)
+Provider coverage (the OpenAI adapter, native in-browser WebGPU
+inference) lives in [`peerd-provider`](../peerd-provider/README.md), not
+here: the runtime is provider-agnostic.
 
 ## See also
 

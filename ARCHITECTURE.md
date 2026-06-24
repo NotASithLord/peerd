@@ -3,8 +3,8 @@
 > **HISTORICAL — predates several changes (banner added 2026-06-21).** The
 > module shape (five peerd-* modules) still holds, but treat specifics here
 > as historical and defer to `CLAUDE.md` for current orientation. In
-> particular: there is no `content/` directory — DOM work happens via
-> injected functions, not a persistent content script; the permissions
+> particular: there is no `content/` directory (DOM work happens via
+> injected functions, not a persistent content script); the permissions
 > module is `peerd-runtime/permissions/`, not `personas/` or
 > `peerd-egress/trust/`; the trust-mode axis (Open/Scoped/Paranoid) was
 > REMOVED (safety is Plan/Act + `confirmActions` + the denylist); peerd is
@@ -13,7 +13,7 @@
 >
 > **Companion to:** `DESIGN.md` (V1 architecture).
 > **Audience:** Claude Code. This doc supersedes the file-layout sections of
-> the V1 design doc — wherever this and the V1 doc disagree on directory
+> the V1 design doc: wherever this and the V1 doc disagree on directory
 > structure or module organization, this doc wins. Behavioral and security
 > requirements in the V1 doc still apply unchanged.
 > **Goal:** reorganize the extension codebase around five top-level modules
@@ -24,7 +24,7 @@
 ## Philosophy: borrow what's useful, discard what's not
 
 Peerd is not "OpenCode in a browser" or "Hermes for browsers." It's its own
-thing — a complete agent harness designed *for* the browser context, not
+thing: a complete agent harness designed *for* the browser context, not
 ported into it. This document and the codebase organization reflect that.
 
 The pattern is to borrow what's been proven useful by mature terminal
@@ -42,14 +42,14 @@ model, both of which exist regardless of platform.
 - **MCP servers for web access.** OpenCode and Hermes use MCP because they
   can't talk to the DOM. Peerd is in the browser. The agent already has the
   user's session state, login, search history, and personalization. Opening
-  a tab to google.com and reading targeted DOM nodes is the better tool
-  than calling out to an MCP web-search server — same structured-result
-  benefit, no protocol overhead, no context tax from verbose tool
-  definitions, and the result is shaped by the user's actual web identity.
-  Peerd implements its own structured DOM extraction tools (`web_search`,
-  `read_page`, `query_selector`) using the accessibility tree and selector
-  queries. MCP remains available as a V2+ optional plugin type for
-  *non-web* services that genuinely have no browser-reachable surface.
+  a tab to google.com and reading targeted DOM nodes beats calling out to an
+  MCP web-search server: same structured-result benefit, no protocol
+  overhead, no context tax from verbose tool definitions, and the result is
+  shaped by the user's actual web identity. Peerd implements its own
+  structured DOM extraction tools (`web_search`, `read_page`,
+  `query_selector`) using the accessibility tree and selector queries. MCP
+  remains available as a V2+ optional plugin type for *non-web* services
+  that genuinely have no browser-reachable surface.
 
 - **External execution backends (SSH, Docker, Singularity, Modal).** WebVM
   is enough. Adding remote-execution targets violates the "client-side
@@ -67,7 +67,7 @@ model, both of which exist regardless of platform.
 **The test for any borrowed pattern.** Does the browser context make this
 a *better* tool, *worse* tool, or *equivalent* tool? If better or equivalent
 with less complexity, peerd does it natively. If worse, peerd skips it or
-ports a deliberately scoped version. The default is to skip — every borrowed
+ports a deliberately scoped version. The default is to skip: every borrowed
 pattern carries maintenance and conceptual debt, and peerd's wedge is
 specifically the things terminal harnesses cannot do.
 
@@ -83,16 +83,16 @@ navigates by the brand.
 | Letter | Color | Module | Role |
 |--------|-------|--------|------|
 | **p** | cyan `#00B7EB` | **peerd-provider** | Model adapters. The connection to whichever LLM the user picked. |
-| **e** | red `#EF4444` | **peerd-egress** | The security layer. Vault, allowlist, denylist, audit. (Trust modes removed 2026-06-12 — Plan/Act carries that axis.) |
-| **e** | amber `#F59E0B` | **peerd-engine** | Execution instances. Sandboxes: four kinds (DESIGN.md §8.5). Three are hosted in a visible tab — WebVMs (sandboxed Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). The fourth, the headless worker (`js_run`), runs the Notebook's sealed worker offscreen with no tab. The sandbox is the isolate; a tab is one way to host it (DECISIONS #25). |
+| **e** | red `#EF4444` | **peerd-egress** | The security layer. Vault, allowlist, denylist, audit. (Trust modes removed 2026-06-12; Plan/Act carries that axis.) |
+| **e** | amber `#F59E0B` | **peerd-engine** | Execution instances. Sandboxes: four kinds (DESIGN.md §8.5). Three are hosted in a visible tab: WebVMs (sandboxed Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). The fourth, the headless worker (`js_run`), runs the Notebook's sealed worker offscreen with no tab. The sandbox is the isolate; a tab is one way to host it (DECISIONS #25). |
 | **r** | green `#22C55E` | **peerd-runtime** | The orchestrator. Agent loop, tools, skills, memory, sessions, profiles. |
 | **d** | magenta `#D946EF` | **peerd-distributed** | The dweb. P2P, swarms, DHT discovery, dwapps. The forward-looking surface. Mostly empty in V1; the namespace reserved for V2+. |
 
 This mapping is **locked**. The semantic meaning of each color is fixed in
 the homepage's design system (see `index.html` palette section), and any
 future module reorganization must preserve it. If a new feature doesn't
-fit any of the five, the discussion is whether the feature belongs at all
-— not whether the five should grow to six.
+fit any of the five, the discussion is whether the feature belongs at all,
+not whether the five should grow to six.
 
 ---
 
@@ -135,7 +135,7 @@ ones; never the reverse.
   and memory.
 - **Layer 3 (`peerd-distributed`) composes Layer 2 across instances.**
   It operates *between* peerds (different browsers, different machines,
-  different users) — not inside any single one. Phase 0 (identity,
+  different users), not inside any single one. Phase 0 (identity,
   codec, content addressing, signed bundle transfer scaffolding) ships
   in the preview channel; the store package prunes the module entirely;
   by V2.3 it owns peer transport, by V3 it owns the dwapp runtime.
@@ -144,13 +144,13 @@ ones; never the reverse.
   `no-restricted-imports`.
 - **Shared utility code** (typed messaging, error classes, deep-equality,
   UUIDs, base64 helpers) lives in `/shared/`. Importable by any module.
-  Cannot import from any `peerd-*` module — it's lower than Layer 1.
+  Cannot import from any `peerd-*` module; it's lower than Layer 1.
 
 ### Why this shape
 
 - `peerd-runtime` is the orchestrator. The agent loop is where everything
   meets. Tools dispatch through here. Skills load through here. Sessions
-  and profiles live here because they're orchestration containers — a
+  and profiles live here because they're orchestration containers: a
   session contains a running agent, a profile contains a set of
   sessions. Anything the model can *do*, and any context the model
   operates *in*, passes through this module.
@@ -159,12 +159,12 @@ ones; never the reverse.
   through it. Putting it at Layer 1 means it's never bypassed by another
   Layer 1 module accidentally.
 - `peerd-provider` and `peerd-engine` are intentionally peers (Layer 1)
-  because they're both *capability providers* the runtime composes —
+  because they're both *capability providers* the runtime composes;
   neither outranks the other.
 - `peerd-distributed` is its own layer because it operates on something
   qualitatively different: not a single session, not a single profile,
   but the *boundary between independent peerd instances*. It's the
-  forward-looking surface — empty today, the canvas for V2's peer
+  forward-looking surface: empty today, the canvas for V2's peer
   transport, V2.5's DHT discovery, V3's decentralized agent apps.
 
 ---
@@ -172,9 +172,9 @@ ones; never the reverse.
 ## 2. Per-module breakdown
 
 > **File trees below are illustrative, not exhaustive.** They date from
-> the V1 design and lag the directories (the V1-buildout subsystems —
-> permissions/, edit/, cost/, composer/, review/, runner/,
-> clock/, tools/hooks/ and friends — live under `peerd-runtime/` today).
+> the V1 design and lag the directories: the V1-buildout subsystems
+> (permissions/, edit/, cost/, composer/, review/, runner/,
+> clock/, tools/hooks/ and friends) live under `peerd-runtime/` today.
 > Treat each module's PROSE as the contract and the directory itself as
 > the truth; `CLAUDE.md` carries the current per-module one-liners.
 
@@ -230,8 +230,8 @@ const response = await callModel({
 - `shared/` for messaging types, error classes.
 - **None** of the other `peerd-*` modules. Provider takes its `fetch` and
   `getSecret` as injected functions; it doesn't import egress directly.
-  This makes the module independently testable (pass mock fetch and mock
-  getSecret in tests).
+  This makes the module independently testable with mock fetch and mock
+  getSecret.
 
 **Roadmap fit.**
 
@@ -254,13 +254,13 @@ egress allowlist (`safeFetch`), the denylist matcher, the confirmation
 gate protocol, and the audit log.
 
 Named "egress" because the load-bearing security primitive is the egress
-allowlist (`safeFetch`) — for the **credentialed provider path**, that's
-the boundary nothing crosses, even if everything else fails. Scope it
-honestly: the open-web tools (`read_api`/`read_article`/`web_search`/
-`vm_import`) use the allowlist-FREE `webFetch` path (SSRF block + denylist
-+ audit, but no per-host allowlist), so this is not a complete seal against
-exfil to arbitrary public hosts — see `peerd-egress/fetch/safe-fetch.js`.
-The other primitives compose around it.
+allowlist (`safeFetch`): for the **credentialed provider path**, that's
+the boundary nothing crosses, even if everything else fails. The open-web
+tools (`read_api`/`read_article`/`web_search`/`vm_import`) use the
+allowlist-free `webFetch` path (SSRF block, denylist, and audit, but no
+per-host allowlist), so this is not a complete seal against exfil to
+arbitrary public hosts. See `peerd-egress/fetch/safe-fetch.js`. The other
+primitives compose around it.
 
 **Contents.**
 
@@ -341,13 +341,13 @@ the headless worker, runs offscreen with no tab:
 
 | Kind | Substrate / host | Disk | When to reach for it |
 |------|------------------|------|----------------------|
-| **WebVM** (`vm_*`) | CheerpX WASM Linux, visible tab | IDB block-device overlay | POSIX, binaries, multi-language stacks. The heavy hitter. |
-| **Notebook** (`js_notebook`) | sealed JS worker, visible tab | OPFS file tree | Vanilla JS the agent owns — parsing, transforms, numerical work. ~hundreds of ms boot. |
+| **WebVM** (`vm_*`) | CheerpX WASM Linux, visible tab | IDB block-device overlay | POSIX, binaries, multi-language stacks. |
+| **Notebook** (`js_notebook`) | sealed JS worker, visible tab | OPFS file tree | Vanilla JS the agent owns: parsing, transforms, numerical work. ~hundreds of ms boot. |
 | **Headless worker** (`js_run`) | the **same** sealed JS worker, offscreen, **no tab** | ephemeral scratch | The agent's own quick compute / code mode (one script vs many tool calls), when there's nothing to watch. A distinct kind, not a Notebook variant. |
 | **App** (`app_*`) | opaque-origin iframe, visible tab | none (state in the body) | User-facing artifacts built FOR the user (calculators, charts, tools); the dweb-shareable artifact (a dwapp). |
 
 Named "engine" both for the obvious mechanical/compute meaning and as a
-nod to "x86 virtualization engine" — the thing CheerpX calls itself.
+nod to "x86 virtualization engine," the thing CheerpX calls itself.
 The name still fits now that the module hosts several runtimes instead of
 one: engine is the *substrate* where execution kinds live.
 
@@ -376,10 +376,9 @@ the SW can't provide. SW-side **tab tracking** + **RPC** for each kind
 live in `extension/background/<kind>-tab-tracker.js` and
 `extension/background/<kind>-client.js`.
 
-Apps' bodies are large enough (typically tens to hundreds of KB of
-generated HTML) that they don't belong in `chrome.storage.local`'s 10MB
-shared cap, so `app-store.js` owns a small IDB layer (`peerd-app-bodies`
-DB) just for those.
+Apps' bodies (typically tens to hundreds of KB of generated HTML) don't
+fit `chrome.storage.local`'s 10MB shared cap, so `app-store.js` owns a
+small IDB layer (`peerd-app-bodies` DB) just for those.
 
 **Public API (per kind):**
 
@@ -397,7 +396,7 @@ const vmRegistry = createVmRegistry({ storage });
 ```
 
 The SW-side clients (`background/<kind>-client.js`) wrap each registry
-with a `resolveId({sessionId, id?})` shortcut + RPC to the tab — that's
+with a `resolveId({sessionId, id?})` shortcut + RPC to the tab; that's
 what the agent tools dispatch through.
 
 **Dependencies.**
@@ -421,8 +420,8 @@ what the agent tools dispatch through.
 **Tests.** `tests/integration/peerd-engine/` — each runtime needs a
 real browser context (CheerpX is WASM-heavy; Notebook needs Worker;
 App needs an iframe with srcdoc), so its tests run as integration tests
-in the extension's test page, not as unit tests.
-Round-trip `run('echo hello')` and assert stdout.
+in the extension's test page, not as unit tests. Round-trip
+`run('echo hello')` and assert stdout.
 
 ---
 
@@ -434,8 +433,7 @@ system. The thing the side panel UI is a view over.
 
 This is the largest module by code volume. It's where features land
 when they're not specifically about *talking to a model*, *defending
-state*, or *running code* — i.e., when they're about *making the agent
-go*.
+state*, or *running code*: when they're about *making the agent go*.
 
 **Contents.**
 
@@ -495,30 +493,30 @@ peerd-runtime/
 └── errors.js                # ToolBlockedError, ToolNotFoundError, ...
 ```
 
-Sessions and profiles live here, not in distributed. Reason: both are
+Sessions and profiles live here, not in distributed, because both are
 *containers for orchestration state*. A session contains a running
 agent's conversation, tool grants, audit slice, trust mode, and persona.
 A profile contains sessions, vault namespace, denylist, skills, and
-memory. Both are higher-order orchestration concerns — distributed
+memory. Both are higher-order orchestration concerns; distributed
 operates a layer above, on the boundary *between* peerd instances, not
 inside one.
 
 Personas (`personas/`) are a second security axis alongside trust modes.
 Trust mode controls *how much confirmation* a tool requires; persona
-controls *whether the agent can act at all*. Read persona means the
-agent can observe (read pages, take screenshots, query the DOM) but
-cannot click, type, submit, navigate, download, or run VM commands that
-modify state. Act persona means the agent can do those things, subject
-to trust-mode confirmation. The two axes compose: Read+Paranoid is "look
-around, ask before anything" (effectively meaningless since Read denies
-state changes anyway); Act+Open is "do whatever, minimal asks". This is
-the OpenCode build/plan pattern adapted for the browser.
+controls *whether the agent can act at all*. Read persona can observe
+(read pages, take screenshots, query the DOM) but cannot click, type,
+submit, navigate, download, or run VM commands that modify state. Act
+persona can do those things, subject to trust-mode confirmation. The two
+axes compose: Read+Paranoid is "look around, ask before anything"
+(effectively meaningless since Read denies state changes anyway); Act+Open
+is "do whatever, minimal asks". This is the OpenCode build/plan pattern
+adapted for the browser.
 
 `undo.js` lives in `loop/` because rollback is a turn-level concern.
 Each turn produces a journal of effects (DOM mutations attributable to
 the agent, tab state changes, form fills); `/undo` walks the journal in
 reverse to restore prior state. Out of scope: external state changes
-(network requests sent, files downloaded) — those are confirmation-gated
+(network requests sent, files downloaded), which are confirmation-gated
 and can't be undone after the fact.
 
 `clock/` is the temporal-grounding submodule. The agent loop calls into
@@ -527,11 +525,10 @@ into the prompt (spartan by default; expands conditionally for notable
 events). `events.js` runs in the service worker and maintains a rolling
 buffer of browser events (tab focus, idle state, system sleep, network
 state) which `context.js` classifies and summarizes. The full design is
-in DESIGN.md §10.5. This is a peerd-specific differentiator: terminal
-harnesses can only fake this by injecting a static timestamp, because
-they don't observe a running browser. Peerd does.
+in DESIGN.md §10.5. Terminal harnesses can only fake this by injecting a
+static timestamp, because they don't observe a running browser. Peerd does.
 
-`tools/web/` holds the explicit policy for choosing between `safeFetch`
+`tools/web/` holds the policy for choosing between `safeFetch`
 and a tab when reaching a web resource. The default is wrapper tools
 (`web_search`, `read_article`, `read_api`, `submit_form`, `screenshot`)
 that encode the right choice per use case. Primitives (`safeFetch`,
@@ -566,7 +563,7 @@ for await (const ev of events) {
 **Dependencies.**
 
 - All three Layer 1 modules (`peerd-provider`, `peerd-egress`,
-  `peerd-engine`) — but only via dependency injection at startup.
+  `peerd-engine`), but only via dependency injection at startup.
   Runtime never *imports* concrete adapter functions from Layer 1; it
   imports types/schemas and accepts the implementations as parameters.
   This makes runtime independently testable with mocks for all three.
@@ -608,10 +605,9 @@ running across a dweb mesh.
 
 This module is *the forward-looking surface*. Phase 0 is real code
 (identity / codec / content / transport scaffolding, preview-channel
-only — see `docs/distributed/ROADMAP.md`); everything beyond it is
-V2+.
-That's the point. V1 is a single-browser harness; no dweb yet.
-The module exists in the architecture from day one for two reasons:
+only; see `docs/distributed/ROADMAP.md`); everything beyond it is V2+.
+V1 is a single-browser harness; no dweb yet. The module exists in the
+architecture from day one for two reasons:
 
 1. The wordmark commits to five modules. The brand is the architecture.
 2. The roadmap from V2.2 onward needs a clearly delineated home.
@@ -694,16 +690,15 @@ import { loadDwapp, listDwapps, publishDwapp } from 'peerd-distributed';
   the workshop; the gateway is the notification surface.
 - **V2.3 — Pairing.** WebRTC peer connections. Cryptographic identity
   (ECDSA keypair per profile). Pairing flow (QR code, paste, short
-  code). Two peerds — your own across devices, or you and someone
-  else's — can negotiate and trade messages, memory entries, skills,
+  code). Two peerds (your own across devices, or you and someone
+  else's) can negotiate and trade messages, memory entries, skills,
   delegated tasks.
 - **V2.5 — Discovery.** Kademlia-style DHT over the WebRTC mesh.
   Discover peers without a central directory. Advertise services.
-  Solve the "two strangers find each other without a server" problem.
 - **V3.0 — Swarm.** WebTorrent-style chunked content distribution for
   skills, training data, and dwapp resources. Multi-agent task
   coordination across peers. Subagents that span instances.
-- **V3.x — Dwapps.** *Decentralized agent applications* — applications
+- **V3.x — Dwapps.** *Decentralized agent applications*: applications
   hosted across a dweb mesh of peerds, agent-native by design.
   A dwapp is a manifest + skills + content + coordination protocol,
   loaded into a local peerd and partly executed across the swarm. No
@@ -715,9 +710,7 @@ import { loadDwapp, listDwapps, publishDwapp } from 'peerd-distributed';
 the actual feature lands, then has to be torn out. `peerd-distributed`
 ships as a stub. Each phase adds a complete subdirectory. The phases
 are independent enough that landing them in roadmap order doesn't
-require predicting the design of later phases. The empty module is the
-*honest* version of "we're going to do this later" — better than a
-half-built one would be.
+require predicting the design of later phases.
 
 **Tests.** None in V1 (no code). Each subsequent phase ships tests
 following the same patterns as other modules.
@@ -727,7 +720,7 @@ following the same patterns as other modules.
 ## 3. Extension chassis — what's NOT in a peerd-* module
 
 The five peerd-* modules are the *content*. The extension also needs a
-*chassis* — the entry points, the offscreen document, the side panel,
+*chassis*: the entry points, the offscreen document, the side panel,
 the content scripts, the manifest. These are infrastructure, not
 modules; they live at the top level of the extension repo.
 
@@ -804,13 +797,13 @@ OpenCode runs the agent as a local server process and connects multiple
 clients (TUI, desktop app, IDE extension) to it. We follow the same
 architectural shape, mapped to the browser-extension context:
 
-- **The service worker is the "server"** — it owns the agent loop,
+- **The service worker is the "server":** it owns the agent loop,
   module instances, message routing, and SW-keepalive port.
-- **The side panel is one "client"** — Mithril UI driving the SW via
+- **The side panel is one "client":** Mithril UI driving the SW via
   typed messages.
-- **Content scripts are a second "client"** — page-injected when needed,
+- **Content scripts are a second "client":** page-injected when needed,
   reporting back via the same messaging surface.
-- **The offscreen document is the engine host** — analogous to a
+- **The offscreen document is the engine host:** analogous to a
   spawned-subprocess in OpenCode's model.
 
 The benefit is the same one OpenCode talks about: you can build new
@@ -868,7 +861,7 @@ is the migration table:
 | `/background/service-worker.js` | `background/service-worker.js` (chassis) |
 
 Audit log moves from `/shared/audit.js` to `peerd-egress/audit/log.js`
-because it's a security primitive — write paths are tightly controlled
+because it's a security primitive: write paths are tightly controlled
 and the storage backing it sits inside the egress module.
 
 ---
@@ -1002,4 +995,4 @@ Module-level rules added by this doc:
   obvious home.
 - **The brand never goes stale.** As the codebase grows, the wordmark's
   meaning grows with it. The five colors come to *mean* something
-  beyond decoration — they're the system's organizing principle.
+  beyond decoration: they're the system's organizing principle.

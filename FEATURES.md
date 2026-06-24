@@ -4,10 +4,10 @@
 > modules plus the chassis. One line per feature; the source dir is in
 > backticks. For one-screen orientation see `MAP.md`, then `CLAUDE.md`.
 >
-> `peerd-distributed/` (the dweb) is **preview-channel only** — the store
+> `peerd-distributed/` (the dweb) is **preview-channel only**: the store
 > package prunes the whole module, so every dweb feature below is absent
 > from a store build. Items not fully shipped are marked **(partial)** or
-> grouped under a **Not yet** subsection per module so this stays honest.
+> grouped under a per-module **Not yet** subsection.
 
 ---
 
@@ -26,7 +26,7 @@ context-window, error, failover, and GPU-fit helpers around it.
 - **OpenRouter live catalog + curated seed** — `listOpenRouterModels` reads `GET /models` (doubles as key-verify probe); `OPENROUTER_POPULAR` seed for the Settings picker. `peerd-provider/adapters/openrouter.js`
 - **Ollama adapter (keyless local inference)** — `localhost:11434`, keyless (skips vault), 120s connect timeout for cold load, 404→`ollama pull` hint; default `qwen3:8b`. `peerd-provider/adapters/ollama.js`
 - **Ollama live model inventory** — `listModels` reads `GET /api/tags` so pickers show actually-pulled models. `peerd-provider/adapters/ollama.js`
-- **Ollama daemon-down legibility** — bare `TypeError` → `OllamaNotRunningError` with the `ollama serve` fix instead of "Failed to fetch". `peerd-provider/adapters/ollama.js`, `errors.js`
+- **Ollama daemon-down error** — maps a bare `TypeError` to `OllamaNotRunningError` with the `ollama serve` fix instead of "Failed to fetch". `peerd-provider/adapters/ollama.js`, `errors.js`
 - **OpenAI-compatible SSE parser** — `fromOpenAiStream`: incremental `tool_calls` keyed by index with id/name backfill, finish-reason mapping, usage tally; shared by OpenRouter + Ollama. `peerd-provider/format/from-openai.js`
 - **Internal-message schema conversion (both wire formats)** — `to-anthropic`/`to-openai` map the internal union per provider; image/pdf blocks, stripped sentinels, system-as-prepended-message. `peerd-provider/format/`
 - **Orphan tool_use/tool_call repair** — synthesizes `is_error` results for tool calls left unpaired by mid-dispatch interruption; both formats. `peerd-provider/format/`
@@ -35,14 +35,14 @@ context-window, error, failover, and GPU-fit helpers around it.
 - **Hard-limit vs transient classification** — `isUsageLimitResponse` (402 + billing/credit/quota) fails fast as `ProviderUsageLimitError` instead of burning retries. `peerd-provider/error-classify.js`, `errors.js`
 - **Provider failover (switch-and-continue)** — `shouldFailover` classifies 500/503/529/usage-limit as cross-provider-recoverable; `planFailoverChain` orders deduped candidates. `peerd-provider/failover.js`
 - **Page-reader runner-model resolution** — `resolveRunnerModel` picks runner model: user pin > local WebGPU > provider default (Haiku) > inherit. `peerd-provider/runner-model.js`
-- **Client-side cost telemetry** — `DEFAULT_PRICING` rate table + `costOf`/`resolvePricing`; user-overridable, unknown-id degrades to honest `$0`. No network. `peerd-provider/pricing.js`
+- **Client-side cost telemetry** — `DEFAULT_PRICING` rate table + `costOf`/`resolvePricing`; user-overridable, unknown-id degrades to `$0`. No network. `peerd-provider/pricing.js`
 - **Context-window table + live resolution** — `DEFAULT_CONTEXT_WINDOWS` + `resolveContextWindow` (override > live > table); live windows from each provider's API. Drives the long-session trim trigger. `peerd-provider/context-window.js`, `model-window.js`
 - **Ollama GPU-fit recommendation** — `probeGpuCapability` + pure `recommendOllamaModel` picks the largest qwen3 tier that fits, with confidence. `peerd-provider/ollama-recommend.js`
 - **Local-model hardware capability gate** — `probeLocalModelCapability` + pure `judgeModelCapability` vs `MODEL_SPECS`; powers the Settings "Test" button. `peerd-provider/local-model-capability.js`
 
 **Not yet**
 
-- **Local WebGPU adapter (on-device runner)** — keyless `$0` shim re-yielding the offscreen Gemma engine's token stream as `ProviderEvents` (parses `<tool_call>` into tool-use events); engine bridge injected via `setLocalGenerate`, errors cleanly until the SW wires it at boot. `peerd-provider/adapters/local-webgpu.js` **(partial)**
+- **Local WebGPU adapter (on-device runner)** — keyless `$0` shim that re-yields the offscreen Gemma engine's token stream as `ProviderEvents` (parsing `<tool_call>` into tool-use events). Engine bridge injected via `setLocalGenerate`; errors until the SW wires it at boot. `peerd-provider/adapters/local-webgpu.js` **(partial)**
 - **OpenAI native adapter** — not present; OpenRouter covers OpenAI models meanwhile (no `adapters/openai.js`). `peerd-provider/index.js` **(planned)**
 
 ---
@@ -64,8 +64,8 @@ built on.
 - **`safeFetch` — provider-endpoint egress allowlist** — exact-origin allowlist (no wildcards) wrapping the credentialed provider path; denies off-list, fails closed on any 3xx redirect, audits denials. `peerd-egress/fetch/`
 - **Hardcoded provider allowlist** — frozen origin set: Anthropic, OpenAI, OpenRouter, Ollama loopback; changing requires editing the file. `peerd-egress/fetch/allowlist.js`
 - **`webFetch` — open-web egress wrapper** — allowlist-free path for web tools: http/https only, private-network block, denylist, redirect fail-closed; audits `web_fetch` + denials. `peerd-egress/fetch/web-fetch.js`
-- **SSRF / private-network guard** — blocks loopback/LAN/link-local incl. inet_aton encodings, IPv6 (`::1`, ULA, IPv4-mapped/NAT64), `*.localhost`/`*.local`; honest that DNS rebinding is out of scope. `peerd-egress/fetch/private-network.js`
-- **Sensitive-site denylist matcher** — boundary-safe (exact host or leading `*.subdomain` only, no substring bugs); flattens categorised JSON; normalizes/validates user patterns fail-closed. `peerd-egress/denylist/`
+- **SSRF / private-network guard** — blocks loopback, LAN, and link-local addresses, including obfuscated encodings. DNS rebinding is out of scope. `peerd-egress/fetch/private-network.js`
+- **Sensitive-site denylist matcher** — matches exact host or leading `*.subdomain` only (no substring matching); validates user patterns fail-closed. `peerd-egress/denylist/`
 - **Seed denylist (164 patterns, 8 categories)** — banks_us, brokers, crypto_exchanges, wallets, health_us, government, password_managers, identity; apex + subdomain wildcard listed per site. `peerd-egress/denylist/default.json`
 - **Confirmation coordinator (SW ↔ side panel)** — async user-confirm protocol that always settles: auto-deny on broken channel/timeout, pending-count badge, late-joiner replay, broadcast-dismiss. `peerd-egress/confirm/protocol.js`
 - **Append-only audit log with capped retention** — IDB append/list, in-house id+timestamp, amortized prune (every 256 appends) to a 20k cap; UUIDv7 keys keep order. `peerd-egress/audit/`
@@ -99,7 +99,7 @@ shared utilities.
 - **VM package/git control-ops** — host-side resolvers staging deps: git clone (snapshot archive, github/gitlab + private via vault), npm/yarn/pnpm, pip (pure-python), gem (pure-ruby). apt-get + native C builds unavailable. `peerd-engine/vm-net/control-ops.js`
 - **Socket-stub guardrails** — ssh/scp/nc/telnet/ping/rsync become clear bash error stubs (no raw TCP/UDP/ICMP) rather than hangs. `peerd-engine/vm-net/socket-stubs.js`
 - **Per-VM IndexedDB rootfs overlay** — read/write block overlay (one IDB DB per install) over the streamed read-only base image so disk survives restarts; `reset()` wipes it. `peerd-engine/overlay.js`
-- **Typed engine error taxonomy** — `VMNotReady`/`BootFailed`/`RunTimeout`/`NetworkDenied`/`TabClosed`, `ArtifactTooLarge`, `EnvelopeFormat`/`Integrity` for precise sandbox failure signaling. `peerd-engine/errors.js`
+- **Typed engine error taxonomy** — `VMNotReady`/`BootFailed`/`RunTimeout`/`NetworkDenied`/`TabClosed`, `ArtifactTooLarge`, `EnvelopeFormat`/`Integrity`. `peerd-engine/errors.js`
 
 **Not yet**
 
@@ -145,7 +145,7 @@ transfer, goal mode, profiles — pure-core/injected-IO so the SW stays thin.
 - **Clock (temporal grounding + tools)** — `buildTemporalBlock` for the prompt + `now` / `wait_until` tools. `clock/`
 - **Voice (local transcription)** — voice manager + model store + engine picker (Moonshine WASM, Web Speech fallback) + MicButton; offscreen-hosted. `voice/`
 - **Transfer (settings export/import)** — pure build/inspect/apply export shaping + passphrase encrypt/decrypt for cross-install migration. `transfer/`
-- **Goal mode (autonomous loop)** — the agent keeps taking normal turns in the main chat (turn 1 = the goal, later turns = hidden synthetic continuations) until it calls `complete_goal`, the user Stops, or a turn cap is hit; the `complete_goal` tool is exposed only while a run is active; runs persist to storage and resume on SW restart, and keep running while the user is in another chat. `loop/goal-runner.js`
+- **Goal mode (autonomous loop)** — the agent keeps taking normal turns in the main chat (turn 1 is the goal, later turns are hidden continuations) until it calls `complete_goal`, the user Stops, or a turn cap is hit. `complete_goal` is exposed only during an active run. Runs persist across SW restart and keep going while the user is in another chat. `loop/goal-runner.js`
 - **Skills (progressive disclosure)** — parse `SKILL.md`, store+registry, install from local/git/manifest, `load_skill` tool. Remote install flag-gated off for store. `skills/`
 - **Web tool policy** — `WEB_TOOLS` (`call_api`, `read_article`, `web_search`, `submit_form`, `capture`) with fetch-vs-tab escalation heuristics. `tools/web/`
 - **PDF reading (`read_pdf`)** — pdf.js text-layer extraction with opt-in SRI-pinned OCR engine + page assembly. `pdf/`, `tools/defs/read-pdf.js`

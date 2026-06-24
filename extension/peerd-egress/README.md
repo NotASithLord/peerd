@@ -9,9 +9,9 @@
 > dispatcher gates).
 
 **Status: 0.x — experimental beta.** The crypto is built on the
-browser's own primitives (WebCrypto, WebAuthn, SRI) — peerd writes zero
-lines of cryptographic code — but this is early software that holds your
-API keys and drives your browser. Storage formats may still move; the
+browser's own primitives (WebCrypto, WebAuthn, SRI); peerd writes no
+cryptographic code of its own. But this is early software that holds your
+API keys and drives your browser. Storage formats may still move, and the
 denylist is a floor, not a guarantee. **Use it with care.**
 
 ---
@@ -24,7 +24,7 @@ denylist is a floor, not a guarantee. **Use it with care.**
    rest, unlocked by a passkey (Touch ID / Windows Hello / a security
    key) or a recovery passphrase.
 2. **The egress chokepoint** — `safeFetch` for provider traffic (a hard
-   allowlist) and `webFetch` for open-web traffic (an SSRF guard + the
+   allowlist) and `webFetch` for open-web traffic (an SSRF guard plus the
    denylist). Bare `fetch` is forbidden anywhere outbound; the agent and
    every sandbox it spawns reach the network only through these.
 3. **The denylist** — a 164-pattern seed of banks, brokers, health
@@ -42,74 +42,73 @@ since those are the substrate the security surfaces are built on.
 ### The vault
 
 - **Key hierarchy.** A random 256-bit data key (DK) encrypts every
-  secret with a per-secret random IV. The DK itself is stored *wrapped*
-  (never plaintext on disk) under one or more key-encryption keys — a
+  secret with a per-secret random IV. The DK itself is stored wrapped
+  (never plaintext on disk) under one or more key-encryption keys: a
   passphrase-derived KEK and/or a WebAuthn-PRF-derived KEK. Either
   unlock path yields the same DK.
-- **Passphrase KDF: Argon2id, the only one.** The `vault.v2` format
-  records the full Argon2id descriptor per wrap (default 64 MiB,
-  3 iterations, 1 lane — the RFC 9106 single-lane profile, since MV3
-  service workers have no `SharedArrayBuffer`). Argon2 runs via vendored,
-  SHA-pinned `hash-wasm` (`vault/argon2.js` is the only importer). The
-  pre-release PBKDF2 path was deleted outright (0.x, no installs, no
-  compat code — `docs/DECISIONS.md` #17).
+- **Passphrase KDF: Argon2id only.** The `vault.v2` format records the
+  full Argon2id descriptor per wrap (default 64 MiB, 3 iterations, 1 lane:
+  the RFC 9106 single-lane profile, since MV3 service workers have no
+  `SharedArrayBuffer`). Argon2 runs via vendored, SHA-pinned `hash-wasm`
+  (`vault/argon2.js` is the only importer). The pre-release PBKDF2 path
+  was deleted outright (0.x, no installs, no compat code; `docs/DECISIONS.md`
+  #17).
 - **WebAuthn PRF unlock.** Touch ID, Windows Hello, and cross-platform
-  security keys (YubiKey/FIDO2). Enrollment is **PRF-honest** — an
-  authenticator that can't do PRF fails enrollment with a clear error
-  rather than minting a credential that can never unlock. Transports are
-  recorded so the unlock prompt routes to the right authenticator.
+  security keys (YubiKey/FIDO2). An authenticator that can't do PRF fails
+  enrollment with a clear error rather than minting a credential that can
+  never unlock. Transports are recorded so the unlock prompt routes to the
+  right authenticator.
 - **Idle auto-lock** (45 min default, user-settable, `0` = never) plus a
   manual Lock button. The unwrapped DK is mirrored to
   `chrome.storage.session` so an MV3 service-worker restart doesn't
   re-prompt; it is cleared on lock and gone when the browser closes.
 - **Blob home.** The vault blob lives in IndexedDB, migrated off
-  `chrome.storage.local` with a read-back-verified, loss-proof migration
-  (hygiene, not a security change).
+  `chrome.storage.local` with a read-back-verified migration (hygiene,
+  not a security change).
 
 ### The egress chokepoint
 
-- **`safeFetch`** (`fetch/safe-fetch.js`) enforces a **hardcoded**
-  provider allowlist (`fetch/allowlist.js`): `api.anthropic.com`,
+- **`safeFetch`** (`fetch/safe-fetch.js`) enforces a hardcoded provider
+  allowlist (`fetch/allowlist.js`): `api.anthropic.com`,
   `api.openai.com`, `openrouter.ai`, and the Ollama loopback. Exact
   origin match (no wildcards). Redirects are forced to `manual` and fail
   closed. Even a fully prompt-injected agent trying to POST your
   conversation elsewhere is refused here.
 - **`webFetch`** (`fetch/web-fetch.js`) is the open-web path for the web
-  tools and the VM's `curl`/`wget`/`git`. It is allowlist-*free* but
-  guarded: scheme check (http/https only), an **SSRF / private-network
-  guard** (`fetch/private-network.js` — blocks loopback, LAN,
-  link-local, all IPv4 notations, IPv6 including IPv4-mapped and NAT64,
-  `localhost`/`*.local`), redirect fail-close, and the denylist as a
-  backstop. Every call is audited.
-- **Honest gap:** the guards match host strings and structural IP forms,
-  not DNS resolution — a public domain that *resolves* to a private IP
-  (DNS rebinding) isn't caught at this layer. The structural defense is
-  that the page-reading runner has no web tools at all (see
+  tools and the VM's `curl`/`wget`/`git`. It is allowlist-free but
+  guarded: a scheme check (http/https only), an SSRF / private-network
+  guard (`fetch/private-network.js`, blocking loopback, LAN, link-local,
+  and IPv6 private ranges including obfuscated encodings, plus
+  `localhost`/`*.local` hostnames), redirect fail-close, and the denylist
+  as a backstop. Every call is audited.
+- **Gap:** the guards match host strings and structural IP forms, not DNS
+  resolution. A public domain that resolves to a private IP (DNS
+  rebinding) isn't caught at this layer. The structural defense is that
+  the page-reading runner has no web tools at all (see
   [`peerd-runtime`](../peerd-runtime/README.md)).
 
 ### The denylist
 
 - A 164-pattern seed (`denylist/default.json`) across 11 categories,
-  each with apex + `*.` wildcard listed separately to avoid
-  substring/boundary bugs.
+  each with apex and `*.` wildcard listed separately.
 - The matcher (`denylist/denylist.js`) supports exact hostnames and a
-  single leading `*.` wildcard only — no mid-pattern wildcards, no
-  regex. `*.proton.me` matches `mail.proton.me` but not `protonmail.com`.
-- A full user editor: add (validated/canonicalized by
+  single leading `*.` wildcard only: no mid-pattern wildcards, no regex.
+  `*.proton.me` matches `mail.proton.me` but not `protonmail.com`.
+- A full user editor: add (validated and canonicalized by
   `normalizeDenylistPattern`), live search, and confirmed remove. User
   patterns truly delete; seed patterns disable reversibly with their
   provenance shown. Every mutation is audited.
 
 ### The audit log
 
-- Append-only, IndexedDB-backed, UUIDv7-keyed (so insertion order *is*
+- Append-only, IndexedDB-backed, UUIDv7-keyed (so insertion order is
   chronological order). Entry types cover `egress_denied`,
   `denylist_hit`, `tool_confirmed`, `vault_unlocked`, and more
   (`audit/types.js`).
-- **Capped retention** — 20,000 entries default (channel-overridable),
+- **Capped retention:** 20,000 entries default (channel-overridable),
   pruned oldest-first, amortized to one count per 256 appends.
 - The service worker authenticates the sender on every message and port
-  before routing — the audit log can't be poisoned by a spoofed sender.
+  before routing, so the audit log can't be poisoned by a spoofed sender.
 - Local-only, always. The audit log never leaves the device.
 
 ## Public API (`index.js`)
@@ -129,7 +128,7 @@ since those are the substrate the security surfaces are built on.
 - **Audit:** `createAuditLog(...)`, `DEFAULT_AUDIT_MAX_ENTRIES`.
 - **Storage:** `kv`, `idb.*`, `idbKV(store)`, `sessionCache.*`.
 
-All IO is injected as dependencies into the factories — the policy logic
+All IO is injected as dependencies into the factories, so the policy logic
 (KDF planning, the denylist matcher, retention arithmetic, the SSRF
 guard, enrollment planning) is pure and unit-tested without a browser.
 
@@ -138,17 +137,17 @@ guard, enrollment planning) is pure and unit-tested without a browser.
 - **The DK is extractable in the WebCrypto sense.** `SubtleCrypto.wrapKey`
   requires it; the key bytes are never exported to JS. A hardware-bound,
   truly non-extractable DK is future work. An attacker with code
-  execution *inside the extension* already defeats this boundary —
-  that's out of the threat model.
-- **DNS rebinding isn't caught at the egress layer** (see above) — the
+  execution inside the extension already defeats this boundary, which is
+  out of the threat model.
+- **DNS rebinding isn't caught at the egress layer** (see above); the
   structural defense is the no-web-tools runner.
 - **Tool grants are session-scoped and origin-blind.** "Yes for this
   session" approves a tool everywhere in that chat; persistent,
   origin-scoped grants are a TODO.
-- **The denylist is a floor, not a guarantee** — 164 patterns,
-  user-extendable. It is matched on the host string only. Turn on
-  *Confirm before actions* for per-step approval on top.
-- **User-added provider endpoints aren't wired yet** — only the
+- **The denylist is a floor, not a guarantee.** 164 patterns,
+  user-extendable, matched on the host string only. Turn on *Confirm
+  before actions* for per-step approval on top.
+- **User-added provider endpoints aren't wired yet**: only the
   hardcoded provider allowlist is enforced today.
 
 ## TODO / backlog
@@ -164,7 +163,7 @@ Backlog (tracked in GitHub Issues):
 
 - **Multi-profile** — per-profile vault namespacing (its own KEK),
   denylist, skills, memory, and sessions, plus encrypted profile
-  export/import. The default profile + onboarding already landed in the
+  export/import. The default profile and onboarding already landed in the
   multi-profile shape; this is the namespacing on top.
 - Hardware-bound, non-extractable DK.
 

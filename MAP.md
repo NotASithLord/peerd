@@ -100,10 +100,9 @@ consolidated in `docs/specs/`).
 
 ## When does it act on its own?
 
-Almost everything in peerd is **synchronous with an attended browser** — a
-turn runs because the user sent a message. The shipped exception and the
-planned unattended surface are worth knowing because they carry the most
-safety design:
+Almost everything in peerd is **synchronous with an attended browser**: a
+turn runs because the user sent a message. The one shipped exception and
+the planned unattended surface carry the most safety design:
 
 | Surface | Trigger | Attended? | Where |
 |---|---|---|---|
@@ -114,17 +113,16 @@ safety design:
 The rule for anything that acts unattended: it can never widen its own
 permissions, every byte it reads from the web is `wrapUntrusted`-fenced,
 and it routes through the same egress policy (`safeFetch` for provider/API
-traffic, `webFetch` for open-web reads) as an attended turn. No backend, no
-new egress path — that's what makes the
-chokepoint a real boundary.
+traffic, `webFetch` for open-web reads) as an attended turn. No backend and
+no new egress path: that's what makes the chokepoint a real boundary.
 
 ---
 
-## The non-negotiables (one line each — full list in `CLAUDE.md`)
+## The non-negotiables (one line each; full list in `CLAUDE.md`)
 
 - **Vanilla JS, ES modules, no build step.** Load unpacked → refresh.
 - **`index.js` is each module's public API.** Deep imports from outside are lint-forbidden.
 - **The dweb boundary.** Nothing outside `peerd-distributed/` imports it; core uses the stub in `shared/`.
 - **Functional core, imperative shell.** Reducers/policy are pure; IO is injected.
 - **Generated files aren't hand-edited.** `manifest.json`, `shared/channel-config.js` come from `bun run gen:dev`.
-- **The brand is the architecture.** A sixth top-level `peerd-*` directory is a smell — reconsider instead.
+- **The brand is the architecture.** A sixth top-level `peerd-*` directory is a smell; reconsider instead.

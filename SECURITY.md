@@ -1,6 +1,6 @@
 # Security Policy
 
-peerd is a high-trust artifact: it holds your model-provider API key, it
+peerd is high-trust software: it holds your model-provider API key, it
 drives your logged-in browser tabs, and it executes code in sandboxes.
 We take security seriously and welcome good-faith research.
 
@@ -21,14 +21,14 @@ Please include: what you found, the impact, a minimal reproduction
 (steps / a tiny repro extension build or page), affected version/commit,
 and the channel (store or preview).
 
-This is a solo-maintained alpha — expect a best-effort acknowledgement
+This is a solo-maintained alpha, so expect a best-effort acknowledgement
 within a few days, not an enterprise SLA. We'll keep you updated as we
 triage and fix, and we're happy to credit you in the advisory (opt-in).
 
 ## Supported versions
 
 peerd is `0.x`; only the **latest commit on `main`** (and the most recent
-preview/store build) is supported. There are no backported fixes — fixes
+preview/store build) is supported. There are no backported fixes; they
 land on `main`.
 
 ## Trust model (what peerd already defends)
@@ -39,7 +39,7 @@ Understanding the boundaries helps you scope a report:
   encrypted **vault** (`peerd-egress/vault/`, Argon2id / WebAuthn-PRF).
   Nothing is sent anywhere except your chosen model endpoint.
 - **Egress chokepoint.** All network calls route through
-  `peerd-egress/fetch/` — `safeFetch` (a hardcoded provider allowlist for
+  `peerd-egress/fetch/`: `safeFetch` (a hardcoded provider allowlist for
   model calls) and `webFetch` (SSRF guard + a denylist of sensitive
   origins, no redirects). There is no other egress path.
 - **Untrusted-content boundary.** The main agent never sees raw page
@@ -70,8 +70,8 @@ Understanding the boundaries helps you scope a report:
 - Anything requiring an already-compromised OS/browser or a malicious
   extension installed alongside peerd.
 - The **dweb / `peerd-distributed` preview** is explicitly research-grade
-  and ships only in the preview channel — see
-  `docs/distributed/THREAT-MODEL.md`. Report issues, but understand the
+  and ships only in the preview channel (see
+  `docs/distributed/THREAT-MODEL.md`). Report issues, but understand the
   protocol is pre-hardening.
 - Self-inflicted config (e.g. removing your own denylist entries).
 - Social engineering, spam, missing best-practice headers without a

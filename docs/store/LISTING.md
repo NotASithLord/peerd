@@ -12,13 +12,13 @@ peerd
 ## Description (store listing)
 
 Single-purpose framing: ONE product (an assistant), everything else is
-a capability of it. Deliberately no module-by-module enumeration, no
-"harness", no "sovereign", no "peer daemon".
+a capability of it. No module-by-module enumeration, no "harness", no
+"sovereign", no "peer daemon".
 
 ---
 
 peerd is an AI assistant that lives in your browser's side panel and
-does things for you — not just answers questions.
+does things for you, not just answers questions.
 
 Give it a task in plain language (typed or spoken):
 
@@ -28,19 +28,19 @@ Give it a task in plain language (typed or spoken):
 • "Fill in this form from the spreadsheet in my other tab."
 • "Crunch this CSV and chart the monthly totals."
 
-The assistant reads the page you're on, clicks, types, and navigates —
+The assistant reads the page you're on, clicks, types, and navigates,
 visibly, in your tabs. When a task needs real computation, it runs the
 work in a sandboxed Linux environment that exists entirely inside your
-browser tab (WebAssembly — nothing is installed on your machine).
+browser tab (WebAssembly, nothing is installed on your machine).
 
 YOUR DATA STAYS YOURS
 
 peerd is local-first and has no backend:
 
 • Bring your own AI provider key, or use a configured local provider
-  where supported. Keys are stored in an encrypted vault on your device
-  — unlocked with a passphrase or Touch ID / Windows Hello — and are
-  only ever sent to the provider you selected.
+  where supported. Keys are stored in an encrypted vault on your device,
+  unlocked with a passphrase or Touch ID / Windows Hello, and are only
+  ever sent to the provider you selected.
 • Conversations, settings, and history live in your browser's local
   storage. No account, no sync, no analytics, no telemetry.
 • A built-in audit log shows every network request the assistant made,
@@ -72,7 +72,7 @@ English
 
 | Asset | Spec | Status |
 |---|---|---|
-| Store icon | 128×128 PNG, 96×96 art + 16px transparent padding | ✅ `extension/icons/icon128.png` — rainbow-stripe icon, spec-compliant padding (padded source: `docs/store/assets/peerd-icon-128.svg`; full-bleed master + 256/512 renders: `docs/store/assets/peerd-icon*`). 16/32/48 stay full-bleed by design (padding at toolbar sizes shrinks the art to illegibility) |
+| Store icon | 128×128 PNG, 96×96 art + 16px transparent padding | ✅ `extension/icons/icon128.png` — rainbow-stripe icon, spec-compliant padding. Padded source `docs/store/assets/peerd-icon-128.svg`; full-bleed master + 256/512 renders `docs/store/assets/peerd-icon*`. 16/32/48 stay full-bleed by design, since padding at toolbar sizes shrinks the art too far |
 | Screenshots (≥1, max 5) | 1280×800 or 640×400 | ☐ capture — see shot list below |
 | Small promo tile | 440×280 PNG | ✅ `docs/store/assets/promo-440x280.png` |
 | Marquee promo tile (optional) | 1400×560 PNG | ✅ `docs/store/assets/marquee-1400x560.png` |
@@ -84,11 +84,11 @@ English
 1. Side panel open next to a real article, mid-task: user asked for a
    summary, assistant's answer visible. (Hero shot.)
 2. The assistant operating a page: tab group visible, automation in
-   progress, Chrome's debugger banner honestly in frame.
+   progress, Chrome's debugger banner in frame.
 3. VM tab with the terminal: `uname -a` output after "boot a linux vm".
-4. Audit log view: allowed + denied entries visible (denylist block of
-   a bank shown if possible — strongest trust signal).
+4. Audit log view: allowed + denied entries visible (show a denylist
+   block of a bank if possible).
 5. Vault/onboarding: the BYOK screen with passphrase / Touch ID unlock.
 
 Capture at 1280×800 device pixels, light-on-dark as the UI ships. No
-mockups or composited frames — store policy requires actual product UI.
+mockups or composited frames; store policy requires actual product UI.

@@ -28,12 +28,12 @@ how to land a change.
   re-litigating settled calls.
 - **`CLAUDE.md`** — *agent-facing* project context (peerd is built with an
   AI coding agent). It's useful background, but it's written **for the
-  agent, not for human contributors** — `README.md` + `ARCHITECTURE.md`
+  agent, not for human contributors**; `README.md` + `ARCHITECTURE.md`
   are your canonical docs.
 
 ## Development setup
 
-No build step, no bundler, no transpiler — the browser runs the source as
+No build step, no bundler, no transpiler: the browser runs the source as
 written.
 
 ```bash
@@ -86,7 +86,7 @@ These keep the codebase coherent (the full list is in `CLAUDE.md` /
 - **JSDoc types** (the strict `tsc` gate makes them real). **Mithril** for
   UI. **Named error subclasses**, not bare `Error`.
 - **Filenames** lowercase-hyphenated; comments explain **why**, not what.
-- **The name is always lowercase: `peerd`** — even at the start of a
+- **The name is always lowercase: `peerd`**, even at the start of a
   sentence (`docs/DECISIONS.md`).
 - **Third-party code is vendored** under `extension/vendor/` with a
   `SOURCE.txt` (origin + version) and SHA/SRI pinning — never an npm
@@ -111,7 +111,7 @@ git commit -s -m "your message"      # appends: Signed-off-by: Name <email>
 
 (There is no CLA.)
 
-### Keep peerd copyleft-clean — this is load-bearing
+### Keep peerd copyleft-clean (this is critical)
 
 peerd is **Apache-2.0** and deliberately avoids copyleft contamination.
 
