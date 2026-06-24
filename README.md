@@ -26,7 +26,11 @@ cloud component in the data path.**
 <p align="center">
 
 
-https://github.com/user-attachments/assets/79e873c9-93d0-4431-91bc-01238aaa665f
+
+
+https://github.com/user-attachments/assets/d2e4c285-6952-4c95-bf5a-d06087de084d
+
+
 
 
 </p>
