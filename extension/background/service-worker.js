@@ -31,7 +31,7 @@ import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { openHome } from '/shared/open-home.js';
-import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
+import { REMOTE_SKILL_INSTALL, RESIDENT_TAB_AGENTS } from '/shared/flags.js';
 
 import {
   // vault
@@ -218,6 +218,10 @@ import {
   wrapUntrusted,
   // DESIGN-11: the async-subagent orchestrator (testable; the SW injects its IO).
   makeAsyncSubagents,
+  // DESIGN-17: the message_resident orchestrator + the resident capability-tier
+  // helpers the resident tool context is built from (keyless strip + kind scope).
+  makeResidentMessaging, restrictCtxCapabilities, residentAllowedTools, EXPOSURE_RESIDENT,
+  finalAssistantText,
   // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
   pullInHintInjected,
 } from '/peerd-runtime/index.js';
@@ -904,7 +908,7 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, residentInstanceId, residentKind } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
@@ -969,12 +973,22 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // still falls back to the inherited chat model at runtime if it struggles.
   const runnerProvider = listProviders().find((p) => p.name === ctxProviderName);
   const runnerModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
-  return {
+  const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name. The
     // runner / subagents leave it unset (they hold those tools by design).
+    // DESIGN-17: a resident turn sets 'resident' — the kind-scoped, instance-
+    // pinned tier (and the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
+    // DESIGN-17: the load-bearing input to the message_resident sender gate —
+    // a synthetic (goal/async/reply-wake) turn is refused. Threaded from the
+    // turn driver; defaults false for direct dispatch / composer ctx builds.
+    synthetic: synthetic === true,
+    // DESIGN-17: a resident's bound instance + kind (the gate's per-instance pin
+    // + positive kind-scope read these; absent on non-resident ctx).
+    ...(residentInstanceId ? { residentInstanceId } : {}),
+    ...(residentKind ? { residentKind } : {}),
     // why: the exposure gate's SECOND check — the session's resolved tool
     // manifest (Set | null) plus the label its refusal reason names, so
     // the lineage tells the user WHICH manifest excluded the tool.
@@ -1003,6 +1017,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // ctx.spawnSubagent(...) to decompose a task into a child session
     // that runs the same loop. Wired below; see makeSpawnSubagent.
     spawnSubagent,
+    // DESIGN-17: the message_resident orchestrator (wired below). Injected ONLY
+    // when the flag is on — the gate refuses message_resident by name when off,
+    // and a resident's own ctx strips this back out (it's not in its toolset).
+    ...(RESIDENT_TAB_AGENTS ? { messageResident: (/** @type {any} */ req) => residentMessaging.messageResident(req) } : {}),
     // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
     // as a later synthetic turn. subagentTasks/subagentCancel back the
@@ -1170,6 +1188,17 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     },
     vault: { isLocked: vault.isLocked() },
   };
+  // DESIGN-17: a RESIDENT gets a KEYLESS, kind-narrowed tool context — the
+  // do/get/check runner trust model generalized. restrictCtxCapabilities strips
+  // every capability closure (getSecret, safeFetch, webFetch, spawnSubagent,
+  // memory, messageResident, …) that none of the resident's OWN kind tools need,
+  // so a confused/injected tool has no path to secrets/egress/spawn. The loop
+  // still gets the provider key via the turn driver's injected getSecret (off
+  // this ctx), exactly like a subagent. Non-resident ctx is unchanged.
+  if (RESIDENT_TAB_AGENTS && exposure === EXPOSURE_RESIDENT) {
+    return restrictCtxCapabilities(ctx, new Set(residentAllowedTools(residentKind)));
+  }
+  return ctx;
 };
 
 // Local helper to avoid importing the same logic the dom-helpers file
@@ -1447,7 +1476,16 @@ const deleteIDBDatabase = (/** @type {string} */ name) => new Promise((resolve, 
   req.onblocked = () => reject(new Error(`deleteDatabase blocked: ${name} (close VM tab first)`));
 });
 
-const vmRegistry = createVmRegistry({ storage: idbKV('vms') });
+// DESIGN-17: archive a resident session orphaned by its instance's deletion.
+// Fired by registry.remove() (so it covers BOTH the *_delete tools and the
+// Library UI route uniformly). Archiving only sets archivedAt — safe even on a
+// resident's own self-delete turn. Fire-and-forget; the binding died with the record.
+const archiveOrphanedResident = (/** @type {string} */ residentSessionId) => {
+  Promise.resolve(sessions.archive(residentSessionId)).catch(() => {});
+  auditLog.append({ type: 'resident_archived', sessionId: residentSessionId, details: { reason: 'instance_deleted' } }).catch(() => {});
+};
+
+const vmRegistry = createVmRegistry({ storage: idbKV('vms'), onResidentArchive: archiveOrphanedResident });
 // Per-kind tracker note: on every background ensureTab the card updates to the
 // touched tab, labelled "<Kind> · <instance name>" (looked up from the registry
 // by the instance id) so it reads like a real tab. noteAgentTab is late-bound.
@@ -1463,13 +1501,13 @@ const vmClient = createVmClient({ registry: vmRegistry, tracker: vmTabTracker })
 // VMs: persistent metadata, in-memory tabId map, lazy-tab spawning
 // via chrome.tabs.sendMessage to the Notebook's host page. (The IDB
 // store name 'notebooks' is the persistence key — see notebook-registry.)
-const jsRegistry = createNotebookRegistry({ storage: idbKV('notebooks') });
+const jsRegistry = createNotebookRegistry({ storage: idbKV('notebooks'), onResidentArchive: archiveOrphanedResident });
 const jsTabTracker = createJsTabTracker({ announce: trackerNote(jsRegistry, 'Notebook') });
 const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker });
 
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
-const appRegistry = createAppRegistry({ storage: idbKV('apps') });
+const appRegistry = createAppRegistry({ storage: idbKV('apps'), onResidentArchive: archiveOrphanedResident });
 const appTabTracker = createAppTabTracker({ announce: trackerNote(appRegistry, 'App') });
 const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
 
@@ -1877,15 +1915,25 @@ const confirmAction = async (prompt) => {
   const grantKey = prompt.tool === WEB_WRITE_CONFIRM_KEY
     ? `${WEB_WRITE_CONFIRM_KEY}|${(Array.isArray(prompt.origins) && prompt.origins[0]) || ''}`
     : prompt.tool;
-  if (sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
+  // DESIGN-17: a RESIDENT never accumulates a STANDING grant — its confirms are
+  // strictly PER-TURN (a resident can be steered by untrusted instance output
+  // across turns, so a once-granted "yes for session" must not silence the next
+  // one). Bypass the grant cache for a resident session AND downgrade a
+  // yes_session answer to a one-shot. Flag-gated; one extra get only when on.
+  let ephemeral = false;
+  if (RESIDENT_TAB_AGENTS && sid) {
+    try { ephemeral = (await sessions.get(sid))?.kind === 'resident'; } catch { ephemeral = false; }
+  }
+  if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
   const answer = await confirmCoordinator.confirm(/** @type {any} */ (prompt));
-  if (answer === 'yes_session' && sid) {
+  if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
   }
-  return answer;
+  // Ephemeral: a resident's yes_session approves THIS call only (no standing grant).
+  return ephemeral && answer === 'yes_session' ? 'yes_once' : answer;
 };
 
 // Per-SW "current active session" cache (background/session-state.js), behind a
@@ -2085,6 +2133,12 @@ browser.tabs.onRemoved.addListener((tabId) => {
   if (closedVmId) vmClient.onTabClosed(closedVmId);
   jsTabTracker.onTabRemoved(tabId);
   appTabTracker.onTabRemoved(tabId);
+  // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
+  // interrupt on tab-close (above). The Notebook/App clients have no such lane —
+  // their ops are request/response with a per-call timeout — so there is nothing
+  // to "generalize" for js/app at P0 beyond the tracker mapping drop already
+  // done here. A resident bound to a tabless instance simply re-spawns the tab on
+  // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
 });
@@ -2245,6 +2299,79 @@ goalRunner = makeGoalRunner({
   // resume() (on vault unlock) re-drives them. Without it the run is in-memory
   // only and an MV3 recycle would silently drop it.
   kv,
+});
+
+// ---------------------------------------------------------------------------
+// 5b2. DESIGN-17 — resident tab agents: the message_resident orchestrator
+// ---------------------------------------------------------------------------
+// A resident is a per-instance agent that OWNS one tab-hosted instance and
+// exclusively holds its tools. The orchestrator (the async-subagents shape,
+// specialized) is the mailbox to it; the SW supplies the IO — resolve + lazy-
+// mint the resident across the three registries, drive ONE resident turn (the
+// SAME runAgentTurn wrapper, kind-aware), and re-enter the sender with the reply.
+// Built always (cheap); only reachable when RESIDENT_TAB_AGENTS is on (the tool
+// is gate-refused + unexposed otherwise, and ctx.messageResident is unwired).
+
+// Route an instance id to its registry + engine kind by id-prefix (the registry
+// idPrefix: 'vm' / 'notebook' / 'app').
+const RESIDENT_REGISTRY_BY_PREFIX = {
+  vm: { reg: vmRegistry, kind: 'webvm' },
+  notebook: { reg: jsRegistry, kind: 'notebook' },
+  app: { reg: appRegistry, kind: 'app' },
+};
+
+// Lazily mint a resident session for an instance (on the first message_resident).
+// Inherits the spawning chat's RESOLVED Plan/Act posture — resolved + stored
+// EXPLICITLY so it can't silently widen to the global default (the subagent
+// guardrail-3 precedent). Binds BOTH directions: residentSessionId on the
+// registry record, and the resident session as the instance's session-default so
+// id-less tools (vm_write_file / vm_import / edit_file) resolve the bound instance.
+const mintResident = async (/** @type {{ reg: any, kind: string }} */ entry, /** @type {any} */ record) => {
+  const activeId = await sessionCache.sessionGet('currentSessionId');
+  const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
+  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  const created = await sessions.create({
+    kind: 'resident',
+    ...(activeId ? { parentSessionId: /** @type {string} */ (activeId) } : {}),
+    instanceId: record.id,
+    residentKind: /** @type {any} */ (entry.kind),
+    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    permissionMode: perm.mode,
+    confirmActions: perm.confirmActions,
+  });
+  await entry.reg.setResidentSession(record.id, created.sessionId);
+  await entry.reg.setDefaultForSession(created.sessionId, record.id);
+  auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
+  return created.sessionId;
+};
+
+const residentMessaging = makeResidentMessaging({
+  resolveResident: async (/** @type {string} */ instanceId) => {
+    const prefix = String(instanceId).split('-')[0];
+    const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (RESIDENT_REGISTRY_BY_PREFIX)[prefix];
+    if (!entry) return null;
+    const record = await entry.reg.get(instanceId);
+    if (!record) return null;
+    let residentSessionId = await entry.reg.getResidentSession(instanceId);
+    if (!residentSessionId) residentSessionId = await mintResident(entry, record);
+    return { instanceId, kind: entry.kind, residentSessionId, name: record.name };
+  },
+  // Drive ONE resident turn (the kind-aware runAgentTurn), then read its final
+  // assistant text as the reply. runWhenIdle guaranteed the slot is free; the
+  // turn claims it, and its release drains the next queued message to it.
+  runResidentTurn: async ({ residentSessionId, message }) => {
+    await runAgentTurn({ sessionId: residentSessionId, userText: message, synthetic: false });
+    const s = await sessions.get(residentSessionId);
+    return { result: finalAssistantText(s) };
+  },
+  reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
+  turnSlots,
+  getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
+  isVaultLocked: () => vault.isLocked(),
+  wrapUntrusted,
+  appendAudit: (/** @type {any} */ e) => auditLog.append(e),
+  log: (/** @type {any[]} */ ...a) => console.warn('[resident]', ...a),
 });
 
 // ---------------------------------------------------------------------------

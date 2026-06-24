@@ -216,8 +216,12 @@ export const makeSessionRoutes = (deps) => {
         // why: subagent sessions are inspectable through their parent's
         // transcript, not the chat list — filter them out of /chats so
         // decomposition work doesn't clutter the user's conversations.
-        // See docs/SUBAGENTS.md.
-        sessions: all.filter((/** @type {any} */ s) => (s.kind ?? 'chat') !== 'subagent').map((/** @type {any} */ s) => ({
+        // See docs/SUBAGENTS.md. DESIGN-17: resident sessions are reached only
+        // by message (via their instance), never as a chat — keep them out too.
+        sessions: all.filter((/** @type {any} */ s) => {
+          const kind = s.kind ?? 'chat';
+          return kind !== 'subagent' && kind !== 'resident';
+        }).map((/** @type {any} */ s) => ({
           sessionId: s.sessionId,
           title: s.title ?? null,
           createdAt: s.createdAt,

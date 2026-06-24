@@ -45,6 +45,7 @@ const newDiskKey = (vmId) => `peerd-vm-${vmId}`;
  *
  * @param {Object} deps
  * @param {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }} deps.storage
+ * @param {(residentSessionId: string) => void} [deps.onResidentArchive]  DESIGN-17: forwarded to createRegistry — archive a resident orphaned by delete.
  * @returns the registry; snapshot() returns { vms, currentVmId }.
  */
 export const createVmRegistry = (deps) =>

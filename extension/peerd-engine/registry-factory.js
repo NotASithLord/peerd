@@ -62,8 +62,13 @@ const newId = (prefix) =>
  * @param {RegistryConfig<Rec>} config
  * @param {Object} deps
  * @param {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }} deps.storage
+ * @param {(residentSessionId: string) => void} [deps.onResidentArchive]
+ *   DESIGN-17: fired (fire-and-forget) when an instance with a bound resident is
+ *   removed, so the SW can archive the now-orphaned resident session. Covers
+ *   EVERY delete path (the *_delete tools AND the Library UI route) because they
+ *   all funnel through remove(). No-op when unset / no resident bound.
  */
-export const createRegistry = (config, { storage }) => {
+export const createRegistry = (config, { storage, onResidentArchive }) => {
   const {
     storageKey,
     collectionKey,
@@ -189,12 +194,21 @@ export const createRegistry = (config, { storage }) => {
    */
   const remove = async (id) => {
     await load();
-    if (!collection()[id]) return false;
+    const rec = /** @type {{ residentSessionId?: string } | undefined} */ (collection()[id]);
+    if (!rec) return false;
+    // DESIGN-17: the bound resident is orphaned once its instance is gone —
+    // capture it BEFORE the delete so the SW can archive that session. Archiving
+    // only sets archivedAt (no abort), so it's safe even on a resident's own
+    // self-delete turn. Fire-and-forget; the binding itself dies with the record.
+    const orphanedResident = rec.residentSessionId;
     delete collection()[id];
     for (const [sessionId, mappedId] of Object.entries(state.sessionDefaults)) {
       if (mappedId === id) delete state.sessionDefaults[sessionId];
     }
     await persist();
+    if (orphanedResident && onResidentArchive) {
+      try { onResidentArchive(orphanedResident); } catch { /* never block a delete on archive */ }
+    }
     return true;
   };
 
