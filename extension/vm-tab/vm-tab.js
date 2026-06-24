@@ -161,6 +161,13 @@ const loadCheerpx = () => {
 // ---------------------------------------------------------------------------
 
 const WRAPPERS_BASH = `
+# Disable history expansion in this interactive shell. why: bash -i turns "!"
+# into a history-recall metacharacter, so an everyday command like
+# python3 -c "print('Hi!')" dies with "bash: !': event not found". Sourced into
+# the persistent shell at boot, this turns it off session-wide. Logical "!"
+# (if ! cmd; [ ! -f x ]) is unaffected -- only the !history footgun goes away.
+set +H
+
 # ---- peerd-egress wrappers (bash functions) ------------------------------
 # Timeout for a single bridged request, in seconds (configurable). Bumped from
 # the old hard 30s so large archive/package downloads don't die mid-stream; the
@@ -690,6 +697,21 @@ const peerdTailLen = (/** @type {string} */ text) => {
       const m = /^([A-Za-z0-9_]+)(.*)$/.exec(rest);
       if (m && PRINTF_LITERAL_SUFFIX.startsWith(m[2])) return SCAN - printfIdx;
     }
+  }
+
+  // The boundary may also split the marker-printf echo INSIDE the "printf"
+  // keyword (tail ends e.g. "...\nprin"), which lastIndexOf('printf') above
+  // misses, leaking "tf '\n%s:%s\n' '___PEERD_..." into the terminal. The echo
+  // always begins a line, so hold a tail ending with a prefix of the full
+  // literal that starts right after a newline (or at the tail start) — that
+  // excludes mid-line words like "fingerprint". Non-destructive: a non-marker
+  // continuation is simply flushed on the next chunk.
+  for (let len = Math.min(PRINTF_LITERAL_PREFIX.length, SCAN); len > 0; len--) {
+    if (!PRINTF_LITERAL_PREFIX.startsWith(tail.slice(SCAN - len))) continue;
+    const before = SCAN - len;
+    if (before === 0) return len;
+    if (tail[before - 1] === '\n') return len + 1;
+    break; // longest match isn't at a line start → not our marker
   }
 
   return 0;

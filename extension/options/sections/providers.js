@@ -23,7 +23,7 @@ import { resetRow } from './reset-row.js';
 import { LocalModelsSection } from './local-models.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
-/** @typedef {{ name: string, label: string, defaultModel?: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
+/** @typedef {{ name: string, label: string, defaultModel?: string, defaultRunnerModel?: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
 
 // ── Provider logos ──────────────────────────────────────────────────────
 // Inline SVG marks (no network, no external asset — same privacy posture
@@ -235,15 +235,39 @@ export const ProvidersSection = {
     ];
     /** @param {string} name */
     const keyPlaceholder = (name) => `${KEY_PREFIX[name] ?? 'sk-'}...`;
-    const defaultProvRow = providerRows.find((p) => p.name === provider.current);
+    // A provider is USABLE when it's keyed-with-key, or a keyless daemon we've
+    // confirmed reachable (Ollama probed 'connected'). anyUsable gates the whole
+    // "Default model for new chats" block: on a fresh install (nothing
+    // configured) it stays hidden rather than showing a keyless-Anthropic guess.
+    /** @param {ProviderRow} p */
+    const isUsable = (p) => (!p.keyless && !!p.hasKey)
+      || (!!p.keyless && ui.connStatus[p.name] === 'connected');
+    const firstUsable = providerRows.find(isUsable);
+    const anyUsable = !!firstUsable || ((ui.modelOptions ?? []).length > 0);
+    // The provider the block edits. HONOR an explicit choice as-is — even one
+    // with no key yet: the "No key set" hint below says so honestly, whereas
+    // silently switching would desync the <select> from the persisted
+    // providerName (and start fresh chats on a different provider than shown).
+    // Only when NOTHING is explicitly chosen do we pick the first usable
+    // provider — so a fresh OpenRouter/Ollama user sees THAT, not the Anthropic
+    // fallback resolveActiveProvider returns for an empty providerName. The
+    // modelOptions[0] fallback covers the brief window where a daemon probe is
+    // still in flight (so it never momentarily reads as Anthropic).
+    const settingsProviderName = state.settings?.providerName ?? '';
+    const effectiveProvider =
+      (settingsProviderName && providerRows.some((p) => p.name === settingsProviderName))
+        ? settingsProviderName
+        : (firstUsable?.name ?? (ui.modelOptions ?? [])[0]?.provider ?? provider.current);
+    const defaultProvRow = providerRows.find((p) => p.name === effectiveProvider);
+    const runnerPlaceholder = defaultProvRow?.defaultRunnerModel ?? provider.defaultRunnerModel ?? 'claude-haiku-4-5';
     // Keep the Model selector populated from the chat-picker source; re-fetch
     // when the active provider, the curated OpenRouter set, or key-state changes.
-    const moKey = `${provider.current}|${provider.hasKey ? 1 : 0}|${(state.settings?.openrouterModels ?? []).join(',')}`;
+    const moKey = `${effectiveProvider}|${defaultProvRow?.hasKey ? 1 : 0}|${(state.settings?.openrouterModels ?? []).join(',')}`;
     if (moKey !== ui.modelOptionsKey) {
       ui.modelOptionsKey = moKey;
       ProvidersSection.loadModelOptions(ui, send);
     }
-    const modelOpts = (ui.modelOptions ?? []).filter((/** @type {any} */ o) => o.provider === provider.current);
+    const modelOpts = (ui.modelOptions ?? []).filter((/** @type {any} */ o) => o.provider === effectiveProvider);
 
     // One provider per card: logo, name, key status, and a slick inline
     // key editor that stays collapsed to the masked badge until you hit
@@ -347,89 +371,104 @@ export const ProvidersSection = {
         ? [m('.settings-divider'), m(OpenRouterModels, { state, send, reloadToken: ui.orReloadToken ?? 0 })]
         : null,
 
-      m('.settings-divider'),
-      m('h3', 'Default model for new chats'),
-      m('p', 'Which provider + model a fresh chat starts on. With keys for '
-        + 'more than one provider you can also switch the model per chat from '
-        + 'the picker above the message box. Existing chats keep theirs.'),
-      m('.input-row', [
-        m('label', { for: 'provider' }, 'Provider'),
-        m('select', {
-          id: 'provider',
-          value: provider.current,
-          onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
-            // Reset the model override on switch so the new provider's
-            // default applies until the user picks one.
-            await send({ type: 'settings/update', patch: { providerName: e.target.value, providerModel: '' } });
-            m.redraw();
-          },
-        }, providerRows.map((p) => m('option', { value: p.name }, p.label))),
-      ]),
-      m('.input-row', [
-        m('label', { for: 'model' }, 'Model'),
-        m('select', {
-          id: 'model',
-          value: providerModel,
-          onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
-            await send({ type: 'settings/update', patch: { providerModel: e.target.value } });
-            m.redraw();
-          },
-        }, [
-          // Blank = the provider's own default model.
-          m('option', { value: '' }, `Default — ${defaultProvRow?.defaultModel ?? provider.model ?? 'provider default'}`),
-          ...modelOpts.map((/** @type {any} */ o) => m('option', { value: o.model }, o.label)),
-          // Keep a current custom/legacy id selectable even if it isn't curated.
-          (providerModel && !modelOpts.some((/** @type {any} */ o) => o.model === providerModel))
-            ? m('option', { value: providerModel }, `${providerModel} (custom)`)
-            : null,
+      // Gated: until ANY provider is usable (a key saved, or a reachable Ollama),
+      // this whole block stays out — no Anthropic-by-default selectors on a
+      // fresh install. It appears + becomes configurable the moment you connect
+      // one, bound to that provider (effectiveProvider), not a keyless guess.
+      // Render nothing until provider status has loaded, so an established user
+      // never flashes the empty-state during the initial fetch.
+      ui.providerStatus === null ? null : anyUsable ? [
+        m('.settings-divider'),
+        m('h3', 'Default model for new chats'),
+        m('p', 'Which provider + model a fresh chat starts on. With keys for '
+          + 'more than one provider you can also switch the model per chat from '
+          + 'the picker above the message box. Existing chats keep theirs.'),
+        m('.input-row', [
+          m('label', { for: 'provider' }, 'Provider'),
+          m('select', {
+            id: 'provider',
+            value: effectiveProvider,
+            onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
+              // Reset the model override on switch so the new provider's
+              // default applies until the user picks one.
+              await send({ type: 'settings/update', patch: { providerName: e.target.value, providerModel: '' } });
+              m.redraw();
+            },
+          }, providerRows.map((p) => m('option', { value: p.name }, p.label))),
         ]),
-      ]),
-      m('p.hint', provider.current === 'openrouter'
-        ? ['Pick from the models you curated above, or ', m('strong', 'Default'), ' for the gateway default.']
-        : provider.current === 'ollama'
-          ? ['Models you’ve pulled in Ollama appear here, or ', m('strong', 'Default'), ' for the provider default.']
-          : ['Choose a model, or ', m('strong', 'Default'), ' for the provider default.']),
-      (defaultProvRow && !defaultProvRow.hasKey)
-        ? m('p.error.hint', `No key set for ${defaultProvRow.label} yet — add one above, or new chats on it will fail.`)
-        : null,
-      // "Which local model fits this machine?" — only meaningful when
-      // local inference is the selected provider.
-      provider.current === 'ollama'
-        ? [m('.settings-divider'), m(OllamaRecommendation, { send })]
-        : null,
-      m('.input-row', [
-        m('label', { for: 'runner-model' }, 'Page-reader model'),
-        m('input', {
-          id: 'runner-model',
-          type: 'text',
-          spellcheck: false,
-          // why: blank no longer means "inherit chat model" — it means this
-          // provider's fast runner default (Haiku on Anthropic). Show that id
-          // as the placeholder so the field is honest about what runs.
-          placeholder: provider.defaultRunnerModel ?? 'claude-haiku-4-5',
-          value: state.settings?.runnerModel ?? '',
-          onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
-            await send({ type: 'settings/update', patch: { runnerModel: e.target.value } });
-            m.redraw();
-          },
-        }),
-      ]),
-      m('p.hint', [
-        'The page-reading sub-agents (',
-        m('code', 'get'), '/', m('code', 'check'),
-        ') run on a fast, cheap model by default — ',
-        m('code', provider.defaultRunnerModel ?? 'claude-haiku-4-5'),
-        ' on ', m('strong', defaultProvRow?.label ?? 'this provider'),
-        '. Leave blank for that default, or pin any same-provider model id. ',
-        'It falls back to the chat model automatically when it struggles.',
-      ]),
-      resetRow(send, ['providerName', 'providerModel', 'runnerModel']),
+        m('.input-row', [
+          m('label', { for: 'model' }, 'Model'),
+          m('select', {
+            id: 'model',
+            value: providerModel,
+            onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
+              await send({ type: 'settings/update', patch: { providerModel: e.target.value } });
+              m.redraw();
+            },
+          }, [
+            // Blank = the provider's own default model.
+            m('option', { value: '' }, `Default — ${defaultProvRow?.defaultModel ?? 'provider default'}`),
+            ...modelOpts.map((/** @type {any} */ o) => m('option', { value: o.model }, o.label)),
+            // Keep a current custom/legacy id selectable even if it isn't curated.
+            (providerModel && !modelOpts.some((/** @type {any} */ o) => o.model === providerModel))
+              ? m('option', { value: providerModel }, `${providerModel} (custom)`)
+              : null,
+          ]),
+        ]),
+        m('p.hint', effectiveProvider === 'openrouter'
+          ? ['Pick from the models you curated above, or ', m('strong', 'Default'), ' for the gateway default.']
+          : effectiveProvider === 'ollama'
+            ? ['Models you’ve pulled in Ollama appear here, or ', m('strong', 'Default'), ' for the provider default.']
+            : ['Choose a model, or ', m('strong', 'Default'), ' for the provider default.']),
+        (defaultProvRow && !defaultProvRow.hasKey)
+          ? m('p.error.hint', `No key set for ${defaultProvRow.label} yet — add one above, or new chats on it will fail.`)
+          : null,
+        // "Which local model fits this machine?" — only meaningful when
+        // local inference is the selected provider.
+        effectiveProvider === 'ollama'
+          ? [m('.settings-divider'), m(OllamaRecommendation, { send })]
+          : null,
+        m('.input-row', [
+          m('label', { for: 'runner-model' }, 'Page-reader model'),
+          m('input', {
+            id: 'runner-model',
+            type: 'text',
+            spellcheck: false,
+            // why: blank no longer means "inherit chat model" — it means this
+            // provider's fast runner default (Haiku on Anthropic / OpenRouter).
+            // Show that id as the placeholder so the field is honest about what runs.
+            placeholder: runnerPlaceholder,
+            value: state.settings?.runnerModel ?? '',
+            onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+              await send({ type: 'settings/update', patch: { runnerModel: e.target.value } });
+              m.redraw();
+            },
+          }),
+        ]),
+        m('p.hint', [
+          'The page-reading sub-agents (',
+          m('code', 'get'), '/', m('code', 'check'),
+          ') run on a fast, cheap model by default — ',
+          m('code', runnerPlaceholder),
+          ' on ', m('strong', defaultProvRow?.label ?? 'this provider'),
+          '. Leave blank for that default, or pin any same-provider model id. ',
+          'It falls back to the chat model automatically when it struggles.',
+        ]),
+        resetRow(send, ['providerName', 'providerModel', 'runnerModel']),
 
-      m('p.muted.settings-footer', [
-        'Default model: ', m('code', provider.model ?? 'claude-sonnet-4-6'),
-        '. All traffic goes through ', m('code', 'safeFetch'),
-        ' against the hardcoded provider allowlist.',
-      ]),
+        m('p.muted.settings-footer', [
+          'Default model: ', m('code', defaultProvRow?.defaultModel ?? 'provider default'),
+          '. All traffic goes through ', m('code', 'safeFetch'),
+          ' against the hardcoded provider allowlist.',
+        ]),
+      ] : [
+        m('.settings-divider'),
+        m('h3', 'Default model for new chats'),
+        m('p.muted', 'Add an API key for a provider above — or start a local '
+          + 'Ollama daemon — and this is where you’ll pick the default model and '
+          + 'page-reader model for new chats. Nothing is assumed until you '
+          + 'connect a provider.'),
+      ],
     ]);
   },
 };

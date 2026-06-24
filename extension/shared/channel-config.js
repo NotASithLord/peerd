@@ -25,7 +25,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   devMode: false,
   reasoningEnabled: true,
   reasoningEffort: "medium",
-  providerName: "anthropic",
+  providerName: "",
   providerModel: "",
   openrouterModels: [],
   advancedAutomationEnabled: true,

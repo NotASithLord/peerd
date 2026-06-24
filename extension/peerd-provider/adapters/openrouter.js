@@ -35,9 +35,13 @@ const VAULT_SECRET_NAME = 'openrouter_api_key';
 const CONNECT_TIMEOUT_MS = 45_000;
 
 // Default model id. OpenRouter model ids are `vendor/model`; the user
-// picks their own in Settings. gpt-4o-mini is a stable, cheap, tool-use-
-// capable default that won't surprise anyone on cost.
-export const DEFAULT_MODEL = 'openai/gpt-4o-mini';
+// picks their own in Settings. GLM-5.1 is the strongest OPEN-WEIGHTS model
+// for agentic tool-calling on OpenRouter as of mid-2026 (#1 on the BFCL/
+// Tau-Bench tool-use leaderboard, ahead of proprietary models) — exactly the
+// profile a browser agent harness wants for its default. Reliable JSON
+// tool-call emission matters more here than raw coding throughput. Runner-up
+// open picks: moonshotai/kimi-k2.6, minimax/minimax-m2 (see MODEL_CATALOG).
+export const DEFAULT_MODEL = 'z-ai/glm-5.1';
 
 // why: the page-reader (do/get/check) runner default — Haiku reached via
 // OpenRouter's gateway. Same intent as Anthropic's DEFAULT_RUNNER_MODEL: a
@@ -181,6 +185,15 @@ export const _computeBackoffMsForTests = computeBackoffMs;
 // catalog at render time, so any that a given account can't reach simply drop
 // out (never a 404 in the chat picker). Maintained by hand — see DECISIONS.
 export const OPENROUTER_POPULAR = Object.freeze([
+  // Current open-weights leaders for agentic tool-calling (mid-2026), surfaced
+  // first so a fresh OpenRouter user sees the best defaults before scrolling.
+  'z-ai/glm-5.1',
+  'z-ai/glm-5.2',
+  'moonshotai/kimi-k2.6',
+  'minimax/minimax-m2',
+  'qwen/qwen3-coder',
+  'anthropic/claude-haiku-4.5',
+  'google/gemini-3-flash',
   'openai/gpt-4o',
   'openai/gpt-4o-mini',
   'openai/o4-mini',

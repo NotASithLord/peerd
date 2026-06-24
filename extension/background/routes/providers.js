@@ -84,6 +84,7 @@ export const makeProviderRoutes = (deps) => {
         if (p.keyless) {
           providers.push({
             name: p.name, label: p.label, defaultModel: p.defaultModel,
+            defaultRunnerModel: p.defaultRunnerModel,
             hasKey: true, keyless: true, keyPreview: null,
             // liveModels marks a daemon the card can probe (Ollama /api/tags) —
             // so the badge can read "connected" only when it actually answers,
@@ -97,6 +98,7 @@ export const makeProviderRoutes = (deps) => {
         catch { key = null; }
         providers.push({
           name: p.name, label: p.label, defaultModel: p.defaultModel,
+          defaultRunnerModel: p.defaultRunnerModel,
           hasKey: !!key,
           keyless: false,
           liveModels: !!p.liveModels,
@@ -154,8 +156,8 @@ export const makeProviderRoutes = (deps) => {
         await vault.setSecret(adapter.vaultSecretName, key);
         auditLog.append({ type: 'provider_added', details: { provider } }).catch(() => {});
         // Auto-activate the provider you just configured if the current
-        // selection isn't usable yet — so a fresh install (default providerName
-        // 'anthropic', no key) becomes ready the moment ANY provider is keyed,
+        // selection isn't usable yet — so a fresh install (empty default
+        // providerName, no key) becomes ready the moment ANY provider is keyed,
         // with no separate "select provider" step. Never override an
         // already-usable selection (an explicit keyless pick, or a provider that
         // already has a key). Clear providerModel so the new provider's default
