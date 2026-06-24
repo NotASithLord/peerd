@@ -17,7 +17,7 @@
 // The recorder is what makes the loop legible to an agent: every state leaves a
 // screenshot to look at and a structured pass/fail with the "why".
 
-import { rpc, evalIn, waitFor, sseText, sseToolCall } from './e2e-harness.mjs';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -130,6 +130,74 @@ export const STATES = [
       await rec.shot('final');
     },
   },
+
+  // --- functional: a multi-turn conversation (history carries) ---------------
+  {
+    name: 'multi-turn', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => ({ sse: sseText(callIndex === 0 ? 'first reply' : 'second reply') }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'first question' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText === 'first reply' && !o.busy; }, { budgetMs: 20_000 });
+      await rpc(ctx.page, { type: 'agent/send', text: 'second question' });
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const users = [...document.querySelectorAll('.message-user')].map((u) => u.textContent.trim());
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { users, bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('second reply') && !out.busy;
+      }, { budgetMs: 20_000 });
+      rec.check('both user messages persist in the transcript', out.users?.length === 2
+        && out.users.some((u) => u.includes('first question')) && out.users.some((u) => u.includes('second question')), JSON.stringify(out.users));
+      rec.check('both assistant replies render (history carried across turns)',
+        out.bubbles?.includes('first reply') && out.bubbles?.includes('second reply'), JSON.stringify(out.bubbles));
+      rec.check('settles idle after the second turn', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: the Plan/Act mode toggle ----------------------------------
+  {
+    name: 'mode-toggle', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('ack') }),
+    async run(ctx, rec) {
+      // A session must exist for the mode row to render — send one turn first.
+      await rpc(ctx.page, { type: 'agent/send', text: 'hi' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      const activeMode = () => evalIn(ctx.page, `(() => { const b = document.querySelector('.planact-mode[aria-pressed="true"]'); return b ? b.textContent.trim() : null; })()`);
+      await rpc(ctx.page, { type: 'permission/set', mode: 'plan' });
+      await waitFor(async () => (await activeMode()) === 'Plan', { budgetMs: 8_000 });
+      rec.check('Plan becomes the active mode', (await activeMode()) === 'Plan');
+      await rec.shot('plan');
+      await rpc(ctx.page, { type: 'permission/set', mode: 'act' });
+      await waitFor(async () => (await activeMode()) === 'Act', { budgetMs: 8_000 });
+      rec.check('toggles back to Act', (await activeMode()) === 'Act');
+    },
+  },
+
+  // --- functional: vault lock → gate, unlock → ready (restores unlocked) ------
+  {
+    name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'vault/lock' });
+      const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
+      rec.check('locking flips the panel to the vault gate', !!locked);
+      await rec.shot('locked');
+      // Unlock again so later states start from a ready, unlocked panel.
+      await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE });
+      const ready = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar')`), { budgetMs: 10_000 });
+      rec.check('unlocking restores the ready composer', !!ready);
+    },
+  },
+
+  // (A rate-limit/retry-banner state is deferred: the keyless Ollama adapter
+  // doesn't retry 429 — only the keyed OpenRouter/Anthropic adapters do — so
+  // exercising the retry banner needs a keyed provider wired into the harness.
+  // Likewise tool-use rendering is already covered by the goal state's
+  // complete_goal card; a distinct safe-tool state is a later add.)
 
   // --- visual: a completed assistant turn ------------------------------------
   {
