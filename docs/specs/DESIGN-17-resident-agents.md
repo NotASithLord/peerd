@@ -22,7 +22,7 @@
 > Read first: `docs/SUBAGENTS.md` (a resident is "a session with parentage" — the
 > shape reused; and the global-registry / "no owner check" decision this narrows),
 > `docs/specs/DESIGN-11-async-subagents.md` (the wake/mailbox + runaway-guard
-> reused for `tell_instance`), `DESIGN.md` §8.5 (which instances are in scope).
+> reused for `message_resident`), `DESIGN.md` §8.5 (which instances are in scope).
 
 ## Motivation
 
@@ -52,7 +52,7 @@ Its loop runs **on the SW heap**, through the existing `turn-driver.js` →
    registry record (a *routing* pointer — below);
 2. it is **the only kind of session that may hold instance-mutating tools**, and
    then only for *its own* instance;
-3. you **reach it only by message** (`tell_instance`).
+3. you **reach it only by message** (`message_resident`).
 
 `js_run` (headless, ephemeral, no instance) stays a parent tool. Scope is the
 three tab-hosted kinds (§8.5).
@@ -64,7 +64,7 @@ current host (reconstitutable via `ensureTab`); the binding must survive the tab
 closing (a VM persists when its tab closes). So:
 
 - **The binding is a persisted `residentSessionId` field on the registry record**
-  (`registry-factory.js`), set when the resident is minted. `tell_instance`
+  (`registry-factory.js`), set when the resident is minted. `message_resident`
   resolves `instanceId → residentSessionId` from there; the `tab-tracker` is used
   only to ensure the tab is live when the resident needs to act (`ensureTab`).
 - **This is not the ownership *gate* the earlier draft rejected.** That gate was a
@@ -122,9 +122,9 @@ tool **fails closed at the gate** for them, and a resident cannot mutate a
 stay global and id-addressable, as `docs/SUBAGENTS.md` has them — only *mutation*
 is tiered; goal #1 is the mutation half, honestly scoped.)
 
-## Move 3 — the message channel: `tell_instance`
+## Move 3 — the message channel: `message_resident`
 
-`tell_instance({ to, message, sync? })`; `to` is the instance id → resolve
+`message_resident({ to, message, sync? })`; `to` is the instance id → resolve
 `residentSessionId` (Move 1) → `turnSlots.runWhenIdle(residentSessionId, fn)`
 (the serializing mailbox: runs when the resident is idle, **never interrupting an
 in-flight turn**, DECISIONS #20). The resident's turn is
@@ -141,7 +141,7 @@ residents — they render attacker content). Correlation is pinned **SW-side**
   **`!synthetic && senderSessionId === getActiveSessionId()`** (attended,
   first-party). The unattended path (peer messages, scheduled tasks) is **blocked
   at P0** and unlocks only when the shared clamp lands (P1+).
-- **Runaway guard.** `tell_instance` reuses the async-subagents `RATE_CAP` /
+- **Runaway guard.** `message_resident` reuses the async-subagents `RATE_CAP` /
   `OUTSTANDING_CAP` per sender (a resident↔resident or parent↔resident ping-pong
   must be bounded — see cost, below).
 
@@ -195,8 +195,8 @@ seam. Then B is one scoped relocation. Spec the seam once; cross it later.
 A resident is a *separate session*. `makeTurnCostTracker` (`cost/turn-tracker.js`)
 checks `limitUsd` **per session**, so **N residents = N independent caps**: the
 user's attended chat hitting its limit does not stop its residents, and a
-`tell_instance` ping-pong burns two independent caps. P0 must therefore (a) carry
-the `tell_instance` runaway guard (Move 3), and (b) **document** that residents
+`message_resident` ping-pong burns two independent caps. P0 must therefore (a) carry
+the `message_resident` runaway guard (Move 3), and (b) **document** that residents
 multiply the cap by live-resident count. A true cross-session rollup into one
 owning-user budget does not exist today and is an open question (below), not a P0
 claim.
@@ -208,12 +208,12 @@ A structurally avoids the split's four regressions (loop is on the SW). Folded i
 - **Ephemeral resident confirm.** `sessionConfirmGrants` banks a blanket
   `yes_session` per session; a *persistent* resident would replay one approval
   every turn. Residents use **per-turn** grants (the runner's grant-less posture).
-- **`tell_instance` P0 fail-closed** on synthetic/unattended senders (Move 3).
+- **`message_resident` P0 fail-closed** on synthetic/unattended senders (Move 3).
 - **SW-side reply correlation** (Move 3) — never a persisted sender pointer.
 
 ## Context shedding (goal #2)
 
-Parent keeps create + `tell_instance` + list; the ~23 instance tools move behind
+Parent keeps create + `message_resident` + list; the ~23 instance tools move behind
 the `resident` tier (minus `js_run`). Non-eroding (unlike `INSTANCE_GATED_TOOLS`
 progressive disclosure). Net ~4.5–6 k tokens off every parent turn; the engine
 prose moves into per-kind `*_RESIDENT_PROMPT`. (Honest: the per-resident prompt
@@ -257,7 +257,7 @@ tabless instance re-spawns the tab via `ensureTab`. Generalize
 - **Which kinds get residents by default** (WebVM strongest; per-kind).
 - **Cross-session spend rollup** — do residents share the owning user's budget, or
   is per-session-cap-× -tab-count acceptable? (No rollup exists today.)
-- **The inbound clamp** is the shared dependency that unlocks `tell_instance`'s
+- **The inbound clamp** is the shared dependency that unlocks `message_resident`'s
   unattended path; P0 ships attended-only without it.
 - **The user talking to a resident** — does `kind:'resident'` appear in a switcher
   or only via the tab?
@@ -270,7 +270,7 @@ tabless instance re-spawns the tab via `ensureTab`. Generalize
    kind-switches, the `/chats` filter, store-load default); the **`resident`
    exposure tier + dispatch-gate refusal + closure strip + per-instance pin +
    the dispatcher test** (Move 2 — the security spine); the instance→resident
-   `residentSessionId` binding; `tell_instance` (SW correlation + mailbox +
+   `residentSessionId` binding; `message_resident` (SW correlation + mailbox +
    runaway guard + the `!synthetic && active` fail-closed gate); the kind-aware
    resident turn branch (exposure/descriptors/`*_RESIDENT_PROMPT`/`activeTabId`);
    ephemeral confirm; resident-spawn wired across all three trackers. Behind a
