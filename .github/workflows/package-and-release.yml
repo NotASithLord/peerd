@@ -173,9 +173,9 @@ jobs:
       - name: Run side-panel E2E suite
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-        # The suite runner (run-e2e-all.mjs) runs every scenario — smoke, goal
-        # mode, stop, error — each with its own per-scenario retry for the
-        # headless-Chrome / CDP-attach startup flake.
+        # The verify runner (--functional) drives every functional state —
+        # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
+        # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
 
   package:

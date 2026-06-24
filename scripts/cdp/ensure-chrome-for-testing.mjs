@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Provision Chrome for Testing into ~/.cache/peerd-cft for the side-panel E2E
-// harness (scripts/cdp/run-e2e-sidepanel.mjs).
+// verify loop (scripts/cdp/run-e2e-verify.mjs).
 //
 // why a dedicated binary: branded "Google Chrome" IGNORES --load-extension /
 // --disable-extensions-except (a security restriction), so the unpacked

@@ -1,0 +1,144 @@
+#!/usr/bin/env bun
+// The E2E "states" — the single source of truth for what the verify loop drives
+// and asserts. Each state is data + a run() that interacts with the LIVE side
+// panel through one ctx (the harness). The single-Chrome verify runner
+// (run-e2e-verify.mjs) executes every state against ONE Chrome — reset the
+// session, swap the model responder, run — so a full pass is ~1 launch, not N.
+//
+// A state:
+//   { name, kind: 'functional'|'visual', phase: 'pre-unlock'|'post-unlock',
+//     responder, async run(ctx, rec) }
+//   - responder: the per-call model behaviour (swapped in before run)
+//   - run(ctx, rec): drives the panel and records via the recorder:
+//       rec.check(name, pass, detail)   — a functional assertion
+//       rec.shot(label)                 — a screenshot artifact (Claude can read)
+//       rec.visual(name, opts)          — capture + baseline pixel-compare
+//
+// The recorder is what makes the loop legible to an agent: every state leaves a
+// screenshot to look at and a structured pass/fail with the "why".
+
+import { rpc, evalIn, waitFor, sseText, sseToolCall } from './e2e-harness.mjs';
+
+// A compact transcript probe shared by the functional states.
+const probe = (ctx) => evalIn(ctx.page, `(() => {
+  const u = document.querySelector('.message-user');
+  const b = document.querySelector('.message-assistant .bubble');
+  const err = document.querySelector('.error-line');
+  const goalBar = !!document.querySelector('.goal-bar');
+  const stopChip = !!document.querySelector('.stop-chip');
+  const busy = !!(document.querySelector('.message-assistant.streaming') || document.querySelector('form.input-bar button.stop'));
+  const capped = /hit the .*limit/i.test(document.body.innerText);
+  return {
+    userText: u ? u.textContent.trim() : null,
+    assistantText: b ? b.textContent.trim() : null,
+    errorText: err ? err.textContent.trim() : null,
+    goalBar, stopChip, busy, capped,
+  };
+})()`);
+
+const SMOKE_TEXT = 'e2e-smoke-ok';
+
+export const STATES = [
+  // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
+  {
+    name: 'initial-screen', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) { await rec.visual('initial-screen'); },
+  },
+
+  // --- functional: one full happy-path turn ----------------------------------
+  {
+    name: 'smoke', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText(SMOKE_TEXT) }),
+    async run(ctx, rec) {
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'ping from e2e' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => { out = await probe(ctx); return out.assistantText && !out.busy; }, { budgetMs: 25_000 });
+      rec.check('model call intercepted (no real egress)', ctx.modelCallCount() > 0);
+      rec.check('user message round-trips', !!out.userText && out.userText.includes('ping from e2e'), JSON.stringify(out.userText));
+      rec.check('assistant turn renders the streamed text', out.assistantText === SMOKE_TEXT, JSON.stringify(out.assistantText));
+      rec.check('turn reaches a terminal/idle state', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- visual: idle unlocked panel -------------------------------------------
+  {
+    name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) { await rec.visual('idle-unlocked'); },
+  },
+
+  // --- functional: the goal-mode autonomous loop -----------------------------
+  {
+    name: 'goal', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => {
+      if (callIndex === 0) return { delayMs: 250, sse: sseText('On it — starting the goal.') };
+      if (callIndex === 1) return { delayMs: 250, sse: sseToolCall('complete_goal', { summary: 'all tidy' }) };
+      return { delayMs: 120, sse: sseText('Goal complete.') };
+    },
+    async run(ctx, rec) {
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'tidy the repo', goal: true });
+      rec.check('goal run started', sent?.ok && sent.handled === 'goal', JSON.stringify(sent));
+      const goalBarSeen = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
+      // Snapshot WHILE the bar is up (best-effort — the loop is quick).
+      if (goalBarSeen) await rec.shot('goal-bar');
+      let out = {};
+      await waitFor(async () => { out = await probe(ctx); return !out.goalBar && !out.busy; }, { budgetMs: 25_000 });
+      const calls = ctx.modelCallCount();
+      rec.check('Goal bar appeared while driving', !!goalBarSeen);
+      rec.check('loop drove >1 autonomous turn', calls >= 3, `model calls: ${calls}`);
+      rec.check('complete_goal ended it cleanly (not the cap)', !out.capped && calls < 10, `capped=${out.capped} calls=${calls}`);
+      rec.check('run reaches terminal: Goal bar cleared + idle', out.goalBar === false && out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: Stop a turn mid-flight -------------------------------------
+  {
+    name: 'stop', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ delayMs: 12_000, sse: sseText('this-should-never-render') }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'start a long turn' });
+      const busySeen = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 15_000, pollMs: 100 });
+      rec.check('turn went busy (Stop button appeared)', !!busySeen);
+      if (busySeen) await rec.shot('busy');
+      const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+      rec.check('agent/stop accepted', !!stopped?.ok);
+      let out = {};
+      await waitFor(async () => { out = await probe(ctx); return !out.busy; }, { budgetMs: 15_000 });
+      rec.check('Stop returns the turn to idle', out.busy === false);
+      rec.check('the aborted model response never renders', !(out.assistantText || '').includes('never-render'));
+      rec.check('the aborted turn shows a "stopped" chip', out.stopChip === true);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: a provider error surfaces + idles --------------------------
+  {
+    name: 'error', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'e2e injected provider error', type: 'invalid_request_error' } }) }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'trigger an error' });
+      let out = {};
+      await waitFor(async () => { out = await probe(ctx); return out.errorText && !out.busy; }, { budgetMs: 25_000 });
+      rec.check('model call intercepted', ctx.modelCallCount() > 0);
+      rec.check('a provider error surfaces inline (error-line)', !!out.errorText, JSON.stringify(out.errorText));
+      rec.check('the error names the HTTP failure honestly', /HTTP 400/.test(out.errorText || ''));
+      rec.check('the failed turn comes to rest (not stuck busy)', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- visual: a completed assistant turn ------------------------------------
+  {
+    name: 'completed-turn', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText(SMOKE_TEXT) }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'hello there' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      await rec.visual('completed-turn');
+    },
+  },
+];

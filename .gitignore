@@ -70,3 +70,4 @@ scripts/cdp/artifacts/
 # the vendored CheerpX/xterm assets kept directly in dist/) into /dist/
 # for Cloudflare Pages.
 /dist/
+scripts/cdp/artifacts/
