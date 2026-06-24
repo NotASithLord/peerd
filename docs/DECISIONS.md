@@ -624,3 +624,38 @@ This is the **first** non-`self` `peerd.*` capability wired for Apps;
 `egress` goes first because its blast radius is the most contained of the
 five modules, and the grant/quota machinery built here is the template the
 others inherit (#21).
+
+## 28. A resident is a per-instance agent; the binding is a routing pointer, not an owner gate
+
+DESIGN-17 P0 (`docs/specs/DESIGN-17-resident-agents.md` + `DESIGN-17-DEV-NOTES.md`).
+Three structural choices worth recording:
+
+**A third `SessionKind`, `resident`.** Each tab-hosted instance (WebVM /
+Notebook / App) is owned by one agent — a resident — that exclusively holds
+that environment's MUTATING tools and is addressed only by `message_resident`.
+The per-environment tooling LEAVES the main agent (context optimized, and
+non-eroding because it never returns), and "who may touch this instance" becomes
+STRUCTURAL instead of a convention. A resident is "a session with parentage"
+(the subagent precedent, #SUBAGENTS) — no new shape, just `kind:'resident'` +
+two binding fields. Hidden from `/chats` (reached via its instance, not the
+chat list), like a subagent.
+
+**The capability tier is a dispatch-gate refusal, not descriptor hygiene.** The
+exposure axis is binary `main`/not-`main` and cannot keep instance tools off a
+*subagent*, so a deny-set alone is bypassable by a one-line
+`spawn_subagent({tools:['app_delete']})`. The wall is `exposureGate`: the
+mutating tier is refused for every ctx whose marker isn't `resident`, and a
+resident is positively scoped to its own kind + pinned to its own instance.
+Only MUTATION is tiered — reads stay global and id-addressable.
+
+**The instance→resident binding is a ROUTING pointer (`residentSessionId`), not
+a per-call owner gate.** A `session === record.owner` check on every mutation
+carries transfer-on-settle and brick-the-instance failure modes; the routing
+pointer is one-directional addressing — mutation is gated by the capability
+tier, not the pointer — so if the resident session is gone, mint a fresh one and
+the instance is never bricked. Minting is lazy (the first `message_resident`).
+
+The actor structure is the foundation for later per-tab JS-safety isolation
+(relocate only the inner loop into a per-tab worker — the wrapper stays SW-side),
+purpose-tuned per-actor model tiers, an in-browser actor mesh, and A2A across
+peers — but P0 is the structure + its security, behind a flag, attended-only.
