@@ -61,6 +61,7 @@ describe('notebook-tab realm seal (real worker realm)', () => {
       for (const channel of [
         'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource',
         'WebTransport', 'Worker', 'SharedWorker', 'importScripts', 'sendBeacon',
+        'caches',
       ]) {
         expect(results[channel].threw).toBe(true);
         expect(results[channel].name).toBe('NotebookEgressBlockedError');

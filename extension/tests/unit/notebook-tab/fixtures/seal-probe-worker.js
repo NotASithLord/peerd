@@ -67,6 +67,9 @@ const runProbes = () => ({
   SharedWorker: probe(() => new workerGlobal.SharedWorker('/nested.js')),
   importScripts: probe(() => workerGlobal.importScripts('https://example.invalid/x.js')),
   sendBeacon: probe(() => workerGlobal.navigator.sendBeacon('https://example.invalid/', 'x')),
+  // caches.open(...).add(url) runs the Fetch algorithm — sealed because the
+  // offscreen js_run host has no connect-src 'none' backstop.
+  caches: probe(() => workerGlobal.caches.open('x')),
 });
 
 const inspectFetch = () => {

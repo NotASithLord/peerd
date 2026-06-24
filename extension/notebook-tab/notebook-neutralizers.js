@@ -23,16 +23,17 @@
 //      old gap where statically-imported agent code ran pre-stub.
 //
 // What this still is NOT: the outermost fence. The host page's CSP
-// (notebook-tab/index.html, connect-src 'none') backstops the seal — it is
-// inherited by the blob worker and by anything that would somehow obtain
-// a fresh realm, so even then no connection-class API can leave.
-// Two channels remain OPEN by design and are NOT sealed here:
+// (notebook-tab/index.html, connect-src 'none') backstops the seal in the
+// Notebook TAB — inherited by the blob worker, so even a fresh realm there
+// can't leave. But the SAME sealed worker also runs HEADLESS in the offscreen
+// document (offscreen/job-runner.js, for js_run), whose CSP must allow https:
+// (the voice model downloads there) — so in that host the realm seal is the
+// ONLY fence. Every network-capable primitive must therefore be sealed by the
+// realm itself, not deferred to the page CSP.
+// One channel remains OPEN by design and is NOT sealed here:
 //   - module loads: static/dynamic `import` of absolute CDN URLs is a
 //     documented js_notebook feature (script-src territory, not reachable
 //     from inside the realm — import() is syntax, not a global).
-//   - the Cache API: storage-legit (put/match); its only network verb
-//     (cache.add) rides the internal fetch algorithm, which the page CSP
-//     connect-src fences, not the realm.
 //
 // One implementation, three callers: realm-seal.js (the worker entry's
 // first static import — the production path), the bun unit tests (mock
@@ -184,4 +185,17 @@ export function applyRealmSeal(global) {
   if (global.navigator) {
     seal(global.navigator, 'sendBeacon', function () { fail('navigator.sendBeacon'); });
   }
+
+  // The Cache API: cache.add()/addAll() run the Fetch algorithm — a REAL network
+  // GET that escapes the audited bridge. The Notebook tab's connect-src 'none'
+  // would fence it, but the offscreen js_run host that runs this SAME worker
+  // allows https:, so the realm must block it directly. Replace the whole
+  // CacheStorage with throwing stubs (open/match/has/delete/keys); the sandbox's
+  // sanctioned storage is OPFS. seal() deletes the prototype getter the same way
+  // it does for fetch, so the native CacheStorage is unreachable.
+  const cacheBlocked = () => fail('Cache API (caches)');
+  seal(global, 'caches', /** @type {any} */ ({
+    open: cacheBlocked, match: cacheBlocked, has: cacheBlocked,
+    delete: cacheBlocked, keys: cacheBlocked,
+  }));
 }
