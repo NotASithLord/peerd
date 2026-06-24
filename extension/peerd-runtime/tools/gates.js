@@ -71,7 +71,6 @@ import {
  *   toolAllow?: Set<string> | null,
  *   toolManifestLabel?: string,
  *   residentInstanceId?: string,
- *   residentInstanceName?: string,
  *   residentKind?: string,
  * }} GateContext
  */
@@ -143,8 +142,13 @@ export const residentTierGate = (tool, args, ctx, flagOn) => {
   if (!isAllowedForResidentKind(tool.name, ctx.residentKind)) {
     return { allowed: false, reason: `'${tool.name}' is not in this resident's (${ctx.residentKind ?? 'unknown'}) toolset` };
   }
+  // The resident dispatch wrapper (turn-driver pinResidentCall) already FORCE-
+  // normalizes any id/name arg to the bound instance id before dispatch, so by
+  // the time the gate runs an explicit target is the bound id. This is the
+  // defense-in-depth backstop: an explicit id that ISN'T the bound one (e.g. a
+  // path that somehow skipped the wrapper) is refused.
   const explicit = residentTargetId(tool.name, args);
-  if (explicit && explicit !== ctx.residentInstanceId && explicit !== ctx.residentInstanceName) {
+  if (explicit && explicit !== ctx.residentInstanceId) {
     return { allowed: false, reason: `resident is pinned to ${ctx.residentInstanceId ?? 'its instance'}; refusing ${tool.name} targeting ${explicit}` };
   }
   return null;

@@ -943,8 +943,16 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // Resolve the active tab once per ctx build. Tools use this as the
   // default target; the origin gate uses ctx.activeTab.origin against
   // the denylist before any DOM tool runs.
+  // DESIGN-17: a RESIDENT has NO user-foreground-tab context — its tools act on
+  // its instance (origins:()=>[]), never the user's page. Skip the query so the
+  // resident ctx never carries the user's foreground origin (a latent leak the
+  // moment a resident ever gains a tab-targeting tool), matching the turn
+  // driver's memory/active-tab skip.
   let activeTab;
   try {
+    if (RESIDENT_TAB_AGENTS && exposure === EXPOSURE_RESIDENT) {
+      activeTab = undefined;
+    } else {
     // why: a browser-runner (do/get/check) is PINNED to one specific tab,
     // passed as activeTabId. Resolve activeTab to THAT tab so its DOM tools
     // target it — and, critically, so ctx.activeTab.origin is the runner's tab
@@ -963,6 +971,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
         url: t.url ?? '',
         origin: originOfTabUrl(/** @type {string} */ (t.url)),
       };
+    }
     }
   } catch (e) {
     console.warn('[sw] active tab query failed', e);
@@ -1481,8 +1490,17 @@ const deleteIDBDatabase = (/** @type {string} */ name) => new Promise((resolve, 
 // Library UI route uniformly). Archiving only sets archivedAt — safe even on a
 // resident's own self-delete turn. Fire-and-forget; the binding died with the record.
 const archiveOrphanedResident = (/** @type {string} */ residentSessionId) => {
-  Promise.resolve(sessions.archive(residentSessionId)).catch(() => {});
-  auditLog.append({ type: 'resident_archived', sessionId: residentSessionId, details: { reason: 'instance_deleted' } }).catch(() => {});
+  const doArchive = () => {
+    Promise.resolve(sessions.archive(residentSessionId)).catch(() => {});
+    auditLog.append({ type: 'resident_archived', sessionId: residentSessionId, details: { reason: 'instance_deleted' } }).catch(() => {});
+  };
+  // why: a resident can delete its OWN instance mid-turn (vm_delete/app_delete are
+  // in its toolset). archive() is a read-modify-write of the resident's session
+  // record, so doing it WHILE that turn is still appending messages could clobber
+  // the final message and hand the sender a stale reply. Defer to when the slot is
+  // idle (the turn settled) — runs immediately when nothing is in flight.
+  if (turnSlots.isBusy(residentSessionId)) turnSlots.runWhenIdle(residentSessionId, doArchive);
+  else doArchive();
 };
 
 const vmRegistry = createVmRegistry({ storage: idbKV('vms'), onResidentArchive: archiveOrphanedResident });
@@ -2340,8 +2358,13 @@ const mintResident = async (/** @type {{ reg: any, kind: string }} */ entry, /**
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
   });
-  await entry.reg.setResidentSession(record.id, created.sessionId);
+  // Order matters for crash-safety: bind the session-default FIRST, then the
+  // forward pointer LAST. resolveResident re-mints whenever the forward pointer
+  // is absent, so an SW death between these two persists leaves an un-pointed
+  // (re-mintable) instance rather than a pointed-but-unresolvable one — a present
+  // residentSessionId now IMPLIES its session-default was written.
   await entry.reg.setDefaultForSession(created.sessionId, record.id);
+  await entry.reg.setResidentSession(record.id, created.sessionId);
   auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
   return created.sessionId;
 };

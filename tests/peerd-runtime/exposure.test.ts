@@ -255,10 +255,12 @@ describe('DESIGN-17 resident tier — the gate (the wall, flagOn:true)', () => {
   });
 
   test('the per-instance pin refuses a sibling id, allows the bound id / no id', () => {
-    const ctx = { exposure: EXPOSURE_RESIDENT, residentKind: 'app', residentInstanceId: 'app-1', residentInstanceName: 'my-app' };
+    // The resident dispatch wrapper (pinResidentCall) normalizes any id/name arg
+    // to the bound INSTANCE ID before the gate runs, so the gate only ever sees
+    // ids — it refuses any explicit id that isn't the bound one.
+    const ctx = { exposure: EXPOSURE_RESIDENT, residentKind: 'app', residentInstanceId: 'app-1' };
     expect(rt({ name: 'app_delete' }, { appId: 'app-2' }, ctx, true)?.allowed).toBe(false); // sibling
     expect(rt({ name: 'app_delete' }, { appId: 'app-1' }, ctx, true)).toBeNull();           // own id
-    expect(rt({ name: 'app_delete' }, { appId: 'my-app' }, ctx, true)).toBeNull();          // own name
     expect(rt({ name: 'app_delete' }, {}, ctx, true)).toBeNull();                           // wrapper injects
     // a webvm resident pinned by name-or-id arg
     const vm = { exposure: EXPOSURE_RESIDENT, residentKind: 'webvm', residentInstanceId: 'vm-1' };

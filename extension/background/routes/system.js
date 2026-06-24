@@ -65,6 +65,13 @@ export const makeSystemRoutes = (deps) => {
         const all = await sessions.list();
         let usd = 0, tokens = 0, chats = 0;
         for (const s of all) {
+          // Only real CHATS count here. Subagents never persist cost, but
+          // DESIGN-17 residents DO (they run the full turn-driver wrapper) — skip
+          // them, else every minted resident would inflate the chat count and
+          // hide its spend under a phantom "chat". (A cross-session spend rollup
+          // is a deliberate open question — DESIGN-17-DEV-NOTES.md.)
+          const kind = s.kind ?? 'chat';
+          if (kind === 'resident' || kind === 'subagent') continue;
           const c = s.cost;
           if (!c) continue;
           const t = (c.inputTokens || 0) + (c.outputTokens || 0)
