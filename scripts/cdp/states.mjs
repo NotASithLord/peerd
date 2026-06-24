@@ -91,6 +91,7 @@ export const STATES = [
       rec.check('loop drove >1 autonomous turn', calls >= 3, `model calls: ${calls}`);
       rec.check('complete_goal ended it cleanly (not the cap)', !out.capped && calls < 10, `capped=${out.capped} calls=${calls}`);
       rec.check('run reaches terminal: Goal bar cleared + idle', out.goalBar === false && out.busy === false);
+      rec.check('submitted goal text round-trips as the first user message', !!out.userText && out.userText.includes('tidy the repo'), JSON.stringify(out.userText));
       await rec.shot('final');
     },
   },
