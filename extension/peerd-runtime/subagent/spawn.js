@@ -26,6 +26,7 @@
 // manifest into the allow-set the narrowing intersects.
 import { confirmActionsFromRecord } from '../permissions/policy.js';
 import { resolveManifestAllow } from '../tools/manifests.js';
+import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 /** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
@@ -115,6 +116,33 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // the dweb closure alongside the dweb_* tools.
   dweb:               ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers',
     'dweb_block', 'dweb_discovery', 'dweb_guide', 'app_create'],
+  // DESIGN-17 (flag-gated): the engine instance closures buildToolContext
+  // injects into EVERY ctx — the SW-side clients + registries + tab trackers
+  // that the vm_*/js_*/app_*/edit_file tools reach through. Pre-DESIGN-17 they
+  // were absent from this map, so they were NEVER stripped (every child kept
+  // them). Adding them strips them from any narrowed child whose granted tools
+  // don't read them — generalizing the keyless tool ctx the resident relies on,
+  // and closing the confused-deputy path for plain subagents too. Gated by the
+  // flag so flag-OFF subagent ctx-stripping is byte-for-byte unchanged. The
+  // reader lists are EXHAUSTIVE (an omitted reader silently loses its closure
+  // and the tool returns `*_not_available`, never a crash — covered by tests).
+  // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
+  // (edit-file.js: ctx[kind==='app'?'appRegistry':'jsRegistry']), so it must be
+  // listed in BOTH despite not matching a `.appRegistry` grep.
+  ...(RESIDENT_TAB_AGENTS ? {
+    vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
+    vmRegistry:         ['vm_create', 'vm_delete', 'vm_boot', 'vm_list'],
+    vmTabTracker:       ['vm_create', 'vm_delete', 'vm_list'],
+    jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
+    jsRegistry:         ['js_notebook', 'js_create', 'js_delete', 'js_list', 'edit_file'],
+    jsTabTracker:       ['js_create', 'js_delete', 'js_list'],
+    jsOffscreenClient:  ['js_run'],
+    appClient:          ['app_create', 'app_open', 'app_update', 'app_write_file',
+      'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
+    appRegistry:        ['app_delete', 'app_list', 'edit_file'],
+    appTabTracker:      ['app_list'],
+    messageResident:    ['message_resident'],
+  } : {}),
 });
 
 /**

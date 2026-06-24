@@ -16,7 +16,11 @@
 //                  passes here and defers auto-vs-ask to the dispatcher.
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
-//                  runner-only tool even if the model emits its name.
+//                  runner-only tool even if the model emits its name. Also
+//                  carries the DESIGN-17 resident capability tier (flag-gated):
+//                  the instance-mutating set is resident-only, and a resident
+//                  is positively scoped to its own kind + pinned to its own
+//                  instance.
 //   origin       — active (denylist)
 //   confirmation — active as a lineage placeholder: computes the policy's
 //                  PLANNED verdict; the dispatcher resolves the real
@@ -37,7 +41,11 @@
 // module unimportable under the bun test runner). Same pattern as
 // composer/resolvers.js and tools/defs/dom-helpers.js.
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
-import { isHiddenFromMain, isInstanceGatedOut, instanceGateKind } from './exposure.js';
+import {
+  isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
+  EXPOSURE_RESIDENT, isResidentMutatingTool, isAllowedForResidentKind, residentTargetId,
+} from './exposure.js';
+import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
 import {
   decideAction,
   PERMISSION_MODES,
@@ -62,6 +70,9 @@ import {
  *   instanceState?: { webvm?: boolean, notebook?: boolean, app?: boolean } | null,
  *   toolAllow?: Set<string> | null,
  *   toolManifestLabel?: string,
+ *   residentInstanceId?: string,
+ *   residentInstanceName?: string,
+ *   residentKind?: string,
  * }} GateContext
  */
 
@@ -100,6 +111,46 @@ const personaGate = (tool, _args, ctx) => {
 };
 
 /**
+ * DESIGN-17 resident capability tier — pure, flag injected. Returns a REFUSAL
+ * `{allowed:false, reason}` when the call violates the tier, or `null` when the
+ * tier has no opinion (the gate continues). Three rules:
+ *   (1) flag ON, non-resident ctx → the instance-MUTATING set is refused (it's
+ *       resident-only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
+ *   (2) flag ON, resident ctx → POSITIVELY constrained to its own kind's toolset
+ *       (a hallucinated/injected non-env tool fails closed here, not just in the
+ *       descriptor list — the keyless/narrow runner trust model).
+ *   (3) flag ON, resident ctx → per-instance pin: an EXPLICIT target that isn't
+ *       this resident's instance is refused (defense in depth — the resident
+ *       dispatch wrapper already force-injects the bound id).
+ * flag OFF → no mutating-tier refusals (instance tools stay on the main agent),
+ * but `message_resident` is refused by name (its orchestrator isn't wired).
+ *
+ * @param {Tool} tool @param {any} args @param {GateContext} ctx @param {boolean} flagOn
+ * @returns {Omit<GateResult, 'name'> | null}
+ */
+export const residentTierGate = (tool, args, ctx, flagOn) => {
+  if (!flagOn) {
+    return tool.name === 'message_resident'
+      ? { allowed: false, reason: `'message_resident' is not enabled` }
+      : null;
+  }
+  if (ctx?.exposure !== EXPOSURE_RESIDENT) {
+    if (isResidentMutatingTool(tool.name)) {
+      return { allowed: false, reason: `'${tool.name}' is resident-only — message the instance's resident (message_resident)` };
+    }
+    return null;
+  }
+  if (!isAllowedForResidentKind(tool.name, ctx.residentKind)) {
+    return { allowed: false, reason: `'${tool.name}' is not in this resident's (${ctx.residentKind ?? 'unknown'}) toolset` };
+  }
+  const explicit = residentTargetId(tool.name, args);
+  if (explicit && explicit !== ctx.residentInstanceId && explicit !== ctx.residentInstanceName) {
+    return { allowed: false, reason: `resident is pinned to ${ctx.residentInstanceId ?? 'its instance'}; refusing ${tool.name} targeting ${explicit}` };
+  }
+  return null;
+};
+
+/**
  * Exposure — enforces the main-agent tool boundary at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
  * (snapshot, click, type, page_exec, …) are hidden from the main agent and
@@ -121,10 +172,10 @@ const personaGate = (tool, _args, ctx) => {
  * effective set can intersect with, but never escalate past, its
  * parent's manifest.
  *
- * @param {Tool} tool @param {any} _args @param {GateContext} ctx
+ * @param {Tool} tool @param {any} args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'>}
  */
-export const exposureGate = (tool, _args, ctx) => {
+export const exposureGate = (tool, args, ctx) => {
   if (ctx?.exposure === 'main') {
     if (isHiddenFromMain(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is runner-only, not available to the main agent` };
@@ -141,6 +192,14 @@ export const exposureGate = (tool, _args, ctx) => {
       return { allowed: false, reason: `'${tool.name}' needs a current ${kind} in this chat — create one first (${create})` };
     }
   }
+  // DESIGN-17: the resident capability tier (flag-gated; see tools/exposure.js).
+  // The WALL behind the advisory descriptor filters — enforced for every
+  // dispatch path so a `spawn_subagent({tools:['app_delete']})` can't escalate.
+  // Extracted to a pure, flag-INJECTED function so the boundary test can prove
+  // the structure with flagOn:true regardless of the source const (the same DI
+  // pattern the dweb descriptor filters use). null = no resident-tier opinion.
+  const resident = residentTierGate(tool, args, ctx, RESIDENT_TAB_AGENTS);
+  if (resident) return resident;
   if (ctx?.toolAllow instanceof Set && !ctx.toolAllow.has(tool.name)) {
     const label = ctx.toolManifestLabel ?? 'manifest';
     return { allowed: false, reason: `'${tool.name}' is excluded by this session's tool manifest (${label})` };

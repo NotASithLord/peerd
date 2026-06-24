@@ -277,4 +277,41 @@ describe('gate composition order', () => {
     expect(exposure?.allowed).toBe(false);
     expect(exposure?.reason.includes('runner-only')).toBe(true);
   });
+
+  // DESIGN-17: the resident capability tier, end-to-end through the dispatcher.
+  // The full-chain analog of the residentTierGate unit proof (tests/peerd-runtime/
+  // exposure.test.ts). Flag-aware so it stays honest whatever RESIDENT_TAB_AGENTS
+  // is set to: with the flag ON it proves a subagent can't escalate into the
+  // mutating tier; with it OFF it proves message_resident fails closed (its
+  // orchestrator isn't wired) AND the mutating tier still reaches the main agent.
+  it('resident tier: enforced at dispatch per the RESIDENT_TAB_AGENTS flag', async () => {
+    const { RESIDENT_TAB_AGENTS } = await import('/shared/flags.js');
+    clearTools();
+    registerTool(makeTool({ name: 'app_delete', sideEffect: 'destructive' }));
+    registerTool(makeTool({ name: 'message_resident', sideEffect: 'write' }));
+    // act + confirm-off so persona/confirmation don't pre-empt the exposure gate.
+    const permission = { mode: 'act', confirmActions: false };
+
+    // A subagent (exposure unset) trying the mutating tier by name.
+    const sub = recorderCtx({ permission }).ctx;
+    const rDelete = await dispatchToolCall({ id: 'a', name: 'app_delete', args: { appId: 'app-x' } }, sub);
+    if (RESIDENT_TAB_AGENTS) {
+      expect(rDelete.ok).toBe(false);
+      expect(errOf(rDelete).startsWith('gate_blocked:exposure:')).toBe(true);
+      expect(metaOf(rDelete).gates.find((g) => g.name === 'exposure')?.reason.includes('resident-only')).toBe(true);
+    } else {
+      // Flag OFF: instance tools stay on the main agent — the resident tier
+      // doesn't fire, so the exposure gate passes app_delete.
+      expect(metaOf(rDelete).gates.find((g) => g.name === 'exposure')?.allowed).toBe(true);
+    }
+
+    // message_resident with the flag OFF must fail closed by name.
+    const main = recorderCtx({ permission, exposure: 'main' }).ctx;
+    const rMsg = await dispatchToolCall({ id: 'b', name: 'message_resident', args: {} }, main);
+    if (!RESIDENT_TAB_AGENTS) {
+      expect(rMsg.ok).toBe(false);
+      expect(errOf(rMsg).startsWith('gate_blocked:exposure:')).toBe(true);
+      expect(metaOf(rMsg).gates.find((g) => g.name === 'exposure')?.reason.includes('not enabled')).toBe(true);
+    }
+  });
 });

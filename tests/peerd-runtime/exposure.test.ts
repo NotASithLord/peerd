@@ -4,8 +4,11 @@ import {
   filterByInstanceState, isInstanceGatedOut, instanceGateKind,
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool,
+  isResidentMutatingTool, residentAllowedTools, isAllowedForResidentKind,
+  residentTargetId, residentTargetIdField, residentDescriptors, filterResidentSurface,
+  EXPOSURE_RESIDENT,
 } from '../../extension/peerd-runtime/tools/exposure.js';
-import { exposureGate as exposureGateRaw } from '../../extension/peerd-runtime/tools/gates.js';
+import { exposureGate as exposureGateRaw, residentTierGate } from '../../extension/peerd-runtime/tools/gates.js';
 
 type ToolT = import('../../extension/shared/tool-types.js').Tool;
 type GateCtxT = import('../../extension/peerd-runtime/tools/gates.js').GateContext;
@@ -164,5 +167,121 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
     for (const n of ['vm_boot', 'js_notebook', 'app_create', 'vm_create', 'app_open']) {
       expect(eg({ name: n }, {}, { exposure: 'main', instanceState: none }).allowed).toBe(true);
     }
+  });
+});
+
+// ── DESIGN-17: resident tab agents — the capability tier ────────────────────
+// The gate's resident logic is a pure, flag-INJECTED function (residentTierGate)
+// so these prove the structure with flagOn:true regardless of the source flag's
+// current value. null = "no resident-tier opinion" (the gate continues).
+const rt = (tool: { name: string }, args: unknown, ctx: object, flagOn: boolean) =>
+  residentTierGate(tool as unknown as ToolT, args, ctx as GateCtxT, flagOn);
+
+describe('DESIGN-17 resident tier — the tool sets', () => {
+  test('the MUTATING tier is what leaves the main agent (reads stay global)', () => {
+    for (const n of ['vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
+      'js_notebook', 'js_write_file', 'js_delete',
+      'app_update', 'app_write_file', 'app_delete_file', 'app_delete', 'edit_file']) {
+      expect(isResidentMutatingTool(n)).toBe(true);
+    }
+    // Reads + entry/catalog tools + js_run stay GLOBAL — NOT tiered (spec).
+    for (const n of ['js_read_file', 'app_read_file', 'app_list_files',
+      'vm_create', 'vm_list', 'js_create', 'js_list', 'js_run',
+      'app_create', 'app_list', 'app_open', 'app_search', 'message_resident']) {
+      expect(isResidentMutatingTool(n)).toBe(false);
+    }
+  });
+
+  test('residentAllowedTools scopes each kind to its own surface (+ reads + edit_file)', () => {
+    expect([...residentAllowedTools('webvm')].sort()).toEqual(
+      ['vm_boot', 'vm_delete', 'vm_import', 'vm_write_file'].sort());
+    expect(isAllowedForResidentKind('app_update', 'app')).toBe(true);
+    expect(isAllowedForResidentKind('app_read_file', 'app')).toBe(true); // reads allowed for its own
+    expect(isAllowedForResidentKind('edit_file', 'app')).toBe(true);
+    expect(isAllowedForResidentKind('edit_file', 'notebook')).toBe(true);
+    expect(isAllowedForResidentKind('edit_file', 'webvm')).toBe(false);   // no vm files via edit_file
+    expect(isAllowedForResidentKind('vm_boot', 'app')).toBe(false);       // foreign kind
+    expect(isAllowedForResidentKind('call_api', 'app')).toBe(false);      // non-env tool
+    expect(isAllowedForResidentKind('vm_boot', undefined as unknown as string)).toBe(false);
+  });
+
+  test('residentTargetId reads the correct per-tool arg (the pin source)', () => {
+    expect(residentTargetIdField('app_delete')).toBe('appId');
+    expect(residentTargetIdField('vm_boot')).toBe('vm');
+    expect(residentTargetIdField('vm_delete')).toBe('vmId');
+    expect(residentTargetIdField('js_delete')).toBe('notebookId');
+    expect(residentTargetIdField('js_notebook')).toBe('notebook');
+    expect(residentTargetIdField('edit_file')).toBe('targetId');
+    expect(residentTargetIdField('vm_write_file')).toBe(null);  // session-default only
+    expect(residentTargetId('app_delete', { appId: 'app-9' })).toBe('app-9');
+    expect(residentTargetId('app_delete', {})).toBeUndefined();
+    expect(residentTargetId('vm_write_file', { path: '/x' })).toBeUndefined();
+  });
+
+  test('residentDescriptors filters to the kind; filterResidentSurface respects the flag', () => {
+    const all = [{ name: 'app_update' }, { name: 'vm_boot' }, { name: 'do' }, { name: 'message_resident' }];
+    expect(residentDescriptors(all, 'app').map((t) => t.name)).toEqual(['app_update']);
+    // flag ON: the mutating tier leaves main, message_resident stays.
+    expect(filterResidentSurface(all, true).map((t) => t.name)).toEqual(['do', 'message_resident']);
+    // flag OFF: status quo — mutating tier stays, message_resident hidden.
+    expect(filterResidentSurface(all, false).map((t) => t.name)).toEqual(['app_update', 'vm_boot', 'do']);
+  });
+});
+
+describe('DESIGN-17 resident tier — the gate (the wall, flagOn:true)', () => {
+  test('a NON-resident (subagent/main/direct) is refused the mutating tier', () => {
+    // THE PROOF: a `spawn_subagent({tools:['app_delete']})` child has exposure
+    // unset → refused at the gate even though the tool name is in its subset.
+    for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'subagent' }]) {
+      const r = rt({ name: 'app_delete' }, {}, ctx, true);
+      expect(r?.allowed).toBe(false);
+      expect(r?.reason).toContain('resident-only');
+    }
+    expect(rt({ name: 'edit_file' }, {}, { exposure: 'main' }, true)?.allowed).toBe(false);
+  });
+
+  test('reads are NOT tiered — a non-resident may still read globally', () => {
+    expect(rt({ name: 'app_read_file' }, {}, {}, true)).toBeNull();
+    expect(rt({ name: 'app_list_files' }, {}, { exposure: 'main' }, true)).toBeNull();
+    expect(rt({ name: 'js_read_file' }, {}, {}, true)).toBeNull();
+  });
+
+  test('a resident may call its own kind; foreign/non-env tools fail closed', () => {
+    const appCtx = { exposure: EXPOSURE_RESIDENT, residentKind: 'app', residentInstanceId: 'app-1' };
+    expect(rt({ name: 'app_update' }, {}, appCtx, true)).toBeNull();          // allowed
+    expect(rt({ name: 'vm_boot' }, {}, appCtx, true)?.allowed).toBe(false);   // foreign kind
+    expect(rt({ name: 'call_api' }, {}, appCtx, true)?.allowed).toBe(false);  // non-env
+    expect(rt({ name: 'spawn_subagent' }, {}, appCtx, true)?.allowed).toBe(false);
+  });
+
+  test('the per-instance pin refuses a sibling id, allows the bound id / no id', () => {
+    const ctx = { exposure: EXPOSURE_RESIDENT, residentKind: 'app', residentInstanceId: 'app-1', residentInstanceName: 'my-app' };
+    expect(rt({ name: 'app_delete' }, { appId: 'app-2' }, ctx, true)?.allowed).toBe(false); // sibling
+    expect(rt({ name: 'app_delete' }, { appId: 'app-1' }, ctx, true)).toBeNull();           // own id
+    expect(rt({ name: 'app_delete' }, { appId: 'my-app' }, ctx, true)).toBeNull();          // own name
+    expect(rt({ name: 'app_delete' }, {}, ctx, true)).toBeNull();                           // wrapper injects
+    // a webvm resident pinned by name-or-id arg
+    const vm = { exposure: EXPOSURE_RESIDENT, residentKind: 'webvm', residentInstanceId: 'vm-1' };
+    expect(rt({ name: 'vm_boot' }, { vm: 'vm-2' }, vm, true)?.allowed).toBe(false);
+    expect(rt({ name: 'vm_boot' }, { vm: 'vm-1' }, vm, true)).toBeNull();
+  });
+
+  test('message_resident: refused by name with flag OFF, allowed (non-mutating) with flag ON', () => {
+    expect(rt({ name: 'message_resident' }, {}, {}, false)?.allowed).toBe(false);
+    expect(rt({ name: 'message_resident' }, {}, {}, true)).toBeNull();
+    // flag OFF: the mutating tier is NOT refused (instance tools stay on main).
+    expect(rt({ name: 'app_delete' }, {}, {}, false)).toBeNull();
+    expect(rt({ name: 'vm_boot' }, {}, { exposure: 'main' }, false)).toBeNull();
+  });
+
+  test('exposureGate WIRES residentTierGate with the real flag (flag-OFF proof)', () => {
+    // The real gate reads the source flag (OFF by default), so this proves the
+    // exposureGate→residentTierGate wiring end to end with today's flag: a
+    // hallucinated message_resident fails closed (its orchestrator isn't wired),
+    // while the mutating tier stays on the main agent (no regression).
+    const r = eg({ name: 'message_resident' }, {}, {});
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toContain('not enabled');
+    expect(eg({ name: 'app_update' }, {}, { exposure: 'main', instanceState: { app: true } }).allowed).toBe(true);
   });
 });
