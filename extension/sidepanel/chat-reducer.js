@@ -342,7 +342,7 @@ export const reduceChat = (state, msg) => {
     case 'async-tasks/update':
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
-    case 'state':
+    case 'state': {
       // Full snapshot. Replace, seeding the cost meter from the persisted
       // session tally + the configured limit. (Voice-restore is the surface's
       // job — see the module header.) why preserve pendingConfirm: confirm
@@ -354,10 +354,22 @@ export const reduceChat = (state, msg) => {
       // switched-to (idle) chat — a stale "⏳ Rate limited" control in the wrong
       // conversation. A switched-to chat is never mid-retry from the previous
       // one; an active retry in THIS chat re-asserts via the next pause/delta.
-      return { ...state, ...msg.state, pendingConfirm: state.pendingConfirm, lastError: null, rateLimit: null, cost: { ...state.cost,
+      // why limitReached + the spend-limit lastError are SESSION-scoped (not
+      // per-push): they are a halt state ("raise your limit to continue") that
+      // must persist until the user acts. A 'state' push fires on a Plan/Act
+      // toggle, /system, settings — not just a session switch — so blanket-
+      // clearing them erased the actionable halt guidance while the agent was
+      // still halted. Clear only on an ACTUAL session switch; within the same
+      // session the next send clears them via turn/streaming.
+      const sessionChanged = msg.state?.session?.sessionId !== state.session.sessionId;
+      const stillHalted = !sessionChanged && state.cost.limitReached;
+      const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
+      return { ...state, ...msg.state, pendingConfirm: state.pendingConfirm,
+        lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
-        limitReached: false } };
+        limitReached: stillHalted } };
+    }
     case 'turn/state':
       // Per-session guard: a turn streaming in a BACKGROUND chat must not snap
       // the view to its transcript. Null current = fresh surface adopting it.

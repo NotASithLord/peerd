@@ -81,6 +81,26 @@ describe('reduceChat', () => {
     expect(switched.rateLimit).toBe(null);
   });
 
+  // The spend-limit halt ("raise your limit to continue") is a per-SESSION
+  // state, not a per-push one: a 'state' push from a Plan/Act toggle or
+  // /system must NOT erase it while the same session is still halted — but a
+  // switch to a different session clears it.
+  test('a same-session state push preserves the spend-limit halt; a session switch clears it', () => {
+    const halted = reduceChat(withSession('A'), { type: 'turn/spend-limit-reached', sessionId: 'A', limitUsd: 5 });
+    expect(halted.cost.limitReached).toBe(true);
+    expect(halted.lastError).toBe('spend-limit-reached');
+
+    // same session (e.g. a settings / mode-toggle push) → halt preserved
+    const sameSession = reduceChat(halted, { type: 'state', state: { session: { sessionId: 'A', messages: [] } } });
+    expect(sameSession.cost.limitReached).toBe(true);
+    expect(sameSession.lastError).toBe('spend-limit-reached');
+
+    // switching to a different session → halt cleared
+    const switched = reduceChat(halted, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } });
+    expect(switched.cost.limitReached).toBe(false);
+    expect(switched.lastError).toBe(null);
+  });
+
   test('async-tasks/update keys the snapshot by parent session', () => {
     const s1 = reduceChat(INITIAL_STATE, { type: 'async-tasks/update', parentSessionId: 'p1', tasks: [{ taskId: 'as-1' }] });
     expect(s1.asyncTasks.p1).toEqual([{ taskId: 'as-1' }]);
