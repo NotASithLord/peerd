@@ -58,6 +58,25 @@ describe('parseCheckVerdict', () => {
   });
 });
 
+describe('RUNNER_PROMPT untrusted-content contract', () => {
+  // why: the runner reads the open web. The DOM tools already fence every
+  // result in <untrusted_web_content>; this asserts the PROMPT teaches the
+  // runner what that fence is, that the attack vector is an embedded
+  // instruction, and the ignore→flag→exclude discipline for one.
+  test('names the <untrusted_web_content> fence the runner actually receives', () => {
+    expect(RUNNER_PROMPT).toContain('<untrusted_web_content');
+  });
+  test('names the attack vector explicitly as a prompt injection', () => {
+    expect(RUNNER_PROMPT).toContain('prompt injection');
+    expect(RUNNER_PROMPT).toContain('THE ATTACK VECTOR');
+  });
+  test('carries the ignore → flag → exclude directive', () => {
+    expect(RUNNER_PROMPT).toContain('IGNORE it');
+    expect(RUNNER_PROMPT).toContain('FLAG it');
+    expect(RUNNER_PROMPT).toContain('EXCLUDE it');
+  });
+});
+
 const makeCtx = (over: any = {}) => {
   const calls: any[] = [];
   const ctx = {
