@@ -24,9 +24,11 @@ to the model provider of your choice. **No backend, no telemetry, no
 cloud component in the data path.**
 
 <p align="center">
-  <video src="https://github.com/NotASithLord/peerd/raw/main/docs/store/assets/demo.mp4" controls muted width="720">
-    <a href="https://github.com/NotASithLord/peerd/raw/main/docs/store/assets/demo.mp4">▶ Watch the peerd demo</a>
-  </video>
+  <a href="https://github.com/NotASithLord/peerd/raw/main/docs/store/assets/demo.mp4">
+    <img src="docs/store/assets/demo-poster.png" alt="Watch the peerd demo" width="720">
+  </a>
+  <br>
+  <em>▶ <a href="https://github.com/NotASithLord/peerd/raw/main/docs/store/assets/demo.mp4">Watch the demo</a></em>
 </p>
 
 The bet is structural: peerd uses *the browser* as its runtime, its
