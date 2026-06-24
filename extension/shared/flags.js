@@ -34,11 +34,13 @@ export const REMOTE_SKILL_INSTALL = false;
  * per-environment tooling leaves the main agent (context optimized, non-eroding)
  * and "who may touch this instance" becomes structural instead of conventional.
  *
- * OFF for now: this re-shapes the core actor structure (the main agent stops
- * driving instances directly and delegates via message_resident), so it ships
- * behind a source flag for battle-testing before it's exposed. With this false,
- * the gate/descriptor/prompt/orchestrator changes are all inert — instance tools
- * stay on the main agent exactly as today, and no resident sessions are minted.
- * Source-flip + reload to enable (no runtime/UI toggle, not channel-config).
+ * ON for this branch: the actor structure is the default reality here — the
+ * main agent orchestrates and delegates instance work to per-instance residents
+ * via message_resident, the mutating tier leaves the main agent, and the prompt
+ * surfaces (main orchestrator framing + per-kind resident prompts) render their
+ * resident-world variants. Flip back to false to return to the status quo (the
+ * gate/descriptor/prompt/orchestrator changes all go inert and instance tools
+ * stay on the main agent exactly as before). Source-flip + reload (no runtime/UI
+ * toggle, not channel-config).
  */
-export const RESIDENT_TAB_AGENTS = false;
+export const RESIDENT_TAB_AGENTS = true;

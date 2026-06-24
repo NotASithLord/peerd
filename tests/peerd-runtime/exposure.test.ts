@@ -149,8 +149,11 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
   });
 
   test('allows the gated op once the instance exists', () => {
-    expect(eg({ name: 'app_write_file' }, {}, { exposure: 'main', instanceState: { app: true } }).allowed).toBe(true);
-    expect(eg({ name: 'vm_write_file' }, {}, { exposure: 'main', instanceState: { webvm: true } }).allowed).toBe(true);
+    // With RESIDENT_TAB_AGENTS on, the MUTATING ops are resident-only even with an
+    // instance present; the READ ops (which stay on the main agent) are what
+    // instance-gating still admits once their kind exists.
+    expect(eg({ name: 'app_read_file' }, {}, { exposure: 'main', instanceState: { app: true } }).allowed).toBe(true);
+    expect(eg({ name: 'js_read_file' }, {}, { exposure: 'main', instanceState: { notebook: true } }).allowed).toBe(true);
   });
 
   test('fails closed when instanceState is absent on the main turn', () => {
@@ -158,13 +161,18 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
   });
 
   test('never instance-gates a non-main context (runner / subagent hold full tools)', () => {
-    expect(eg({ name: 'app_write_file' }, {}, {}).allowed).toBe(true);
-    expect(eg({ name: 'vm_write_file' }, {}, { exposure: null }).allowed).toBe(true);
+    // Instance gating is main-only; a non-main ctx is never instance-gated. Uses
+    // READ ops (non-tiered) so the DESIGN-17 resident tier doesn't mask the point.
+    expect(eg({ name: 'app_read_file' }, {}, {}).allowed).toBe(true);
+    expect(eg({ name: 'js_read_file' }, {}, { exposure: null }).allowed).toBe(true);
   });
 
-  test('always-on ops (auto-create + entry) pass even with no instances', () => {
+  test('always-on ops (create/entry) pass on the main agent even with no instances', () => {
     const none = { webvm: false, notebook: false, app: false };
-    for (const n of ['vm_boot', 'js_notebook', 'app_create', 'vm_create', 'app_open']) {
+    // The create/list/open entry tools stay on the main agent (it bootstraps an
+    // instance, then delegates). The RUN tools (vm_boot/js_notebook) are now
+    // resident-only — proven in the resident-tier gate tests below.
+    for (const n of ['app_create', 'vm_create', 'vm_list', 'js_create', 'app_open']) {
       expect(eg({ name: n }, {}, { exposure: 'main', instanceState: none }).allowed).toBe(true);
     }
   });
@@ -276,14 +284,15 @@ describe('DESIGN-17 resident tier — the gate (the wall, flagOn:true)', () => {
     expect(rt({ name: 'vm_boot' }, {}, { exposure: 'main' }, false)).toBeNull();
   });
 
-  test('exposureGate WIRES residentTierGate with the real flag (flag-OFF proof)', () => {
-    // The real gate reads the source flag (OFF by default), so this proves the
-    // exposureGate→residentTierGate wiring end to end with today's flag: a
-    // hallucinated message_resident fails closed (its orchestrator isn't wired),
-    // while the mutating tier stays on the main agent (no regression).
-    const r = eg({ name: 'message_resident' }, {}, {});
+  test('exposureGate WIRES residentTierGate with the real flag (flag ON for this branch)', () => {
+    // The real gate reads the source flag (ON for this branch), so this proves the
+    // exposureGate→residentTierGate wiring end to end: message_resident is allowed
+    // (the non-mutating delegation channel), while the mutating tier is refused on
+    // the main agent — it must go through the instance's resident. The flag-OFF
+    // structure stays proven by the injected rt(..., false) tests above.
+    expect(eg({ name: 'message_resident' }, {}, { exposure: 'main' }).allowed).toBe(true);
+    const r = eg({ name: 'app_update' }, {}, { exposure: 'main', instanceState: { app: true } });
     expect(r.allowed).toBe(false);
-    expect(r.reason).toContain('not enabled');
-    expect(eg({ name: 'app_update' }, {}, { exposure: 'main', instanceState: { app: true } }).allowed).toBe(true);
+    expect(r.reason).toContain('resident-only');
   });
 });

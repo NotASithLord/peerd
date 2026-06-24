@@ -2,9 +2,13 @@
 
 Implementation record for DESIGN-17 P0 "resident tab agents"
 (`DESIGN-17-resident-agents.md` is the design; this is what landed and why).
-**Behind `shared/flags.js` `RESIDENT_TAB_AGENTS` (default OFF)** — with the flag
-off the gate/descriptor/prompt/orchestrator changes are inert and instance tools
-stay on the main agent exactly as before.
+**Gated by `shared/flags.js` `RESIDENT_TAB_AGENTS`** — with the flag off the
+gate/descriptor/prompt/orchestrator changes are inert and instance tools stay on
+the main agent exactly as before. **On this branch the flag is ON by default**
+(battle-testing the actor structure as the live reality). The flag is a SOURCE
+const, not channel-config, so it applies to every build — a heads-up for the
+release decision when this merges (store/preview alike get residents while it's
+on). Flip it back to `false` for the status quo.
 
 ## What landed (the P0 deliverables)
 
@@ -79,15 +83,46 @@ stay on the main agent exactly as before.
    request/response with a per-call timeout, so there's nothing to generalize
    beyond the tracker-mapping drop already done.
 
+9. **The prompts are scoped to the actor structure (flag ON).** The code already
+   moved the mutating tier off the main agent's descriptor list
+   (`filterResidentSurface`); the PROSE now matches. `loop/system-prompt.js`
+   `applyResidentOrchestration(base)` is a pure, flag-gated transform that
+   rewrites the main template in place — keyed on the template's OWN section
+   markers (so flag-off it never runs and the base stays byte-identical):
+   (a) the top "grow it file by file" instruction → "create the shell, delegate
+   the build"; (b) the webvm/notebook/app/edit tool groups → a create/open/read
+   listing + a `resident` group introducing `message_resident`; (c) the
+   "Sandboxes" mechanics section → orchestrator framing (pick a kind, bootstrap,
+   delegate a GOAL); (d) the deep "webvm specifics" section → removed. That's
+   ~6k chars (~30%) off the ALWAYS-ON main prompt. The deep per-kind lore isn't
+   lost — it's relocated into `residentBlock(kind)` (`RESIDENT_KIND_LORE`: the VM
+   shell wrappers/quirks/flows, the App Mithril/iterative/chunking rules, the
+   Notebook worker/OPFS specifics), so it loads LAZILY, only on a resident turn
+   for that kind — the spec's "purpose-tuned agents" win. The resident block also
+   carries a tool-scope disclaimer ("your ONLY tools are this environment's;
+   ignore the orchestrator-only sections above") since a resident still renders
+   the shared base, but sees only its kind's tools (`residentDescriptors`).
+   Anchor-drift guard: `tests/peerd-runtime/resident-prompt.test.ts` runs the
+   transform on the LIVE template and asserts it fires + shrinks (a near-miss
+   anchor would silently no-op and leak the lore back onto the main prompt).
+
 ## Tests
 
 - `tests/peerd-runtime/exposure.test.ts` — the tool sets + the gate
   (`residentTierGate`, flag-injected) in both directions + the per-instance pin +
-  reads-stay-global + the flag-OFF wiring proof.
+  reads-stay-global. The real-gate (`eg`) wiring proofs now assert the flag-ON
+  reality (mutating tier refused on main; `message_resident` allowed); flag-OFF
+  stays proven by the injected `rt(..., false)` tests.
+- `tests/peerd-runtime/resident-prompt.test.ts` — the orchestrator transform
+  (regions rewritten/removed, sections kept, no-op without anchors), the per-kind
+  resident lore + disclaimer, and the live-template anchor-drift guard.
 - `tests/peerd-runtime/resident-messaging.test.ts` — sender gate, happy-path
   correlation, error-still-wakes, both runaway caps.
 - `extension/tests/unit/peerd-runtime/dispatcher.test.js` — the full-chain
   boundary test (flag-aware).
+- The manifest gate tests (`tool-manifests.test.ts`) use a NON-tiered tool
+  (`call_api`/`js_run`) so they exercise the manifest refusal itself — the
+  resident tier now precedes the manifest check for a mutating tool.
 
 ## Still ahead (P1+, not in this change)
 
