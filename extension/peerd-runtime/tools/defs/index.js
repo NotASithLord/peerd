@@ -54,6 +54,7 @@ import { editFileTool }               from './edit-file.js';
 import { spawnSubagentTool }          from './spawn-subagent.js';
 import { subagentTasksTool }          from './subagent-tasks.js';
 import { subagentCancelTool }         from './subagent-cancel.js';
+import { messageResidentTool }        from './message-resident.js';
 import { doTool }                      from './do.js';
 import { getTool }                     from './get.js';
 import { checkTool }                   from './check.js';
@@ -124,6 +125,7 @@ export {
   spawnSubagentTool,
   subagentTasksTool,
   subagentCancelTool,
+  messageResidentTool,
   // high-level browser tools (do/get/check — runner layer over the DOM engine)
   doTool,
   getTool,
@@ -203,6 +205,11 @@ export const BUILTIN_TOOLS = Object.freeze([
   spawnSubagentTool,
   subagentTasksTool,
   subagentCancelTool,
+  // resident (DESIGN-17 — message the agent that owns a tab-hosted instance).
+  // Registered always; exposed + wired (ctx.messageResident) ONLY when
+  // RESIDENT_TAB_AGENTS is on (the exposure gate refuses it by name when off,
+  // and filterResidentSurface hides it from the main descriptor list).
+  messageResidentTool,
   // high-level browser tools — the runner layer over the DOM engine. After the
   // exposure cutover these are the ONLY browser tools the MAIN agent sees.
   doTool,
