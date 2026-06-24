@@ -15,10 +15,10 @@
 
 **peerd is the first AI agent harness native to the browser.** It's a
 Chrome/Firefox extension that runs a full agent loop *inside* the
-browser you already use — with the tabs and sessions you already have.
+browser you already use, with your existing tabs and sessions.
 It reads and drives your pages, spins up sandboxed compute (JS
 Notebooks, full Linux VMs compiled to WebAssembly, personal client-side
-apps), and — on the preview channel — shares what it builds over a
+apps), and (on the preview channel) shares what it builds over a
 peer-to-peer WebRTC network built for agent-to-agent communication. BYOK
 to the model provider of your choice. **No backend, no telemetry, no
 cloud component in the data path.**
@@ -35,26 +35,24 @@ https://github.com/user-attachments/assets/d2e4c285-6952-4c95-bf5a-d06087de084d
 
 </p>
 
-peerd uses *the browser* as its runtime, its
-hypervisor, and its security model. It inherits decades of hardened
-browser platform work — V8 isolates for sandboxing, WebCrypto for the
-vault, WebAuthn passkeys to unlock it, opaque-origin iframes, Subresource
-Integrity — and writes zero lines of its own cryptographic or
-process-isolation code. The agent that holds your keys never reads a raw
-page; a disposable runner with no keys and no network does, and its
-output comes back fenced as untrusted. And the agent never takes its own
-word for success: every action it drives is verified against the live page
-before it counts as done — the model proposes, the browser decides. (More
-at [peerd.ai](https://peerd.ai).)
+peerd uses *the browser* as its runtime and its security model. It builds
+on decades of hardened browser platform work (V8 isolates for sandboxing,
+WebCrypto for the vault, WebAuthn passkeys to unlock it, opaque-origin
+iframes, Subresource Integrity) and writes none of its own cryptographic
+or process-isolation code. The agent that holds your keys never reads a
+raw page; a disposable runner with no keys and no network does, and its
+output comes back fenced as untrusted. Every action the agent drives is
+verified against the live page before it counts as done. (More at
+[peerd.ai](https://peerd.ai).)
 
-**Status: 0.x — experimental beta.** It works and the initial feature
-buildout is complete and integrated (see `STATUS.md`), but the surface
-is still moving: **breaking changes are likely**, storage formats may
-shift, and it drives your browser and holds your API keys — use it with
-care. There is no "V1" commitment; versions stay in the 0.x range until
-the surface stabilizes.
+**Status: 0.x, experimental beta.** The initial feature buildout is
+complete and integrated (see `STATUS.md`), but the surface is still
+moving: **breaking changes are likely**, storage formats may shift, and
+it drives your browser and holds your API keys, so use it with care.
+There is no "V1" commitment; versions stay in the 0.x range until the
+surface stabilizes.
 
-For the full, itemized list of what's shipped — categorized by module —
+For the full, itemized list of what's shipped, categorized by module,
 see [`FEATURES.md`](FEATURES.md).
 
 ## Install
@@ -72,9 +70,9 @@ preview/dev advanced automation path.
 GitHub Releases may include signed preview artifacts. If there is no
 release attached yet, use the source install path below.
 
-The preview package includes the decentralized web (dweb) layer —
+The preview package includes the decentralized web (dweb) layer:
 peer-to-peer dwapps between peerd instances. It's intended for
-contributors and early testers — the dweb protocol is research-grade
+contributors and early testers, since the dweb protocol is research-grade
 and subject to change. Most users want one of the two store packages
 above. The preview installs alongside the store package as a separate
 extension ("peerd preview") with its own isolated storage; move state
@@ -82,12 +80,12 @@ between them explicitly via **Settings → Export & import**.
 
 Preview package install paths (Firefox is the smoother of the two):
 
-- **Firefox:** click `peerd-preview-firefox.xpi` on the release page —
-  it's AMO-signed, installs like any extension, and auto-updates.
+- **Firefox:** click `peerd-preview-firefox.xpi` on the release page.
+  It's AMO-signed, installs like any extension, and auto-updates.
 - **Chrome on macOS / Windows (recommended): load the zip unpacked.**
   Chrome hard-disables off-store CRX installs on these platforms
-  ("may have been added without your knowledge", enable toggle locked)
-  — and field testing showed even an `ExtensionInstallAllowlist`
+  ("may have been added without your knowledge", enable toggle locked),
+  and field testing showed even an `ExtensionInstallAllowlist`
   policy visible in `chrome://policy` does NOT unlock it on an
   unmanaged machine (Chrome wants MDM-grade management). So don't
   fight it: download `peerd-preview-chrome.zip`, unzip it, enable
@@ -112,7 +110,7 @@ Preview package install paths (Firefox is the smoother of the two):
 
 ## Getting started
 
-peerd has **no build step** — you load the `extension/` folder straight
+peerd has **no build step**: you load the `extension/` folder straight
 into Chrome as it is on disk. You need a Chromium-based browser (Chrome,
 Edge, Brave, Arc, …) and a model to talk to: a key from
 [Anthropic](https://console.anthropic.com/) and/or
@@ -133,7 +131,7 @@ cd peerd
 1. Open `chrome://extensions`.
 2. Turn on **Developer mode** (toggle, top-right).
 3. Click **Load unpacked**.
-4. Select the **`extension/`** folder inside the repo — *not* the repo
+4. Select the **`extension/`** folder inside the repo, *not* the repo
    root. (The folder with `manifest.json` in it.)
 
 peerd now appears in your extensions list. Click the puzzle-piece icon
@@ -141,7 +139,7 @@ in the toolbar and **pin** peerd so its icon is always visible.
 
 **3. Open peerd and set up the vault**
 
-Click the peerd toolbar icon — the side panel opens. On first run you
+Click the peerd toolbar icon and the side panel opens. On first run you
 create a local vault: unlock with **Touch ID / a passkey** (recommended)
 or a recovery passphrase. Keys, chat history, and the audit log are all
 encrypted on this device; nothing leaves your machine except the calls
@@ -151,7 +149,7 @@ to your model provider.
 
 Open **Settings** (gear icon) → **API keys**. Paste a key for
 **Anthropic** (`sk-ant-…`) and/or **OpenRouter** (`sk-or-…`). You can set
-both at once — each is stored independently. Choose a default under
+both at once, each stored independently. Choose a default under
 *Default model for new chats*, and switch the model per chat from the
 picker above the message box.
 
@@ -169,12 +167,12 @@ any open VM/JS/App tabs reload with it.
 
 **Firefox (temporary).** `about:debugging#/runtime/this-firefox` →
 **Load Temporary Add-on** → pick `extension/manifest.json`. Re-load on
-each edit. Firefox parity is still being polished — Chrome is the
+each edit. Firefox parity is still being polished; Chrome is the
 primary target for now.
 
 **Generated files.** `extension/manifest.json` and
 `extension/shared/channel-config.js` are GENERATED (the checked-in copies
-are the dev defaults — preview channel, dweb on). Don't hand-edit
+are the dev defaults: preview channel, dweb on). Don't hand-edit
 them; change `manifests/*.json` or `packaging/default-settings.mjs` and run
 `bun run gen:dev`. CI fails if they drift.
 
@@ -183,8 +181,8 @@ and `debugger` on the preview/dev channels) because driving arbitrary
 tabs and reading the page the agent is acting on is the whole point. Each
 permission, why it's needed, and what the store build strips is spelled
 out in
-[`docs/store/PERMISSION-JUSTIFICATIONS.md`](docs/store/PERMISSION-JUSTIFICATIONS.md)
-— and the trust boundaries (BYOK vault, egress allowlist,
+[`docs/store/PERMISSION-JUSTIFICATIONS.md`](docs/store/PERMISSION-JUSTIFICATIONS.md),
+and the trust boundaries (BYOK vault, egress allowlist,
 untrusted-content handling, no telemetry) in [`SECURITY.md`](SECURITY.md).
 
 ## Project conventions (the short version)
@@ -194,20 +192,20 @@ untrusted-content handling, no telemetry) in [`SECURITY.md`](SECURITY.md).
 - ES modules only. Strict mode by default.
 - Pure functions and reducers over classes. Classes only where lifecycle is
   real (vault, VM, ports).
-- `safeFetch` / `webFetch` for all outbound HTTP — bare `fetch` is forbidden.
+- `safeFetch` / `webFetch` for all outbound HTTP; bare `fetch` is forbidden.
 - Comments explain *why*, not *what*. The codebase is security-sensitive
   and is meant to be read carefully.
 
 The full version of these conventions and the architectural rationale
 lives in `CLAUDE.md` (orientation), `ARCHITECTURE.md` (module
-organization), and `DESIGN.md` (the full technical design record —
+organization), and `DESIGN.md` (the full technical design record:
 vault crypto, dispatcher gates, prompt-injection defenses, the MV3
 keepalive trick; long, historical, and worth searching before
 reopening a settled question).
 
 ## The five modules
 
-The five-letter wordmark *is* the architecture — each colored letter is
+The five-letter wordmark *is* the architecture: each colored letter is
 one top-level module. **Each module has its own README** with how it
 works today, its public API, known limitations, and TODOs:
 
@@ -226,11 +224,11 @@ module's `index.js`, never deep paths; nothing outside
 
 ## Trust boundaries
 
-peerd's safety is *who is allowed to do what* — small, legible boundaries
+peerd's safety is *who is allowed to do what*: small boundaries
 enforced by the browser platform, not by peerd's own crypto. Two
 principles run through all of it: **the agent that holds your keys never
 touches a raw page or runs untrusted code**, and **the agent never gets the
-final word on correctness — every action is verified against the live page
+final word on correctness; every action is verified against the live page
 before it counts as done.**
 
 | Actor | Trusted with | Never |
@@ -242,10 +240,9 @@ before it counts as done.**
 | **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
 
-The shape is *proposes vs. decides*: the AI proposes and drives; the
-browser platform (WebCrypto vault, WebAuthn unlock, V8 isolates, SRI) and
-the live DOM are what actually decide. Full detail in
-[`SECURITY.md`](SECURITY.md) and `DESIGN.md`.
+The AI proposes and drives; the browser platform (WebCrypto vault,
+WebAuthn unlock, V8 isolates, SRI) and the live DOM decide what actually
+happens. Full detail in [`SECURITY.md`](SECURITY.md) and `DESIGN.md`.
 
 ## Documentation
 
@@ -294,26 +291,26 @@ peerd/
 peerd ships from this one tree in **two channels**: `peerd` (Chrome Web
 Store / Firefox Add-ons, no dweb code in the artifact) and
 `peerd preview` (GitHub Releases, dweb enabled, signed,
-auto-updating). Same source, same version, same release — the channel
+auto-updating). Same source, same version, same release; the channel
 only decides whether the dweb module ships. `PACKAGING.md` has the
 whole story.
 
-Cross-module imports go through each module's `index.js` — never deep
+Cross-module imports go through each module's `index.js`, never deep
 paths. ESLint enforces. Within a module, deep imports are fine.
 
 ## Execution instances
 
-`peerd-engine` hosts Sandboxes — four execution kinds (taxonomy in
+`peerd-engine` hosts Sandboxes: four execution kinds (taxonomy in
 DESIGN.md §8.5). Three are discrete, persistent browser tabs the user can
 see, focus, and close, grouped under "peerd" in the tab strip and
 surviving browser restarts: the WebVM, the Notebook, and the App. The
 fourth, the headless worker (`js_run`), runs the Notebook's sealed worker
-offscreen with no tab — ephemeral, for the agent's own quick compute. The
+offscreen with no tab: ephemeral, for the agent's own quick compute. The
 agent picks the lightest kind that fits the task.
 
-**WebVM** — CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB
-overlay), own bash, own POSIX. ~10s first boot. The heavy hitter; use
-when you need real binaries, a shell, multi-language stacks.
+**WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB
+overlay), own bash, own POSIX. ~10s first boot. Use it when you need
+real binaries, a shell, or multi-language stacks.
 
 ```
 vm_list   vm_create   vm_boot   vm_import   vm_write_file   vm_delete
@@ -323,24 +320,24 @@ HTTP egress from the VM (curl / wget / git clone) is intercepted by
 bash function wrappers that route every request through `peerd-egress`
 before it leaves the browser.
 
-**Notebook** — a sealed Web Worker with its own JS realm and an OPFS file
+**Notebook**: a sealed Web Worker with its own JS realm and an OPFS file
 tree, in a visible tab. ~hundreds of ms boot. `peerd.egress.fetch` is the
 worker's only network, routed through `peerd-egress` so it's honest. Each
 `js_notebook` run spawns a fresh worker, so in-memory state (`globalThis`,
-`let`/`const`) does NOT carry between runs — persist via
+`let`/`const`) does NOT carry between runs; persist via
 `peerd.self.writeFile`/`readFile` to the OPFS file tree.
 
 ```
 js_list   js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
 ```
 
-**Headless worker** — the same sealed worker as a Notebook, but headless:
+**Headless worker** is the same sealed worker as a Notebook, but headless:
 `js_run` runs it in the offscreen document with no tab, ephemeral scratch
 discarded after. It's the agent's own quick compute and peerd's code mode
 (one script instead of a chain of tool/MCP calls), not a workspace you
-watch — a distinct kind from the Notebook, same substrate.
+watch. A distinct kind from the Notebook, same substrate.
 
-**App** — a stored HTML document the agent built for the user, rendered
+**App**: a stored HTML document the agent built for the user, rendered
 in a sandboxed iframe (own opaque origin, no extension access).
 Metadata in `chrome.storage.local`; body in IndexedDB; substring
 search across name, tags, and body. `app_update` auto-reloads the open
@@ -354,17 +351,17 @@ app_list   app_create   app_update   app_open   app_search   app_delete
 
 Two surfaces, different jobs (see `CLAUDE.md`):
 
-**In-browser** — things that need a real browser (DOM, `chrome.*`, IDB,
+**In-browser**: things that need a real browser (DOM, `chrome.*`, IDB,
 side-panel components, the SW). Open
 `chrome-extension://<ext-id>/tests/runner.html` in a tab and refresh to
 re-run. Tiny custom framework covering the vault, the tool dispatcher,
 introspection tools, provider streaming + tool_use, the
 session store, agent loop, denylist matcher, egress, and more. The same
 suite runs headless in CI via the CDP harness
-(`scripts/cdp/run-inbrowser-tests.mjs` — headless Chrome over the
+(`scripts/cdp/run-inbrowser-tests.mjs`, headless Chrome over the
 DevTools Protocol, no MCP).
 
-**Bun** — pure logic that runs without a browser (registries, the module
+**Bun**: pure logic that runs without a browser (registries, the module
 resolver, the Markdown renderer, the OpenAI/OpenRouter format layer).
 Fast and runnable from the terminal:
 
@@ -374,24 +371,24 @@ bun test ./tests
 ```
 
 (Bun is only needed for these terminal tests and for re-vendoring
-third-party deps — running the extension itself needs no toolchain at
+third-party deps; running the extension itself needs no toolchain at
 all.)
 
-**Types — JSDoc + `// @ts-check`, mandatory for browser files.** The
+**Types: JSDoc + `// @ts-check`, mandatory for browser files.** The
 extension is no-build vanilla JS, so types come from JSDoc checked by a
 `// @ts-check` directive, not a `.ts` toolchain. `bun run typecheck`
 (strict `tsc`) checks every annotated file; `bun run check:tscheck` is a
 CI gate on coverage. **Every browser file (`extension/**/*.js`) now
-carries `// @ts-check` — 100% — and it is required on new ones:** add the
+carries `// @ts-check` (100%), and it is required on new ones:** add the
 directive and make the file type-clean (`bun run typecheck`), or CI
-fails. (The Bun tests under `tests/` are real TypeScript — Bun runs `.ts`
-directly; only code the browser loads is JSDoc-on-JS.)
+fails. (The Bun tests under `tests/` are real TypeScript, since Bun runs
+`.ts` directly; only code the browser loads is JSDoc-on-JS.)
 
 ## Open-source components
 
 peerd stands on a lot of excellent open-source work. The MV3 CSP
 forbids remote script execution (`script-src 'self' 'wasm-unsafe-eval'`),
-so every third-party runtime dependency is **vendored** — committed
+so every third-party runtime dependency is **vendored**: committed
 pre-built under `extension/vendor/`, pinned to a version, and SHA-verified
 by a `scripts/vendor-*.sh` (or `.ts`) re-vendor step. Each directory
 carries a `SOURCE.txt` recording the upstream, the pinned version, the
@@ -435,34 +432,34 @@ the runtime as a convenience and makes no licensing grant. If you run,
 fork, distribute, or build a commercial offering on peerd, obtaining
 whatever CheerpX license your use requires is your responsibility, not
 peerd's** — contact Leaning Technologies before any commercial launch.
-² Local in-browser WebGPU inference is **early but proven** — one model
+² Local in-browser WebGPU inference is **early but proven**: one model
 (Gemma-4-E2B) ships behind an opt-in download, WebGPU-only; broader model
 support is staged. Design notes: `docs/LOCAL-INFERENCE.md`.
 
 ### Models and data fetched at runtime
 
 These are **data, not script**, so they're fetched lazily on first use
-and cached locally (IndexedDB / OPFS) rather than shipped in-package — but
+and cached locally (IndexedDB / OPFS) rather than shipped in-package, but
 they're open assets worth crediting:
 
-- **CheerpX Debian image** — CheerpX's stock Debian `ext2` disk,
+- **CheerpX Debian image**: CheerpX's stock Debian `ext2` disk,
   streamed lazily over WebSocket from `disks.webvm.io` (the only relaxed
   `connect-src` origin). The disk *content* is unmodified Debian under
-  Debian's own (free) licensing — a separate concern from the proprietary
+  Debian's own (free) licensing, a separate concern from the proprietary
   CheerpX runtime that streams it (note ¹ above).
-- **Moonshine STT models** — [`UsefulSensors/moonshine`](https://huggingface.co/UsefulSensors/moonshine)
+- **Moonshine STT models**: [`UsefulSensors/moonshine`](https://huggingface.co/UsefulSensors/moonshine)
   ONNX weights (the `base` variant, ~250 MB), SRI-pinned to specific
   Hugging Face commits (`peerd-runtime/voice/model-store.js`).
-- **Silero VAD model** — `silero_vad` ONNX weights, served same-origin
+- **Silero VAD model**: `silero_vad` ONNX weights, served same-origin
   from the vendored `vad-web` package.
-- **Gemma on-device model** — [`onnx-community/gemma-4-E2B-it-ONNX`](https://huggingface.co/onnx-community/gemma-4-E2B-it-ONNX)
+- **Gemma on-device model**: [`onnx-community/gemma-4-E2B-it-ONNX`](https://huggingface.co/onnx-community/gemma-4-E2B-it-ONNX)
   weights (~1.3 GB), the model behind the early on-device WebGPU runner.
   It's Google's **Gemma** converted to ONNX by the onnx-community /
   **Xenova** ([Transformers.js](https://github.com/huggingface/transformers.js))
   ecosystem, downloaded opt-in and run in the offscreen doc
   (`offscreen/local-model.js`). The Gemma weights are under Google's
-  [Gemma Terms of Use](https://ai.google.dev/gemma/terms) — a custom
-  license with use restrictions, **not** a standard OSI-approved one — so
+  [Gemma Terms of Use](https://ai.google.dev/gemma/terms), a custom
+  license with use restrictions (**not** a standard OSI-approved one), so
   they're a credited runtime download, never bundled.
 
 The brand mark on monochrome, the spinner cadence, and the rest of peerd's
@@ -471,7 +468,7 @@ its upstream.
 
 ## License
 
-Apache 2.0 — see [`LICENSE`](LICENSE).
+Apache 2.0. See [`LICENSE`](LICENSE).
 
 ## Warranty
 
