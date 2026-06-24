@@ -32,21 +32,30 @@ const harness = (over: Partial<Parameters<typeof makeResidentMessaging>[0]> = {}
   return { ...makeResidentMessaging(deps), reentries, turnsRun };
 };
 
-describe('message_resident — the P0 sender gate (fail closed)', () => {
-  test('refuses a SYNTHETIC sender even when it is the active chat', async () => {
-    const { messageResident } = harness();
-    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: 'chat-1', synthetic: true });
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain('attended');
+describe('message_resident — the sender gate (fail closed)', () => {
+  test('ALLOWS a first-party continuation in the active chat (not inbound)', async () => {
+    // The trust marker (goal turn / resident reply-wake) folds to inbound:false,
+    // so a synthetic-but-trusted turn in the active chat may delegate.
+    const { messageResident, turnsRun } = harness();
+    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: 'chat-1', inbound: false });
+    expect(r.ok).toBe(true);
+    await tick();
+    expect(turnsRun.length).toBe(1);
   });
-  test('refuses a sender that is NOT the active chat', async () => {
+  test('refuses an INBOUND (untrusted-origin) sender even in the active chat', async () => {
     const { messageResident } = harness();
-    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: 'chat-OTHER', synthetic: false });
+    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: 'chat-1', inbound: true });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('untrusted');
+  });
+  test('refuses a sender that is NOT the active chat (even if not inbound)', async () => {
+    const { messageResident } = harness();
+    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: 'chat-OTHER', inbound: false });
     expect(r.ok).toBe(false);
   });
   test('refuses a missing senderSessionId', async () => {
     const { messageResident } = harness();
-    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: null, synthetic: false });
+    const r = await messageResident({ to: 'app-1', message: 'hi', senderSessionId: null, inbound: false });
     expect(r.ok).toBe(false);
   });
   test('refuses when the vault is locked', async () => {

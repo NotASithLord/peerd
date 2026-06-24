@@ -908,7 +908,7 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, residentInstanceId, residentKind } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, residentInstanceId, residentKind } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
@@ -990,10 +990,15 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // DESIGN-17: a resident turn sets 'resident' — the kind-scoped, instance-
     // pinned tier (and the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
-    // DESIGN-17: the load-bearing input to the message_resident sender gate —
-    // a synthetic (goal/async/reply-wake) turn is refused. Threaded from the
-    // turn driver; defaults false for direct dispatch / composer ctx builds.
     synthetic: synthetic === true,
+    // DESIGN-17: the message_resident sender gate's untrusted-ORIGIN signal. A
+    // synthetic turn (goal continuation / async wake / resident reply-wake) is
+    // "inbound" — refused — UNLESS it is an explicit first-party continuation
+    // that set trusted:true (goal turns + resident reply-wakes do). FAIL-CLOSED:
+    // any NEW re-entry source (future peer messages / scheduled tasks) is inbound
+    // by default and must never set trusted; the gate's `=== active` check is the
+    // second wall. Direct/composer builds: synthetic false → inbound false.
+    inbound: synthetic === true && trusted !== true,
     // DESIGN-17: a resident's bound instance + kind (the gate's per-instance pin
     // + positive kind-scope read these; absent on non-resident ctx).
     ...(residentInstanceId ? { residentInstanceId } : {}),
@@ -1352,6 +1357,9 @@ const asyncSubagentsOrchestrator = makeAsyncSubagents({
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
   },
+  // async-subagent wakes are NOT trusted to delegate (a parent reacting to a
+  // subagent result stays attended-gated for message_resident, like today) —
+  // so this reenter deliberately does not forward trusted.
   reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),
@@ -2388,7 +2396,7 @@ const residentMessaging = makeResidentMessaging({
     const s = await sessions.get(residentSessionId);
     return { result: finalAssistantText(s) };
   },
-  reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
+  reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),

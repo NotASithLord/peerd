@@ -63,7 +63,7 @@ export const goalContinuationPrompt = (goal) => [
 
 /**
  * @param {Object} deps
- * @param {(args: { sessionId: string, userText: string, synthetic: boolean }) => Promise<{ ok?: boolean, stopReason?: string } | void>} deps.runTurn
+ * @param {(args: { sessionId: string, userText: string, synthetic: boolean, trusted?: boolean }) => Promise<{ ok?: boolean, stopReason?: string } | void>} deps.runTurn
  *   One full agent turn (runAgentTurn). Returns the turn outcome so the loop can
  *   stop on a failed/aborted turn instead of re-driving a broken condition.
  *   complete()/halt() may also fire DURING it (the complete_goal tool, or Stop).
@@ -206,6 +206,12 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
             userText: first ? run.goal : goalContinuationPrompt(run.goal),
             // turn 1 is the user's real goal message; continuations are hidden.
             synthetic: !first,
+            // DESIGN-17: a goal is USER-initiated, so each continuation is a
+            // TRUSTED first-party autonomous turn — allowed to message residents
+            // (so an autonomous goal can drive a VM/Notebook/App). The sender
+            // gate's `=== active` check still requires the goal's chat be the
+            // foreground one; a backgrounded goal stays blocked.
+            trusted: true,
           });
         } catch (e) {
           // A hard throw. A locked vault is TRANSIENT — pause (keep the

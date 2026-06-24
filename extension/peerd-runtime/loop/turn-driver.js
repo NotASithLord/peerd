@@ -69,7 +69,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, resume = false, activeTabId = null }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -227,11 +227,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   //
   // DESIGN-17: a resident turn builds a 'resident' ctx instead — the keyless,
   // kind-scoped, instance-pinned tool context (buildToolContext applies the
-  // capability strip + sets residentInstanceId/residentKind). `synthetic` rides
-  // onto BOTH (it's the load-bearing input to the message_resident sender gate).
+  // capability strip + sets residentInstanceId/residentKind). `synthetic` +
+  // `trusted` ride onto BOTH: buildToolContext folds them into ctx.inbound, the
+  // message_resident sender gate's untrusted-origin signal (synthetic AND not a
+  // trusted first-party continuation → inbound → refused).
   const toolContext = await buildToolContext(isResident
-    ? { exposure: EXPOSURE_RESIDENT, sessionId, activeTabId, synthetic, residentInstanceId, residentKind }
-    : { exposure: 'main', sessionId, activeTabId, synthetic });
+    ? { exposure: EXPOSURE_RESIDENT, sessionId, activeTabId, synthetic, trusted, residentInstanceId, residentKind }
+    : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
 
   // THIRD cut: progressive disclosure. The vm/js/app SECONDARY ops are hidden
   // until the chat has a current instance of that kind (filterByInstanceState).

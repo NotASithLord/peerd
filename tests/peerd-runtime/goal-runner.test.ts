@@ -16,7 +16,7 @@ const settle = async (pred: () => boolean, tries = 500) => {
   for (let i = 0; i < tries && !pred(); i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-type TurnArgs = { sessionId: string; userText: string; synthetic: boolean };
+type TurnArgs = { sessionId: string; userText: string; synthetic: boolean; trusted?: boolean };
 
 describe('makeGoalRunner — the goal loop', () => {
   it('runs turn 1 as the visible goal, later turns as synthetic continuations, until complete_goal', async () => {
@@ -38,7 +38,8 @@ describe('makeGoalRunner — the goal loop', () => {
 
     expect(calls.length).toBe(2);
     // Turn 1: the user's real goal, NOT synthetic (renders in the chat).
-    expect(calls[0]).toEqual({ sessionId: 's1', userText: 'do the thing', synthetic: false });
+    // trusted:true — a goal is user-initiated, so its turns may message residents.
+    expect(calls[0]).toEqual({ sessionId: 's1', userText: 'do the thing', synthetic: false, trusted: true });
     // Turn 2: a hidden continuation that still carries the goal text.
     expect(calls[1].synthetic).toBe(true);
     expect(calls[1].userText).toContain('do the thing');

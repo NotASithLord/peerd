@@ -128,21 +128,31 @@ features that *use* `message_resident` weren't traced. The findings:
   (`ORCH_SUBAGENTS`): subagents are for non-instance decomposition; instance
   PARALLELISM is N `message_resident` calls in one turn (residents run concurrently).
 
-- **#2 / #3 (ROOT: the attended-only sender gate) — pending a posture decision.**
-  Both stem from the P0 gate `!synthetic && senderSessionId === active`:
-  - **#2 goal mode** — `goal-runner.js:153` sends `synthetic: !first`, so every
-    autonomous continuation is refused → an autonomous goal can't use an instance
-    past turn one.
-  - **#3 follow-up** — a resident's reply re-enters the orchestrator as
-    `synthetic`, so the turn that READS the reply can't fire a follow-up
-    `message_resident` → multi-round delegation needs a user turn between rounds.
-  The `!synthetic` block was deliberate (decision #6). Relaxing it (the spec's
-  `inbound`-clamp seed: gate on untrusted-ORIGIN, not on `synthetic`, keeping
-  `=== active`) would unblock goal-mode + follow-ups in the attended chat but
-  EXPANDS the autonomy posture (autonomous instance actions during a user goal,
-  bounded by the runaway guard). That is a security/safety call, staged here for
-  an explicit owner decision rather than reversed silently. P0 stays attended-only
-  until decided.
+- **#2 / #3 (FIXED — owner chose to enable autonomy; the `inbound`-clamp seed).**
+  Both stemmed from the P0 gate `!synthetic && senderSessionId === active`: a goal
+  continuation (`goal-runner.js` `synthetic: !first`) and a resident reply-wake
+  both re-enter `synthetic`, so neither could delegate. The fix replaces the coarse
+  `synthetic` block with an untrusted-ORIGIN signal, keeping `=== active`:
+  - The turn driver threads a `trusted` flag; `buildToolContext` folds it to
+    **`ctx.inbound = synthetic && !trusted`**. The gate refuses
+    `inbound || !sender || sender !== active`.
+  - **Fail-CLOSED**: `trusted` defaults false, so any synthetic turn is `inbound`
+    (refused) unless an explicit first-party continuation sets it. Only TWO do:
+    the **goal continuation** (a goal is user-initiated) and the **resident
+    reply-wake** (`deliver()` — the sender's own resident replied). Async-subagent
+    wakes and auto-resume deliberately do NOT (they stay attended-gated — a scoped
+    choice; liftable the same way later). Any FUTURE re-entry source (peer
+    messages / scheduled tasks) is `inbound` by default and must never set
+    `trusted`; the `=== active` check is the second wall.
+  - **What it enables**: an autonomous goal in the FOREGROUND chat can drive a
+    VM/Notebook/App, and the orchestrator can react to a resident reply with a
+    follow-up — both bounded by the per-sender runaway guard (rate + outstanding
+    caps). A BACKGROUNDED goal (chat not foreground) stays blocked by `=== active`.
+  - `trusted` is about a turn's ORIGIN (peerd's own loop), NOT its content — a
+    resident reply body is still `wrapUntrusted`-fenced.
+  - Tests: `resident-messaging.test.ts` (a non-inbound first-party turn in the
+    active chat is ALLOWED; an `inbound:true` turn is refused even when active);
+    `goal-runner.test.ts` (turns carry `trusted:true`).
 
 - **Minor (deferred):** instance tool DESCRIPTIONS (e.g. `vm_boot` "auto-creates
   one if none") are orchestrator-voiced but now read only by a (pinned) resident;

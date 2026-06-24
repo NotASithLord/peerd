@@ -10,12 +10,15 @@
 // a per-sender runaway guard. Functional core / imperative shell: every IO
 // surface is injected, so the spawn → run → reply flow is unit-testable.
 //
-// P0 posture (the spec's "attended-only"): a message is accepted ONLY from the
-// active, attended, first-party chat — `!synthetic && senderSessionId ===
-// getActiveSessionId()`. Synthetic/background senders (goal-mode continuations,
-// async-subagent wakes, and the resident's own reply wake) are blocked, so the
-// unattended path stays closed until the shared inbound clamp lands (P1) and a
-// parent↔resident ping-pong can't run autonomously.
+// Posture: a message is accepted from the active foreground chat (`senderSessionId
+// === getActiveSessionId()`) when it is NOT `inbound`. `inbound` is the
+// untrusted-ORIGIN signal the turn driver folds from synthetic + trusted:
+// `inbound = synthetic && !trusted`. So a real user turn (non-synthetic) and an
+// explicit first-party continuation (a goal turn, or the orchestrator reacting to
+// a resident's reply — both set trusted:true) MAY delegate; an untrusted/external
+// synthetic turn (future peer messages / scheduled tasks — never trusted) is
+// refused. Fail-CLOSED (default deny for synthetic) + the `=== active` second
+// wall. The per-sender runaway guard bounds an autonomous parent↔resident loop.
 
 /**
  * @param {Object} deps
@@ -26,8 +29,9 @@
  *   Drive ONE resident turn (runAgentTurn against the resident session) and
  *   resolve with its final assistant text. Contracted to CLAIM the resident's
  *   turn slot (so runWhenIdle drains correctly).
- * @param {(opts: { userText: string, sessionId: string, synthetic: boolean }) => Promise<unknown>} deps.reenter
- *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn.
+ * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean }) => Promise<unknown>} deps.reenter
+ *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn. trusted:true
+ *   marks a first-party continuation allowed to message residents (the reply-wake).
  * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void }} deps.turnSlots
  * @param {() => Promise<string | null>} deps.getActiveSessionId
  * @param {() => boolean} deps.isVaultLocked
@@ -76,17 +80,21 @@ export const makeResidentMessaging = (deps) => {
       ? `The ${kind} resident ${who} could not complete your request:`
       : `The ${kind} resident ${who} you messaged has replied:`;
     turnSlots.runWhenIdle(senderSessionId, () => {
-      Promise.resolve(reenter({ userText: `${lead}\n\n${wrapped}`, sessionId: senderSessionId, synthetic: true }))
+      // trusted:true — the reply-wake is a FIRST-PARTY continuation (the sender's
+      // own resident replied), so the sender's turn that reads it MAY fire a
+      // follow-up message_resident. The reply BODY is still wrapUntrusted-fenced:
+      // trusted is about the turn's ORIGIN (peerd's own loop), not its content.
+      Promise.resolve(reenter({ userText: `${lead}\n\n${wrapped}`, sessionId: senderSessionId, synthetic: true, trusted: true }))
         .catch((e) => log('reenter failed', e));
     });
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, synthetic?: boolean }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean }} req
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageResident = async (req) => {
-    const { to, message, senderSessionId, synthetic } = req;
+    const { to, message, senderSessionId, inbound } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_resident: `to` (a tab-hosted instance id) is required' };
     }
@@ -98,13 +106,14 @@ export const makeResidentMessaging = (deps) => {
     if (isVaultLocked()) {
       return { ok: false, error: 'message_resident: the vault is locked — unlock and retry' };
     }
-    // P0 fail-closed sender gate: attended + first-party only. A synthetic turn
-    // (goal continuation, async wake, the resident reply wake) is refused, so the
-    // unattended path stays blocked and no autonomous ping-pong can run.
+    // Fail-closed sender gate: the foreground chat, and not an untrusted-origin
+    // (inbound) turn. A real user turn and an explicit first-party continuation
+    // (goal turn / resident reply-wake — both non-inbound) pass; an untrusted or
+    // background synthetic turn, or any non-active sender, is refused.
     const active = await getActiveSessionId();
-    if (synthetic === true || !senderSessionId || senderSessionId !== active) {
-      log('REFUSED', { reason: 'sender_gate', senderSessionId, synthetic });
-      return { ok: false, error: 'message_resident: only the active, attended chat may message a resident (P0 — synthetic/background senders are blocked until the inbound clamp lands)' };
+    if (inbound === true || !senderSessionId || senderSessionId !== active) {
+      log('REFUSED', { reason: 'sender_gate', senderSessionId, inbound });
+      return { ok: false, error: 'message_resident: only the active foreground chat (or its first-party autonomous continuation — a goal turn, or reacting to a resident reply) may message a resident; untrusted/background senders and non-active chats are blocked' };
     }
 
     // Runaway guard (per sender) — a burst means a likely loop, so refuse past

@@ -14,9 +14,9 @@
  * The ctx slot message_resident reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageResidentCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, synthetic?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageResident]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageResident]
  * @property {{ sessionId?: string }} [session]
- * @property {boolean} [synthetic]
+ * @property {boolean} [inbound]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -62,9 +62,10 @@ export const messageResidentTool = {
       to: args?.to,
       message: args?.message,
       senderSessionId: c.session?.sessionId,
-      // The P0 sender gate keys on this — a synthetic (goal/async/reply-wake)
-      // turn is refused. Threaded onto the ctx by the turn driver.
-      synthetic: c.synthetic === true,
+      // The sender gate keys on this — an untrusted-origin (inbound) turn is
+      // refused. ctx.inbound = synthetic && !trusted (folded by the turn driver):
+      // a goal continuation or a resident reply-wake is trusted → not inbound.
+      inbound: c.inbound === true,
     });
     // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
     return res.ok
