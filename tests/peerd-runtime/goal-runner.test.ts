@@ -187,6 +187,26 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     const kv = makeKv();
     expect((await makeGoalRunner({ runTurn: async () => {}, kv }).resume())).toEqual({ resumed: 0 });
   });
+
+  it('resume() re-runs a final turn interrupted at the cap, not dropping it as capped', async () => {
+    const kv = makeKv();
+    // SW died DURING the last allowed turn → stored iteration === maxIterations.
+    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'finish it', iteration: 3, startedAt: 1 } });
+    const calls: TurnArgs[] = [];
+    const events: any[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => { calls.push(a); },
+      onEvent: (ev) => events.push(ev),
+      maxIterations: 3,
+      kv,
+    });
+    await runner.resume();
+    await settle(() => !runner.isActive('s'));
+    // The interrupted final turn re-ran exactly once, THEN the run caps — without
+    // the clamp the loop would exit immediately (0 turns) and still report capped.
+    expect(calls.length).toBe(1);
+    expect(events[events.length - 1].phase).toBe('capped');
+  });
 });
 
 describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
@@ -248,5 +268,35 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     await settle(() => !runner.isActive('s'));
     expect(ends).toHaveLength(1);
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+
+  it('stop() on a vault-lock-PAUSED run drops its kv record so it does NOT resurrect on resume()', async () => {
+    const kv = makeKv();
+    let throwOnce = true;
+    const calls: TurnArgs[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async (a: TurnArgs) => {
+        calls.push(a);
+        if (throwOnce) { throwOnce = false; const e: any = new Error('locked'); e.name = 'VaultLockedError'; throw e; }
+      },
+      kv,
+    });
+    await runner.start({ sessionId: 's', goal: 'keep going' });
+    await settle(() => !runner.isActive('s'));
+    // Paused: evicted from the in-memory map, but the record survives in kv.
+    expect(runner.get('s')).toBe(null);
+    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
+
+    // The user clicks Stop on the (still-visible) paused run. halt() alone would
+    // be a no-op (not in the map); stop() durably forgets the record.
+    await runner.stop('s');
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+
+    // resume() must NOT re-drive a stopped run.
+    const before = calls.length;
+    await runner.resume();
+    await settle(() => true, 5);
+    expect(calls.length).toBe(before);
   });
 });

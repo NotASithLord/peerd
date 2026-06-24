@@ -567,6 +567,11 @@ const maybeAutoResume = async (sessionId) => {
     if (!sessionId || vault.isLocked()) return;
     // Don't race a live turn — the loop is mid-stream, not interrupted.
     if (turnSlots.isBusy(sessionId)) return;
+    // Don't double-drive a session a Goal run owns: goalRunner.resume() re-drives
+    // its OWN interrupted turn after an SW respawn, so auto-resume firing for the
+    // same session would contend the turn slot (a spurious aborted turn / a
+    // narrowly-windowed goal-run halt). The goal loop is the authority here.
+    if (goalActiveFor?.(sessionId)) return;
     const session = await sessions.get(sessionId);
     const verdict = detectInterruptedTurn(session);
     if (!verdict.resumable) return;
