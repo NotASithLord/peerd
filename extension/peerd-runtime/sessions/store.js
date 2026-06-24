@@ -153,6 +153,8 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   confirmActions?: boolean,
    *   customSystemPrompt?: string,
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
+   *   instanceId?: string,
+   *   residentKind?: 'webvm' | 'notebook' | 'app',
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -167,6 +169,8 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     confirmActions,
     customSystemPrompt,
     toolManifest,
+    instanceId,
+    residentKind,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -187,6 +191,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
       ...(task ? { task } : {}),
+      // DESIGN-17: a resident self-describes the instance it owns + its kind.
+      ...(instanceId ? { instanceId } : {}),
+      ...(residentKind ? { residentKind } : {}),
     };
     await idb.put(STORE, record);
     return present(record, []);

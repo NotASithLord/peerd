@@ -4,12 +4,21 @@
 /** @typedef {import('/peerd-provider/types.js').InternalMessage} InternalMessage */
 
 /**
- * @typedef {'chat' | 'subagent'} SessionKind
+ * @typedef {'chat' | 'subagent' | 'resident'} SessionKind
  *   'chat'     — a top-level conversation the user drives. Shows in /chats.
  *   'subagent' — a session spawned by another session (the model via
  *                spawn_subagent, or Notebook code via peerd.runtime.runAgent).
  *                Hidden from /chats; discovered through its parent's
  *                transcript. See docs/SUBAGENTS.md.
+ *   'resident' — a per-instance agent that OWNS one tab-hosted execution
+ *                instance (WebVM / Notebook / App): it exclusively holds that
+ *                environment's mutating tools and is addressed only by
+ *                `message_resident`. Hidden from /chats (reached via its
+ *                instance, not the chat list). Lazily minted; bound to the
+ *                instance by `residentSessionId` on the engine registry record,
+ *                and self-describes via `instanceId` + `residentKind` below.
+ *                See docs/specs/DESIGN-17-resident-agents.md. (DESIGN-17 P0,
+ *                behind shared/flags.js RESIDENT_TAB_AGENTS.)
  */
 
 /**
@@ -26,10 +35,19 @@
  * session with a parent — no new shape, four fields. Solo dev: no
  * migration code, so these default at read time (`kind ?? 'chat'`,
  * `depth ?? 0`) for sessions written before subagents landed.
- * @property {SessionKind} kind               'chat' (default) | 'subagent'
+ * @property {SessionKind} kind               'chat' (default) | 'subagent' | 'resident'
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
  * @property {string} [task]                  the spawning prompt (subagents only)
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
+ *
+ * Resident binding (DESIGN-17). A `kind:'resident'` session self-describes
+ * which instance it owns: `instanceId` (the WebVM/Notebook/App id it drives)
+ * and `residentKind` (the engine kind, used to scope its toolset + prompt).
+ * The FORWARD pointer (instance → resident) lives on the engine registry
+ * record (`residentSessionId`); these are the REVERSE pointer the resident
+ * turn reads to set up its tool context. Absent on chat/subagent sessions.
+ * @property {string} [instanceId]            the tab-hosted instance this resident owns
+ * @property {'webvm' | 'notebook' | 'app'} [residentKind]  the instance's engine kind
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

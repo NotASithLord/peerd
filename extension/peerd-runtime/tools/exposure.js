@@ -118,6 +118,134 @@ export const isInstanceGatedOut = (name, instanceState) => {
 export const filterByInstanceState = (descriptors, instanceState) =>
   descriptors.filter((t) => !isInstanceGatedOut(t.name, instanceState));
 
+// ── DESIGN-17: resident tab agents — the capability tier ────────────────────
+//
+// A `kind:'resident'` session OWNS one tab-hosted instance and exclusively
+// holds that environment's MUTATING tools. The split has two sides, both
+// enforced at the dispatch gate (gates.js — the WALL, not just these
+// descriptor filters which are advisory):
+//
+//   - RESIDENT_MUTATING_TOOLS leave the MAIN agent. A non-resident ctx
+//     (main / subagent / runner / review / direct) is REFUSED any of them —
+//     so a one-line `spawn_subagent({tools:['app_delete']})` can't escalate.
+//     Only MUTATION is tiered; READS (app_read_file/app_list_files/
+//     js_read_file) stay GLOBAL + id-addressable, per the spec.
+//   - A resident is POSITIVELY constrained to its own kind's toolset
+//     (residentAllowedTools) — the keyless/narrow runner trust model
+//     generalized: a hallucinated/injected non-env tool from a resident
+//     fails closed at the gate, not just in the descriptor list.
+//
+// The exposure marker is a free string on ctx: 'main' (main turn) / 'resident'
+// (resident turn) / unset (subagent/runner). Consts here so a typo can't
+// silently widen authority. All of this is behind shared/flags.js
+// RESIDENT_TAB_AGENTS — with the flag OFF these sets are referenced by nothing
+// load-bearing and instance tools stay on the main agent exactly as today.
+export const EXPOSURE_MAIN = 'main';
+export const EXPOSURE_RESIDENT = 'resident';
+
+// The tiered MUTATION set — refused for every non-resident ctx when the flag is
+// on. vm_boot/js_notebook are the RUN tools (they mutate instance state);
+// edit_file is the cross-kind SEARCH/REPLACE write path for App/Notebook files;
+// the rest are write/delete ops. js_run (headless, no instance) stays a parent
+// tool and is deliberately ABSENT.
+export const RESIDENT_MUTATING_TOOLS = Object.freeze(new Set([
+  'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
+  'js_notebook', 'js_write_file', 'js_delete',
+  'app_update', 'app_write_file', 'app_delete_file', 'app_delete',
+  'edit_file',
+]));
+
+/** Is this a tiered mutating tool (resident-only when the flag is on)? Pure. @param {string} name */
+export const isResidentMutatingTool = (name) => RESIDENT_MUTATING_TOOLS.has(name);
+
+// The POSITIVE allow-list a resident of each kind may call — its own kind's
+// operational surface (mutations + reads + edit_file). Everything else (other
+// kinds' tools, browser/web/memory/spawn tools) is refused for a resident ctx.
+// Keys match the residentKind vocabulary { webvm, notebook, app }.
+const RESIDENT_KIND_TOOLS = Object.freeze({
+  webvm: Object.freeze(new Set([
+    'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
+  ])),
+  notebook: Object.freeze(new Set([
+    'js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file',
+  ])),
+  app: Object.freeze(new Set([
+    'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
+    'app_delete_file', 'app_delete', 'edit_file',
+  ])),
+});
+
+/** The Set of tool names a resident of `kind` may call (empty for an unknown kind). Pure. @param {string} [kind] */
+export const residentAllowedTools = (kind) =>
+  RESIDENT_KIND_TOOLS[/** @type {keyof typeof RESIDENT_KIND_TOOLS} */ (kind)] ?? new Set();
+
+/** May a resident of `kind` call this tool? Pure. @param {string} name @param {string} [kind] */
+export const isAllowedForResidentKind = (name, kind) => residentAllowedTools(kind).has(name);
+
+// Per-tool target-id ARG field — what a resident-gated tool calls its instance
+// target. The resident dispatch wrapper force-injects the bound id here (the
+// per-instance pin); the gate reads it for a defense-in-depth mismatch refusal.
+// null = no explicit id arg (the tool resolves the session-default instance,
+// which for a resident is its bound instance via setDefaultForSession).
+const RESIDENT_TARGET_ID_FIELD = Object.freeze({
+  vm_boot: 'vm',          // id OR name
+  vm_delete: 'vmId',
+  vm_write_file: null,
+  vm_import: null,
+  js_notebook: 'notebook',
+  js_write_file: 'notebook',
+  js_read_file: 'notebook',
+  js_delete: 'notebookId',
+  app_update: 'appId',
+  app_write_file: 'appId',
+  app_read_file: 'appId',
+  app_list_files: 'appId',
+  app_delete_file: 'appId',
+  app_delete: 'appId',
+  edit_file: 'targetId',
+});
+
+/** The arg field holding this tool's instance target id, or null. Pure. @param {string} name @returns {string|null} */
+export const residentTargetIdField = (name) =>
+  /** @type {Record<string, string|null>} */ (RESIDENT_TARGET_ID_FIELD)[name] ?? null;
+
+/**
+ * The EXPLICIT instance id/name a tool call names, or undefined when it names
+ * none (relying on the session-default). Pure — read-only over args.
+ * @param {string} name @param {Record<string, any> | null | undefined} args @returns {string | undefined}
+ */
+export const residentTargetId = (name, args) => {
+  const field = residentTargetIdField(name);
+  if (!field || !args) return undefined;
+  const v = args[field];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+};
+
+/**
+ * The descriptor list a resident of `kind` should SEE — its own kind's toolset.
+ * Pure. (The gate is the wall; this keeps the model's advertised list tight.)
+ * @template {{ name: string }} T
+ * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @returns {T[]}
+ */
+export const residentDescriptors = (descriptors, kind) => {
+  const allow = residentAllowedTools(kind);
+  return descriptors.filter((t) => allow.has(t.name));
+};
+
+/**
+ * Re-shape the MAIN agent's descriptor list for the resident world. Flag ON:
+ * the mutating tier LEAVES the main agent (it delegates via message_resident,
+ * which is kept). Flag OFF: status quo — the mutating tier stays on main and
+ * message_resident is hidden (its orchestrator isn't wired). Pure; composes
+ * after mainAgentDescriptors()/the instance/dweb/goal filters.
+ * @template {{ name: string }} T
+ * @param {ReadonlyArray<T>} descriptors @param {boolean} flagOn @returns {T[]}
+ */
+export const filterResidentSurface = (descriptors, flagOn) =>
+  flagOn
+    ? descriptors.filter((t) => !RESIDENT_MUTATING_TOOLS.has(t.name))
+    : descriptors.filter((t) => t.name !== 'message_resident');
+
 // ── dweb tools: gated on the dweb being enabled ─────────────────────────────
 // The dweb network tools (publish/discover/install) are exposed to the agent
 // ONLY when the dweb is on. On the store build the agent never sees them — the

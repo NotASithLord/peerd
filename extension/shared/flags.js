@@ -25,3 +25,20 @@
  * ships and is still unit-tested; it's just unreachable from the product.
  */
 export const REMOTE_SKILL_INSTALL = false;
+
+/**
+ * Resident tab agents (DESIGN-17 P0). A per-tab `kind:'resident'` session that
+ * OWNS one tab-hosted instance (WebVM / Notebook / App): it exclusively holds
+ * that environment's mutating tools (behind a resident-keyed capability tier at
+ * the dispatch gate) and is addressed only by `message_resident`. The
+ * per-environment tooling leaves the main agent (context optimized, non-eroding)
+ * and "who may touch this instance" becomes structural instead of conventional.
+ *
+ * OFF for now: this re-shapes the core actor structure (the main agent stops
+ * driving instances directly and delegates via message_resident), so it ships
+ * behind a source flag for battle-testing before it's exposed. With this false,
+ * the gate/descriptor/prompt/orchestrator changes are all inert — instance tools
+ * stay on the main agent exactly as today, and no resident sessions are minted.
+ * Source-flip + reload to enable (no runtime/UI toggle, not channel-config).
+ */
+export const RESIDENT_TAB_AGENTS = false;
