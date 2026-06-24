@@ -46,6 +46,11 @@ Debian. Picking rule: node could run it → notebook.
 
 spawn_subagent runs a fresh agent on ONE focused task.
 
+A subagent is a PURE FUNCTION: task text in → result out. So pass a child
+the ids it should act on, and tell it to RETURN any handle it creates.
+
+peerd.runAgent is for a different job — an embedded agent.
+
 ──── webvm specifics ──────────────────────────────────────────────────
 
 Image: stock Debian (32-bit i686). CheerpX quirks: /dev/null denies writes.
@@ -76,6 +81,16 @@ describe('applyResidentOrchestration (the main agent transform, flag ON)', () =>
     // create/open/read tools stay on the main agent.
     expect(out.includes('vm_create / vm_list')).toBe(true);
     expect(out.includes('reads stay global')).toBe(true);
+  });
+
+  test('carves the subagents section off instance work (a child can do neither)', () => {
+    // The old guidance ("pass a child the ids it should act on") is a dead end —
+    // a subagent can't mutate (resident-only) nor message_resident (sender-gated).
+    expect(out.includes('the ids it should act on')).toBe(false);
+    expect(out.includes('never hand a vm/notebook/')).toBe(true);
+    expect(out.includes('PARALLELISM is many message_resident')).toBe(true);
+    // the non-instance subagent guidance + the peerd.runAgent note survive.
+    expect(out.includes('peerd.runAgent is for a different job')).toBe(true);
   });
 
   test('removes the deep webvm specifics + the Sandboxes mechanics (relocated to residents)', () => {
@@ -155,6 +170,9 @@ describe('applyResidentOrchestration on the live system-prompt.txt', () => {
     expect(out.includes('run a shell command in a VM')).toBe(false);
     expect(out.includes('CheerpX quirks (work around')).toBe(false);
     expect(out.includes('USE MITHRIL')).toBe(false);
+    // ...and the subagents section no longer routes instance work to a child.
+    expect(out.includes('the ids it should act on')).toBe(false);
+    expect(out.includes('never hand a vm/notebook/')).toBe(true);
     // net: the main prompt got materially smaller (the savings).
     expect(out.length).toBeLessThan(base.length - 2000);
   });

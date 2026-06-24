@@ -308,6 +308,23 @@ commands; synthesize its reply for the user when it returns.
 
 `;
 
+// The subagents section still tells the orchestrator to hand instance work to a
+// child by id — a dead end now: a subagent holds NONE of the mutating tools
+// (resident-only) and message_resident is refused from a child (only the active
+// chat may delegate). Rewrite that paragraph so subagents stay for non-instance
+// decomposition, and instance PARALLELISM is N message_resident calls.
+const ORCH_SUBAGENTS = `A subagent is a PURE FUNCTION: task text in → result text out — for
+DECOMPOSING non-instance work (research, multi-source gathering, parallel
+analysis, reasoning over text). A subagent CANNOT drive a sandbox: the
+instance-mutating tools are resident-only, and message_resident is refused
+from a child (only the active chat may delegate). So never hand a vm/notebook/
+app to a subagent — delegate it to the instance's RESIDENT. Instance
+PARALLELISM is many message_resident calls in ONE turn (one per instance): the
+residents run concurrently, each serialising its own work, and each reply comes
+back as its own later fenced note.
+
+`;
+
 /**
  * Re-shape the MAIN agent's base prompt for the resident world. Pure; runs only
  * when RESIDENT_TAB_AGENTS is on. Each region splice no-ops if its anchor is
@@ -318,6 +335,7 @@ export const applyResidentOrchestration = (base) => {
   if (out.includes(ORCH_TOP_ANCHOR)) out = out.replace(ORCH_TOP_ANCHOR, ORCH_TOP);
   out = spliceRegion(out, '  webvm (sandboxed Linux instances', '  subagent (decompose', ORCH_TOOL_LISTING);
   out = spliceRegion(out, '──── Sandboxes — WebVM, Notebook, App', '──── subagents', ORCH_SANDBOXES);
+  out = spliceRegion(out, 'A subagent is a PURE FUNCTION:', 'peerd.runAgent is for a different job', ORCH_SUBAGENTS);
   out = spliceRegion(out, '──── webvm specifics', '──── trust + security', '');
   return out;
 };

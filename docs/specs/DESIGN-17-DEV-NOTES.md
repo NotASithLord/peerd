@@ -106,6 +106,49 @@ on). Flip it back to `false` for the status quo.
    transform on the LIVE template and asserts it fires + shrinks (a near-miss
    anchor would silently no-op and leak the lore back onto the main prompt).
 
+## Second-order audit (what the flag flip surfaced)
+
+Flipping the flag on exposed a class of miss the adversarial review didn't catch:
+the security WALL was verified in isolation, but its INTERACTIONS with the
+features that *use* `message_resident` weren't traced. The findings:
+
+- **Capability tier is COMPLETE — verified, no bypass.** All 12 instance mutators
+  (`vm_boot`, `vm_write_file`, `vm_import`, `vm_delete`, `js_notebook`,
+  `js_write_file`, `js_delete`, `app_update`, `app_write_file`, `app_delete_file`,
+  `app_delete`, `edit_file`) are in `RESIDENT_MUTATING_TOOLS`. The `write`-flagged
+  tools that AREN'T tiered (`vm_create`/`app_create`/`app_open`/`js_create`) are
+  all bootstrap/open — correctly on the orchestrator. No mutator slips the tier.
+
+- **#1 (FIXED) — the subagents prompt told the orchestrator to do the impossible.**
+  `system-prompt.txt`'s subagents section still said "pass a child the ids it
+  should act on." With the flag on a subagent can do NEITHER: it holds no mutating
+  tools (resident-only) AND `message_resident` is refused from it (the sender gate
+  keys on `senderSessionId === getActiveSessionId()`, and a child runs under its
+  own session id). `applyResidentOrchestration` now rewrites that paragraph
+  (`ORCH_SUBAGENTS`): subagents are for non-instance decomposition; instance
+  PARALLELISM is N `message_resident` calls in one turn (residents run concurrently).
+
+- **#2 / #3 (ROOT: the attended-only sender gate) — pending a posture decision.**
+  Both stem from the P0 gate `!synthetic && senderSessionId === active`:
+  - **#2 goal mode** — `goal-runner.js:153` sends `synthetic: !first`, so every
+    autonomous continuation is refused → an autonomous goal can't use an instance
+    past turn one.
+  - **#3 follow-up** — a resident's reply re-enters the orchestrator as
+    `synthetic`, so the turn that READS the reply can't fire a follow-up
+    `message_resident` → multi-round delegation needs a user turn between rounds.
+  The `!synthetic` block was deliberate (decision #6). Relaxing it (the spec's
+  `inbound`-clamp seed: gate on untrusted-ORIGIN, not on `synthetic`, keeping
+  `=== active`) would unblock goal-mode + follow-ups in the attended chat but
+  EXPANDS the autonomy posture (autonomous instance actions during a user goal,
+  bounded by the runaway guard). That is a security/safety call, staged here for
+  an explicit owner decision rather than reversed silently. P0 stays attended-only
+  until decided.
+
+- **Minor (deferred):** instance tool DESCRIPTIONS (e.g. `vm_boot` "auto-creates
+  one if none") are orchestrator-voiced but now read only by a (pinned) resident;
+  the `code-style-note` rides `js_create`/`app_create` (orchestrator tools) yet the
+  RESIDENT writes the code. Low-value polish; not blocking.
+
 ## Tests
 
 - `tests/peerd-runtime/exposure.test.ts` — the tool sets + the gate
