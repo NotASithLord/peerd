@@ -68,7 +68,9 @@ export const makeSessionRoutes = (deps) => {
       // top of the new message.
       if (haltGoalRun) {
         const curSid = await sessionCache.sessionGet('currentSessionId');
-        if (curSid) haltGoalRun(/** @type {any} */ (curSid));
+        // Awaited: durably forget the run so a steer-takeover can't be undone by
+        // a resume() on the next unlock (parity with agent/stop; #60).
+        if (curSid) await haltGoalRun(/** @type {any} */ (curSid));
       }
       // /init is handled in the SW, not sent to the model (feature 01) —
       // check it BEFORE composer expansion so the slash command short-

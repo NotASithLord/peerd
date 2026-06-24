@@ -131,3 +131,29 @@ describe('permission/set', () => {
     expect(calls.updated).toEqual([['cur', { permissionMode: 'plan', confirmActions: true }]]);
   });
 });
+
+// #60 (related): new-chat and archive must AWAIT the durable goal Stop, so the
+// run's persisted record is forgotten before the handler returns — otherwise an
+// SW teardown right after could let resume() resurrect the stopped run. A
+// late-resolving haltGoalRun reverts-proves the await (un-awaited → not done yet).
+describe('durable goal Stop is awaited on new-chat / archive (#60)', () => {
+  const slowHalt = () => {
+    let done = false;
+    const haltGoalRun = async () => { await new Promise((r) => setTimeout(r, 20)); done = true; };
+    return { haltGoalRun, isDone: () => done };
+  };
+
+  test('session/reset awaits the durable Stop before returning', async () => {
+    const halt = slowHalt();
+    const { deps } = baseDeps({ haltGoalRun: halt.haltGoalRun });
+    await makeSessionMutationRoutes(deps)['session/reset']();
+    expect(halt.isDone()).toBe(true);
+  });
+
+  test('session/archive awaits the durable Stop before returning', async () => {
+    const halt = slowHalt();
+    const { deps } = baseDeps({ haltGoalRun: halt.haltGoalRun });
+    await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'cur' });
+    expect(halt.isDone()).toBe(true);
+  });
+});

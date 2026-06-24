@@ -52,15 +52,23 @@ export const makeVaultRoutes = (deps) => {
         auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
         ensureOffscreen().catch((/** @type {unknown} */ e) => console.error('[sw] ensureOffscreen failed', e));
         maybeStartBaseNetwork('unlock');
-        // #72: auto-resume the current chat if its last turn was interrupted (a
-        // cold SW wake unlocks here; this is the moment to finish what the
-        // eviction cut off). Fire-and-forget; gated + deduped in the helper.
-        sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
-        // Re-drive any goal run that paused on a mid-run auto-lock — an
-        // interactive unlock is when secrets are back, so the run can continue.
-        // Idempotent (skips sessions with a live run); resumes ALL, not just the
-        // current chat (a goal can run in the background).
-        resumeGoalRuns?.()?.catch?.(() => {});
+        // Re-drive any goal run that paused on a mid-run auto-lock, THEN
+        // auto-resume the current chat. Order matters (symmetric to the #55
+        // SW-boot fix; #60): resumeGoalRuns() synchronously re-adds a paused run
+        // to the runner's map (goalActiveFor → true) before its drive() awaits,
+        // so chaining maybeAutoResume AFTER it guarantees the goalActiveFor guard
+        // in maybeAutoResume sees the goal run and bails. The opposite order let
+        // maybeAutoResume read goalActiveFor=false and re-drive the interrupted
+        // turn, contending the slot and spuriously HALTING the goal run.
+        // Idempotent; resumes ALL runs (a goal can run in a background chat).
+        Promise.resolve(resumeGoalRuns?.())
+          .catch(() => {})
+          // #72: then auto-resume the current chat if its last turn was
+          // interrupted (a cold SW wake unlocks here; finish what the eviction
+          // cut off). Fire-and-forget; gated + deduped in the helper.
+          .then(() => sessionCache.sessionGet('currentSessionId'))
+          .then((/** @type {any} */ cur) => maybeAutoResume(cur))
+          .catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof WrongPassphraseError) return { ok: false, error: 'wrong-passphrase' };
@@ -187,14 +195,16 @@ export const makeVaultRoutes = (deps) => {
         auditLog.append({ type: 'vault_unlocked', details: { via: 'prf' } }).catch(() => {});
         ensureOffscreen().catch((/** @type {unknown} */ e) => console.error('[sw] ensureOffscreen failed', e));
         maybeStartBaseNetwork('unlock-prf');
-        // #72: auto-resume the current chat if its last turn was interrupted
-        // (see the passphrase unlock path above). Fire-and-forget; gated in helper.
-        sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
-        // Re-drive any goal run that paused on a mid-run auto-lock — an
-        // interactive unlock is when secrets are back, so the run can continue.
-        // Idempotent (skips sessions with a live run); resumes ALL, not just the
-        // current chat (a goal can run in the background).
-        resumeGoalRuns?.()?.catch?.(() => {});
+        // Re-drive paused goal runs BEFORE auto-resume — see the passphrase
+        // unlock path above (resume re-adds the run so the goalActiveFor guard in
+        // maybeAutoResume bails for a goal-owned session; #60). Idempotent.
+        Promise.resolve(resumeGoalRuns?.())
+          .catch(() => {})
+          // #72: then auto-resume the current chat if its last turn was
+          // interrupted. Fire-and-forget; gated + deduped in the helper.
+          .then(() => sessionCache.sessionGet('currentSessionId'))
+          .then((/** @type {any} */ cur) => maybeAutoResume(cur))
+          .catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof PrfNotEnrolledError) return { ok: false, error: 'prf-not-enrolled' };
