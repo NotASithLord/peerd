@@ -1856,7 +1856,7 @@ const sessionConfirmGrants = new Map();
  * prior "yes for session" doesn't re-prompt, then falls back to the
  * round-trip. Records new session grants.
  *
- * @param {{ tool: string, sessionId?: string|null }} prompt
+ * @param {{ tool: string, sessionId?: string|null, origins?: string[] }} prompt
  * @returns {Promise<'yes_once'|'yes_session'|'no'>}
  */
 const confirmAction = async (prompt) => {
@@ -1868,13 +1868,22 @@ const confirmAction = async (prompt) => {
   if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
     return 'yes_once';
   }
-  if (sid && sessionConfirmGrants.get(sid)?.has(prompt.tool)) {
+  // why scope the web-write grant by host: the prompt names a SPECIFIC host
+  // ("…send a POST request to {host}?"), so "approve for this session" must mean
+  // THIS host this session — not a blanket pass for non-GET egress to any host
+  // for the rest of the session. The prompt already carries origins:[host]; fold
+  // it into the grant key. Every other tool keys by its (already host-specific
+  // or host-agnostic-by-design) tool name.
+  const grantKey = prompt.tool === WEB_WRITE_CONFIRM_KEY
+    ? `${WEB_WRITE_CONFIRM_KEY}|${(Array.isArray(prompt.origins) && prompt.origins[0]) || ''}`
+    : prompt.tool;
+  if (sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
   const answer = await confirmCoordinator.confirm(/** @type {any} */ (prompt));
   if (answer === 'yes_session' && sid) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
-    (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(prompt.tool);
+    (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
   }
   return answer;
 };
