@@ -257,20 +257,22 @@ here):
   the orchestrator on the frontier model doing only routing + synthesis.
   Specialization up, cost down — the orchestrator stops carrying every
   environment's reasoning.
-- **An actor mesh** — `message_resident` is session→session, so residents can
-  address *each other* (a VM resident asks an App resident to render its output);
-  the orchestrator thins toward a router over a graph of specialists.
-- **Across peers (dweb)** — the same channel extends agent-to-agent over the mesh
-  (`docs/distributed/ROADMAP.md`): a resident addresses a peer's resident, and the
-  actor graph goes distributed.
+- **An in-browser actor mesh** — `message_resident` is session→session, so local
+  residents address *each other* as peers (the VM resident asks the App resident
+  to render its output); the orchestrator thins toward a router over a graph of
+  specialists.
+- **A2A across peers** — the same message primitive extends to *remote* agents
+  over the dweb (`docs/distributed/ROADMAP.md`). Local↔remote is a deliberate
+  line: a peer's agent is a different trust + latency regime than a local
+  resident, even though both are addressed as peers.
 - **Autonomous residents** — once the inbound clamp lands, residents react to
   schedules/events and tend their environments unattended.
 
-**The mature model:** the orchestrator is a thin conversational router; the work
-lives in a graph of persistent, purpose-tuned, isolated actor-agents — one per
-environment, local and eventually across peers — reached only by message. peerd
-shifts from *one agent with many tools* toward *a society of specialized agents,
-each owning its world.*
+**The mature model:** actor-based orchestration of specialized agents in the
+browser — the orchestrator routes, the work lives in a graph of purpose-tuned
+residents acting as peers — with a deliberate line between **local** peers
+(in-browser, trusted, cheap to reach) and **remote** ones over **A2A**
+(agent-to-agent across the dweb).
 
 ## Alternatives considered
 
