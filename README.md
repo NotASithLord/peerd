@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/d2e4c285-6952-4c95-bf5a-d06087de084d
 
 </p>
 
-The bet is structural: peerd uses *the browser* as its runtime, its
+peerd uses *the browser* as its runtime, its
 hypervisor, and its security model. It inherits decades of hardened
 browser platform work — V8 isolates for sandboxing, WebCrypto for the
 vault, WebAuthn passkeys to unlock it, opaque-origin iframes, Subresource
@@ -46,8 +46,6 @@ output comes back fenced as untrusted. And the agent never takes its own
 word for success: every action it drives is verified against the live page
 before it counts as done — the model proposes, the browser decides. (More
 at [peerd.ai](https://peerd.ai).)
-
-The name is always lowercase: `peerd`.
 
 **Status: 0.x — experimental beta.** It works and the initial feature
 buildout is complete and integrated (see `STATUS.md`), but the surface

@@ -86,6 +86,8 @@ These keep the codebase coherent (the full list is in `CLAUDE.md` /
 - **JSDoc types** (the strict `tsc` gate makes them real). **Mithril** for
   UI. **Named error subclasses**, not bare `Error`.
 - **Filenames** lowercase-hyphenated; comments explain **why**, not what.
+- **The name is always lowercase: `peerd`** — even at the start of a
+  sentence (`docs/DECISIONS.md`).
 - **Third-party code is vendored** under `extension/vendor/` with a
   `SOURCE.txt` (origin + version) and SHA/SRI pinning — never an npm
   runtime import. Audit before vendoring.
