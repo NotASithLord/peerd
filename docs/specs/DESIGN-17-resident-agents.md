@@ -244,6 +244,34 @@ instance re-spawns the tab via `ensureTab`. Generalize
    `runUserTurn` into a per-tab worker behind the proxy; wrapper stays SW-side.
 4. **P3 — durable resume** across vault unlock / browser restart (DESIGN-08).
 
+## Future steps — the substrate, and the mature model
+
+This design is the foundation for a longer arc (forward-looking, not committed
+here):
+
+- **Per-tab security isolation** (Phase 2) — the actor boundary makes JS-heap
+  isolation against untrusted *code* a single loop relocation; the substrate for
+  executing untrusted dweb-delivered dwapps.
+- **Purpose-tuned models per actor** — each resident on a fit-for-purpose tier:
+  the shell/VM resident fast and cheap, the App resident a strong coding model,
+  the orchestrator on the frontier model doing only routing + synthesis.
+  Specialization up, cost down — the orchestrator stops carrying every
+  environment's reasoning.
+- **An actor mesh** — `message_resident` is session→session, so residents can
+  address *each other* (a VM resident asks an App resident to render its output);
+  the orchestrator thins toward a router over a graph of specialists.
+- **Across peers (dweb)** — the same channel extends agent-to-agent over the mesh
+  (`docs/distributed/ROADMAP.md`): a resident addresses a peer's resident, and the
+  actor graph goes distributed.
+- **Autonomous residents** — once the inbound clamp lands, residents react to
+  schedules/events and tend their environments unattended.
+
+**The mature model:** the orchestrator is a thin conversational router; the work
+lives in a graph of persistent, purpose-tuned, isolated actor-agents — one per
+environment, local and eventually across peers — reached only by message. peerd
+shifts from *one agent with many tools* toward *a society of specialized agents,
+each owning its world.*
+
 ## Alternatives considered
 
 - **Loop in the tab (worker) from day one** — rejected as the *default*: against
