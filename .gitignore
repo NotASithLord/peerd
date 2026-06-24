@@ -5,7 +5,7 @@
 # Finder custom-icon file: its on-disk name is "Icon" + a trailing CR.
 # The line below ends in TWO raw CRs because git strips one CR before
 # the newline when parsing; a bare "Icon" line matches the wrong thing.
-Icon
+Icon
 ._*
 .DocumentRevisions-V100
 .fseventsd
@@ -70,4 +70,3 @@ scripts/cdp/artifacts/
 # the vendored CheerpX/xterm assets kept directly in dist/) into /dist/
 # for Cloudflare Pages.
 /dist/
-scripts/cdp/artifacts/
