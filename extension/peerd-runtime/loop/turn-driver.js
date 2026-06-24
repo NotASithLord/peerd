@@ -23,6 +23,29 @@ import {
   ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
 } from '/peerd-provider/index.js';
 import { SessionNotFoundError } from '../errors.js';
+// Pure policy helpers (not IO) — direct import is the gates.js precedent, and
+// keeps the resident turn setup readable. Flag-gated so they're inert when off.
+import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
+import { EXPOSURE_RESIDENT, residentDescriptors, residentTargetIdField, filterResidentSurface } from '../tools/exposure.js';
+
+/**
+ * DESIGN-17 per-instance PIN. Before a resident's tool call dispatches, force
+ * the instance-target arg to the resident's BOUND instance (overwriting any id
+ * or NAME the model supplied) so a resident can only ever touch its own
+ * instance — and lock edit_file to the resident's kind. The gate's pin check is
+ * the defense-in-depth backstop; this is the normalization that makes it pass.
+ * Mutates call.args in place (it's a per-turn call object).
+ * @param {any} call @param {string|undefined} residentKind @param {string|undefined} instanceId
+ */
+const pinResidentCall = (call, residentKind, instanceId) => {
+  if (!instanceId) return;
+  const field = residentTargetIdField(call?.name);
+  if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
+  // edit_file is cross-kind — also lock it to the resident's own workspace kind.
+  if (call?.name === 'edit_file' && residentKind) {
+    call.args = { ...(call.args ?? {}), kind: residentKind === 'notebook' ? 'notebook' : 'app' };
+  }
+};
 
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
@@ -86,6 +109,18 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // turns streaming in OTHER chats are untouched.
   const { controller: abortController, release: releaseTurnSlot } = turnSlots.claim(sessionId);
 
+  // DESIGN-17: resolve the session kind ONCE (authoritative, persisted — robust
+  // even when re-driven by auto-resume). A resident turn runs the SAME wrapper
+  // (cost/clamp/scheduler/key/egress below) but a kind-aware per-turn SETUP: no
+  // user-tab/memory context, a resident-only descriptor list + tuned prompt, the
+  // 'resident' exposure marker, and the per-instance pin. Reused for cost.
+  const turnSession = sessionId ? await sessions.get(sessionId) : null;
+  const isResident = RESIDENT_TAB_AGENTS && turnSession?.kind === 'resident';
+  /** @type {string|undefined} */
+  const residentKind = isResident ? turnSession.residentKind : undefined;
+  /** @type {string|undefined} */
+  const residentInstanceId = isResident ? turnSession.instanceId : undefined;
+
   // Build the per-turn temporal block: absolute now + a coarse, plain-
   // words elapsed since the user's previous message (only when the gap
   // is non-trivial). prevTurnAt lives in chrome.storage.session
@@ -112,22 +147,30 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // vanishes (the user's "back on home → gone" requirement, by construction).
   // Re-derived per turn from the live active tab; never persisted to history.
   let activeTabContext = null;
-  try {
-    const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-    const ws = activeTab?.url ? originOfTabUrl(activeTab.url) : '';
-    const loaded = await memory.loadAlwaysLoaded({ workspace: ws });
-    memoryBlock = loaded.text;
-    if (typeof activeTab?.url === 'string' && /^https?:\/\//i.test(activeTab.url)) {
-      activeTabContext = { url: activeTab.url, title: (activeTab.title || '').slice(0, 200) };
+  // why: a RESIDENT has no user-workspace memory and no foreground-tab
+  // reorientation — its context is its INSTANCE, not the user's browsing. Pulling
+  // the user's current page + that origin's memory into a resident turn would be
+  // both wrong context AND a leak (esp. for an App resident rendering attacker
+  // content). So a resident turn skips the foreground query entirely.
+  if (!isResident) {
+    try {
+      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+      const ws = activeTab?.url ? originOfTabUrl(activeTab.url) : '';
+      const loaded = await memory.loadAlwaysLoaded({ workspace: ws });
+      memoryBlock = loaded.text;
+      if (typeof activeTab?.url === 'string' && /^https?:\/\//i.test(activeTab.url)) {
+        activeTabContext = { url: activeTab.url, title: (activeTab.title || '').slice(0, 200) };
+      }
+    } catch (e) {
+      console.warn('[sw] memory load failed', e);
     }
-  } catch (e) {
-    console.warn('[sw] memory load failed', e);
   }
   // Progressive disclosure, cheap half: build the skill DESCRIPTIONS
   // block once per turn (names + one-line descriptions only — bodies stay
   // on disk until load_skill fetches one). Collapses to '' when no skills
-  // are installed, so the prompt placeholder costs nothing.
-  const skillsBlock = await skillRegistry.describeForPrompt().catch((/** @type {any} */ e) => {
+  // are installed, so the prompt placeholder costs nothing. A resident gets
+  // none — its prompt is the tuned, kind-specific block, not the user's skills.
+  const skillsBlock = isResident ? '' : await skillRegistry.describeForPrompt().catch((/** @type {any} */ e) => {
     console.error('[sw] skill descriptions failed', e);
     return '';
   });
@@ -145,8 +188,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       temporalBlock,
       skillsBlock,
       customSystemPrompt: promptSession?.customSystemPrompt,
-      // Ephemeral active-tab reorientation (null on home / non-web tabs).
+      // Ephemeral active-tab reorientation (null on home / non-web tabs; always
+      // null for a resident).
       activeTab: activeTabContext,
+      // DESIGN-17: a resident gets a kind-specific tuned block appended (the base
+      // template — incl. all the security/defense text — survives verbatim).
+      ...(isResident ? { residentKind } : {}),
     });
   };
 
@@ -177,7 +224,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // exposure gate refuse runner-only tools the model shouldn't reach.
   // Built BEFORE the descriptor list so refreshMainTools (below) can restamp
   // its instanceState each step — progressive disclosure.
-  const toolContext = await buildToolContext({ exposure: 'main', sessionId, activeTabId });
+  //
+  // DESIGN-17: a resident turn builds a 'resident' ctx instead — the keyless,
+  // kind-scoped, instance-pinned tool context (buildToolContext applies the
+  // capability strip + sets residentInstanceId/residentKind). `synthetic` rides
+  // onto BOTH (it's the load-bearing input to the message_resident sender gate).
+  const toolContext = await buildToolContext(isResident
+    ? { exposure: EXPOSURE_RESIDENT, sessionId, activeTabId, synthetic, residentInstanceId, residentKind }
+    : { exposure: 'main', sessionId, activeTabId, synthetic });
 
   // THIRD cut: progressive disclosure. The vm/js/app SECONDARY ops are hidden
   // until the chat has a current instance of that kind (filterByInstanceState).
@@ -202,24 +256,43 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // SIXTH cut: goal mode. complete_goal is registered always but revealed to
     // the model ONLY while a goal run is live for this session (goalActiveFor),
     // so a normal chat never sees it. Outermost so it composes over the rest.
-    const descriptors = filterByGoalActive(
-      filterByDwebActive(
-        filterByDwebEnabled(
-          filterByInstanceState(
-            filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
-            instanceState,
+    // SEVENTH cut (DESIGN-17): the resident surface. Flag ON → the instance
+    // mutating tier LEAVES the main agent (it delegates via message_resident,
+    // which is kept). Flag OFF → status quo (mutating tier stays; message_resident
+    // hidden). Outermost so it composes over everything else.
+    const descriptors = filterResidentSurface(
+      filterByGoalActive(
+        filterByDwebActive(
+          filterByDwebEnabled(
+            filterByInstanceState(
+              filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
+              instanceState,
+            ),
+            DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
           ),
-          DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
+          dwebEngagedSessions.has(sessionId),
         ),
-        dwebEngagedSessions.has(sessionId),
+        !!goalActiveFor?.(sessionId),
       ),
-      !!goalActiveFor?.(sessionId),
+      RESIDENT_TAB_AGENTS,
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     toolContext.instanceState = instanceState;
     return descriptors;
   };
-  const toolDescriptors = await refreshMainTools();
+  // DESIGN-17: a resident sees a FIXED set — its own kind's toolset (no
+  // progressive disclosure; the resident gate is the wall). REPLACE both the
+  // initial descriptors AND the per-step refresh below — otherwise the resident
+  // would lose all its instance tools on step 2+.
+  const refreshResidentTools = async () =>
+    residentDescriptors(listTools(), residentKind)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+  const refreshTools = isResident ? refreshResidentTools : refreshMainTools;
+  const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
+    // DESIGN-17 per-instance pin: force a resident's instance-target arg to its
+    // BOUND instance before dispatch, so it can only ever touch its own (the gate
+    // is the backstop). Runs first — before the gate chain sees the args.
+    if (isResident) pinResidentCall(call, residentKind, residentInstanceId);
     // Engagement trigger: any dweb tool call marks the session dweb-engaged, so
     // refreshMainTools reveals the SECONDARY dweb tools on the next step. The
     // entry tools (discover/share/install) are dweb_* too, so the first one the
@@ -262,7 +335,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // AbortController (same clean-abort path as Stop / steer-live, so the
   // loop unwinds through its existing branch — persists partial, yields
   // stopReason='aborted').
-  const costSession = await sessions.get(sessionId);
+  // why: reuse the record resolved at turn start (also the kind source) — a
+  // resident is a SEPARATE session, so makeTurnCostTracker's per-session limitUsd
+  // gives N residents N independent caps (the documented P0 cost posture).
+  const costSession = turnSession;
   // why: keyless providers (Ollama) run on the user's own hardware — an
   // unknown local model id still costs $0, so the pricing fold is told
   // it's a local provider and resolves a KNOWN zero rate card instead of
@@ -381,8 +457,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       tools: toolDescriptors,
       // why: progressive disclosure — the loop calls this each step to get the
       // current tool list, so an instance created mid-turn reveals its ops on
-      // the next step (and restamps toolContext.instanceState for the gate).
-      refreshTools: refreshMainTools,
+      // the next step (and restamps toolContext.instanceState for the gate). A
+      // resident uses a fixed-set refresh (no disclosure; the gate is the wall).
+      refreshTools,
       toolDispatch,
       classifyToolCall,
       // why: resolve from CURRENT settings at turn start (settings load

@@ -90,11 +90,15 @@ export { makeTurnCostTracker } from './cost/turn-tracker.js';
 // --- subagents (orchestration over sessions; see docs/SUBAGENTS.md) ------
 export {
   makeSpawnSubagent, narrowTools, finalAssistantText,
+  restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
 } from './subagent/spawn.js';
 // DESIGN-11: async (non-blocking) subagents — spawn returns a handle, the
 // result re-enters the parent as a synthetic wake turn. Testable orchestrator.
 export { makeAsyncSubagents } from './subagent/async-subagents.js';
+// DESIGN-17: the message_resident orchestrator (the mailbox to a tab-hosted
+// instance's resident — the async-subagents shape, specialized).
+export { makeResidentMessaging } from './subagent/resident-messaging.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
@@ -136,6 +140,9 @@ export {
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
+  // DESIGN-17: the resident capability tier vocabulary.
+  EXPOSURE_MAIN, EXPOSURE_RESIDENT, RESIDENT_MUTATING_TOOLS, isResidentMutatingTool,
+  residentAllowedTools, isAllowedForResidentKind, residentDescriptors, filterResidentSurface,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.
