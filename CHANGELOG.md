@@ -43,6 +43,32 @@ The staged integration of the open-PR backlog onto one verified branch
 
 ---
 
+## [0.1.5] — 2026-06-24
+
+Two sandbox/egress security fixes plus the e2e tier's autonomous
+verify-loop. All changes reviewed by adversarial-swarm passes (security
+fixes held to a no-residual-bypass bar) and verified green before merge.
+
+### Fixed
+- **Notebook realm seal now covers the Cache API** — the sealed worker
+  also runs headless in the offscreen `js_run` host, whose CSP allows
+  `https:`, so `connect-src 'none'` did not backstop there;
+  `CacheStorage.{open,match,has,delete,keys}` are now sealed like the
+  other network primitives, leaving no reachable network verb (#72).
+- **Web-write "approve for this session" is scoped to the consented
+  host** — the non-GET egress confirm named a specific host but cached
+  the grant by tool key alone, so one approval became a blanket pass to
+  any host; the grant key now folds in the host (#73).
+
+### Added
+- **Autonomous e2e verify loop** — `bun run e2e:verify` drives the real
+  extension through every state on one Chrome (~6s), writing a screenshot
+  per state + structured `result.json` (+ a diff image on a visual miss)
+  an agent can self-drive; multi-turn / mode-toggle / vault-lock states
+  added (#70, #77). Per-run artifacts gitignored (#74).
+
+---
+
 ## [0.1.4] — 2026-06-24
 
 Goal-mode hardening, side-panel state fixes, an end-to-end test tier, and
