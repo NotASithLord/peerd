@@ -23,6 +23,12 @@ peer-to-peer WebRTC network built for agent-to-agent communication. BYOK
 to the model provider of your choice. **No backend, no telemetry, no
 cloud component in the data path.**
 
+<p align="center">
+  <video src="https://github.com/NotASithLord/peerd/raw/main/docs/store/assets/demo.mp4" controls muted width="720">
+    <a href="https://github.com/NotASithLord/peerd/raw/main/docs/store/assets/demo.mp4">▶ Watch the peerd demo</a>
+  </video>
+</p>
+
 The bet is structural: peerd uses *the browser* as its runtime, its
 hypervisor, and its security model. It inherits decades of hardened
 browser platform work — V8 isolates for sandboxing, WebCrypto for the
