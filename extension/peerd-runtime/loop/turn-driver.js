@@ -26,7 +26,7 @@ import { SessionNotFoundError } from '../errors.js';
 
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
-    vault, VaultLockedError, sessionCache, resolveActiveProvider, resolvePermission,
+    vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
     sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
@@ -49,15 +49,21 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
 const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, resume = false, activeTabId = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
-  // Lazy session create — bind the chat to whatever provider/model the
-  // user has selected in Settings (defaults to Anthropic). targetSessionId
+  // Lazy session create — bind the chat to whatever provider/model the user
+  // has configured (no provider is assumed on a fresh install; see
+  // ensureActiveProvider below). targetSessionId
   // re-enters a SPECIFIC parent session for an async-subagent reintegration
   // (DESIGN-11) WITHOUT touching currentSessionId — never switch the user's
   // active view (DECISIONS #20). The lazy-create path below only runs for a
   // genuinely fresh active chat (no target, no current).
   let sessionId = targetSessionId ?? await sessionCache.sessionGet('currentSessionId');
   if (!sessionId) {
-    const ap = resolveActiveProvider();
+    // ensureActiveProvider (async): when the user hasn't explicitly chosen a
+    // provider, bind this fresh chat to the first USABLE one (keyed-with-key, or
+    // a reachable keyless daemon) instead of a keyless-Anthropic guess — matching
+    // what the model picker shows. No-op (returns the explicit choice) when a
+    // provider is already selected, so the common path adds no probes.
+    const ap = await ensureActiveProvider();
     // Inherit the Plan/Act permission the user set before sending (cached
     // in storage.session) so a fresh chat opens in the chosen mode +
     // confirm setting rather than reverting to the read-only default

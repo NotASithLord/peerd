@@ -399,6 +399,46 @@ const resolveActiveProvider = () => {
 };
 
 /**
+ * Async sibling of resolveActiveProvider used at lazy session-create. When the
+ * user has NOT explicitly chosen a provider (providerName is empty, or names an
+ * unregistered adapter), pick the first USABLE provider — a keyed one with a
+ * stored key, or a keyless one that is actually reachable/ready — and PERSIST it
+ * as the active provider, instead of falling back to a keyless-Anthropic guess.
+ * So a fresh chat binds to a provider that actually works (Ollama-only, or the
+ * just-keyed OpenRouter) and matches what the model picker already shows.
+ * No-op (returns the explicit choice) when providerName names a registered
+ * provider — an explicit selection is never silently overridden, and the common
+ * case skips the vault/daemon probes entirely.
+ */
+const ensureActiveProvider = async () => {
+  const list = listProviders();
+  const name = settingsStore.get().providerName;
+  if (name && list.some((p) => p.name === name)) return resolveActiveProvider();
+  for (const p of list) {
+    let usable = false;
+    if (p.keyless) {
+      // Keyless usability is REAL readiness, not mere presence: a live daemon
+      // (Ollama) must answer; the on-device model must be downloaded.
+      if (p.liveModels) usable = !!(await liveProviderModels(p.name));
+      else if (p.name === 'local-webgpu') usable = localModelState.available();
+      else usable = true;
+    } else {
+      try { usable = !!(await vault.getSecret(/** @type {string} */ (p.vaultSecretName))); }
+      catch { usable = false; }
+    }
+    if (usable) {
+      // Clear providerModel so the picked provider's own default model applies.
+      try { await settingsStore.update({ providerName: p.name, providerModel: '' }); }
+      catch { /* a settings write failure must not block chat creation */ }
+      return resolveActiveProvider();
+    }
+  }
+  // Nothing usable — keep the existing fallback so the turn fails with a clear
+  // provider error (the UI gates sending before reaching here on a fresh chat).
+  return resolveActiveProvider();
+};
+
+/**
  * Build the ordered failover candidate chain for a turn: the active
  * {provider, model} first, then each configured fallback PROVIDER (resolved
  * to its default model). Returns just [start] when failover is off or no
@@ -449,9 +489,14 @@ const MODEL_CATALOG = Object.freeze({
     { model: 'claude-sonnet-4-6',          label: 'Claude Sonnet 4.6' },
     { model: 'claude-haiku-4-5-20251001',  label: 'Claude Haiku 4.5' },
   ],
+  // The fallback set shown until the user curates their own (openrouterChatCatalog).
+  // Led by the current best open-weights tool-calling models (mid-2026), so a
+  // fresh OpenRouter user gets a strong default without curating first.
   openrouter: [
-    { model: 'openai/gpt-4o',       label: 'GPT-4o' },
-    { model: 'openai/gpt-4o-mini',  label: 'GPT-4o mini' },
+    { model: 'z-ai/glm-5.1',          label: 'GLM-5.1 (open · tool-calling)' },
+    { model: 'moonshotai/kimi-k2.6',  label: 'Kimi K2.6 (open)' },
+    { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
+    { model: 'openai/gpt-4o',         label: 'GPT-4o' },
   ],
   // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
   'local-webgpu': [
@@ -2153,7 +2198,7 @@ const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSe
 /** @type {ReturnType<typeof makeGoalRunner> | null} */
 let goalRunner = null;
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
-  vault, VaultLockedError, sessionCache, resolveActiveProvider, resolvePermission,
+  vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
   computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
@@ -2373,7 +2418,7 @@ const runInit = async () => {
 const ensureCurrentSession = async () => {
   let sessionId = /** @type {any} */ (await sessionCache.sessionGet('currentSessionId'));
   if (sessionId) return sessionId;
-  const ap = resolveActiveProvider();
+  const ap = await ensureActiveProvider();
   const inherited = await resolvePermission(null);
   const created = await sessions.create({
     provider: ap.name,

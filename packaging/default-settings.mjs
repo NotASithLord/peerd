@@ -78,7 +78,12 @@ export const defaults = {
   // tool action. The chat mode-row dial raises it per task.
   reasoningEffort: { store: 'medium', preview: 'medium' },
 
-  providerName: { store: 'anthropic', preview: 'anthropic' },
+  // Empty on fresh install — NO provider is assumed. The first provider the
+  // user configures auto-activates (provider/setKey for keyed providers,
+  // ensureActiveProvider for a reachable keyless daemon at first chat). Until
+  // then the Settings "Default model for new chats" section stays hidden and
+  // chats can't start, instead of silently defaulting to Anthropic with no key.
+  providerName: { store: '', preview: '' },
   providerModel: { store: '', preview: '' },
 
   // Curated OpenRouter model ids the chat model-picker offers (OpenRouter is
