@@ -29,6 +29,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { compareToBaseline, UPDATE_BASELINES } from './visual.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..', '..');
@@ -263,11 +264,75 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {
   if (!mounted) { cleanup(); throw new Error('side panel never mounted'); }
   log('side panel mounted');
 
+  // Capture the panel as a PNG buffer. Two headless-Chrome gotchas handled:
+  // (1) bringToFront ONCE (lazily) — headless composites only the foregrounded
+  //     target, so the first capture needs it active; calling it before EVERY
+  //     capture hangs the next captureScreenshot. Activate once.
+  // (2) the nudge pump — visualCheck freezes animations for a deterministic
+  //     shot, but a frozen page idles the compositor and captureScreenshot then
+  //     waits forever for a frame. Toggling a sub-pixel translateZ on the root
+  //     (invisible in 2D, so the pixels are unaffected — verified 0.00000 diff)
+  //     forces the compositor to keep producing frames until the capture
+  //     resolves. Without this, capturing a perpetual-spinner screen deadlocks.
+  let broughtToFront = false;
+  const screenshot = async () => {
+    if (!broughtToFront) { await page.send('Page.bringToFront'); broughtToFront = true; }
+    let pumping = true;
+    let toggle = false;
+    const pump = (async () => {
+      while (pumping) {
+        toggle = !toggle;
+        await page.send('Runtime.evaluate', {
+          expression: `(() => { const e = document.documentElement; if (e) e.style.transform = 'translateZ(${toggle ? '0.0001px' : '0px'})'; })()`,
+        }).catch(() => {});
+        await sleep(50);
+      }
+    })();
+    try {
+      const r = await page.send('Page.captureScreenshot', { format: 'png' });
+      return Buffer.from(r.data, 'base64');
+    } finally { pumping = false; await pump; }
+  };
+
   return {
-    sw, swConn, page, port, profile,
+    sw, swConn, page, port, profile, screenshot,
     close: () => { try { page.close(); } catch { /* */ } try { swConn.close(); } catch { /* */ } cleanup(); },
     modelCallCount: () => modelCalls,
   };
+}
+
+/**
+ * Capture the panel and fold a visual-regression verdict into the scenario's
+ * checks: compare the screenshot against baselines/<name>.png (or write it when
+ * missing / UPDATE_BASELINES=1). A small diff-ratio threshold absorbs rendering
+ * noise so only real UI changes fail.
+ * @param {object} ctx     the launchPeerd ctx
+ * @param {object} checks  a makeChecks() collector
+ * @param {string} name    baseline key
+ * @param {{ threshold?: number, tolerance?: number }} [opts]
+ */
+export async function visualCheck(ctx, checks, name, opts = {}) {
+  // Deterministic capture: freeze animations/transitions and hide the blinking
+  // caret so the PNG is identical run-to-run (the brand has spinners + a
+  // wordmark typing intro). Idempotent — the <style> rides in <head>, which
+  // Mithril's #app re-renders don't touch, so one injection covers every state.
+  await evalIn(ctx.page, `(() => {
+    if (document.getElementById('e2e-no-anim')) return;
+    const s = document.createElement('style');
+    s.id = 'e2e-no-anim';
+    s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
+    document.head.appendChild(s);
+  })()`);
+  const png = await ctx.screenshot();
+  const v = compareToBaseline(name, png, { update: UPDATE_BASELINES, ...opts });
+  if (v.wrote) {
+    checks.check(`visual: ${name} — baseline ${v.missing ? 'created' : 'updated'} (skipped compare)`, true);
+  } else if (!v.dimsMatch) {
+    checks.check(`visual: ${name} — dimensions match the baseline`, false);
+  } else {
+    checks.check(`visual: ${name} — diff ${(v.ratio * 100).toFixed(2)}% ≤ ${(v.threshold * 100).toFixed(0)}%`, v.pass);
+  }
+  return v;
 }
 
 /**
