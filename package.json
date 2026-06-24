@@ -2,12 +2,17 @@
   "name": "peerd",
   "private": true,
   "type": "module",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Browser-native AI agent harness. Solo dev — Bun is for tests + one-shot vendor scripts only; the extension itself runs no build step.",
   "license": "Apache-2.0",
   "homepage": "https://peerd.ai",
-  "repository": { "type": "git", "url": "https://github.com/NotASithLord/peerd" },
-  "bugs": { "url": "https://github.com/NotASithLord/peerd/issues" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NotASithLord/peerd"
+  },
+  "bugs": {
+    "url": "https://github.com/NotASithLord/peerd/issues"
+  },
   "scripts": {
     "test": "bun test ./tests",
     "test:watch": "bun test ./tests --watch",

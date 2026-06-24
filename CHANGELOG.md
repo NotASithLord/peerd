@@ -43,6 +43,35 @@ The staged integration of the open-PR backlog onto one verified branch
 
 ---
 
+## [0.1.4] — 2026-06-24
+
+Goal-mode hardening, side-panel state fixes, an end-to-end test tier, and
+provider default-model selection. All changes verified green and reviewed
+by adversarial-swarm passes before merge.
+
+### Added
+- **Live-extension E2E tier** — a reusable raw-CDP harness with goal /
+  stop / error scenarios (real chassis, model faked at the wire), wired
+  into CI (#57); plus a local, npm-free visual-regression layer
+  (self-contained PNG decode + pixel diff against committed baselines;
+  deliberately out of blocking CI) (#64).
+- **Provider-aware default models** + WebVM terminal fixes (#62).
+
+### Fixed
+- **Goal-mode autonomous loop** — durable Stop that reaches a
+  vault-lock-paused run, resume sequencing, and cap-boundary correctness
+  (#55); Goal bar / Stop rehydrate when a surface (re)connects mid-run
+  (#59); goal-resume ordered before auto-resume on interactive unlock,
+  with durable-Stop now awaited on steer / new-chat / archive (#63).
+- **Spend-limit halt banner** persists across unrelated state pushes
+  (Plan/Act toggle, `/system`, `/tools`, settings) instead of vanishing
+  mid-halt (#54).
+
+### Changed
+- README embeds the demo video after the intro (#65).
+
+---
+
 ## [0.1.0] — 2026
 
 Initial **experimental preview** — the core buildout, integrated:
