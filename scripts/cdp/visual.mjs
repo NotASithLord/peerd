@@ -11,7 +11,7 @@
 // threshold (rendering noise — antialiasing, subpixel — is absorbed by the
 // per-pixel tolerance, so only real UI changes trip it).
 
-import { inflateSync } from 'node:zlib';
+import { inflateSync, deflateSync } from 'node:zlib';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -141,3 +141,78 @@ export function compareToBaseline(name, pngBuffer, { update = false, threshold =
 }
 
 export const UPDATE_BASELINES = process.env.UPDATE_BASELINES === '1';
+
+// ---- minimal PNG encoder (for diff-highlight images) ------------------------
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+const crc32 = (buf) => {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+};
+const pngChunk = (type, data) => {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+};
+
+/**
+ * Encode raw RGB (8-bit, width*height*3) to a PNG buffer (colour type 2, filter
+ * 0). The inverse of decodePng for the RGB case — used to write diff images.
+ * @param {number} width @param {number} height @param {Uint8Array} rgb
+ * @returns {Buffer}
+ */
+export function encodePng(width, height, rgb) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // bit depth 8, colour type 2 (RGB)
+  const stride = width * 3;
+  const raw = Buffer.alloc(height * (stride + 1));
+  for (let y = 0; y < height; y += 1) {
+    raw[y * (stride + 1)] = 0; // filter type None
+    raw.set(rgb.subarray(y * stride, y * stride + stride), y * (stride + 1) + 1);
+  }
+  const idat = deflateSync(raw);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr), pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+/**
+ * Write a diff-highlight PNG: changed pixels painted solid red, everything else
+ * a dimmed grayscale of the current capture (so the layout is visible and the
+ * changes pop). Readable by an agent to SEE what moved.
+ * @param {object} base  decoded baseline
+ * @param {object} cur   decoded current
+ * @param {string} path
+ * @param {{ tolerance?: number }} [opts]
+ */
+export function writeDiffImage(base, cur, path, { tolerance = 8 } = {}) {
+  const w = Math.min(base.width, cur.width);
+  const h = Math.min(base.height, cur.height);
+  const out = new Uint8Array(w * h * 3);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const bi = (y * base.width + x) * base.channels;
+      const ci = (y * cur.width + x) * cur.channels;
+      let diff = false;
+      for (let k = 0; k < 3; k += 1) {
+        if (Math.abs(base.data[bi + k] - cur.data[ci + k]) > tolerance) { diff = true; break; }
+      }
+      const oi = (y * w + x) * 3;
+      if (diff) { out[oi] = 255; out[oi + 1] = 0; out[oi + 2] = 0; }
+      else { const g = (cur.data[ci] * 0.35 + 165) & 0xff; out[oi] = g; out[oi + 1] = g; out[oi + 2] = g; }
+    }
+  }
+  writeFileSync(path, encodePng(w, h, out));
+}

@@ -1,6 +1,6 @@
 # Visual-regression baselines
 
-Reference PNGs for `run-e2e-visual.mjs` (`bun run test:e2e:visual`). Each is a
+Reference PNGs for the visual states (`bun run test:e2e:visual`, i.e. `run-e2e-verify.mjs --visual`). Each is a
 deterministic screenshot of the live side panel at a named state, captured with
 animations frozen and the compositor pumped (see `e2e-harness.mjs` /
 `visual.mjs`). The scenario decodes both the baseline and a fresh capture (an

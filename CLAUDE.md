@@ -114,7 +114,7 @@ top-level peerd-* directory, stop and reconsider.
   steps are pure functions. IO is *injected* as a parameter, never
   imported directly inside a module. This is the testability lever.
 - **Mithril.js for UI.** Already vendored. Don't swap frameworks.
-- **Two test surfaces, different jobs.**
+- **Three test surfaces, different jobs.**
     - **In-browser** at `extension/tests/runner.html` (tiny custom
       framework). Tests that need a browser: DOM, chrome.*,
       real IDB lifecycle, side panel components, SW behavior, the
@@ -152,6 +152,34 @@ top-level peerd-* directory, stop and reconsider.
     Rule of thumb: if a test would mock half the world to run, it
     wants the browser. If it operates on values in and values out,
     it wants Bun.
+    - **Live E2E + the verify loop** at `scripts/cdp/run-e2e-verify.mjs`
+      (`bun run e2e:verify`). Loads the REAL unpacked extension in
+      Chrome for Testing and drives the live side panel through every
+      "state" in `scripts/cdp/states.mjs` (smoke, goal mode, stop,
+      error + visual snapshots) against ONE Chrome — the seam the other
+      two surfaces can't reach (SW + port + vault + agent loop end to
+      end; only the model wire bytes are faked, over CDP Fetch). It
+      writes `scripts/cdp/artifacts/` (gitignored): a **screenshot per
+      state** to LOOK at, a structured **`result.json`** (per-check
+      pass/fail + the why), and a **diff-highlight PNG** on a visual
+      miss. This is built for an AGENT to self-drive a change→verify→fix
+      loop: edit, `bun run e2e:verify`, read `result.json` + the
+      screenshots, fix, repeat until `ok:true`. See
+      `docs/E2E-VERIFY-LOOP.md`. (`--functional` skips the
+      per-machine visual baselines; CI runs that via `test:e2e:all`.)
+- **UI work runs through the verify loop — never call a rendered change
+  done on assertions alone.** When you touch a side-panel / home /
+  component surface, iterate edit → `bun run e2e:verify` → read
+  `scripts/cdp/artifacts/result.json` AND **`Read` the screenshots** →
+  fix, until `ok:true`. Looking at the PNGs is mandatory, not optional:
+  for *new* UI there's no baseline, so your eyes are the test; on a
+  regression read the `*-diff.png` to see what moved. Tighten the loop
+  with `--only=<state>` or `--visual`. If you change a flow no state
+  covers, ADD one to `scripts/cdp/states.mjs` (seed a new visual
+  baseline with `UPDATE_BASELINES=1 … --visual` and commit it) — an
+  uncovered UI change is an unfinished one. why: the unit tiers can
+  assert structure but can't SEE the render; this loop is how an agent
+  closes that gap on its own before pushing.
 - **`index.js` is the public API per module.** ESLint
   `no-restricted-imports` forbids deep paths from outside the module.
   Inside the module, deep imports are fine.

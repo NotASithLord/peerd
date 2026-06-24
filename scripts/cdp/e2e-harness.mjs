@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// Reusable scaffolding for peerd's end-to-end side-panel tests. Extracted from
-// run-e2e-sidepanel.mjs so each new flow (goal mode, stop, error, …) is a short
-// scenario script instead of ~150 lines of duplicated CDP plumbing.
+// Reusable scaffolding for peerd's end-to-end side-panel tests. The states live
+// in states.mjs and run against ONE Chrome via run-e2e-verify.mjs (the verify
+// loop); this module is the shared CDP plumbing they build on.
 //
 // What a scenario gets:
 //   launchPeerd({ modelResponder }) — load the REAL unpacked extension in
@@ -219,7 +219,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {
   log('extension id:', sw.id);
 
   // 2) attach to the SW and intercept the Ollama model call over CDP Fetch.
-  const respond = modelResponder || (() => ({ sse: sseText('e2e-smoke-ok') }));
+  // currentResponder is SWAPPABLE (ctx.setModelResponder) so a single Chrome can
+  // host many states back-to-back, each with its own model behaviour — the
+  // single-Chrome speed path for the verify loop.
+  let currentResponder = modelResponder || (() => ({ sse: sseText('e2e-smoke-ok') }));
   let modelCalls = 0;
   const swConn = await attach(sw.wsUrl, async (method, params) => {
     if (method !== 'Fetch.requestPaused') return;
@@ -232,7 +235,7 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {
     });
     try {
       if (url.includes('/v1/chat/completions')) {
-        const spec = await respond(modelCalls++, request);
+        const spec = await currentResponder(modelCalls++, request);
         if (spec?.delayMs) await sleep(spec.delayMs);
         if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
         else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
@@ -298,7 +301,43 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {
     sw, swConn, page, port, profile, screenshot,
     close: () => { try { page.close(); } catch { /* */ } try { swConn.close(); } catch { /* */ } cleanup(); },
     modelCallCount: () => modelCalls,
+    // Swap the model behaviour + reset the per-state call counter — lets one
+    // Chrome run many states back-to-back (the single-Chrome verify path).
+    setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },
   };
+}
+
+/**
+ * Start a clean chat (new session) between states so transcripts don't bleed.
+ * AWAITS the view actually clearing — session/reset clears the SW session, but
+ * the panel re-renders the empty transcript on the SW's async state push, so a
+ * capture/assert right after the RPC could still see the PREVIOUS state's
+ * messages (it did: an idle-snapshot caught the prior turn's transcript).
+ * @param {object} ctx
+ */
+export async function resetSession(ctx) {
+  await rpc(ctx.page, { type: 'session/reset' });
+  await waitFor(
+    () => evalIn(ctx.page, `!document.querySelector('.message-user, .message-assistant')`),
+    { budgetMs: 5_000 },
+  );
+}
+
+/**
+ * Freeze animations/transitions and hide the blinking caret so screenshots are
+ * identical run-to-run (the brand has spinners + a wordmark typing intro).
+ * Idempotent — the <style> rides in <head>, which Mithril's #app re-renders
+ * don't touch, so one injection covers every state. Call once before capturing.
+ * @param {object} ctx
+ */
+export async function freezeAnimations(ctx) {
+  await evalIn(ctx.page, `(() => {
+    if (document.getElementById('e2e-no-anim')) return;
+    const s = document.createElement('style');
+    s.id = 'e2e-no-anim';
+    s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
+    document.head.appendChild(s);
+  })()`);
 }
 
 /**
@@ -312,17 +351,7 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {
  * @param {{ threshold?: number, tolerance?: number }} [opts]
  */
 export async function visualCheck(ctx, checks, name, opts = {}) {
-  // Deterministic capture: freeze animations/transitions and hide the blinking
-  // caret so the PNG is identical run-to-run (the brand has spinners + a
-  // wordmark typing intro). Idempotent — the <style> rides in <head>, which
-  // Mithril's #app re-renders don't touch, so one injection covers every state.
-  await evalIn(ctx.page, `(() => {
-    if (document.getElementById('e2e-no-anim')) return;
-    const s = document.createElement('style');
-    s.id = 'e2e-no-anim';
-    s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
-    document.head.appendChild(s);
-  })()`);
+  await freezeAnimations(ctx);
   const png = await ctx.screenshot();
   const v = compareToBaseline(name, png, { update: UPDATE_BASELINES, ...opts });
   if (v.wrote) {
