@@ -245,6 +245,11 @@ instance re-spawns the tab via `ensureTab`. Generalize
 3. **P2 — the worker relocation, for JS-safety against untrusted code.** Move
    `runUserTurn` into a per-tab worker behind the proxy; wrapper stays SW-side.
 4. **P3 — durable resume** across vault unlock / browser restart (DESIGN-08).
+5. **The web resident** — extend the model to a fourth, *web-tab* kind: the
+   browser runner (`do`/`get`/`check` → `runRunner`) folded into the actor model,
+   so tabs stop being global mutable objects and the runner becomes steerable.
+   Rides P1/P2; the steering piece is independently extractable. Full design in
+   **§The web resident — tabs as the fourth resident kind** below.
 
 ## Future steps — the substrate, and the mature model
 
@@ -285,3 +290,174 @@ residents acting as peers — with a deliberate line between **local** peers
 - **A per-call ownership gate** (`session === record.owner` on every mutation) —
   rejected: imperative bookkeeping with transfer-on-settle / brick failure modes.
   Replaced by the capability tier + the routing pointer.
+
+## The web resident — tabs as the fourth resident kind (forward design)
+
+> Status: DESIGN, not built. Extends P0's three tab-hosted *sandbox* kinds
+> (WebVM / Notebook / App) to a fourth — the **web tab** — folding the browser
+> runner (`do`/`get`/`check` → `runRunner`) into the same actor model. Grounded
+> in a code-recon + adversarial design pass; the honest trade-off (a HARD
+> invariant traded for a SOFT one) is recorded below, not papered over. This is
+> the concrete near-term realization of the "in-browser actor mesh" arc above.
+
+### The problem it closes
+The runner is the one execution surface P0 left *outside* the resident model:
+
+- **Tabs are global mutable objects.** `do`/`get`/`check` take any `tabId`; no
+  actor owns a tab and the capability tier never reaches it — the same
+  shared-mutable-state problem residents fixed for sandboxes, still open for tabs.
+- **The runner isn't steerable.** `spawn.js` invokes the child loop with *no*
+  abort signal, so a `Stop` unwinds the parent's `await` while the child keeps
+  clicking/typing the page to its step cap (orphaned await, not aborted loop).
+- **It's a pure function, not an owner** — per-call, addressless, stateless.
+
+### The model — everything is an actor, the orchestrator included
+Drop "pane of glass" and "supervisor" as descriptions of the orchestrator's
+*nature*: those are the UX and the role. The orchestrator is itself an **actor**
+— the *user-facing* one (it holds the screen and the key), with its own logic and
+its own untrusted-output assumption. The system is a graph of actors; one renders.
+(OS analogue: the shell is a process too, not above them.)
+
+A **web resident** is then the fourth kind: a `kind:'web'` resident that **owns
+one tab**, holds the low-level DOM toolset (the runner's `DO_TOOLSET` /
+`READ_TOOLSET`), is keyless + pinned exactly as the runner is today, and is
+reached by message. Reply/lifecycle collapse to **stateful + await** (synchronous
+request→summary, preserving `do`/`get`/`check`'s tight latency), versus the
+sandbox resident's **stateful + wake** (async, batch). The lone *pure function*
+left is the ephemeral `spawn_subagent`: residency ⟺ statefulness ⟺ actorhood.
+
+### The accumulation decision — state lives WITH the actor (the trilemma)
+You cannot have all three: **(i)** a uniform actor model, **(ii)** no
+orchestrator-side per-kind split, **(iii)** accumulation kept out of the resident.
+
+- Accumulate in the *orchestrator* (today's runner) → buys (iii), costs (i)+(ii):
+  the web worker is a pure function (not an actor), and the orchestrator must
+  treat it specially + compose history-laden briefings for it — lossy, and the
+  very split P0 set out to remove.
+- Accumulate in the *resident* → buys (i)+(ii): every kind is a real actor, the
+  orchestrator just sends a task, no split, no briefing-composer.
+- Accumulate *nowhere* → lose multi-step task context (the DOM is the truth for
+  *current* state, never for *intent / progress*).
+
+**Decision: accumulate in the resident.** It is the only option that keeps the
+model uniform and the orchestrator simple. State lives with the actor; the DOM
+stays the source of truth for current page state (re-snapshot per step).
+
+### The security principle — compress at every accumulation boundary
+The objection to resident accumulation is injection surface. But the comparison
+is narrower than it looks: **the same compressed summary reaches the orchestrator
+either way** (it must, for the user-facing synthesis). The *only* delta of
+resident-side accumulation is the worker *also* keeping a trimmed working memory.
+So **location is not the lever — compression is.** A lossy distillation is far
+less likely to carry an injection intact than verbatim DOM; whatever survives is
+still `wrapUntrusted`-fenced (treated as data) wherever it lands.
+
+The rule, applied at *every* accumulation boundary: **compress untrusted content
+before it accumulates, aggressiveness keyed to provenance.**
+
+- **Web resident** (untrusted-sourced) → trim hard: keep a rolling *progress*
+  summary (intent, what was tried, learned page structure), drop stale DOM
+  snapshots; reuse the existing rolling-summary / redact / trim machinery.
+- **Sandbox resident** (own work) → accumulate loose: its context is its own
+  reasoning over its own disk/files.
+
+This replaces "stateless vs stateful" with one knob — *how hard the actor
+compresses what it keeps* — so every resident stays a real actor.
+
+**The honest trade.** P0's non-accumulation was a HARD invariant ("no session →
+structurally cannot accumulate, CI-floored"). This is a SOFTER one ("bounded
+session, capped by a trim policy" — a cap can be misconfigured where a missing
+field cannot). In exchange: a glass orchestrator, simple messages, no lossy
+briefing, real actors, better local task performance. The residual the soft
+invariant admits, and P0's purity avoided: **a retained (compressed) memory can
+compound a *steered* line of reasoning across steps, where a pure function resets
+each call.** It is contained on every side — keyless (no exfil), pinned (one tab),
+trimmed (bounded), watched (the display), interruptible (steer). Given keyless
+already removes the catastrophic outcome (exfil), the soft invariant is the right
+trade — but the **trim cap becomes a load-bearing, tested security knob** (assert
+the web resident's context never retains stale snapshots / stays under budget),
+not a structural guarantee. Stated plainly: the isolate is no longer pristine; it
+holds a small, compressed, keyless, watched working memory.
+
+### Message-based control — abort / steer as addressed messages
+Steering is net-new (the runner is unsignaled today) but does **not** require
+threading an ambient `AbortController` through the shared `spawnSubagent` — which
+would wrongly abort async `wake` subagents that must outlive the parent. Instead,
+control is an **addressed in-band message**: the resident is a state machine that
+inspects each message and decides — abort → abort, steer → fold the new
+instruction in, else continue. Addressed, so an async sibling never sees it; no
+async path breaks. The loop's existing checkpoints (`agent-loop.js`) are where it
+polls the control channel mid-turn (the mailbox today delivers only *between*
+turns). Physical caveat, not a flaw: a cross-process action already on the wire (a
+CDP `Runtime.evaluate` / `scripting.executeScript`) completes — abort lands at the
+*next* checkpoint. "Interruptible," not "transactionally abortable."
+
+### Canonical identity — one resident per tab dissolves the snapshot race
+A naive read of "addressable tabs" *amplifies* a latent race: `get`/`check` are
+read-class (concurrency-safe), and `domRefs` is one shared, last-writer-wins
+registry keyed by tabId — two concurrent reads on the same tab clobber each
+other's snapshot. **One canonical resident per tab, with the mailbox serializing
+that resident's turns, removes the race by construction** — there are never two
+concurrent snapshot writes to a tab, because all access routes through its single
+serialized owner. The dependency: this only holds if `do`/`get`/`check` are
+*re-pointed through* the resident, not left as parallel-capable raw-`tabId` tools
+beside it.
+
+### The display — glass over a stateful actor (two streams)
+"Looks like one chat but isn't." The resident emits every action; the user-facing
+orchestrator renders that stream inline (the existing subagent-card live-view,
+left visible instead of hidden from `/chats`). Keep two streams distinct:
+
+- **Display stream** → every emission, full fidelity, cheap (rendering only;
+  summarized / collapsed by default to avoid micro-action noise).
+- **Model-memory stream** → the *compressed* summary the orchestrator keeps for
+  its own synthesis — never every micro-action, or its context explodes. (This is
+  also what keeps the emissions "low cost.")
+
+### The do / get / check collapse
+With tabs addressable, `do`/`get`/`check` fold into `message_resident`: the
+orchestrator's whole browser surface becomes "message the tab's resident," and
+that tool class + its system-prompt section is removed (more context saved). The
+low-level DOM tools live ONLY on the web resident. Because the resident is
+*stateful*, the message stays simple — `message(task, tabResidentId)` — with **no**
+history-packing briefing tool and no lossy curation (the worker remembers). The
+web message is `await`-style so the summary returns this turn, preserving today's
+tight reasoning loop.
+
+### Open implementation questions
+- **Capability-strip layering.** The runner's keyless strip runs in `spawn.js` on
+  an *exposure-unset* ctx (self-narrows by granted tool names); a resident ctx
+  strips via `service-worker.js` keyed on `residentAllowedTools(kind)`. The web
+  resident must not stack both incoherently — decide which layer wins; note
+  `residentAllowedTools('web')` is empty until `web` is added to
+  `RESIDENT_KIND_TOOLS` (= the DOM toolset).
+- **Exposure × tier reconciliation.** DOM mutators (`click`/`type`/`navigate`)
+  are contained for the main agent by `MAIN_AGENT_HIDDEN_TOOLS` (exposure axis),
+  not `RESIDENT_MUTATING_TOOLS`. Legitimate holders become {runner (exposure
+  unset), web resident (`residentKind:'web'`)} — gate-test all four cases
+  (main=refused, runner=allowed, web=allowed, non-web-resident=refused). The
+  runner's protection is the *absence* of a marker — fragile under a future "tier
+  the DOM mutators" refactor.
+- **The tabId pin is a new shape.** `pinResidentCall` overwrites an instance-id
+  *arg*; DOM tools carry the tab via `ctx.activeTab.id`, not an arg. Invert it:
+  positively bind ctx → owned tab, plus a new gate rule refusing a web resident
+  any call whose resolved tab ≠ owned tab — ordered against `resolveTargetTab`'s
+  denylist check.
+- **`buildToolContext` activeTab inversion is fail-OPEN.** P0 sets
+  `activeTab=undefined` for a resident (leak guard). The web resident must *carry*
+  its owned tab; a missing `residentKind==='web'` exception silently falls back to
+  the user's foreground tab. Make it **fail-closed** — a web ctx with no owned tab
+  refuses, never queries the active tab.
+- **Lifecycle / rehydration.** Cache the web resident's working memory keyed to
+  the tab/binding so a re-mint (SW restart) rehydrates it; cheap version is
+  in-memory (lost on SW death → re-derive from the live page), durable version
+  persists the trimmed memory with the care any untrusted-derived state needs.
+
+### Where it sits in the phasing
+This is **P1/P2 territory** — it rides the conversational-surface + actor-mesh
+work and the steering machinery. One piece is independently extractable and is the
+only *new capability* here (the rest is consolidation + hardening): **steerable
+in-flight tab work** — abort/steer as an addressed message to the runner so `Stop`
+halts the next page action instead of orphaning the await. Ship that alone first
+if the goal is capability; the full re-housing is the "every tab owned"
+consolidation + hardening.

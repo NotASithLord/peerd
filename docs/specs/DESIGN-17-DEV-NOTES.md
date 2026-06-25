@@ -191,3 +191,14 @@ features that *use* `message_resident` weren't traced. The findings:
 The conversational surface (talk to a resident), the unattended path (once the
 inbound clamp lands), per-kind tuned model tiers, the Phase-2 worker relocation,
 and durable resume — all per the spec's Phasing.
+
+**The web resident** (tabs as a fourth resident kind) now has a full forward
+design in the spec — see `DESIGN-17-resident-agents.md` §"The web resident — tabs
+as the fourth resident kind". It folds the browser runner into the actor model
+(every tab owned, the runner steerable, `do`/`get`/`check` collapsed into
+`message_resident`), and records the central decision (accumulate IN the actor,
+compress at every boundary keyed to provenance) + its honest trade (a HARD
+non-accumulation invariant swapped for a SOFT, tested trim cap). Not built; the
+one independently-extractable piece is steerable in-flight tab work (abort/steer
+as an addressed message). The display-only `<untrusted_*>` strip it depends on
+already shipped (`stripUntrustedFences`, `shared/util.js`).
