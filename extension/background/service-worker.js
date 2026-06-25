@@ -2910,6 +2910,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
     startGoalRun, haltGoalRun, ensureSession,
+    // DESIGN-17 P1: agent/stop cascades to this chat's in-flight residents.
+    residentMessaging,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,

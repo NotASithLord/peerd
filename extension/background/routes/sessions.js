@@ -20,7 +20,7 @@ export const makeSessionRoutes = (deps) => {
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
-    startGoalRun, haltGoalRun, ensureSession,
+    startGoalRun, haltGoalRun, ensureSession, residentMessaging,
   } = deps;
 
   return {
@@ -38,6 +38,23 @@ export const makeSessionRoutes = (deps) => {
       if (sessionId && turnSlots.stop(sessionId)) {
         auditLog.append({ type: 'session_ended', details: { reason: 'user_stop' } })
           .catch(() => {});
+      }
+      // DESIGN-17 P1 — CASCADE the stop to this chat's in-flight RESIDENTS. They
+      // run on their OWN turn slots (a resident is a separate session), so the
+      // line above only aborted the orchestrator; without this, delegated VM/
+      // App/Notebook work keeps mutating to completion after the user hit Stop —
+      // sharper now that goal mode can autonomously drive residents. Aborting a
+      // resident slot lands at its loop's next checkpoint (interruptible, per the
+      // spec); the aborted turn settles through the normal path, which delivers a
+      // partial reply and clears its durable mailbox entry — so a redrain can't
+      // resurrect it. A queued-but-unstarted resident turn has no slot yet; it is
+      // bounded by the same Stop ending the orchestrator that would have read it.
+      if (sessionId && residentMessaging?.residentsFor) {
+        for (const residentSessionId of residentMessaging.residentsFor(/** @type {any} */ (sessionId))) {
+          if (turnSlots.stop(residentSessionId)) {
+            auditLog.append({ type: 'resident_stopped', details: { residentSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
+          }
+        }
       }
       return { ok: true };
     },
