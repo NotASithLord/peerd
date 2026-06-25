@@ -17,6 +17,12 @@
 // tool result (preserving the do/get/check ergonomics it replaces). Same gates,
 // same guards, same untrusted-content posture — only the delivery differs.
 //
+// Durable mailbox (P1). The ASYNC correlation is persisted (deps.mailbox): an SW
+// death between accept and deliver() no longer drops the reply-wake — redrain()
+// re-queues every pending engine message on boot (mirrors goalRunner.resume). WEB
+// is never persisted (sync within one turn; SW death there is turn-resume, not a
+// lost wake). The default no-op mailbox keeps the pure-heap P0 behavior in tests.
+//
 // Posture: a message is accepted from the active foreground chat (`senderSessionId
 // === getActiveSessionId()`) when it is NOT `inbound`. `inbound` is the
 // untrusted-ORIGIN signal the turn driver folds from synthetic + trusted:
@@ -47,12 +53,20 @@
  * @param {() => number} [deps.now]
  * @param {{ outstanding?: number, rateCap?: number, rateWindowMs?: number, resultChars?: number }} [deps.caps]
  * @param {(...args: unknown[]) => void} [deps.log]
+ * @param {{ append: (e: { id: string, senderSessionId: string, to: string, message: string, createdAt: number }) => Promise<unknown>, remove: (id: string) => Promise<unknown>, load: () => Promise<any[]> }} [deps.mailbox]
+ *   DURABLE MAILBOX (DESIGN-17 P1). Persists an ENGINE resident's in-flight
+ *   message→reply correlation so an SW death between accept and deliver() doesn't
+ *   silently drop the reply-wake. append() on accept, remove() on settle, load()
+ *   at boot (redrain). Default no-op = the P0 pure-heap behavior (web is sync, so
+ *   it is never persisted — its SW-death story is orchestrator turn-resume, not a
+ *   wake). Mirrors goal-runner's persist/resume.
  */
 export const makeResidentMessaging = (deps) => {
   const {
     resolveResident, runResidentTurn, reenter, turnSlots,
     getActiveSessionId, isVaultLocked, wrapUntrusted,
     appendAudit = async () => {}, now = Date.now, caps = {}, log = () => {},
+    mailbox = { append: async () => {}, remove: async () => {}, load: async () => [] },
   } = deps;
 
   const OUTSTANDING_CAP = caps.outstanding ?? 4;
@@ -66,6 +80,27 @@ export const makeResidentMessaging = (deps) => {
   const recentSends = new Map();
   /** @type {Map<string, Promise<unknown>>} web-resident sessionId → its serialization chain */
   const webChains = new Map();
+  /** @type {Map<string, Set<string>>} senderSessionId → residentSessionIds it has in flight (Stop cascade, Phase L) */
+  const inFlightResidents = new Map();
+  // Monotonic correlation id — durable-mailbox key + de-dupe. Process-unique
+  // (not now()-derived, which is fixed in tests and collides on same-ms sends).
+  let seq = 0;
+
+  /** @param {string} sender @param {string} residentSessionId */
+  const trackResident = (sender, residentSessionId) => {
+    const set = inFlightResidents.get(sender) ?? new Set();
+    set.add(residentSessionId);
+    inFlightResidents.set(sender, set);
+  };
+  /** @param {string} sender @param {string} residentSessionId */
+  const untrackResident = (sender, residentSessionId) => {
+    const set = inFlightResidents.get(sender);
+    if (!set) return;
+    set.delete(residentSessionId);
+    if (set.size === 0) inFlightResidents.delete(sender);
+  };
+  /** @param {string} sender @returns {string[]} the resident sessions this sender has in flight */
+  const residentsFor = (sender) => [...(inFlightResidents.get(sender) ?? [])];
 
   // Serialize web-resident turns per session: the sync-await relay below awaits the
   // turn, so two concurrent messages to the SAME tab would otherwise both call
@@ -108,6 +143,30 @@ export const makeResidentMessaging = (deps) => {
       // trusted is about the turn's ORIGIN (peerd's own loop), not its content.
       Promise.resolve(reenter({ userText: `${lead}\n\n${wrapped}`, sessionId: senderSessionId, synthetic: true, trusted: true }))
         .catch((e) => log('reenter failed', e));
+    });
+  };
+
+  // Queue ONE engine resident turn on its slot, deliver the fenced reply to the
+  // sender, and clear the mailbox entry on settle. Shared by a fresh message and a
+  // boot redrain() so the in-flight bookkeeping (count, Stop-cascade tracking,
+  // durable entry) stays identical on both paths.
+  /** @param {{ correlationId: string, senderSessionId: string, resident: { instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number }, message: string }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, resident, message }) => {
+    const { instanceId, kind, residentSessionId, name, tabId } = resident;
+    trackResident(senderSessionId, residentSessionId);
+    // Serialize on the RESIDENT's slot — runWhenIdle runs the turn the moment the
+    // resident is idle (never interrupting an in-flight resident turn). A thrown/
+    // failed resident turn STILL wakes the sender (with an error notice) so the
+    // caller is never left hanging.
+    turnSlots.runWhenIdle(residentSessionId, () => {
+      Promise.resolve(runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind }))
+        .then((res) => deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the resident produced no text reply)').slice(0, RESULT_CHARS)))
+        .catch((e) => deliver(senderSessionId, instanceId, kind, name, `the resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
+        .finally(() => {
+          decInFlight(senderSessionId);
+          untrackResident(senderSessionId, residentSessionId);
+          mailbox.remove(correlationId).catch(() => {});
+        });
     });
   };
 
@@ -175,7 +234,10 @@ export const makeResidentMessaging = (deps) => {
     // content returns in THIS tool result. Serialize per tab (runWebSerialized)
     // because runResidentTurn claims the resident's turn slot and turnSlots.claim
     // aborts an in-flight turn — concurrent messages to one tab must queue, not race.
+    // NOT persisted to the mailbox: a web message lives inside one orchestrator turn,
+    // so SW death there is the orchestrator's turn-resume story, not a lost wake.
     if (kind === 'web') {
+      trackResident(senderSessionId, residentSessionId);
       try {
         const res = await runWebSerialized(residentSessionId, () =>
           runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind }));
@@ -184,19 +246,16 @@ export const makeResidentMessaging = (deps) => {
         return { ok: false, error: `message_resident: the web resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
       } finally {
         decInFlight(senderSessionId);
+        untrackResident(senderSessionId, residentSessionId);
       }
     }
 
-    // Serialize on the RESIDENT's slot — runWhenIdle runs the turn the moment the
-    // resident is idle (never interrupting an in-flight resident turn). The reply
-    // re-enters the sender; a thrown/failed resident turn STILL wakes the sender
-    // (with an error notice) so the caller is never left hanging.
-    turnSlots.runWhenIdle(residentSessionId, () => {
-      Promise.resolve(runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind }))
-        .then((res) => deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the resident produced no text reply)').slice(0, RESULT_CHARS)))
-        .catch((e) => deliver(senderSessionId, instanceId, kind, name, `the resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
-        .finally(() => decInFlight(senderSessionId));
-    });
+    // ENGINE resident: persist the correlation to the durable mailbox, THEN queue
+    // the async-wake delivery. The mailbox entry survives an SW death between here
+    // and deliver(); redrain() re-queues it on boot.
+    const correlationId = `${instanceId}:${++seq}:${nowMs}`;
+    mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs }).catch(() => {});
+    runEngineDelivery({ correlationId, senderSessionId, resident, message });
 
     return {
       ok: true,
@@ -204,5 +263,44 @@ export const makeResidentMessaging = (deps) => {
     };
   };
 
-  return { messageResident };
+  // DURABLE REDRAIN (DESIGN-17 P1). Called once on SW boot, after the registries
+  // load + the vault unlocks (a resident turn needs the model key). Re-queues every
+  // persisted ENGINE message so its reply still reaches the sender. Idempotent: a
+  // stale entry whose instance is gone (or whose sender vanished) wakes the sender
+  // with a failure note and clears; a still-live instance re-runs the turn normally
+  // (resolveResident re-mints a dropped forward pointer). Mirrors goalRunner.resume.
+  /** @returns {Promise<{ redrained: number }>} */
+  const redrain = async () => {
+    let entries;
+    try { entries = await mailbox.load(); }
+    catch (e) { log('redrain load failed', e); return { redrained: 0 }; }
+    if (!Array.isArray(entries) || entries.length === 0) return { redrained: 0 };
+    let redrained = 0;
+    for (const e of entries) {
+      if (!e?.id || typeof e.senderSessionId !== 'string' || typeof e.to !== 'string' || typeof e.message !== 'string') {
+        if (e?.id) mailbox.remove(e.id).catch(() => {});
+        continue;
+      }
+      let resident = null;
+      try { resident = await resolveResident(e.to); }
+      catch { resident = null; }
+      // A web entry should never be in the mailbox (sync, never persisted); if one
+      // is, or the instance is gone, abandon it — wake the sender so it isn't left
+      // waiting on a reply that can never come.
+      if (!resident || resident.kind === 'web') {
+        deliver(e.senderSessionId, e.to, resident?.kind ?? 'tab-hosted', resident?.name,
+          'could not be reached after a restart (its instance may have been closed). Re-issue the request if it still matters.', true);
+        mailbox.remove(e.id).catch(() => {});
+        appendAudit({ type: 'resident_message_abandoned', details: { to: e.to, senderSessionId: e.senderSessionId } }).catch(() => {});
+        continue;
+      }
+      inFlight.set(e.senderSessionId, (inFlight.get(e.senderSessionId) ?? 0) + 1);
+      runEngineDelivery({ correlationId: e.id, senderSessionId: e.senderSessionId, resident, message: e.message });
+      redrained += 1;
+    }
+    log('redrained', redrained);
+    return { redrained };
+  };
+
+  return { messageResident, redrain, residentsFor };
 };

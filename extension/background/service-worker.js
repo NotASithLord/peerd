@@ -2441,6 +2441,33 @@ if (WEB_RESIDENT) {
     .catch(() => {});
 }
 
+// DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
+// correlation persists here, so an SW death between accept and deliver() doesn't
+// silently drop the reply-wake; redrain() re-queues it on boot. chrome.storage.
+// session (not local): a pending message only makes sense within ONE browser
+// session — a full browser restart drops the orchestrator turn anyway, so a stale
+// resurrection would be wrong. The blob is keyed by correlationId for O(1) removal.
+const RESIDENT_MAILBOX_KEY = 'residentMailbox';
+// Serialize read-modify-write: a concurrent append+remove on the single blob would
+// otherwise clobber. A promise chain makes each update see the prior one's write.
+let mailboxChain = Promise.resolve();
+const mailboxUpdate = (/** @type {(m: Record<string, any>) => Record<string, any>} */ mutate) => {
+  mailboxChain = mailboxChain.then(async () => {
+    const cur = await sessionCache.sessionGet(RESIDENT_MAILBOX_KEY);
+    const base = (cur && typeof cur === 'object') ? /** @type {Record<string, any>} */ (cur) : {};
+    await sessionCache.sessionSet(RESIDENT_MAILBOX_KEY, mutate(base));
+  }).catch(() => {});
+  return mailboxChain;
+};
+const residentMailbox = {
+  append: (/** @type {{ id: string }} */ e) => mailboxUpdate((m) => ({ ...m, [e.id]: e })),
+  remove: (/** @type {string} */ id) => mailboxUpdate((m) => { const n = { ...m }; delete n[id]; return n; }),
+  load: async () => {
+    const m = await sessionCache.sessionGet(RESIDENT_MAILBOX_KEY);
+    return (m && typeof m === 'object') ? Object.values(m) : [];
+  },
+};
+
 // Lazily mint a web resident for a tab (the analog of mintResident). No registry
 // record + no session-default to bind (id-less engine tools don't apply); the
 // only binding is tab→session, persisted so the resident's accumulated memory
@@ -2525,8 +2552,24 @@ const residentMessaging = makeResidentMessaging({
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),
+  mailbox: residentMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[resident]', ...a),
 });
+
+// Redrain the durable mailbox ONCE per SW lifetime, the moment the vault is
+// unlocked (a re-queued resident turn needs the model key). Boots already-unlocked
+// → fires from the attemptResume chain below; booted locked → fires on the first
+// unlock via the subscription. The once-guard prevents a double-drain (entries
+// aren't cleared until their turn SETTLES, so a second drain would double-deliver).
+let mailboxRedrained = false;
+const maybeRedrainMailbox = () => {
+  if (mailboxRedrained || !RESIDENT_TAB_AGENTS || vault.isLocked()) return;
+  mailboxRedrained = true;
+  Promise.resolve(residentMessaging.redrain())
+    .then((r) => { if (r?.redrained) console.warn('[resident] redrained', r.redrained, 'pending message(s) after restart'); })
+    .catch((e) => console.error('[sw] resident redrain failed', e));
+};
+vault.subscribe(() => { maybeRedrainMailbox(); });
 
 // ---------------------------------------------------------------------------
 // 5b. /init — workspace scan → draft AGENTS.md → confirm → persist (V1.5)
@@ -3139,6 +3182,12 @@ vault.attemptResume().then((resumed) => {
     // No auto-resume here — it needs an unlocked vault to call the model.
     goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
   }
+  // DESIGN-17 P1: redrain any in-flight resident message→reply correlations the SW
+  // death interrupted. Once-guarded + internally gated on an unlocked vault (a
+  // re-queued resident turn needs the model key); also fires on the first vault
+  // unlock if the SW booted locked. resolveResident lazy-loads the registries, so
+  // no ordering vs goal/auto-resume above is needed (resident sessions are separate).
+  maybeRedrainMailbox();
 }).catch((e) => console.error('[sw] attemptResume failed', e));
 
 // One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote

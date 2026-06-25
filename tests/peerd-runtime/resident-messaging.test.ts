@@ -105,6 +105,91 @@ describe('message_resident — error path still wakes the sender', () => {
   });
 });
 
+describe('message_resident — durable mailbox (persist + redrain)', () => {
+  const makeMailbox = () => {
+    const appended: any[] = [];
+    const removed: string[] = [];
+    let loadReturns: any[] = [];
+    return {
+      mailbox: {
+        append: async (e: any) => { appended.push(e); },
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => loadReturns,
+      },
+      appended, removed,
+      setLoad: (arr: any[]) => { loadReturns = arr; },
+    };
+  };
+
+  test('an ENGINE message persists on accept and clears on settle', async () => {
+    const mb = makeMailbox();
+    const { messageResident, reentries } = harness({ mailbox: mb.mailbox });
+    await messageResident({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    expect(mb.appended.length).toBe(1);
+    expect(mb.appended[0]).toMatchObject({ senderSessionId: 'chat-1', to: 'app-1', message: 'build' });
+    await tick();
+    // The reply delivered → the durable entry is cleared (same id).
+    expect(reentries.length).toBe(1);
+    expect(mb.removed).toEqual([mb.appended[0].id]);
+  });
+
+  test('a WEB message is NOT persisted (sync within one turn)', async () => {
+    const mb = makeMailbox();
+    const { messageResident } = harness({
+      mailbox: mb.mailbox,
+      resolveResident: async (to: string) =>
+        to === '42' ? { instanceId: '42', kind: 'web', residentSessionId: 'web-1', tabId: 42 } : null,
+    });
+    await messageResident({ to: '42', message: 'click', senderSessionId: 'chat-1' });
+    expect(mb.appended.length).toBe(0);
+  });
+
+  test('redrain re-queues a persisted engine message → resident runs, sender woken, entry cleared', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{ id: 'c1', senderSessionId: 'chat-1', to: 'app-1', message: 'resume me', createdAt: 1 }]);
+    const { redrain, reentries, turnsRun } = harness({ mailbox: mb.mailbox });
+    const r = await redrain();
+    expect(r.redrained).toBe(1);
+    await tick();
+    expect(turnsRun).toEqual([{ residentSessionId: 'res-1', message: 'resume me' }]);
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].sessionId).toBe('chat-1');
+    expect(mb.removed).toEqual(['c1']);
+  });
+
+  test('redrain abandons an entry whose instance is gone — wakes the sender with a failure, clears it', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{ id: 'c2', senderSessionId: 'chat-1', to: 'gone-9', message: 'x', createdAt: 1 }]);
+    const { redrain, reentries } = harness({ mailbox: mb.mailbox });
+    const r = await redrain();
+    expect(r.redrained).toBe(0);
+    await tick();
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].userText).toContain('could not be reached');
+    expect(mb.removed).toEqual(['c2']);
+  });
+
+  test('redrain drops a malformed entry without crashing', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{ id: 'bad', senderSessionId: 'chat-1' /* no to/message */ }, null]);
+    const { redrain } = harness({ mailbox: mb.mailbox });
+    const r = await redrain();
+    expect(r.redrained).toBe(0);
+    expect(mb.removed).toContain('bad');
+  });
+
+  test('residentsFor tracks the in-flight resident sessions for a sender (Stop cascade)', async () => {
+    const { messageResident, residentsFor } = harness({
+      // Never resolves → the resident stays in flight.
+      runResidentTurn: () => new Promise(() => {}) as Promise<{ result: string }>,
+    });
+    expect(residentsFor('chat-1')).toEqual([]);
+    await messageResident({ to: 'app-1', message: 'x', senderSessionId: 'chat-1' });
+    await tick();
+    expect(residentsFor('chat-1')).toEqual(['res-1']);
+  });
+});
+
 describe('message_resident — web resident (sync-await relay)', () => {
   // A harness whose resolveResident returns a WEB resident (kind 'web', the owned
   // tabId as instance). The web branch awaits the turn and returns content INLINE.
