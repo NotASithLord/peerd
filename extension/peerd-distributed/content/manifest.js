@@ -34,6 +34,43 @@ const signingBytes = (manifest) =>
 
 export { manifestHash };
 
+// why a cap before buffering: a bundle is fetched and reassembled fully in
+// memory before the loader's own MAX_TOTAL_CHARS cap can fire. The publisher
+// signs their OWN manifest, so the hash + signature checks do NOT bound its
+// size — a hostile manifest can declare a multi-GB payload, or a short chunk
+// list whose entries all reference ONE chunk so reassembly amplifies it
+// thousand-fold. Bound it on the FETCH path, before any chunk is pulled.
+// Aligns with apps/loader.js MAX_TOTAL_CHARS.
+export const MAX_BUNDLE_BYTES = 50_000_000;
+
+/**
+ * Reject an over-large or amplified manifest BEFORE any chunk is fetched or the
+ * payload is reassembled. Sums the declared chunk sizes over EVERY entry
+ * (duplicates included — reassembly maps over all of manifest.chunks, so N refs
+ * to one chunk reassemble to N×size even though the chunk is fetched once), and
+ * binds manifest.size to that sum so the size field cannot under-report to slip
+ * past a naive size check. A legit manifest never trips this: chunks are
+ * non-overlapping slices, so size === sum(chunk.size) by construction.
+ *
+ * @param {Manifest} manifest
+ */
+export const assertBundleWithinLimits = (manifest) => {
+  const chunks = manifest?.chunks;
+  if (!Array.isArray(chunks)) throw new Error('manifest has no chunk list');
+  let declared = 0;
+  for (const c of chunks) {
+    const size = c?.size;
+    if (!Number.isInteger(size) || size < 0) throw new Error('manifest chunk size invalid');
+    declared += size;
+    if (declared > MAX_BUNDLE_BYTES) {
+      throw new Error(`bundle too large: chunks declare more than ${MAX_BUNDLE_BYTES} bytes`);
+    }
+  }
+  if (!Number.isInteger(manifest.size) || manifest.size !== declared) {
+    throw new Error(`manifest size ${manifest?.size} does not match its chunk list (${declared})`);
+  }
+};
+
 /**
  * Build (and optionally sign) a manifest for a payload.
  *

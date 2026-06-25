@@ -16,7 +16,7 @@
 // against the signed manifest's hash, so a malicious provider can't corrupt a
 // byte — it can only fail to serve, which failover covers.
 
-import { manifestHash, verifyManifest } from './manifest.js';
+import { manifestHash, verifyManifest, assertBundleWithinLimits } from './manifest.js';
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
 import { fromBase64, concat } from '/shared/bundle/bytes.js';
@@ -105,6 +105,9 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     if (await manifestHash(manifest) !== hash) throw new Error('manifest hash mismatch — address does not match payload');
     const v = await verifyManifest(manifest);
     if (!v.ok) throw new Error(`manifest signature invalid: ${v.reason}`);
+    // 2b. Bound the (attacker-signed) manifest before buffering anything — a
+    // valid signature does not bound its declared size or chunk count.
+    assertBundleWithinLimits(manifest);
     onProgress?.({ phase: 'manifest', publisher: v.publisher, total: manifest.chunks.length, providers: clients.length });
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.
