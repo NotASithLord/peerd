@@ -85,6 +85,8 @@ export const createRegistry = (config, { storage }) => {
 
   let state = defaultState();
   let loaded = false;
+  /** @type {Promise<void> | null} the in-flight load(), shared by concurrent callers */
+  let loadPromise = null;
 
   // why a typed accessor: the id→record map sits under the dynamic
   // `collectionKey`, so index access yields the state's union value type;
@@ -93,18 +95,30 @@ export const createRegistry = (config, { storage }) => {
   /** @returns {Record<string, Rec>} */
   const collection = () => /** @type {Record<string, Rec>} */ (state[collectionKey]);
 
-  const load = async () => {
-    if (loaded) return;
-    const raw = await storage.get(storageKey);
-    state = (raw && typeof raw === 'object' && raw.schemaVersion === 1)
-      ? {
-          ...defaultState(),
-          ...raw,
-          [collectionKey]: { ...raw[collectionKey] },
-          sessionDefaults: { ...raw.sessionDefaults },
-        }
-      : defaultState();
-    loaded = true;
+  // why memoize the in-flight read: load() yields at `await storage.get`, and
+  // the `loaded` flag is only set AFTER. Two concurrent callers (a cold-boot
+  // wave — boot runs load() un-awaited and a registry op can arrive before it
+  // resolves) would each reassign the module-level `state` from a pre-write
+  // snapshot, so the later resolver clobbers the earlier op's committed write
+  // (a just-created/deleted record silently vanishes, its OPFS subtree orphaned).
+  // Sharing one promise collapses concurrent loads onto a single read + state.
+  const load = () => {
+    if (loaded) return Promise.resolve();
+    if (!loadPromise) {
+      loadPromise = (async () => {
+        const raw = await storage.get(storageKey);
+        state = (raw && typeof raw === 'object' && raw.schemaVersion === 1)
+          ? {
+              ...defaultState(),
+              ...raw,
+              [collectionKey]: { ...raw[collectionKey] },
+              sessionDefaults: { ...raw.sessionDefaults },
+            }
+          : defaultState();
+        loaded = true;
+      })();
+    }
+    return loadPromise;
   };
 
   const persist = async () => {

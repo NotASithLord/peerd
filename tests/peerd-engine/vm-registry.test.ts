@@ -101,4 +101,24 @@ describe('createVmRegistry', () => {
     expect(items[0].name).toBe('persisted');
     expect(await reg2.getDefaultForSession('chat-1')).toBe(rec.id);
   });
+
+  // Cold-registry re-entrancy: load() yields at storage.get before setting the
+  // `loaded` flag, so two concurrent first-ops must share ONE load — otherwise
+  // each reassigns `state` from a pre-write snapshot and the later one clobbers
+  // the earlier op's record (it vanishes, its OPFS subtree orphaned).
+  test('concurrent first ops on a cold registry share one load (no clobber)', async () => {
+    const store = new Map<string, unknown>();
+    let getCount = 0;
+    const storage = {
+      // slow get widens the race window; counted to prove load() reads once
+      get: async (k: string) => { getCount += 1; await new Promise((r) => setTimeout(r, 15)); return store.get(k); },
+      set: async (k: string, v: unknown) => { store.set(k, v); },
+      delete: async (k: string) => { store.delete(k); },
+    };
+    const reg = createVmRegistry({ storage });
+    await Promise.all([reg.create({ name: 'a' }), reg.create({ name: 'b' })]);
+    const items = await reg.list();
+    expect(items.map((x) => x.name).sort()).toEqual(['a', 'b']); // neither create clobbered
+    expect(getCount).toBe(1);                                    // load() read storage exactly once (memoized)
+  });
 });
