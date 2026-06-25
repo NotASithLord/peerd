@@ -175,10 +175,9 @@ Decisions:
 
 ## 9. CheerpX licensing
 
-CheerpX is a commercial dependency (`docs/store/...`; the v86 migration is
-tracked). A read-only `/vm-demo/` is one exposure; an agent-driven VM as a
-public, BYOK service is more. **Confirm the license permits this use before
-Tier 3 ships.** Independent reason the v86 (BSD-2) migration matters.
+Cleared with the CheerpX team: the public, agent-driven WebVM use is fine, so
+this is **not a blocker** for Tier 3. (The v86 / BSD-2 migration remains
+tracked for its own reasons, but is independent of this surface.)
 
 ## 10. Maintenance discipline (how it stays a derivation)
 
