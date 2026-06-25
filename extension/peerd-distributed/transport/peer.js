@@ -86,6 +86,11 @@ export const createPeer = ({
   }
   /** @type {RTCIceCandidateInit[]} */
   const pendingRemote = [];
+  // why a cap: candidates that arrive before the remote description is set are
+  // buffered here; a hostile peer could otherwise trickle UNBOUNDED candidate
+  // frames before ever sending a description, growing this array without limit.
+  // A real ICE gather is a handful of candidates; 64 is generous headroom.
+  const MAX_PENDING_REMOTE = 64;
   /** @param {RTCSessionDescriptionInit} desc */
   const setRemote = async (desc) => {
     await pc.setRemoteDescription(desc);
@@ -97,7 +102,14 @@ export const createPeer = ({
   /** @param {RTCIceCandidateInit | null} candidate */
   const addRemoteCandidate = async (candidate) => {
     if (!candidate) return; // end-of-candidates marker — nothing to add
-    if (!pc.remoteDescription) { pendingRemote.push(candidate); return; }
+    if (!pc.remoteDescription) {
+      if (pendingRemote.length >= MAX_PENDING_REMOTE) {
+        dwarn('webrtc', 'dropping ICE candidate — pre-description buffer full');
+        return;
+      }
+      pendingRemote.push(candidate);
+      return;
+    }
     try { await pc.addIceCandidate(candidate); }
     catch (e) { dwarn('webrtc', `addIceCandidate failed: ${/** @type {{ message?: string }} */ (e)?.message ?? e}`); }
   };
@@ -164,7 +176,16 @@ export const createPeer = ({
     // selected candidate pair off the live pc; the mesh stores the channel,
     // not the peer wrapper, so the pc rides along.
     channel.pc = pc;
-    dc.onmessage = (e) => channel.deliver(decode(e.data));
+    dc.onmessage = (e) => {
+      // why try/catch: e.data is attacker-controlled bytes from a remote peer;
+      // a malformed frame would otherwise throw an uncaught exception out of the
+      // event handler. Best-effort mesh traffic — drop the bad frame, like the
+      // outbound send already drops when the channel isn't open.
+      let m;
+      try { m = decode(e.data); }
+      catch { dwarn('webrtc', 'dropping unparseable data-channel frame'); return; }
+      channel.deliver(m);
+    };
     dc.onopen = () => { dlog('webrtc', '🟢 data channel OPEN — peers connected directly'); resolveChannel(channel); };
     dc.onclose = () => channel.signalClose();
     pc.addEventListener('connectionstatechange', () => {
