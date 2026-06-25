@@ -45,9 +45,10 @@ The staged integration of the open-PR backlog onto one verified branch
 
 ## [0.1.5] — 2026-06-24
 
-Two sandbox/egress security fixes plus the e2e tier's autonomous
-verify-loop. All changes reviewed by adversarial-swarm passes (security
-fixes held to a no-residual-bypass bar) and verified green before merge.
+Sandbox, egress, and runner security hardening plus the e2e tier's
+autonomous verify-loop and a docs pass. All code changes reviewed by
+adversarial-swarm passes (security fixes held to a no-residual-bypass
+bar) and verified green before merge.
 
 ### Fixed
 - **Notebook realm seal now covers the Cache API** — the sealed worker
@@ -59,13 +60,22 @@ fixes held to a no-residual-bypass bar) and verified green before merge.
   host** — the non-GET egress confirm named a specific host but cached
   the grant by tool key alone, so one approval became a blanket pass to
   any host; the grant key now folds in the host (#73).
+- **Browser-runner prompt-injection hardening** — the disposable
+  do/get/check runner's prompt now names the `<untrusted_web_content>`
+  fence, calls out prompt injection as the attack vector, and adds an
+  IGNORE → FLAG → EXCLUDE drill with anti-suppression language; 6
+  contract tests lock in each invariant (#81).
 
 ### Added
 - **Autonomous e2e verify loop** — `bun run e2e:verify` drives the real
   extension through every state on one Chrome (~6s), writing a screenshot
   per state + structured `result.json` (+ a diff image on a visual miss)
   an agent can self-drive; multi-turn / mode-toggle / vault-lock states
-  added (#70, #77). Per-run artifacts gitignored (#74).
+  added (#70, #77); the goal-state user-message assertion dropped in the
+  consolidation was restored (#76). Per-run artifacts gitignored (#74).
+
+### Changed
+- Reader-facing docs de-jargoned — tighter voice, AI-isms removed.
 
 ---
 
