@@ -115,7 +115,7 @@ describe('applyResidentOrchestration (the main agent transform, flag ON)', () =>
 
 describe('residentBlock (the per-kind tuned prompt)', () => {
   test('every kind gets the actor framing, the pin rule, and the tool-scope disclaimer', () => {
-    for (const kind of ['webvm', 'notebook', 'app']) {
+    for (const kind of ['webvm', 'notebook', 'app', 'web']) {
       const block = residentBlock(kind);
       expect(block.includes('<resident_agent>')).toBe(true);
       expect(block.includes('You are a RESIDENT')).toBe(true);
@@ -127,6 +127,14 @@ describe('residentBlock (the per-kind tuned prompt)', () => {
       // wording in its (pinned) tool descriptions.
       expect(block.includes('IGNORE that wording')).toBe(true);
     }
+  });
+
+  test('the web resident carries DOM-driving lore, DOM-as-truth, and no code notes', () => {
+    const web = residentBlock('web');
+    expect(web.includes('browser-page operator')).toBe(true);
+    expect(web.includes('RE-SNAPSHOT')).toBe(true);
+    expect(web.includes('UNTRUSTED')).toBe(true);
+    expect(web.includes('<code-style>')).toBe(false); // web writes no JS app/notebook code
   });
 
   test('the code-WRITING residents carry the relocated style/correctness notes', () => {
