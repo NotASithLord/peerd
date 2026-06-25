@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<!--
+  peerd-lite PROTOTYPE — slice 1: a REAL Notebook running in the page.
+  The notebook panel runs peerd's actual sealed worker (notebook-tab/
+  worker-source.js, vendored unmodified) via /web/notebook-host.js. The chat's
+  "Chart some numbers" action drives it end-to-end. Network/agent/Apps/VM are
+  later slices (shown as mock panels). See docs/specs/PEERD-WEB-SURFACE.md.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>peerd-lite — prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@500;700&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --base:#0A0C0D;--panel:rgba(255,255,255,0.025);--panel2:rgba(255,255,255,0.04);
+    --line:rgba(255,255,255,0.09);--line2:rgba(255,255,255,0.06);
+    --paper:#E8E6E1;--white:#FAFAFA;--muted:rgba(232,230,225,0.56);--faint:rgba(232,230,225,0.3);
+    --cyan:#00B7EB;--red:#EF4444;--amber:#F59E0B;--green:#22C55E;--magenta:#D946EF;
+    --mono:'JetBrains Mono',ui-monospace,monospace;--disp:'Geist Mono',var(--mono);
+  }
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:var(--base);color:var(--paper);font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;position:relative}
+  body::before{content:'';position:fixed;inset:0;z-index:0;background-image:radial-gradient(rgba(255,255,255,0.03) 1px,transparent 1px);background-size:26px 26px;mask-image:radial-gradient(ellipse 90% 80% at 50% 0%,#000 30%,transparent 75%)}
+  body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(700px 380px at 12% -8%,rgba(0,183,235,0.09),transparent 70%),radial-gradient(620px 420px at 100% 8%,rgba(217,70,239,0.08),transparent 70%)}
+  .app{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh}
+
+  .topbar{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--line2);flex:none}
+  .wordmark{display:inline-flex;gap:3px}
+  .wordmark .blk{width:23px;height:23px;display:grid;place-items:center;font-family:var(--disp);font-weight:700;font-size:15px;color:#fff;border-radius:4px}
+  .b-p{background:var(--cyan)}.b-e{background:var(--red)}.b-e2{background:var(--amber)}.b-r{background:var(--green)}.b-d{background:var(--magenta)}
+  .lite{font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+  .topbar .sp{flex:1}
+  .slicetag{font-family:var(--mono);font-size:11px;color:var(--green);border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.06);border-radius:999px;padding:4px 11px}
+  .cta{font-family:var(--mono);font-size:12px;font-weight:500;padding:7px 14px;border-radius:8px;border:1px solid var(--cyan);background:linear-gradient(180deg,#13c3f2,#00a6d6);color:#04222b;cursor:pointer;text-decoration:none;white-space:nowrap}
+  .cta:hover{filter:brightness(1.07)}
+
+  .main{display:grid;grid-template-columns:360px 1fr;flex:1;min-height:0}
+  .chat{display:flex;flex-direction:column;border-right:1px solid var(--line2);min-height:0}
+  .chat-scroll{flex:1;overflow-y:auto;padding:18px 16px 6px}
+  .msg{margin-bottom:16px;animation:fade .35s ease}@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .who{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
+  .orb{width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,var(--cyan),var(--red),var(--amber),var(--green),var(--magenta),var(--cyan))}
+  .msg.user .bubble{background:var(--panel2);border:1px solid var(--line);border-radius:11px;border-top-left-radius:4px;padding:9px 12px;display:inline-block}
+  .toolcall{display:flex;align-items:center;gap:9px;margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(255,255,255,0.03);border:1px solid var(--line2);border-left:2px solid var(--amber);border-radius:9px;padding:7px 10px}
+  .toolcall .g{width:17px;height:17px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:700;color:#0a0c0d;background:var(--amber)}
+  .toolcall .ok{margin-left:auto;color:var(--green)}
+  .starters{padding:0 16px 12px;display:flex;flex-wrap:wrap;gap:7px}
+  .starter{font-family:var(--mono);font-size:11.5px;color:var(--paper);background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 10px;cursor:pointer;text-align:left;transition:.15s}
+  .starter:hover{border-color:var(--faint);background:var(--panel2)}
+  .starter.real{border-color:rgba(34,197,94,.4)} .starter.mock{color:var(--muted)}
+  .composer{border-top:1px solid var(--line2);padding:12px 14px;display:flex;gap:9px;flex:none}
+  .composer textarea{flex:1;resize:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--paper);font-family:inherit;font-size:13px;padding:10px 12px;height:42px;outline:none}
+  .send{width:42px;height:42px;border-radius:10px;border:none;background:conic-gradient(from 200deg,var(--green),var(--cyan));color:#062712;font-size:17px;cursor:pointer}
+
+  .wb{display:flex;flex-direction:column;min-height:0}
+  .caprail{display:flex;align-items:center;gap:8px;padding:11px 18px;border-bottom:1px solid var(--line2);flex:none;overflow-x:auto}
+  .caprail .lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--faint);text-transform:uppercase;white-space:nowrap}
+  .cap{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+  .cap .d{width:6px;height:6px;border-radius:50%}
+  .cap.on{color:var(--paper);background:rgba(34,197,94,.05);border-color:rgba(34,197,94,.25)}.cap.on .d{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,.6)}
+  .cap.soon{color:var(--faint)}.cap.soon .d{background:var(--amber)}
+  .cap.locked{color:var(--faint)}.cap.locked .d{background:var(--faint)}.cap.locked::after{content:'🔒';font-size:9px;opacity:.6}
+
+  .panels{flex:1;overflow-y:auto;padding:16px;display:grid;grid-template-columns:repeat(2,1fr);gap:14px;align-content:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .panel.wide{grid-column:1 / -1}
+  .ph{display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line2);background:rgba(255,255,255,0.02)}
+  .kind{width:19px;height:19px;border-radius:5px;display:grid;place-items:center;font-family:var(--disp);font-size:10px;font-weight:700;color:#0a0c0d}
+  .k-engine{background:linear-gradient(135deg,#fbbf24,#f59e0b)}.k-dweb{background:linear-gradient(135deg,#e879f9,#d946ef)}
+  .ptitle{font-family:var(--mono);font-size:12.5px;color:var(--white)}
+  .badge{font-family:var(--mono);font-size:9px;letter-spacing:.05em;text-transform:uppercase;border-radius:5px;padding:1px 6px}
+  .badge.real{color:var(--green);border:1px solid rgba(34,197,94,.4)} .badge.mock{color:var(--faint);border:1px solid var(--line)}
+  .ph .sp{flex:1}
+  .substrate{font-family:var(--mono);font-size:9.5px;color:var(--faint);padding:6px 12px;border-top:1px dashed var(--line2);background:rgba(0,0,0,0.15)}
+
+  /* notebook editor + output */
+  .nb-editor{font-family:var(--mono);font-size:12px;line-height:1.55;width:100%;min-height:150px;background:#070908;border:1px solid var(--line2);border-radius:9px;color:#dfe6ea;padding:11px 12px;resize:vertical;outline:none;white-space:pre;tab-size:2}
+  .nb-editor:focus{border-color:rgba(0,183,235,.45)}
+  .nb-bar{display:flex;align-items:center;gap:10px;margin:10px 0}
+  .run{font-family:var(--mono);font-size:12px;font-weight:600;background:var(--green);color:#062712;border:none;border-radius:8px;padding:8px 16px;cursor:pointer}
+  .run:hover{filter:brightness(1.06)} .run:disabled{opacity:.5;cursor:default}
+  .hint{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .nb-section{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:12px 0 6px}
+  .nb-output{min-height:30px}
+  .nb-output:empty::after{content:'— run to see output —';font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .nb-console{font-family:var(--mono);font-size:11px;line-height:1.5;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:9px 11px;max-height:150px;overflow:auto}
+  .nbline{white-space:pre-wrap} .log-info{color:var(--muted)} .log-warn{color:var(--amber)} .log-error{color:var(--red)} .log-eval{color:var(--green)}
+
+  /* output-render.js produced DOM */
+  .nb-table{border-collapse:collapse;font-family:var(--mono);font-size:11px;margin:4px 0}
+  .nb-table th,.nb-table td{border:1px solid var(--line);padding:3px 9px;text-align:left} .nb-table th{color:var(--muted);font-weight:500}
+  .nb-chart{margin:6px 0} .nb-chart-title{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:4px}
+  .nb-chart-svg{max-width:100%;height:auto} .nb-series-fill{fill:var(--cyan)} .nb-series-stroke{stroke:var(--cyan);stroke-width:1.5}
+  .nb-axis{stroke:var(--line)} .nb-grid{stroke:var(--line2)} .nb-tick{fill:var(--faint);font-family:var(--mono);font-size:8px}
+  .nb-json{font-family:var(--mono);font-size:11px;background:#070908;border:1px solid var(--line2);border-radius:7px;padding:8px 10px;white-space:pre-wrap;color:#cfe6ea}
+  .log-return{font-family:var(--mono);font-size:11px;color:var(--green);margin-top:4px} .nb-table-note{font-family:var(--mono);font-size:10px;color:var(--faint)}
+
+  .term{font-family:var(--mono);font-size:11.5px;line-height:1.6;color:#d3ecda;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:10px 12px;white-space:pre-wrap}
+  .term .pr{color:var(--green)}.term .dim{color:var(--faint)}
+  .peers-wrap{display:grid;grid-template-columns:110px 1fr;gap:12px;align-items:center}
+  .peer{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;margin-bottom:6px}.peer .pdot{width:8px;height:8px;border-radius:50%;background:var(--magenta)}.peer .pdot.ext{background:var(--cyan)}.peer .pid{color:var(--faint)}
+
+  .funnel{flex:none;border-top:1px solid var(--line2);padding:12px 18px;display:flex;align-items:center;gap:14px;background:linear-gradient(180deg,transparent,rgba(0,183,235,0.04))}
+  .funnel .txt{font-size:12.5px;color:var(--muted)}.funnel .txt b{color:var(--white);font-weight:600}.funnel .sp{flex:1}
+  .mockflag{position:fixed;bottom:8px;right:13px;font-family:var(--mono);font-size:10px;color:var(--faint);z-index:5}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <span class="wordmark"><span class="blk b-p">p</span><span class="blk b-e">e</span><span class="blk b-e2">e</span><span class="blk b-r">r</span><span class="blk b-d">d</span></span>
+    <span class="lite">lite · prototype</span>
+    <span class="sp"></span>
+    <span class="slicetag">● slice 1 — real Notebook substrate</span>
+    <a class="cta" href="#" onclick="return false">Install the extension →</a>
+  </div>
+
+  <div class="main">
+    <div class="chat">
+      <div class="chat-scroll" id="chat">
+        <div class="msg"><div class="who"><span class="orb"></span> peerd</div>
+          <div>This notebook is <b>real</b> — your code runs in peerd's actual sealed worker, vendored unmodified from the extension. Try the green action, or edit the code on the right and hit Run.</div></div>
+      </div>
+      <div class="starters">
+        <button class="starter real" id="act-chart">▸ Chart some numbers (runs for real)</button>
+        <button class="starter mock" disabled>▸ Build an app · later slice</button>
+        <button class="starter mock" disabled>▸ Boot a Linux VM · later slice</button>
+      </div>
+      <div class="composer"><textarea placeholder="agent chat lands in the agent slice…" disabled></textarea><button class="send" disabled>↑</button></div>
+    </div>
+
+    <div class="wb">
+      <div class="caprail">
+        <span class="lbl">in&nbsp;this&nbsp;page</span>
+        <span class="cap on"><span class="d"></span>Notebooks</span>
+        <span class="cap soon"><span class="d"></span>Apps</span>
+        <span class="cap soon"><span class="d"></span>Linux&nbsp;VM</span>
+        <span class="cap soon"><span class="d"></span>Peers</span>
+        <span class="lbl" style="margin-left:6px">extension&nbsp;only</span>
+        <span class="cap locked"><span class="d"></span>Your&nbsp;tabs</span>
+        <span class="cap locked"><span class="d"></span>Your&nbsp;sessions</span>
+        <span class="cap locked"><span class="d"></span>do·get·check</span>
+      </div>
+
+      <div class="panels">
+        <!-- REAL notebook -->
+        <div class="panel wide">
+          <div class="ph"><span class="kind k-engine">N</span><span class="ptitle">notebook · scratch</span><span class="badge real">real</span><span class="sp"></span></div>
+          <div style="padding:13px">
+            <textarea class="nb-editor" id="editor" spellcheck="false"></textarea>
+            <div class="nb-bar"><button class="run" id="run">▸ Run</button><span class="hint">runs in a fresh sealed worker · ⌘/Ctrl + Enter</span></div>
+            <div class="nb-section">output</div>
+            <div class="nb-output" id="output"></div>
+            <div class="nb-section">console</div>
+            <div class="nb-console" id="console"></div>
+          </div>
+          <div class="substrate">mounts: notebook-tab/worker-source.js + realm-seal.js + notebook-std.js + peerd-engine/module-resolver.js (all vendored unmodified)</div>
+        </div>
+
+        <!-- mock continuity panels -->
+        <div class="panel">
+          <div class="ph"><span class="kind k-engine">⌘</span><span class="ptitle">webvm · debian</span><span class="badge mock">mock</span><span class="sp"></span></div>
+          <div style="padding:13px"><div class="term"><span class="dim"># later slice — CheerpX behind COOP/COEP</span>
+<span class="pr">user@peerd</span>:~$ <span class="dim">▋</span></div></div>
+          <div class="substrate">will mount: vendor/cheerpx + peerd-engine/vm-net</div>
+        </div>
+        <div class="panel">
+          <div class="ph"><span class="kind k-dweb">◈</span><span class="ptitle">peers · peerd-global</span><span class="badge mock">mock</span><span class="sp"></span></div>
+          <div style="padding:13px"><div class="peers-wrap"><div></div><div>
+            <div class="peer"><span class="pdot"></span>this page <span class="pid">later slice</span></div>
+            <div class="peer"><span class="pdot ext"></span>extension peer <span class="pid">…</span></div>
+          </div></div></div>
+          <div class="substrate">will mount: peerd-distributed (already live on peerd.ai)</div>
+        </div>
+      </div>
+
+      <div class="funnel">
+        <div class="txt"><b>Slice 1 of the peerd-lite prototype.</b> The notebook is real peerd code. The agent, network egress, Apps, VM, and dweb are the next slices; your real tabs &amp; sessions stay extension-only.</div>
+        <span class="sp"></span>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="mockflag">// prototype — notebook is REAL; other panels mocked</div>
+
+<script type="module">
+  import { runNotebook } from '/web/notebook-host.js';
+
+  const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
+
+// real computation in a sealed worker (no network, no keys)
+const data = [
+  { month: 'Jan', sales: 42 }, { month: 'Feb', sales: 55 },
+  { month: 'Mar', sales: 48 }, { month: 'Apr', sales: 71 },
+  { month: 'May', sales: 63 }, { month: 'Jun', sales: 80 },
+];
+console.log('rows:', data.length, '· mean:', round(mean(data.map(d => d.sales))));
+
+peerd.self.display(table(data));
+peerd.self.display(chart({ type: 'bar', data, x: 'month', y: 'sales', title: 'Sales by month' }));
+
+return 'computed ' + data.length + ' rows in the sealed worker';`;
+
+  const editor = document.getElementById('editor');
+  const output = document.getElementById('output');
+  const cons = document.getElementById('console');
+  const runBtn = document.getElementById('run');
+  editor.value = SAMPLE;
+
+  let running = false;
+  async function run() {
+    if (running) return; running = true;
+    runBtn.disabled = true; runBtn.textContent = '▸ Running…';
+    output.innerHTML = ''; cons.innerHTML = '';
+    await runNotebook(editor.value, { outputEl: output, logEl: cons });
+    runBtn.disabled = false; runBtn.textContent = '▸ Run'; running = false;
+  }
+  runBtn.addEventListener('click', run);
+  editor.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
+
+  // chat action: canned prompt that drives the REAL notebook end-to-end
+  document.getElementById('act-chart').addEventListener('click', async () => {
+    const chat = document.getElementById('chat');
+    chat.insertAdjacentHTML('beforeend', '<div class="msg user"><div class="who">you</div><div class="bubble">Chart some numbers</div></div>');
+    chat.insertAdjacentHTML('beforeend', '<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Writing a notebook and running it in a sealed worker.<div class="toolcall"><span class="g">N</span>js_create → js_run · notebook<span class="ok">✓</span></div></div></div>');
+    chat.scrollTop = chat.scrollHeight;
+    editor.value = SAMPLE;
+    run();
+  });
+</script>
+</body>
+</html>
