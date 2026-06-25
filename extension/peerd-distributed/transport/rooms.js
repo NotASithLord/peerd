@@ -195,13 +195,18 @@ export const joinRoom = async ({
       dlog('room', `📥 offer from ${from} — answering (trickle)`);
       const { route: r, signaling } = makeSignaling((p) => s.sendSignal(from, p));
       routers.set(from, r);
+      // why ac: on the give-up timeout below, abort tells the transport to close
+      // the abandoned pc (D2 leak). The transport ignores the abort once the
+      // channel has opened, so aborting in finally never harms an admitted link.
+      const ac = new AbortController();
       try {
-        const { channel } = await t.accept({ offer: payload, iceServers, signaling });
+        const { channel } = await t.accept({ offer: payload, iceServers, signaling, signal: ac.signal });
         await admit(await withConnectTimeout(channel, `accept ${from}`), null, 'rendezvous');
       } catch (e) {
         logConnectFail('accept from', from, e);
         audit?.('room_accept_failed', { member: from, error: /** @type {{ message?: string }} */ (e)?.message });
       } finally {
+        ac.abort();
         routers.delete(from);
       }
     });
@@ -224,9 +229,11 @@ export const joinRoom = async ({
       dlog('room', `📞 dialing ${member} (trickle: offer now, candidates streaming)…`);
       const { route, signaling } = makeSignaling((p) => s.sendSignal(member, p));
       routers.set(member, route);
+      // why ac: see s.on('signal') above — close the abandoned pc on timeout (D2).
+      const ac = new AbortController();
       try {
         const channel = await withConnectTimeout(
-          t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling }),
+          t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal: ac.signal }),
           `dial ${member}`,
         );
         await admit(channel, null, 'rendezvous');
@@ -234,6 +241,7 @@ export const joinRoom = async ({
         logConnectFail('dial to', member, e);
         audit?.('room_dial_failed', { member, error: /** @type {{ message?: string }} */ (e)?.message });
       } finally {
+        ac.abort();
         routers.delete(member);
       }
     };
@@ -254,14 +262,18 @@ export const joinRoom = async ({
       const { route, signaling } = makeSignaling((p) =>
         mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p));
       relayRouters.set(sid, route);
+      // why ac: a hostile relayed offerer can answer then stall ICE forever —
+      // close the abandoned pc on the give-up timeout (D2).
+      const ac = new AbortController();
       try {
-        const { channel } = await t.accept({ offer: payload, iceServers, signaling });
+        const { channel } = await t.accept({ offer: payload, iceServers, signaling, signal: ac.signal });
         await admit(await withConnectTimeout(channel, `relay accept ${short(env.from)}`), env.from, via);
         audit?.('relay_join_accepted', { did: env.from, via });
       } catch (e) {
         logConnectFail('relay accept', env.from, e);
         audit?.('relay_accept_failed', { from: env.from, error: /** @type {{ message?: string }} */ (e)?.message });
       } finally {
+        ac.abort();
         relayRouters.delete(sid);
       }
       return;
@@ -277,13 +289,16 @@ export const joinRoom = async ({
     const { route, signaling } = makeSignaling((p) =>
       mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p));
     relayRouters.set(sid, route);
+    // why ac: close the abandoned pc on the give-up timeout (D2).
+    const ac = new AbortController();
     try {
       const channel = await withConnectTimeout(
-        t.connect({ did: targetDid }, { iceServers, signaling }),
+        t.connect({ did: targetDid }, { iceServers, signaling, signal: ac.signal }),
         `relay dial ${short(targetDid)}`,
       );
       await admit(channel, targetDid, via);
     } finally {
+      ac.abort();
       relayRouters.delete(sid);
     }
   };

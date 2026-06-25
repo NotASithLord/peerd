@@ -216,13 +216,18 @@ export const connectViaSignaling = async ({
     };
   };
 
+  // why ac: when `deadline` wins the race below (the peer never pairs), the
+  // in-flight t.connect/t.accept pc is abandoned — abort closes it (the D2 leak
+  // the rooms.js sites also fix). The transport ignores the abort once the
+  // channel has opened, so aborting in finally never harms a live link.
+  const ac = new AbortController();
   const dance = (async () => {
     const sig = makeSignaling();
     if (session.members.length > 0) {
       // A member is present → we are the joiner → we offer (to the first;
       // 1:1 callers use single-purpose room codes).
       sig.setMember(session.members[0]);
-      const channel = await t.connect({ did: room }, { sameMachine, iceServers, signaling: sig.signaling });
+      const channel = await t.connect({ did: room }, { sameMachine, iceServers, signaling: sig.signaling, signal: ac.signal });
       return { channel, role: 'initiator', transport: 'webrtc' };
     }
     // Room was empty → wait for the first inbound payload (an offer), which
@@ -230,13 +235,14 @@ export const connectViaSignaling = async ({
     const offer = await new Promise((res) => {
       const off = session.on('signal', (/** @type {{ payload: any }} */ { payload }) => { off(); res(payload); });
     });
-    const { channel } = await t.accept({ offer, sameMachine, iceServers, signaling: sig.signaling });
+    const { channel } = await t.accept({ offer, sameMachine, iceServers, signaling: sig.signaling, signal: ac.signal });
     return { channel: await channel, role: 'responder', transport: 'webrtc' };
   })();
 
   try {
     return await Promise.race([dance, deadline]);
   } finally {
+    ac.abort();
     clearTimeout(timer);
     session.close();
   }
