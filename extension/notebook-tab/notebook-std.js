@@ -246,6 +246,60 @@ export const partition = (xs, predicate) => {
   return [pass, fail];
 };
 
+// ── line-delimited records (JSONL) — pure, dependency-free ────────────────
+// why: the natural on-disk shape for a growing record set — an append-only log,
+// or a harvested index in OPFS — is JSONL: one JSON object per line. These
+// round-trip it with no parser dependency (parseJsonl(toJsonl(rows)) deep-equals
+// rows), and dedupeBy is the idempotent append-merge partner.
+
+/**
+ * Parse JSONL text into an array of values — one per non-blank line. Blank /
+ * whitespace-only lines AND any line that is not valid JSON are SKIPPED, so a
+ * trailing newline or a half-written final line never breaks a read. (For strict
+ * parsing, split on newlines and JSON.parse yourself.) Non-string → [].
+ * @param {unknown} text @returns {any[]}
+ */
+export const parseJsonl = (text) => {
+  if (typeof text !== 'string') return [];
+  /** @type {any[]} */
+  const out = [];
+  for (const line of text.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try { out.push(JSON.parse(s)); } catch { /* skip a non-JSON line */ }
+  }
+  return out;
+};
+
+/**
+ * Serialize an array of values to JSONL — one JSON line each, newline-joined
+ * (no trailing newline). The inverse of parseJsonl. Non-array → ''.
+ * @param {unknown} rows @returns {string}
+ */
+export const toJsonl = (rows) =>
+  (Array.isArray(rows) ? rows : []).map((r) => JSON.stringify(r)).join('\n');
+
+/**
+ * Drop duplicate rows by a key (string) or key-fn, keeping the FIRST occurrence
+ * (stable order). The append-merge partner: dedupeBy([...existing, ...fresh],
+ * 'id') is an idempotent upsert that keeps the existing row. (keyBy is the
+ * last-wins, object-valued cousin; unique is for primitives.)
+ * @param {unknown} xs @param {KeySpec} key
+ */
+export const dedupeBy = (xs, key) => {
+  const accessor = keyOf(key);
+  const seen = new Set();
+  /** @type {any[]} */
+  const out = [];
+  for (const x of (Array.isArray(xs) ? xs : [])) {
+    const k = accessor(x);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(x);
+  }
+  return out;
+};
+
 // ── exact integer / ratio math — BigInt in, exact value out ───────────────
 // why: every helper above takes Number, so feeding one a BigInt collapses it to
 // a lossy 53-bit float — the precision footgun called out in JS_PITFALLS_NOTE.
