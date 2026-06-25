@@ -382,6 +382,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // sessionId rides along so the panel only ticks the meter of the
       // chat actually being viewed (turns can stream in the background).
       uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/cost', ...info, sessionId }));
+      // DESIGN-17 P1: surface a resident turn's spend on its card — delegated work
+      // is not free. Caps stay per-session (the spec's posture); this only makes the
+      // spend VISIBLE. info.turn is THIS exchange's tally (the resident accumulates
+      // across messages; the card shows just this turn).
+      if (residentDisplay) {
+        uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/resident-cost', parentToolUseId: residentDisplay.parentToolUseId, cost: info.turn }));
+      }
     },
     onLimitExceeded: (/** @type {any} */ { sessionId: sid, spent, limitUsd }) => {
       if (uiConnected()) {
