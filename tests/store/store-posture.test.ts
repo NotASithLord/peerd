@@ -110,6 +110,14 @@ describe('store feature flags', () => {
     const flags = await import('../../extension/shared/flags.js');
     expect(flags.REMOTE_SKILL_INSTALL).toBe(false);
   });
+  // DESIGN-17: resident tab agents ship ON (the orchestrator/resident split is the
+  // shipped posture); the web resident stays dark until its orchestrator-facing
+  // path lands. Pin both so a flip is a conscious, test-visible release decision.
+  test('resident tab agents ON, web resident still dark', async () => {
+    const flags = await import('../../extension/shared/flags.js');
+    expect(flags.RESIDENT_TAB_AGENTS).toBe(true);
+    expect(flags.WEB_RESIDENT).toBe(false);
+  });
 });
 
 describe('store prompt posture — no dweb/dwapp in the store system prompt', () => {

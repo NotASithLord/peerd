@@ -201,6 +201,12 @@ describe('applyResidentOrchestration on the live system-prompt.txt', () => {
     // ...and the subagents section no longer routes instance work to a child.
     expect(out.includes('the ids it should act on')).toBe(false);
     expect(out.includes('never hand a vm/notebook/')).toBe(true);
+    // The ORCH_TOP splice is the ONE exact-`replace` (not spliceRegion) — if the
+    // template's opening is reworded it silently no-ops, leaving the orchestrator
+    // told to "grow it file by file with app_write_file" (a tool it no longer
+    // holds). Assert it FIRED: the new framing is in, the stale direct-write is out.
+    expect(out.includes('Hand the build-out to the App\'s')).toBe(true);
+    expect(out.includes('grow it file by file with\napp_write_file')).toBe(false);
     // net: the main prompt got materially smaller (the savings).
     expect(out.length).toBeLessThan(base.length - 2000);
   });
