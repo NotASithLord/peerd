@@ -1,195 +1,297 @@
 <!DOCTYPE html>
 <!--
-  peerd-lite PROTOTYPE — slice 1: a REAL Notebook running in the page.
-  The notebook panel runs peerd's actual sealed worker (notebook-tab/
-  worker-source.js, vendored unmodified) via /web/notebook-host.js. The chat's
-  "Chart some numbers" action drives it end-to-end. Network/agent/Apps/VM are
-  later slices (shown as mock panels). See docs/specs/PEERD-WEB-SURFACE.md.
+  peerd-lite PROTOTYPE — a browser-inside-the-browser. Each peerd instance is a
+  TAB (mirroring the extension, where every instance is a real Chrome tab). The
+  Notebook tabs run peerd's actual sealed worker; the Peers tab is a REAL dweb
+  peer on the live lobby (observe-only, kind:'website'). Installable PWA, mobile
+  first. App/WebVM are later slices. See docs/specs/PEERD-WEB-SURFACE.md.
 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>peerd-lite — prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>peerd-lite</title>
+<meta name="theme-color" content="#0A0C0D" />
+<meta name="color-scheme" content="dark" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="peerd" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="manifest" href="/manifest.json" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@500;700&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
   :root{
-    --base:#0A0C0D;--panel:rgba(255,255,255,0.025);--panel2:rgba(255,255,255,0.04);
+    --base:#0A0C0D;--panel:rgba(255,255,255,0.025);--panel2:rgba(255,255,255,0.045);
     --line:rgba(255,255,255,0.09);--line2:rgba(255,255,255,0.06);
     --paper:#E8E6E1;--white:#FAFAFA;--muted:rgba(232,230,225,0.56);--faint:rgba(232,230,225,0.3);
     --cyan:#00B7EB;--red:#EF4444;--amber:#F59E0B;--green:#22C55E;--magenta:#D946EF;
     --mono:'JetBrains Mono',ui-monospace,monospace;--disp:'Geist Mono',var(--mono);
+    --tab-h:38px;--toolbar-h:38px;--chat-w:360px;
   }
-  *{box-sizing:border-box} html,body{margin:0;height:100%}
-  body{background:var(--base);color:var(--paper);font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;position:relative}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--base);color:var(--paper);font-family:'Inter',system-ui,sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;height:100dvh;overflow:hidden;position:relative}
   body::before{content:'';position:fixed;inset:0;z-index:0;background-image:radial-gradient(rgba(255,255,255,0.03) 1px,transparent 1px);background-size:26px 26px;mask-image:radial-gradient(ellipse 90% 80% at 50% 0%,#000 30%,transparent 75%)}
-  body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(700px 380px at 12% -8%,rgba(0,183,235,0.09),transparent 70%),radial-gradient(620px 420px at 100% 8%,rgba(217,70,239,0.08),transparent 70%)}
-  .app{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh}
+  body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(700px 380px at 12% -8%,rgba(0,183,235,0.08),transparent 70%),radial-gradient(620px 420px at 100% 8%,rgba(217,70,239,0.07),transparent 70%)}
 
-  .topbar{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--line2);flex:none}
-  .wordmark{display:inline-flex;gap:3px}
-  .wordmark .blk{width:23px;height:23px;display:grid;place-items:center;font-family:var(--disp);font-weight:700;font-size:15px;color:#fff;border-radius:4px}
-  .b-p{background:var(--cyan)}.b-e{background:var(--red)}.b-e2{background:var(--amber)}.b-r{background:var(--green)}.b-d{background:var(--magenta)}
-  .lite{font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
-  .topbar .sp{flex:1}
-  .slicetag{font-family:var(--mono);font-size:11px;color:var(--green);border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.06);border-radius:999px;padding:4px 11px}
-  .cta{font-family:var(--mono);font-size:12px;font-weight:500;padding:7px 14px;border-radius:8px;border:1px solid var(--cyan);background:linear-gradient(180deg,#13c3f2,#00a6d6);color:#04222b;cursor:pointer;text-decoration:none;white-space:nowrap}
-  .cta:hover{filter:brightness(1.07)}
+  /* ---- browser shell grid ---- */
+  .browser{position:relative;z-index:1;display:grid;grid-template-columns:1fr var(--chat-w);grid-template-rows:var(--tab-h) var(--toolbar-h) 1fr;
+    grid-template-areas:"tabs chat" "toolbar chat" "view chat";height:100dvh;padding-top:env(safe-area-inset-top)}
 
-  .main{display:grid;grid-template-columns:360px 1fr;flex:1;min-height:0}
-  .chat{display:flex;flex-direction:column;border-right:1px solid var(--line2);min-height:0}
-  .chat-scroll{flex:1;overflow-y:auto;padding:18px 16px 6px}
-  .msg{margin-bottom:16px;animation:fade .35s ease}@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-  .who{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
-  .orb{width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,var(--cyan),var(--red),var(--amber),var(--green),var(--magenta),var(--cyan))}
-  .msg.user .bubble{background:var(--panel2);border:1px solid var(--line);border-radius:11px;border-top-left-radius:4px;padding:9px 12px;display:inline-block}
-  .toolcall{display:flex;align-items:center;gap:9px;margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(255,255,255,0.03);border:1px solid var(--line2);border-left:2px solid var(--amber);border-radius:9px;padding:7px 10px}
-  .toolcall .g{width:17px;height:17px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:700;color:#0a0c0d;background:var(--amber)}
-  .toolcall .ok{margin-left:auto;color:var(--green)}
-  .starters{padding:0 16px 12px;display:flex;flex-wrap:wrap;gap:7px}
-  .starter{font-family:var(--mono);font-size:11.5px;color:var(--paper);background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 10px;cursor:pointer;text-align:left;transition:.15s}
-  .starter:hover{border-color:var(--faint);background:var(--panel2)}
-  .starter.real{border-color:rgba(34,197,94,.4)} .starter.mock{color:var(--muted)}
-  .composer{border-top:1px solid var(--line2);padding:12px 14px;display:flex;gap:9px;flex:none}
-  .composer textarea{flex:1;resize:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--paper);font-family:inherit;font-size:13px;padding:10px 12px;height:42px;outline:none}
-  .send{width:42px;height:42px;border-radius:10px;border:none;background:conic-gradient(from 200deg,var(--green),var(--cyan));color:#062712;font-size:17px;cursor:pointer}
-
-  .wb{display:flex;flex-direction:column;min-height:0}
-  .caprail{display:flex;align-items:center;gap:8px;padding:11px 18px;border-bottom:1px solid var(--line2);flex:none;overflow-x:auto}
-  .caprail .lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--faint);text-transform:uppercase;white-space:nowrap}
-  .cap{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
-  .cap .d{width:6px;height:6px;border-radius:50%}
-  .cap.on{color:var(--paper);background:rgba(34,197,94,.05);border-color:rgba(34,197,94,.25)}.cap.on .d{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,.6)}
-  .cap.soon{color:var(--faint)}.cap.soon .d{background:var(--amber)}
-  .cap.locked{color:var(--faint)}.cap.locked .d{background:var(--faint)}.cap.locked::after{content:'🔒';font-size:9px;opacity:.6}
-
-  .panels{flex:1;overflow-y:auto;padding:16px;display:grid;grid-template-columns:repeat(2,1fr);gap:14px;align-content:start}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.4)}
-  .panel.wide{grid-column:1 / -1}
-  .ph{display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line2);background:rgba(255,255,255,0.02)}
-  .kind{width:19px;height:19px;border-radius:5px;display:grid;place-items:center;font-family:var(--disp);font-size:10px;font-weight:700;color:#0a0c0d}
+  /* ---- tab strip ---- */
+  .tabstrip{grid-area:tabs;display:flex;align-items:flex-end;gap:4px;padding:0 10px;border-bottom:1px solid var(--line2);overflow-x:auto;scrollbar-width:none}
+  .tabstrip::-webkit-scrollbar{display:none}
+  .tab{display:inline-flex;align-items:center;gap:7px;height:calc(var(--tab-h) - 6px);padding:0 9px;border:1px solid transparent;border-bottom:none;border-radius:8px 8px 0 0;
+    font-family:var(--mono);font-size:12px;color:var(--muted);cursor:pointer;background:transparent;max-width:190px;flex:0 0 auto;white-space:nowrap}
+  .tab:hover{color:var(--paper);background:var(--panel)}
+  .tab[aria-selected="true"]{background:var(--panel2);color:var(--white);border-color:var(--line2)}
+  .tab .favicon{width:17px;height:17px;border-radius:4px;display:grid;place-items:center;font-family:var(--disp);font-size:10px;font-weight:700;color:#0a0c0d;flex:none}
   .k-engine{background:linear-gradient(135deg,#fbbf24,#f59e0b)}.k-dweb{background:linear-gradient(135deg,#e879f9,#d946ef)}
-  .ptitle{font-family:var(--mono);font-size:12.5px;color:var(--white)}
-  .badge{font-family:var(--mono);font-size:9px;letter-spacing:.05em;text-transform:uppercase;border-radius:5px;padding:1px 6px}
-  .badge.real{color:var(--green);border:1px solid rgba(34,197,94,.4)} .badge.mock{color:var(--faint);border:1px solid var(--line)}
-  .ph .sp{flex:1}
-  .substrate{font-family:var(--mono);font-size:9.5px;color:var(--faint);padding:6px 12px;border-top:1px dashed var(--line2);background:rgba(0,0,0,0.15)}
+  .tab .tab-title{overflow:hidden;text-overflow:ellipsis}
+  .tab .tab-close{display:grid;place-items:center;width:18px;height:18px;border-radius:5px;color:var(--faint);font-size:14px}
+  .tab .tab-close:hover{background:var(--line);color:var(--paper)}
+  .tab.home .wm{display:inline-flex;gap:2px}
+  .tab.home .wm i{width:15px;height:15px;display:grid;place-items:center;font-family:var(--disp);font-weight:700;font-size:10px;color:#fff;border-radius:3px;font-style:normal}
+  .b-p{background:var(--cyan)}.b-e{background:var(--red)}.b-e2{background:var(--amber)}.b-r{background:var(--green)}.b-d{background:var(--magenta)}
+  .tab-new{height:calc(var(--tab-h) - 8px);width:30px;border:1px solid var(--line2);border-radius:7px;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:none;align-self:center}
+  .tab-new:hover{color:var(--paper);border-color:var(--faint)}
 
-  /* notebook editor + output */
-  .nb-editor{font-family:var(--mono);font-size:12px;line-height:1.55;width:100%;min-height:150px;background:#070908;border:1px solid var(--line2);border-radius:9px;color:#dfe6ea;padding:11px 12px;resize:vertical;outline:none;white-space:pre;tab-size:2}
+  /* ---- toolbar ---- */
+  .toolbar{grid-area:toolbar;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--line2)}
+  .addr{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line2);border-radius:7px;padding:4px 11px;flex:1;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .addr .proto{color:var(--faint)}
+  .toolbar .sp{flex:1}
+  .install{font-family:var(--mono);font-size:11.5px;border:1px solid var(--line);background:var(--panel);color:var(--paper);border-radius:7px;padding:5px 11px;cursor:pointer}
+  .install:hover{border-color:var(--faint)}
+  .ext-cta{font-family:var(--mono);font-size:11.5px;font-weight:500;padding:6px 12px;border-radius:7px;border:1px solid var(--cyan);background:linear-gradient(180deg,#13c3f2,#00a6d6);color:#04222b;cursor:pointer;text-decoration:none;white-space:nowrap}
+
+  /* ---- viewport / panels ---- */
+  .viewport{grid-area:view;min-height:0;overflow:auto;position:relative}
+  .tabpanel{padding:18px;min-height:100%}
+  .tabpanel[hidden]{display:none}
+  .substrate{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-top:14px;padding-top:10px;border-top:1px dashed var(--line2)}
+
+  /* ---- home tab ---- */
+  .home-wrap{max-width:880px;margin:0 auto}
+  .home-hero{display:flex;align-items:center;gap:14px;margin:6px 0 6px}
+  .home-wm{display:inline-flex;gap:3px}
+  .home-wm i{width:30px;height:30px;display:grid;place-items:center;font-family:var(--disp);font-weight:700;font-size:19px;color:#fff;border-radius:5px;font-style:normal}
+  .home-tag{font-family:var(--mono);font-size:12px;color:var(--green);border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.06);border-radius:999px;padding:4px 11px}
+  .home-lede{color:var(--muted);max-width:620px;margin:0 0 22px;font-size:14.5px}
+  .home-lede b{color:var(--paper);font-weight:600}
+  .launch{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:26px}
+  .lcard{text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;cursor:pointer;transition:.16s;color:var(--paper)}
+  .lcard:hover:not(:disabled){transform:translateY(-2px);border-color:var(--faint);background:var(--panel2)}
+  .lcard:disabled{opacity:.5;cursor:default}
+  .lcard .lc-top{display:flex;align-items:center;gap:9px;margin-bottom:8px}
+  .lcard .favicon{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-family:var(--disp);font-size:11px;font-weight:700;color:#0a0c0d}
+  .lcard h4{margin:0;font-size:13.5px;font-family:var(--mono)}
+  .lcard .badge{margin-left:auto;font-family:var(--mono);font-size:8.5px;letter-spacing:.05em;text-transform:uppercase;border-radius:5px;padding:1px 6px}
+  .badge.real{color:var(--green);border:1px solid rgba(34,197,94,.4)}.badge.soon{color:var(--faint);border:1px solid var(--line)}
+  .lcard p{margin:0;font-size:12px;color:var(--muted)}
+  .funnel-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:24px}
+  .fcol h5{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:0 0 9px}
+  .frow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;margin-bottom:7px;color:var(--paper)}
+  .frow.locked{color:var(--faint)} .frow .d{width:7px;height:7px;border-radius:50%}
+  .frow.on .d{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,.6)} .frow.soon .d{background:var(--amber)} .frow.locked .d{background:var(--faint)}
+  .frow.locked::after{content:'🔒';font-size:9px;opacity:.6}
+  .ext-card{background:linear-gradient(135deg,rgba(0,183,235,0.07),rgba(217,70,239,0.05));border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .ext-card .t{flex:1;min-width:220px}.ext-card .t b{color:var(--white)}.ext-card .t p{margin:4px 0 0;font-size:12.5px;color:var(--muted)}
+
+  /* ---- notebook panel (real) ---- */
+  .nb-editor{font-family:var(--mono);font-size:12px;line-height:1.55;width:100%;min-height:160px;background:#070908;border:1px solid var(--line2);border-radius:9px;color:#dfe6ea;padding:11px 12px;resize:vertical;outline:none;white-space:pre;tab-size:2}
   .nb-editor:focus{border-color:rgba(0,183,235,.45)}
   .nb-bar{display:flex;align-items:center;gap:10px;margin:10px 0}
-  .run{font-family:var(--mono);font-size:12px;font-weight:600;background:var(--green);color:#062712;border:none;border-radius:8px;padding:8px 16px;cursor:pointer}
+  .run{font-family:var(--mono);font-size:12px;font-weight:600;background:var(--green);color:#062712;border:none;border-radius:8px;padding:9px 18px;cursor:pointer}
   .run:hover{filter:brightness(1.06)} .run:disabled{opacity:.5;cursor:default}
   .hint{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
-  .nb-section{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:12px 0 6px}
-  .nb-output{min-height:30px}
+  .nb-section{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:13px 0 6px}
   .nb-output:empty::after{content:'— run to see output —';font-family:var(--mono);font-size:11px;color:var(--faint)}
-  .nb-console{font-family:var(--mono);font-size:11px;line-height:1.5;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:9px 11px;max-height:150px;overflow:auto}
-  .nbline{white-space:pre-wrap} .log-info{color:var(--muted)} .log-warn{color:var(--amber)} .log-error{color:var(--red)} .log-eval{color:var(--green)}
-
-  /* output-render.js produced DOM */
+  .nb-console{font-family:var(--mono);font-size:11px;line-height:1.5;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:9px 11px;max-height:160px;overflow:auto;min-height:30px}
+  .nbline{white-space:pre-wrap}.log-info{color:var(--muted)}.log-warn{color:var(--amber)}.log-error{color:var(--red)}.log-eval{color:var(--green)}
   .nb-table{border-collapse:collapse;font-family:var(--mono);font-size:11px;margin:4px 0}
-  .nb-table th,.nb-table td{border:1px solid var(--line);padding:3px 9px;text-align:left} .nb-table th{color:var(--muted);font-weight:500}
-  .nb-chart{margin:6px 0} .nb-chart-title{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:4px}
-  .nb-chart-svg{max-width:100%;height:auto} .nb-series-fill{fill:var(--cyan)} .nb-series-stroke{stroke:var(--cyan);stroke-width:1.5}
-  .nb-axis{stroke:var(--line)} .nb-grid{stroke:var(--line2)} .nb-tick{fill:var(--faint);font-family:var(--mono);font-size:8px}
+  .nb-table th,.nb-table td{border:1px solid var(--line);padding:3px 9px;text-align:left}.nb-table th{color:var(--muted);font-weight:500}
+  .nb-chart{margin:6px 0}.nb-chart-title{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:4px}
+  .nb-chart-svg{max-width:100%;height:auto}.nb-series-fill{fill:var(--cyan)}.nb-series-stroke{stroke:var(--cyan);stroke-width:1.5}
+  .nb-axis{stroke:var(--line)}.nb-grid{stroke:var(--line2)}.nb-tick{fill:var(--faint);font-family:var(--mono);font-size:8px}
   .nb-json{font-family:var(--mono);font-size:11px;background:#070908;border:1px solid var(--line2);border-radius:7px;padding:8px 10px;white-space:pre-wrap;color:#cfe6ea}
-  .log-return{font-family:var(--mono);font-size:11px;color:var(--green);margin-top:4px} .nb-table-note{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  .log-return{font-family:var(--mono);font-size:11px;color:var(--green);margin-top:4px}.nb-table-note{font-family:var(--mono);font-size:10px;color:var(--faint)}
 
-  .term{font-family:var(--mono);font-size:11.5px;line-height:1.6;color:#d3ecda;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:10px 12px;white-space:pre-wrap}
-  .term .pr{color:var(--green)}.term .dim{color:var(--faint)}
-  .peers-wrap{display:grid;grid-template-columns:110px 1fr;gap:12px;align-items:center}
-  .peer{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;margin-bottom:6px}.peer .pdot{width:8px;height:8px;border-radius:50%;background:var(--magenta)}.peer .pdot.ext{background:var(--cyan)}.peer .pid{color:var(--faint)}
+  /* ---- peers panel (real) ---- */
+  .peers-panel{display:flex;flex-direction:column;height:100%}
+  .peers-panel .head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .peers-panel .conn{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .status-dot{width:8px;height:8px;border-radius:50%;background:var(--amber)}
+  .is-connecting .status-dot{background:var(--amber);animation:pulse 1.6s infinite}
+  .is-live .status-dot{background:var(--green);box-shadow:0 0 8px rgba(34,197,94,.7)}
+  .is-failed .status-dot{background:var(--red)}
+  @keyframes pulse{50%{opacity:.4}}
+  .peers-panel .tag{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint);border:1px solid var(--line2);border-radius:999px;padding:3px 10px}
+  .peers-graph-mount{flex:1;min-height:300px;display:grid;place-items:center}
+  .peers-graph-mount svg{width:100%;height:100%;max-height:440px}
+  .pn-graph{width:100%;height:100%}
+  .pn-self{fill:var(--paper)} .pn-self-ring{fill:none;stroke:var(--line)} .pn-self-label{fill:var(--muted);font-family:var(--mono);font-size:11px}
+  .pn-edge{stroke:rgba(255,255,255,0.2);stroke-width:1} .pn-edge--faint{stroke:rgba(255,255,255,0.07)}
+  .pn-dot{stroke:var(--base);stroke-width:1.5} .pn-label{fill:var(--faint);font-family:var(--mono);font-size:9px;text-anchor:middle}
 
-  .funnel{flex:none;border-top:1px solid var(--line2);padding:12px 18px;display:flex;align-items:center;gap:14px;background:linear-gradient(180deg,transparent,rgba(0,183,235,0.04))}
-  .funnel .txt{font-size:12.5px;color:var(--muted)}.funnel .txt b{color:var(--white);font-weight:600}.funnel .sp{flex:1}
-  .mockflag{position:fixed;bottom:8px;right:13px;font-family:var(--mono);font-size:10px;color:var(--faint);z-index:5}
+  /* ---- soon panels ---- */
+  .soon-box{display:flex;flex-direction:column;gap:10px}
+  .term{font-family:var(--mono);font-size:11.5px;line-height:1.6;color:#d3ecda;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:11px 13px;white-space:pre-wrap}
+  .term .dim{color:var(--faint)}.term .pr{color:var(--green)}
+  .soon-note{font-family:var(--mono);font-size:12px;color:var(--amber)}
+
+  /* ---- chat (desktop docked) ---- */
+  .chat{grid-area:chat;display:flex;flex-direction:column;border-left:1px solid var(--line2);min-height:0;background:linear-gradient(180deg,rgba(255,255,255,0.012),transparent)}
+  .chat-head{display:none;align-items:center;gap:9px;padding:10px 14px;border-bottom:1px solid var(--line2)}
+  .chat-grip{width:34px;height:4px;border-radius:2px;background:var(--line);margin:0 auto}
+  .chat-title{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .chat-collapse{margin-left:auto;background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer}
+  .orb{width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,var(--cyan),var(--red),var(--amber),var(--green),var(--magenta),var(--cyan));flex:none}
+  .chat-scroll{flex:1;overflow-y:auto;padding:16px 14px 6px}
+  .msg{margin-bottom:15px;animation:fade .3s ease}@keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .who{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
+  .msg.user .bubble{background:var(--panel2);border:1px solid var(--line);border-radius:11px;border-top-left-radius:4px;padding:9px 12px;display:inline-block}
+  .toolcall{display:flex;align-items:center;gap:9px;margin-top:9px;font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(255,255,255,0.03);border:1px solid var(--line2);border-left:2px solid var(--amber);border-radius:9px;padding:7px 10px;cursor:pointer}
+  .toolcall .g{width:17px;height:17px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:700;color:#0a0c0d;background:var(--amber)}
+  .toolcall .ok{margin-left:auto;color:var(--green)}
+  .starters{padding:0 14px 10px;display:flex;flex-direction:column;gap:7px}
+  .starter{font-family:var(--mono);font-size:11.5px;color:var(--paper);background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 10px;cursor:pointer;text-align:left}
+  .starter.real{border-color:rgba(34,197,94,.4)} .starter:hover{background:var(--panel2)}
+  .composer{border-top:1px solid var(--line2);padding:11px 13px;display:flex;gap:8px;flex:none}
+  .composer textarea{flex:1;resize:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--paper);font-family:inherit;font-size:13px;padding:9px 11px;height:40px;outline:none}
+  .send{width:40px;height:40px;border-radius:10px;border:none;background:conic-gradient(from 200deg,var(--green),var(--cyan));color:#062712;font-size:16px;cursor:pointer}
+  .chat-fab{display:none;position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));width:52px;height:52px;border-radius:50%;border:1px solid var(--line);background:var(--panel2);backdrop-filter:blur(6px);place-items:center;cursor:pointer;z-index:45;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+  .chat-scrim{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:39}
+
+  /* ---- responsive ---- */
+  @media (max-width:899px){
+    .browser{grid-template-columns:1fr;grid-template-areas:"tabs" "toolbar" "view"}
+    .chat{position:fixed;top:0;right:0;bottom:0;width:min(380px,86vw);transform:translateX(100%);transition:transform .22s ease;z-index:40;background:var(--base);box-shadow:-18px 0 50px rgba(0,0,0,.5)}
+    .browser.chat-open .chat{transform:none}
+    .browser.chat-open .chat-scrim{display:block}
+    .chat-head{display:flex}
+    .chat-fab{display:grid}
+    .ext-cta{display:none}
+  }
+  @media (max-width:600px){
+    :root{--tab-h:46px;--toolbar-h:42px}
+    .tab{height:calc(var(--tab-h) - 8px);min-height:38px}
+    .tab .tab-close{width:26px;height:26px}
+    .tab-new{width:38px}
+    .tabpanel{padding:14px}
+    .chat{left:0;right:0;width:100%;top:auto;height:min(74dvh,560px);transform:translateY(100%);border-left:none;border-top:1px solid var(--line);border-radius:16px 16px 0 0;padding-bottom:env(safe-area-inset-bottom)}
+    .browser.chat-open .chat{transform:none}
+    .funnel-grid{grid-template-columns:1fr}
+    .home-hero{flex-wrap:wrap}
+    .nb-editor{min-height:40dvh}
+    .viewport{padding-bottom:72px}
+  }
+  @media (display-mode:standalone){ .install{display:none} }
   ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="topbar">
-    <span class="wordmark"><span class="blk b-p">p</span><span class="blk b-e">e</span><span class="blk b-e2">e</span><span class="blk b-r">r</span><span class="blk b-d">d</span></span>
-    <span class="lite">lite · prototype</span>
+<div class="browser" id="browser">
+
+  <!-- TAB STRIP -->
+  <div class="tabstrip" id="strip" role="tablist" aria-label="peerd instances">
+    <button class="tab home" data-tab="home" role="tab" aria-selected="true" title="Home">
+      <span class="wm" aria-hidden="true"><i class="b-p">p</i><i class="b-e">e</i><i class="b-e2">e</i><i class="b-r">r</i><i class="b-d">d</i></span>
+    </button>
+    <button class="tab" data-tab="peers" role="tab" aria-selected="false">
+      <span class="favicon k-dweb">◈</span><span class="tab-title">peers</span>
+    </button>
+    <button class="tab-new" id="newTab" aria-label="New tab" title="New instance">+</button>
+  </div>
+
+  <!-- TOOLBAR -->
+  <div class="toolbar">
+    <span class="addr" id="addr"><span class="proto">peerd://</span><span id="addrPath">home</span></span>
     <span class="sp"></span>
-    <span class="slicetag">● slice 1 — real Notebook substrate</span>
-    <a class="cta" href="#" onclick="return false">Install the extension →</a>
+    <button class="install" id="install" hidden>Install app ↓</button>
+    <a class="ext-cta" href="#" onclick="return false">Install the extension →</a>
   </div>
 
-  <div class="main">
-    <div class="chat">
-      <div class="chat-scroll" id="chat">
-        <div class="msg"><div class="who"><span class="orb"></span> peerd</div>
-          <div>This notebook is <b>real</b> — your code runs in peerd's actual sealed worker, vendored unmodified from the extension. Try the green action, or edit the code on the right and hit Run.</div></div>
-      </div>
-      <div class="starters">
-        <button class="starter real" id="act-chart">▸ Chart some numbers (runs for real)</button>
-        <button class="starter mock" disabled>▸ Build an app · later slice</button>
-        <button class="starter mock" disabled>▸ Boot a Linux VM · later slice</button>
-      </div>
-      <div class="composer"><textarea placeholder="agent chat lands in the agent slice…" disabled></textarea><button class="send" disabled>↑</button></div>
-    </div>
+  <!-- VIEWPORT -->
+  <main class="viewport" id="viewport">
 
-    <div class="wb">
-      <div class="caprail">
-        <span class="lbl">in&nbsp;this&nbsp;page</span>
-        <span class="cap on"><span class="d"></span>Notebooks</span>
-        <span class="cap soon"><span class="d"></span>Apps</span>
-        <span class="cap soon"><span class="d"></span>Linux&nbsp;VM</span>
-        <span class="cap soon"><span class="d"></span>Peers</span>
-        <span class="lbl" style="margin-left:6px">extension&nbsp;only</span>
-        <span class="cap locked"><span class="d"></span>Your&nbsp;tabs</span>
-        <span class="cap locked"><span class="d"></span>Your&nbsp;sessions</span>
-        <span class="cap locked"><span class="d"></span>do·get·check</span>
-      </div>
+    <!-- HOME -->
+    <section class="tabpanel" data-panel="home" role="tabpanel">
+      <div class="home-wrap">
+        <div class="home-hero">
+          <span class="home-wm" aria-hidden="true"><i class="b-p">p</i><i class="b-e">e</i><i class="b-e2">e</i><i class="b-r">r</i><i class="b-d">d</i></span>
+          <span class="home-tag">● lite · prototype</span>
+        </div>
+        <p class="home-lede">peerd in a browser tab. Each instance below opens as its own <b>tab</b>, just like the extension. The <b>Notebook is real</b> (peerd's actual sealed worker) and the <b>Peers tab is a real dweb peer</b> on the live network. Install it as an app for your phone.</p>
 
-      <div class="panels">
-        <!-- REAL notebook -->
-        <div class="panel wide">
-          <div class="ph"><span class="kind k-engine">N</span><span class="ptitle">notebook · scratch</span><span class="badge real">real</span><span class="sp"></span></div>
-          <div style="padding:13px">
-            <textarea class="nb-editor" id="editor" spellcheck="false"></textarea>
-            <div class="nb-bar"><button class="run" id="run">▸ Run</button><span class="hint">runs in a fresh sealed worker · ⌘/Ctrl + Enter</span></div>
-            <div class="nb-section">output</div>
-            <div class="nb-output" id="output"></div>
-            <div class="nb-section">console</div>
-            <div class="nb-console" id="console"></div>
+        <div class="launch">
+          <button class="lcard" data-open="notebook"><div class="lc-top"><span class="favicon k-engine">N</span><h4>Notebook</h4><span class="badge real">real</span></div><p>Write &amp; run JS in a sealed worker. Charts, tables, peerd:std.</p></button>
+          <button class="lcard" data-open="peers"><div class="lc-top"><span class="favicon k-dweb">◈</span><h4>Peers</h4><span class="badge real">real</span></div><p>Join the live peerd lobby over WebRTC. Observe-only.</p></button>
+          <button class="lcard" data-open="app" disabled><div class="lc-top"><span class="favicon k-engine">◇</span><h4>App</h4><span class="badge soon">soon</span></div><p>Build a client-side app in a sandboxed iframe.</p></button>
+          <button class="lcard" data-open="webvm" disabled><div class="lc-top"><span class="favicon k-engine">⌘</span><h4>WebVM</h4><span class="badge soon">soon</span></div><p>A real Linux VM in WebAssembly (CheerpX).</p></button>
+        </div>
+
+        <div class="funnel-grid">
+          <div class="fcol"><h5>in this page</h5>
+            <div class="frow on"><span class="d"></span>Notebooks · sealed worker</div>
+            <div class="frow on"><span class="d"></span>Peers · live dweb</div>
+            <div class="frow soon"><span class="d"></span>Apps · sandboxed iframe</div>
+            <div class="frow soon"><span class="d"></span>Linux VM · WebAssembly</div>
           </div>
-          <div class="substrate">mounts: notebook-tab/worker-source.js + realm-seal.js + notebook-std.js + peerd-engine/module-resolver.js (all vendored unmodified)</div>
+          <div class="fcol"><h5>extension only</h5>
+            <div class="frow locked"><span class="d"></span>Your tabs</div>
+            <div class="frow locked"><span class="d"></span>Your logged-in sessions</div>
+            <div class="frow locked"><span class="d"></span>do · get · check</div>
+            <div class="frow locked"><span class="d"></span>The agent across the web</div>
+          </div>
         </div>
 
-        <!-- mock continuity panels -->
-        <div class="panel">
-          <div class="ph"><span class="kind k-engine">⌘</span><span class="ptitle">webvm · debian</span><span class="badge mock">mock</span><span class="sp"></span></div>
-          <div style="padding:13px"><div class="term"><span class="dim"># later slice — CheerpX behind COOP/COEP</span>
-<span class="pr">user@peerd</span>:~$ <span class="dim">▋</span></div></div>
-          <div class="substrate">will mount: vendor/cheerpx + peerd-engine/vm-net</div>
+        <div class="ext-card">
+          <div class="t"><b>This is peerd-lite.</b><p>The extension runs the same agent against your real browser, tabs and sessions. peerd-lite is the sandbox you can try with no install.</p></div>
+          <a class="ext-cta" href="#" onclick="return false">Get the extension →</a>
         </div>
-        <div class="panel">
-          <div class="ph"><span class="kind k-dweb">◈</span><span class="ptitle">peers · peerd-global</span><span class="badge mock">mock</span><span class="sp"></span></div>
-          <div style="padding:13px"><div class="peers-wrap"><div></div><div>
-            <div class="peer"><span class="pdot"></span>this page <span class="pid">later slice</span></div>
-            <div class="peer"><span class="pdot ext"></span>extension peer <span class="pid">…</span></div>
-          </div></div></div>
-          <div class="substrate">will mount: peerd-distributed (already live on peerd.ai)</div>
-        </div>
+        <p class="substrate">slice 2 · Notebook + Peers are real, derived from core peerd. Agent, Apps, VM are next slices.</p>
       </div>
+    </section>
 
-      <div class="funnel">
-        <div class="txt"><b>Slice 1 of the peerd-lite prototype.</b> The notebook is real peerd code. The agent, network egress, Apps, VM, and dweb are the next slices; your real tabs &amp; sessions stay extension-only.</div>
-        <span class="sp"></span>
+    <!-- PEERS (real, singleton, pre-created so peers-widget.js self-inits) -->
+    <section class="tabpanel" data-panel="peers" role="tabpanel" hidden>
+      <div class="peers-panel is-connecting" id="peers-panel" aria-live="polite">
+        <div class="head">
+          <span class="conn"><span class="status-dot" aria-hidden="true"></span><span id="peers-conn-label">open this tab to join…</span></span>
+          <span class="tag" id="peers-count">just you</span>
+        </div>
+        <div class="peers-graph-mount" id="peers-graph"></div>
+        <p class="substrate">mounts: peerd-distributed (vendored) · joins wss://bootstrap.peerd.ai/rendezvous as kind:'website' (observe-only)</p>
       </div>
+    </section>
+  </main>
+
+  <!-- CHAT -->
+  <aside class="chat" id="chat" aria-label="Agent chat">
+    <div class="chat-head"><span class="chat-title"><span class="orb"></span> agent</span><button class="chat-collapse" id="chatClose" aria-label="Close chat">▾</button></div>
+    <div class="chat-scroll" id="chatScroll">
+      <div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Tap an action to drive a tab. The agent goes live in the next slice; today these run the real substrate directly.</div></div>
     </div>
-  </div>
+    <div class="starters">
+      <button class="starter real" id="act-chart">▸ Chart some numbers (real notebook)</button>
+      <button class="starter" id="act-peers">▸ Show me who's on the network</button>
+    </div>
+    <div class="composer"><textarea placeholder="agent chat lands in the agent slice…" disabled></textarea><button class="send" disabled>↑</button></div>
+  </aside>
+  <div class="chat-scrim" id="chatScrim"></div>
+  <button class="chat-fab" id="chatFab" aria-label="Open agent chat"><span class="orb"></span></button>
 </div>
-<div class="mockflag">// prototype — notebook is REAL; other panels mocked</div>
 
 <script type="module">
   import { runNotebook } from '/web/notebook-host.js';
+  import { startPeer } from '/web/peer-host.js';   // real observe-only dweb peer, started on tab activation
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
 
@@ -206,32 +308,127 @@ peerd.self.display(chart({ type: 'bar', data, x: 'month', y: 'sales', title: 'Sa
 
 return 'computed ' + data.length + ' rows in the sealed worker';`;
 
-  const editor = document.getElementById('editor');
-  const output = document.getElementById('output');
-  const cons = document.getElementById('console');
-  const runBtn = document.getElementById('run');
-  editor.value = SAMPLE;
+  const KINDS = {
+    home:     { fav:'',         glyph:'p', title:'Home',     addr:()=>'home' },
+    notebook: { fav:'k-engine', glyph:'N', title:'notebook', addr:(n)=>`notebook/${n}`, single:false },
+    peers:    { fav:'k-dweb',   glyph:'◈', title:'peers',    addr:()=>'peers/peerd-global', single:true },
+    app:      { fav:'k-engine', glyph:'◇', title:'app',      addr:()=>'app/new', single:true, soon:true },
+    webvm:    { fav:'k-engine', glyph:'⌘', title:'webvm',    addr:()=>'webvm/debian', single:true, soon:true },
+  };
+  const reg = new Map([['home',{kind:'home'}],['peers',{kind:'peers'}]]);
+  let seq = 0, active = 'home';
+  const $ = (s,r=document)=>r.querySelector(s);
+  const tabBtn = (id)=>$(`.tab[data-tab="${id}"]`);
+  const panelEl = (id)=>$(`[data-panel="${id}"]`);
 
-  let running = false;
-  async function run() {
-    if (running) return; running = true;
-    runBtn.disabled = true; runBtn.textContent = '▸ Running…';
-    output.innerHTML = ''; cons.innerHTML = '';
-    await runNotebook(editor.value, { outputEl: output, logEl: cons });
-    runBtn.disabled = false; runBtn.textContent = '▸ Run'; running = false;
+  function setAddr(id){ const k=reg.get(id)?.kind||'home'; const lbl = k==='notebook'? KINDS.notebook.addr(id.split('-')[1]||'scratch') : KINDS[k].addr(); $('#addrPath').textContent = lbl; }
+
+  function activate(id){
+    active = id;
+    reg.forEach((_,tid)=>{ tabBtn(tid)?.setAttribute('aria-selected', String(tid===id)); const p=panelEl(tid); if(p) p.hidden = tid!==id; });
+    setAddr(id);
+    // mobile: opening a tab closes the chat sheet
+    document.getElementById('browser').classList.remove('chat-open');
+    if(id==='peers') ensurePeer();
   }
-  runBtn.addEventListener('click', run);
-  editor.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
 
-  // chat action: canned prompt that drives the REAL notebook end-to-end
-  document.getElementById('act-chart').addEventListener('click', async () => {
-    const chat = document.getElementById('chat');
-    chat.insertAdjacentHTML('beforeend', '<div class="msg user"><div class="who">you</div><div class="bubble">Chart some numbers</div></div>');
-    chat.insertAdjacentHTML('beforeend', '<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Writing a notebook and running it in a sealed worker.<div class="toolcall"><span class="g">N</span>js_create → js_run · notebook<span class="ok">✓</span></div></div></div>');
-    chat.scrollTop = chat.scrollHeight;
-    editor.value = SAMPLE;
-    run();
+  let peersStarted = false;
+  function ensurePeer(){
+    if(peersStarted) return; peersStarted = true;
+    startPeer({
+      rootEl: document.getElementById('peers-panel'),
+      mountEl: document.getElementById('peers-graph'),
+      statusEl: document.getElementById('peers-conn-label'),
+      countEl: document.getElementById('peers-count'),
+    });
+  }
+
+  function panelHTML(kind, id){
+    if(kind==='notebook') return `<div class="nb-host">
+      <textarea class="nb-editor" spellcheck="false"></textarea>
+      <div class="nb-bar"><button class="run">▸ Run</button><span class="hint">fresh sealed worker · ⌘/Ctrl + Enter</span></div>
+      <div class="nb-section">output</div><div class="nb-output"></div>
+      <div class="nb-section">console</div><div class="nb-console"></div>
+      <p class="substrate">mounts: notebook-tab/worker-source.js + realm-seal.js + notebook-std.js (vendored unmodified)</p></div>`;
+    if(kind==='app') return `<div class="soon-box"><p class="soon-note">App sandbox — coming in a later slice.</p><div class="term"><span class="dim"># will mount: app-tab/runner.html (opaque-origin iframe)</span></div><p class="substrate">peerd-engine/app-compose.js → sandboxed iframe</p></div>`;
+    if(kind==='webvm') return `<div class="soon-box"><p class="soon-note">Linux VM — coming in a later slice.</p><div class="term"><span class="dim"># will stream Debian, cached to IndexedDB</span>
+<span class="pr">user@peerd</span>:~$ <span class="dim">▋</span></div><p class="substrate">vendor/cheerpx + peerd-engine/vm-net · needs COOP/COEP</p></div>`;
+    return '';
+  }
+
+  function wireNotebook(panel, id, seed){
+    const editor = $('.nb-editor', panel), output = $('.nb-output', panel), cons = $('.nb-console', panel), runBtn = $('.run', panel);
+    editor.value = seed || SAMPLE;
+    let running = false;
+    const run = async ()=>{ if(running) return; running=true; runBtn.disabled=true; runBtn.textContent='▸ Running…'; output.innerHTML=''; cons.innerHTML='';
+      await runNotebook(editor.value, { outputEl: output, logEl: cons, notebookId: id });
+      runBtn.disabled=false; runBtn.textContent='▸ Run'; running=false; };
+    runBtn.addEventListener('click', run);
+    editor.addEventListener('keydown', (e)=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); run(); } });
+    panel._run = run;
+  }
+
+  function openTab(kind, { seed, run } = {}){
+    if(KINDS[kind].single){ const ex=[...reg].find(([,v])=>v.kind===kind); if(ex){ activate(ex[0]); return ex[0]; } }
+    const id = `${kind}-${++seq}`;
+    reg.set(id,{kind});
+    const b = document.createElement('button');
+    b.className='tab'; b.dataset.tab=id; b.setAttribute('role','tab'); b.setAttribute('aria-selected','false');
+    b.innerHTML = `<span class="favicon ${KINDS[kind].fav}">${KINDS[kind].glyph}</span><span class="tab-title">${KINDS[kind].title}</span><span class="tab-close" title="Close">×</span>`;
+    document.getElementById('newTab').before(b);
+    const p = document.createElement('section');
+    p.className='tabpanel'; p.dataset.panel=id; p.setAttribute('role','tabpanel'); p.hidden=true;
+    p.innerHTML = panelHTML(kind, id);
+    document.getElementById('viewport').appendChild(p);
+    if(kind==='notebook'){ wireNotebook(p, id, seed); }
+    activate(id);
+    if(kind==='notebook' && run){ p._run && p._run(); }
+    return id;
+  }
+
+  function closeTab(id){
+    if(id==='home'||id==='peers') return;   // permanent
+    const order=[...reg.keys()], idx=order.indexOf(id);
+    reg.delete(id); tabBtn(id)?.remove(); panelEl(id)?.remove();
+    if(active===id) activate(order[idx-1]||order[idx+1]||'home');
+  }
+
+  // tab strip interactions
+  document.getElementById('strip').addEventListener('click', (e)=>{
+    const close=e.target.closest('.tab-close'); if(close){ e.stopPropagation(); closeTab(close.closest('.tab').dataset.tab); return; }
+    const tab=e.target.closest('.tab'); if(tab){ activate(tab.dataset.tab); return; }
+    if(e.target.closest('#newTab')) activate('home');
   });
+  // home launcher
+  document.querySelectorAll('.lcard[data-open]').forEach(c=> c.addEventListener('click', ()=>{ if(!c.disabled) openTab(c.dataset.open, c.dataset.open==='notebook'?{}:undefined); }));
+
+  // chat actions
+  const chat = document.getElementById('chatScroll');
+  const addMsg = (html)=>{ chat.insertAdjacentHTML('beforeend', html); chat.scrollTop=chat.scrollHeight; };
+  document.getElementById('act-chart').addEventListener('click', ()=>{
+    addMsg('<div class="msg user"><div class="who">you</div><div class="bubble">Chart some numbers</div></div>');
+    addMsg('<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Opening a notebook and running it in a sealed worker.<div class="toolcall"><span class="g">N</span>js_create → js_run · notebook<span class="ok">✓</span></div></div></div>');
+    openTab('notebook', { seed: SAMPLE, run: true });
+  });
+  document.getElementById('act-peers').addEventListener('click', ()=>{
+    addMsg('<div class="msg user"><div class="who">you</div><div class="bubble">Who\'s on the network?</div></div>');
+    addMsg('<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Joining the live peerd lobby over WebRTC.<div class="toolcall" style="border-left-color:var(--magenta)"><span class="g" style="background:var(--magenta)">◈</span>dweb_discover · base network<span class="ok">✓</span></div></div></div>');
+    openTab('peers');
+  });
+
+  // mobile chat sheet
+  const browser = document.getElementById('browser');
+  document.getElementById('chatFab').addEventListener('click', ()=> browser.classList.add('chat-open'));
+  document.getElementById('chatClose').addEventListener('click', ()=> browser.classList.remove('chat-open'));
+  document.getElementById('chatScrim').addEventListener('click', ()=> browser.classList.remove('chat-open'));
+
+  // ---- PWA: service worker + install ----
+  if('serviceWorker' in navigator) window.addEventListener('load', ()=> navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+  let deferred=null; const installBtn=document.getElementById('install');
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone===true;
+  window.addEventListener('beforeinstallprompt', (e)=>{ e.preventDefault(); deferred=e; if(!standalone) installBtn.hidden=false; });
+  installBtn.addEventListener('click', async ()=>{ if(!deferred) return; deferred.prompt(); await deferred.userChoice; deferred=null; installBtn.hidden=true; });
+  window.addEventListener('appinstalled', ()=>{ installBtn.hidden=true; });
 </script>
 </body>
 </html>

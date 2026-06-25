@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  peerd favicon — the brand icon: white "p" over the five module-color
+  stripes, edge-to-edge (no padding). The "p" is the Geist Mono glyph at
+  weight 700, OUTLINED to a vector path (no embedded font) so it renders
+  in browser tabs, where SVG favicons don't load @font-face. Extracted
+  from the SAME vendored variable font the extension wordmark uses
+  (extension/shared/fonts/GeistMono.woff2, wght 700), so the favicon, the
+  extension tabs, and the store icon all show an identical "p".
+  Framing matches the icon PNGs: centered x=48, baseline y=66, size 100.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+  <defs>
+    <clipPath id="r"><rect width="96" height="96" rx="8" ry="8"/></clipPath>
+  </defs>
+  <g clip-path="url(#r)">
+    <rect y="0"    width="96" height="19.2" fill="#00BCE5"/>
+    <rect y="19.2" width="96" height="19.2" fill="#EF4444"/>
+    <rect y="38.4" width="96" height="19.2" fill="#F59E0B"/>
+    <rect y="57.6" width="96" height="19.2" fill="#22C55E"/>
+    <rect y="76.8" width="96" height="19.2" fill="#DB2777"/>
+  </g>
+  <path d="M23.60 81.00V12.40H36.68L37.06 24.76L35.80 24.16Q37.86 17.90 42.18 14.55Q46.50 11.20 52.96 11.20Q60.08 11.20 64.80 14.92Q69.52 18.64 71.86 24.97Q74.20 31.30 74.20 39.20Q74.20 47.04 71.86 53.40Q69.52 59.76 64.80 63.48Q60.08 67.20 52.96 67.20Q48.74 67.20 45.34 65.89Q41.94 64.58 39.55 61.96Q37.16 59.34 35.72 55.40L37.16 54.06V81.00ZM48.80 55.24Q54.20 55.24 57.16 51.33Q60.12 47.42 60.12 39.20Q60.12 30.98 57.16 27.07Q54.20 23.16 48.80 23.16Q45.40 23.16 42.77 24.88Q40.14 26.60 38.65 30.16Q37.16 33.72 37.16 39.20Q37.16 44.68 38.63 48.24Q40.10 51.80 42.75 53.52Q45.40 55.24 48.80 55.24Z" fill="#FFFFFF"/>
+</svg>
