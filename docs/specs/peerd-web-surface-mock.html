@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<!--
+  peerd web surface ("peerd-lite") — UX MOCK.
+  Companion to docs/specs/PEERD-WEB-SURFACE.md. A single self-contained HTML
+  sketch to align the UX with the technical plan. Panels are mocked; each one
+  is captioned with the real substrate it would mount (so the layout maps 1:1
+  to the derivation). No real agent, vault, or sandboxes here yet.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>peerd-lite — UX mock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@500;700&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --base:#0B0D0E; --panel:#121517; --panel2:#16191c; --line:#23282c;
+    --paper:#E8E6E1; --white:#FAFAFA; --muted:rgba(232,230,225,0.55); --faint:rgba(232,230,225,0.32);
+    --cyan:#00B7EB; --red:#EF4444; --amber:#F59E0B; --green:#22C55E; --magenta:#D946EF;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--base); color:var(--paper);
+    font-family:'Inter',-apple-system,system-ui,sans-serif; font-size:14px; line-height:1.5;
+    -webkit-font-smoothing:antialiased; height:100vh; overflow:hidden;
+  }
+  .app{display:flex; flex-direction:column; height:100vh}
+
+  /* ---- top bar ---- */
+  .topbar{display:flex; align-items:center; gap:14px; padding:10px 18px; border-bottom:1px solid var(--line); flex:none}
+  .wordmark{display:inline-flex; gap:2px}
+  .wordmark .blk{width:22px; height:22px; display:grid; place-items:center; font-family:'Geist Mono',var(--mono); font-weight:700; font-size:15px; color:#fff; border-radius:3px}
+  .b-p{background:var(--cyan)} .b-e{background:var(--red)} .b-e2{background:var(--amber)} .b-r{background:var(--green)} .b-d{background:var(--magenta)}
+  .lite{font-family:var(--mono); font-size:11px; letter-spacing:.04em; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 8px}
+  .topbar .spacer{flex:1}
+  .keychip{display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:5px 11px; cursor:pointer; background:none}
+  .keychip:hover{color:var(--paper)}
+  .keychip .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+  .keychip.unset .dot{background:var(--amber)}
+  .cta{font-family:var(--mono); font-size:12px; font-weight:500; padding:7px 13px; border-radius:7px; border:1px solid var(--cyan); background:var(--cyan); color:#04222b; cursor:pointer; text-decoration:none; white-space:nowrap}
+  .cta:hover{filter:brightness(1.08)}
+
+  /* ---- body grid ---- */
+  .main{display:grid; grid-template-columns:380px 1fr; flex:1; min-height:0}
+
+  /* ---- chat column ---- */
+  .chat{display:flex; flex-direction:column; border-right:1px solid var(--line); min-height:0; background:linear-gradient(180deg,rgba(255,255,255,0.012),transparent)}
+  .chat-scroll{flex:1; overflow-y:auto; padding:18px 16px 8px}
+  .msg{margin-bottom:16px; max-width:100%}
+  .msg .who{font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); margin-bottom:5px}
+  .msg.user .bubble{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:9px 12px}
+  .msg.agent .bubble{color:var(--paper)}
+  .msg .bubble code{font-family:var(--mono); font-size:12px; background:rgba(255,255,255,0.06); padding:1px 5px; border-radius:4px}
+  .agent-act{display:flex; align-items:center; gap:8px; margin-top:9px; font-family:var(--mono); font-size:11px; color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:7px 10px}
+  .agent-act .g{width:16px;height:16px;border-radius:4px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#04222b}
+  .starters{padding:0 16px 10px; display:flex; flex-wrap:wrap; gap:7px}
+  .starter{font-family:var(--mono); font-size:11.5px; color:var(--paper); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:7px 10px; cursor:pointer; text-align:left}
+  .starter:hover{border-color:var(--faint); background:var(--panel2)}
+  .composer{border-top:1px solid var(--line); padding:12px 14px; display:flex; gap:9px; align-items:flex-end; flex:none}
+  .composer textarea{flex:1; resize:none; background:var(--panel); border:1px solid var(--line); border-radius:9px; color:var(--paper); font-family:inherit; font-size:13.5px; padding:10px 12px; height:44px; outline:none}
+  .composer textarea:focus{border-color:var(--faint)}
+  .send{width:40px;height:40px;border-radius:9px;border:none;background:var(--green);color:#062712;font-size:17px;cursor:pointer;flex:none}
+
+  /* ---- workbench ---- */
+  .wb{display:flex; flex-direction:column; min-height:0; background:var(--base)}
+  .caprail{display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--line); flex:none; overflow-x:auto}
+  .caprail .lbl{font-family:var(--mono); font-size:10px; letter-spacing:.06em; color:var(--faint); text-transform:uppercase; margin-right:2px}
+  .cap{display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11.5px; padding:4px 9px; border-radius:999px; border:1px solid var(--line); white-space:nowrap}
+  .cap .d{width:6px;height:6px;border-radius:50%}
+  .cap.on{color:var(--paper)} .cap.on .d{background:var(--green)}
+  .cap.locked{color:var(--faint); cursor:pointer} .cap.locked .d{background:var(--faint)}
+  .cap.locked::after{content:'🔒'; font-size:9px; opacity:.7}
+  .cap.wiggle{animation:wig .4s}
+  @keyframes wig{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
+
+  .panels{flex:1; overflow-y:auto; padding:16px; display:grid; grid-template-columns:repeat(2,1fr); gap:14px; align-content:start}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:11px; overflow:hidden; display:flex; flex-direction:column; min-height:170px; animation:rise .28s ease}
+  .panel.wide{grid-column:1 / -1}
+  @keyframes rise{from{opacity:0; transform:translateY(8px)}to{opacity:1;transform:none}}
+  .panel .ph{display:flex; align-items:center; gap:9px; padding:9px 11px; border-bottom:1px solid var(--line); background:var(--panel2)}
+  .panel .kind{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-family:var(--mono);font-size:10px;font-weight:700;color:#0b0d0e}
+  .k-engine{background:var(--amber)} .k-dweb{background:var(--magenta)} .k-runtime{background:var(--green)}
+  .panel .title{font-family:var(--mono); font-size:12.5px; color:var(--paper)}
+  .panel .tag{font-family:var(--mono); font-size:9.5px; letter-spacing:.04em; color:var(--faint); border:1px solid var(--line); border-radius:4px; padding:1px 5px}
+  .panel .tag.live{color:var(--green); border-color:rgba(34,197,94,.4)}
+  .panel .ph .sp{flex:1}
+  .panel .x{cursor:pointer; color:var(--faint); font-size:14px; line-height:1; background:none;border:none}
+  .panel .x:hover{color:var(--paper)}
+  .panel .pb{padding:11px 12px; flex:1; overflow:auto}
+  .panel .substrate{font-family:var(--mono); font-size:9.5px; color:var(--faint); padding:6px 12px; border-top:1px dashed var(--line)}
+
+  .term{font-family:var(--mono); font-size:11.5px; line-height:1.55; color:#cfe8d6; background:#0a0c0d; border-radius:7px; padding:9px 11px; white-space:pre-wrap}
+  .term .pr{color:var(--green)} .term .dim{color:var(--faint)}
+  .nb-code{font-family:var(--mono); font-size:11.5px; background:#0a0c0d; border-radius:7px; padding:9px 11px; white-space:pre-wrap; color:#dfe6ea}
+  .nb-code .kw{color:var(--cyan)} .nb-code .st{color:var(--amber)} .nb-code .cm{color:var(--faint)}
+  .nb-out{margin-top:8px; font-family:var(--mono); font-size:11px}
+  .nb-out table{border-collapse:collapse; width:100%}
+  .nb-out td,.nb-out th{border:1px solid var(--line); padding:3px 7px; text-align:left}
+  .nb-out th{color:var(--muted); font-weight:500}
+  .appframe{border:1px solid var(--line); border-radius:7px; background:#fff; color:#111; padding:13px; font-family:'Inter',sans-serif}
+  .appframe h4{margin:0 0 9px; font-size:13px}
+  .appframe .row{display:flex; gap:7px; align-items:center; margin-bottom:7px; font-size:12.5px}
+  .appframe input{width:70px; padding:3px 6px; border:1px solid #ccc; border-radius:5px; font-size:12.5px}
+  .appframe .big{font-size:18px; font-weight:600; color:#0a7d3a}
+  .peers{display:flex; flex-direction:column; gap:7px}
+  .peer{display:flex; align-items:center; gap:9px; font-family:var(--mono); font-size:11.5px}
+  .peer .pd{width:8px;height:8px;border-radius:50%;background:var(--magenta)}
+  .peer .pd.ext{background:var(--cyan)} .peer .id{color:var(--muted)}
+
+  .empty{grid-column:1 / -1; display:grid; place-items:center; color:var(--faint); font-family:var(--mono); font-size:12px; height:200px; text-align:center}
+
+  /* ---- funnel strip ---- */
+  .funnel{flex:none; border-top:1px solid var(--line); padding:11px 16px; display:flex; align-items:center; gap:14px; background:linear-gradient(180deg,transparent,rgba(0,183,235,0.04))}
+  .funnel .txt{font-size:12.5px; color:var(--muted)} .funnel .txt b{color:var(--paper); font-weight:600}
+  .funnel .spacer{flex:1}
+
+  /* ---- key modal ---- */
+  .scrim{position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; place-items:center; z-index:50}
+  .scrim.open{display:grid}
+  .modal{width:420px; max-width:92vw; background:var(--panel); border:1px solid var(--line); border-radius:13px; padding:20px}
+  .modal h3{margin:0 0 4px; font-size:16px}
+  .modal p{margin:0 0 15px; color:var(--muted); font-size:12.5px}
+  .modal label{font-family:var(--mono); font-size:11px; color:var(--muted); display:block; margin:0 0 5px}
+  .modal select,.modal input{width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:8px; color:var(--paper); padding:9px 11px; font-family:var(--mono); font-size:12.5px; margin-bottom:13px; outline:none}
+  .sessnote{display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px; color:var(--muted); margin-bottom:16px}
+  .modal .actions{display:flex; gap:9px; justify-content:flex-end}
+  .modal .ghost{background:none; border:1px solid var(--line); color:var(--paper); border-radius:8px; padding:8px 14px; cursor:pointer; font-size:13px}
+  .mockflag{position:fixed; bottom:8px; right:12px; font-family:var(--mono); font-size:10px; color:var(--faint); z-index:5}
+  ::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <span class="wordmark" aria-label="peerd">
+      <span class="blk b-p">p</span><span class="blk b-e">e</span><span class="blk b-e2">e</span><span class="blk b-r">r</span><span class="blk b-d">d</span>
+    </span>
+    <span class="lite">lite · in-page demo</span>
+    <span class="spacer"></span>
+    <button class="keychip unset" id="keychip"><span class="dot"></span> Add your model key</button>
+    <a class="cta" href="#" onclick="flashInstall();return false">Install the extension →</a>
+  </div>
+
+  <div class="main">
+    <!-- CHAT -->
+    <div class="chat">
+      <div class="chat-scroll" id="chat">
+        <div class="msg agent">
+          <div class="who">peerd</div>
+          <div class="bubble">I run right here in the page. I can write &amp; run JS notebooks, build small client-side apps, boot a real Linux VM in WebAssembly, and reach the peer network. Try one:</div>
+        </div>
+      </div>
+      <div class="starters" id="starters">
+        <button class="starter" data-flow="nb">▸ Write a notebook that charts some numbers</button>
+        <button class="starter" data-flow="app">▸ Build a tiny tip calculator app</button>
+        <button class="starter" data-flow="vm">▸ Boot a Linux VM and run a command</button>
+        <button class="starter" data-flow="peer">▸ Find a peer on the network</button>
+        <button class="starter" data-flow="locked">▸ Summarize the Gmail tab I have open</button>
+      </div>
+      <div class="composer">
+        <textarea id="composer" placeholder="Ask peerd to do something…"></textarea>
+        <button class="send" id="send">↑</button>
+      </div>
+    </div>
+
+    <!-- WORKBENCH -->
+    <div class="wb">
+      <div class="caprail">
+        <span class="lbl">in this page</span>
+        <span class="cap on"><span class="d"></span>Notebooks</span>
+        <span class="cap on"><span class="d"></span>Apps</span>
+        <span class="cap on"><span class="d"></span>Linux VM</span>
+        <span class="cap on"><span class="d"></span>Peer network</span>
+        <span class="lbl" style="margin-left:8px">extension only</span>
+        <span class="cap locked" data-lock="1"><span class="d"></span>Your tabs</span>
+        <span class="cap locked" data-lock="1"><span class="d"></span>Your sessions</span>
+        <span class="cap locked" data-lock="1"><span class="d"></span>do / get / check</span>
+      </div>
+
+      <div class="panels" id="panels">
+        <!-- a pre-mounted notebook so the workbench isn't empty -->
+        <div class="panel">
+          <div class="ph">
+            <span class="kind k-engine">N</span>
+            <span class="title">notebook · scratch</span>
+            <span class="tag live">live</span>
+            <span class="sp"></span>
+            <button class="x" onclick="this.closest('.panel').remove()">✕</button>
+          </div>
+          <div class="pb">
+            <div class="nb-code"><span class="cm">// runs in a sealed worker, no network, no keys</span>
+<span class="kw">const</span> sum = [3,7,2,9].reduce((a,b)=>a+b, 0);
+peerd.self.display(<span class="st">`total: ${sum}`</span>);</div>
+            <div class="nb-out">→ total: 21</div>
+          </div>
+          <div class="substrate">mounts: notebook-tab/worker-source.js (verbatim)</div>
+        </div>
+
+        <!-- dweb peers, pre-mounted -->
+        <div class="panel">
+          <div class="ph">
+            <span class="kind k-dweb">◈</span>
+            <span class="title">peers · peerd-global</span>
+            <span class="tag live">live</span>
+            <span class="sp"></span>
+            <button class="x" onclick="this.closest('.panel').remove()">✕</button>
+          </div>
+          <div class="pb">
+            <div class="peers">
+              <div class="peer"><span class="pd"></span>this page <span class="id">did:key:z6Mk…a1</span></div>
+              <div class="peer"><span class="pd ext"></span>extension peer <span class="id">did:key:z6Mk…7f</span></div>
+              <div class="peer"><span class="pd"></span>web visitor <span class="id">did:key:z6Mk…c3</span></div>
+            </div>
+          </div>
+          <div class="substrate">mounts: peerd-distributed (already live on peerd.ai)</div>
+        </div>
+      </div>
+
+      <div class="funnel">
+        <div class="txt"><b>This is peerd-lite.</b> The same agent, in the extension, points at your real browser: your tabs, your logged-in sessions, and <code>do/get/check</code> across the whole web.</div>
+        <span class="spacer"></span>
+        <a class="cta" href="#" onclick="flashInstall();return false">Get the extension →</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- KEY MODAL -->
+<div class="scrim" id="scrim">
+  <div class="modal">
+    <h3>Use your own model key</h3>
+    <p>Encrypted in your browser with WebCrypto, the same vault the extension uses. In the demo it's session-only by default and never leaves this page.</p>
+    <label>Provider</label>
+    <select><option>Anthropic</option><option>OpenRouter</option><option>Ollama (local, no key)</option></select>
+    <label>API key</label>
+    <input type="password" placeholder="sk-ant-…" />
+    <div class="sessnote"><input type="checkbox" checked style="width:auto;margin:0" /> Session only — forget when I close the tab</div>
+    <div class="actions">
+      <button class="ghost" onclick="closeKey()">Cancel</button>
+      <button class="cta" onclick="setKey()">Save key</button>
+    </div>
+  </div>
+</div>
+
+<div class="mockflag">// UX mock — panels are illustrative; captions show the real substrate</div>
+
+<script>
+  const chat = document.getElementById('chat');
+  const panels = document.getElementById('panels');
+
+  function add(role, html){
+    const m = document.createElement('div');
+    m.className = 'msg ' + role;
+    m.innerHTML = '<div class="who">' + (role==='user'?'you':'peerd') + '</div><div class="bubble">' + html + '</div>';
+    chat.appendChild(m); chat.scrollTop = chat.scrollHeight; return m;
+  }
+  function act(m, glyphClass, glyph, text){
+    const a = document.createElement('div');
+    a.className='agent-act';
+    a.innerHTML = '<span class="g '+glyphClass+'">'+glyph+'</span>'+text;
+    m.querySelector('.bubble').appendChild(a); chat.scrollTop = chat.scrollHeight;
+  }
+  function panel(html){ panels.insertAdjacentHTML('afterbegin', html); }
+
+  const flows = {
+    nb(){
+      add('user','Write a notebook that charts some numbers');
+      const m = add('agent','Spinning up a notebook in a sealed worker and running it.');
+      act(m,'k-engine','N','js_create → js_run · notebook · chart');
+      panel(`<div class="panel"><div class="ph"><span class="kind k-engine">N</span><span class="title">notebook · chart</span><span class="tag live">live</span><span class="sp"></span><button class="x" onclick="this.closest('.panel').remove()">✕</button></div><div class="pb"><div class="nb-code"><span class="cm">// sealed worker · explicit imports only</span>
+<span class="kw">import</span> { svgBarChart } <span class="kw">from</span> <span class="st">'peerd:std'</span>;
+<span class="kw">const</span> data = [12, 19, 7, 23, 15];
+peerd.self.display(svgBarChart(data));</div><div class="nb-out">→ <svg width="100%" height="56" viewBox="0 0 200 56"><rect x="4" y="20" width="30" height="32" fill="#00B7EB"/><rect x="40" y="4" width="30" height="48" fill="#22C55E"/><rect x="76" y="34" width="30" height="18" fill="#F59E0B"/><rect x="112" y="0" width="30" height="52" fill="#D946EF"/><rect x="148" y="14" width="30" height="38" fill="#EF4444"/></svg></div></div><div class="substrate">mounts: notebook-tab/worker-source.js + peerd:std</div></div>`);
+    },
+    app(){
+      add('user','Build a tiny tip calculator app');
+      const m = add('agent','Composing a client-side app and rendering it in a sandboxed iframe.');
+      act(m,'k-engine','A','app_create → app_open · opaque-origin iframe');
+      panel(`<div class="panel"><div class="ph"><span class="kind k-engine">A</span><span class="title">app · tip-calc</span><span class="tag live">live</span><span class="sp"></span><button class="x" onclick="this.closest('.panel').remove()">✕</button></div><div class="pb"><div class="appframe"><h4>Tip calculator</h4><div class="row">Bill <input value="48.00"/></div><div class="row">Tip % <input value="20"/></div><div class="big">Total: $57.60</div></div></div><div class="substrate">mounts: app-tab/runner.html (sandboxed, opaque origin)</div></div>`);
+    },
+    vm(){
+      add('user','Boot a Linux VM and run a command');
+      const m = add('agent','Booting Debian in WebAssembly. First boot streams the image (~10-30s), then it caches.');
+      act(m,'k-engine','VM','vm_create → vm_boot · CheerpX');
+      panel(`<div class="panel wide"><div class="ph"><span class="kind k-engine">⌘</span><span class="title">webvm · debian</span><span class="tag live">live</span><span class="sp"></span><button class="x" onclick="this.closest('.panel').remove()">✕</button></div><div class="pb"><div class="term"><span class="dim"># streaming disk image… cached to IndexedDB</span>
+<span class="pr">user@peerd</span>:~$ uname -a &amp;&amp; python3 -c 'print(6*7)'
+Linux peerd 6.1.0-wasm #1 SMP x86_64 GNU/Linux
+42
+<span class="pr">user@peerd</span>:~$ <span class="dim">▋</span></div></div><div class="substrate">mounts: vendor/cheerpx + peerd-engine/vm-net · needs COOP/COEP (already set for /vm-demo/)</div></div>`);
+    },
+    peer(){
+      add('user','Find a peer on the network');
+      const m = add('agent','Querying the DHT on the peerd-global room over WebRTC.');
+      act(m,'k-dweb','◈','dweb_discover · base network');
+      add('agent','Found 2 peers: one running the extension, one a web visitor like you. I can exchange signed apps/workflows with either, no server in the path.');
+    },
+    locked(){
+      add('user','Summarize the Gmail tab I have open');
+      const m = add('agent','I can\'t reach your other tabs or logged-in sessions from a web page, that\'s the one thing the page can\'t do. The extension runs this same agent against your real browser: your Gmail tab, your session, no re-login.');
+      act(m,'k-runtime','↗','locked: do/get/check · tabs · sessions → in the extension');
+      flashInstall();
+    }
+  };
+
+  document.getElementById('starters').addEventListener('click', e=>{
+    const b = e.target.closest('.starter'); if(!b) return; flows[b.dataset.flow]();
+  });
+  document.getElementById('send').addEventListener('click', sendMsg);
+  document.getElementById('composer').addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMsg(); }});
+  function sendMsg(){
+    const t = document.getElementById('composer'); const v=t.value.trim(); if(!v) return; t.value='';
+    add('user', v.replace(/</g,'&lt;'));
+    add('agent','(mock) I\'d plan this, then spin up the right sandbox. Try a starter chip to see a panel mount.');
+  }
+
+  // key modal
+  const scrim = document.getElementById('scrim');
+  document.getElementById('keychip').onclick = ()=> scrim.classList.add('open');
+  window.closeKey = ()=> scrim.classList.remove('open');
+  window.setKey = ()=>{ const c=document.getElementById('keychip'); c.classList.remove('unset'); c.innerHTML='<span class="dot"></span> session key set'; scrim.classList.remove('open'); };
+
+  // funnel emphasis
+  window.flashInstall = ()=>{
+    document.querySelectorAll('.cap.locked').forEach(c=>{ c.classList.add('wiggle'); setTimeout(()=>c.classList.remove('wiggle'),450); });
+    const f=document.querySelector('.funnel'); f.style.transition='background .25s'; const o=f.style.background; f.style.background='rgba(0,183,235,0.10)'; setTimeout(()=>f.style.background=o,600);
+  };
+  document.querySelectorAll('.cap.locked').forEach(c=> c.onclick=flashInstall);
+</script>
+</body>
+</html>
