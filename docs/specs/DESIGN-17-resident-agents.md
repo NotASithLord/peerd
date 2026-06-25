@@ -343,41 +343,77 @@ orchestrator-side per-kind split, **(iii)** accumulation kept out of the residen
 model uniform and the orchestrator simple. State lives with the actor; the DOM
 stays the source of truth for current page state (re-snapshot per step).
 
-### The security principle — compress at every accumulation boundary
-The objection to resident accumulation is injection surface. But the comparison
-is narrower than it looks: **the same compressed summary reaches the orchestrator
+### The security principle — the same rolling-summary, at every actor
+The objection to resident accumulation is injection surface. But the comparison is
+narrower than it looks: **the same compressed summary reaches the orchestrator
 either way** (it must, for the user-facing synthesis). The *only* delta of
-resident-side accumulation is the worker *also* keeping a trimmed working memory.
-So **location is not the lever — compression is.** A lossy distillation is far
-less likely to carry an injection intact than verbatim DOM; whatever survives is
-still `wrapUntrusted`-fenced (treated as data) wherever it lands.
+resident-side accumulation is that the worker *also* keeps a trimmed working
+memory. So **location is not the lever — compression is.** A lossy distillation is
+far less likely to carry an injection intact than verbatim DOM.
 
-The rule, applied at *every* accumulation boundary: **compress untrusted content
-before it accumulates, aggressiveness keyed to provenance.**
+So the resident doesn't invent a trim policy — it **reuses the loop's own
+rolling-summary** (`loop/rolling-summary.js`), the exact discipline the
+orchestrator already runs: *summarize the old, keep the recent verbatim.* One
+mechanism, at every actor. For the resident, "recent verbatim" = **the current
+task message + the latest DOM snapshot**, and "the old" = prior action-steps
+compressed to a progress note. Concretely its context is:
 
-- **Web resident** (untrusted-sourced) → trim hard: keep a rolling *progress*
-  summary (intent, what was tried, learned page structure), drop stale DOM
-  snapshots; reuse the existing rolling-summary / redact / trim machinery.
-- **Sandbox resident** (own work) → accumulate loose: its context is its own
-  reasoning over its own disk/files.
+> **rolling progress-summary of old steps + verbatim current task + latest snapshot**
+
+— structurally identical to the orchestrator's "summary + recent-verbatim."
+
+**Why summarizing doesn't cost the resident its intent (the asymmetry that
+matters).** The orchestrator keeps recent turns verbatim because *its intent lives
+in its own chat history* — summarize the user's words away and "cheapest nonstop
+under $400 after 9am" degrades to "wants a flight." The resident is different:
+**its intent arrives fresh in each task message, and its current state is in the
+DOM** — neither lives in its accumulated history. So summarization only has to
+compress the one thing the resident *is* the sole holder of — **its own progress**
+(what it tried, what failed, what it learned about the page) — an action log, not a
+nuanced human ask, which compresses cleanly. DOM-as-truth is load-bearing here: it
+lets the summary omit page state entirely, shrinking the retained, untrusted-
+derived memory to the minimum.
+
+One mechanism, two role-tuned knobs:
+- **Aggressiveness** keyed to provenance — the **web resident** (untrusted-sourced)
+  trims hard; the **sandbox resident** (own work) accumulates loose.
+- **What to preserve** keyed to *what the actor can get elsewhere* — the
+  orchestrator keeps intent (sole holder); the resident keeps only progress (intent
+  ← messages, state ← DOM). A *prompt* difference (an action-log summary prompt —
+  "what I did / learned / where I am" — vs the orchestrator's conversation prompt),
+  not new machinery.
+
+**Belt-and-suspenders: the resident fences its OWN summary.** The resident's
+rolling summary is re-inserted into its context **`wrapUntrusted`-fenced**, so even
+its self-accumulated progress is read as DATA, not commands — a laundered injection
+that survives compression cannot re-enter as an instruction next turn. This is
+*more* apt for the resident than the orchestrator: the orchestrator's rolling
+summary is **mixed-provenance** (it contains the user's trusted intent) and cannot
+be fenced wholesale; the resident's accumulation is **100% untrusted-provenance**,
+so it *can* be fenced entirely. Fencing-your-own-memory is a resident-specific
+hardening the orchestrator structurally can't apply.
 
 This replaces "stateless vs stateful" with one knob — *how hard the actor
-compresses what it keeps* — so every resident stays a real actor.
+compresses what it keeps, and that it fences what it keeps* — so every resident
+stays a real actor.
 
 **The honest trade.** P0's non-accumulation was a HARD invariant ("no session →
 structurally cannot accumulate, CI-floored"). This is a SOFTER one ("bounded
-session, capped by a trim policy" — a cap can be misconfigured where a missing
-field cannot). In exchange: a glass orchestrator, simple messages, no lossy
-briefing, real actors, better local task performance. The residual the soft
-invariant admits, and P0's purity avoided: **a retained (compressed) memory can
-compound a *steered* line of reasoning across steps, where a pure function resets
-each call.** It is contained on every side — keyless (no exfil), pinned (one tab),
-trimmed (bounded), watched (the display), interruptible (steer). Given keyless
-already removes the catastrophic outcome (exfil), the soft invariant is the right
-trade — but the **trim cap becomes a load-bearing, tested security knob** (assert
-the web resident's context never retains stale snapshots / stays under budget),
-not a structural guarantee. Stated plainly: the isolate is no longer pristine; it
-holds a small, compressed, keyless, watched working memory.
+session, capped + self-fenced") — a cap can be misconfigured where a missing field
+cannot. In exchange: a glass orchestrator, simple messages, no lossy briefing, real
+actors, better local task performance. The residual the soft invariant admits, and
+P0's purity avoided: **a retained memory can compound a *steered* line of reasoning
+across steps, where a pure function resets each call.** Self-fencing *reduces* this
+(explicit injected instructions in the summary re-enter as data, not commands) but
+does not erase it — the resident's own *reasoning* over untrusted input isn't
+fenced. It is contained on every other side too — keyless (no exfil), pinned (one
+tab), trimmed (bounded), watched (the display), interruptible (steer). Given
+keyless already removes the catastrophic outcome (exfil), the soft invariant is the
+right trade — but the **trim cap and the self-fence become load-bearing, tested
+security knobs** (assert the web resident retains no stale snapshots, stays under
+budget, and re-inserts its summary fenced), not structural guarantees. Stated
+plainly: the isolate is no longer pristine; it holds a small, compressed, keyless,
+self-fenced, watched working memory.
 
 ### Message-based control — abort / steer as addressed messages
 Steering is net-new (the runner is unsignaled today) but does **not** require

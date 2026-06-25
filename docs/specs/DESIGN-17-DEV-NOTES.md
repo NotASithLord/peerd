@@ -196,9 +196,10 @@ and durable resume — all per the spec's Phasing.
 design in the spec — see `DESIGN-17-resident-agents.md` §"The web resident — tabs
 as the fourth resident kind". It folds the browser runner into the actor model
 (every tab owned, the runner steerable, `do`/`get`/`check` collapsed into
-`message_resident`), and records the central decision (accumulate IN the actor,
-compress at every boundary keyed to provenance) + its honest trade (a HARD
-non-accumulation invariant swapped for a SOFT, tested trim cap). Not built; the
+`message_resident`), and records the central decision (accumulate IN the actor;
+reuse the loop's rolling-summary at every boundary, keyed to provenance; the
+resident fences its own summary) + its honest trade (a HARD non-accumulation
+invariant swapped for a SOFT, tested trim-cap + self-fence). Not built; the
 one independently-extractable piece is steerable in-flight tab work (abort/steer
 as an addressed message). The display-only `<untrusted_*>` strip it depends on
 already shipped (`stripUntrustedFences`, `shared/util.js`).
