@@ -24,6 +24,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
+import { stripUntrustedFences } from '/shared/util.js';
 import { formatBytes } from '/peerd-runtime/index.js';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
@@ -655,7 +656,11 @@ const formatResultContent = (toolResult) => {
       content = JSON.stringify(parsed, null, 2);
     }
   } catch { /* leave as-is */ }
-  return content;
+  // Display-only: hide the <untrusted_*> fence WRAPPER tags from the rendered
+  // card (do/get/check runner summaries + read_article/call_api, at every nested
+  // transcript depth) — the body stays, the model still receives the fence in
+  // the persisted tool_result. The single chokepoint for every tool-result card.
+  return stripUntrustedFences(content);
 };
 
 // Canonical primitive → owning peerd module. This is the SINGLE source
