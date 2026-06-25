@@ -61,6 +61,28 @@ describe('planTrim rolling summary', () => {
     expect(plan.messages[0].content).toContain('60 earlier messages elided');
   });
 
+  test('wrapSummary post-processes the rendered summary content (web-resident self-fence)', () => {
+    // DESIGN-17: a web resident injects fenceWebResidentSummary here so its own
+    // page-derived summary re-enters as fenced DATA. The hook sees the FULL rendered
+    // text and its output BECOMES the message content verbatim.
+    const msgs = plainConversation(80);
+    let seen = '';
+    const plan = planTrim(msgs, {
+      wrapSummary: (t) => { seen = t; return `<untrusted>${t}</untrusted>`; },
+    });
+    expect(plan.didTrim).toBe(true);
+    // The hook received the real rendered summary…
+    expect(seen).toContain('60 earlier messages elided');
+    // …and its wrapped output is exactly what the synthesised message carries.
+    expect(plan.messages[0].content).toBe(`<untrusted>${seen}</untrusted>`);
+  });
+
+  test('omitting wrapSummary renders the summary verbatim (every non-web caller)', () => {
+    const plan = planTrim(plainConversation(80));
+    expect(plan.messages[0].content).toContain('60 earlier messages elided');
+    expect(plan.messages[0].content).not.toContain('<untrusted>');
+  });
+
   test('second trim with prior state folds ONLY the newly-dropped slice', () => {
     const msgs = plainConversation(80);
     const first = planTrim(msgs);

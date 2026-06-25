@@ -99,6 +99,12 @@ export { makeAsyncSubagents } from './subagent/async-subagents.js';
 // DESIGN-17: the message_resident orchestrator (the mailbox to a tab-hosted
 // instance's resident — the async-subagents shape, specialized).
 export { makeResidentMessaging } from './subagent/resident-messaging.js';
+// DESIGN-17: the WEB resident — the disposable browser-runner folded into the
+// actor model as a fourth `kind:'web'` resident that owns one tab. Pure core:
+// the tab→session bindings, the action-log rolling-summary prompt, the self-fence.
+export {
+  makeWebResidentBindings, WEB_RESIDENT_SUMMARY_PROMPT, fenceWebResidentSummary,
+} from './subagent/web-resident.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.

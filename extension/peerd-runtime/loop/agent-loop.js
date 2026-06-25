@@ -151,6 +151,11 @@ export async function* asCompleted(promises) {
  *   fire-and-forget when the history trim drops NEW messages; the SW
  *   queues the request and runs the cheap summarisation call after the
  *   turn. Never awaited — the loop must never block on summarization.
+ * @param {(summaryText: string) => string} [ctx.fenceResidentSummary]
+ *   DESIGN-17: present ONLY on a WEB-resident ctx (the SW injects it). Wraps the
+ *   rolling trim-summary as untrusted data before it's folded back into history —
+ *   the web resident self-fences its own page-derived accumulation. Passed straight
+ *   through to planTrim's wrapSummary; absent everywhere else (verbatim summary).
  * @param {number} [ctx.contextWindow]
  *   The active model's context window in tokens (SW resolves it from
  *   session.model via peerd-provider/context-window.js). Enables the
@@ -380,6 +385,13 @@ export async function* runUserTurn(ctx) {
         // estimate since it's part of the prompt the window must hold.
         contextWindow: ctx.contextWindow,
         system,
+        // DESIGN-17: a WEB resident self-fences its OWN rolling summary on
+        // re-insertion (its accumulation is 100% untrusted-provenance — every byte
+        // is page-derived). The SW injects ctx.fenceResidentSummary on a web-resident
+        // ctx; absent everywhere else, so the summary renders verbatim as before.
+        ...(typeof ctx.fenceResidentSummary === 'function'
+          ? { wrapSummary: ctx.fenceResidentSummary }
+          : {}),
       });
       // why: turns interrupted mid-reasoning (abort / max_tokens /
       // provider error) persist partial `thinking`, but the API strips

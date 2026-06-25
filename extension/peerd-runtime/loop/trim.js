@@ -140,6 +140,11 @@ const carriesToolResults = (m) =>
  * @param {number} [opts.targetFraction]   fraction of contextWindow to cut down to (default 0.55)
  * @param {(messages: readonly TrimInputMessage[], system?: string) => number} [opts.estimateTokens]
  *   Injected prompt-token estimator (default estimate.js char/4 heuristic).
+ * @param {(summaryText: string) => string} [opts.wrapSummary]
+ *   DESIGN-17: post-process the rendered summary text before it becomes the
+ *   synthesised message content. The WEB resident injects fenceWebResidentSummary
+ *   here to SELF-FENCE its own (100%-untrusted-provenance) rolling summary. Default
+ *   identity — every other caller renders the summary verbatim, unchanged.
  * @returns {{
  *   messages: TrimmedMessage[],
  *   didTrim: boolean,
@@ -155,6 +160,7 @@ export const planTrim = (messages, opts = {}) => {
   const targetFraction = opts.targetFraction ?? TARGET_FRACTION_DEFAULT;
   const estimate = opts.estimateTokens ?? estimateMessagesTokens;
   const system = opts.system ?? '';
+  const wrapSummary = typeof opts.wrapSummary === 'function' ? opts.wrapSummary : (/** @type {string} */ t) => t;
   const noop = () => ({
     messages: Array.isArray(messages) ? [...messages] : [],
     didTrim: false,
@@ -232,7 +238,7 @@ export const planTrim = (messages, opts = {}) => {
   /** @type {InternalMessage} */
   const summaryMsg = {
     role: 'user',
-    content: renderSummaryText(nextState),
+    content: wrapSummary(renderSummaryText(nextState)),
     id: `trim-summary-${dropCount}`,
     when: nextState.lastWhen ?? 0,
     // why: flag so the side panel can hide / dim this synthesised

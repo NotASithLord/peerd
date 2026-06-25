@@ -31,7 +31,7 @@ import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { openHome } from '/shared/open-home.js';
-import { REMOTE_SKILL_INSTALL, RESIDENT_TAB_AGENTS } from '/shared/flags.js';
+import { REMOTE_SKILL_INSTALL, RESIDENT_TAB_AGENTS, WEB_RESIDENT } from '/shared/flags.js';
 
 import {
   // vault
@@ -221,6 +221,8 @@ import {
   // DESIGN-17: the message_resident orchestrator + the resident capability-tier
   // helpers the resident tool context is built from (keyless strip + kind scope).
   makeResidentMessaging, restrictCtxCapabilities, residentAllowedTools, EXPOSURE_RESIDENT,
+  // DESIGN-17: web-resident core — tab→session bindings + the self-fenced summary.
+  makeWebResidentBindings, fenceWebResidentSummary,
   finalAssistantText,
   // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
   pullInHintInjected,
@@ -948,10 +950,28 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // resident ctx never carries the user's foreground origin (a latent leak the
   // moment a resident ever gains a tab-targeting tool), matching the turn
   // driver's memory/active-tab skip.
+  /** @type {{ id?: number, windowId?: number, url: string, origin: string } | undefined} */
   let activeTab;
   try {
     if (RESIDENT_TAB_AGENTS && exposure === EXPOSURE_RESIDENT) {
-      activeTab = undefined;
+      // A WEB resident OWNS exactly one tab: its DOM tools must target THAT tab,
+      // and the origin/denylist gate must see THAT tab's origin. Resolve activeTab
+      // from the owned tab id (threaded as activeTabId) ONLY — and FAIL CLOSED: if
+      // the owned tab can't be resolved (closed/unknown), leave activeTab undefined
+      // rather than ever querying the foreground (a web resident must NEVER act on
+      // the user's current page). The three ENGINE kinds (webvm/notebook/app) act
+      // on their instance, not a tab, so they stay activeTab-undefined as before.
+      if (residentKind === 'web' && activeTabId != null) {
+        const t = await browser.tabs.get(activeTabId).catch(() => null);
+        if (t) {
+          activeTab = {
+            id: t.id,
+            windowId: t.windowId,
+            url: t.url ?? '',
+            origin: originOfTabUrl(/** @type {string} */ (t.url)),
+          };
+        }
+      }
     } else {
     // why: a browser-runner (do/get/check) is PINNED to one specific tab,
     // passed as activeTabId. Resolve activeTab to THAT tab so its DOM tools
@@ -1003,6 +1023,15 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // + positive kind-scope read these; absent on non-resident ctx).
     ...(residentInstanceId ? { residentInstanceId } : {}),
     ...(residentKind ? { residentKind } : {}),
+    // DESIGN-17: the WEB resident SELF-FENCES its own rolling summary. Its whole
+    // accumulation is untrusted-provenance (every byte derives from page content),
+    // so when the agent loop folds the trim-summary back into history it wraps it
+    // with this — even a laundered injection that survives compression re-enters as
+    // DATA, not a command. (Survives restrictCtxCapabilities below: this is not a
+    // CAPABILITY_CONSUMERS key, so the keyless narrowing leaves it in place.)
+    ...(residentKind === 'web'
+      ? { fenceResidentSummary: (/** @type {string} */ text) => fenceWebResidentSummary(text, { tabUrl: activeTab?.url }) }
+      : {}),
     // why: the exposure gate's SECOND check — the session's resolved tool
     // manifest (Set | null) plus the label its refusal reason names, so
     // the lineage tells the user WHICH manifest excluded the tool.
@@ -2377,8 +2406,82 @@ const mintResident = async (/** @type {{ reg: any, kind: string }} */ entry, /**
   return created.sessionId;
 };
 
+// DESIGN-17 — WEB residents (a fourth `kind:'web'` resident that owns one TAB).
+// Unlike the three engine kinds, a web resident has no registry record: the TAB
+// is the durable handle and the binding is tab→session, held here and mirrored to
+// session storage (ephemeral by design — on a cold miss we re-mint against the
+// live tab, whose DOM re-derives state). Behind WEB_RESIDENT (dark). The address
+// the orchestrator uses is the tabId AS A STRING (the resident's instanceId).
+const webResidentBindings = makeWebResidentBindings();
+const WEB_BINDINGS_KEY = 'webResidentBindings';
+const persistWebBindings = () => {
+  sessionCache.sessionSet(WEB_BINDINGS_KEY, webResidentBindings.entries()).catch(() => {});
+};
+// Rehydrate on SW boot (best-effort; a missing/garbage value just starts empty).
+if (WEB_RESIDENT) {
+  Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
+    .then((e) => { if (Array.isArray(e)) webResidentBindings.load(/** @type {any} */ (e)); })
+    .catch(() => {});
+}
+
+// Lazily mint a web resident for a tab (the analog of mintResident). No registry
+// record + no session-default to bind (id-less engine tools don't apply); the
+// only binding is tab→session, persisted so the resident's accumulated memory
+// survives an SW restart while the tab lives.
+const mintWebResident = async (/** @type {number} */ tabId) => {
+  const activeId = await sessionCache.sessionGet('currentSessionId');
+  const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
+  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  const created = await sessions.create({
+    kind: 'resident',
+    ...(activeId ? { parentSessionId: /** @type {string} */ (activeId) } : {}),
+    instanceId: String(tabId),
+    residentKind: 'web',
+    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    permissionMode: perm.mode,
+    confirmActions: perm.confirmActions,
+  });
+  webResidentBindings.bind(tabId, created.sessionId);
+  persistWebBindings();
+  auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId: String(tabId), kind: 'web' } }).catch(() => {});
+  return created.sessionId;
+};
+
+// Resolve (+ lazy-mint) the web resident that owns `tabId`. FAIL CLOSED: the tab
+// must still exist (a web resident with no tab is unreachable, and we must never
+// silently retarget a different tab). Re-mints when the bound session vanished
+// (SW death cleared session storage) so a live tab is always reachable.
+const resolveWebResident = async (/** @type {number} */ tabId) => {
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  if (!tab) return null;
+  let residentSessionId = webResidentBindings.resolve(tabId);
+  if (residentSessionId && !(await sessions.get(residentSessionId))) {
+    webResidentBindings.drop(tabId);
+    persistWebBindings();
+    residentSessionId = null;
+  }
+  if (!residentSessionId) residentSessionId = await mintWebResident(tabId);
+  return { instanceId: String(tabId), kind: 'web', residentSessionId, name: tab.title || tab.url || undefined, tabId };
+};
+
+// Prune a web resident's binding when its tab closes (the resident is then
+// unreachable; the orphaned session is harmless and ages out). Separate listener
+// from the agent-tab-card cleanup so the two concerns stay independent.
+if (WEB_RESIDENT) {
+  browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
+    if (webResidentBindings.drop(tabId)) persistWebBindings();
+  });
+}
+
 const residentMessaging = makeResidentMessaging({
   resolveResident: async (/** @type {string} */ instanceId) => {
+    // A WEB resident is addressed by its tabId-as-string (purely numeric, no
+    // engine prefix). Gated behind WEB_RESIDENT; engine ids (vm-/notebook-/app-)
+    // carry a hyphen and never match, so the branch is unambiguous.
+    if (WEB_RESIDENT && /^\d+$/.test(String(instanceId))) {
+      return resolveWebResident(Number(instanceId));
+    }
     const prefix = String(instanceId).split('-')[0];
     const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (RESIDENT_REGISTRY_BY_PREFIX)[prefix];
     if (!entry) return null;
@@ -2391,8 +2494,11 @@ const residentMessaging = makeResidentMessaging({
   // Drive ONE resident turn (the kind-aware runAgentTurn), then read its final
   // assistant text as the reply. runWhenIdle guaranteed the slot is free; the
   // turn claims it, and its release drains the next queued message to it.
-  runResidentTurn: async ({ residentSessionId, message }) => {
-    await runAgentTurn({ sessionId: residentSessionId, userText: message, synthetic: false });
+  // residentTabId threads the WEB resident's owned tab into the turn so its DOM
+  // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
+  // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
+  runResidentTurn: async ({ residentSessionId, message, residentTabId }) => {
+    await runAgentTurn({ sessionId: residentSessionId, userText: message, synthetic: false, activeTabId: residentTabId });
     const s = await sessions.get(residentSessionId);
     return { result: finalAssistantText(s) };
   },
