@@ -127,6 +127,9 @@ export const ChatView = {
             peerName: state.profile?.peerName,
             // subagent nested-transcript wiring (docs/SUBAGENTS.md)
             subagents: state.subagents,
+            // DESIGN-17 P1: resident display cards (glass pane) — keyed by the
+            // message_resident tool_use id; rendered inline under that card.
+            residents: state.residents,
             loadSubagent: uiActions?.loadSubagent,
             // "peerd opened a tab" notices render INLINE in the transcript at the
             // turn they happened (and fade into the backlog as the chat continues)

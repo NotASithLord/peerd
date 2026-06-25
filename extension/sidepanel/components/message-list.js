@@ -67,6 +67,7 @@ import { formatBytes } from '/peerd-runtime/index.js';
  * @property {ChatMessage[]} [messages]
  * @property {Record<string, { stdout: string, stderr: string }>} [vmStreams]
  * @property {{ byToolUse?: Record<string, string>, sessions?: Record<string, SubagentSession> }} [subagents]
+ * @property {Record<string, any>} [residents]
  * @property {(sessionId: string) => void} [loadSubagent]
  * @property {string} [peerName]
  * @property {number} [depth]
@@ -102,7 +103,7 @@ const MAX_NESTED_DEPTH = 5;
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, subagents, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
+const renderTranscript = ({ messages, vmStreams, subagents, residents, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
   const groups = groupMessages(messages ?? []);
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
@@ -138,7 +139,7 @@ const renderTranscript = ({ messages, vmStreams, subagents, loadSubagent, peerNa
       ? m(UserMessage, { key: g.message.id, message: g.message })
       : m(AssistantMessage, {
           key: g.message.id, message: g.message, toolResults: g.toolResults,
-          vmStreams, subagents, loadSubagent, peerName, depth,
+          vmStreams, subagents, residents, loadSubagent, peerName, depth,
         }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
@@ -159,9 +160,9 @@ export const MessageList = {
   onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
 
   /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, subagents, loadSubagent, peerName, tabEvents, uiActions } }) =>
+  view: ({ attrs: { messages, vmStreams, subagents, residents, loadSubagent, peerName, tabEvents, uiActions } }) =>
     m('.message-list',
-      renderTranscript({ messages, vmStreams, subagents, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
+      renderTranscript({ messages, vmStreams, subagents, residents, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -273,11 +274,12 @@ const AssistantMessage = {
    *   message: ChatMessage, toolResults: PairedTool[],
    *   vmStreams?: Record<string, { stdout: string, stderr: string }>,
    *   subagents?: TranscriptArgs['subagents'],
+   *   residents?: Record<string, any>,
    *   loadSubagent?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
    * } }} vnode
    */
-  view: ({ attrs: { message, toolResults, vmStreams, subagents, loadSubagent, peerName, depth } }) => {
+  view: ({ attrs: { message, toolResults, vmStreams, subagents, residents, loadSubagent, peerName, depth } }) => {
     const hasText = typeof message.content === 'string' && message.content.length > 0;
     const hasToolUses = toolResults.length > 0;
     const hasThinking = typeof message.thinking === 'string' && message.thinking.length > 0;
@@ -340,6 +342,7 @@ const AssistantMessage = {
               interrupted: message.stopReason === 'aborted',
               liveStream: vmStreams?.[toolUse.id] ?? null,
               subagents,
+              residents,
               loadSubagent,
               peerName,
               depth: depth ?? 0,
@@ -444,17 +447,23 @@ const ToolCall = {
    *     interrupted?: boolean,
    *     liveStream?: { stdout: string, stderr: string }|null,
    *     subagents?: TranscriptArgs['subagents'],
+   *     residents?: Record<string, any>,
    *     loadSubagent?: (sessionId: string) => void,
    *     peerName?: string, depth?: number,
    *   },
    *   state: ToolCallState,
    * }} vnode
    */
-  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, loadSubagent, peerName, depth }, state: ui }) => {
+  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, residents, loadSubagent, peerName, depth }, state: ui }) => {
     // spawn_subagent gets its own card: the expanded body is the child's
     // full transcript rendered inline (recursively), not a result blob.
     if (toolUse.name === 'spawn_subagent') {
-      return renderSubagentCard({ toolUse, toolResult, interrupted, subagents, loadSubagent, peerName, depth: depth ?? 0, ui });
+      return renderSubagentCard({ toolUse, toolResult, interrupted, subagents, residents, loadSubagent, peerName, depth: depth ?? 0, ui });
+    }
+    // DESIGN-17 P1: message_resident gets the resident glass-pane card (its work
+    // rendered inline from the turn/resident-* display stream).
+    if (toolUse.name === 'message_resident') {
+      return renderResidentCard({ toolUse, toolResult, interrupted, residents, subagents, loadSubagent, peerName, depth: depth ?? 0, ui });
     }
     const meta = toolResult?.meta ?? null;
     // why 'cancelled': a tool_use with no result on an ABORTED turn (Stop /
@@ -551,12 +560,12 @@ const ToolCall = {
 /**
  * @param {{
  *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
- *   subagents?: TranscriptArgs['subagents'],
+ *   subagents?: TranscriptArgs['subagents'], residents?: Record<string, any>,
  *   loadSubagent?: (sessionId: string) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
  * }} args
  */
-const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, loadSubagent, peerName, depth, ui }) => {
+const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, residents, loadSubagent, peerName, depth, ui }) => {
   const meta = toolResult?.meta ?? null;
   const status = toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending');
   const childId = resolveChildSessionId(toolUse, toolResult, subagents);
@@ -591,10 +600,59 @@ const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, loadS
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
         : (childSession && childSession.messages.length > 0)
           ? m('.subagent-transcript',
-              renderTranscript({ messages: childSession.messages, subagents, loadSubagent, peerName, depth: depth + 1 }))
+              renderTranscript({ messages: childSession.messages, subagents, residents, loadSubagent, peerName, depth: depth + 1 }))
           : childId
             ? m('p.muted', status === 'pending' ? 'subagent running…' : status === 'cancelled' ? 'subagent cancelled' : 'loading transcript…')
             : m('p.muted', 'no child transcript recorded'),
+    ]) : null,
+  ]);
+};
+
+// DESIGN-17 P1 glass pane: the message_resident card. The resident is a hidden,
+// long-lived actor; the orchestrator only delegates to it. This renders the
+// resident's work for THIS message inline (the subagent live-view, for a resident)
+// — driven by the turn/resident-* display stream (chat-reducer `residents`, keyed
+// by this tool_use id). The tool RESULT is just the async "delivered" ack, so the
+// card's live state (streaming / error / cost) — not the result — drives the chip.
+/**
+ * @param {{ toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
+ *   residents?: Record<string, any>, subagents?: TranscriptArgs['subagents'],
+ *   loadSubagent?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
+ */
+const renderResidentCard = ({ toolUse, toolResult, interrupted, residents, subagents, loadSubagent, peerName, depth, ui }) => {
+  const card = residents?.[toolUse.id] ?? null;
+  const task = String(toolUse.input?.message ?? '');
+  const kindLabel = card?.kind ? `${card.kind} resident` : 'resident';
+  const who = card?.name ?? card?.instanceId ?? toolUse.input?.to ?? '';
+  // The resident's own live state drives the status (the tool result is the async
+  // "delivered" ack, not the resident outcome). No card yet → fall back to the ack.
+  const status = card?.error ? 'failed'
+    : card?.streaming ? 'pending'
+    : card ? 'ok'
+    : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
+  const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
+  const onToggle = () => { ui.expanded = !ui.expanded; };
+  return m(`.tool-call.tool-resident.tool-${status}`, [
+    m('.tool-call-header', { onclick: onToggle }, [
+      m('span.disclosure', ui.expanded ? '▼' : '▶'),
+      m(`span.tool-status-dot.dot-${status}`,
+        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+      m('span.tool-name', 'message_resident'),
+      m('span.tool-args', `${kindLabel}${who ? ` · ${who}` : ''}: "${truncate(task, 40)}"`),
+      m('.spacer'),
+      status === 'pending' ? m('span.tool-pending', 'working…')
+        : card?.cost?.cost ? m('span.tool-duration', { title: 'this resident turn’s spend' }, `$${Number(card.cost.cost).toFixed(card.cost.cost < 0.01 ? 4 : 2)}`)
+        : null,
+    ]),
+    ui.expanded ? m('.subagent-body', [
+      card?.error ? m('p.error-line', String(card.error)) : null,
+      tooDeep
+        ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
+        : (card && Array.isArray(card.messages) && card.messages.length > 0)
+          ? m('.subagent-transcript',
+              renderTranscript({ messages: card.messages, residents, subagents, loadSubagent, peerName, depth: depth + 1 }))
+          : m('p.muted', card?.streaming ? 'resident working…'
+              : 'no resident activity yet — its reply will arrive on a later turn'),
     ]) : null,
   ]);
 };

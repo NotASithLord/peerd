@@ -2541,8 +2541,17 @@ const residentMessaging = makeResidentMessaging({
   // residentTabId threads the WEB resident's owned tab into the turn so its DOM
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
-  runResidentTurn: async ({ residentSessionId, message, residentTabId }) => {
-    await runAgentTurn({ sessionId: residentSessionId, userText: message, synthetic: false, activeTabId: residentTabId });
+  runResidentTurn: async ({ residentSessionId, message, residentTabId, instanceId, kind, parentToolUseId, name }) => {
+    // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_resident
+    // call (parentToolUseId present — absent on a boot redrain), pass a `display`
+    // descriptor so the turn driver re-emits the resident's stream as turn/resident-*
+    // events keyed to that card. The orchestrator renders it inline (the subagent
+    // live-view, for a resident). Cheap: rendering only — the model-memory the
+    // orchestrator keeps is still just the fenced reply (deliver()).
+    const display = parentToolUseId
+      ? { parentToolUseId, kind, instanceId, name }
+      : undefined;
+    await runAgentTurn({ sessionId: residentSessionId, userText: message, synthetic: false, activeTabId: residentTabId, display });
     const s = await sessions.get(residentSessionId);
     return { result: finalAssistantText(s) };
   },

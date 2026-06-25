@@ -38,9 +38,11 @@
  * @param {(instanceId: string) => Promise<{ instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number } | null>} deps.resolveResident
  *   Resolve an instance id to its (lazily-minted) resident. Returns null when no
  *   instance with that id exists across the three registries.
- * @param {(opts: { residentSessionId: string, message: string, residentTabId?: number, instanceId: string, kind: string }) => Promise<{ result: string }>} deps.runResidentTurn
+ * @param {(opts: { residentSessionId: string, message: string, residentTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string }) => Promise<{ result: string }>} deps.runResidentTurn
  *   Drive ONE resident turn (runAgentTurn against the resident session) and
- *   resolve with its final assistant text. Contracted to CLAIM the resident's
+ *   resolve with its final assistant text. parentToolUseId (the message_resident
+ *   tool_use id, absent on a boot redrain) keys the resident's live DISPLAY stream
+ *   to its card. Contracted to CLAIM the resident's
  *   turn slot (so runWhenIdle drains correctly).
  * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn. trusted:true
@@ -149,9 +151,10 @@ export const makeResidentMessaging = (deps) => {
   // Queue ONE engine resident turn on its slot, deliver the fenced reply to the
   // sender, and clear the mailbox entry on settle. Shared by a fresh message and a
   // boot redrain() so the in-flight bookkeeping (count, Stop-cascade tracking,
-  // durable entry) stays identical on both paths.
-  /** @param {{ correlationId: string, senderSessionId: string, resident: { instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number }, message: string }} o */
-  const runEngineDelivery = ({ correlationId, senderSessionId, resident, message }) => {
+  // durable entry) stays identical on both paths. parentToolUseId (absent on a
+  // redrain — the orchestrator card is gone) keys the resident's display stream.
+  /** @param {{ correlationId: string, senderSessionId: string, resident: { instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, resident, message, parentToolUseId }) => {
     const { instanceId, kind, residentSessionId, name, tabId } = resident;
     trackResident(senderSessionId, residentSessionId);
     // Serialize on the RESIDENT's slot — runWhenIdle runs the turn the moment the
@@ -159,7 +162,7 @@ export const makeResidentMessaging = (deps) => {
     // failed resident turn STILL wakes the sender (with an error notice) so the
     // caller is never left hanging.
     turnSlots.runWhenIdle(residentSessionId, () => {
-      Promise.resolve(runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind }))
+      Promise.resolve(runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind, parentToolUseId, name }))
         .then((res) => deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the resident produced no text reply)').slice(0, RESULT_CHARS)))
         .catch((e) => deliver(senderSessionId, instanceId, kind, name, `the resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
         .finally(() => {
@@ -171,11 +174,11 @@ export const makeResidentMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string }} req
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageResident = async (req) => {
-    const { to, message, senderSessionId, inbound } = req;
+    const { to, message, senderSessionId, inbound, toolUseId } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_resident: `to` (a tab-hosted instance id) is required' };
     }
@@ -240,7 +243,7 @@ export const makeResidentMessaging = (deps) => {
       trackResident(senderSessionId, residentSessionId);
       try {
         const res = await runWebSerialized(residentSessionId, () =>
-          runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind }));
+          runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind, parentToolUseId: toolUseId, name }));
         return { ok: true, content: (res?.result || '(the web resident produced no text reply)').slice(0, RESULT_CHARS) };
       } catch (e) {
         return { ok: false, error: `message_resident: the web resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -255,7 +258,7 @@ export const makeResidentMessaging = (deps) => {
     // and deliver(); redrain() re-queues it on boot.
     const correlationId = `${instanceId}:${++seq}:${nowMs}`;
     mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs }).catch(() => {});
-    runEngineDelivery({ correlationId, senderSessionId, resident, message });
+    runEngineDelivery({ correlationId, senderSessionId, resident, message, parentToolUseId: toolUseId });
 
     return {
       ok: true,

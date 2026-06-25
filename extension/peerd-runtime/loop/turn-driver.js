@@ -69,7 +69,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -120,6 +120,25 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const residentKind = isResident ? turnSession.residentKind : undefined;
   /** @type {string|undefined} */
   const residentInstanceId = isResident ? turnSession.instanceId : undefined;
+
+  // DESIGN-17 P1 glass pane. When a resident turn was triggered by a LIVE
+  // message_resident (display set; absent on a boot redrain), re-emit its stream as
+  // a turn/resident-* family keyed to that tool_use card — the orchestrator renders
+  // the resident's work inline (the subagent live-view, for a resident). The plain
+  // turn/* below are dropped anyway (a resident session is never the viewed chat);
+  // these carry the card correlation. fromIndex is the resident session length
+  // BEFORE this turn appends its message, so the card shows just THIS exchange —
+  // not the resident's whole accumulated history (it is a long-lived actor).
+  const residentDisplay = (display && isResident) ? display : null;
+  const displayFromIndex = residentDisplay ? (turnSession?.messages?.length ?? 0) : 0;
+  if (residentDisplay && uiConnected()) {
+    uiPorts.broadcast({
+      type: 'turn/resident-start',
+      parentToolUseId: residentDisplay.parentToolUseId,
+      sessionId, fromIndex: displayFromIndex,
+      kind: residentDisplay.kind, instanceId: residentDisplay.instanceId, name: residentDisplay.name,
+    });
+  }
 
   // Build the per-turn temporal block: absolute now + a coarse, plain-
   // words elapsed since the user's previous message (only when the gap
@@ -512,6 +531,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         case 'state':
           lastSession = ev.session;
           uiPorts.broadcast({ type: 'turn/state', session: ev.session });
+          // Glass pane: the full resident-session snapshot drives the inline card
+          // (collapsed, per-step — not per-delta, to keep the resident's micro-
+          // actions low-noise as the spec's display stream prescribes).
+          if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-state', parentToolUseId: residentDisplay.parentToolUseId, session: ev.session });
           break;
         case 'delta':
           uiPorts.broadcast({
@@ -554,6 +577,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
             messageId: ev.messageId,
             error: ev.error,
           });
+          if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-error', parentToolUseId: residentDisplay.parentToolUseId, sessionId: ev.sessionId, error: ev.error });
           break;
         case 'stop':
           uiPorts.broadcast({
@@ -603,6 +627,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       .catch((/** @type {any} */ e) => console.warn('[sw] trim enrichment failed', e));
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
+      // Glass pane: close the resident card's live state (stops its spinner). ok
+      // reflects whether the resident turn completed cleanly (vs aborted/errored).
+      if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-done', parentToolUseId: residentDisplay.parentToolUseId, sessionId, ok: turnOk });
     }
     // --- Feature 02: per-turn workspace snapshot ----------------------
     // why: snapshot AFTER every turn that could have touched files so

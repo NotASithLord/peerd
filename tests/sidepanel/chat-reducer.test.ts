@@ -113,6 +113,33 @@ describe('reduceChat', () => {
     expect(folded.subagents.sessions.c1.messages).toHaveLength(1);
   });
 
+  test('resident display card: start seeds, state slices to fromIndex, done stops streaming', () => {
+    // DESIGN-17 P1 glass pane. A resident is long-lived; the card shows only THIS
+    // exchange (messages from fromIndex), not the resident's whole history.
+    const started = reduceChat(INITIAL_STATE, {
+      type: 'turn/resident-start', parentToolUseId: 'tu-1', sessionId: 'res-1',
+      fromIndex: 2, kind: 'app', instanceId: 'app-9', name: 'todo',
+    });
+    expect(started.residents['tu-1']).toMatchObject({ sessionId: 'res-1', kind: 'app', fromIndex: 2, streaming: true });
+    // A full resident-session snapshot (4 msgs) → the card keeps only msgs 2..end.
+    const stateMsg = { type: 'turn/resident-state', parentToolUseId: 'tu-1',
+      session: { sessionId: 'res-1', messages: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }] } };
+    const filled = reduceChat(started, stateMsg);
+    expect(filled.residents['tu-1'].messages.map((m: any) => m.id)).toEqual(['c', 'd']);
+    const done = reduceChat(filled, { type: 'turn/resident-done', parentToolUseId: 'tu-1', ok: true });
+    expect(done.residents['tu-1'].streaming).toBe(false);
+  });
+
+  test('resident card error + cost fold; a state push for an unknown card is a no-op', () => {
+    const started = reduceChat(INITIAL_STATE, { type: 'turn/resident-start', parentToolUseId: 'tu-2', sessionId: 'res-2', fromIndex: 0 });
+    const errored = reduceChat(started, { type: 'turn/resident-error', parentToolUseId: 'tu-2', error: 'tab closed' });
+    expect(errored.residents['tu-2']).toMatchObject({ error: 'tab closed', streaming: false });
+    const costed = reduceChat(errored, { type: 'turn/resident-cost', parentToolUseId: 'tu-2', cost: { cost: 0.0123 } });
+    expect(costed.residents['tu-2'].cost.cost).toBe(0.0123);
+    // A state push for a card that was never started is dropped (no crash).
+    expect(reduceChat(costed, { type: 'turn/resident-state', parentToolUseId: 'nope', session: { messages: [] } })).toBe(costed);
+  });
+
   test('goal/state tracks a run per session, and a terminal phase clears it', () => {
     const running: any = reduceChat(INITIAL_STATE, {
       type: 'goal/state', sessionId: 's1', phase: 'running', iteration: 3, maxIterations: 40, goal: 'ship it', summary: null,

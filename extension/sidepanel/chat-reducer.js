@@ -93,6 +93,7 @@
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, cost?: any }>>} residents
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
@@ -177,6 +178,11 @@ export const INITIAL_STATE = Object.freeze({
   // Subagent transcripts for inline rendering under spawn_subagent tool
   // cards (docs/SUBAGENTS.md).
   subagents: Object.freeze({ byToolUse: {}, sessions: {} }),
+  // DESIGN-17 P1 glass pane: resident DISPLAY cards, keyed by the message_resident
+  // tool_use id. Each is self-contained (its own sliced transcript) so a long-lived
+  // resident messaged N times shows N distinct exchanges, not its whole history.
+  // { sessionId, kind, instanceId, name, fromIndex, messages, streaming, error, cost }.
+  residents: Object.freeze({}),
   // In-flight async subagents (DESIGN-11), keyed by PARENT session id.
   asyncTasks: Object.freeze({}),
   // Goal mode (the mode-row Goal toggle) — active runs keyed by sessionId, so
@@ -273,6 +279,21 @@ const patchSubagentMessages = (state, sessionId, mapFn) => {
   return putSubagentSession(state, { ...session, messages: session.messages.map(mapFn) });
 };
 
+// DESIGN-17 P1 glass pane: merge a patch into a resident card (keyed by the
+// message_resident tool_use id). Drops a patch with no key (a boot redrain emits no
+// display events, so this is belt-and-braces).
+/**
+ * @param {ChatState} state
+ * @param {string | undefined} parentToolUseId
+ * @param {Record<string, unknown>} patch
+ * @returns {ChatState}
+ */
+const putResidentCard = (state, parentToolUseId, patch) => {
+  if (!parentToolUseId) return state;
+  const cur = /** @type {any} */ (state.residents)[parentToolUseId] ?? {};
+  return { ...state, residents: { ...state.residents, [parentToolUseId]: { ...cur, ...patch } } };
+};
+
 /**
  * Fold one SW-pushed message into UI state. Pure; see the module header for
  * the side effects that deliberately stay in each surface.
@@ -339,6 +360,31 @@ export const reduceChat = (state, msg) => {
       // The turn/subagent-state pushes carry the authoritative message array;
       // these are live complements we don't fold separately.
       return state;
+    // DESIGN-17 P1 glass pane — the resident DISPLAY stream (parallel to subagents,
+    // keyed by the message_resident tool_use id). Each event carries parentToolUseId
+    // so there is no viewed-session guard: a resident card renders regardless of
+    // which chat is in view (it belongs to the orchestrator's transcript).
+    case 'turn/resident-start':
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), {
+        sessionId: msg.sessionId, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null, cost: null,
+      });
+    case 'turn/resident-state': {
+      // The full resident-session snapshot; slice to this card's exchange (fromIndex).
+      const card = /** @type {any} */ (state.residents)[/** @type {string} */ (msg.parentToolUseId)];
+      if (!card) return state;
+      const from = card.fromIndex ?? 0;
+      const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(from) : card.messages;
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { messages });
+    }
+    case 'turn/resident-error':
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { error: msg.error, streaming: false });
+    case 'turn/resident-done':
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { streaming: false });
+    case 'turn/resident-cost':
+      // Phase K: the resident turn's spend, surfaced on its card (delegated work
+      // isn't free — make it visible even though caps stay per-session).
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { cost: msg.cost });
     case 'async-tasks/update':
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
