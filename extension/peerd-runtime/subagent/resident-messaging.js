@@ -38,7 +38,7 @@
  * @param {(instanceId: string) => Promise<{ instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number } | null>} deps.resolveResident
  *   Resolve an instance id to its (lazily-minted) resident. Returns null when no
  *   instance with that id exists across the three registries.
- * @param {(opts: { residentSessionId: string, message: string, residentTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string }) => Promise<{ result: string }>} deps.runResidentTurn
+ * @param {(opts: { residentSessionId: string, message: string, residentTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string }) => Promise<{ result: string, stopped?: boolean }>} deps.runResidentTurn
  *   Drive ONE resident turn (runAgentTurn against the resident session) and
  *   resolve with its final assistant text. parentToolUseId (the message_resident
  *   tool_use id, absent on a boot redrain) keys the resident's live DISPLAY stream
@@ -82,27 +82,44 @@ export const makeResidentMessaging = (deps) => {
   const recentSends = new Map();
   /** @type {Map<string, Promise<unknown>>} web-resident sessionId → its serialization chain */
   const webChains = new Map();
-  /** @type {Map<string, Set<string>>} senderSessionId → residentSessionIds it has in flight (Stop cascade, Phase L) */
+  // senderSessionId → (residentSessionId → REFCOUNT). A set can't represent two
+  // messages in flight to the SAME resident, so a Stop cascade would miss the
+  // second once the first settled and cleared the entry. Refcount keeps the
+  // residentSessionId visible to residentsFor() for the whole span ANY message to
+  // it is in flight. @type {Map<string, Map<string, number>>}
   const inFlightResidents = new Map();
+  // senderSessionId → Stop generation. Bumped by stopResidentsFor(); a queued
+  // (not-yet-started) engine turn whose captured generation no longer matches skips
+  // — so Stop reaches not just the RUNNING resident slot (turnSlots.stop) but also
+  // resident turns still queued behind it on the same slot. @type {Map<string, number>}
+  const stopGen = new Map();
   // Monotonic correlation id — durable-mailbox key + de-dupe. Process-unique
   // (not now()-derived, which is fixed in tests and collides on same-ms sends).
   let seq = 0;
 
   /** @param {string} sender @param {string} residentSessionId */
   const trackResident = (sender, residentSessionId) => {
-    const set = inFlightResidents.get(sender) ?? new Set();
-    set.add(residentSessionId);
-    inFlightResidents.set(sender, set);
+    const m = inFlightResidents.get(sender) ?? new Map();
+    m.set(residentSessionId, (m.get(residentSessionId) ?? 0) + 1);
+    inFlightResidents.set(sender, m);
   };
   /** @param {string} sender @param {string} residentSessionId */
   const untrackResident = (sender, residentSessionId) => {
-    const set = inFlightResidents.get(sender);
-    if (!set) return;
-    set.delete(residentSessionId);
-    if (set.size === 0) inFlightResidents.delete(sender);
+    const m = inFlightResidents.get(sender);
+    if (!m) return;
+    const c = (m.get(residentSessionId) ?? 1) - 1;
+    if (c <= 0) m.delete(residentSessionId); else m.set(residentSessionId, c);
+    if (m.size === 0) inFlightResidents.delete(sender);
   };
   /** @param {string} sender @returns {string[]} the resident sessions this sender has in flight */
-  const residentsFor = (sender) => [...(inFlightResidents.get(sender) ?? [])];
+  const residentsFor = (sender) => [...(inFlightResidents.get(sender)?.keys() ?? [])];
+  // Stop every resident this sender has in flight: bump the generation (so QUEUED
+  // turns skip) and return the RUNNING ones (so the caller aborts their slots).
+  /** @param {string} sender @returns {string[]} */
+  const stopResidentsFor = (sender) => {
+    stopGen.set(sender, (stopGen.get(sender) ?? 0) + 1);
+    return residentsFor(sender);
+  };
 
   // Serialize web-resident turns per session: the sync-await relay below awaits the
   // turn, so two concurrent messages to the SAME tab would otherwise both call
@@ -157,19 +174,28 @@ export const makeResidentMessaging = (deps) => {
   const runEngineDelivery = ({ correlationId, senderSessionId, resident, message, parentToolUseId }) => {
     const { instanceId, kind, residentSessionId, name, tabId } = resident;
     trackResident(senderSessionId, residentSessionId);
+    // Capture the sender's Stop generation NOW — if the user Stops while this turn is
+    // queued behind another on the same resident slot, the generation advances and we
+    // skip it when the slot finally frees (so Stop reaches queued work, not just the
+    // running slot turnSlots.stop aborts). The bookkeeping is cleared either way.
+    const genAtQueue = stopGen.get(senderSessionId) ?? 0;
+    const clear = () => {
+      decInFlight(senderSessionId);
+      untrackResident(senderSessionId, residentSessionId);
+      mailbox.remove(correlationId).catch(() => {});
+    };
     // Serialize on the RESIDENT's slot — runWhenIdle runs the turn the moment the
     // resident is idle (never interrupting an in-flight resident turn). A thrown/
     // failed resident turn STILL wakes the sender (with an error notice) so the
     // caller is never left hanging.
     turnSlots.runWhenIdle(residentSessionId, () => {
+      // Stopped after we queued → don't start the turn; just clean up silently (the
+      // sender was stopped, so a wake would re-start unwanted post-Stop activity).
+      if ((stopGen.get(senderSessionId) ?? 0) !== genAtQueue) { clear(); return; }
       Promise.resolve(runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind, parentToolUseId, name }))
-        .then((res) => deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the resident produced no text reply)').slice(0, RESULT_CHARS)))
+        .then((res) => deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the resident produced no text reply)').slice(0, RESULT_CHARS), res?.stopped === true))
         .catch((e) => deliver(senderSessionId, instanceId, kind, name, `the resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
-        .finally(() => {
-          decInFlight(senderSessionId);
-          untrackResident(senderSessionId, residentSessionId);
-          mailbox.remove(correlationId).catch(() => {});
-        });
+        .finally(clear);
     });
   };
 
@@ -254,10 +280,12 @@ export const makeResidentMessaging = (deps) => {
     }
 
     // ENGINE resident: persist the correlation to the durable mailbox, THEN queue
-    // the async-wake delivery. The mailbox entry survives an SW death between here
-    // and deliver(); redrain() re-queues it on boot.
+    // the async-wake delivery. AWAIT the write so the durable record is guaranteed
+    // on disk before any resident side effect begins — closing the narrow accept→
+    // persist window where an SW death would still drop the wake. A storage failure
+    // degrades to P0 (heap-only) rather than throwing.
     const correlationId = `${instanceId}:${++seq}:${nowMs}`;
-    mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs }).catch(() => {});
+    await Promise.resolve(mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs })).catch(() => {});
     runEngineDelivery({ correlationId, senderSessionId, resident, message, parentToolUseId: toolUseId });
 
     return {
@@ -305,5 +333,5 @@ export const makeResidentMessaging = (deps) => {
     return { redrained };
   };
 
-  return { messageResident, redrain, residentsFor };
+  return { messageResident, redrain, residentsFor, stopResidentsFor };
 };

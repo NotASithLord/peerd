@@ -130,6 +130,31 @@ describe('reduceChat', () => {
     expect(done.residents['tu-1'].streaming).toBe(false);
   });
 
+  test('resident done: an abort renders cancelled; an ok:false failure marks failed; churn is short-circuited', () => {
+    const started = reduceChat(INITIAL_STATE, { type: 'turn/resident-start', parentToolUseId: 'tu-a', sessionId: 'r', fromIndex: 0 });
+    const aborted = reduceChat(started, { type: 'turn/resident-done', parentToolUseId: 'tu-a', ok: true, aborted: true });
+    expect(aborted.residents['tu-a']).toMatchObject({ streaming: false, aborted: true });
+    // A done after a card is already terminal (error folded first) is a no-op (no churn).
+    const erroredThenDone = reduceChat(
+      reduceChat(started, { type: 'turn/resident-error', parentToolUseId: 'tu-a', error: 'boom' }),
+      { type: 'turn/resident-done', parentToolUseId: 'tu-a', ok: false });
+    expect(reduceChat(erroredThenDone, { type: 'turn/resident-done', parentToolUseId: 'tu-a', ok: false })).toBe(erroredThenDone);
+    // ok:false with no prior error → marked failed.
+    const s2 = reduceChat(INITIAL_STATE, { type: 'turn/resident-start', parentToolUseId: 'tu-b', sessionId: 'r2', fromIndex: 0 });
+    expect(reduceChat(s2, { type: 'turn/resident-done', parentToolUseId: 'tu-b', ok: false }).residents['tu-b'].error).toBeTruthy();
+  });
+
+  test('resident card self-seeds from a state push when start was missed (mid-turn reconnect)', () => {
+    const seeded = reduceChat(INITIAL_STATE, {
+      type: 'turn/resident-state', parentToolUseId: 'tu-c', fromIndex: 1, kind: 'app',
+      session: { messages: [{ id: 'a' }, { id: 'b' }] },
+    });
+    expect(seeded.residents['tu-c']).toMatchObject({ kind: 'app', fromIndex: 1, streaming: true });
+    expect(seeded.residents['tu-c'].messages.map((m: any) => m.id)).toEqual(['b']);
+    // A state push with no fromIndex and no existing card can't be placed → dropped.
+    expect(reduceChat(INITIAL_STATE, { type: 'turn/resident-state', parentToolUseId: 'x', session: { messages: [] } })).toBe(INITIAL_STATE);
+  });
+
   test('resident card error + cost fold; a state push for an unknown card is a no-op', () => {
     const started = reduceChat(INITIAL_STATE, { type: 'turn/resident-start', parentToolUseId: 'tu-2', sessionId: 'res-2', fromIndex: 0 });
     const errored = reduceChat(started, { type: 'turn/resident-error', parentToolUseId: 'tu-2', error: 'tab closed' });

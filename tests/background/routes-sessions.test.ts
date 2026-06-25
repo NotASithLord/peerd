@@ -112,7 +112,7 @@ describe('session read routes', () => {
     const stopped: string[] = [];
     const { deps } = baseDeps({
       turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
-      residentMessaging: { residentsFor: (sid: string) => (sid === 'a' ? ['res-1', 'res-2'] : []) },
+      residentMessaging: { stopResidentsFor: (sid: string) => (sid === 'a' ? ['res-1', 'res-2'] : []) },
     });
     expect(await makeSessionRoutes(deps)['agent/stop']()).toEqual({ ok: true });
     expect(stopped).toEqual(['a', 'res-1', 'res-2']);   // orchestrator first, then its residents
@@ -121,7 +121,7 @@ describe('session read routes', () => {
     const stopped: string[] = [];
     const { deps } = baseDeps({
       turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
-      residentMessaging: { residentsFor: () => [] },
+      residentMessaging: { stopResidentsFor: () => [] },
     });
     await makeSessionRoutes(deps)['agent/stop']();
     expect(stopped).toEqual(['a']);

@@ -93,7 +93,7 @@
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
- * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, cost?: any }>>} residents
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} residents
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
@@ -371,16 +371,30 @@ export const reduceChat = (state, msg) => {
       });
     case 'turn/resident-state': {
       // The full resident-session snapshot; slice to this card's exchange (fromIndex).
-      const card = /** @type {any} */ (state.residents)[/** @type {string} */ (msg.parentToolUseId)];
-      if (!card) return state;
-      const from = card.fromIndex ?? 0;
-      const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(from) : card.messages;
-      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { messages });
+      const existing = /** @type {any} */ (state.residents)[/** @type {string} */ (msg.parentToolUseId)];
+      // Self-seed when the panel connected mid-turn and missed turn/resident-start
+      // (the state push carries fromIndex/kind/… for exactly this); without fromIndex
+      // we can't place the slice, so drop.
+      const fromIndex = existing?.fromIndex ?? msg.fromIndex;
+      if (fromIndex == null) return state;
+      const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(fromIndex) : (existing?.messages ?? []);
+      const seed = existing ? {} : { fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name, streaming: true, error: null, cost: null };
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages });
     }
     case 'turn/resident-error':
       return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { error: msg.error, streaming: false });
-    case 'turn/resident-done':
-      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), { streaming: false });
+    case 'turn/resident-done': {
+      // An ABORT (Stop cascade) → 'cancelled' card; a clean failure with no error
+      // already folded → mark failed; else just stop the spinner. Short-circuit when
+      // the card is already terminal (turn/resident-error folded first) to avoid churn.
+      const card = /** @type {any} */ (state.residents)[/** @type {string} */ (msg.parentToolUseId)];
+      if (!card || card.streaming === false) return state;
+      /** @type {Record<string, unknown>} */
+      const patch = { streaming: false };
+      if (msg.aborted) patch.aborted = true;
+      else if (msg.ok === false && !card.error) patch.error = 'the resident turn did not complete';
+      return putResidentCard(state, /** @type {string} */ (msg.parentToolUseId), patch);
+    }
     case 'turn/resident-cost':
       // Phase K: the resident turn's spend, surfaced on its card (delegated work
       // isn't free — make it visible even though caps stay per-session).

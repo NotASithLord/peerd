@@ -540,8 +540,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
           uiPorts.broadcast({ type: 'turn/state', session: ev.session });
           // Glass pane: the full resident-session snapshot drives the inline card
           // (collapsed, per-step — not per-delta, to keep the resident's micro-
-          // actions low-noise as the spec's display stream prescribes).
-          if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-state', parentToolUseId: residentDisplay.parentToolUseId, session: ev.session });
+          // actions low-noise as the spec's display stream prescribes). Carry the
+          // card meta (fromIndex/kind/…) too, so a panel that connects mid-turn and
+          // MISSED turn/resident-start can still self-seed the card from this push.
+          if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-state', parentToolUseId: residentDisplay.parentToolUseId, session: ev.session, fromIndex: displayFromIndex, kind: residentDisplay.kind, instanceId: residentDisplay.instanceId, name: residentDisplay.name });
           break;
         case 'delta':
           uiPorts.broadcast({
@@ -622,6 +624,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     turnOk = false;
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/error', sessionId, error });
+      // Glass pane: a LOOP-level failure (provider error etc.) never reached the
+      // stream's 'error' case, so the resident card would otherwise close as 'ok'.
+      // Surface it as a failed card.
+      if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-error', parentToolUseId: residentDisplay.parentToolUseId, sessionId, error });
     }
   } finally {
     // Self-scoped: a superseded (steered) turn unwinding late can only
@@ -634,9 +640,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       .catch((/** @type {any} */ e) => console.warn('[sw] trim enrichment failed', e));
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
-      // Glass pane: close the resident card's live state (stops its spinner). ok
-      // reflects whether the resident turn completed cleanly (vs aborted/errored).
-      if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-done', parentToolUseId: residentDisplay.parentToolUseId, sessionId, ok: turnOk });
+      // Glass pane: close the resident card's live state (stops its spinner). An
+      // ABORT (Stop cascade / spend-limit) yields a clean stopReason='aborted' with
+      // turnOk still true, so carry `aborted` explicitly — the reducer renders it as
+      // a 'cancelled' card (not a misleading green 'ok'). ok=false marks a failure.
+      if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-done', parentToolUseId: residentDisplay.parentToolUseId, sessionId, ok: turnOk, aborted: lastStopReason === 'aborted' });
     }
     // --- Feature 02: per-turn workspace snapshot ----------------------
     // why: snapshot AFTER every turn that could have touched files so

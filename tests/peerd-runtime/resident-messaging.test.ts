@@ -188,6 +188,44 @@ describe('message_resident — durable mailbox (persist + redrain)', () => {
     await tick();
     expect(residentsFor('chat-1')).toEqual(['res-1']);
   });
+
+  test('residentsFor keeps a resident visible until ALL its in-flight messages settle (refcount)', async () => {
+    // Two messages to the SAME resident. A Set would drop it the moment the FIRST
+    // settled, so a Stop during the second would miss it. Refcount keeps it visible.
+    const releases: Array<() => void> = [];
+    const { messageResident, residentsFor } = harness({
+      caps: { rateCap: 100, outstanding: 100 },
+      runResidentTurn: () => new Promise<{ result: string }>((res) => releases.push(() => res({ result: 'done' }))),
+    });
+    await messageResident({ to: 'app-1', message: 'A', senderSessionId: 'chat-1' });
+    await messageResident({ to: 'app-1', message: 'B', senderSessionId: 'chat-1' });
+    await tick();
+    expect(residentsFor('chat-1')).toEqual(['res-1']);   // both in flight to res-1
+    releases[0]();                                       // first settles…
+    await tick();
+    expect(residentsFor('chat-1')).toEqual(['res-1']);   // …STILL visible (B in flight) — the fix
+    releases[1]();
+    await tick();
+    expect(residentsFor('chat-1')).toEqual([]);
+  });
+
+  test('stopResidentsFor returns the in-flight residents AND makes a then-queued turn skip', async () => {
+    const queue: Array<() => void> = [];
+    const ran: string[] = [];
+    const { messageResident, residentsFor, stopResidentsFor } = harness({
+      caps: { rateCap: 100, outstanding: 100 },
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { queue.push(fn); } }, // defer (don't run yet)
+      runResidentTurn: async (o: { message: string }) => { ran.push(o.message); return { result: 'x' }; },
+    });
+    await messageResident({ to: 'app-1', message: 'A', senderSessionId: 'chat-1' });
+    expect(residentsFor('chat-1')).toEqual(['res-1']);   // tracked at dispatch, before the turn runs
+    const stopped = stopResidentsFor('chat-1');
+    expect(stopped).toEqual(['res-1']);                  // the running/queued resident to abort
+    queue.forEach((fn) => fn());                         // drain — A's queued turn fires post-Stop
+    await tick();
+    expect(ran).toEqual([]);                             // …and SKIPS (the generation advanced)
+    expect(residentsFor('chat-1')).toEqual([]);          // bookkeeping cleared
+  });
 });
 
 describe('message_resident — web resident (sync-await relay)', () => {

@@ -627,6 +627,7 @@ const renderResidentCard = ({ toolUse, toolResult, interrupted, residents, subag
   // The resident's own live state drives the status (the tool result is the async
   // "delivered" ack, not the resident outcome). No card yet → fall back to the ack.
   const status = card?.error ? 'failed'
+    : card?.aborted ? 'cancelled'
     : card?.streaming ? 'pending'
     : card ? 'ok'
     : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
@@ -641,7 +642,9 @@ const renderResidentCard = ({ toolUse, toolResult, interrupted, residents, subag
       m('span.tool-args', `${kindLabel}${who ? ` · ${who}` : ''}: "${truncate(task, 40)}"`),
       m('.spacer'),
       status === 'pending' ? m('span.tool-pending', 'working…')
-        : card?.cost?.cost ? m('span.tool-duration', { title: 'this resident turn’s spend' }, `$${Number(card.cost.cost).toFixed(card.cost.cost < 0.01 ? 4 : 2)}`)
+        // Show the spend chip whenever a tally is present — incl. $0.00 for a
+        // keyless/Ollama turn — so a completed card always carries a terminal chip.
+        : card?.cost ? m('span.tool-duration', { title: 'this resident turn’s spend' }, `$${Number(card.cost.cost ?? 0).toFixed((card.cost.cost ?? 0) < 0.01 ? 4 : 2)}`)
         : null,
     ]),
     ui.expanded ? m('.subagent-body', [
@@ -652,6 +655,9 @@ const renderResidentCard = ({ toolUse, toolResult, interrupted, residents, subag
           ? m('.subagent-transcript',
               renderTranscript({ messages: card.messages, residents, subagents, loadSubagent, peerName, depth: depth + 1 }))
           : m('p.muted', card?.streaming ? 'resident working…'
+              // No card after a non-error "delivered" ack = the reply already landed
+              // on a later turn (the live stream was lost to a reload / SW restart).
+              : (!card && toolResult && !toolResult.is_error) ? 'reply delivered on a later turn'
               : 'no resident activity yet — its reply will arrive on a later turn'),
     ]) : null,
   ]);

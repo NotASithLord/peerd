@@ -2456,15 +2456,23 @@ const mailboxUpdate = (/** @type {(m: Record<string, any>) => Record<string, any
     const cur = await sessionCache.sessionGet(RESIDENT_MAILBOX_KEY);
     const base = (cur && typeof cur === 'object') ? /** @type {Record<string, any>} */ (cur) : {};
     await sessionCache.sessionSet(RESIDENT_MAILBOX_KEY, mutate(base));
-  }).catch(() => {});
+    // why log (not swallow): a persist failure silently degrades a message to
+    // heap-only (P0) durability — surface it so a lost-wake-after-restart is at
+    // least explicable in the SW console rather than a mystery.
+  }).catch((e) => console.warn('[resident] mailbox persist failed — message is heap-only this SW lifetime', e));
   return mailboxChain;
 };
 const residentMailbox = {
   append: (/** @type {{ id: string }} */ e) => mailboxUpdate((m) => ({ ...m, [e.id]: e })),
   remove: (/** @type {string} */ id) => mailboxUpdate((m) => { const n = { ...m }; delete n[id]; return n; }),
+  // Carry the storage KEY as the entry id so redrain can PRUNE a malformed/legacy
+  // value (one missing its own id) under its real key — else it would skip forever
+  // and the blob would grow unbounded.
   load: async () => {
     const m = await sessionCache.sessionGet(RESIDENT_MAILBOX_KEY);
-    return (m && typeof m === 'object') ? Object.values(m) : [];
+    if (!m || typeof m !== 'object') return [];
+    return Object.entries(/** @type {Record<string, any>} */ (m))
+      .map(([k, v]) => (v && typeof v === 'object') ? { ...v, id: v.id ?? k } : { id: k });
   },
 };
 
@@ -2551,9 +2559,17 @@ const residentMessaging = makeResidentMessaging({
     const display = parentToolUseId
       ? { parentToolUseId, kind, instanceId, name }
       : undefined;
+    // Count the resident's messages BEFORE the turn so we read only the reply THIS
+    // turn produced — finalAssistantText scans backward and would otherwise return a
+    // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
+    // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
+    const before = (await sessions.get(residentSessionId))?.messages?.length ?? 0;
     await runAgentTurn({ sessionId: residentSessionId, userText: message, synthetic: false, activeTabId: residentTabId, display });
     const s = await sessions.get(residentSessionId);
-    return { result: finalAssistantText(s) };
+    const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
+    return fresh
+      ? { result: fresh }
+      : { result: 'the resident turn was stopped before it produced a reply.', stopped: true };
   },
   reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
   turnSlots,
