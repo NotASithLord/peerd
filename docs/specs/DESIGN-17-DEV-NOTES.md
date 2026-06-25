@@ -139,11 +139,15 @@ features that *use* `message_resident` weren't traced. The findings:
   - **Fail-CLOSED**: `trusted` defaults false, so any synthetic turn is `inbound`
     (refused) unless an explicit first-party continuation sets it. Only TWO do:
     the **goal continuation** (a goal is user-initiated) and the **resident
-    reply-wake** (`deliver()` — the sender's own resident replied). Async-subagent
-    wakes and auto-resume deliberately do NOT (they stay attended-gated — a scoped
-    choice; liftable the same way later). Any FUTURE re-entry source (peer
-    messages / scheduled tasks) is `inbound` by default and must never set
-    `trusted`; the `=== active` check is the second wall.
+    reply-wake** (`deliver()` — the sender's own resident replied). Two re-entry
+    sources are bounded by the **`=== active` wall**, not the inbound axis, so they
+    need no `trusted`: an **async-subagent wake** re-enters a child session (never
+    `=== active`), so it's refused regardless; an **auto-resume** of the FOREGROUND
+    chat (`maybeAutoResume` → `runAgentTurn({resume:true})`, non-synthetic ⇒
+    `inbound:false`) is a first-party attended continuation of a real user turn —
+    it passes with the same standing as that turn, bounded by `=== active` + the
+    runaway caps. Any FUTURE re-entry source (peer messages / scheduled tasks) is
+    `inbound` by default and must never set `trusted`; `=== active` is the second wall.
   - **What it enables**: an autonomous goal in the FOREGROUND chat can drive a
     VM/Notebook/App, and the orchestrator can react to a resident reply with a
     follow-up — both bounded by the per-sender runaway guard (rate + outstanding
@@ -192,14 +196,57 @@ The conversational surface (talk to a resident), the unattended path (once the
 inbound clamp lands), per-kind tuned model tiers, the Phase-2 worker relocation,
 and durable resume — all per the spec's Phasing.
 
-**The web resident** (tabs as a fourth resident kind) now has a full forward
-design in the spec — see `DESIGN-17-resident-agents.md` §"The web resident — tabs
-as the fourth resident kind". It folds the browser runner into the actor model
-(every tab owned, the runner steerable, `do`/`get`/`check` collapsed into
-`message_resident`), and records the central decision (accumulate IN the actor;
-reuse the loop's rolling-summary at every boundary, keyed to provenance; the
-resident fences its own summary) + its honest trade (a HARD non-accumulation
-invariant swapped for a SOFT, tested trim-cap + self-fence). Not built; the
-one independently-extractable piece is steerable in-flight tab work (abort/steer
-as an addressed message). The display-only `<untrusted_*>` strip it depends on
+**The web resident** (tabs as a fourth resident kind) has a full forward design in
+the spec — see `DESIGN-17-resident-agents.md` §"The web resident — tabs as the
+fourth resident kind". It folds the browser runner into the actor model (every tab
+owned, the runner steerable, `do`/`get`/`check` collapsed into `message_resident`),
+and records the central decision (accumulate IN the actor; reuse the loop's
+rolling-summary at every boundary, keyed to provenance; the resident fences its own
+summary) + its honest trade (a HARD non-accumulation invariant swapped for a SOFT,
+tested trim-cap + self-fence). The display-only `<untrusted_*>` strip it depends on
 already shipped (`stripUntrustedFences`, `shared/util.js`).
+
+The **core + SW wiring is now BUILT behind `shared/flags.js WEB_RESIDENT` (dark,
+default false; requires `RESIDENT_TAB_AGENTS`)** — but unreachable until the flag
+flips AND the orchestrator-facing path (a tool that hands the orchestrator a web
+tab to address, + the `do`/`get`/`check`→`message_resident` cutover) lands. What's
+in code, all dark:
+- `subagent/web-resident.js` — tab→session bindings, the action-log summary prompt,
+  the self-fence (`fenceWebResidentSummary`). Pure, Bun-tested.
+- `tools/exposure.js` — `residentKind:'web'` toolset (`WEB_RESIDENT_DOM_TOOLS`,
+  drift-guarded against the runner's `DO_TOOLSET`) + the tab pin (`residentWebTabTarget`).
+- `subagent/resident-messaging.js` — the **sync-await relay** (web replies inline in
+  the tool result, not via the async reply-wake), serialized per tab.
+- `background/service-worker.js` — `resolveWebResident` / `mintWebResident` (gated on
+  `WEB_RESIDENT`), tab→session bindings mirrored to session storage + pruned on
+  `tabs.onRemoved`, and **fail-closed `activeTab`**: a web resident resolves its OWNED
+  tab only and `resolveTargetTab` REFUSES the foreground fallback for any resident ctx.
+- `loop/trim.js` + `agent-loop.js` — `planTrim`'s `wrapSummary` hook folds the web
+  resident's own rolling summary back in `wrapUntrusted`-fenced.
+
+Still ahead for the web resident: the orchestrator-facing mint/cutover, steerable
+in-flight tab work (abort/steer as an addressed message), and the `message_resident`
+description/lore polish for the inline-reply shape.
+
+## Known residuals (P0 — documented, not yet closed)
+
+These are bounded and named, not silent. They ride the SAME gaps as async-subagents;
+DESIGN-17 widens the blast radius because residents are the primary work surface.
+
+- **Reply-wake lost on SW death (engine kinds).** The message→reply correlation
+  (`resident-messaging.js inFlight`/`runWhenIdle`) lives in SW heap with no durable
+  mailbox. If the SW is evicted after a message is accepted but before `deliver()`
+  fires, the orchestrator — told "do NOT poll" — never gets the wake. Fix is a
+  persisted `{correlationId → sender, instance, status}` re-drained on boot (the
+  goal-runner persist/resume pattern). The web kind is immune: its relay is
+  sync-await within one turn, no cross-restart wake. *(P1: durable mailbox.)*
+- **Orphaned resident session on interrupted mint.** `mintResident` writes the
+  session, then the session-default, then the forward pointer; an SW death between
+  the create and the pointer leaves a `kind:'resident'` session no instance points
+  at. Now far rarer — `mintOnce` dedupes concurrent first-mints — but not GC'd.
+  *(P1: boot-time GC of un-pointed resident sessions.)*
+- **A resident confirm auto-denies after ~120s.** A confirm raised inside a hidden
+  resident session sits unrendered (the side panel views the orchestrator) until the
+  120s auto-deny. P0 residents run under the chat's resolved non-confirm posture, so
+  this is reached only if a resident hits a confirm-gated op; P1 routes the confirm
+  to the foreground orchestrator.

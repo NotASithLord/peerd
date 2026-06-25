@@ -2375,6 +2375,23 @@ const RESIDENT_REGISTRY_BY_PREFIX = {
   app: { reg: appRegistry, kind: 'app' },
 };
 
+// Dedupe concurrent first-mints: two message_resident calls to the SAME not-yet-
+// minted instance (e.g. the model emits two tool_use blocks targeting one new
+// instance in a single turn) would both see no forward pointer and both mint —
+// one wins setResidentSession, the other orphans a session. A per-id in-flight
+// promise collapses them to ONE mint; the entry clears when it settles. why a
+// shared map: engine ids carry a prefix and web keys are `web:<tabId>`, so they
+// never collide. @type {Map<string, Promise<string>>} */
+const mintInFlight = new Map();
+/** @param {string} key @param {() => Promise<string>} fn @returns {Promise<string>} */
+const mintOnce = (key, fn) => {
+  const existing = mintInFlight.get(key);
+  if (existing) return existing;
+  const p = (async () => { try { return await fn(); } finally { mintInFlight.delete(key); } })();
+  mintInFlight.set(key, p);
+  return p;
+};
+
 // Lazily mint a resident session for an instance (on the first message_resident).
 // Inherits the spawning chat's RESOLVED Plan/Act posture — resolved + stored
 // EXPLICITLY so it can't silently widen to the global default (the subagent
@@ -2461,7 +2478,7 @@ const resolveWebResident = async (/** @type {number} */ tabId) => {
     persistWebBindings();
     residentSessionId = null;
   }
-  if (!residentSessionId) residentSessionId = await mintWebResident(tabId);
+  if (!residentSessionId) residentSessionId = await mintOnce(`web:${tabId}`, () => mintWebResident(tabId));
   return { instanceId: String(tabId), kind: 'web', residentSessionId, name: tab.title || tab.url || undefined, tabId };
 };
 
@@ -2488,7 +2505,7 @@ const residentMessaging = makeResidentMessaging({
     const record = await entry.reg.get(instanceId);
     if (!record) return null;
     let residentSessionId = await entry.reg.getResidentSession(instanceId);
-    if (!residentSessionId) residentSessionId = await mintResident(entry, record);
+    if (!residentSessionId) residentSessionId = await mintOnce(instanceId, () => mintResident(entry, record));
     return { instanceId, kind: entry.kind, residentSessionId, name: record.name };
   },
   // Drive ONE resident turn (the kind-aware runAgentTurn), then read its final
