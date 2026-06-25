@@ -7,8 +7,10 @@ import {
   isResidentMutatingTool, residentAllowedTools, isAllowedForResidentKind,
   residentTargetId, residentTargetIdField, residentDescriptors, filterResidentSurface,
   EXPOSURE_RESIDENT,
+  WEB_RESIDENT_DOM_TOOLS, residentWebTabTarget,
 } from '../../extension/peerd-runtime/tools/exposure.js';
 import { exposureGate as exposureGateRaw, residentTierGate } from '../../extension/peerd-runtime/tools/gates.js';
+import { DO_TOOLSET } from '../../extension/peerd-runtime/runner/index.js';
 
 type ToolT = import('../../extension/shared/tool-types.js').Tool;
 type GateCtxT = import('../../extension/peerd-runtime/tools/gates.js').GateContext;
@@ -294,5 +296,55 @@ describe('DESIGN-17 resident tier — the gate (the wall, flagOn:true)', () => {
     const r = eg({ name: 'app_update' }, {}, { exposure: 'main', instanceState: { app: true } });
     expect(r.allowed).toBe(false);
     expect(r.reason).toContain('resident-only');
+  });
+});
+
+describe('DESIGN-17 web resident — the fourth kind (DOM toolset + tab pin)', () => {
+  const web = (over: object = {}) =>
+    ({ exposure: EXPOSURE_RESIDENT, residentKind: 'web', residentInstanceId: '42', ...over });
+
+  test('the web toolset mirrors the runner DO_TOOLSET (drift guard)', () => {
+    expect([...WEB_RESIDENT_DOM_TOOLS].sort()).toEqual([...DO_TOOLSET].sort());
+  });
+
+  test('a web resident may call its DOM tools (read + mutate)', () => {
+    for (const n of ['snapshot', 'read_page', 'click', 'type', 'navigate', 'query_dom']) {
+      expect(rt({ name: n }, {}, web(), true)).toBeNull();
+    }
+    expect(isAllowedForResidentKind('click', 'web')).toBe(true);
+    expect(residentAllowedTools('web').size).toBe(WEB_RESIDENT_DOM_TOOLS.length);
+  });
+
+  test('a web resident is positively scoped — foreign + powerful tools refused', () => {
+    // notably page_eval/page_exec (code-exec) are NOT in the web toolset — the
+    // same exclusion that IS the runner's boundary, now enforced at the gate.
+    for (const n of ['app_update', 'vm_boot', 'js_notebook', 'edit_file',
+      'call_api', 'spawn_subagent', 'page_eval', 'page_exec', 'message_resident']) {
+      expect(rt({ name: n }, {}, web(), true)?.allowed).toBe(false);
+    }
+  });
+
+  test('the exposure×tier reconciliation: DOM mutators stay OFF the mutating tier', () => {
+    // why: the runner (exposure UNSET) must keep using click/type/navigate. They're
+    // contained for MAIN by isHiddenFromMain (the exposure axis), NOT by the
+    // mutating tier — so the tier has no opinion and the runner is never refused.
+    for (const n of ['click', 'type', 'navigate']) {
+      expect(isResidentMutatingTool(n)).toBe(false);
+      expect(rt({ name: n }, {}, {}, true)).toBeNull();                   // runner (exposure unset)
+      expect(rt({ name: n }, {}, { exposure: 'main' }, true)).toBeNull(); // tier no-opinion (exposure hides it)
+    }
+  });
+
+  test('the tab pin — explicit foreign tabId refused; owned / absent pass', () => {
+    expect(residentWebTabTarget({ tabId: 99 })).toBe(99);
+    expect(residentWebTabTarget({})).toBeUndefined();
+    expect(rt({ name: 'click' }, { tabId: 99 }, web(), true)?.allowed).toBe(false); // sibling tab
+    expect(rt({ name: 'click' }, { tabId: 42 }, web(), true)).toBeNull();           // own tab
+    expect(rt({ name: 'click' }, {}, web(), true)).toBeNull();                      // default → bound
+  });
+
+  test('residentDescriptors filters a web resident to its DOM toolset', () => {
+    const all = [{ name: 'click' }, { name: 'app_update' }, { name: 'do' }, { name: 'snapshot' }];
+    expect(residentDescriptors(all, 'web').map((t) => t.name).sort()).toEqual(['click', 'snapshot']);
   });
 });

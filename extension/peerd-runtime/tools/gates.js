@@ -44,6 +44,7 @@ import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
   EXPOSURE_RESIDENT, isResidentMutatingTool, isAllowedForResidentKind, residentTargetId,
+  residentWebTabTarget,
 } from './exposure.js';
 import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
 import {
@@ -150,6 +151,18 @@ export const residentTierGate = (tool, args, ctx, flagOn) => {
   const explicit = residentTargetId(tool.name, args);
   if (explicit && explicit !== ctx.residentInstanceId) {
     return { allowed: false, reason: `resident is pinned to ${ctx.residentInstanceId ?? 'its instance'}; refusing ${tool.name} targeting ${explicit}` };
+  }
+  // DESIGN-17 web resident — the tab pin. The DOM tools resolve their tab from an
+  // explicit numeric `args.tabId` (or the bound tab if absent), so the pin is on
+  // tabId, not an instance-id string. An explicit tabId that isn't the owned tab
+  // is refused; absent → the bound tab (fine). residentInstanceId = owned tabId
+  // as a string. (Runs before resolveTargetTab, so it sees only the explicit arg
+  // — the in-execute denylist re-check in resolveTargetTab is the second wall.)
+  if (ctx.residentKind === 'web') {
+    const tab = residentWebTabTarget(args);
+    if (tab !== undefined && String(tab) !== ctx.residentInstanceId) {
+      return { allowed: false, reason: `web resident is pinned to tab ${ctx.residentInstanceId ?? '?'}; refusing ${tool.name} targeting tab ${tab}` };
+    }
   }
   return null;
 };

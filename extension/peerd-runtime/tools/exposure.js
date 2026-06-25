@@ -158,10 +158,22 @@ export const RESIDENT_MUTATING_TOOLS = Object.freeze(new Set([
 /** Is this a tiered mutating tool (resident-only when the flag is on)? Pure. @param {string} name */
 export const isResidentMutatingTool = (name) => RESIDENT_MUTATING_TOOLS.has(name);
 
+// DESIGN-17 web resident — the DOM toolset it owns. MUST mirror the runner's
+// DO_TOOLSET (`runner/index.js`): the web resident IS the runner's lineage with a
+// tier marker + a tab pin, so it holds exactly the runner's tools. Kept as a
+// literal here (not imported) so exposure.js stays a leaf — a drift-guard test
+// (exposure.test.ts) asserts equality with DO_TOOLSET. why these and not
+// page_eval/page_exec: same as the runner — it ingests untrusted page text, so it
+// must not also wield code-exec (the exclusion IS the boundary).
+export const WEB_RESIDENT_DOM_TOOLS = Object.freeze([
+  'snapshot', 'read_page', 'read_state', 'watch_changes',
+  'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
+]);
+
 // The POSITIVE allow-list a resident of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
 // kinds' tools, browser/web/memory/spawn tools) is refused for a resident ctx.
-// Keys match the residentKind vocabulary { webvm, notebook, app }.
+// Keys match the residentKind vocabulary { webvm, notebook, app, web }.
 const RESIDENT_KIND_TOOLS = Object.freeze({
   webvm: Object.freeze(new Set([
     'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
@@ -173,6 +185,12 @@ const RESIDENT_KIND_TOOLS = Object.freeze({
     'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
     'app_delete_file', 'app_delete', 'edit_file',
   ])),
+  // The web resident owns a tab via the DOM toolset. The DOM mutators
+  // (click/type/navigate) are NOT in RESIDENT_MUTATING_TOOLS — they're contained
+  // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis), and the
+  // runner (exposure unset) keeps using them. Putting them in this POSITIVE set
+  // is what lets a web-resident ctx call them (gate rule 2) — the reconciliation.
+  web: Object.freeze(new Set(WEB_RESIDENT_DOM_TOOLS)),
 });
 
 /** The Set of tool names a resident of `kind` may call (empty for an unknown kind). Pure. @param {string} [kind] */
@@ -220,6 +238,22 @@ export const residentTargetId = (name, args) => {
   const v = args[field];
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 };
+
+// DESIGN-17 web resident — the tab pin. A web resident owns ONE tab; the DOM
+// tools resolve their target via `resolveTargetTab`, which honors an explicit
+// numeric `args.tabId`. So the pin is on tabId (a number), not an instance-id
+// string — `residentTargetId` (string-only) can't express it. The web resident's
+// `residentInstanceId` is its owned tabId AS A STRING. The GATE runs before
+// `resolveTargetTab` (async) and can only see the explicit arg, so this checks
+// the EXPLICIT `args.tabId`: absent → defaults to the bound tab (fine); present
+// and ≠ the owned tab → refused.
+/**
+ * The explicit numeric `tabId` a DOM-tool call names, or undefined. Pure.
+ * @param {Record<string, any> | null | undefined} args
+ * @returns {number | undefined}
+ */
+export const residentWebTabTarget = (args) =>
+  args && typeof args.tabId === 'number' ? args.tabId : undefined;
 
 /**
  * The descriptor list a resident of `kind` should SEE — its own kind's toolset.

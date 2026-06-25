@@ -44,3 +44,19 @@ export const REMOTE_SKILL_INSTALL = false;
  * toggle, not channel-config).
  */
 export const RESIDENT_TAB_AGENTS = true;
+
+/**
+ * The WEB RESIDENT (DESIGN-17, "tabs as the fourth resident kind"). Folds the
+ * disposable browser-runner into the actor model: a `kind:'web'` resident OWNS
+ * one tab, holds the DOM toolset (keyless + pinned, like the runner), accumulates
+ * a SELF-FENCED rolling progress summary (compress-at-every-boundary), and is
+ * reached by an addressed message (sync-await) instead of a raw-`tabId` tool.
+ *
+ * OFF (dark): this is the forward design (spec: §"The web resident"), built behind
+ * its own sub-flag so it ships unreachable while the three P0 engine residents
+ * stay on. The browser-coupled wiring needs the CDP harness to verify; with this
+ * false the gate/exposure/SW additions are inert and do/get/check + the runner
+ * behave exactly as today. Requires RESIDENT_TAB_AGENTS too (it's a resident kind).
+ * Source-flip + reload; no runtime/UI toggle.
+ */
+export const WEB_RESIDENT = false;
