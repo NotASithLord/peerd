@@ -13,7 +13,7 @@
 //   { t:'CHUNK_REQ', hash }         -> { t:'CHUNK', hash, bytes(base64) }
 //                                   or { t:'NOCHUNK', hash }
 
-import { manifestHash, verifyManifest } from './manifest.js';
+import { manifestHash, verifyManifest, assertBundleWithinLimits } from './manifest.js';
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
 import { toBase64, fromBase64, concat } from '/shared/bundle/bytes.js';
@@ -124,6 +124,9 @@ export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 
   if (computed !== hash) throw new Error('manifest hash mismatch — content address does not match payload');
   const v = await verifyManifest(manifest);
   if (!v.ok) throw new Error(`manifest signature invalid: ${v.reason}`);
+  // 2b. Bound the (attacker-signed) manifest before buffering anything — a
+  // valid signature does not bound its declared size or chunk count.
+  assertBundleWithinLimits(manifest);
   onProgress?.({ phase: 'manifest', publisher: v.publisher, total: manifest.chunks.length });
 
   // 3. Fetch unique chunk hashes in parallel (dedup so identical chunks
