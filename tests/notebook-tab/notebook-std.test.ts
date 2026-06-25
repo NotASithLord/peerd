@@ -8,6 +8,7 @@ import {
   divmod, divDecimal,
   clamp, variance, stdev, quantile, mode, sumBy, meanBy, countBy, keyBy,
   chunk, zip, partition,
+  parseJsonl, toJsonl, dedupeBy,
   gcd, lcm, factorial, modpow,
 } from '../../extension/notebook-tab/notebook-std.js';
 
@@ -157,6 +158,38 @@ describe('peerd:std stats + reshaping (pure)', () => {
     expect(zip()).toEqual([]);
 
     expect(partition([1, 2, 3, 4], (n: number) => n % 2 === 0)).toEqual([[2, 4], [1, 3]]);
+  });
+});
+
+describe('peerd:std line-delimited records (JSONL)', () => {
+  test('parseJsonl: one value per non-blank line, skipping blanks + non-JSON lines', () => {
+    const text = '{"id":1,"a":"x"}\n\n  \n{"id":2}\nnot json\n{"id":3}';
+    expect(parseJsonl(text)).toEqual([{ id: 1, a: 'x' }, { id: 2 }, { id: 3 }]);
+    expect(parseJsonl('')).toEqual([]);
+    expect(parseJsonl(42 as any)).toEqual([]);
+  });
+
+  test('toJsonl: one JSON line each, newline-joined, no trailing newline; non-array → ""', () => {
+    expect(toJsonl([{ id: 1 }, { id: 2 }])).toBe('{"id":1}\n{"id":2}');
+    expect(toJsonl([])).toBe('');
+    expect(toJsonl('nope' as any)).toBe('');
+  });
+
+  test('parseJsonl ∘ toJsonl round-trips an object array (and tolerates a trailing newline)', () => {
+    const rows = [{ id: 'a', amount: 12.5 }, { id: 'b', amount: 7 }];
+    expect(parseJsonl(toJsonl(rows))).toEqual(rows);
+    expect(parseJsonl(toJsonl(rows) + '\n')).toEqual(rows);
+  });
+
+  test('dedupeBy keeps the FIRST occurrence per key (idempotent append-merge)', () => {
+    const existing = [{ id: 'o1', total: 10 }, { id: 'o2', total: 20 }];
+    const fresh = [{ id: 'o2', total: 999 }, { id: 'o3', total: 30 }]; // o2 re-harvested
+    const merged = dedupeBy([...existing, ...fresh], 'id');
+    expect(merged.map((r: any) => r.id)).toEqual(['o1', 'o2', 'o3']);              // stable order
+    expect((merged.find((r: any) => r.id === 'o2') as any).total).toBe(20);        // existing wins
+    expect(dedupeBy(merged, 'id')).toEqual(merged);                                 // idempotent
+    expect(dedupeBy([{ d: '25-01' }, { d: '25-01' }, { d: '25-02' }], (r: any) => r.d).length).toBe(2);
+    expect(dedupeBy('nope' as any, 'id')).toEqual([]);
   });
 });
 
