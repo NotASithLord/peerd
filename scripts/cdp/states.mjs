@@ -38,6 +38,28 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
 
+// The local-first personal-data agent, end to end through the REAL stack: the
+// faked model calls js_run, the sealed worker builds an on-device index in OPFS
+// and queries it, and the agent reports the answer — every byte computed on
+// device (the realm seal makes the worker incapable of egress).
+const PDA_SCRIPT = `
+const records = [
+  { id: 'amazon:o1', date: '2025-02-03', merchant: 'Amazon', amount: 12.5 },
+  { id: 'amazon:o2', date: '2025-06-20', merchant: 'Amazon', amount: 7.5 },
+  { id: 'amazon:o3', date: '2025-11-03', merchant: 'Amazon', amount: 30 },
+];
+await peerd.self.writeFile('records/orders.jsonl', records.map((r) => JSON.stringify(r)).join('\\n'));
+const text = await peerd.self.readFile('records/orders.jsonl');
+const rows = text.split('\\n').filter(Boolean).map((l) => JSON.parse(l));
+const total = rows.reduce((a, r) => a + r.amount, 0);
+return { total, count: rows.length, source: 'on-device OPFS index' };
+`;
+
+// Captures the model's SECOND request body (which carries the js_run tool result
+// back to the model) so the state can prove the sealed worker REALLY computed the
+// answer — not that the faked final turn merely claims it.
+let pdaToolResultBody = '';
+
 export const STATES = [
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
   {
@@ -92,6 +114,32 @@ export const STATES = [
       rec.check('complete_goal ended it cleanly (not the cap)', !out.capped && calls < 10, `capped=${out.capped} calls=${calls}`);
       rec.check('run reaches terminal: Goal bar cleared + idle', out.goalBar === false && out.busy === false);
       rec.check('submitted goal text round-trips as the first user message', !!out.userText && out.userText.includes('tidy the repo'), JSON.stringify(out.userText));
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: the local-first personal-data agent (code-mode over OPFS) --
+  {
+    name: 'personal-data', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      if (callIndex === 0) return { sse: sseToolCall('js_run', { code: PDA_SCRIPT }) };
+      // call 1 carries the js_run tool result back — capture it for the assertion.
+      if (callIndex === 1) pdaToolResultBody = (request && request.postData) || '';
+      return { sse: sseText('You spent $50.00 across 3 orders — computed on-device, nothing left your machine.') };
+    },
+    async run(ctx, rec) {
+      pdaToolResultBody = '';
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Index my orders and tell me what I spent.' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => { out = await probe(ctx); return out.assistantText && !out.busy; }, { budgetMs: 30_000 });
+      const calls = ctx.modelCallCount();
+      rec.check('the agent ran the js_run tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
+      // the load-bearing proof: the sealed worker actually built + queried the
+      // OPFS index — its result marker rode back to the model in call 1.
+      rec.check('js_run REALLY computed on-device (worker result marker in the tool reply)',
+        pdaToolResultBody.includes('on-device OPFS index'), pdaToolResultBody.slice(0, 160));
+      rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
       await rec.shot('final');
     },
   },
