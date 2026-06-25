@@ -1,9 +1,15 @@
 # DESIGN-17 — resident tab agents: a per-tab session that owns its instance
 
-> Status: P0 IMPLEMENTED — behind the `shared/flags.js` `RESIDENT_TAB_AGENTS`
-> source flag (default OFF). This file is the original DESIGN record; the
-> as-built decisions, refinements, and deviations are in
-> `DESIGN-17-DEV-NOTES.md` (read it alongside this). Feature number 17.
+> Status: P0 IMPLEMENTED + much of P1 — behind the `shared/flags.js`
+> `RESIDENT_TAB_AGENTS` source flag (ON for this branch). P1 landed: the durable
+> message mailbox (SW-death survives → boot redrain), the glass pane (a resident's
+> work renders inline under its `message_resident` card — the display stream),
+> per-card cost visibility, and a Stop cascade to in-flight residents. Still ahead
+> in P1: the "talk to a resident" conversational surface, the unattended clamp, and
+> mid-turn steer-as-message-fold (the spec-isolated net-new capability, below). The
+> web resident (§ below) is built behind the dark `WEB_RESIDENT` sub-flag. This
+> file is the original DESIGN record; the as-built decisions, refinements, and
+> deviations are in `DESIGN-17-DEV-NOTES.md` (read it alongside this). Feature 17.
 > Read first: `docs/SUBAGENTS.md` (a resident is "a session with parentage";
 > this narrows its global-registry decision),
 > `docs/specs/DESIGN-11-async-subagents.md` (the wake/mailbox + runaway-guard

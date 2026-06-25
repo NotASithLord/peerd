@@ -190,11 +190,42 @@ features that *use* `message_resident` weren't traced. The findings:
   (`call_api`/`js_run`) so they exercise the manifest refusal itself — the
   resident tier now precedes the manifest check for a mutating tool.
 
-## Still ahead (P1+, not in this change)
+## P1 — landed (the actor matures into a visible, durable, interruptible thing)
 
-The conversational surface (talk to a resident), the unattended path (once the
-inbound clamp lands), per-kind tuned model tiers, the Phase-2 worker relocation,
-and durable resume — all per the spec's Phasing.
+Built on top of P0, all behind the same `RESIDENT_TAB_AGENTS` flag:
+
+- **Durable message mailbox** (`resident-messaging.js` `deps.mailbox` + `redrain()`;
+  SW backs it with `chrome.storage.session`, serialized writes). An in-flight ENGINE
+  message→reply correlation persists on accept and clears on settle; on boot the SW
+  redrains every pending message ONCE the vault is unlocked (once-guarded against
+  double-delivery). A stale entry whose instance is gone wakes the sender with a
+  failure note. Mirrors `goalRunner.resume`. WEB is never persisted (sync within one
+  turn). **Closes the P0 lost-reply-wake residual.**
+- **The glass pane (display stream).** A resident turn triggered by a live
+  `message_resident` (its `ctx.toolUseId` threaded through as `parentToolUseId`)
+  re-emits its stream as a `turn/resident-*` family keyed to that card; the
+  chat-reducer `residents` slice + `renderResidentCard` (reusing the recursive
+  `renderTranscript`) render the resident's work inline — the subagent live-view,
+  for a resident. `fromIndex` slices each card to ITS exchange (a long-lived resident
+  messaged N times shows N distinct cards, not its whole history). Display stream =
+  full fidelity, per-step snapshots (low-noise); model-memory stream (the fenced
+  reply that re-enters the orchestrator) unchanged.
+- **Per-card cost visibility** (`turn/resident-cost`). Delegated spend is no longer
+  invisible; caps stay per-session (the cross-session rollup is the spec's open
+  question).
+- **Stop cascade.** `agent/stop` aborts the orchestrator AND `residentsFor(chat)` —
+  each resident's own turn slot — so Stop actually halts delegated work. The aborted
+  turn settles through the normal path (partial reply + mailbox cleared).
+
+## Still ahead (P1/P2+, not in this change)
+
+The **conversational surface** (talk to a resident directly — a switcher/affordance,
+not just the inline card), the **unattended path** (once the inbound clamp lands),
+**mid-turn steer-as-message-fold** (the spec-isolated net-new capability — fold a
+refinement INTO a running resident turn via an agent-loop control channel; a new
+user message already steers coarsely via the orchestrator relay today), per-kind
+tuned model tiers, the Phase-2 worker relocation, and full durable resume across a
+browser restart — all per the spec's Phasing.
 
 **The web resident** (tabs as a fourth resident kind) has a full forward design in
 the spec — see `DESIGN-17-resident-agents.md` §"The web resident — tabs as the
@@ -228,18 +259,14 @@ Still ahead for the web resident: the orchestrator-facing mint/cutover, steerabl
 in-flight tab work (abort/steer as an addressed message), and the `message_resident`
 description/lore polish for the inline-reply shape.
 
-## Known residuals (P0 — documented, not yet closed)
+## Known residuals (documented, not yet closed)
 
-These are bounded and named, not silent. They ride the SAME gaps as async-subagents;
-DESIGN-17 widens the blast radius because residents are the primary work surface.
+These are bounded and named, not silent.
 
-- **Reply-wake lost on SW death (engine kinds).** The message→reply correlation
-  (`resident-messaging.js inFlight`/`runWhenIdle`) lives in SW heap with no durable
-  mailbox. If the SW is evicted after a message is accepted but before `deliver()`
-  fires, the orchestrator — told "do NOT poll" — never gets the wake. Fix is a
-  persisted `{correlationId → sender, instance, status}` re-drained on boot (the
-  goal-runner persist/resume pattern). The web kind is immune: its relay is
-  sync-await within one turn, no cross-restart wake. *(P1: durable mailbox.)*
+- **Reply-wake lost on SW death — CLOSED in P1** by the durable mailbox (above). The
+  residual narrows to a death DURING the redrain's own resident turn before its
+  mailbox entry clears; the next boot redrains it again (the entry is only removed on
+  settle), so it self-heals rather than silently dropping.
 - **Orphaned resident session on interrupted mint.** `mintResident` writes the
   session, then the session-default, then the forward pointer; an SW death between
   the create and the pointer leaves a `kind:'resident'` session no instance points
