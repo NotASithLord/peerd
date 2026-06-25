@@ -62,7 +62,11 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
     if (env.ch !== CH_DHT || !env.body) return;
     if (env.typ === REQ) {
       // Serve it. env.from is the authenticated neighbour (mesh guaranteed it).
-      const resp = await node.handle(env.from, env.body.msg);
+      // Backstop: a malformed frame must never throw out of this fire-and-forget
+      // callback (unhandled rejection) nor black-hole the RESP — always answer.
+      let resp;
+      try { resp = await node.handle(env.from, env.body.msg); }
+      catch { resp = { t: 'ERR', reason: 'handler-error' }; }
       mesh.send(env.from, await mesh.sign(CH_DHT, RESP, { reqId: env.body.reqId, resp }));
     } else if (env.typ === RESP) {
       const p = pending.get(env.body.reqId);

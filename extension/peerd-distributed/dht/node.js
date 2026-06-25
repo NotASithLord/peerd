@@ -23,6 +23,14 @@ import { nodeIdOf, byDistanceTo } from './distance.js';
 import { itemKey } from './records.js';
 import { toHex, fromHex } from '/shared/bundle/bytes.js';
 
+// A wire-supplied DHT key/target is always a SHA-256 digest in hex: exactly 64
+// lowercase hex chars (nodeIdOf / itemKey / mutableKey all hash to 32 bytes,
+// toHex emits lowercase). Anything else is a malformed frame — reject it BEFORE
+// fromHex (odd-length throws, `undefined` throws a TypeError) so handle() stays
+// total and the responder can answer {t:'ERR'} instead of black-holing the RESP.
+/** @param {unknown} h */
+const isDhtKeyHex = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
+
 /**
  * @param {{
  *   identity: { did: string },
@@ -71,8 +79,10 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
       case 'PING':
         return { t: 'PONG' };
       case 'FIND_NODE':
+        if (!isDhtKeyHex(msg.target)) return { t: 'ERR', reason: 'bad-target' };
         return { t: 'NODES', nodes: rt.closest(fromHex(msg.target), k).map(wire) };
       case 'FIND_VALUE': {
+        if (!isDhtKeyHex(msg.key)) return { t: 'ERR', reason: 'bad-key' };
         const hit = store.get(msg.key);
         if (hit) return { t: 'VALUE', item: hit };
         return { t: 'NODES', nodes: rt.closest(fromHex(msg.key), k).map(wire) };
@@ -84,6 +94,7 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
       case 'GET_PROVIDERS':
         // Like FIND_VALUE: hand back whatever providers we hold for the key AND
         // the closer contacts, so the caller's iterative walk converges.
+        if (!isDhtKeyHex(msg.key)) return { t: 'ERR', reason: 'bad-key' };
         return { t: 'PROVIDERS', providers: providers ? providers.list(msg.key) : [], nodes: rt.closest(fromHex(msg.key), k).map(wire) };
       default:
         return { t: 'ERR', reason: 'unknown-rpc' };

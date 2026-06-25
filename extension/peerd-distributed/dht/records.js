@@ -75,6 +75,10 @@ export const itemWellFormed = (item) => {
   if (!item || typeof item !== 'object') return false;
   const it = /** @type {Record<string, unknown>} */ (item);
   if (typeof it.publisher !== 'string' || !it.publisher) return false;
+  // publisher must be a decodable did:key — itemKey()/verifyItem() both feed it
+  // straight into decodeDidKey (which throws on anything else), so reject it here
+  // rather than let a malformed STORE throw out of store.put().
+  try { decodeDidKey(it.publisher); } catch { return false; }
   if (typeof it.seq !== 'number' || !Number.isInteger(it.seq) || it.seq < 0) return false;
   if (typeof it.sig !== 'string' || !it.sig) return false;
   if (it.salt != null && (typeof it.salt !== 'string' || it.salt.length > MAX_SALT_LEN)) return false;
