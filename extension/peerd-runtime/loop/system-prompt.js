@@ -13,6 +13,10 @@
 
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
+// DESIGN-17: the code-writing guidance belongs on the agent that WRITES the code
+// — the App/Notebook RESIDENT — not the orchestrator's create-result. Reused
+// from the one source of truth (intra-module deep import is allowed).
+import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE } from '../tools/defs/code-style-note.js';
 
 /** @type {string | null} */
 let cachedTemplate = null;
@@ -425,6 +429,12 @@ export const residentBlock = (kind) => {
   const framing = /** @type {Record<string,string>} */ (RESIDENT_KIND_FRAMING)[kind]
     ?? 'the owner of one tab-hosted instance.';
   const lore = /** @type {Record<string,string>} */ (RESIDENT_KIND_LORE)[kind] ?? '';
+  // The resident is the agent that WRITES the code, so the style (and, for a
+  // Notebook, the correctness) guidance rides HERE — not the orchestrator's
+  // create-result (js_create/app_create stop appending these when the flag is on).
+  const codeNotes = kind === 'app' ? [CODE_STYLE_NOTE]
+    : kind === 'notebook' ? [CODE_STYLE_NOTE, JS_PITFALLS_NOTE]
+    : [];
   return [
     '',
     '',
@@ -433,10 +443,14 @@ export const residentBlock = (kind) => {
     'You were messaged by the orchestrator to do focused work on YOUR instance,',
     "and you alone hold this environment's tools.",
     ...(lore ? ['', lore] : []),
+    ...codeNotes.flatMap((n) => ['', n]),
     '',
     'Rules:',
     '(1) Act ONLY on your own instance — your tools are already pinned to it;',
-    '    never reach for another instance by id or name.',
+    '    never reach for another instance by id or name. Your tool descriptions',
+    '    may mention a "current"/"default" instance, auto-creating one, or',
+    '    targeting "another" — IGNORE that wording: there is exactly one instance',
+    '    (yours) and its id is injected for you.',
     "(2) Your ONLY tools are this environment's (see your tool schema). Any",
     '    browser / web / subagent / memory / message_resident tools named in the',
     "    sections above are the ORCHESTRATOR's, not yours — ignore them.",

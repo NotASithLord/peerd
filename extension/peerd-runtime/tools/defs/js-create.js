@@ -7,6 +7,7 @@
 
 import { JS_TAB_GROUP_TITLE } from '/background/notebook-client.js';
 import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE } from './code-style-note.js';
+import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
 
 // why a Notebook-specific note (CODE_STYLE_NOTE is shared with app_create): the
 // fresh-realm + file-tree + OPFS-state guidance holds for Notebooks, not Apps.
@@ -103,9 +104,13 @@ export const jsCreateTool = {
       name: record.name,
       isCurrent: !!sessionId,
     }, null, 2);
+    // Flag ON: the Notebook RESIDENT writes + runs the code, so the style +
+    // correctness guidance rides ITS prompt (residentBlock), not this
+    // orchestrator create-result. Flag OFF: the main agent writes → keep them.
+    const codeNotes = RESIDENT_TAB_AGENTS ? '' : `\n\n${CODE_STYLE_NOTE}\n\n${JS_PITFALLS_NOTE}`;
     return {
       ok: true,
-      content: `${summary}\n\n${NOTEBOOK_NOTE}\n\n${CODE_STYLE_NOTE}\n\n${JS_PITFALLS_NOTE}`,
+      content: `${summary}\n\n${NOTEBOOK_NOTE}${codeNotes}`,
     };
   },
 };

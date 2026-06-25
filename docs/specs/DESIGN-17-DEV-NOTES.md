@@ -154,10 +154,19 @@ features that *use* `message_resident` weren't traced. The findings:
     active chat is ALLOWED; an `inbound:true` turn is refused even when active);
     `goal-runner.test.ts` (turns carry `trusted:true`).
 
-- **Minor (deferred):** instance tool DESCRIPTIONS (e.g. `vm_boot` "auto-creates
-  one if none") are orchestrator-voiced but now read only by a (pinned) resident;
-  the `code-style-note` rides `js_create`/`app_create` (orchestrator tools) yet the
-  RESIDENT writes the code. Low-value polish; not blocking.
+- **Minor polish (DONE).** Two cosmetic mismatches the flag-on world introduced:
+  - *Tool descriptions* — instance tools (e.g. `vm_boot` "auto-creates one if
+    none", `app_update` "targets the chat's current app") are orchestrator-voiced
+    but now read only by a (pinned) resident. They can't be rewritten without
+    breaking the flag-OFF main-agent reading, so instead the resident PROMPT's
+    rule (1) now tells it to IGNORE any "current/default/auto-create/target
+    another" wording — flag-safe, and it covers every tool + schema param at once.
+  - *Code-style note* — `CODE_STYLE_NOTE` (and, for Notebooks, `JS_PITFALLS_NOTE`)
+    rode `app_create`/`js_create` results, i.e. the ORCHESTRATOR that no longer
+    writes the code. Now those notes ride the App/Notebook `residentBlock` (the
+    writer), reused from the one source of truth (`tools/defs/code-style-note.js`);
+    `app_create`/`js_create` append them only when the flag is OFF. `js_run` keeps
+    `JS_PITFALLS_NOTE` (it's the orchestrator's own compute, flag-independent).
 
 ## Tests
 
