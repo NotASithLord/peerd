@@ -160,7 +160,10 @@ export const residentTierGate = (tool, args, ctx, flagOn) => {
   // — the in-execute denylist re-check in resolveTargetTab is the second wall.)
   if (ctx.residentKind === 'web') {
     const tab = residentWebTabTarget(args);
-    if (tab !== undefined && String(tab) !== ctx.residentInstanceId) {
+    // String() BOTH sides (M6): residentInstanceId SHOULD be the tabId as a
+    // string, but coercing defensively means a numeric mint can't lock the
+    // resident out of its own tab ('42' !== 42).
+    if (tab !== undefined && String(tab) !== String(ctx.residentInstanceId)) {
       return { allowed: false, reason: `web resident is pinned to tab ${ctx.residentInstanceId ?? '?'}; refusing ${tool.name} targeting tab ${tab}` };
     }
   }

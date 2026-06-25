@@ -41,13 +41,14 @@
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
  *
  * Resident binding (DESIGN-17). A `kind:'resident'` session self-describes
- * which instance it owns: `instanceId` (the WebVM/Notebook/App id it drives)
- * and `residentKind` (the engine kind, used to scope its toolset + prompt).
- * The FORWARD pointer (instance → resident) lives on the engine registry
- * record (`residentSessionId`); these are the REVERSE pointer the resident
- * turn reads to set up its tool context. Absent on chat/subagent sessions.
- * @property {string} [instanceId]            the tab-hosted instance this resident owns
- * @property {'webvm' | 'notebook' | 'app'} [residentKind]  the instance's engine kind
+ * which instance it owns: `instanceId` (the WebVM/Notebook/App id it drives, or
+ * — for a `web` resident — the owned tabId AS A STRING) and `residentKind` (the
+ * kind, used to scope its toolset + prompt). The FORWARD pointer lives on the
+ * engine registry record (`residentSessionId`) for the three engine kinds, or in
+ * the tab→session bindings store (`subagent/web-resident.js`) for `web`. These
+ * are the REVERSE pointer the resident turn reads. Absent on chat/subagent.
+ * @property {string} [instanceId]            the instance (engine id) or owned tabId (String) this resident owns
+ * @property {'webvm' | 'notebook' | 'app' | 'web'} [residentKind]  webvm/notebook/app = engine kinds; web = a browser tab (WEB_RESIDENT)
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

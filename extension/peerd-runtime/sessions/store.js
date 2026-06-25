@@ -154,7 +154,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   customSystemPrompt?: string,
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
    *   instanceId?: string,
-   *   residentKind?: 'webvm' | 'notebook' | 'app',
+   *   residentKind?: 'webvm' | 'notebook' | 'app' | 'web',
    * }} [opts]
    * @returns {Promise<Session>}
    */
