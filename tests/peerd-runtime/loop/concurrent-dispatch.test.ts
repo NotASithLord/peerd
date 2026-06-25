@@ -234,6 +234,44 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(log).toEqual(['start:a', 'end:a', 'start:b', 'end:b']);
   });
 
+  test('Stop mid-batch halts the remaining side-effecting waves and ends on a deliberate abort', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    // Three writes → three sequential waves (writes are barriers).
+    const calls = [
+      { id: 't_w1', name: 'click' },
+      { id: 't_w2', name: 'click' },
+      { id: 't_w3', name: 'click' },
+    ];
+    const dispatched: string[] = [];
+    const ac = new AbortController();
+    const ctx = baseCtx(store, {
+      callModel: makeToolModel(calls),
+      tools: calls.map((c) => ({ name: c.name, description: '', schema: {} })),
+      classifyToolCall: () => WRITE_VERDICT, // confirmations off → each write just runs
+      signal: ac.signal,
+      toolDispatch: async (call: any) => {
+        dispatched.push(call.id);
+        if (call.id === 't_w1') ac.abort(); // user presses Stop while wave 1 is in flight
+        return { ok: true, content: 'r', meta: {} };
+      },
+    });
+
+    const events = await drain(runUserTurn(ctx));
+
+    // waves 2 + 3 must NOT have dispatched their side effects after Stop.
+    expect(dispatched).toEqual(['t_w1']);
+    // the turn ENDS on a deliberate abort (there's a pre-dispatch segment stop
+    // carrying the model's tool_use; the terminal one must be the abort).
+    const stops = events.filter((e: any) => e.type === 'stop');
+    expect(stops.at(-1)?.stopReason).toBe('aborted');
+    const s = await store.get('s1');
+    // the partial batch is dropped (no tool_result message appended)...
+    expect(s.messages.some((m: any) => Array.isArray(m.toolResults))).toBe(false);
+    // ...and the assistant message is marked aborted so resume won't re-drive it.
+    expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
+  });
+
   test('one failing sibling in a concurrent wave becomes its own error block, not a batch failure', async () => {
     const store = makeStore();
     store.seed('s1');
