@@ -138,9 +138,14 @@ describe('residentBlock (the per-kind tuned prompt)', () => {
   });
 
   test('the code-WRITING residents carry the relocated style/correctness notes', () => {
-    // App writes UI code → style note; Notebook writes compute → style + correctness.
+    // App writes UI code → style note + the iframe-runtime gotcha; Notebook writes
+    // compute → style + correctness. The App RESIDENT is the agent that writes the
+    // page files, so the worker/cross-file-module note must reach IT (not just the
+    // orchestrator's app_create result) — the flag-ON guidance regression we fixed.
     const app = residentBlock('app');
     expect(app.includes('<code-style>')).toBe(true);
+    expect(app.includes('<app-runtime>')).toBe(true);
+    expect(app.includes("new Worker('worker.js')")).toBe(true);
     const nb = residentBlock('notebook');
     expect(nb.includes('<code-style>')).toBe(true);
     expect(nb.includes('<js-correctness>')).toBe(true);

@@ -136,11 +136,12 @@ export const filterByInstanceState = (descriptors, instanceState) =>
 //     fails closed at the gate, not just in the descriptor list.
 //
 // The exposure marker is a free string on ctx: 'main' (main turn) / 'resident'
-// (resident turn) / unset (subagent/runner). Consts here so a typo can't
-// silently widen authority. All of this is behind shared/flags.js
-// RESIDENT_TAB_AGENTS — with the flag OFF these sets are referenced by nothing
-// load-bearing and instance tools stay on the main agent exactly as today.
-export const EXPOSURE_MAIN = 'main';
+// (resident turn) / unset (subagent/runner). EXPOSURE_RESIDENT is a const so a
+// typo can't silently widen authority at its (many) read sites; 'main' stays a
+// bare literal — it's only ever the gate's negative space, never matched by name.
+// All of this is behind shared/flags.js RESIDENT_TAB_AGENTS — with the flag OFF
+// these sets are referenced by nothing load-bearing and instance tools stay on
+// the main agent exactly as today.
 export const EXPOSURE_RESIDENT = 'resident';
 
 // The tiered MUTATION set — refused for every non-resident ctx when the flag is

@@ -147,7 +147,7 @@ export {
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
   // DESIGN-17: the resident capability tier vocabulary.
-  EXPOSURE_MAIN, EXPOSURE_RESIDENT, RESIDENT_MUTATING_TOOLS, isResidentMutatingTool,
+  EXPOSURE_RESIDENT, RESIDENT_MUTATING_TOOLS, isResidentMutatingTool,
   residentAllowedTools, isAllowedForResidentKind, residentDescriptors, filterResidentSurface,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the

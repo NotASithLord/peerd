@@ -16,7 +16,7 @@ import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
 // DESIGN-17: the code-writing guidance belongs on the agent that WRITES the code
 // — the App/Notebook RESIDENT — not the orchestrator's create-result. Reused
 // from the one source of truth (intra-module deep import is allowed).
-import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE } from '../tools/defs/code-style-note.js';
+import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE, APP_RUNTIME_NOTE } from '../tools/defs/code-style-note.js';
 
 /** @type {string | null} */
 let cachedTemplate = null;
@@ -424,8 +424,9 @@ components + m.redraw()/m.route instead of hand-rolled innerHTML concatenation.
 Prefer edit_file over app_write_file to change an existing file; tag-relative
 <link>/<script src> are inlined at render time.`,
   web: `Your tab is a live web page you drive with the low-level DOM tools
-(snapshot / read_page / read_state / query_dom to observe; click / type / navigate
-/ page_keys to act; read_pdf for PDFs). The DOM is your SOURCE OF TRUTH for the
+(snapshot / read_page / read_state / query_dom to observe, watch_changes to await a
+mutation; click / type / navigate / page_keys to act; read_pdf for PDFs). The DOM
+is your SOURCE OF TRUTH for the
 CURRENT state — RE-SNAPSHOT after each action rather than assuming the page didn't
 change. You hold NO snapshot, value, or ref in your own words; read it from the
 page each time. Your accumulated memory is a compact PROGRESS note (what you did,
@@ -442,9 +443,11 @@ export const residentBlock = (kind) => {
     ?? 'the owner of one tab-hosted instance.';
   const lore = /** @type {Record<string,string>} */ (RESIDENT_KIND_LORE)[kind] ?? '';
   // The resident is the agent that WRITES the code, so the style (and, for a
-  // Notebook, the correctness) guidance rides HERE — not the orchestrator's
-  // create-result (js_create/app_create stop appending these when the flag is on).
-  const codeNotes = kind === 'app' ? [CODE_STYLE_NOTE]
+  // Notebook, the correctness; for an App, the iframe-runtime gotcha) guidance
+  // rides HERE — not the orchestrator's create-result (js_create/app_create stop
+  // appending these when the flag is on, but app_create still discloses
+  // APP_RUNTIME_NOTE to the orchestrator flag-OFF, from the same source).
+  const codeNotes = kind === 'app' ? [CODE_STYLE_NOTE, APP_RUNTIME_NOTE]
     : kind === 'notebook' ? [CODE_STYLE_NOTE, JS_PITFALLS_NOTE]
     : [];
   return [
