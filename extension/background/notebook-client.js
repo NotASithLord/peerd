@@ -8,6 +8,7 @@
 // vocabulary.
 
 import browser from '/vendor/browser-polyfill.js';
+import { createKeyedQueue } from '/peerd-engine/index.js';
 
 const MESSAGE_TIMEOUT_MS = 60_000;
 
@@ -42,6 +43,21 @@ export const createJsClient = ({ registry, tracker }) => {
     });
     await registry.setDefaultForSession(sessionId, created.id);
     return created.id;
+  };
+
+  // why a keyed queue (mirrors vm-client.js): the agent loop dispatches
+  // consecutive READ-class js tools (js_read_file, js_list_files) CONCURRENTLY,
+  // so two implicit-target calls in a fresh chat could BOTH see "no default
+  // notebook yet" and race to create two — one becomes an orphan (leaked tab +
+  // OPFS scratch) and the reads target different scratch dirs. Serialize lazy
+  // default-resolution per session so concurrent first-commands share the one
+  // created Notebook. Explicit-id / no-session lookups are pure reads — they
+  // skip the lane.
+  const queue = createKeyedQueue();
+  /** @param {{ sessionId?: string, notebookId?: string }} [opts] */
+  const resolveIdQueued = (opts = {}) => {
+    if (opts.notebookId || !opts.sessionId) return resolveId(opts);
+    return queue.enqueue(`resolve:${opts.sessionId}`, () => resolveId(opts));
   };
 
   /** @param {string} notebookId @param {{ type: string, [k: string]: unknown }} message */
@@ -84,7 +100,7 @@ export const createJsClient = ({ registry, tracker }) => {
 
     /** @param {string} code @param {{ sessionId?: string, notebookId?: string, timeoutMs?: number }} [opts] */
     eval: async (code, opts = {}) => {
-      const id = await resolveId(opts);
+      const id = await resolveIdQueued(opts);
       const response = await callTab(id, {
         type: 'js/eval',
         code,
@@ -95,7 +111,7 @@ export const createJsClient = ({ registry, tracker }) => {
 
     /** @param {string} path @param {string} content @param {{ sessionId?: string, notebookId?: string }} [opts] */
     writeFile: async (path, content, opts = {}) => {
-      const id = await resolveId(opts);
+      const id = await resolveIdQueued(opts);
       await callTab(id, {
         type: 'js/write-file',
         path,
@@ -105,14 +121,14 @@ export const createJsClient = ({ registry, tracker }) => {
 
     /** @param {string} path @param {{ sessionId?: string, notebookId?: string }} [opts] */
     readFile: async (path, opts = {}) => {
-      const id = await resolveId(opts);
+      const id = await resolveIdQueued(opts);
       const response = await callTab(id, { type: 'js/read-file', path });
       return response.content;
     },
 
     /** @param {{ sessionId?: string, notebookId?: string }} [opts] */
     listFiles: async (opts = {}) => {
-      const id = await resolveId(opts);
+      const id = await resolveIdQueued(opts);
       const response = await callTab(id, { type: 'js/list-files' });
       return response.files;
     },
