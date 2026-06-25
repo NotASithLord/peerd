@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>peerd-lite PoC — Notebook substrate in a plain page</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 2rem; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0b0b0d; color: #e6e6e6;
+    }
+    .wrap { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 .25rem; }
+    p.sub { color: #9a9a9a; margin: 0 0 1.5rem; }
+    .card { background: #141417; border: 1px solid #26262b; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+    label { display: block; color: #9a9a9a; font-size: .8rem; margin-bottom: .4rem; }
+    textarea {
+      width: 100%; min-height: 200px; resize: vertical; background: #0b0b0d; color: #e6e6e6;
+      border: 1px solid #26262b; border-radius: 8px; padding: .75rem; font: inherit;
+    }
+    button {
+      margin-top: .75rem; background: #e6e6e6; color: #0b0b0d; border: 0; border-radius: 8px;
+      padding: .5rem 1rem; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: default; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+    .out { background: #0b0b0d; border: 1px solid #26262b; border-radius: 8px; padding: .75rem; min-height: 2rem; }
+    .muted { color: #9a9a9a; }
+    .ok { color: #5bd17a; }
+    .err { color: #ff6b6b; }
+    .row { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    .row > div { flex: 1; min-width: 240px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>peerd-lite · the Notebook substrate, running in a plain web page</h1>
+    <p class="sub">
+      No extension. The sealed worker, realm seal, <code>peerd.*</code> surface, and OPFS
+      are imported <em>verbatim</em> from the extension tree — only the host adapter is new.
+      This cell builds a personal-data index on device and queries it; the realm seal makes
+      the worker incapable of egress except through the audited bridge.
+    </p>
+
+    <div class="card">
+      <label for="code">Notebook cell (runs in the sealed worker)</label>
+      <textarea id="code" spellcheck="false">
+// The personal-data index — building + querying an on-device OPFS index,
+// in a plain page, in the same sealed worker the extension uses.
+const records = [
+  { id: 'order:1001', item: 'Coffee Mug', amount: 12.00 },
+  { id: 'order:1002', item: 'Notebook',   amount:  8.50 },
+  { id: 'order:1003', item: 'Pen Set',    amount: 15.00 },
+];
+await peerd.self.writeFile('orders.jsonl', records.map((r) => JSON.stringify(r)).join('\n'));
+
+const rows = (await peerd.self.readFile('orders.jsonl'))
+  .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+console.log('indexed ' + rows.length + ' orders on device');
+
+return { total: rows.reduce((a, r) => a + r.amount, 0), count: rows.length };
+</textarea>
+      <button id="run">Run cell</button>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <label>Return value</label>
+        <div class="out"><pre id="value" class="muted">— not run yet —</pre></div>
+      </div>
+      <div class="card">
+        <label>Console</label>
+        <div class="out"><pre id="console" class="muted">—</pre></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>OPFS — files on device (persist across runs)</label>
+      <div class="out"><pre id="files" class="muted">—</pre></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
