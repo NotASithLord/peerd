@@ -105,6 +105,90 @@ describe('message_resident — error path still wakes the sender', () => {
   });
 });
 
+describe('message_resident — web resident (sync-await relay)', () => {
+  // A harness whose resolveResident returns a WEB resident (kind 'web', the owned
+  // tabId as instance). The web branch awaits the turn and returns content INLINE.
+  const webHarness = (over: Partial<Parameters<typeof makeResidentMessaging>[0]> = {}) => harness({
+    resolveResident: async (to: string) =>
+      to === '42'
+        ? { instanceId: '42', kind: 'web', residentSessionId: 'web-res-1', name: undefined, tabId: 42 }
+        : null,
+    ...over,
+  });
+
+  test('returns the reply SYNCHRONOUSLY in the tool result — no reentry wake', async () => {
+    const { messageResident, reentries } = webHarness({
+      runResidentTurn: async () => ({ result: 'clicked the button, page now shows success' }),
+    });
+    const r = await messageResident({ to: '42', message: 'click submit', senderSessionId: 'chat-1' });
+    expect(r.ok).toBe(true);
+    // Content is inline (not a "reply arrives later" placeholder) — proves the turn ran.
+    expect(r.content).toBe('clicked the button, page now shows success');
+    await tick();
+    // The engine-kind async-wake path is NOT taken for web.
+    expect(reentries.length).toBe(0);
+  });
+
+  test('threads the owned tabId into the resident turn as residentTabId', async () => {
+    let seenTabId: number | undefined = -1;
+    const { messageResident } = webHarness({
+      runResidentTurn: async (o: { residentTabId?: number }) => {
+        seenTabId = o.residentTabId;
+        return { result: 'ok' };
+      },
+    });
+    await messageResident({ to: '42', message: 'x', senderSessionId: 'chat-1' });
+    expect(seenTabId).toBe(42);
+  });
+
+  test('a thrown web turn returns ok:false INLINE (not a wake)', async () => {
+    const { messageResident, reentries } = webHarness({
+      runResidentTurn: async () => { throw new Error('tab closed'); },
+    });
+    const r = await messageResident({ to: '42', message: 'x', senderSessionId: 'chat-1' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('web resident turn failed');
+    expect(r.error).toContain('tab closed');
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('serializes concurrent messages to the SAME tab (never two turns at once)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const order: string[] = [];
+    // Each turn parks on its OWN gate (a queued resolver), so releasing one can't
+    // accidentally free another — the test stays deterministic across microtasks.
+    const releasers: Array<() => void> = [];
+    const gate = () => new Promise<void>((res) => { releasers.push(res); });
+    const { messageResident } = webHarness({
+      caps: { rateCap: 100, outstanding: 100 },
+      runResidentTurn: async (o: { message: string }) => {
+        active++; maxActive = Math.max(maxActive, active);
+        order.push(`start:${o.message}`);
+        await gate();
+        order.push(`end:${o.message}`);
+        active--;
+        return { result: o.message };
+      },
+    });
+    // Wait (bounded) until exactly one turn is parked and waiting.
+    const settle = async () => { for (let i = 0; i < 10 && releasers.length === 0; i++) await tick(); };
+    // Fire two WITHOUT awaiting — they must queue, not overlap.
+    const p1 = messageResident({ to: '42', message: 'A', senderSessionId: 'chat-1' });
+    const p2 = messageResident({ to: '42', message: 'B', senderSessionId: 'chat-1' });
+    await settle();
+    expect(active).toBe(1);          // only A has started; B is queued behind the chain
+    releasers.shift()?.();           // let A finish; B's turn then starts and re-gates
+    await settle();
+    expect(active).toBe(1);          // now only B is running — never both
+    releasers.shift()?.();           // let B finish
+    await Promise.all([p1, p2]);
+    expect(maxActive).toBe(1);
+    expect(order).toEqual(['start:A', 'end:A', 'start:B', 'end:B']);
+  });
+});
+
 describe('message_resident — runaway guard (per sender)', () => {
   test('refuses past the RATE cap within the window', async () => {
     // never-resolving turns keep nothing pending on the rate path; outstanding

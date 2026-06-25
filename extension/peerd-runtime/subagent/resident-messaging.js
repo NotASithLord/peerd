@@ -10,6 +10,13 @@
 // a per-sender runaway guard. Functional core / imperative shell: every IO
 // surface is injected, so the spawn → run → reply flow is unit-testable.
 //
+// Two reply shapes by kind. The three ENGINE kinds (webvm/notebook/app) run
+// potentially-long turns → ASYNC: the reply lands on a later sender turn via
+// deliver()/runWhenIdle. The WEB kind drives a page in a request→response shape →
+// SYNC-AWAIT: the orchestrator awaits the turn and the reply returns inline in the
+// tool result (preserving the do/get/check ergonomics it replaces). Same gates,
+// same guards, same untrusted-content posture — only the delivery differs.
+//
 // Posture: a message is accepted from the active foreground chat (`senderSessionId
 // === getActiveSessionId()`) when it is NOT `inbound`. `inbound` is the
 // untrusted-ORIGIN signal the turn driver folds from synthetic + trusted:
@@ -57,6 +64,21 @@ export const makeResidentMessaging = (deps) => {
   const inFlight = new Map();
   /** @type {Map<string, number[]>} senderSessionId → recent dispatch timestamps (the burst guard) */
   const recentSends = new Map();
+  /** @type {Map<string, Promise<unknown>>} web-resident sessionId → its serialization chain */
+  const webChains = new Map();
+
+  // Serialize web-resident turns per session: the sync-await relay below awaits the
+  // turn, so two concurrent messages to the SAME tab would otherwise both call
+  // runAgentTurn, whose turnSlots.claim aborts the in-flight one. A promise chain
+  // runs each after the previous SETTLES; the stored link never rejects so the next
+  // caller chains cleanly.
+  /** @param {string} sessionId @param {() => Promise<any>} fn @returns {Promise<any>} */
+  const runWebSerialized = (sessionId, fn) => {
+    const prev = webChains.get(sessionId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    webChains.set(sessionId, run.then(() => {}, () => {}));
+    return run;
+  };
 
   /** @param {string} sender */
   const decInFlight = (sender) => {
@@ -144,6 +166,26 @@ export const makeResidentMessaging = (deps) => {
     recentSends.set(senderSessionId, recent);
     inFlight.set(senderSessionId, (inFlight.get(senderSessionId) ?? 0) + 1);
     appendAudit({ type: 'resident_message', details: { to: instanceId, kind, senderSessionId } }).catch(() => {});
+
+    // Web resident: SYNC-AWAIT relay (the do/get/check collapse). The three engine
+    // kinds run potentially-long turns, so their reply arrives on a LATER turn via
+    // deliver()/runWhenIdle. A web resident drives the page in a request→response
+    // shape the orchestrator awaits inline — preserving the do/get/check ergonomics
+    // it replaces (one tool call, one page result, same turn). No reenter wake: the
+    // content returns in THIS tool result. Serialize per tab (runWebSerialized)
+    // because runResidentTurn claims the resident's turn slot and turnSlots.claim
+    // aborts an in-flight turn — concurrent messages to one tab must queue, not race.
+    if (kind === 'web') {
+      try {
+        const res = await runWebSerialized(residentSessionId, () =>
+          runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind }));
+        return { ok: true, content: (res?.result || '(the web resident produced no text reply)').slice(0, RESULT_CHARS) };
+      } catch (e) {
+        return { ok: false, error: `message_resident: the web resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      } finally {
+        decInFlight(senderSessionId);
+      }
+    }
 
     // Serialize on the RESIDENT's slot — runWhenIdle runs the turn the moment the
     // resident is idle (never interrupting an in-flight resident turn). The reply
