@@ -1,14 +1,20 @@
 # DESIGN-17 — resident tab agents: a per-tab session that owns its instance
 
-> Status: P0 IMPLEMENTED + much of P1 — behind the `shared/flags.js`
-> `RESIDENT_TAB_AGENTS` source flag (ON for this branch). P1 landed: the durable
-> message mailbox (SW-death survives → boot redrain), the glass pane (a resident's
-> work renders inline under its `message_resident` card — the display stream),
-> per-card cost visibility, and a Stop cascade to in-flight residents. Still ahead
-> in P1: the "talk to a resident" conversational surface, the unattended clamp, and
-> mid-turn steer-as-message-fold (the spec-isolated net-new capability, below). The
-> web resident (§ below) is built behind the dark `WEB_RESIDENT` sub-flag. This
-> file is the original DESIGN record; the as-built decisions, refinements, and
+> Status: P0 + P1 + the WEB RESIDENT — behind the `shared/flags.js`
+> `RESIDENT_TAB_AGENTS` + `WEB_RESIDENT` source flags (BOTH ON for this branch).
+> P1 landed: the durable message mailbox (SW-death survives → boot redrain), the
+> glass pane (a resident's work renders inline under its `message_resident` card),
+> per-card cost, and a Stop cascade. The web resident is now LIVE and the model is
+> UNIFORM: **async-everything** (the orchestrator never blocks — it delegates and
+> gets woken, for all four kinds), **every tab is a resident** (the orchestrator
+> reaches a page by messaging its tab's resident), and **do/get/check are folded
+> into `message_resident`** (the page runner left the main agent; gated on
+> `WEB_RESIDENT` so flipping it off restores do/get/check + the runner exactly —
+> the escape hatch). Still ahead: the "talk to a resident" conversational surface,
+> the unattended clamp, mid-turn steer-as-message-fold, and — critically — **live
+> CDP verification of the web-resident page path before store ship** (it's the
+> orchestrator's only browser surface now, and unverifiable outside a real Chrome).
+> This file is the original DESIGN record; the as-built decisions, refinements, and
 > deviations are in `DESIGN-17-DEV-NOTES.md` (read it alongside this). Feature 17.
 > Read first: `docs/SUBAGENTS.md` (a resident is "a session with parentage";
 > this narrows its global-registry decision),

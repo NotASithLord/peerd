@@ -217,6 +217,39 @@ Built on top of P0, all behind the same `RESIDENT_TAB_AGENTS` flag:
   each resident's own turn slot — so Stop actually halts delegated work. The aborted
   turn settles through the normal path (partial reply + mailbox cleared).
 
+## The web resident goes live + the uniform actor model (owner direction)
+
+The owner's call: "everything is an actor; the orchestrator never blocks." So the
+web resident's sync-await special case was wrong. Three changes made the model
+uniform (`WEB_RESIDENT` flipped ON):
+
+- **Async-everything** (`resident-messaging.js`). The `kind==='web'` sync branch +
+  `runWebSerialized` + `webChains` are gone; web rides the engine path (mailbox-
+  persist → `runWhenIdle` wake → `deliver()`). The orchestrator never blocks; per-
+  tab serialization comes free from the resident slot. Bonus: the old sync path
+  returned the web reply RAW as a tool result — the async `deliver()` wrapUntrusted-
+  fences it, so a page-derived reply is now fenced like any untrusted content.
+- **The do/get/check cutover** (`exposure.js` / `gates.js` / `manifests.js`). Every
+  open tab is a resident; the orchestrator reaches a page by messaging its tab's
+  resident (`open_tab` + `list_tabs` + `message_resident`), and the do/get/check
+  page runner LEAVES the main agent. The strip is **gated on `WEB_RESIDENT`, not
+  `RESIDENT_TAB_AGENTS`** — flipping `WEB_RESIDENT` off restores do/get/check + the
+  runner exactly (the escape hatch); a flag-on-but-web-off config keeps them.
+  SUBAGENTS keep do/get/check (their only page path — they can't message residents);
+  the runner + tool defs + `RUNNER_PROMPT` all STAY (registered, reachable web-off).
+- **The prompt fine-comb** (`system-prompt.js`). `applyResidentOrchestration` gained
+  `webOn` splices folding do/get/check into "every tab is a resident" (the reuse-vs-
+  new-tab judgment, async-OUTCOMES delegation, the untrusted boundary). The web
+  resident lore now carries the full page mechanics + the IGNORE/FLAG/EXCLUDE
+  injection drill (relocated from `RUNNER_PROMPT`) + its stateful framing.
+
+**The irreducible caveat:** the web resident is now the orchestrator's ONLY browser
+surface, and its page path (DOM tools driving a real tab) is **unverifiable outside
+a live Chrome** — the CDP harness is blocked in this environment. The unit/bun tiers
++ the review swarm cover the wiring/gating/prompts; the live page path MUST be run
+through the CDP harness before store ship. The `WEB_RESIDENT`-off escape hatch is
+the safety valve if it regresses.
+
 ## Still ahead (P1/P2+, not in this change)
 
 The **conversational surface** (talk to a resident directly — a switcher/affordance,
