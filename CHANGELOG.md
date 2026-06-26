@@ -43,12 +43,14 @@ The staged integration of the open-PR backlog onto one verified branch
 
 ---
 
-## [0.1.5] — 2026-06-24
+## [0.1.5] — 2026-06-26
 
-Sandbox, egress, and runner security hardening plus the e2e tier's
-autonomous verify-loop and a docs pass. All code changes reviewed by
-adversarial-swarm passes (security fixes held to a no-residual-bypass
-bar) and verified green before merge.
+A broad security-hardening pass across the sandbox, egress, runner, agent
+loop, dweb transport, and engine registries, plus the autonomous e2e
+verify-loop and the groundwork for the peerd-lite / personal-data
+directions. Every code change was reviewed by adversarial-swarm passes
+(security fixes held to a no-residual-bypass bar) and verified green
+before merge.
 
 ### Fixed
 - **Notebook realm seal now covers the Cache API** — the sealed worker
@@ -65,6 +67,25 @@ bar) and verified green before merge.
   fence, calls out prompt injection as the attack vector, and adds an
   IGNORE → FLAG → EXCLUDE drill with anti-suppression language; 6
   contract tests lock in each invariant (#81).
+- **Stop is honored between tool-batch waves** — a Stop (or spend-limit
+  halt) landing mid-batch no longer lets queued write-tool waves dispatch
+  and commit side effects after the abort; the loop rechecks before each
+  wave and ends the turn as a deliberate stop (#97).
+- **Agent-core input hardening** — four edge cases from a security audit:
+  the `@file` fence is defanged against break-out, the `load_skill`
+  version attribute is escaped, the SSE parser caps its buffers (no OOM),
+  and a non-string Anthropic `tool_use` name surfaces an error instead of
+  vanishing silently (#98).
+- **dweb untrusted-inbound robustness** *(preview channel)* — guards on
+  the transport that reads directly from anonymous peers: drop
+  unparseable data-channel frames + bound the pre-description ICE buffer
+  (#88), cap declared bundle size before buffering as an OOM guard (#89),
+  make the DHT `node.handle` total over malformed RPC (#90), and close
+  the `RTCPeerConnection` on an abandoned dial so it can't leak (#91).
+- **Engine registry races** — memoize each registry's `load()` so a
+  cold-boot race can't drop a just-created record (#86), and serialize
+  Notebook default-resolution per session so concurrent first-commands
+  don't double-create (#85).
 
 ### Added
 - **Autonomous e2e verify loop** — `bun run e2e:verify` drives the real
@@ -73,6 +94,15 @@ bar) and verified green before merge.
   an agent can self-drive; multi-turn / mode-toggle / vault-lock states
   added (#70, #77); the goal-state user-message assertion dropped in the
   consolidation was restored (#76). Per-run artifacts gitignored (#74).
+- **`peerd:std` record helpers** — `parseJsonl` / `toJsonl` / `dedupeBy`
+  for line-delimited records in code-mode (#92).
+- **peerd-lite groundwork** — a proof that the sealed Notebook substrate
+  runs verbatim in a plain web page (host adapter only), under
+  `web-prototype/poc/` (#96); plus durable-OPFS round-trip coverage for
+  the on-device personal-data index (#93).
+- **Design specs** — the local-first personal-data agent (#92), the
+  peerd-web / peerd-lite surface (#84), and the site-as-demo reuse plan
+  (#87).
 
 ### Changed
 - Reader-facing docs de-jargoned — tighter voice, AI-isms removed.
