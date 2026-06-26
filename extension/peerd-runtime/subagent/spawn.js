@@ -1,5 +1,5 @@
 // @ts-check
-// Subagent orchestrator (docs/SUBAGENTS.md).
+// Subagent orchestrator.
 //
 // A subagent is NOT a fourth engine kind — it's an orchestration
 // primitive. "Who is reasoning about the next step?" is the agent loop,
@@ -30,7 +30,7 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 /** @typedef {import('../sessions/types.js').Session} Session */
 /** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
 
-// Guardrail defaults (docs/SUBAGENTS.md §guardrails). Callers may lower
+// Guardrail defaults. Callers may lower
 // them per spawn; they can't be raised past the loop's own MAX_STEPS
 // backstop (runUserTurn clamps maxSteps itself).
 export const DEFAULT_MAX_DEPTH = 5;
@@ -40,7 +40,7 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 /**
  * Compute the tool subset a subagent may use.
  *
- * Rules, in order (docs/SUBAGENTS.md §tool-narrowing):
+ * Rules, in order (tool-narrowing):
  *   - explicit `tools: [...]` → exactly those names (intersected with
  *     what's actually registered). An empty array means NO tools.
  *   - otherwise → inherit the parent's full set.

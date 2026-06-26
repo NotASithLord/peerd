@@ -1,7 +1,7 @@
 // @ts-check
 // web_search — always a tab.
 //
-// Per POLICY.md: search results are heavily personalized, sometimes
+// Search results are heavily personalized, sometimes
 // SPA-rendered, often anti-bot-protected. We open the user's chosen
 // search engine in an inactive tab, let it load (with the user's
 // session and cookies), and read the visible text. Closing the tab

@@ -8,7 +8,7 @@
 //
 // The subagent is the same agent loop, scoped: it runs under the
 // parent's permissions through the same six gates, inherits the provider
-// key, and audits every step with parentage + depth. See docs/SUBAGENTS.md.
+// key, and audits every step with parentage + depth.
 
 // why: the model's tool_result is re-sent on every subsequent turn, so a
 // runaway subagent result would balloon the parent's context + rate-limit

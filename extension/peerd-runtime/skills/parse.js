@@ -40,7 +40,7 @@ export class SkillParseError extends Error {
 // Fields the standard defines. Unknown keys are preserved under `extra`
 // (forward-compat: Claude Code adds `allowed-tools`, `license`, etc.) but
 // never interpreted as behaviour by peerd — a skill cannot, e.g., set a
-// key that silently widens egress. See DESIGN.md "egress/safety story".
+// key that silently widens egress.
 // Keys peerd interprets into first-class meta fields. Everything else
 // (metadata, author, category, Claude Code's future additions, …) is
 // preserved verbatim under `extra` and NEVER interpreted as behaviour —

@@ -6,7 +6,7 @@
 // Q3"). A disposable runner drives the page (snapshot → act → observe) and
 // returns a plain-text summary of what changed. The caller never sees the
 // accessibility tree, element refs, or the action trace — only the summary. See
-// docs/DO-GET-CHECK-DESIGN.md and peerd-runtime/runner/index.js.
+// peerd-runtime/runner/index.js.
 
 import { runRunner, DO_TOOLSET, DO_MAX_STEPS, DO_SUFFIX } from '../../runner/index.js';
 import { wrapUntrustedRunner } from '../prompt-wrap.js';
@@ -28,7 +28,7 @@ export const doTool = {
   // resource axis with the execution mechanism). `dispatch: 'runner'` records
   // that it's carried out by spawning a browser-runner, surfaced as its own
   // dimension so the card reads "tab · via runner" with the runner transcript
-  // nested. See docs/DO-GET-CHECK-DESIGN.md.
+  // nested.
   primitive: 'tab',
   dispatch: 'runner',
   description: [

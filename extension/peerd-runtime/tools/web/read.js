@@ -1,7 +1,7 @@
 // @ts-check
 // read_article — safeFetch with tab fallback.
 //
-// The escalation default from POLICY.md lives here. We try safeFetch
+// The escalation default lives here. We try safeFetch
 // first; if `shouldEscalate` flags the response (SPA shell, anti-bot,
 // HTTP 403/429/503, or missing `expects` substrings), we open a real
 // tab, let it load JS, read the page text, close the tab. That escalation

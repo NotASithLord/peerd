@@ -11,7 +11,7 @@
 // store, a reader calls `.get()` (always current) and the routes call
 // `.update()` / `.reset()`.
 //
-// Migration semantics (Option A, PACKAGING.md) preserved exactly: `stored` holds
+// Migration semantics (Option A) preserved exactly: `stored` holds
 // ONLY the keys the user explicitly set (what persists + exports); the merged
 // view is `{ ...defaults, ...stored }`, so a key absent from `stored` tracks the
 // channel default across releases, and reset FORGETS keys rather than writing

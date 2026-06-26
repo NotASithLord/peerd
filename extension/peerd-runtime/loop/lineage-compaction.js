@@ -25,8 +25,7 @@
 // Recovery is "re-run the tool" (fresher than a stale snapshot anyway);
 // there is deliberately no re-expansion tool or body store. The classifier
 // keeps the results that are costly to re-run — writes, mutations, errors,
-// expensive computes — uncompacted longest. See
-// specs/DESIGN-LINEAGE-COMPRESSION.md.
+// expensive computes — uncompacted longest.
 
 import { estimateMessagesTokens, estimateTextTokens } from './estimate.js';
 import { extractInstanceHandle } from './instance-handle.js';

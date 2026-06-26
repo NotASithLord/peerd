@@ -314,8 +314,7 @@ const routeArgs = (view) => ({ state: currentState, send, voiceManager, uiAction
 // why only two routes: settings + context (memory/activity/denylist/
 // skills/hooks) moved to the full-tab options page — the panel is the
 // pure conversation surface. The old /settings, /skills, and /logs
-// routes died with their views; pre-release means no alias shims
-// (docs/DECISIONS.md #17).
+// routes died with their views; pre-release means no alias shims.
 //
 // why ONE shared component for both routes: it's a SPA and the header
 // doesn't change between /chat and /chats. Mapping each route to its own

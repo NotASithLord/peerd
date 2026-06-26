@@ -6,7 +6,7 @@
 //
 //   1. SW puts a prompt on the queue keyed by its UUIDv7
 //   2. SW pushes a 'confirm/request' message to the side panel port
-//   3. Side panel renders the prompt inline (DECISIONS.md §5)
+//   3. Side panel renders the prompt inline
 //   4. User clicks Yes-once / Yes-session / No
 //   5. Side panel posts 'confirm/answer' with { id, answer }
 //   6. SW resolves the waiting Promise; the dispatcher proceeds
@@ -25,7 +25,7 @@
 // radius as the vault DK), and they are origin-blind — "yes for this
 // session" on `click` approves `click` everywhere for that chat. A
 // persistent, origin-scoped `tool_grants` store is a documented
-// follow-up (TODO.md).
+// follow-up.
 
 import { uuidv7 } from '/shared/util.js';
 

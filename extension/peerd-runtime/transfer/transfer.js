@@ -1,5 +1,5 @@
 // @ts-check
-// Settings export / import (PACKAGING.md §"Export & import") — the
+// Settings export / import — the
 // explicit migration path between peerd installs, including between the
 // store and preview channels. No background sync, no shared storage:
 // the user exports a JSON file, the user imports it, and the import

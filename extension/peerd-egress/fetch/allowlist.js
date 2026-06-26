@@ -3,8 +3,8 @@
 //
 // To add an entry here, open a PR. The user-added endpoint set is
 // separate and lives in chrome.storage.local — see the registry in
-// peerd-provider/registry.js (the add flow is a TODO.md "Followups"
-// item). Keeping the hardcoded list in its own tiny file
+// peerd-provider/registry.js (the add flow is a documented
+// follow-up). Keeping the hardcoded list in its own tiny file
 // makes the diff for any change to it stand out in code review.
 //
 // Frozen so feature code can't accidentally `.push()` to it.

@@ -8,8 +8,6 @@
 // The SW (service-worker.js) wires persistence (chrome.storage.session), session
 // creation, and the relay; the loop reuses `rolling-summary.js` verbatim. All of
 // the security knobs the spec calls out live here so they're unit-testable.
-//
-// See the spec: docs/specs/DESIGN-17-resident-agents.md §"The web resident".
 
 import { wrapUntrusted } from '../tools/prompt-wrap.js';
 

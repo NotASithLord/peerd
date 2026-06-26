@@ -21,12 +21,12 @@
 //     per-host allowlist. So exfil/C2 to an arbitrary PUBLIC domain over
 //     the open-web path is NOT prevented here; the architectural
 //     mitigation is that the do/get/check runner has no web tools (see
-//     web-fetch.js + docs/DO-GET-CHECK-DEV-NOTES.md "Egress & SSRF").
+//     web-fetch.js).
 //   - Network requests originating from web pages the agent is browsing
 //     (normal browser CORS + the denylist §4.2)
 //   - Requests from inside the WebVM — those go through CheerpX's
 //     emulated socket layer, which we route through webFetch when the VM
-//     has network enabled (off by default per DECISIONS.md)
+//     has network enabled (off by default)
 //
 // What is on the allowlist:
 //   - The "hardcoded" set (Anthropic, OpenAI, Ollama loopback) — these
@@ -36,7 +36,7 @@
 //     under `provider_endpoints.v1`. Adding goes through an explicit
 //     per-endpoint "you are adding api.example.com" confirmation flow
 //     (peerd-provider/registry.js + a per-host runtime grant flow —
-//     not built yet; see TODO.md "Followups").
+//     not built yet).
 
 import { EgressDeniedError } from './errors.js';
 import { isRedirect } from './web-fetch.js';

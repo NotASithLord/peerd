@@ -5,13 +5,13 @@ import {
 } from '../../../extension/peerd-engine/vm-net/capability-info.js';
 
 describe('capabilitiesText', () => {
-  test('lists what works and what does not, names the doc', () => {
+  test('lists what works and what does not', () => {
     const t = capabilitiesText();
     expect(t).toContain('WORKS:');
     expect(t).toContain('git clone');
     expect(t).toContain('NOT AVAILABLE');
     expect(t).toContain('apt-get install');
-    expect(t).toContain('VM-NETWORKING.md');
+    expect(t).toContain('build a custom image');
   });
   test('covers every capability entry', () => {
     const t = capabilitiesText();

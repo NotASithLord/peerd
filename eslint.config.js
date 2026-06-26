@@ -116,7 +116,7 @@ export default [
           patterns: [
             {
               regex: '(^|/)peerd-[a-z]+/(?!index\\.js$).+',
-              message: 'Cross-module imports must go through /peerd-<name>/index.js. See docs/architecture.md §4.',
+              message: 'Cross-module imports must go through /peerd-<name>/index.js.',
             },
             // The dweb module is stricter still: NOTHING outside it
             // may import it — not even its index.js. Core code programs
@@ -128,7 +128,7 @@ export default [
             // would break the store service worker outright.
             {
               regex: '(^|/)peerd-distributed/.*',
-              message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly. See PACKAGING.md.',
+              message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly.',
             },
           ],
         },
@@ -280,7 +280,7 @@ export default [
           patterns: [
             {
               regex: '(^|/)peerd-distributed/.*',
-              message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly. See PACKAGING.md.',
+              message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly.',
             },
           ],
         },

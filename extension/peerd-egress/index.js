@@ -10,7 +10,7 @@
 //
 // Grouped here by sub-area (vault, fetch, denylist, confirm,
 // audit, storage). When the surface grows past ~30 names, time to ask
-// whether the module is doing too much — see architecture.md §7.
+// whether the module is doing too much.
 
 // --- vault ---------------------------------------------------------------
 export { createVault, purgeVaultBlob, DEFAULT_AUTO_LOCK_MS } from './vault/vault.js';

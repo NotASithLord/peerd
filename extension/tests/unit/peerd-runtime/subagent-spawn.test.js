@@ -3,7 +3,7 @@
 // the REAL session store. Only the model is mocked. This is the
 // integration the Bun unit tests can't run (they mock the loop): a spawn
 // actually creates a child session, drives a turn through the loop, and
-// returns the final assistant text. See docs/SUBAGENTS.md.
+// returns the final assistant text.
 
 import { describe, it, expect } from '../../framework.js';
 import {

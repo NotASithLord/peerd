@@ -13,7 +13,7 @@
 // session model" (the last-resort fallback) — runRunner ALSO falls back to
 // the inherited model at runtime if the resolved one blows its step budget.
 //
-// Resolution order (first match wins) — mirrors FEATURE-LOCAL-WEBGPU.md §2.3:
+// Resolution order (first match wins):
 //   1. Explicit user pin (Settings → Page-reader model), if set.
 //   2. Local WebGPU runner, when downloaded + available — on-device, keyless,
 //      provider-independent. This is the rung the local Gemma runner plugs

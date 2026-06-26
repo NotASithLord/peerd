@@ -45,7 +45,7 @@ describe('session store', () => {
     expect(session.model).toBe('claude-sonnet-4-6');
     expect(session.messages).toEqual([]);
     expect(session.createdAt).toBe(1000);
-    // Subagent fields default to a top-level chat (docs/SUBAGENTS.md).
+    // Subagent fields default to a top-level chat.
     expect(session.kind).toBe('chat');
     expect(session.depth).toBe(0);
     expect(session.parentSessionId).toBe(undefined);

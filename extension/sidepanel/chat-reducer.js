@@ -176,7 +176,7 @@ export const INITIAL_STATE = Object.freeze({
   // Streaming stdout/stderr per in-flight vm_boot, keyed by toolUseId.
   vmStreams: Object.freeze({}),
   // Subagent transcripts for inline rendering under spawn_subagent tool
-  // cards (docs/SUBAGENTS.md).
+  // cards.
   subagents: Object.freeze({ byToolUse: {}, sessions: {} }),
   // DESIGN-17 P1 glass pane: resident DISPLAY cards, keyed by the message_resident
   // tool_use id. Each is self-contained (its own sliced transcript) so a long-lived

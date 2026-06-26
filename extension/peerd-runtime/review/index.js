@@ -5,7 +5,7 @@
 // diff and returns a STRUCTURED summary {verdict, severity, issues[], fixes}.
 // Implemented over the EXISTING subagent machinery (subagent/spawn.js): the
 // reviewer is a spawned child with a clean session and a READ-ONLY tool
-// subset. The writer stays the single writer. See docs/REVIEW.md.
+// subset. The writer stays the single writer.
 
 export { makeRequestReview } from './orchestrator.js';
 export {

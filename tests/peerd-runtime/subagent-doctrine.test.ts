@@ -1,6 +1,6 @@
 // Doctrine guard: peerd.runtime.runAgent is for an agent embedded in an
 // artifact the agent BUILDS FOR THE USER — never an orchestration shortcut for
-// the model's own work (that's the spawn_subagent tool; docs/SUBAGENTS.md). The
+// the model's own work (that's the spawn_subagent tool). The
 // tool descriptions are the model's nudges, so they must not invite the
 // forbidden "fan out via a sandbox" pattern. These assertions pin that.
 
