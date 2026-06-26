@@ -44,9 +44,9 @@ import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
   EXPOSURE_RESIDENT, isResidentMutatingTool, isAllowedForResidentKind, residentTargetId,
-  residentWebTabTarget,
+  residentWebTabTarget, isRunnerPageTool,
 } from './exposure.js';
-import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
+import { RESIDENT_TAB_AGENTS, WEB_RESIDENT } from '/shared/flags.js';
 import {
   decideAction,
   PERMISSION_MODES,
@@ -137,6 +137,14 @@ export const residentTierGate = (tool, args, ctx, flagOn) => {
   if (ctx?.exposure !== EXPOSURE_RESIDENT) {
     if (isResidentMutatingTool(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is resident-only — message the instance's resident (message_resident)` };
+    }
+    // DESIGN-17 web-resident cutover: with the web resident live, the do/get/check
+    // page runner leaves the MAIN agent — it reaches a page by messaging that tab's
+    // resident. The wall mirrors the descriptor strip (filterResidentSurface). Scoped
+    // to exposure==='main': SUBAGENTS (exposure unset) keep do/get/check as their page
+    // path (they can't message residents), and the runner itself never calls them.
+    if (WEB_RESIDENT && ctx?.exposure === 'main' && isRunnerPageTool(tool.name)) {
+      return { allowed: false, reason: `'${tool.name}' is folded into the web resident — open_tab, then message that tab's resident to read or act on the page` };
     }
     return null;
   }

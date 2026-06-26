@@ -89,8 +89,23 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
   });
 
   test('always allows a non-hidden tool, even on the main turn', () => {
-    expect(eg({ name: 'do' }, {}, { exposure: 'main' }).allowed).toBe(true);
+    expect(eg({ name: 'open_tab' }, {}, { exposure: 'main' }).allowed).toBe(true);
     expect(eg({ name: 'list_tabs' }, {}, { exposure: 'main' }).allowed).toBe(true);
+  });
+
+  // DESIGN-17 web-resident cutover: with WEB_RESIDENT on, the do/get/check page
+  // runner leaves the MAIN agent (it messages a tab's resident instead). Subagents
+  // (exposure unset) keep them — they can't message residents.
+  test('refuses do/get/check on the MAIN turn (folded into the web resident)', () => {
+    for (const name of ['do', 'get', 'check']) {
+      const r = eg({ name }, {}, { exposure: 'main' });
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toContain('web resident');
+    }
+  });
+  test('a subagent (exposure unset) still keeps do/get/check', () => {
+    expect(eg({ name: 'do' }, {}, { exposure: null }).allowed).toBe(true);
+    expect(eg({ name: 'get' }, {}, {}).allowed).toBe(true);
   });
 });
 
@@ -228,13 +243,16 @@ describe('DESIGN-17 resident tier — the tool sets', () => {
     expect(residentTargetId('vm_write_file', { path: '/x' })).toBeUndefined();
   });
 
-  test('residentDescriptors filters to the kind; filterResidentSurface respects the flag', () => {
-    const all = [{ name: 'app_update' }, { name: 'vm_boot' }, { name: 'do' }, { name: 'message_resident' }];
+  test('residentDescriptors filters to the kind; filterResidentSurface respects the flags', () => {
+    const all = [{ name: 'app_update' }, { name: 'vm_boot' }, { name: 'do' }, { name: 'get' }, { name: 'message_resident' }, { name: 'open_tab' }];
     expect(residentDescriptors(all, 'app').map((t) => t.name)).toEqual(['app_update']);
-    // flag ON: the mutating tier leaves main, message_resident stays.
-    expect(filterResidentSurface(all, true).map((t) => t.name)).toEqual(['do', 'message_resident']);
-    // flag OFF: status quo — mutating tier stays, message_resident hidden.
-    expect(filterResidentSurface(all, false).map((t) => t.name)).toEqual(['app_update', 'vm_boot', 'do']);
+    // flag ON, web OFF: the mutating tier leaves main; do/get/check stay (no web
+    // resident to replace them); message_resident stays.
+    expect(filterResidentSurface(all, true, false).map((t) => t.name)).toEqual(['do', 'get', 'message_resident', 'open_tab']);
+    // flag ON, web ON: do/get/check ALSO leave main (folded into the web resident).
+    expect(filterResidentSurface(all, true, true).map((t) => t.name)).toEqual(['message_resident', 'open_tab']);
+    // flag OFF: status quo — mutating tier + do/get/check stay, message_resident hidden.
+    expect(filterResidentSurface(all, false).map((t) => t.name)).toEqual(['app_update', 'vm_boot', 'do', 'get', 'open_tab']);
   });
 });
 

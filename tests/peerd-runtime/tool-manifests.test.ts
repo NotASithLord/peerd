@@ -182,7 +182,9 @@ describe('exposureGate — per-session manifest refusal at dispatch', () => {
   });
 
   test('allows manifest-included tools; null toolAllow keeps today\'s behavior', () => {
-    expect(eg({ name: 'get' }, {}, { exposure: 'main', toolAllow: new Set(['get']) }).allowed).toBe(true);
+    // js_run (a non-folded main tool) exercises the manifest allow-path; do/get/check
+    // would be refused earlier by the web-resident cutover, so they can't be used here.
+    expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: new Set(['js_run']) }).allowed).toBe(true);
     // js_run stays on the main agent (not the resident-mutating tier), so a
     // null/absent manifest leaves it allowed — the no-manifest status quo.
     expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: null }).allowed).toBe(true);

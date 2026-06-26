@@ -159,6 +159,19 @@ export const RESIDENT_MUTATING_TOOLS = Object.freeze(new Set([
 /** Is this a tiered mutating tool (resident-only when the flag is on)? Pure. @param {string} name */
 export const isResidentMutatingTool = (name) => RESIDENT_MUTATING_TOOLS.has(name);
 
+// DESIGN-17 web-resident cutover — the do/get/check page RUNNER, folded into the
+// actor model. When the WEB resident is live the orchestrator reaches a page ONLY
+// by messaging that tab's resident (open_tab + message_resident), so these leave
+// the MAIN agent. Gated on WEB_RESIDENT (not just RESIDENT_TAB_AGENTS): a flag-on-
+// but-web-off config keeps do/get/check, since there's no web resident to replace
+// them. Subagents (exposure unset) keep them too — they can't message residents.
+// The tools + the runner stay REGISTERED (reachable flag/web-off) — only the
+// main-agent surface narrows.
+export const RUNNER_PAGE_TOOLS = Object.freeze(new Set(['do', 'get', 'check']));
+
+/** Is this one of the do/get/check page-runner tools? Pure. @param {string} name */
+export const isRunnerPageTool = (name) => RUNNER_PAGE_TOOLS.has(name);
+
 // DESIGN-17 web resident — the DOM toolset it owns. MUST mirror the runner's
 // DO_TOOLSET (`runner/index.js`): the web resident IS the runner's lineage with a
 // tier marker + a tab pin, so it holds exactly the runner's tools. Kept as a
@@ -268,18 +281,22 @@ export const residentDescriptors = (descriptors, kind) => {
 };
 
 /**
- * Re-shape the MAIN agent's descriptor list for the resident world. Flag ON:
- * the mutating tier LEAVES the main agent (it delegates via message_resident,
- * which is kept). Flag OFF: status quo — the mutating tier stays on main and
- * message_resident is hidden (its orchestrator isn't wired). Pure; composes
- * after mainAgentDescriptors()/the instance/dweb/goal filters.
+ * Re-shape the MAIN agent's descriptor list for the resident world. Flag ON: the
+ * mutating tier LEAVES the main agent (it delegates via message_resident, which is
+ * kept); and when the WEB resident is live (webOn), the do/get/check page runner
+ * leaves too (the orchestrator reaches pages by messaging a tab's resident). Flag
+ * OFF: status quo — the mutating tier stays on main and message_resident is hidden
+ * (its orchestrator isn't wired). Pure; composes after mainAgentDescriptors()/the
+ * instance/dweb/goal filters.
  * @template {{ name: string }} T
- * @param {ReadonlyArray<T>} descriptors @param {boolean} flagOn @returns {T[]}
+ * @param {ReadonlyArray<T>} descriptors @param {boolean} flagOn @param {boolean} [webOn] @returns {T[]}
  */
-export const filterResidentSurface = (descriptors, flagOn) =>
-  flagOn
-    ? descriptors.filter((t) => !RESIDENT_MUTATING_TOOLS.has(t.name))
-    : descriptors.filter((t) => t.name !== 'message_resident');
+export const filterResidentSurface = (descriptors, flagOn, webOn = false) => {
+  if (!flagOn) return descriptors.filter((t) => t.name !== 'message_resident');
+  let out = descriptors.filter((t) => !RESIDENT_MUTATING_TOOLS.has(t.name));
+  if (webOn) out = out.filter((t) => !RUNNER_PAGE_TOOLS.has(t.name));
+  return out;
+};
 
 // ── dweb tools: gated on the dweb being enabled ─────────────────────────────
 // The dweb network tools (publish/discover/install) are exposed to the agent

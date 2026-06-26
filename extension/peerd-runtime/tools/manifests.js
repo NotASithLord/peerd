@@ -39,14 +39,19 @@
 // keep them.
 export const TOOL_MANIFEST_PRESETS = Object.freeze({
   research: Object.freeze({
-    description: 'web reads + search, do/get/check browsing, memory, introspection — no VM/JS/App, no file edits, no spawning',
+    description: 'web reads + search, page browsing (message a tab\'s resident), memory, introspection — no VM/JS/App, no file edits, no spawning',
     allow: Object.freeze([
       // web fetch surface (the 'web' primitive). submit_form stays out:
       // research is read-shaped and form submission mutates the world.
       'read_article', 'call_api', 'web_search', 'capture',
-      // the main agent's browser surface + tab management
-      'do', 'get', 'check', 'list_tabs', 'open_tab',
-      // runner internals: DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
+      // the main agent's browser surface: open/enumerate tabs + message a tab's
+      // web resident to read or act (do/get/check are folded into the resident).
+      'list_tabs', 'open_tab', 'message_resident',
+      // do/get/check stay for SUBAGENTS (they can't message residents) + the
+      // flag-off escape hatch; the main agent has them folded by the cutover.
+      'do', 'get', 'check',
+      // page DOM toolset (inherited by the web resident, which DOES the page work):
+      // DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
       'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
       // memory
@@ -59,10 +64,14 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
     ]),
   }),
   'browse-only': Object.freeze({
-    description: 'passive browsing — read-only page access (get/check), navigation, web reads; no page actions, no memory, no execution',
+    description: 'passive browsing — read-only page access via a tab\'s resident, navigation, web reads; no page actions, no memory, no execution',
     allow: Object.freeze([
-      'get', 'check', 'list_tabs', 'open_tab', 'navigate',
-      // get/check runner internals: READ_TOOLSET (observe, never mutate)
+      // open/enumerate + message a tab's resident; the resident is held READ-ONLY
+      // by this manifest (only the READ DOM tools below are allowed, so it can
+      // observe but not click/type — the manifest constrains the resident too).
+      'list_tabs', 'open_tab', 'navigate', 'message_resident',
+      'get', 'check',   // subagent read path + flag-off escape hatch
+      // READ_TOOLSET only (observe, never mutate) — inherited by the web resident.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',
       // web reads
       'read_article', 'call_api', 'web_search',

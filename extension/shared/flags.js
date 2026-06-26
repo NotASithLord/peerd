@@ -50,13 +50,16 @@ export const RESIDENT_TAB_AGENTS = true;
  * disposable browser-runner into the actor model: a `kind:'web'` resident OWNS
  * one tab, holds the DOM toolset (keyless + pinned, like the runner), accumulates
  * a SELF-FENCED rolling progress summary (compress-at-every-boundary), and is
- * reached by an addressed message (sync-await) instead of a raw-`tabId` tool.
+ * reached by an addressed ASYNC message (uniform actor model) instead of a
+ * raw-`tabId` tool.
  *
- * OFF (dark): this is the forward design (spec: §"The web resident"), built behind
- * its own sub-flag so it ships unreachable while the three P0 engine residents
- * stay on. The browser-coupled wiring needs the CDP harness to verify; with this
- * false the gate/exposure/SW additions are inert and do/get/check + the runner
- * behave exactly as today. Requires RESIDENT_TAB_AGENTS too (it's a resident kind).
- * Source-flip + reload; no runtime/UI toggle.
+ * ON: every open tab is a resident; the orchestrator reaches a page by messaging
+ * its tab's resident (open_tab + message_resident), and the do/get/check page
+ * runner LEAVES the main agent (filterResidentSurface/residentTierGate gate the
+ * strip on THIS flag — not RESIDENT_TAB_AGENTS — so flipping it OFF restores
+ * do/get/check + the runner exactly as before, the escape hatch). Requires
+ * RESIDENT_TAB_AGENTS (it's a resident kind). The browser-coupled page path needs
+ * the CDP harness to verify live before store ship. Source-flip + reload; no
+ * runtime/UI toggle.
  */
-export const WEB_RESIDENT = false;
+export const WEB_RESIDENT = true;

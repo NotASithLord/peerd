@@ -25,7 +25,7 @@ import {
 import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the resident turn setup readable. Flag-gated so they're inert when off.
-import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
+import { RESIDENT_TAB_AGENTS, WEB_RESIDENT } from '/shared/flags.js';
 import { EXPOSURE_RESIDENT, residentDescriptors, residentTargetIdField, filterResidentSurface } from '../tools/exposure.js';
 
 /**
@@ -296,6 +296,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         !!goalActiveFor?.(sessionId),
       ),
       RESIDENT_TAB_AGENTS,
+      // WEB resident live → the do/get/check page runner also leaves the main agent.
+      WEB_RESIDENT,
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     toolContext.instanceState = instanceState;
     return descriptors;
