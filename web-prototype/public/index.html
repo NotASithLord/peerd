@@ -371,21 +371,34 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   document.getElementById('gemmaDl').addEventListener('click', async ()=>{
     if(gemmaReady||gemmaLoading) return; gemmaLoading=true;
     const prog=document.getElementById('gemmaProg'), fill=document.getElementById('gemmaFill'), pct=document.getElementById('gemmaPct'), btn=document.getElementById('gemmaDl');
-    prog.hidden=false; btn.disabled=true; btn.textContent='⬇ Downloading…'; setGemmaStat('loading…');
+    prog.hidden=false; btn.disabled=true; btn.textContent='⬇ Downloading…'; setGemmaStat('loading…'); pct.style.color='';
+    let watchdog=null, hit100=false;
     try{
       await initGemma((p)=>{
-        if(p.status==='phase' && typeof p.overall!=='number') pct.textContent=p.phase;
-        if(typeof p.overall==='number'){ fill.style.width=p.overall.toFixed(1)+'%'; pct.textContent=`downloading weights · ${p.overall.toFixed(0)}%`; }
+        if(typeof p.overall==='number'){
+          fill.style.width=p.overall.toFixed(1)+'%';
+          if(p.overall>=99.5){
+            // the bar = the DOWNLOAD; the GPU compile happens after, with no
+            // progress events — say so instead of a stuck "100%".
+            pct.textContent='weights downloaded · compiling onto your GPU (first load can take a minute)…';
+            if(!hit100){ hit100=true; watchdog=setTimeout(()=>{ if(!gemmaReady) pct.textContent='still compiling on the GPU… large model — if this stalls for several minutes your GPU may not have enough memory (~3 GB) for Gemma.'; }, 45000); }
+          } else {
+            pct.textContent=`downloading weights · ${p.overall.toFixed(0)}%`;
+          }
+        } else if(p.status==='phase'){ pct.textContent=p.phase==='ready'?'finalizing…':p.phase; }
       });
-      gemmaReady=true; gemmaLoading=false; fill.style.width='100%'; pct.textContent='ready · running locally on your GPU';
+      clearTimeout(watchdog);
+      gemmaReady=true; gemmaLoading=false; fill.style.width='100%'; pct.style.color='var(--green)'; pct.textContent='ready · running locally on your GPU';
       const gc=document.getElementById('gchip'); gc.classList.add('on'); gc.querySelector('.gtxt').textContent='gemma: ready';
       setGemmaStat('ready · local'); btn.textContent='✓ Gemma loaded';
       composer.disabled=false; sendBtn.disabled=false; composer.placeholder='Ask Gemma to do something…'; composer.focus();
       agent = makeAgent({ generate: generateGemma, runTool, tools: TOOLS, system: SYSTEM });
       say('bot','Gemma is loaded and running on your GPU — no key, no server. Ask me anything: I can write and run notebooks, open the peer network, and more. Try <i>"chart the first 10 fibonacci numbers"</i>.');
     }catch(e){
+      clearTimeout(watchdog);
       gemmaLoading=false; btn.disabled=false; btn.textContent='⬇ Download Gemma · run locally';
-      pct.textContent='couldn’t start: '+(e?.message||e); setGemmaStat('unavailable');
+      pct.style.color='var(--red)'; pct.textContent='couldn’t start: '+(e?.message||e); setGemmaStat('unavailable');
+      console.error('[gemma] load error', e);
     }
   });
 
