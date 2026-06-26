@@ -25,21 +25,24 @@ export const messageResidentTool = {
   name: 'message_resident',
   primitive: 'subagent',
   description: [
-    'Send a request to the RESIDENT that owns a tab-hosted instance (a WebVM,',
-    'Notebook, or App). The resident holds that environment\'s tools and does',
-    'the work — running commands, editing files, building the UI — in its own',
-    'focused context. ASYNC: returns immediately; the resident\'s reply arrives',
-    'as a fenced note on a LATER turn. Do NOT wait or poll. `to` is the instance',
-    'id (from the create/list tools); `message` is the natural-language request.',
-    'Use this instead of the instance\'s own *_write_file / *_update / boot tools —',
-    'those now live ONLY on the resident.',
+    'Delegate a focused GOAL to the RESIDENT that owns a tab — a web PAGE (address',
+    'by its tabId from list_tabs / open_tab), or a WebVM / Notebook / App (address',
+    'by its instance id from vm_list / js_list / app_list). The resident holds that',
+    'environment\'s tools and does the work — driving the page, running commands,',
+    'editing files, building the UI — in its own focused context, then replies.',
+    'ASYNC, always: returns immediately; the reply arrives as a fenced note on a',
+    'LATER turn. NEVER wait or poll — fire it and continue or end your turn; react',
+    'to each reply when it lands. A resident is STATEFUL: reuse the same `to` for',
+    'follow-up work on the same page/instance (no re-orientation); message a',
+    'DIFFERENT tab/instance for independent work — they run in parallel. This is',
+    'your ONLY path to act on a page or mutate an instance.',
   ].join(' '),
   schema: {
     type: 'object',
     properties: {
       to: {
         type: 'string',
-        description: 'The tab-hosted instance id to address (e.g. an app/vm/notebook id from app_list / vm_list / js_list).',
+        description: 'Who to address: a web page\'s tabId (from list_tabs / open_tab) OR a vm/notebook/app instance id (from vm_list / js_list / app_list). Every open tab has a resident, minted on first message.',
       },
       message: {
         type: 'string',

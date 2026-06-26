@@ -129,11 +129,15 @@ describe('residentBlock (the per-kind tuned prompt)', () => {
     }
   });
 
-  test('the web resident carries DOM-driving lore, DOM-as-truth, and no code notes', () => {
+  test('the web resident carries DOM-driving lore, the injection drill, and no code notes', () => {
     const web = residentBlock('web');
     expect(web.includes('browser-page operator')).toBe(true);
-    expect(web.includes('RE-SNAPSHOT')).toBe(true);
+    expect(web.includes('re-snapshot')).toBe(true);
     expect(web.includes('UNTRUSTED')).toBe(true);
+    // the full IGNORE/FLAG/EXCLUDE injection drill (relocated from the runner prompt)
+    expect(web.includes('IGNORE it')).toBe(true);
+    expect(web.includes('FLAG it')).toBe(true);
+    expect(web.includes('EXCLUDE it')).toBe(true);
     expect(web.includes('<code-style>')).toBe(false); // web writes no JS app/notebook code
   });
 
@@ -192,7 +196,7 @@ describe('applyResidentOrchestration on the live system-prompt.txt', () => {
     const base = await Bun.file('./extension/peerd-provider/system-prompt.txt').text();
     const out = applyResidentOrchestration(base);
     // the orchestrator framing is in...
-    expect(out.includes('message_resident — hand a tab-hosted instance')).toBe(true);
+    expect(out.includes('message_resident — hand a focused GOAL to a tab\'s resident')).toBe(true);
     expect(out.includes('sandboxes: you bootstrap, the resident runs')).toBe(true);
     // ...and the direct-drive lore is OUT (relocated to the residents).
     expect(out.includes('run a shell command in a VM')).toBe(false);
@@ -209,5 +213,22 @@ describe('applyResidentOrchestration on the live system-prompt.txt', () => {
     expect(out.includes('grow it file by file with\napp_write_file')).toBe(false);
     // net: the main prompt got materially smaller (the savings).
     expect(out.length).toBeLessThan(base.length - 2000);
+  });
+
+  test('webOn folds do/get/check browsing into the tabs-are-residents model', async () => {
+    const base = await Bun.file('./extension/peerd-provider/system-prompt.txt').text();
+    const webOn = applyResidentOrchestration(base, true);
+    const webOff = applyResidentOrchestration(base, false);
+    // WEB ON: do/get/check leave the browser group + the browsing section reframes.
+    expect(webOn.includes('do                       — perform an action')).toBe(false);
+    expect(webOn.includes('browsing — every tab is a resident')).toBe(true);
+    expect(webOn.includes('focused RUNNER handles')).toBe(false);     // old runner prose gone
+    expect(webOn.includes('Reuse vs. open')).toBe(true);              // the enumerate judgment
+    expect(webOn.includes("The tab's RESIDENT is your page-content boundary")).toBe(true); // trust reframed
+    expect(webOn.includes('get to work with do/get/check')).toBe(false);  // denylist closer reframed
+    // WEB OFF (escape hatch): do/get/check + the runner prose stay verbatim.
+    expect(webOff.includes('do                       — perform an action')).toBe(true);
+    expect(webOff.includes('focused RUNNER handles')).toBe(true);
+    expect(webOff.includes('every tab is a resident')).toBe(false);
   });
 });
