@@ -52,7 +52,7 @@
   .tab:hover{color:var(--paper);background:var(--panel)}
   .tab[aria-selected="true"]{background:var(--panel2);color:var(--white);border-color:var(--line2)}
   .tab .favicon{width:17px;height:17px;border-radius:4px;display:grid;place-items:center;font-family:var(--disp);font-size:10px;font-weight:700;color:#0a0c0d;flex:none}
-  .k-engine{background:linear-gradient(135deg,#fbbf24,#f59e0b)}.k-dweb{background:linear-gradient(135deg,#e879f9,#d946ef)}
+  .k-engine{background:linear-gradient(135deg,#fbbf24,#f59e0b)}.k-dweb{background:linear-gradient(135deg,#e879f9,#d946ef)}.k-mail{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
   .tab .tab-title{overflow:hidden;text-overflow:ellipsis}
   .tab .tab-close{display:grid;place-items:center;width:18px;height:18px;border-radius:5px;color:var(--faint);font-size:14px}
   .tab .tab-close:hover{background:var(--line);color:var(--paper)}
@@ -93,7 +93,7 @@
   .lcard .favicon{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-family:var(--disp);font-size:11px;font-weight:700;color:#0a0c0d}
   .lcard h4{margin:0;font-size:13.5px;font-family:var(--mono)}
   .lcard .badge{margin-left:auto;font-family:var(--mono);font-size:8.5px;letter-spacing:.05em;text-transform:uppercase;border-radius:5px;padding:1px 6px}
-  .badge.real{color:var(--green);border:1px solid rgba(34,197,94,.4)}.badge.soon{color:var(--faint);border:1px solid var(--line)}
+  .badge.real{color:var(--green);border:1px solid rgba(34,197,94,.4)}.badge.soon{color:var(--faint);border:1px solid var(--line)}.badge.demo{color:var(--cyan);border:1px solid rgba(0,183,235,.4)}
   .lcard p{margin:0;font-size:12px;color:var(--muted)}
   .funnel-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:24px}
   .fcol h5{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:0 0 9px}
@@ -233,6 +233,7 @@
         <div class="launch">
           <button class="lcard" data-open="notebook"><div class="lc-top"><span class="favicon k-engine">N</span><h4>Notebook</h4><span class="badge real">real</span></div><p>Write &amp; run JS in a sealed worker. Charts, tables, peerd:std.</p></button>
           <button class="lcard" data-open="peers"><div class="lc-top"><span class="favicon k-dweb">◈</span><h4>Peers</h4><span class="badge real">real</span></div><p>Join the live peerd lobby over WebRTC. Observe-only.</p></button>
+          <button class="lcard" data-open="gmail"><div class="lc-top"><span class="favicon k-mail">M</span><h4>Mail</h4><span class="badge demo">fake site</span></div><p>A stand-in web app the agent reads &amp; acts on — a preview of what the extension does to your real tabs.</p></button>
           <button class="lcard" data-open="app" disabled><div class="lc-top"><span class="favicon k-engine">◇</span><h4>App</h4><span class="badge soon">soon</span></div><p>Build a client-side app in a sandboxed iframe.</p></button>
           <button class="lcard" data-open="webvm" disabled><div class="lc-top"><span class="favicon k-engine">⌘</span><h4>WebVM</h4><span class="badge soon">soon</span></div><p>A real Linux VM in WebAssembly (CheerpX).</p></button>
         </div>
@@ -241,14 +242,14 @@
           <div class="fcol"><h5>in this page</h5>
             <div class="frow on"><span class="d"></span>Notebooks · sealed worker</div>
             <div class="frow on"><span class="d"></span>Peers · live dweb</div>
-            <div class="frow soon"><span class="d"></span>Apps · sandboxed iframe</div>
-            <div class="frow soon"><span class="d"></span>Linux VM · WebAssembly</div>
+            <div class="frow on"><span class="d"></span>do · get · check · on fake sites</div>
+            <div class="frow soon"><span class="d"></span>Apps · Linux VM</div>
           </div>
           <div class="fcol"><h5>extension only</h5>
-            <div class="frow locked"><span class="d"></span>Your tabs</div>
+            <div class="frow locked"><span class="d"></span>Your <i>real</i> tabs</div>
             <div class="frow locked"><span class="d"></span>Your logged-in sessions</div>
-            <div class="frow locked"><span class="d"></span>do · get · check</div>
-            <div class="frow locked"><span class="d"></span>The agent across the web</div>
+            <div class="frow locked"><span class="d"></span>The agent across the live web</div>
+            <div class="frow locked"><span class="d"></span>Cross-site, authenticated</div>
           </div>
         </div>
 
@@ -280,6 +281,7 @@
       <div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Tap an action to drive a tab. The agent goes live in the next slice; today these run the real substrate directly.</div></div>
     </div>
     <div class="starters">
+      <button class="starter" id="act-mail">▸ Triage my inbox &amp; reply to anything urgent</button>
       <button class="starter real" id="act-chart">▸ Chart some numbers (real notebook)</button>
       <button class="starter" id="act-peers">▸ Show me who's on the network</button>
     </div>
@@ -292,6 +294,7 @@
 <script type="module">
   import { runNotebook } from '/web/notebook-host.js';
   import { startPeer } from '/web/peer-host.js';   // real observe-only dweb peer, started on tab activation
+  import { mountMail } from '/web/gmail-host.js';   // a fake website the agent can DRIVE (the do/get/check story, sandboxed)
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
 
@@ -314,6 +317,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     peers:    { fav:'k-dweb',   glyph:'◈', title:'peers',    addr:()=>'peers/peerd-global', single:true },
     app:      { fav:'k-engine', glyph:'◇', title:'app',      addr:()=>'app/new', single:true, soon:true },
     webvm:    { fav:'k-engine', glyph:'⌘', title:'webvm',    addr:()=>'webvm/debian', single:true, soon:true },
+    gmail:    { fav:'k-mail',   glyph:'M', title:'Mail',     addr:()=>'mail.demo/inbox', single:true },
   };
   const reg = new Map([['home',{kind:'home'}],['peers',{kind:'peers'}]]);
   let seq = 0, active = 'home';
@@ -381,6 +385,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     p.innerHTML = panelHTML(kind, id);
     document.getElementById('viewport').appendChild(p);
     if(kind==='notebook'){ wireNotebook(p, id, seed); }
+    if(kind==='gmail'){ p.style.padding='0'; p._mail = mountMail(p); }   // fake site fills the panel; agent API on p._mail
     activate(id);
     if(kind==='notebook' && run){ p._run && p._run(); }
     return id;
@@ -414,6 +419,29 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     addMsg('<div class="msg user"><div class="who">you</div><div class="bubble">Who\'s on the network?</div></div>');
     addMsg('<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Joining the live peerd lobby over WebRTC.<div class="toolcall" style="border-left-color:var(--magenta)"><span class="g" style="background:var(--magenta)">◈</span>dweb_discover · base network<span class="ok">✓</span></div></div></div>');
     openTab('peers');
+  });
+
+  // ---- the fake-site demo: the agent triages a fake inbox, VISIBLY -----------
+  // Same read-DOM / click / type loop the extension runs on your real tabs, here
+  // on a site WE render (the funnel boundary, made safe). Scripted today; wires
+  // to the live Gemma agent's tools in the agent slice (p._mail is the surface).
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+  const tool = (g,txt,color)=>`<div class="toolcall"${color?` style="border-left-color:${color}"`:''}><span class="g"${color?` style="background:${color}"`:''}>${g}</span>${txt}<span class="ok">✓</span></div>`;
+  document.getElementById('act-mail').addEventListener('click', async ()=>{
+    const btn=document.getElementById('act-mail'); if(btn.disabled) return; btn.disabled=true;
+    addMsg('<div class="msg user"><div class="who">you</div><div class="bubble">Triage my inbox and reply to anything urgent.</div></div>');
+    const id = openTab('gmail'); const mail = panelEl(id)._mail;
+    document.getElementById('browser').classList.add('chat-open');
+    await sleep(750);
+    addMsg('<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Reading your inbox.'+tool('M','tab.read · mail.demo/inbox','#ef4444')+'</div></div>');
+    const unread = mail.list().filter(m=>m.unread);
+    await sleep(650);
+    await mail.open('m1'); await sleep(250); await mail.open('m3'); await sleep(250);
+    addMsg('<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>'+unread.length+' unread. <b>Sarah</b> wants to move the roadmap review to <b>Thursday 3pm</b>; <b>Marcus</b> sent invoice #4471 (due Friday); the rest are notifications. Sarah\'s is time-sensitive — replying.</div></div>');
+    await sleep(550);
+    await mail.reply('m1', 'Thursday at 3pm works for me — see you then. Thanks for the heads up!');
+    addMsg('<div class="msg"><div class="who"><span class="orb"></span> peerd</div><div>Replied to Sarah, confirming <b>Thursday 3pm</b>.'+tool('M','tab.click · type · send','#ef4444')+'<div style="margin-top:7px;color:var(--muted);font-size:12.5px">That\'s the same <b>read&nbsp;·&nbsp;click&nbsp;·&nbsp;type</b> loop the extension runs — but on your <i>real</i> Gmail, with your real session. <a class="ext-cta" style="display:inline-block;margin-top:6px;padding:4px 10px;font-size:11px" href="#" onclick="return false">Get the extension →</a></div></div></div>');
+    btn.disabled=false;
   });
 
   // mobile chat sheet
