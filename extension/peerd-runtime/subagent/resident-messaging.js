@@ -10,18 +10,18 @@
 // a per-sender runaway guard. Functional core / imperative shell: every IO
 // surface is injected, so the spawn → run → reply flow is unit-testable.
 //
-// Two reply shapes by kind. The three ENGINE kinds (webvm/notebook/app) run
-// potentially-long turns → ASYNC: the reply lands on a later sender turn via
-// deliver()/runWhenIdle. The WEB kind drives a page in a request→response shape →
-// SYNC-AWAIT: the orchestrator awaits the turn and the reply returns inline in the
-// tool result (preserving the do/get/check ergonomics it replaces). Same gates,
-// same guards, same untrusted-content posture — only the delivery differs.
+// ONE reply shape for EVERY kind (web included). The orchestrator NEVER blocks: it
+// hands a task to a resident and gets woken with the reply on a later turn via
+// deliver()/runWhenIdle — the actor model, uniformly. The resident's own turn slot
+// serializes its turns (one resident per tab/instance); deliver() wrapUntrusted-
+// fences the reply, so a web resident's page-derived reply is fenced like any other
+// untrusted content. (Web used to be a sync-await special case — collapsed into
+// this path; it never blocked the orchestrator, and the fence is now uniform.)
 //
-// Durable mailbox (P1). The ASYNC correlation is persisted (deps.mailbox): an SW
-// death between accept and deliver() no longer drops the reply-wake — redrain()
-// re-queues every pending engine message on boot (mirrors goalRunner.resume). WEB
-// is never persisted (sync within one turn; SW death there is turn-resume, not a
-// lost wake). The default no-op mailbox keeps the pure-heap P0 behavior in tests.
+// Durable mailbox (P1). The correlation is persisted (deps.mailbox): an SW death
+// between accept and deliver() no longer drops the reply-wake — redrain() re-queues
+// every pending message on boot (mirrors goalRunner.resume). The default no-op
+// mailbox keeps the pure-heap behavior in tests.
 //
 // Posture: a message is accepted from the active foreground chat (`senderSessionId
 // === getActiveSessionId()`) when it is NOT `inbound`. `inbound` is the
@@ -80,8 +80,6 @@ export const makeResidentMessaging = (deps) => {
   const inFlight = new Map();
   /** @type {Map<string, number[]>} senderSessionId → recent dispatch timestamps (the burst guard) */
   const recentSends = new Map();
-  /** @type {Map<string, Promise<unknown>>} web-resident sessionId → its serialization chain */
-  const webChains = new Map();
   // senderSessionId → (residentSessionId → REFCOUNT). A set can't represent two
   // messages in flight to the SAME resident, so a Stop cascade would miss the
   // second once the first settled and cleared the entry. Refcount keeps the
@@ -119,19 +117,6 @@ export const makeResidentMessaging = (deps) => {
   const stopResidentsFor = (sender) => {
     stopGen.set(sender, (stopGen.get(sender) ?? 0) + 1);
     return residentsFor(sender);
-  };
-
-  // Serialize web-resident turns per session: the sync-await relay below awaits the
-  // turn, so two concurrent messages to the SAME tab would otherwise both call
-  // runAgentTurn, whose turnSlots.claim aborts the in-flight one. A promise chain
-  // runs each after the previous SETTLES; the stored link never rejects so the next
-  // caller chains cleanly.
-  /** @param {string} sessionId @param {() => Promise<any>} fn @returns {Promise<any>} */
-  const runWebSerialized = (sessionId, fn) => {
-    const prev = webChains.get(sessionId) ?? Promise.resolve();
-    const run = prev.then(fn, fn);
-    webChains.set(sessionId, run.then(() => {}, () => {}));
-    return run;
   };
 
   /** @param {string} sender */
@@ -255,35 +240,15 @@ export const makeResidentMessaging = (deps) => {
     inFlight.set(senderSessionId, (inFlight.get(senderSessionId) ?? 0) + 1);
     appendAudit({ type: 'resident_message', details: { to: instanceId, kind, senderSessionId } }).catch(() => {});
 
-    // Web resident: SYNC-AWAIT relay (the do/get/check collapse). The three engine
-    // kinds run potentially-long turns, so their reply arrives on a LATER turn via
-    // deliver()/runWhenIdle. A web resident drives the page in a request→response
-    // shape the orchestrator awaits inline — preserving the do/get/check ergonomics
-    // it replaces (one tool call, one page result, same turn). No reenter wake: the
-    // content returns in THIS tool result. Serialize per tab (runWebSerialized)
-    // because runResidentTurn claims the resident's turn slot and turnSlots.claim
-    // aborts an in-flight turn — concurrent messages to one tab must queue, not race.
-    // NOT persisted to the mailbox: a web message lives inside one orchestrator turn,
-    // so SW death there is the orchestrator's turn-resume story, not a lost wake.
-    if (kind === 'web') {
-      trackResident(senderSessionId, residentSessionId);
-      try {
-        const res = await runWebSerialized(residentSessionId, () =>
-          runResidentTurn({ residentSessionId, message, residentTabId: tabId, instanceId, kind, parentToolUseId: toolUseId, name }));
-        return { ok: true, content: (res?.result || '(the web resident produced no text reply)').slice(0, RESULT_CHARS) };
-      } catch (e) {
-        return { ok: false, error: `message_resident: the web resident turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
-      } finally {
-        decInFlight(senderSessionId);
-        untrackResident(senderSessionId, residentSessionId);
-      }
-    }
-
-    // ENGINE resident: persist the correlation to the durable mailbox, THEN queue
-    // the async-wake delivery. AWAIT the write so the durable record is guaranteed
-    // on disk before any resident side effect begins — closing the narrow accept→
-    // persist window where an SW death would still drop the wake. A storage failure
-    // degrades to P0 (heap-only) rather than throwing.
+    // ASYNC for EVERY kind — web included. The orchestrator never blocks: it hands a
+    // task to the resident and gets woken with the reply on a later turn (the actor
+    // model, uniformly). Persist the correlation to the durable mailbox FIRST (await
+    // the write so the record is on disk before any resident side effect begins —
+    // closing the accept→persist window an SW death could otherwise drop), then queue
+    // the wake. The resident's slot serializes its turns (one resident per tab/
+    // instance), and deliver() wrapUntrusted-fences the reply — so a web resident's
+    // page-derived reply is fenced like any other untrusted content. A storage
+    // failure degrades to heap-only rather than throwing.
     const correlationId = `${instanceId}:${++seq}:${nowMs}`;
     await Promise.resolve(mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs })).catch(() => {});
     runEngineDelivery({ correlationId, senderSessionId, resident, message, parentToolUseId: toolUseId });
@@ -315,11 +280,11 @@ export const makeResidentMessaging = (deps) => {
       let resident = null;
       try { resident = await resolveResident(e.to); }
       catch { resident = null; }
-      // A web entry should never be in the mailbox (sync, never persisted); if one
-      // is, or the instance is gone, abandon it — wake the sender so it isn't left
-      // waiting on a reply that can never come.
-      if (!resident || resident.kind === 'web') {
-        deliver(e.senderSessionId, e.to, resident?.kind ?? 'tab-hosted', resident?.name,
+      // The instance is gone (engine instance deleted, or a web resident's tab
+      // closed) → abandon it; wake the sender so it isn't left waiting on a reply
+      // that can never come. A live instance (any kind, web included) re-runs.
+      if (!resident) {
+        deliver(e.senderSessionId, e.to, 'tab-hosted', undefined,
           'could not be reached after a restart (its instance may have been closed). Re-issue the request if it still matters.', true);
         mailbox.remove(e.id).catch(() => {});
         appendAudit({ type: 'resident_message_abandoned', details: { to: e.to, senderSessionId: e.senderSessionId } }).catch(() => {});

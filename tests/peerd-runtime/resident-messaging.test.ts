@@ -133,7 +133,7 @@ describe('message_resident — durable mailbox (persist + redrain)', () => {
     expect(mb.removed).toEqual([mb.appended[0].id]);
   });
 
-  test('a WEB message is NOT persisted (sync within one turn)', async () => {
+  test('a WEB message IS persisted now (async like every kind)', async () => {
     const mb = makeMailbox();
     const { messageResident } = harness({
       mailbox: mb.mailbox,
@@ -141,7 +141,9 @@ describe('message_resident — durable mailbox (persist + redrain)', () => {
         to === '42' ? { instanceId: '42', kind: 'web', residentSessionId: 'web-1', tabId: 42 } : null,
     });
     await messageResident({ to: '42', message: 'click', senderSessionId: 'chat-1' });
-    expect(mb.appended.length).toBe(0);
+    await tick();
+    expect(mb.appended.length).toBe(1);
+    expect(mb.removed).toEqual([mb.appended[0].id]);   // cleared on settle, same as engine
   });
 
   test('redrain re-queues a persisted engine message → resident runs, sender woken, entry cleared', async () => {
@@ -228,9 +230,10 @@ describe('message_resident — durable mailbox (persist + redrain)', () => {
   });
 });
 
-describe('message_resident — web resident (sync-await relay)', () => {
+describe('message_resident — web resident (now ASYNC, same path as engine)', () => {
   // A harness whose resolveResident returns a WEB resident (kind 'web', the owned
-  // tabId as instance). The web branch awaits the turn and returns content INLINE.
+  // tabId as instance). Web is no longer a sync special case — it rides the engine
+  // async path: persist → wake → wrapUntrusted-fenced reply.
   const webHarness = (over: Partial<Parameters<typeof makeResidentMessaging>[0]> = {}) => harness({
     resolveResident: async (to: string) =>
       to === '42'
@@ -239,76 +242,51 @@ describe('message_resident — web resident (sync-await relay)', () => {
     ...over,
   });
 
-  test('returns the reply SYNCHRONOUSLY in the tool result — no reentry wake', async () => {
+  test('dispatches async (delivered ack now), then wakes the sender with the FENCED reply', async () => {
     const { messageResident, reentries } = webHarness({
       runResidentTurn: async () => ({ result: 'clicked the button, page now shows success' }),
     });
     const r = await messageResident({ to: '42', message: 'click submit', senderSessionId: 'chat-1' });
     expect(r.ok).toBe(true);
-    // Content is inline (not a "reply arrives later" placeholder) — proves the turn ran.
-    expect(r.content).toBe('clicked the button, page now shows success');
+    expect(r.content).toContain('arrive on a LATER turn');   // async ack — orchestrator never blocks
     await tick();
-    // The engine-kind async-wake path is NOT taken for web.
-    expect(reentries.length).toBe(0);
+    // The reply comes back as a synthetic wake into the SENDER, wrapUntrusted-fenced.
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].sessionId).toBe('chat-1');
+    expect(reentries[0].synthetic).toBe(true);
+    expect(reentries[0].userText).toContain('<u origin="42">clicked the button, page now shows success</u>');
   });
 
   test('threads the owned tabId into the resident turn as residentTabId', async () => {
     let seenTabId: number | undefined = -1;
     const { messageResident } = webHarness({
-      runResidentTurn: async (o: { residentTabId?: number }) => {
-        seenTabId = o.residentTabId;
-        return { result: 'ok' };
-      },
+      runResidentTurn: async (o: { residentTabId?: number }) => { seenTabId = o.residentTabId; return { result: 'ok' }; },
     });
     await messageResident({ to: '42', message: 'x', senderSessionId: 'chat-1' });
+    await tick();
     expect(seenTabId).toBe(42);
   });
 
-  test('a thrown web turn returns ok:false INLINE (not a wake)', async () => {
+  test('a thrown web turn STILL wakes the sender (error notice), like engine kinds', async () => {
     const { messageResident, reentries } = webHarness({
       runResidentTurn: async () => { throw new Error('tab closed'); },
     });
     const r = await messageResident({ to: '42', message: 'x', senderSessionId: 'chat-1' });
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain('web resident turn failed');
-    expect(r.error).toContain('tab closed');
+    expect(r.ok).toBe(true);   // dispatched
     await tick();
-    expect(reentries.length).toBe(0);
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].userText).toContain('could not complete');
+    expect(reentries[0].userText).toContain('tab closed');
   });
 
-  test('serializes concurrent messages to the SAME tab (never two turns at once)', async () => {
-    let active = 0;
-    let maxActive = 0;
-    const order: string[] = [];
-    // Each turn parks on its OWN gate (a queued resolver), so releasing one can't
-    // accidentally free another — the test stays deterministic across microtasks.
-    const releasers: Array<() => void> = [];
-    const gate = () => new Promise<void>((res) => { releasers.push(res); });
+  test('a web message IS persisted to the durable mailbox now (no longer sync-exempt)', async () => {
+    const appended: any[] = [];
     const { messageResident } = webHarness({
-      caps: { rateCap: 100, outstanding: 100 },
-      runResidentTurn: async (o: { message: string }) => {
-        active++; maxActive = Math.max(maxActive, active);
-        order.push(`start:${o.message}`);
-        await gate();
-        order.push(`end:${o.message}`);
-        active--;
-        return { result: o.message };
-      },
+      mailbox: { append: async (e: any) => { appended.push(e); }, remove: async () => {}, load: async () => [] },
     });
-    // Wait (bounded) until exactly one turn is parked and waiting.
-    const settle = async () => { for (let i = 0; i < 10 && releasers.length === 0; i++) await tick(); };
-    // Fire two WITHOUT awaiting — they must queue, not overlap.
-    const p1 = messageResident({ to: '42', message: 'A', senderSessionId: 'chat-1' });
-    const p2 = messageResident({ to: '42', message: 'B', senderSessionId: 'chat-1' });
-    await settle();
-    expect(active).toBe(1);          // only A has started; B is queued behind the chain
-    releasers.shift()?.();           // let A finish; B's turn then starts and re-gates
-    await settle();
-    expect(active).toBe(1);          // now only B is running — never both
-    releasers.shift()?.();           // let B finish
-    await Promise.all([p1, p2]);
-    expect(maxActive).toBe(1);
-    expect(order).toEqual(['start:A', 'end:A', 'start:B', 'end:B']);
+    await messageResident({ to: '42', message: 'fill the form', senderSessionId: 'chat-1' });
+    expect(appended.length).toBe(1);
+    expect(appended[0]).toMatchObject({ to: '42', message: 'fill the form' });
   });
 });
 
