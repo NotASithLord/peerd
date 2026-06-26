@@ -46,7 +46,6 @@ import {
   EXPOSURE_RESIDENT, isResidentMutatingTool, isAllowedForResidentKind, residentTargetId,
   residentWebTabTarget, isRunnerPageTool,
 } from './exposure.js';
-import { RESIDENT_TAB_AGENTS, WEB_RESIDENT } from '/shared/flags.js';
 import {
   decideAction,
   PERMISSION_MODES,
@@ -111,39 +110,30 @@ const personaGate = (tool, _args, ctx) => {
 };
 
 /**
- * DESIGN-17 resident capability tier — pure, flag injected. Returns a REFUSAL
+ * DESIGN-17 resident capability tier — pure. Returns a REFUSAL
  * `{allowed:false, reason}` when the call violates the tier, or `null` when the
- * tier has no opinion (the gate continues). Three rules:
- *   (1) flag ON, non-resident ctx → the instance-MUTATING set is refused (it's
- *       resident-only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
- *   (2) flag ON, resident ctx → POSITIVELY constrained to its own kind's toolset
- *       (a hallucinated/injected non-env tool fails closed here, not just in the
+ * tier has no opinion (the gate continues). The rules:
+ *   (1) non-resident ctx → the instance-MUTATING set is refused (it's resident-
+ *       only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
+ *   (2) main ctx → the do/get/check page runner is refused too (folded into the
+ *       web resident); SUBAGENTS keep it (their page path; they can't message a
+ *       resident), and the runner itself never calls it.
+ *   (3) resident ctx → POSITIVELY constrained to its own kind's toolset (a
+ *       hallucinated/injected non-env tool fails closed here, not just in the
  *       descriptor list — the keyless/narrow runner trust model).
- *   (3) flag ON, resident ctx → per-instance pin: an EXPLICIT target that isn't
- *       this resident's instance is refused (defense in depth — the resident
- *       dispatch wrapper already force-injects the bound id).
- * flag OFF → no mutating-tier refusals (instance tools stay on the main agent),
- * but `message_resident` is refused by name (its orchestrator isn't wired).
+ *   (4) resident ctx → per-instance pin: an EXPLICIT target that isn't this
+ *       resident's instance is refused (defense in depth — the resident dispatch
+ *       wrapper already force-injects the bound id).
  *
- * @param {Tool} tool @param {any} args @param {GateContext} ctx @param {boolean} flagOn
+ * @param {Tool} tool @param {any} args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'> | null}
  */
-export const residentTierGate = (tool, args, ctx, flagOn) => {
-  if (!flagOn) {
-    return tool.name === 'message_resident'
-      ? { allowed: false, reason: `'message_resident' is not enabled` }
-      : null;
-  }
+export const residentTierGate = (tool, args, ctx) => {
   if (ctx?.exposure !== EXPOSURE_RESIDENT) {
     if (isResidentMutatingTool(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is resident-only — message the instance's resident (message_resident)` };
     }
-    // DESIGN-17 web-resident cutover: with the web resident live, the do/get/check
-    // page runner leaves the MAIN agent — it reaches a page by messaging that tab's
-    // resident. The wall mirrors the descriptor strip (filterResidentSurface). Scoped
-    // to exposure==='main': SUBAGENTS (exposure unset) keep do/get/check as their page
-    // path (they can't message residents), and the runner itself never calls them.
-    if (WEB_RESIDENT && ctx?.exposure === 'main' && isRunnerPageTool(tool.name)) {
+    if (ctx?.exposure === 'main' && isRunnerPageTool(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is folded into the web resident — open_tab, then message that tab's resident to read or act on the page` };
     }
     return null;
@@ -220,13 +210,11 @@ export const exposureGate = (tool, args, ctx) => {
       return { allowed: false, reason: `'${tool.name}' needs a current ${kind} in this chat — create one first (${create})` };
     }
   }
-  // DESIGN-17: the resident capability tier (flag-gated; see tools/exposure.js).
-  // The WALL behind the advisory descriptor filters — enforced for every
-  // dispatch path so a `spawn_subagent({tools:['app_delete']})` can't escalate.
-  // Extracted to a pure, flag-INJECTED function so the boundary test can prove
-  // the structure with flagOn:true regardless of the source const (the same DI
-  // pattern the dweb descriptor filters use). null = no resident-tier opinion.
-  const resident = residentTierGate(tool, args, ctx, RESIDENT_TAB_AGENTS);
+  // DESIGN-17: the resident capability tier (see tools/exposure.js). The WALL
+  // behind the advisory descriptor filters — enforced for every dispatch path so a
+  // `spawn_subagent({tools:['app_delete']})` can't escalate. Pure. null = no
+  // resident-tier opinion.
+  const resident = residentTierGate(tool, args, ctx);
   if (resident) return resident;
   if (ctx?.toolAllow instanceof Set && !ctx.toolAllow.has(tool.name)) {
     const label = ctx.toolManifestLabel ?? 'manifest';

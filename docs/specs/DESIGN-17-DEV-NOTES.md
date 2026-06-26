@@ -2,13 +2,11 @@
 
 Implementation record for DESIGN-17 P0 "resident tab agents"
 (`DESIGN-17-resident-agents.md` is the design; this is what landed and why).
-**Gated by `shared/flags.js` `RESIDENT_TAB_AGENTS`** — with the flag off the
-gate/descriptor/prompt/orchestrator changes are inert and instance tools stay on
-the main agent exactly as before. **On this branch the flag is ON by default**
-(battle-testing the actor structure as the live reality). The flag is a SOURCE
-const, not channel-config, so it applies to every build — a heads-up for the
-release decision when this merges (store/preview alike get residents while it's
-on). Flip it back to `false` for the status quo.
+The resident model is **UNCONDITIONAL** — the original `RESIDENT_TAB_AGENTS` +
+`WEB_RESIDENT` source flags were removed (owner call: "the branch is the flag;
+this is introduced wholesale or not at all"). The gate/descriptor/prompt/
+orchestrator changes are the live reality for every build (store/preview alike),
+so the release decision when this merges is the whole feature, not a flag flip.
 
 ## What landed (the P0 deliverables)
 
@@ -85,15 +83,15 @@ on). Flip it back to `false` for the status quo.
 
 9. **The prompts are scoped to the actor structure (flag ON).** The code already
    moved the mutating tier off the main agent's descriptor list
-   (`filterResidentSurface`); the PROSE now matches. `loop/system-prompt.js`
-   `applyResidentOrchestration(base)` is a pure, flag-gated transform that
-   rewrites the main template in place — keyed on the template's OWN section
-   markers (so flag-off it never runs and the base stays byte-identical):
-   (a) the top "grow it file by file" instruction → "create the shell, delegate
-   the build"; (b) the webvm/notebook/app/edit tool groups → a create/open/read
-   listing + a `resident` group introducing `message_resident`; (c) the
-   "Sandboxes" mechanics section → orchestrator framing (pick a kind, bootstrap,
-   delegate a GOAL); (d) the deep "webvm specifics" section → removed. That's
+   (`filterResidentSurface`); the PROSE now matches. The main template in
+   `peerd-provider/system-prompt.txt` IS the orchestrator prompt directly (an
+   earlier `applyResidentOrchestration` transform generated it region-by-region;
+   once the model went unconditional the output was baked into the template and
+   the transform scaffolding deleted): (a) the top instruction is "create the
+   shell, delegate the build"; (b) the webvm/notebook/app/edit tool groups are a
+   create/open/read listing + a `resident` group introducing `message_resident`;
+   (c) the "Sandboxes" section is orchestrator framing (pick a kind, bootstrap,
+   delegate a GOAL); (d) the deep "webvm specifics" section is gone. That's
    ~6k chars (~30%) off the ALWAYS-ON main prompt. The deep per-kind lore isn't
    lost — it's relocated into `residentBlock(kind)` (`RESIDENT_KIND_LORE`: the VM
    shell wrappers/quirks/flows, the App Mithril/iterative/chunking rules, the
@@ -158,49 +156,48 @@ features that *use* `message_resident` weren't traced. The findings:
     active chat is ALLOWED; an `inbound:true` turn is refused even when active);
     `goal-runner.test.ts` (turns carry `trusted:true`).
 
-- **Minor polish (DONE).** Two cosmetic mismatches the flag-on world introduced:
+- **Minor polish (DONE).** Two cosmetic mismatches the resident model introduced:
   - *Tool descriptions* — instance tools (e.g. `vm_boot` "auto-creates one if
     none", `app_update` "targets the chat's current app") are orchestrator-voiced
-    but now read only by a (pinned) resident. They can't be rewritten without
-    breaking the flag-OFF main-agent reading, so instead the resident PROMPT's
-    rule (1) now tells it to IGNORE any "current/default/auto-create/target
-    another" wording — flag-safe, and it covers every tool + schema param at once.
+    but now read only by a (pinned) resident. Rather than rewrite every blurb, the
+    resident PROMPT's rule (1) tells it to IGNORE any "current/default/auto-create/
+    target another" wording — it covers every tool + schema param at once.
   - *Code-style note* — `CODE_STYLE_NOTE` (and, for Notebooks, `JS_PITFALLS_NOTE`)
     rode `app_create`/`js_create` results, i.e. the ORCHESTRATOR that no longer
     writes the code. Now those notes ride the App/Notebook `residentBlock` (the
     writer), reused from the one source of truth (`tools/defs/code-style-note.js`);
-    `app_create`/`js_create` append them only when the flag is OFF. `js_run` keeps
-    `JS_PITFALLS_NOTE` (it's the orchestrator's own compute, flag-independent).
+    `app_create`/`js_create` no longer append them. `js_run` keeps
+    `JS_PITFALLS_NOTE` (it's the orchestrator's own compute).
 
 ## Tests
 
 - `tests/peerd-runtime/exposure.test.ts` — the tool sets + the gate
-  (`residentTierGate`, flag-injected) in both directions + the per-instance pin +
-  reads-stay-global. The real-gate (`eg`) wiring proofs now assert the flag-ON
-  reality (mutating tier refused on main; `message_resident` allowed); flag-OFF
-  stays proven by the injected `rt(..., false)` tests.
-- `tests/peerd-runtime/resident-prompt.test.ts` — the orchestrator transform
-  (regions rewritten/removed, sections kept, no-op without anchors), the per-kind
-  resident lore + disclaimer, and the live-template anchor-drift guard.
+  (`residentTierGate`) + the per-instance pin + reads-stay-global. The real-gate
+  (`eg`) wiring proofs assert the mutating tier is refused on main and
+  `message_resident` (the non-mutating delegation channel) is allowed.
+- `tests/peerd-runtime/resident-prompt.test.ts` — the baked orchestrator prompt
+  (framing present, direct-drive lore relocated off the always-on template), the
+  per-kind resident lore + disclaimer, and the lore-stays-lean guard.
 - `tests/peerd-runtime/resident-messaging.test.ts` — sender gate, happy-path
   correlation, error-still-wakes, both runaway caps.
 - `extension/tests/unit/peerd-runtime/dispatcher.test.js` — the full-chain
-  boundary test (flag-aware).
+  boundary test (a subagent can't escalate into the mutating tier).
 - The manifest gate tests (`tool-manifests.test.ts`) use a NON-tiered tool
   (`call_api`/`js_run`) so they exercise the manifest refusal itself — the
   resident tier now precedes the manifest check for a mutating tool.
 
 ## P1 — landed (the actor matures into a visible, durable, interruptible thing)
 
-Built on top of P0, all behind the same `RESIDENT_TAB_AGENTS` flag:
+Built on top of P0, part of the resident model:
 
 - **Durable message mailbox** (`resident-messaging.js` `deps.mailbox` + `redrain()`;
-  SW backs it with `chrome.storage.session`, serialized writes). An in-flight ENGINE
+  SW backs it with `chrome.storage.session`, serialized writes). An in-flight
   message→reply correlation persists on accept and clears on settle; on boot the SW
   redrains every pending message ONCE the vault is unlocked (once-guarded against
   double-delivery). A stale entry whose instance is gone wakes the sender with a
-  failure note. Mirrors `goalRunner.resume`. WEB is never persisted (sync within one
-  turn). **Closes the P0 lost-reply-wake residual.**
+  failure note. Mirrors `goalRunner.resume`. EVERY kind persists — web included,
+  since the async collapse (below) put web on the same path. **Closes the P0
+  lost-reply-wake residual.**
 - **The glass pane (display stream).** A resident turn triggered by a live
   `message_resident` (its `ctx.toolUseId` threaded through as `parentToolUseId`)
   re-emits its stream as a `turn/resident-*` family keyed to that card; the
@@ -221,7 +218,7 @@ Built on top of P0, all behind the same `RESIDENT_TAB_AGENTS` flag:
 
 The owner's call: "everything is an actor; the orchestrator never blocks." So the
 web resident's sync-await special case was wrong. Three changes made the model
-uniform (`WEB_RESIDENT` flipped ON):
+uniform:
 
 - **Async-everything** (`resident-messaging.js`). The `kind==='web'` sync branch +
   `runWebSerialized` + `webChains` are gone; web rides the engine path (mailbox-
@@ -232,23 +229,22 @@ uniform (`WEB_RESIDENT` flipped ON):
 - **The do/get/check cutover** (`exposure.js` / `gates.js` / `manifests.js`). Every
   open tab is a resident; the orchestrator reaches a page by messaging its tab's
   resident (`open_tab` + `list_tabs` + `message_resident`), and the do/get/check
-  page runner LEAVES the main agent. The strip is **gated on `WEB_RESIDENT`, not
-  `RESIDENT_TAB_AGENTS`** — flipping `WEB_RESIDENT` off restores do/get/check + the
-  runner exactly (the escape hatch); a flag-on-but-web-off config keeps them.
+  page runner LEAVES the main agent (`filterResidentSurface` strips it from the main
+  descriptor list; `residentTierGate` refuses it on a main-exposure ctx).
   SUBAGENTS keep do/get/check (their only page path — they can't message residents);
-  the runner + tool defs + `RUNNER_PROMPT` all STAY (registered, reachable web-off).
-- **The prompt fine-comb** (`system-prompt.js`). `applyResidentOrchestration` gained
-  `webOn` splices folding do/get/check into "every tab is a resident" (the reuse-vs-
-  new-tab judgment, async-OUTCOMES delegation, the untrusted boundary). The web
-  resident lore now carries the full page mechanics + the IGNORE/FLAG/EXCLUDE
-  injection drill (relocated from `RUNNER_PROMPT`) + its stateful framing.
+  the runner + tool defs + `RUNNER_PROMPT` all STAY registered for them.
+- **The prompt fine-comb** (`system-prompt.js`). The base template now IS the
+  orchestrator prompt: "every tab is a resident" folds do/get/check into
+  `message_resident` (the reuse-vs-new-tab judgment, async-OUTCOMES delegation, the
+  untrusted boundary). The web resident lore carries the full page mechanics + the
+  IGNORE/FLAG/EXCLUDE injection drill (mirrored from `RUNNER_PROMPT`, which keeps its
+  own copy for subagents) + its stateful framing.
 
 **The irreducible caveat:** the web resident is now the orchestrator's ONLY browser
 surface, and its page path (DOM tools driving a real tab) is **unverifiable outside
 a live Chrome** — the CDP harness is blocked in this environment. The unit/bun tiers
 + the review swarm cover the wiring/gating/prompts; the live page path MUST be run
-through the CDP harness before store ship. The `WEB_RESIDENT`-off escape hatch is
-the safety valve if it regresses.
+through the CDP harness before store ship.
 
 ## Still ahead (P1/P2+, not in this change)
 
@@ -263,34 +259,32 @@ browser restart — all per the spec's Phasing.
 **The web resident** (tabs as a fourth resident kind) has a full forward design in
 the spec — see `DESIGN-17-resident-agents.md` §"The web resident — tabs as the
 fourth resident kind". It folds the browser runner into the actor model (every tab
-owned, the runner steerable, `do`/`get`/`check` collapsed into `message_resident`),
-and records the central decision (accumulate IN the actor; reuse the loop's
-rolling-summary at every boundary, keyed to provenance; the resident fences its own
-summary) + its honest trade (a HARD non-accumulation invariant swapped for a SOFT,
-tested trim-cap + self-fence). The display-only `<untrusted_*>` strip it depends on
-already shipped (`stripUntrustedFences`, `shared/util.js`).
+owned, `do`/`get`/`check` collapsed into `message_resident`), and records the
+central decision (accumulate IN the actor; reuse the loop's rolling-summary at every
+boundary, keyed to provenance; the resident fences its own summary) + its honest
+trade (a HARD non-accumulation invariant swapped for a SOFT, tested trim-cap +
+self-fence). The display-only `<untrusted_*>` strip it depends on already shipped
+(`stripUntrustedFences`, `shared/util.js`).
 
-The **core + SW wiring is now BUILT behind `shared/flags.js WEB_RESIDENT` (dark,
-default false; requires `RESIDENT_TAB_AGENTS`)** — but unreachable until the flag
-flips AND the orchestrator-facing path (a tool that hands the orchestrator a web
-tab to address, + the `do`/`get`/`check`→`message_resident` cutover) lands. What's
-in code, all dark:
+As-built, all LIVE (the async-everything + cutover above made it the orchestrator's
+only browser surface):
 - `subagent/web-resident.js` — tab→session bindings, the action-log summary prompt,
   the self-fence (`fenceWebResidentSummary`). Pure, Bun-tested.
 - `tools/exposure.js` — `residentKind:'web'` toolset (`WEB_RESIDENT_DOM_TOOLS`,
   drift-guarded against the runner's `DO_TOOLSET`) + the tab pin (`residentWebTabTarget`).
-- `subagent/resident-messaging.js` — the **sync-await relay** (web replies inline in
-  the tool result, not via the async reply-wake), serialized per tab.
-- `background/service-worker.js` — `resolveWebResident` / `mintWebResident` (gated on
-  `WEB_RESIDENT`), tab→session bindings mirrored to session storage + pruned on
-  `tabs.onRemoved`, and **fail-closed `activeTab`**: a web resident resolves its OWNED
-  tab only and `resolveTargetTab` REFUSES the foreground fallback for any resident ctx.
+- `subagent/resident-messaging.js` — the uniform async path (web rides the engine
+  mailbox-persist → wake → `deliver()` like every kind; no sync special case).
+- `background/service-worker.js` — `resolveWebResident` / `mintWebResident`, the web
+  resident inherits the owner chat's tool MANIFEST, its model-facing identity is its
+  trusted tabId (never the page-controlled title), tab→session bindings mirrored to
+  session storage + pruned on `tabs.onRemoved`, and **fail-closed `activeTab`**: a web
+  resident resolves its OWNED tab only and `resolveTargetTab` REFUSES the foreground
+  fallback for any resident ctx.
 - `loop/trim.js` + `agent-loop.js` — `planTrim`'s `wrapSummary` hook folds the web
   resident's own rolling summary back in `wrapUntrusted`-fenced.
 
-Still ahead for the web resident: the orchestrator-facing mint/cutover, steerable
-in-flight tab work (abort/steer as an addressed message), and the `message_resident`
-description/lore polish for the inline-reply shape.
+Still ahead for the web resident: steerable in-flight tab work (abort/steer as an
+addressed message), and the "talk to a resident" conversational surface.
 
 ## Known residuals (documented, not yet closed)
 

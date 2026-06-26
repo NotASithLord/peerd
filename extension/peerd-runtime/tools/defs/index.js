@@ -206,9 +206,8 @@ export const BUILTIN_TOOLS = Object.freeze([
   subagentTasksTool,
   subagentCancelTool,
   // resident (DESIGN-17 — message the agent that owns a tab-hosted instance).
-  // Registered always; exposed + wired (ctx.messageResident) ONLY when
-  // RESIDENT_TAB_AGENTS is on (the exposure gate refuses it by name when off,
-  // and filterResidentSurface hides it from the main descriptor list).
+  // Registered always; the exposure gate refuses it on a resident session, so a
+  // resident can't recursively message another resident.
   messageResidentTool,
   // high-level browser tools — the runner layer over the DOM engine. After the
   // exposure cutover these are the ONLY browser tools the MAIN agent sees.

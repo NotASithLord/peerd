@@ -257,6 +257,24 @@ describe('message_resident — web resident (now ASYNC, same path as engine)', (
     expect(reentries[0].userText).toContain('<u origin="42">clicked the button, page now shows success</u>');
   });
 
+  test('identifies the web resident by its trusted tabId in the lead + ack (no page-controlled name)', async () => {
+    // why: a web resident's `name` is NEVER sourced from the page title/url
+    // (resolveWebResident returns no name) — document.title is attacker-controlled
+    // and the reply lead + the delivered ack interpolate the identity OUTSIDE the
+    // untrusted fence. Sourcing it from the page would open a prompt-injection sink
+    // into the orchestrator's trusted context. The trusted identity is the tabId.
+    const { messageResident, reentries } = webHarness({
+      runResidentTurn: async () => ({ result: 'done' }),
+    });
+    const r = await messageResident({ to: '42', message: 'x', senderSessionId: 'chat-1' });
+    // the delivered ack names the resident by its tabId, not a page title.
+    expect(r.content).toContain('42');
+    await tick();
+    // the trusted lead (outside the <u> fence) identifies it by the tabId.
+    const text = reentries[0].userText;
+    expect(text).toContain('The web resident 42');
+  });
+
   test('threads the owned tabId into the resident turn as residentTabId', async () => {
     let seenTabId: number | undefined = -1;
     const { messageResident } = webHarness({

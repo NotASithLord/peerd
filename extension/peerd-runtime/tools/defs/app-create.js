@@ -5,8 +5,7 @@
 // agent's HTML body lives at index.html (default entry). If you only
 // have one file, pass `html` for back-compat.
 
-import { CODE_STYLE_NOTE, APP_RUNTIME_NOTE } from './code-style-note.js';
-import { RESIDENT_TAB_AGENTS } from '/shared/flags.js';
+import { APP_RUNTIME_NOTE } from './code-style-note.js';
 
 const MAX_TOTAL_CHARS = 2_000_000;
 
@@ -115,13 +114,12 @@ export const appCreateTool = {
         fileCount: Object.keys(files).length,
         opened: true,
       }, null, 2);
-      // Flag ON: the App RESIDENT writes the files, so the code-style guidance
-      // rides ITS prompt (system-prompt.js residentBlock), not this orchestrator
-      // create-result. Flag OFF: the main agent writes → keep the note here.
-      const styleNote = RESIDENT_TAB_AGENTS ? '' : `${CODE_STYLE_NOTE}\n\n`;
+      // The App RESIDENT writes the files, so the code-style guidance rides ITS
+      // prompt (system-prompt.js residentBlock), not this orchestrator
+      // create-result. Only the runtime note (how the iframe behaves) belongs here.
       return {
         ok: true,
-        content: `${summary}\n\n${styleNote}${APP_RUNTIME_NOTE}`,
+        content: `${summary}\n\n${APP_RUNTIME_NOTE}`,
       };
     } catch (e) {
       return { ok: false, error: `app_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };

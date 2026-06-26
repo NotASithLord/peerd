@@ -1,10 +1,11 @@
 // @ts-check
 // do — perform a high-level action on a tab via a browser-runner.
 //
-// You (the main agent) issue INTENT ("compose an email to Mark about Q3").
-// A disposable runner drives the page (snapshot → act → observe) and returns a
-// plain-text summary of what changed. You never see the accessibility tree,
-// element refs, or the action trace — only the summary. See
+// The caller (a SUBAGENT — the main agent reaches a page through its resident
+// after the DESIGN-17 cutover) issues INTENT ("compose an email to Mark about
+// Q3"). A disposable runner drives the page (snapshot → act → observe) and
+// returns a plain-text summary of what changed. The caller never sees the
+// accessibility tree, element refs, or the action trace — only the summary. See
 // docs/DO-GET-CHECK-DESIGN.md and peerd-runtime/runner/index.js.
 
 import { runRunner, DO_TOOLSET, DO_MAX_STEPS, DO_SUFFIX } from '../../runner/index.js';

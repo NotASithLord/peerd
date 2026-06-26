@@ -17,8 +17,7 @@
  *                instance, not the chat list). Lazily minted; bound to the
  *                instance by `residentSessionId` on the engine registry record,
  *                and self-describes via `instanceId` + `residentKind` below.
- *                See docs/specs/DESIGN-17-resident-agents.md. (DESIGN-17 P0,
- *                behind shared/flags.js RESIDENT_TAB_AGENTS.)
+ *                See docs/specs/DESIGN-17-resident-agents.md.
  */
 
 /**
@@ -48,7 +47,7 @@
  * the tab→session bindings store (`subagent/web-resident.js`) for `web`. These
  * are the REVERSE pointer the resident turn reads. Absent on chat/subagent.
  * @property {string} [instanceId]            the instance (engine id) or owned tabId (String) this resident owns
- * @property {'webvm' | 'notebook' | 'app' | 'web'} [residentKind]  webvm/notebook/app = engine kinds; web = a browser tab (WEB_RESIDENT)
+ * @property {'webvm' | 'notebook' | 'app' | 'web'} [residentKind]  webvm/notebook/app = engine kinds; web = a browser tab
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

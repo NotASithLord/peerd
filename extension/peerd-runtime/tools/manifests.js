@@ -47,8 +47,8 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // the main agent's browser surface: open/enumerate tabs + message a tab's
       // web resident to read or act (do/get/check are folded into the resident).
       'list_tabs', 'open_tab', 'message_resident',
-      // do/get/check stay for SUBAGENTS (they can't message residents) + the
-      // flag-off escape hatch; the main agent has them folded by the cutover.
+      // do/get/check stay for SUBAGENTS (they can't message residents); the main
+      // agent has them folded into the tab's resident by the cutover.
       'do', 'get', 'check',
       // page DOM toolset (inherited by the web resident, which DOES the page work):
       // DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
@@ -70,7 +70,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // by this manifest (only the READ DOM tools below are allowed, so it can
       // observe but not click/type — the manifest constrains the resident too).
       'list_tabs', 'open_tab', 'navigate', 'message_resident',
-      'get', 'check',   // subagent read path + flag-off escape hatch
+      'get', 'check',   // subagent read path (the main agent reads via the resident)
       // READ_TOOLSET only (observe, never mutate) — inherited by the web resident.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',
       // web reads

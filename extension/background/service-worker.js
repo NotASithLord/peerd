@@ -31,7 +31,7 @@ import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { openHome } from '/shared/open-home.js';
-import { REMOTE_SKILL_INSTALL, RESIDENT_TAB_AGENTS, WEB_RESIDENT } from '/shared/flags.js';
+import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
 import {
   // vault
@@ -953,7 +953,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   /** @type {{ id?: number, windowId?: number, url: string, origin: string } | undefined} */
   let activeTab;
   try {
-    if (RESIDENT_TAB_AGENTS && exposure === EXPOSURE_RESIDENT) {
+    if (exposure === EXPOSURE_RESIDENT) {
       // A WEB resident OWNS exactly one tab: its DOM tools must target THAT tab,
       // and the origin/denylist gate must see THAT tab's origin. Resolve activeTab
       // from the owned tab id (threaded as activeTabId) ONLY — and FAIL CLOSED: if
@@ -1060,10 +1060,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // ctx.spawnSubagent(...) to decompose a task into a child session
     // that runs the same loop. Wired below; see makeSpawnSubagent.
     spawnSubagent,
-    // DESIGN-17: the message_resident orchestrator (wired below). Injected ONLY
-    // when the flag is on — the gate refuses message_resident by name when off,
-    // and a resident's own ctx strips this back out (it's not in its toolset).
-    ...(RESIDENT_TAB_AGENTS ? { messageResident: (/** @type {any} */ req) => residentMessaging.messageResident(req) } : {}),
+    // DESIGN-17: the message_resident orchestrator (wired below). A resident's own
+    // ctx strips this back out (it's not in its toolset, so the keyless narrowing
+    // removes it).
+    messageResident: (/** @type {any} */ req) => residentMessaging.messageResident(req),
     // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
     // as a later synthetic turn. subagentTasks/subagentCancel back the
@@ -1238,7 +1238,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // so a confused/injected tool has no path to secrets/egress/spawn. The loop
   // still gets the provider key via the turn driver's injected getSecret (off
   // this ctx), exactly like a subagent. Non-resident ctx is unchanged.
-  if (RESIDENT_TAB_AGENTS && exposure === EXPOSURE_RESIDENT) {
+  if (exposure === EXPOSURE_RESIDENT) {
     return restrictCtxCapabilities(ctx, new Set(residentAllowedTools(residentKind)));
   }
   return ctx;
@@ -1974,9 +1974,9 @@ const confirmAction = async (prompt) => {
   // strictly PER-TURN (a resident can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next
   // one). Bypass the grant cache for a resident session AND downgrade a
-  // yes_session answer to a one-shot. Flag-gated; one extra get only when on.
+  // yes_session answer to a one-shot.
   let ephemeral = false;
-  if (RESIDENT_TAB_AGENTS && sid) {
+  if (sid) {
     try { ephemeral = (await sessions.get(sid))?.kind === 'resident'; } catch { ephemeral = false; }
   }
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
@@ -2364,8 +2364,6 @@ goalRunner = makeGoalRunner({
 // specialized) is the mailbox to it; the SW supplies the IO — resolve + lazy-
 // mint the resident across the three registries, drive ONE resident turn (the
 // SAME runAgentTurn wrapper, kind-aware), and re-enter the sender with the reply.
-// Built always (cheap); only reachable when RESIDENT_TAB_AGENTS is on (the tool
-// is gate-refused + unexposed otherwise, and ctx.messageResident is unwired).
 
 // Route an instance id to its registry + engine kind by id-prefix (the registry
 // idPrefix: 'vm' / 'notebook' / 'app').
@@ -2411,6 +2409,12 @@ const mintResident = async (/** @type {{ reg: any, kind: string }} */ entry, /**
     ...(ownerChat?.model ? { model: ownerChat.model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
+    // The resident inherits the owner chat's tool MANIFEST as an authority bound
+    // (the subagent precedent, spawn.js): a /tools-narrowed chat can't widen its
+    // reach by delegating to a resident. A browse-only chat's resident is held to
+    // browse-only's read DOM tools — the gate refuses click/type for it. null /
+    // absent = no manifest = the resident keeps its full kind toolset.
+    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
   // Order matters for crash-safety: bind the session-default FIRST, then the
   // forward pointer LAST. resolveResident re-mints whenever the forward pointer
@@ -2427,19 +2431,17 @@ const mintResident = async (/** @type {{ reg: any, kind: string }} */ entry, /**
 // Unlike the three engine kinds, a web resident has no registry record: the TAB
 // is the durable handle and the binding is tab→session, held here and mirrored to
 // session storage (ephemeral by design — on a cold miss we re-mint against the
-// live tab, whose DOM re-derives state). Behind WEB_RESIDENT (dark). The address
-// the orchestrator uses is the tabId AS A STRING (the resident's instanceId).
+// live tab, whose DOM re-derives state). The address the orchestrator uses is the
+// tabId AS A STRING (the resident's instanceId).
 const webResidentBindings = makeWebResidentBindings();
 const WEB_BINDINGS_KEY = 'webResidentBindings';
 const persistWebBindings = () => {
   sessionCache.sessionSet(WEB_BINDINGS_KEY, webResidentBindings.entries()).catch(() => {});
 };
 // Rehydrate on SW boot (best-effort; a missing/garbage value just starts empty).
-if (WEB_RESIDENT) {
-  Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
-    .then((e) => { if (Array.isArray(e)) webResidentBindings.load(/** @type {any} */ (e)); })
-    .catch(() => {});
-}
+Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
+  .then((e) => { if (Array.isArray(e)) webResidentBindings.load(/** @type {any} */ (e)); })
+  .catch(() => {});
 
 // DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
 // correlation persists here, so an SW death between accept and deliver() doesn't
@@ -2493,6 +2495,10 @@ const mintWebResident = async (/** @type {number} */ tabId) => {
     ...(ownerChat?.model ? { model: ownerChat.model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
+    // The web resident inherits the owner chat's tool MANIFEST (see mintResident):
+    // a browse-only chat's page resident is held to the read DOM tools, so the gate
+    // refuses click/type for it and the read-only preset means what it says.
+    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
   webResidentBindings.bind(tabId, created.sessionId);
   persistWebBindings();
@@ -2514,24 +2520,31 @@ const resolveWebResident = async (/** @type {number} */ tabId) => {
     residentSessionId = null;
   }
   if (!residentSessionId) residentSessionId = await mintOnce(`web:${tabId}`, () => mintWebResident(tabId));
-  return { instanceId: String(tabId), kind: 'web', residentSessionId, name: tab.title || tab.url || undefined, tabId };
+  // why no `name` from the page: a tab's title/url are attacker-CONTROLLED
+  // (document.title is page content). resolveResident's `name` flows UN-fenced
+  // into the orchestrator's model memory — the deliver() reply lead and the
+  // message_resident ack both interpolate it as trusted first-party prose
+  // (resident-messaging.js). Sourcing it from the page would open a prompt-
+  // injection sink the moment the user messages a resident on a hostile page. A
+  // web resident's trusted identity IS its tabId (already the instanceId), so we
+  // leave name undefined and the lead/ack render "the web resident 42 …". (Engine
+  // residents keep record.name — a user/system label, not page-controlled.)
+  return { instanceId: String(tabId), kind: 'web', residentSessionId, tabId };
 };
 
 // Prune a web resident's binding when its tab closes (the resident is then
 // unreachable; the orphaned session is harmless and ages out). Separate listener
 // from the agent-tab-card cleanup so the two concerns stay independent.
-if (WEB_RESIDENT) {
-  browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
-    if (webResidentBindings.drop(tabId)) persistWebBindings();
-  });
-}
+browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
+  if (webResidentBindings.drop(tabId)) persistWebBindings();
+});
 
 const residentMessaging = makeResidentMessaging({
   resolveResident: async (/** @type {string} */ instanceId) => {
     // A WEB resident is addressed by its tabId-as-string (purely numeric, no
-    // engine prefix). Gated behind WEB_RESIDENT; engine ids (vm-/notebook-/app-)
-    // carry a hyphen and never match, so the branch is unambiguous.
-    if (WEB_RESIDENT && /^\d+$/.test(String(instanceId))) {
+    // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
+    // match, so the branch is unambiguous.
+    if (/^\d+$/.test(String(instanceId))) {
       return resolveWebResident(Number(instanceId));
     }
     const prefix = String(instanceId).split('-')[0];
@@ -2588,7 +2601,7 @@ const residentMessaging = makeResidentMessaging({
 // aren't cleared until their turn SETTLES, so a second drain would double-deliver).
 let mailboxRedrained = false;
 const maybeRedrainMailbox = () => {
-  if (mailboxRedrained || !RESIDENT_TAB_AGENTS || vault.isLocked()) return;
+  if (mailboxRedrained || vault.isLocked()) return;
   mailboxRedrained = true;
   Promise.resolve(residentMessaging.redrain())
     .then((r) => { if (r?.redrained) console.warn('[resident] redrained', r.redrained, 'pending message(s) after restart'); })

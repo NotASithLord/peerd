@@ -56,12 +56,11 @@
  * @param {{ outstanding?: number, rateCap?: number, rateWindowMs?: number, resultChars?: number }} [deps.caps]
  * @param {(...args: unknown[]) => void} [deps.log]
  * @param {{ append: (e: { id: string, senderSessionId: string, to: string, message: string, createdAt: number }) => Promise<unknown>, remove: (id: string) => Promise<unknown>, load: () => Promise<any[]> }} [deps.mailbox]
- *   DURABLE MAILBOX (DESIGN-17 P1). Persists an ENGINE resident's in-flight
- *   message→reply correlation so an SW death between accept and deliver() doesn't
- *   silently drop the reply-wake. append() on accept, remove() on settle, load()
- *   at boot (redrain). Default no-op = the P0 pure-heap behavior (web is sync, so
- *   it is never persisted — its SW-death story is orchestrator turn-resume, not a
- *   wake). Mirrors goal-runner's persist/resume.
+ *   DURABLE MAILBOX (DESIGN-17 P1). Persists EVERY resident's in-flight
+ *   message→reply correlation — web included — so an SW death between accept and
+ *   deliver() doesn't silently drop the reply-wake. append() on accept, remove()
+ *   on settle, load() at boot (redrain). Default no-op = the pure-heap behavior
+ *   tests run with. Mirrors goal-runner's persist/resume.
  */
 export const makeResidentMessaging = (deps) => {
   const {
@@ -261,7 +260,8 @@ export const makeResidentMessaging = (deps) => {
 
   // DURABLE REDRAIN (DESIGN-17 P1). Called once on SW boot, after the registries
   // load + the vault unlocks (a resident turn needs the model key). Re-queues every
-  // persisted ENGINE message so its reply still reaches the sender. Idempotent: a
+  // persisted message (any kind, web included) so its reply still reaches the
+  // sender. Idempotent: a
   // stale entry whose instance is gone (or whose sender vanished) wakes the sender
   // with a failure note and clears; a still-live instance re-runs the turn normally
   // (resolveResident re-mints a dropped forward pointer). Mirrors goalRunner.resume.

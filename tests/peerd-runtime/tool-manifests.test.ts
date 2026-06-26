@@ -171,9 +171,9 @@ describe('filterDescriptorsByManifest', () => {
 
 describe('exposureGate — per-session manifest refusal at dispatch', () => {
   test('refuses a manifest-excluded tool BY NAME, naming the manifest in the reason', () => {
-    // call_api is a non-tiered tool, so the MANIFEST gate is what refuses it — with
-    // RESIDENT_TAB_AGENTS on, a mutating tool (vm_boot) would be refused earlier by
-    // the resident tier, which precedes the manifest check in exposureGate.
+    // call_api is a non-tiered tool, so the MANIFEST gate is what refuses it — a
+    // mutating tool (vm_boot) would be refused earlier by the resident tier, which
+    // precedes the manifest check in exposureGate.
     const ctx = { exposure: 'main', toolAllow: new Set(['get', 'check']), toolManifestLabel: 'browse-only' };
     const r = eg({ name: 'call_api' }, {}, ctx);
     expect(r.allowed).toBe(false);

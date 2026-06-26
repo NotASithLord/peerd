@@ -25,7 +25,6 @@ import {
 import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the resident turn setup readable. Flag-gated so they're inert when off.
-import { RESIDENT_TAB_AGENTS, WEB_RESIDENT } from '/shared/flags.js';
 import { EXPOSURE_RESIDENT, residentDescriptors, residentTargetIdField, filterResidentSurface } from '../tools/exposure.js';
 
 /**
@@ -115,7 +114,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // user-tab/memory context, a resident-only descriptor list + tuned prompt, the
   // 'resident' exposure marker, and the per-instance pin. Reused for cost.
   const turnSession = sessionId ? await sessions.get(sessionId) : null;
-  const isResident = RESIDENT_TAB_AGENTS && turnSession?.kind === 'resident';
+  const isResident = turnSession?.kind === 'resident';
   /** @type {string|undefined} */
   const residentKind = isResident ? turnSession.residentKind : undefined;
   /** @type {string|undefined} */
@@ -277,10 +276,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // SIXTH cut: goal mode. complete_goal is registered always but revealed to
     // the model ONLY while a goal run is live for this session (goalActiveFor),
     // so a normal chat never sees it. Outermost so it composes over the rest.
-    // SEVENTH cut (DESIGN-17): the resident surface. Flag ON → the instance
-    // mutating tier LEAVES the main agent (it delegates via message_resident,
-    // which is kept). Flag OFF → status quo (mutating tier stays; message_resident
-    // hidden). Outermost so it composes over everything else.
+    // SEVENTH cut (DESIGN-17): the resident surface. The instance-mutating tier and
+    // the do/get/check page runner LEAVE the main agent (it delegates via
+    // message_resident, which it keeps). Outermost so it composes over everything else.
     const descriptors = filterResidentSurface(
       filterByGoalActive(
         filterByDwebActive(
@@ -295,9 +293,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         ),
         !!goalActiveFor?.(sessionId),
       ),
-      RESIDENT_TAB_AGENTS,
-      // WEB resident live → the do/get/check page runner also leaves the main agent.
-      WEB_RESIDENT,
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     toolContext.instanceState = instanceState;
     return descriptors;
@@ -305,9 +300,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // DESIGN-17: a resident sees a FIXED set — its own kind's toolset (no
   // progressive disclosure; the resident gate is the wall). REPLACE both the
   // initial descriptors AND the per-step refresh below — otherwise the resident
-  // would lose all its instance tools on step 2+.
+  // would lose all its instance tools on step 2+. Intersected with the resident's
+  // inherited tool MANIFEST (sessionToolAllow, above) so the list is honest: a
+  // browse-only chat's web resident is shown only the read DOM tools, matching the
+  // gate (which refuses click/type for it). null manifest passes through unchanged.
   const refreshResidentTools = async () =>
-    residentDescriptors(listTools(), residentKind)
+    filterDescriptorsByManifest(residentDescriptors(listTools(), residentKind), sessionToolAllow)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
   const refreshTools = isResident ? refreshResidentTools : refreshMainTools;
   const toolDescriptors = await refreshTools();

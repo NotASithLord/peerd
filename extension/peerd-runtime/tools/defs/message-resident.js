@@ -7,8 +7,8 @@
 // does the work in its own focused context and replies on a later turn. Thin
 // wrapper — the mailbox / sender-gate / runaway-guard / correlation all live in
 // subagent/resident-messaging.js (bound + injected as ctx.messageResident by the
-// SW, only when the RESIDENT_TAB_AGENTS flag is on; the exposure gate refuses
-// this tool by name when it's off, so a stray call fails closed here too).
+// SW). The exposure gate refuses this tool on a resident session, so a resident
+// can't recursively message another resident.
 
 /**
  * The ctx slot message_resident reads (an SW-injected extra, not on the base

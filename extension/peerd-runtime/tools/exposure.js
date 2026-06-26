@@ -1,17 +1,19 @@
 // @ts-check
 // Tool exposure policy — which tools the MAIN agent sees.
 //
-// After the do/get/check cutover, the main agent's browser surface is just
-// {do, get, check} plus list_tabs / open_tab (tab management — they return no
-// page content). The low-level DOM/page tools (a11y snapshots, element refs,
-// click/type/navigate, raw page content, code-exec) are HIDDEN from the main
-// agent — they belong to the disposable browser-runner, reached only through
-// do/get/check. This keeps untrusted page content and ref noise out of the main
-// context: the security + long-task-reliability thesis.
+// After the DESIGN-17 resident cutover, the main agent's browser surface is
+// list_tabs / open_tab / message_resident (+ capture). The page itself is
+// reached by messaging the tab's web RESIDENT — do/get/check and the low-level
+// DOM/page tools (a11y snapshots, element refs, click/type/navigate, raw page
+// content, code-exec) all LEFT the main agent: the resident holds the DOM
+// toolset, subagents still drive a page through do/get/check. This keeps
+// untrusted page content and ref noise out of the main context: the security +
+// long-task-reliability thesis. The strip is RUNNER_PAGE_TOOLS + the resident
+// mutating tier, applied by filterResidentSurface (below) + the gate.
 //
-// The tools remain REGISTERED; the runner still receives them via tool
-// narrowing (spawn.js). This module ONLY filters what the MAIN model SEES. It is
-// the minimal realization of the V1.3 exposure manifest (gates.js exposureGate).
+// The tools remain REGISTERED; the resident + subagents still receive them via
+// tool narrowing (spawn.js). This module ONLY filters what the MAIN model SEES.
+// It is the realization of the V1.3 exposure manifest (gates.js exposureGate).
 //
 // Pure — unit-tested. The SW applies mainAgentDescriptors() to the main turn's
 // descriptor list, and leaves getToolDescriptors() (the runner's source) full.
@@ -139,16 +141,13 @@ export const filterByInstanceState = (descriptors, instanceState) =>
 // (resident turn) / unset (subagent/runner). EXPOSURE_RESIDENT is a const so a
 // typo can't silently widen authority at its (many) read sites; 'main' stays a
 // bare literal — it's only ever the gate's negative space, never matched by name.
-// All of this is behind shared/flags.js RESIDENT_TAB_AGENTS — with the flag OFF
-// these sets are referenced by nothing load-bearing and instance tools stay on
-// the main agent exactly as today.
 export const EXPOSURE_RESIDENT = 'resident';
 
-// The tiered MUTATION set — refused for every non-resident ctx when the flag is
-// on. vm_boot/js_notebook are the RUN tools (they mutate instance state);
-// edit_file is the cross-kind SEARCH/REPLACE write path for App/Notebook files;
-// the rest are write/delete ops. js_run (headless, no instance) stays a parent
-// tool and is deliberately ABSENT.
+// The tiered MUTATION set — refused for every non-resident ctx (the main agent
+// delegates these via message_resident). vm_boot/js_notebook are the RUN tools
+// (they mutate instance state); edit_file is the cross-kind SEARCH/REPLACE write
+// path for App/Notebook files; the rest are write/delete ops. js_run (headless,
+// no instance) stays a parent tool and is deliberately ABSENT.
 export const RESIDENT_MUTATING_TOOLS = Object.freeze(new Set([
   'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
   'js_notebook', 'js_write_file', 'js_delete',
@@ -156,17 +155,15 @@ export const RESIDENT_MUTATING_TOOLS = Object.freeze(new Set([
   'edit_file',
 ]));
 
-/** Is this a tiered mutating tool (resident-only when the flag is on)? Pure. @param {string} name */
+/** Is this a tiered mutating tool (resident-only, off the main agent)? Pure. @param {string} name */
 export const isResidentMutatingTool = (name) => RESIDENT_MUTATING_TOOLS.has(name);
 
 // DESIGN-17 web-resident cutover — the do/get/check page RUNNER, folded into the
-// actor model. When the WEB resident is live the orchestrator reaches a page ONLY
-// by messaging that tab's resident (open_tab + message_resident), so these leave
-// the MAIN agent. Gated on WEB_RESIDENT (not just RESIDENT_TAB_AGENTS): a flag-on-
-// but-web-off config keeps do/get/check, since there's no web resident to replace
-// them. Subagents (exposure unset) keep them too — they can't message residents.
-// The tools + the runner stay REGISTERED (reachable flag/web-off) — only the
-// main-agent surface narrows.
+// actor model. The orchestrator reaches a page ONLY by messaging that tab's
+// resident (open_tab + message_resident), so these leave the MAIN agent.
+// Subagents (exposure unset) keep them — they can't message residents.
+// The tools + the runner stay REGISTERED (a subagent still drives a page through
+// them) — only the main-agent surface narrows.
 export const RUNNER_PAGE_TOOLS = Object.freeze(new Set(['do', 'get', 'check']));
 
 /** Is this one of the do/get/check page-runner tools? Pure. @param {string} name */
@@ -281,22 +278,15 @@ export const residentDescriptors = (descriptors, kind) => {
 };
 
 /**
- * Re-shape the MAIN agent's descriptor list for the resident world. Flag ON: the
- * mutating tier LEAVES the main agent (it delegates via message_resident, which is
- * kept); and when the WEB resident is live (webOn), the do/get/check page runner
- * leaves too (the orchestrator reaches pages by messaging a tab's resident). Flag
- * OFF: status quo — the mutating tier stays on main and message_resident is hidden
- * (its orchestrator isn't wired). Pure; composes after mainAgentDescriptors()/the
- * instance/dweb/goal filters.
+ * Re-shape the MAIN agent's descriptor list for the resident world: the instance-
+ * mutating tier and the do/get/check page runner both LEAVE the main agent (it
+ * bootstraps + delegates via message_resident, which it keeps). Pure; composes
+ * after mainAgentDescriptors()/the instance/dweb/goal filters.
  * @template {{ name: string }} T
- * @param {ReadonlyArray<T>} descriptors @param {boolean} flagOn @param {boolean} [webOn] @returns {T[]}
+ * @param {ReadonlyArray<T>} descriptors @returns {T[]}
  */
-export const filterResidentSurface = (descriptors, flagOn, webOn = false) => {
-  if (!flagOn) return descriptors.filter((t) => t.name !== 'message_resident');
-  let out = descriptors.filter((t) => !RESIDENT_MUTATING_TOOLS.has(t.name));
-  if (webOn) out = out.filter((t) => !RUNNER_PAGE_TOOLS.has(t.name));
-  return out;
-};
+export const filterResidentSurface = (descriptors) =>
+  descriptors.filter((t) => !RESIDENT_MUTATING_TOOLS.has(t.name) && !RUNNER_PAGE_TOOLS.has(t.name));
 
 // ── dweb tools: gated on the dweb being enabled ─────────────────────────────
 // The dweb network tools (publish/discover/install) are exposed to the agent

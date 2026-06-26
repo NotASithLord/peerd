@@ -93,9 +93,9 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
     expect(eg({ name: 'list_tabs' }, {}, { exposure: 'main' }).allowed).toBe(true);
   });
 
-  // DESIGN-17 web-resident cutover: with WEB_RESIDENT on, the do/get/check page
-  // runner leaves the MAIN agent (it messages a tab's resident instead). Subagents
-  // (exposure unset) keep them — they can't message residents.
+  // DESIGN-17 web-resident cutover: the do/get/check page runner leaves the MAIN
+  // agent (it messages a tab's resident instead). Subagents (exposure unset) keep
+  // them — they can't message residents.
   test('refuses do/get/check on the MAIN turn (folded into the web resident)', () => {
     for (const name of ['do', 'get', 'check']) {
       const r = eg({ name }, {}, { exposure: 'main' });
@@ -166,9 +166,9 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
   });
 
   test('allows the gated op once the instance exists', () => {
-    // With RESIDENT_TAB_AGENTS on, the MUTATING ops are resident-only even with an
-    // instance present; the READ ops (which stay on the main agent) are what
-    // instance-gating still admits once their kind exists.
+    // The MUTATING ops are resident-only even with an instance present; the READ
+    // ops (which stay on the main agent) are what instance-gating still admits
+    // once their kind exists.
     expect(eg({ name: 'app_read_file' }, {}, { exposure: 'main', instanceState: { app: true } }).allowed).toBe(true);
     expect(eg({ name: 'js_read_file' }, {}, { exposure: 'main', instanceState: { notebook: true } }).allowed).toBe(true);
   });
@@ -196,11 +196,11 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
 });
 
 // ── DESIGN-17: resident tab agents — the capability tier ────────────────────
-// The gate's resident logic is a pure, flag-INJECTED function (residentTierGate)
-// so these prove the structure with flagOn:true regardless of the source flag's
-// current value. null = "no resident-tier opinion" (the gate continues).
-const rt = (tool: { name: string }, args: unknown, ctx: object, flagOn: boolean) =>
-  residentTierGate(tool as unknown as ToolT, args, ctx as GateCtxT, flagOn);
+// The gate's resident logic is a pure function (residentTierGate). The resident
+// model is unconditional (the source flags were removed), so the tier is always
+// enforced. null = "no resident-tier opinion" (the gate continues).
+const rt = (tool: { name: string }, args: unknown, ctx: object) =>
+  residentTierGate(tool as unknown as ToolT, args, ctx as GateCtxT);
 
 describe('DESIGN-17 resident tier — the tool sets', () => {
   test('the MUTATING tier is what leaves the main agent (reads stay global)', () => {
@@ -243,43 +243,39 @@ describe('DESIGN-17 resident tier — the tool sets', () => {
     expect(residentTargetId('vm_write_file', { path: '/x' })).toBeUndefined();
   });
 
-  test('residentDescriptors filters to the kind; filterResidentSurface respects the flags', () => {
+  test('residentDescriptors filters to the kind; filterResidentSurface strips the main surface', () => {
     const all = [{ name: 'app_update' }, { name: 'vm_boot' }, { name: 'do' }, { name: 'get' }, { name: 'message_resident' }, { name: 'open_tab' }];
     expect(residentDescriptors(all, 'app').map((t) => t.name)).toEqual(['app_update']);
-    // flag ON, web OFF: the mutating tier leaves main; do/get/check stay (no web
-    // resident to replace them); message_resident stays.
-    expect(filterResidentSurface(all, true, false).map((t) => t.name)).toEqual(['do', 'get', 'message_resident', 'open_tab']);
-    // flag ON, web ON: do/get/check ALSO leave main (folded into the web resident).
-    expect(filterResidentSurface(all, true, true).map((t) => t.name)).toEqual(['message_resident', 'open_tab']);
-    // flag OFF: status quo — mutating tier + do/get/check stay, message_resident hidden.
-    expect(filterResidentSurface(all, false).map((t) => t.name)).toEqual(['app_update', 'vm_boot', 'do', 'get', 'open_tab']);
+    // The mutating tier AND do/get/check both leave the main agent (folded into the
+    // tab's resident); message_resident + open_tab stay.
+    expect(filterResidentSurface(all).map((t) => t.name)).toEqual(['message_resident', 'open_tab']);
   });
 });
 
-describe('DESIGN-17 resident tier — the gate (the wall, flagOn:true)', () => {
+describe('DESIGN-17 resident tier — the gate (the wall)', () => {
   test('a NON-resident (subagent/main/direct) is refused the mutating tier', () => {
     // THE PROOF: a `spawn_subagent({tools:['app_delete']})` child has exposure
     // unset → refused at the gate even though the tool name is in its subset.
     for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'subagent' }]) {
-      const r = rt({ name: 'app_delete' }, {}, ctx, true);
+      const r = rt({ name: 'app_delete' }, {}, ctx);
       expect(r?.allowed).toBe(false);
       expect(r?.reason).toContain('resident-only');
     }
-    expect(rt({ name: 'edit_file' }, {}, { exposure: 'main' }, true)?.allowed).toBe(false);
+    expect(rt({ name: 'edit_file' }, {}, { exposure: 'main' })?.allowed).toBe(false);
   });
 
   test('reads are NOT tiered — a non-resident may still read globally', () => {
-    expect(rt({ name: 'app_read_file' }, {}, {}, true)).toBeNull();
-    expect(rt({ name: 'app_list_files' }, {}, { exposure: 'main' }, true)).toBeNull();
-    expect(rt({ name: 'js_read_file' }, {}, {}, true)).toBeNull();
+    expect(rt({ name: 'app_read_file' }, {}, {})).toBeNull();
+    expect(rt({ name: 'app_list_files' }, {}, { exposure: 'main' })).toBeNull();
+    expect(rt({ name: 'js_read_file' }, {}, {})).toBeNull();
   });
 
   test('a resident may call its own kind; foreign/non-env tools fail closed', () => {
     const appCtx = { exposure: EXPOSURE_RESIDENT, residentKind: 'app', residentInstanceId: 'app-1' };
-    expect(rt({ name: 'app_update' }, {}, appCtx, true)).toBeNull();          // allowed
-    expect(rt({ name: 'vm_boot' }, {}, appCtx, true)?.allowed).toBe(false);   // foreign kind
-    expect(rt({ name: 'call_api' }, {}, appCtx, true)?.allowed).toBe(false);  // non-env
-    expect(rt({ name: 'spawn_subagent' }, {}, appCtx, true)?.allowed).toBe(false);
+    expect(rt({ name: 'app_update' }, {}, appCtx)).toBeNull();          // allowed
+    expect(rt({ name: 'vm_boot' }, {}, appCtx)?.allowed).toBe(false);   // foreign kind
+    expect(rt({ name: 'call_api' }, {}, appCtx)?.allowed).toBe(false);  // non-env
+    expect(rt({ name: 'spawn_subagent' }, {}, appCtx)?.allowed).toBe(false);
   });
 
   test('the per-instance pin refuses a sibling id, allows the bound id / no id', () => {
@@ -287,29 +283,27 @@ describe('DESIGN-17 resident tier — the gate (the wall, flagOn:true)', () => {
     // to the bound INSTANCE ID before the gate runs, so the gate only ever sees
     // ids — it refuses any explicit id that isn't the bound one.
     const ctx = { exposure: EXPOSURE_RESIDENT, residentKind: 'app', residentInstanceId: 'app-1' };
-    expect(rt({ name: 'app_delete' }, { appId: 'app-2' }, ctx, true)?.allowed).toBe(false); // sibling
-    expect(rt({ name: 'app_delete' }, { appId: 'app-1' }, ctx, true)).toBeNull();           // own id
-    expect(rt({ name: 'app_delete' }, {}, ctx, true)).toBeNull();                           // wrapper injects
+    expect(rt({ name: 'app_delete' }, { appId: 'app-2' }, ctx)?.allowed).toBe(false); // sibling
+    expect(rt({ name: 'app_delete' }, { appId: 'app-1' }, ctx)).toBeNull();           // own id
+    expect(rt({ name: 'app_delete' }, {}, ctx)).toBeNull();                           // wrapper injects
     // a webvm resident pinned by name-or-id arg
     const vm = { exposure: EXPOSURE_RESIDENT, residentKind: 'webvm', residentInstanceId: 'vm-1' };
-    expect(rt({ name: 'vm_boot' }, { vm: 'vm-2' }, vm, true)?.allowed).toBe(false);
-    expect(rt({ name: 'vm_boot' }, { vm: 'vm-1' }, vm, true)).toBeNull();
+    expect(rt({ name: 'vm_boot' }, { vm: 'vm-2' }, vm)?.allowed).toBe(false);
+    expect(rt({ name: 'vm_boot' }, { vm: 'vm-1' }, vm)).toBeNull();
   });
 
-  test('message_resident: refused by name with flag OFF, allowed (non-mutating) with flag ON', () => {
-    expect(rt({ name: 'message_resident' }, {}, {}, false)?.allowed).toBe(false);
-    expect(rt({ name: 'message_resident' }, {}, {}, true)).toBeNull();
-    // flag OFF: the mutating tier is NOT refused (instance tools stay on main).
-    expect(rt({ name: 'app_delete' }, {}, {}, false)).toBeNull();
-    expect(rt({ name: 'vm_boot' }, {}, { exposure: 'main' }, false)).toBeNull();
+  test('message_resident is non-mutating — the delegation channel, allowed off a resident', () => {
+    // It is NOT in the mutating tier, so a non-resident main/direct ctx may call it
+    // (that IS how the orchestrator delegates). A resident is refused it separately
+    // (positive-scope rule) so it can't recursively message another resident.
+    expect(rt({ name: 'message_resident' }, {}, {})).toBeNull();
+    expect(rt({ name: 'message_resident' }, {}, { exposure: 'main' })).toBeNull();
   });
 
-  test('exposureGate WIRES residentTierGate with the real flag (flag ON for this branch)', () => {
-    // The real gate reads the source flag (ON for this branch), so this proves the
-    // exposureGate→residentTierGate wiring end to end: message_resident is allowed
-    // (the non-mutating delegation channel), while the mutating tier is refused on
-    // the main agent — it must go through the instance's resident. The flag-OFF
-    // structure stays proven by the injected rt(..., false) tests above.
+  test('exposureGate WIRES residentTierGate end to end', () => {
+    // The full gate proves the exposureGate→residentTierGate wiring: message_resident
+    // is allowed (the non-mutating delegation channel), while the mutating tier is
+    // refused on the main agent — it must go through the instance's resident.
     expect(eg({ name: 'message_resident' }, {}, { exposure: 'main' }).allowed).toBe(true);
     const r = eg({ name: 'app_update' }, {}, { exposure: 'main', instanceState: { app: true } });
     expect(r.allowed).toBe(false);
@@ -327,7 +321,7 @@ describe('DESIGN-17 web resident — the fourth kind (DOM toolset + tab pin)', (
 
   test('a web resident may call its DOM tools (read + mutate)', () => {
     for (const n of ['snapshot', 'read_page', 'click', 'type', 'navigate', 'query_dom']) {
-      expect(rt({ name: n }, {}, web(), true)).toBeNull();
+      expect(rt({ name: n }, {}, web())).toBeNull();
     }
     expect(isAllowedForResidentKind('click', 'web')).toBe(true);
     expect(residentAllowedTools('web').size).toBe(WEB_RESIDENT_DOM_TOOLS.length);
@@ -338,7 +332,7 @@ describe('DESIGN-17 web resident — the fourth kind (DOM toolset + tab pin)', (
     // same exclusion that IS the runner's boundary, now enforced at the gate.
     for (const n of ['app_update', 'vm_boot', 'js_notebook', 'edit_file',
       'call_api', 'spawn_subagent', 'page_eval', 'page_exec', 'message_resident']) {
-      expect(rt({ name: n }, {}, web(), true)?.allowed).toBe(false);
+      expect(rt({ name: n }, {}, web())?.allowed).toBe(false);
     }
   });
 
@@ -348,17 +342,17 @@ describe('DESIGN-17 web resident — the fourth kind (DOM toolset + tab pin)', (
     // mutating tier — so the tier has no opinion and the runner is never refused.
     for (const n of ['click', 'type', 'navigate']) {
       expect(isResidentMutatingTool(n)).toBe(false);
-      expect(rt({ name: n }, {}, {}, true)).toBeNull();                   // runner (exposure unset)
-      expect(rt({ name: n }, {}, { exposure: 'main' }, true)).toBeNull(); // tier no-opinion (exposure hides it)
+      expect(rt({ name: n }, {}, {})).toBeNull();                   // runner (exposure unset)
+      expect(rt({ name: n }, {}, { exposure: 'main' })).toBeNull(); // tier no-opinion (exposure hides it)
     }
   });
 
   test('the tab pin — explicit foreign tabId refused; owned / absent pass', () => {
     expect(residentWebTabTarget({ tabId: 99 })).toBe(99);
     expect(residentWebTabTarget({})).toBeUndefined();
-    expect(rt({ name: 'click' }, { tabId: 99 }, web(), true)?.allowed).toBe(false); // sibling tab
-    expect(rt({ name: 'click' }, { tabId: 42 }, web(), true)).toBeNull();           // own tab
-    expect(rt({ name: 'click' }, {}, web(), true)).toBeNull();                      // default → bound
+    expect(rt({ name: 'click' }, { tabId: 99 }, web())?.allowed).toBe(false); // sibling tab
+    expect(rt({ name: 'click' }, { tabId: 42 }, web())).toBeNull();           // own tab
+    expect(rt({ name: 'click' }, {}, web())).toBeNull();                      // default → bound
   });
 
   test('residentDescriptors filters a web resident to its DOM toolset', () => {
