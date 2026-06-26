@@ -230,6 +230,8 @@
 <script type="module">
   import { runNotebook } from '/web/notebook-host.js';
   import { startPeer } from '/web/peer-host.js';
+  import { initGemma, generateGemma } from '/web/gemma.js';
+  import { makeAgent } from '/web/agent.js';
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
 
@@ -338,12 +340,74 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   };
   document.querySelectorAll('.pc[data-act]').forEach(b=> b.addEventListener('click',()=>{ const a=PRECODED[b.dataset.act]; say('user',a.ask); say('bot',a.say); a.go(); }));
 
-  // Gemma (local agent) — runner wiring lands in the next build; affordance + gating here.
-  document.getElementById('gemmaDl').addEventListener('click', ()=>{
-    const prog=document.getElementById('gemmaProg'); prog.hidden=false;
-    document.getElementById('gemmaPct').textContent='the local Gemma runner (WebGPU, ~3 GB cached) is being wired up — next build';
-    document.getElementById('statGemma').textContent='gemma: wiring…';
+  // ---- Gemma local agent (real: WebGPU via web/gemma.js + web/agent.js) ----
+  const TOOLS = [
+    { type:'function', function:{ name:'run_notebook', description:'Write and run JavaScript in a fresh sealed-worker notebook (opens a new tab). Call peerd.self.display(value) to show output; you may import helpers from "peerd:std" (table, chart, mean, range, sum, …). End with a return value. Returns the console output + result.', parameters:{ type:'object', properties:{ code:{ type:'string', description:'the JavaScript to run' } }, required:['code'] } } },
+    { type:'function', function:{ name:'show_peers', description:'Open the live peer-network tab to show who is connected on the peerd dweb.', parameters:{ type:'object', properties:{} } } },
+  ];
+  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (Gemma on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY: <tool_call>{"name":"<tool>","arguments":{...}}</tool_call>. After a tool result, either call another tool or give a short final answer in plain text. Prefer run_notebook for anything computational. Be concise.`;
+
+  async function agentRunNotebook(code){
+    const id = openTab('notebook', { seed: code });        // open + seed, no auto-run
+    const panel = panelEl(id);
+    const out = panel.querySelector('.nb-output'), cons = panel.querySelector('.nb-console');
+    out.innerHTML=''; cons.innerHTML='';
+    const r = await runNotebook(code, { outputEl: out, logEl: cons, notebookId: id });
+    let s = 'notebook ran.';
+    const c = cons.textContent.trim().slice(0,500);
+    if(r?.error) s += ' error: ' + r.error;
+    if(c) s += ' console: ' + c;
+    if(r && r.value!==undefined && !r.error) s += ' return: ' + JSON.stringify(r.value).slice(0,200);
+    return s;
+  }
+  async function runTool(name, args){
+    if(name==='run_notebook') return await agentRunNotebook(String(args?.code||''));
+    if(name==='show_peers'){ openTab('peers'); return 'Opened the peers tab; the live peer graph is connecting.'; }
+    return 'unknown tool: ' + name;
+  }
+
+  let agent=null, gemmaReady=false, gemmaLoading=false;
+  const composer=document.getElementById('composer'), sendBtn=document.getElementById('send');
+  const setGemmaStat=(t)=>{ document.getElementById('statGemma').textContent='gemma: '+t; };
+
+  document.getElementById('gemmaDl').addEventListener('click', async ()=>{
+    if(gemmaReady||gemmaLoading) return; gemmaLoading=true;
+    const prog=document.getElementById('gemmaProg'), fill=document.getElementById('gemmaFill'), pct=document.getElementById('gemmaPct'), btn=document.getElementById('gemmaDl');
+    prog.hidden=false; btn.disabled=true; btn.textContent='⬇ Downloading…'; setGemmaStat('loading…');
+    try{
+      await initGemma((p)=>{
+        if(p.status==='phase' && typeof p.overall!=='number') pct.textContent=p.phase;
+        if(typeof p.overall==='number'){ fill.style.width=p.overall.toFixed(1)+'%'; pct.textContent=`downloading weights · ${p.overall.toFixed(0)}%`; }
+      });
+      gemmaReady=true; gemmaLoading=false; fill.style.width='100%'; pct.textContent='ready · running locally on your GPU';
+      const gc=document.getElementById('gchip'); gc.classList.add('on'); gc.querySelector('.gtxt').textContent='gemma: ready';
+      setGemmaStat('ready · local'); btn.textContent='✓ Gemma loaded';
+      composer.disabled=false; sendBtn.disabled=false; composer.placeholder='Ask Gemma to do something…'; composer.focus();
+      agent = makeAgent({ generate: generateGemma, runTool, tools: TOOLS, system: SYSTEM });
+      say('bot','Gemma is loaded and running on your GPU — no key, no server. Ask me anything: I can write and run notebooks, open the peer network, and more. Try <i>"chart the first 10 fibonacci numbers"</i>.');
+    }catch(e){
+      gemmaLoading=false; btn.disabled=false; btn.textContent='⬇ Download Gemma · run locally';
+      pct.textContent='couldn’t start: '+(e?.message||e); setGemmaStat('unavailable');
+    }
   });
+
+  async function sendToAgent(){
+    if(!gemmaReady||!agent) return;
+    const text=composer.value.trim(); if(!text) return; composer.value='';
+    say('user', text.replace(/</g,'&lt;'));
+    clog.insertAdjacentHTML('beforeend', '<div class="msg bot"><div class="who"><span class="orb"></span> peerd</div><div class="bubble"><span class="btext">…</span></div></div>');
+    const bubble = clog.lastElementChild.querySelector('.bubble');
+    const btext = bubble.querySelector('.btext');
+    sendBtn.disabled=true;
+    await agent.chat(text, {
+      onDelta:(v)=>{ btext.textContent = v || '…'; clog.scrollTop=clog.scrollHeight; },
+      onText:(v)=>{ btext.textContent = v; clog.scrollTop=clog.scrollHeight; },
+      onToolCall:(c)=>{ bubble.insertAdjacentHTML('beforeend', `<div class="toolcall"${c.name==='show_peers'?' style="border-left-color:var(--magenta)"':''}><span class="g"${c.name==='show_peers'?' style="background:var(--magenta)"':''}>${c.name==='show_peers'?'◈':'N'}</span>${c.name}</div>`); clog.scrollTop=clog.scrollHeight; },
+    });
+    sendBtn.disabled=false;
+  }
+  sendBtn.addEventListener('click', sendToAgent);
+  composer.addEventListener('keydown',(e)=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendToAgent(); } });
 
   // PWA
   if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
