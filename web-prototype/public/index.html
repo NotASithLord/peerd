@@ -103,6 +103,8 @@
   .gemma-card{background:linear-gradient(135deg,rgba(0,183,235,0.08),rgba(217,70,239,0.06));border:1px solid var(--line);border-radius:13px;padding:16px}
   .gemma-top{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:13px;color:var(--white);font-weight:600;margin-bottom:6px}
   .gemma-card p{margin:0 0 13px;font-size:12.5px;color:var(--muted)}
+  .gemma-cap{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:0 0 13px}
+  .cap-yes{color:var(--green);font-weight:600}.cap-no{color:var(--amber);font-weight:600}
   .gemma-dl{font-family:var(--mono);font-size:12.5px;font-weight:600;border:none;border-radius:9px;padding:10px 16px;background:linear-gradient(180deg,#13c3f2,#00a6d6);color:#04222b;cursor:pointer}.gemma-dl:hover{filter:brightness(1.07)}
   .gemma-prog{margin-top:12px}.gemma-bar{height:7px;border-radius:4px;background:rgba(255,255,255,0.08);overflow:hidden}.gemma-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--magenta));transition:width .25s}
   .gemma-pct{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:6px}
@@ -195,6 +197,7 @@
           <div class="gemma-card" id="gemmaCard">
             <div class="gemma-top"><span class="orb"></span> Run a real agent, locally</div>
             <p>Download Google's <b>Gemma</b> and run the agent fully on your device over WebGPU. Cached after the first download. Then I can do custom work and open new tabs on my own. This is the default way to use peerd-lite.</p>
+            <div class="gemma-cap" id="gemmaCap">checking your GPU…</div>
             <button class="gemma-dl" id="gemmaDl">⬇ Download Gemma · run locally</button>
             <div class="gemma-prog" id="gemmaProg" hidden><div class="gemma-bar"><i id="gemmaFill"></i></div><div class="gemma-pct" id="gemmaPct">starting…</div></div>
           </div>
@@ -229,6 +232,7 @@
   import { runNotebook } from '/web/notebook-host.js';
   import { startPeer } from '/web/peer-host.js';
   import { initGemma, generateGemma } from '/web/gemma.js';
+  import { probeLocalModelCapability } from '/web/local-model-capability.js';
   import { makeAgent } from '/web/agent.js';
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
@@ -368,7 +372,31 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   const composer=document.getElementById('composer'), sendBtn=document.getElementById('send');
   const setGemmaStat=(t)=>{ document.getElementById('statGemma').textContent='gemma: '+t; };
 
+  // Page-load GPU capability check (the extension's probe). Real gate = WebGPU +
+  // shader-f16; the storage-binding heuristic over-rejects Apple Silicon (q4f16
+  // fits a 1 GB binding), so it is NOT used as a blocker.
+  let gemmaSupported = false;
+  (async () => {
+    const chip = document.getElementById('gchip'), chipTxt = chip.querySelector('.gtxt');
+    const capEl = document.getElementById('gemmaCap'), dl = document.getElementById('gemmaDl');
+    try {
+      const cap = await probeLocalModelCapability();
+      const gpu = [cap.gpuVendor, cap.gpuArchitecture].filter(Boolean).join(' ') || cap.webglRenderer || 'your GPU';
+      gemmaSupported = !!(cap.webgpu && cap.shaderF16);
+      if (gemmaSupported) {
+        capEl.innerHTML = `<span class="cap-yes">● Gemma available</span> — WebGPU + shader-f16 detected (${gpu}).`;
+        chipTxt.textContent = 'gemma: available'; chip.classList.add('on'); setGemmaStat('available');
+      } else {
+        const why = !cap.webgpu ? 'WebGPU is unavailable in this browser' : 'this GPU lacks shader-f16 (needed for q4f16)';
+        capEl.innerHTML = `<span class="cap-no">● Gemma not supported here</span> — ${why}. Try desktop Chrome or Edge with a recent GPU. The precoded actions below still work.`;
+        chipTxt.textContent = 'gemma: not supported'; setGemmaStat('not supported');
+        dl.disabled = true; dl.style.opacity = '.5'; dl.style.cursor = 'default'; dl.textContent = '⬇ needs WebGPU + shader-f16';
+      }
+    } catch (e) { capEl.textContent = 'couldn’t check GPU: ' + (e?.message || e); }
+  })();
+
   document.getElementById('gemmaDl').addEventListener('click', async ()=>{
+    if(!gemmaSupported) return;
     if(gemmaReady||gemmaLoading) return; gemmaLoading=true;
     const prog=document.getElementById('gemmaProg'), fill=document.getElementById('gemmaFill'), pct=document.getElementById('gemmaPct'), btn=document.getElementById('gemmaDl');
     prog.hidden=false; btn.disabled=true; btn.textContent='⬇ Downloading…'; setGemmaStat('loading…'); pct.style.color='';
