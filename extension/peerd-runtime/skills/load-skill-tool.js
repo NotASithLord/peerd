@@ -16,6 +16,8 @@
 //
 // The registry is injected onto the ToolContext by the SW (ctx.skills).
 
+import { escapeAttr } from '/shared/util.js';
+
 /** @type {import('/shared/tool-types.js').Tool} */
 export const loadSkillTool = {
   name: 'load_skill',
@@ -55,7 +57,7 @@ export const loadSkillTool = {
       return {
         ok: true,
         content: [
-          `<skill name="${meta.name}"${meta.version ? ` version="${meta.version}"` : ''}>`,
+          `<skill name="${meta.name}"${meta.version ? ` version="${escapeAttr(meta.version)}"` : ''}>`,
           'The following is the skill\'s playbook. Follow it for this task.',
           'Tool calls it leads to still pass the normal gates.',
           '',
