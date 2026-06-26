@@ -29,7 +29,9 @@
 <style>
   :root{
     --bg:#07090A;--base:#0A0C0D;--panel:rgba(255,255,255,0.025);--panel2:rgba(255,255,255,0.05);
-    --chrome:#0E1113;--chrome2:#0B0E0F;--line:rgba(255,255,255,0.10);--line2:rgba(255,255,255,0.06);
+    /* retro steel/graphite window chrome — contrasts with the near-black page + viewport */
+    --chrome:#3a4049;--chrome2:#2b3038;--chrome-hi:rgba(255,255,255,0.16);--chrome-lo:rgba(0,0,0,0.45);
+    --line:rgba(255,255,255,0.10);--line2:rgba(255,255,255,0.07);
     --paper:#E8E6E1;--white:#FAFAFA;--muted:rgba(232,230,225,0.56);--faint:rgba(232,230,225,0.3);
     --cyan:#00B7EB;--red:#EF4444;--amber:#F59E0B;--green:#22C55E;--magenta:#D946EF;
     --mono:'JetBrains Mono',ui-monospace,monospace;--disp:'Geist Mono',var(--mono);
@@ -50,25 +52,25 @@
   /* emulated browser window */
   .stage{position:relative;z-index:1;height:100dvh;display:grid;place-items:center;padding:max(14px,2.4vh) max(14px,1.6vw);padding-top:max(14px,calc(2.4vh + env(safe-area-inset-top)))}
   .bz{width:100%;max-width:1240px;height:100%;display:flex;flex-direction:column;min-height:0;position:relative;
-    background:linear-gradient(180deg,var(--chrome),var(--chrome2));border:1px solid var(--line);border-radius:12px;overflow:hidden;
-    box-shadow:0 0 0 1px rgba(0,0,0,.4),0 26px 80px rgba(0,0,0,.6),0 0 60px rgba(0,183,235,.06),0 0 90px rgba(217,70,239,.05)}
+    background:linear-gradient(180deg,var(--chrome),var(--chrome2));border:1px solid #191d22;border-top-color:var(--chrome-hi);border-radius:12px;overflow:hidden;
+    box-shadow:inset 0 1px 0 var(--chrome-hi),0 0 0 1px rgba(0,0,0,.45),0 26px 80px rgba(0,0,0,.6),0 0 70px rgba(0,183,235,.05),0 0 100px rgba(217,70,239,.05)}
   .bz::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(255,255,255,0.012) 0 1px,transparent 1px 3px);z-index:6;mix-blend-mode:overlay}
-  .bz-title{display:flex;align-items:center;gap:11px;height:38px;padding:0 13px;border-bottom:1px solid var(--line2);background:linear-gradient(180deg,rgba(255,255,255,0.04),transparent)}
+  .bz-title{display:flex;align-items:center;gap:11px;height:38px;padding:0 13px;border-bottom:1px solid var(--chrome-lo);background:linear-gradient(180deg,#474e58,#363c45);box-shadow:inset 0 1px 0 rgba(255,255,255,0.10)}
   .bz-title .name{font-family:var(--mono);font-size:11.5px;color:var(--muted)}.bz-title .name b{color:var(--paper);font-weight:600}
   .bz-title .sp{flex:1}
   .winbtns{display:flex;gap:7px}.winbtns i{width:12px;height:12px;border-radius:50%;display:block;border:1px solid rgba(0,0,0,.3)}
   .winbtns .c1{background:#f59e0b}.winbtns .c2{background:#22c55e}.winbtns .c3{background:#ef4444}
-  .bz-tools{display:flex;align-items:center;gap:8px;height:42px;padding:0 12px;border-bottom:1px solid var(--line2);background:var(--chrome2)}
-  .navbtn{width:28px;height:28px;border-radius:7px;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.01));color:var(--muted);cursor:pointer;font-size:14px;display:grid;place-items:center}
+  .bz-tools{display:flex;align-items:center;gap:8px;height:42px;padding:0 12px;border-bottom:1px solid var(--chrome-lo);background:linear-gradient(180deg,#363c45,#2c313a);box-shadow:inset 0 1px 0 rgba(255,255,255,0.07)}
+  .navbtn{width:28px;height:28px;border-radius:6px;border:1px solid #1f242a;background:linear-gradient(180deg,#4a515b,#383e47);color:var(--paper);cursor:pointer;font-size:14px;display:grid;place-items:center;box-shadow:inset 0 1px 0 rgba(255,255,255,0.14)}
   .navbtn:hover:not(:disabled){color:var(--paper);border-color:var(--line)}.navbtn:active:not(:disabled){box-shadow:inset 0 2px 5px rgba(0,0,0,.5)}.navbtn:disabled{opacity:.35;cursor:default}
-  .addr{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:28px;padding:0 12px;font-family:var(--mono);font-size:12px;color:var(--muted);background:#070908;border:1px solid var(--line2);border-radius:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .addr{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:28px;padding:0 12px;font-family:var(--mono);font-size:12px;color:var(--muted);background:#15181c;border:1px solid #1c2025;border-radius:6px;box-shadow:inset 0 1px 3px rgba(0,0,0,0.55);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   .addr .lock{color:var(--green);font-size:9px}.addr .proto{color:var(--faint)}
   .gchip{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;color:var(--muted);border:1px solid var(--line2);background:var(--panel);border-radius:8px;padding:5px 10px;cursor:pointer;white-space:nowrap}
   .gchip .d{width:7px;height:7px;border-radius:50%;background:var(--amber)}.gchip.on .d{background:var(--green);box-shadow:0 0 7px rgba(34,197,94,.7)}
   .install{font-family:var(--mono);font-size:11.5px;border:1px solid var(--line2);background:var(--panel);color:var(--paper);border-radius:8px;padding:5px 10px;cursor:pointer}
-  .bz-tabs{display:flex;align-items:flex-end;gap:3px;height:36px;padding:0 10px;border-bottom:1px solid var(--line);background:var(--chrome2);overflow-x:auto;scrollbar-width:none}
+  .bz-tabs{display:flex;align-items:flex-end;gap:3px;height:36px;padding:0 10px;border-bottom:1px solid #191d22;background:linear-gradient(180deg,#2c313a,#262a31);overflow-x:auto;scrollbar-width:none}
   .bz-tabs::-webkit-scrollbar{display:none}
-  .tab{position:relative;display:inline-flex;align-items:center;gap:7px;height:29px;padding:0 11px;border:1px solid var(--line2);border-bottom:none;border-radius:9px 9px 0 0;background:rgba(255,255,255,0.015);color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11.5px;max-width:185px;flex:0 0 auto;white-space:nowrap;bottom:-1px}
+  .tab{position:relative;display:inline-flex;align-items:center;gap:7px;height:29px;padding:0 11px;border:1px solid #20242a;border-bottom:none;border-radius:9px 9px 0 0;background:linear-gradient(180deg,#383e47,#2e333b);color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11.5px;max-width:185px;flex:0 0 auto;white-space:nowrap;bottom:-1px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.08)}
   .tab:hover{color:var(--paper);background:rgba(255,255,255,0.04)}
   .tab[aria-selected="true"]{background:var(--base);color:var(--white);border-color:var(--line);height:31px;box-shadow:0 -2px 10px rgba(0,0,0,.35)}
   .tab[aria-selected="true"]::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--base)}
@@ -76,12 +78,12 @@
   .k-engine{background:linear-gradient(135deg,#fbbf24,#f59e0b)}.k-dweb{background:linear-gradient(135deg,#e879f9,#d946ef)}
   .tab .tab-title{overflow:hidden;text-overflow:ellipsis}
   .tab .tab-close{display:grid;place-items:center;width:17px;height:17px;border-radius:5px;color:var(--faint);font-size:13px}.tab .tab-close:hover{background:var(--line);color:var(--paper)}
-  .tab.home .wm{--wm:16px}
+  .fav-home{background:linear-gradient(135deg,#5a626c,#3c424a);color:#e8e6e1}
   .tab-new{height:26px;width:28px;border:1px solid var(--line2);border-radius:7px;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:none;align-self:center;margin-left:3px}.tab-new:hover{color:var(--paper);border-color:var(--line)}
   .bz-view{flex:1;min-height:0;overflow:auto;background:var(--base);position:relative}
   .tabpanel{padding:20px}.tabpanel[hidden]{display:none}
   .substrate{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-top:14px;padding-top:10px;border-top:1px dashed var(--line2)}
-  .bz-status{display:flex;align-items:center;gap:14px;height:26px;padding:0 13px;border-top:1px solid var(--line);background:var(--chrome2);font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .bz-status{display:flex;align-items:center;gap:14px;height:26px;padding:0 13px;border-top:1px solid var(--chrome-hi);background:linear-gradient(180deg,#2f343d,#272b32);font-family:var(--mono);font-size:10.5px;color:var(--muted)}
   .bz-status .s-dot{width:6px;height:6px;border-radius:50%;background:var(--faint);display:inline-block;margin-right:5px}
   .bz-status .live .s-dot{background:var(--green);box-shadow:0 0 6px rgba(34,197,94,.7)}
   .bz-status .sp{flex:1}
@@ -89,7 +91,7 @@
   /* HOME = chat */
   .home-chat{display:flex;justify-content:center;padding:22px 18px}
   .chat-col{width:100%;max-width:680px;display:flex;flex-direction:column;gap:14px}
-  .chat-hero{display:flex;align-items:center;gap:13px}.chat-hero .wm{--wm:30px}.chat-hero .tagline{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  /* (home hero wordmark removed — the only wordmark is the title bar) */
   .chat-log{display:flex;flex-direction:column;gap:13px}
   .msg{animation:fade .3s ease}@keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
   .who{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
@@ -179,7 +181,7 @@
     </div>
     <div class="bz-tabs" id="strip" role="tablist" aria-label="peerd instances">
       <button class="tab home" data-tab="home" role="tab" aria-selected="true" title="Home">
-        <span class="wm"><i class="b-p">p</i><i class="b-e">e</i><i class="b-e2">e</i><i class="b-r">r</i><i class="b-d">d</i></span>
+        <span class="favicon fav-home">⌂</span><span class="tab-title">Home</span>
       </button>
       <button class="tab" data-tab="peers" role="tab" aria-selected="false"><span class="favicon k-dweb">◈</span><span class="tab-title">peers</span></button>
       <button class="tab-new" id="newTab" aria-label="New tab" title="New instance">+</button>
@@ -187,10 +189,6 @@
     <main class="bz-view" id="viewport">
       <section class="tabpanel home-chat" data-panel="home" role="tabpanel">
         <div class="chat-col">
-          <div class="chat-hero">
-            <span class="wm" aria-label="peerd"><i class="b-p">p</i><i class="b-e">e</i><i class="b-e2">e</i><i class="b-r">r</i><i class="b-d">d</i></span>
-            <span class="tagline">lite · runs in your browser</span>
-          </div>
           <div class="chat-log" id="chatLog">
             <div class="msg bot"><div class="who"><span class="orb"></span> peerd</div><div class="bubble">Hi. I run right here in this page. Download <b>Gemma</b> to give me a real local brain (WebGPU, cached, no key, no server), or try a precoded action below right now.</div></div>
           </div>
