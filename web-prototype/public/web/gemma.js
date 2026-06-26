@@ -46,8 +46,20 @@ export const probeWebgpu = async () => {
   try { adapter = await navigator.gpu.requestAdapter(); } catch { adapter = null; }
   if (!adapter) return { ok: false, reason: 'No WebGPU adapter (GPU blocked or unavailable).' };
   if (!adapter.features.has('shader-f16')) return { ok: false, reason: 'GPU lacks shader-f16 (needed for q4f16).' };
-  return { ok: true };
+  const lim = adapter.limits || {};
+  const maxStorage = Number(lim.maxStorageBufferBindingSize) || 0;
+  const maxBuffer = Number(lim.maxBufferSize) || 0;
+  console.log('[gemma] WebGPU adapter limits', { maxStorageBufferBindingSize: maxStorage, maxBufferSize: maxBuffer });
+  return { ok: true, maxStorage, maxBuffer };
 };
+
+// Gemma-4-E2B's 1.59 GB per-layer embedding table is a single WebGPU storage
+// binding, so the GPU must allow ≥ ~1.8 GB per binding (and a >3 GB buffer) or
+// the model can't instantiate. We gate on it (a touch below 1.8 GB to avoid
+// false negatives) so an incapable GPU gets a clear message instead of a
+// silent stall during the post-download compile.
+const MIN_STORAGE = 1.6e9;
+const MIN_BUFFER = 3.0e9;
 
 export const gemmaStatus = async () => {
   await detectDownloaded;
@@ -86,6 +98,12 @@ export const initGemma = async (onProgress = () => {}) => {
     report('probing WebGPU');
     const cap = await probeWebgpu();
     if (!cap.ok) throw new Error(cap.reason);
+    if (cap.maxStorage && cap.maxStorage < MIN_STORAGE) {
+      throw new Error(`This GPU allows only ${Math.round(cap.maxStorage / 1e6)} MB per storage buffer; Gemma-4-E2B needs ~1.8 GB, so it can't fit on this GPU. (A discrete/desktop GPU usually works.)`);
+    }
+    if (cap.maxBuffer && cap.maxBuffer < MIN_BUFFER) {
+      throw new Error(`This GPU's max buffer is ${Math.round(cap.maxBuffer / 1e6)} MB; Gemma-4-E2B needs ~3 GB and can't fit here.`);
+    }
     report('loading transformers.js (vendored)');
     const t = await loadTransformers();
     report('loading tokenizer + config');
