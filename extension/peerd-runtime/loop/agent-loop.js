@@ -759,7 +759,15 @@ export async function* runUserTurn(ctx) {
     // to its result the moment it lands (completion order). Hooks, audit
     // and lineage are untouched — every call still goes through the same
     // dispatchOne → toolDispatch pipeline, one invocation per call.
+    let abortedMidBatch = false;
     for (const wave of partitionToolBatch(toolUses, isConcurrencySafe)) {
+      // why recheck per wave: Stop (or a spend-limit halt) can land AFTER the
+      // pre-dispatch guard (:683) while the batch is draining. Each non-READ call
+      // is its own sequential wave, so checking here stops the NEXT side-effecting
+      // wave from dispatching once the user pressed Stop — without this the only
+      // other check is at the loop top, which runs only after the WHOLE batch ran
+      // its side effects. (Already-dispatched calls can't be un-run; we stop here.)
+      if (wasAborted()) { abortedMidBatch = true; break; }
       if (wave.concurrent) {
         for (const tu of wave.calls) {
           yield {
@@ -778,6 +786,9 @@ export async function* runUserTurn(ctx) {
         for (const tu of wave.calls) toolResults.push(blocksById.get(tu.id));
       } else {
         for (const tu of wave.calls) {
+          // belt-and-suspenders: a non-concurrent wave is one call today, but if
+          // that ever changes, don't dispatch a second side effect after Stop.
+          if (wasAborted()) { abortedMidBatch = true; break; }
           yield {
             type: 'tool-use', sessionId, messageId: assistantStub.id,
             toolUseId: tu.id, name: tu.name, input: tu.input,
@@ -786,7 +797,22 @@ export async function* runUserTurn(ctx) {
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
           toolResults.push(block);
         }
+        if (abortedMidBatch) break;
       }
+    }
+    if (abortedMidBatch) {
+      // Mirror the pre-dispatch abort guard (:683): mark a DELIBERATE stop (not a
+      // resumable tools-pending interruption) and drop the partial tool_result
+      // message, so the turn ends cleanly on the aborted assistant message and
+      // detectInterruptedTurn won't re-drive it.
+      await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
+        stopReason: 'aborted',
+      });
+      yield {
+        type: 'stop', sessionId,
+        messageId: assistantStub.id, stopReason: 'aborted',
+      };
+      return;
     }
 
     // Append the user message that carries tool results back to the
