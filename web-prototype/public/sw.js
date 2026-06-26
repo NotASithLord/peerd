@@ -6,7 +6,7 @@
 // the SW never sees it. Same-origin GETs use cache-first (shell + vendored
 // modules) and network-first for navigations. This keeps the sealed-worker
 // notebook, dynamic ES imports, the live dweb peer, and OPFS untouched.
-const CACHE = 'peerd-lite-v3';
+const CACHE = 'peerd-lite-v4';
 const SHELL = [
   '/',
   '/index.html',
