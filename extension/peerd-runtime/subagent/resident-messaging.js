@@ -33,6 +33,8 @@
 // refused. Fail-CLOSED (default deny for synthetic) + the `=== active` second
 // wall. The per-sender runaway guard bounds an autonomous parent↔resident loop.
 
+import { escapeAttr } from '/shared/util.js';
+
 /**
  * @param {Object} deps
  * @param {(instanceId: string) => Promise<{ instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number } | null>} deps.resolveResident
@@ -135,7 +137,16 @@ export const makeResidentMessaging = (deps) => {
       origin: instanceId, tool: 'message_resident', body,
       retrievedAt: new Date(now()).toISOString(),
     });
-    const who = name ? `${name} (${instanceId})` : instanceId;
+    // `name` is UNTRUSTED in the lead: for a web resident it is the page's
+    // document.title (fully page-controlled), for an engine resident it is an
+    // agent-set label (injection-launderable). The lead sits OUTSIDE the fence in
+    // a trusted:true wake, so an un-sanitized name is a clean fence break-out —
+    // a newline-bearing title would inject prose into the orchestrator's trusted
+    // turn, or forge a </untrusted_web_content> close to un-fence the body below.
+    // Collapse whitespace (kill the newline vector), clamp, then escapeAttr (no
+    // surviving angle bracket → no forged fence/close tag).
+    const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : '';
+    const who = safeName ? `${safeName} (${instanceId})` : instanceId;
     const lead = failed
       ? `The ${kind} resident ${who} could not complete your request:`
       : `The ${kind} resident ${who} you messaged has replied:`;
