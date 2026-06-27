@@ -20,7 +20,7 @@ export const makeSessionRoutes = (deps) => {
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
-    startGoalRun, haltGoalRun, ensureSession,
+    startGoalRun, haltGoalRun, ensureSession, actorMessaging,
   } = deps;
 
   return {
@@ -38,6 +38,24 @@ export const makeSessionRoutes = (deps) => {
       if (sessionId && turnSlots.stop(sessionId)) {
         auditLog.append({ type: 'session_ended', details: { reason: 'user_stop' } })
           .catch(() => {});
+      }
+      // DESIGN-17 P1 — CASCADE the stop to this chat's in-flight ACTORS. They
+      // run on their OWN turn slots (an actor is a separate session), so the line
+      // above only aborted the orchestrator; without this, delegated VM/App/Notebook
+      // work keeps mutating to completion after the user hit Stop — sharper now that
+      // goal mode can autonomously drive actors. stopActorsFor bumps a per-
+      // sender Stop generation (so an actor turn still QUEUED behind another on the
+      // same slot skips when drained) AND returns the RUNNING actor sessions to
+      // abort. Aborting a slot lands at its loop's next checkpoint (interruptible per
+      // the spec); the aborted turn settles through the normal path, delivering a
+      // "stopped before a reply" note and clearing its durable mailbox entry — so a
+      // redrain can't resurrect it.
+      if (sessionId && actorMessaging?.stopActorsFor) {
+        for (const actorSessionId of actorMessaging.stopActorsFor(/** @type {any} */ (sessionId))) {
+          if (turnSlots.stop(actorSessionId)) {
+            auditLog.append({ type: 'actor_stopped', details: { actorSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
+          }
+        }
       }
       return { ok: true };
     },
@@ -216,8 +234,12 @@ export const makeSessionRoutes = (deps) => {
         // why: subagent sessions are inspectable through their parent's
         // transcript, not the chat list — filter them out of /chats so
         // decomposition work doesn't clutter the user's conversations.
-        // See docs/SUBAGENTS.md.
-        sessions: all.filter((/** @type {any} */ s) => (s.kind ?? 'chat') !== 'subagent').map((/** @type {any} */ s) => ({
+        // See docs/SUBAGENTS.md. DESIGN-17: actor sessions are reached only
+        // by message (via their instance), never as a chat — keep them out too.
+        sessions: all.filter((/** @type {any} */ s) => {
+          const kind = s.kind ?? 'chat';
+          return kind !== 'subagent' && kind !== 'actor';
+        }).map((/** @type {any} */ s) => ({
           sessionId: s.sessionId,
           title: s.title ?? null,
           createdAt: s.createdAt,

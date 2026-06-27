@@ -102,7 +102,7 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
 export const CAPABILITY_CONSUMERS = Object.freeze({
   getSecret:          [],
   safeFetch:          [],
-  webFetch:           ['call_api', 'read_article', 'web_search', 'vm_import'],
+  webFetch:           ['vm_import', 'fetch_url'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect_storage'],
   idb:                ['inspect_audit_log'],
@@ -115,6 +115,32 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // the dweb closure alongside the dweb_* tools.
   dweb:               ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers',
     'dweb_block', 'dweb_discovery', 'dweb_guide', 'app_create'],
+  // DESIGN-17: the engine instance closures buildToolContext injects into EVERY
+  // ctx — the SW-side clients + registries + tab trackers that the
+  // vm_*/js_*/app_*/edit_file tools reach through. Listing them here strips them
+  // from any narrowed child whose granted tools don't read them — the keyless tool
+  // ctx the actor relies on, and the confused-deputy close for plain subagents.
+  // The reader lists are EXHAUSTIVE (an omitted reader silently loses its closure
+  // and the tool returns `*_not_available`, never a crash — covered by tests).
+  // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
+  // (edit-file.js: ctx[kind==='app'?'appRegistry':'jsRegistry']), so it must be
+  // listed in BOTH despite not matching a `.appRegistry` grep.
+  vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
+  vmRegistry:         ['vm_create', 'vm_delete', 'vm_boot', 'vm_list'],
+  vmTabTracker:       ['vm_create', 'vm_delete', 'vm_list'],
+  jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
+  jsRegistry:         ['js_notebook', 'js_create', 'js_delete', 'js_list', 'edit_file'],
+  jsTabTracker:       ['js_create', 'js_delete', 'js_list'],
+  jsOffscreenClient:  ['js_run'],
+  appClient:          ['app_create', 'app_open', 'app_update', 'app_write_file',
+    'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
+  appRegistry:        ['app_delete', 'app_list', 'edit_file'],
+  appTabTracker:      ['app_list'],
+  messageActor:    ['message_actor'],
+  // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
+  // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
+  // web actor (which has navigate), stripped from any kind whose toolset lacks it.
+  adoptWebTab:        ['navigate'],
 });
 
 /**

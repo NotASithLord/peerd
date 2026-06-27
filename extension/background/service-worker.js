@@ -49,6 +49,7 @@ import {
   // fetch / egress
   makeSafeFetch,
   makeWebFetch,
+  withSessionScopedCredentials,
   HARDCODED_ALLOWLIST,
   matchesDenylist,
   // audit
@@ -69,7 +70,7 @@ import {
   // page-reader (do/get/check) runner-model resolution: pin → local → provider
   // default → inherit. Pure; the SW resolves it per tool-context build.
   resolveRunnerModel,
-  // local WebGPU runner: the offscreen-engine bridge + the resident model id.
+  // local WebGPU runner: the offscreen-engine bridge + the actor model id.
   setLocalGenerate, LOCAL_MODEL_ID,
   // live model inventory (Ollama /api/tags) for the model picker.
   listProviderModels,
@@ -218,6 +219,13 @@ import {
   wrapUntrusted,
   // DESIGN-11: the async-subagent orchestrator (testable; the SW injects its IO).
   makeAsyncSubagents,
+  // DESIGN-17: the message_actor orchestrator + the actor capability-tier
+  // helpers the actor tool context is built from (keyless strip + kind scope).
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedTools, EXPOSURE_ACTOR,
+  // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
+  // registry (the 0-or-1-tab actor), + the self-fenced summary.
+  makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  finalAssistantText,
   // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
   pullInHintInjected,
 } from '/peerd-runtime/index.js';
@@ -498,7 +506,7 @@ const MODEL_CATALOG = Object.freeze({
     { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
     { model: 'openai/gpt-4o',         label: 'GPT-4o' },
   ],
-  // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
+  // Local WebGPU — only surfaced once downloaded/actor (gated in buildModelOptions).
   'local-webgpu': [
     { model: LOCAL_MODEL_ID, label: 'Gemma 4 E2B' },
   ],
@@ -606,7 +614,7 @@ const buildModelOptions = async ({ sessionId = null } = {}) => {
     // still surface that provider's models (and the current one) rather than
     // render an empty picker; the missing-key skip applies to fresh chats only.
     if (!hasKey && !lockProvider) continue;
-    // The local WebGPU model only appears once downloaded + resident (the
+    // The local WebGPU model only appears once downloaded + actor (the
     // offscreen engine reports `available`); otherwise selecting it would error
     // on the first turn ("local model not loaded"). Hardware capability is gated
     // earlier, at download time (Settings → WebGPU models).
@@ -676,8 +684,8 @@ export const safeFetch = makeSafeFetch({
   audit: /** @type {any} */ (auditLog.append),
 });
 
-// why: separate egress wrapper for web tools (read_article, call_api,
-// web_search). Provider allowlist would be too narrow — those tools
+// why: separate egress wrapper for web tools (fetch_url) and
+// the web actor. Provider allowlist would be too narrow — those tools
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
 // in depth alongside the dispatcher's origin gate.
 export const webFetch = makeWebFetch({
@@ -904,7 +912,7 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
@@ -939,8 +947,34 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // Resolve the active tab once per ctx build. Tools use this as the
   // default target; the origin gate uses ctx.activeTab.origin against
   // the denylist before any DOM tool runs.
+  // DESIGN-17: an ACTOR has NO user-foreground-tab context — its tools act on
+  // its instance (origins:()=>[]), never the user's page. Skip the query so the
+  // actor ctx never carries the user's foreground origin (a latent leak the
+  // moment an actor ever gains a tab-targeting tool), matching the turn
+  // driver's memory/active-tab skip.
+  /** @type {{ id?: number, windowId?: number, url: string, origin: string } | undefined} */
   let activeTab;
   try {
+    if (exposure === EXPOSURE_ACTOR) {
+      // A WEB actor OWNS exactly one tab: its DOM tools must target THAT tab,
+      // and the origin/denylist gate must see THAT tab's origin. Resolve activeTab
+      // from the owned tab id (threaded as activeTabId) ONLY — and FAIL CLOSED: if
+      // the owned tab can't be resolved (closed/unknown), leave activeTab undefined
+      // rather than ever querying the foreground (a web actor must NEVER act on
+      // the user's current page). The three ENGINE kinds (webvm/notebook/app) act
+      // on their instance, not a tab, so they stay activeTab-undefined as before.
+      if (actorType === 'web' && activeTabId != null) {
+        const t = await browser.tabs.get(activeTabId).catch(() => null);
+        if (t) {
+          activeTab = {
+            id: t.id,
+            windowId: t.windowId,
+            url: t.url ?? '',
+            origin: originOfTabUrl(/** @type {string} */ (t.url)),
+          };
+        }
+      }
+    } else {
     // why: a browser-runner (do/get/check) is PINNED to one specific tab,
     // passed as activeTabId. Resolve activeTab to THAT tab so its DOM tools
     // target it — and, critically, so ctx.activeTab.origin is the runner's tab
@@ -960,6 +994,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
         origin: originOfTabUrl(/** @type {string} */ (t.url)),
       };
     }
+    }
   } catch (e) {
     console.warn('[sw] active tab query failed', e);
   }
@@ -969,12 +1004,36 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // still falls back to the inherited chat model at runtime if it struggles.
   const runnerProvider = listProviders().find((p) => p.name === ctxProviderName);
   const runnerModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
-  return {
+  const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name. The
     // runner / subagents leave it unset (they hold those tools by design).
+    // DESIGN-17: an actor turn sets 'actor' — the kind-scoped, instance-
+    // pinned tier (and the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
+    synthetic: synthetic === true,
+    // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
+    // synthetic turn (goal continuation / async wake / actor reply-wake) is
+    // "inbound" — refused — UNLESS it is an explicit first-party continuation
+    // that set trusted:true (goal turns + actor reply-wakes do). FAIL-CLOSED:
+    // any NEW re-entry source (future peer messages / scheduled tasks) is inbound
+    // by default and must never set trusted; the gate's `=== active` check is the
+    // second wall. Direct/composer builds: synthetic false → inbound false.
+    inbound: synthetic === true && trusted !== true,
+    // DESIGN-17: an actor's bound instance + kind (the gate's per-instance pin
+    // + positive kind-scope read these; absent on non-actor ctx).
+    ...(actorInstanceId ? { actorInstanceId } : {}),
+    ...(actorType ? { actorType } : {}),
+    // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
+    // accumulation is untrusted-provenance (every byte derives from page content),
+    // so when the agent loop folds the trim-summary back into history it wraps it
+    // with this — even a laundered injection that survives compression re-enters as
+    // DATA, not a command. (Survives restrictCtxCapabilities below: this is not a
+    // CAPABILITY_CONSUMERS key, so the keyless narrowing leaves it in place.)
+    ...(actorType === 'web'
+      ? { fenceActorSummary: (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl: activeTab?.url }) }
+      : {}),
     // why: the exposure gate's SECOND check — the session's resolved tool
     // manifest (Set | null) plus the label its refusal reason names, so
     // the lineage tells the user WHICH manifest excluded the tool.
@@ -1003,6 +1062,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // ctx.spawnSubagent(...) to decompose a task into a child session
     // that runs the same loop. Wired below; see makeSpawnSubagent.
     spawnSubagent,
+    // DESIGN-17: the message_actor orchestrator (wired below). An actor's own
+    // ctx strips this back out (it's not in its toolset, so the keyless narrowing
+    // removes it).
+    messageActor: (/** @type {any} */ req) => actorMessaging.messageActor(req),
     // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
     // as a later synthetic turn. subagentTasks/subagentCancel back the
@@ -1117,8 +1180,16 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // "pull peerd in" reminder to inject once the page is visible (SW-side; no
     // page→SW route). Engine tabs don't use it — they carry the real button.
     hintPullIn: (/** @type {number} */ tabId, /** @type {string} */ url) => scheduleWebTabHint(tabId, url),
+    // DESIGN-17: the web ACTOR's render-decision hook. A web actor with NO tab
+    // (the 0-tab fetch state) calls this from navigate to lazily OPEN + ADOPT its one
+    // tab, bound to THIS actor's session. Injected ONLY for the web kind; the
+    // capability strip drops it from any actor whose toolset lacks navigate, and
+    // it's absent on the main/runner/subagent ctx (actorType unset). adoptWebTab
+    // is defined later in the file — referenced lazily here (called at turn time),
+    // the same late-bound pattern as noteAgentTab.
+    ...(actorType === 'web' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
-    // why: web tools (read_article, call_api, ...) reach arbitrary
+    // why: web tools (fetch_url) reach arbitrary
     // HTTPS hosts. They use webFetch (denylist + audit) NOT safeFetch
     // (provider-allowlist, locked down). safeFetch is still in ctx for
     // any future tool that legitimately needs to hit a provider.
@@ -1170,6 +1241,40 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     },
     vault: { isLocked: vault.isLocked() },
   };
+  // DESIGN-17: an ACTOR gets a KEYLESS, kind-narrowed tool context — the
+  // do/get/check runner trust model generalized. restrictCtxCapabilities strips
+  // every capability closure (getSecret, safeFetch, webFetch, spawnSubagent,
+  // memory, messageActor, …) that none of the actor's OWN kind tools need,
+  // so a confused/injected tool has no path to secrets/egress/spawn. The loop
+  // still gets the provider key via the turn driver's injected getSecret (off
+  // this ctx), exactly like a subagent. Non-actor ctx is unchanged.
+  if (exposure === EXPOSURE_ACTOR) {
+    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedTools(actorType)));
+    // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
+    // the user's session ONLY for a request same-origin to the tab it owns (where it's
+    // already in that session via the rendered tab — no escalation, and it never holds
+    // a credential: the browser attaches the origin's cookies, keyless intact). Every
+    // cross-origin request — and the whole 0-tab state — stays sessionless, so an
+    // injected actor can't point a credentialed fetch at a DIFFERENT logged-in site.
+    // why bound HERE on resCtx (the ctx tools receive AND mutate): navigate re-pins
+    // resCtx.activeTab on a mid-turn tab adoption, and the wrapper reads that SAME
+    // object live — so a same-origin fetch right after a render is correctly in-session.
+    if (actorType === 'web') {
+      resCtx.webFetch = withSessionScopedCredentials(
+        webFetch,
+        () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
+      );
+      // navigate adopts the actor's tab MID-TURN (0->1). It re-pins through this setter
+      // — which closes over the SHARED resCtx — NOT a direct activeTab= on the per-call
+      // {...ctx} copy the dispatcher hands each tool (that write would die with the copy),
+      // so the rest of the turn's DOM tools + the session-scoped webFetch above see the
+      // adopted tab. (The >=1-tab case mutates activeTab in place, which the shallow copy
+      // already shares; only the 0->1 reassignment needs the setter.)
+      resCtx.repinActiveTab = (/** @type {any} */ tab) => { resCtx.activeTab = tab; };
+    }
+    return resCtx;
+  }
+  return ctx;
 };
 
 // Local helper to avoid importing the same logic the dom-helpers file
@@ -1314,6 +1419,9 @@ const asyncSubagentsOrchestrator = makeAsyncSubagents({
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
   },
+  // async-subagent wakes are NOT trusted to delegate (a parent reacting to a
+  // subagent result stays attended-gated for message_actor, like today) —
+  // so this reenter deliberately does not forward trusted.
   reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),
@@ -1447,7 +1555,25 @@ const deleteIDBDatabase = (/** @type {string} */ name) => new Promise((resolve, 
   req.onblocked = () => reject(new Error(`deleteDatabase blocked: ${name} (close VM tab first)`));
 });
 
-const vmRegistry = createVmRegistry({ storage: idbKV('vms') });
+// DESIGN-17: archive an actor session orphaned by its instance's deletion.
+// Fired by registry.remove() (so it covers BOTH the *_delete tools and the
+// Library UI route uniformly). Archiving only sets archivedAt — safe even on a
+// actor's own self-delete turn. Fire-and-forget; the binding died with the record.
+const archiveOrphanedActor = (/** @type {string} */ actorSessionId) => {
+  const doArchive = () => {
+    Promise.resolve(sessions.archive(actorSessionId)).catch(() => {});
+    auditLog.append({ type: 'actor_archived', sessionId: actorSessionId, details: { reason: 'instance_deleted' } }).catch(() => {});
+  };
+  // why: an actor can delete its OWN instance mid-turn (vm_delete/app_delete are
+  // in its toolset). archive() is a read-modify-write of the actor's session
+  // record, so doing it WHILE that turn is still appending messages could clobber
+  // the final message and hand the sender a stale reply. Defer to when the slot is
+  // idle (the turn settled) — runs immediately when nothing is in flight.
+  if (turnSlots.isBusy(actorSessionId)) turnSlots.runWhenIdle(actorSessionId, doArchive);
+  else doArchive();
+};
+
+const vmRegistry = createVmRegistry({ storage: idbKV('vms'), onActorArchive: archiveOrphanedActor });
 // Per-kind tracker note: on every background ensureTab the card updates to the
 // touched tab, labelled "<Kind> · <instance name>" (looked up from the registry
 // by the instance id) so it reads like a real tab. noteAgentTab is late-bound.
@@ -1463,13 +1589,13 @@ const vmClient = createVmClient({ registry: vmRegistry, tracker: vmTabTracker })
 // VMs: persistent metadata, in-memory tabId map, lazy-tab spawning
 // via chrome.tabs.sendMessage to the Notebook's host page. (The IDB
 // store name 'notebooks' is the persistence key — see notebook-registry.)
-const jsRegistry = createNotebookRegistry({ storage: idbKV('notebooks') });
+const jsRegistry = createNotebookRegistry({ storage: idbKV('notebooks'), onActorArchive: archiveOrphanedActor });
 const jsTabTracker = createJsTabTracker({ announce: trackerNote(jsRegistry, 'Notebook') });
 const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker });
 
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
-const appRegistry = createAppRegistry({ storage: idbKV('apps') });
+const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
 const appTabTracker = createAppTabTracker({ announce: trackerNote(appRegistry, 'App') });
 const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
 
@@ -1715,7 +1841,7 @@ const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
 // drives the offscreen engine (offscreen/local-model.js) and streams its tokens
 // back. local-model/{status,init} flip localModelAvailable, which feeds
 // resolveRunnerModel step 2 (local-when-available) — so once the model is
-// resident it becomes the page-reader runner default with no pin.
+// actor it becomes the page-reader runner default with no pin.
 // Local-model residency + progress live in a store (background/local-model-state.js)
 // so the local-model/* routes reach them via deps. available() feeds
 // resolveRunnerModel; progress() is polled by Settings.
@@ -1846,7 +1972,7 @@ const confirmCoordinator = makeConfirmCoordinator({
 /** @type {Map<string, Set<string>>} */
 const sessionConfirmGrants = new Map();
 
-// Shared confirm key for non-GET web egress (call_api + the WebVM HTTP bridge),
+// Shared confirm key for non-GET web egress (fetch_url + the WebVM HTTP bridge),
 // so "approve all writes this session" and the confirmWebWrites setting apply
 // uniformly across both paths. Imported from vm-net so the bridge fetch and
 // this confirm filter can't drift on the literal.
@@ -1861,7 +1987,7 @@ const sessionConfirmGrants = new Map();
  */
 const confirmAction = async (prompt) => {
   const sid = prompt.sessionId ?? null;
-  // Web-write gate (shared key for call_api + the WebVM bridge): when the user
+  // Web-write gate (shared key for fetch_url + the WebVM bridge): when the user
   // has turned confirmWebWrites OFF, non-GET egress is auto-approved — their
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.
@@ -1877,15 +2003,25 @@ const confirmAction = async (prompt) => {
   const grantKey = prompt.tool === WEB_WRITE_CONFIRM_KEY
     ? `${WEB_WRITE_CONFIRM_KEY}|${(Array.isArray(prompt.origins) && prompt.origins[0]) || ''}`
     : prompt.tool;
-  if (sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
+  // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
+  // strictly PER-TURN (an actor can be steered by untrusted instance output
+  // across turns, so a once-granted "yes for session" must not silence the next
+  // one). Bypass the grant cache for an actor session AND downgrade a
+  // yes_session answer to a one-shot.
+  let ephemeral = false;
+  if (sid) {
+    try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
+  }
+  if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
   const answer = await confirmCoordinator.confirm(/** @type {any} */ (prompt));
-  if (answer === 'yes_session' && sid) {
+  if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
   }
-  return answer;
+  // Ephemeral: an actor's yes_session approves THIS call only (no standing grant).
+  return ephemeral && answer === 'yes_session' ? 'yes_once' : answer;
 };
 
 // Per-SW "current active session" cache (background/session-state.js), behind a
@@ -2085,6 +2221,12 @@ browser.tabs.onRemoved.addListener((tabId) => {
   if (closedVmId) vmClient.onTabClosed(closedVmId);
   jsTabTracker.onTabRemoved(tabId);
   appTabTracker.onTabRemoved(tabId);
+  // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
+  // interrupt on tab-close (above). The Notebook/App clients have no such lane —
+  // their ops are request/response with a per-call timeout — so there is nothing
+  // to "generalize" for js/app at P0 beyond the tracker mapping drop already
+  // done here. An actor bound to a tabless instance simply re-spawns the tab on
+  // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
 });
@@ -2246,6 +2388,350 @@ goalRunner = makeGoalRunner({
   // only and an MV3 recycle would silently drop it.
   kv,
 });
+
+// ---------------------------------------------------------------------------
+// 5b2. DESIGN-17 — actor tab agents: the message_actor orchestrator
+// ---------------------------------------------------------------------------
+// An actor is a per-instance agent that OWNS one tab-hosted instance and
+// exclusively holds its tools. The orchestrator (the async-subagents shape,
+// specialized) is the mailbox to it; the SW supplies the IO — resolve + lazy-
+// mint the actor across the three registries, drive ONE actor turn (the
+// SAME runAgentTurn wrapper, kind-aware), and re-enter the sender with the reply.
+
+// Route an instance id to its registry + engine kind by id-prefix (the registry
+// idPrefix: 'vm' / 'notebook' / 'app').
+const ACTOR_REGISTRY_BY_PREFIX = {
+  vm: { reg: vmRegistry, kind: 'webvm' },
+  notebook: { reg: jsRegistry, kind: 'notebook' },
+  app: { reg: appRegistry, kind: 'app' },
+};
+
+// Dedupe concurrent first-mints: two message_actor calls to the SAME not-yet-
+// minted instance (e.g. the model emits two tool_use blocks targeting one new
+// instance in a single turn) would both see no forward pointer and both mint —
+// one wins setActorSession, the other orphans a session. A per-id in-flight
+// promise collapses them to ONE mint; the entry clears when it settles. why a
+// shared map: engine ids carry a prefix and web keys are `web:<tabId>`, so they
+// never collide. @type {Map<string, Promise<string>>} */
+const mintInFlight = new Map();
+/** @param {string} key @param {() => Promise<string>} fn @returns {Promise<string>} */
+const mintOnce = (key, fn) => {
+  const existing = mintInFlight.get(key);
+  if (existing) return existing;
+  const p = (async () => { try { return await fn(); } finally { mintInFlight.delete(key); } })();
+  mintInFlight.set(key, p);
+  return p;
+};
+
+// Start the actor process on demand: lazily mint an actor session for an
+// instance (on the first message_actor). Inherits the spawning chat's RESOLVED
+// Plan/Act posture — resolved + stored EXPLICITLY so it can't silently widen to the
+// global default (the subagent guardrail-3 precedent). Binds BOTH directions:
+// actorSessionId on the registry record (the REGISTERED NAME — the stable
+// instance id → live session pointer resolveActor reads, like a Registry entry),
+// and the actor session as the instance's session-default so id-less tools
+// (vm_write_file / vm_import / edit_file) resolve the bound instance. Lost session?
+// re-minted on the next message — let-it-crash / supervisor restart (resolveActor).
+const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @type {any} */ record) => {
+  const activeId = await sessionCache.sessionGet('currentSessionId');
+  const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
+  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  const created = await sessions.create({
+    kind: 'actor',
+    ...(activeId ? { parentSessionId: /** @type {string} */ (activeId) } : {}),
+    instanceId: record.id,
+    actorType: /** @type {any} */ (entry.kind),
+    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    permissionMode: perm.mode,
+    confirmActions: perm.confirmActions,
+    // The actor inherits the owner chat's tool MANIFEST as an authority bound
+    // (the subagent precedent, spawn.js): a /tools-narrowed chat can't widen its
+    // reach by delegating to an actor. A browse-only chat's actor is held to
+    // browse-only's read DOM tools — the gate refuses click/type for it. null /
+    // absent = no manifest = the actor keeps its full kind toolset.
+    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+  });
+  // Order matters for crash-safety: bind the session-default FIRST, then the
+  // forward pointer LAST. resolveActor re-mints whenever the forward pointer
+  // is absent, so an SW death between these two persists leaves an un-pointed
+  // (re-mintable) instance rather than a pointed-but-unresolvable one — a present
+  // actorSessionId now IMPLIES its session-default was written.
+  await entry.reg.setDefaultForSession(created.sessionId, record.id);
+  await entry.reg.setActorSession(record.id, created.sessionId);
+  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
+  return created.sessionId;
+};
+
+// DESIGN-17 — WEB actors (a fourth `kind:'web'` actor that owns one TAB).
+// Unlike the three engine kinds, a web actor has no registry record: the TAB
+// is the durable handle and the binding is tab→session, held here and mirrored to
+// session storage (ephemeral by design — on a cold miss we re-mint against the
+// live tab, whose DOM re-derives state). The address the orchestrator uses is the
+// tabId AS A STRING (the actor's instanceId).
+const webActorTabBindings = makeWebActorTabBindings();
+const WEB_BINDINGS_KEY = 'webActorTabBindings';
+const persistWebBindings = () => {
+  sessionCache.sessionSet(WEB_BINDINGS_KEY, webActorTabBindings.entries()).catch(() => {});
+};
+// Rehydrate on SW boot (best-effort; a missing/garbage value just starts empty).
+Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
+  .then((e) => { if (Array.isArray(e)) webActorTabBindings.load(/** @type {any} */ (e)); })
+  .catch(() => {});
+
+// The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
+// the SINGLE entry point for web work). Separate from webActorTabBindings because
+// the actor exists BEFORE it owns a tab; its tab (when it renders) is read back
+// from webActorTabBindings.tabFor (one source of truth). Persisted/rehydrated like
+// the tab bindings — ephemeral is fine (re-mint on loss).
+const webActorRegistry = makeWebActorRegistry();
+const WEB_ACTOR_KEY = 'webActorRegistry';
+const persistWebActors = () => {
+  sessionCache.sessionSet(WEB_ACTOR_KEY, webActorRegistry.entries()).catch(() => {});
+};
+Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
+  .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
+  .catch(() => {});
+
+// DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
+// correlation persists here, so an SW death between accept and deliver() doesn't
+// silently drop the reply-wake; redrain() re-queues it on boot. chrome.storage.
+// session (not local): a pending message only makes sense within ONE browser
+// session — a full browser restart drops the orchestrator turn anyway, so a stale
+// resurrection would be wrong. The blob is keyed by correlationId for O(1) removal.
+const ACTOR_MAILBOX_KEY = 'actorMailbox';
+// Serialize read-modify-write: a concurrent append+remove on the single blob would
+// otherwise clobber. A promise chain makes each update see the prior one's write.
+let mailboxChain = Promise.resolve();
+const mailboxUpdate = (/** @type {(m: Record<string, any>) => Record<string, any>} */ mutate) => {
+  mailboxChain = mailboxChain.then(async () => {
+    const cur = await sessionCache.sessionGet(ACTOR_MAILBOX_KEY);
+    const base = (cur && typeof cur === 'object') ? /** @type {Record<string, any>} */ (cur) : {};
+    await sessionCache.sessionSet(ACTOR_MAILBOX_KEY, mutate(base));
+    // why log (not swallow): a persist failure silently degrades a message to
+    // heap-only (P0) durability — surface it so a lost-wake-after-restart is at
+    // least explicable in the SW console rather than a mystery.
+  }).catch((e) => console.warn('[actor] mailbox persist failed — message is heap-only this SW lifetime', e));
+  return mailboxChain;
+};
+const actorMailbox = {
+  append: (/** @type {{ id: string }} */ e) => mailboxUpdate((m) => ({ ...m, [e.id]: e })),
+  remove: (/** @type {string} */ id) => mailboxUpdate((m) => { const n = { ...m }; delete n[id]; return n; }),
+  // Carry the storage KEY as the entry id so redrain can PRUNE a malformed/legacy
+  // value (one missing its own id) under its real key — else it would skip forever
+  // and the blob would grow unbounded.
+  load: async () => {
+    const m = await sessionCache.sessionGet(ACTOR_MAILBOX_KEY);
+    if (!m || typeof m !== 'object') return [];
+    return Object.entries(/** @type {Record<string, any>} */ (m))
+      .map(([k, v]) => (v && typeof v === 'object') ? { ...v, id: v.id ?? k } : { id: k });
+  },
+};
+
+// Lazily mint a web actor for a tab (the analog of mintActor). No registry
+// record + no session-default to bind (id-less engine tools don't apply); the
+// only binding is tab→session, persisted so the actor's accumulated memory
+// survives an SW restart while the tab lives.
+// Shared web-actor session mint. The per-tab actor (mintWebActorForTab) and the
+// chat-scoped actor (mintWebActor) differ ONLY in instanceId, the owner source, and
+// which binding store they write; the create body (inherited provider/model/permission/
+// toolManifest) + the audit append are identical, so they live here ONCE — a new
+// inherited field is a one-site edit, not two that can silently drift.
+// why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
+// to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind }) => {
+  const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
+  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  const created = await sessions.create({
+    kind: 'actor',
+    ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
+    instanceId,
+    actorType: 'web',
+    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    permissionMode: perm.mode,
+    confirmActions: perm.confirmActions,
+    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+  });
+  bind(created.sessionId);
+  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web' } }).catch(() => {});
+  return created.sessionId;
+};
+
+const mintWebActorForTab = async (/** @type {number} */ tabId) => mintWebSession({
+  instanceId: String(tabId),
+  ownerChatId: /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId')),
+  bind: (sessionId) => { webActorTabBindings.bind(tabId, sessionId); persistWebBindings(); },
+});
+
+// Resolve (+ lazy-mint) the web actor that owns `tabId`. FAIL CLOSED: the tab
+// must still exist (a web actor with no tab is unreachable, and we must never
+// silently retarget a different tab). Re-mints when the bound session vanished
+// (SW death cleared session storage) so a live tab is always reachable.
+const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  if (!tab) return null;
+  let actorSessionId = webActorTabBindings.resolve(tabId);
+  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+    webActorTabBindings.drop(tabId);
+    persistWebBindings();
+    actorSessionId = null;
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId));
+  // why no `name` from the page: a tab's title/url are attacker-CONTROLLED
+  // (document.title is page content). resolveActor's `name` flows UN-fenced
+  // into the orchestrator's model memory — the deliver() reply lead and the
+  // message_actor ack both interpolate it as trusted first-party prose
+  // (actor-messaging.js). Sourcing it from the page would open a prompt-
+  // injection sink the moment the user messages an actor on a hostile page. A
+  // web actor's trusted identity IS its tabId (already the instanceId), so we
+  // leave name undefined and the lead/ack render "the web actor 42 …". (Engine
+  // actors keep record.name — a user/system label, not page-controlled.)
+  return { instanceId: String(tabId), kind: 'web', actorSessionId, tabId };
+};
+
+// Lazily mint a CHAT's web actor (the 0-or-1-tab web operator, addressed by `to:'web'`).
+// Binds to the OWNER CHAT, not a tab; instanceId is the literal 'web' — non-numeric, so
+// the gate's tab-pin refuses any explicit tabId (the actor may only ever drive the tab
+// it lazily adopts). Starts with NO tab; adoptWebTab binds one on the render decision.
+const mintWebActor = async (/** @type {string} */ ownerChatId) => mintWebSession({
+  instanceId: 'web',
+  ownerChatId,
+  bind: (sessionId) => { webActorRegistry.bind(ownerChatId, sessionId); persistWebActors(); },
+});
+
+// Resolve (+ lazy-mint) a chat's web actor. Owns 0-OR-1 tab: its owned tab (if it has
+// rendered) is read back from webActorTabBindings.tabFor and threaded as actorTabId —
+// undefined in the 0-tab state, where buildToolContext leaves activeTab unset so fetch_url
+// works and the DOM tools fail closed (the pin) until navigate adopts a tab. Re-mints when
+// the bound session vanished (SW death cleared session storage). The owner is the SENDER
+// chat (threaded by the messaging layer), NOT the ambient active chat — equal on the live
+// path (the sender gate proves it), but on a boot redrain the focused chat may differ, so
+// resolving by sender is what re-attaches a redrained message to its real actor.
+const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOverride) => {
+  const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+  if (!ownerChatId) return null;
+  let actorSessionId = webActorRegistry.resolve(ownerChatId);
+  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+    webActorRegistry.drop(ownerChatId);
+    persistWebActors();
+    actorSessionId = null;
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce(`web-actor:${ownerChatId}`, () => mintWebActor(ownerChatId));
+  // The owned tab (0-or-1). Verify it still exists — a tab can close between the
+  // onRemoved drop and here; if it's gone, fall back to the 0-tab (fetch) state.
+  let tabId = webActorTabBindings.tabFor(actorSessionId);
+  if (tabId != null && !(await browser.tabs.get(tabId).catch(() => null))) {
+    webActorTabBindings.drop(tabId); persistWebBindings(); tabId = undefined;
+  }
+  // name left undefined (like resolveWebActorForTab): a tab title is page-controlled,
+  // and the actor's trusted identity is the literal 'web', not page-derived prose.
+  return { instanceId: 'web', kind: 'web', actorSessionId, tabId };
+};
+
+// The render-decision hook: a web actor in the 0-tab state OPENS its tab here (called
+// from navigate via ctx.adoptWebTab when the actor owns no tab). Opens BLANK in the
+// BACKGROUND (never yanks the user's focus — the actor-stays-in-background policy);
+// navigate then drives it to the URL with its normal wait. Binds tab→actor in
+// webActorTabBindings (so the next turn pins it, and `to:'<tabId>'` reaches the SAME
+// actor), and tracks it as an agent-tab card. Returns the new tab so navigate can
+// re-pin ctx.activeTab for the rest of THIS turn.
+const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
+  const created = await browser.tabs.create({ active: false });
+  const tabId = created?.id;
+  if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
+  webActorTabBindings.bind(tabId, actorSessionId);
+  persistWebBindings();
+  noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
+  return { tabId, windowId: created?.windowId };
+};
+
+// Prune a web actor's binding when its tab closes — for a per-tab actor it then
+// becomes unreachable, and for the chat-scoped web actor this RELEASES its owned tab
+// (tabFor → undefined → the actor falls back to the 0-tab fetch state). The orphaned
+// session is harmless and ages out. Separate listener from the agent-tab-card cleanup
+// so the two concerns stay independent.
+browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
+  if (webActorTabBindings.drop(tabId)) persistWebBindings();
+});
+
+const actorMessaging = makeActorMessaging({
+  resolveActor: async (/** @type {string} */ instanceId, /** @type {{ senderSessionId?: string | null }} */ opts = {}) => {
+    // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
+    // work, addressed by the literal 'web'. It decides fetch-vs-render itself: a
+    // pure-fetch task never opens a tab; navigate adopts one on the render path. Owned by
+    // the SENDER chat (opts.senderSessionId), not the ambient active chat — so a boot
+    // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
+    // actor owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
+    if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
+    // A per-tab WEB actor is addressed by its tabId-as-string (purely numeric, no
+    // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
+    // match, so the branch is unambiguous.
+    if (/^\d+$/.test(String(instanceId))) {
+      return resolveWebActorForTab(Number(instanceId));
+    }
+    const prefix = String(instanceId).split('-')[0];
+    const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (ACTOR_REGISTRY_BY_PREFIX)[prefix];
+    if (!entry) return null;
+    const record = await entry.reg.get(instanceId);
+    if (!record) return null;
+    let actorSessionId = await entry.reg.getActorSession(instanceId);
+    if (!actorSessionId) actorSessionId = await mintOnce(instanceId, () => mintActor(entry, record));
+    return { instanceId, kind: entry.kind, actorSessionId, name: record.name };
+  },
+  // Drive ONE actor turn (the kind-aware runAgentTurn), then read its final
+  // assistant text as the reply. runWhenIdle guaranteed the slot is free; the
+  // turn claims it, and its release drains the next queued message to it.
+  // actorTabId threads the WEB actor's owned tab into the turn so its DOM
+  // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
+  // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
+  runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name }) => {
+    // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_actor
+    // call (parentToolUseId present — absent on a boot redrain), pass a `display`
+    // descriptor so the turn driver re-emits the actor's stream as turn/actor-*
+    // events keyed to that card. The orchestrator renders it inline (the subagent
+    // live-view, for an actor). Cheap: rendering only — the model-memory the
+    // orchestrator keeps is still just the fenced reply (deliver()).
+    const display = parentToolUseId
+      ? { parentToolUseId, kind, instanceId, name }
+      : undefined;
+    // Count the actor's messages BEFORE the turn so we read only the reply THIS
+    // turn produced — finalAssistantText scans backward and would otherwise return a
+    // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
+    // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
+    const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
+    await runAgentTurn({ sessionId: actorSessionId, userText: message, synthetic: false, activeTabId: actorTabId, display });
+    const s = await sessions.get(actorSessionId);
+    const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
+    return fresh
+      ? { result: fresh }
+      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+  },
+  reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
+  turnSlots,
+  getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
+  isVaultLocked: () => vault.isLocked(),
+  wrapUntrusted,
+  appendAudit: (/** @type {any} */ e) => auditLog.append(e),
+  mailbox: actorMailbox,
+  log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
+});
+
+// Redrain the durable mailbox ONCE per SW lifetime, the moment the vault is
+// unlocked (a re-queued actor turn needs the model key). Boots already-unlocked
+// → fires from the attemptResume chain below; booted locked → fires on the first
+// unlock via the subscription. The once-guard prevents a double-drain (entries
+// aren't cleared until their turn SETTLES, so a second drain would double-deliver).
+let mailboxRedrained = false;
+const maybeRedrainMailbox = () => {
+  if (mailboxRedrained || vault.isLocked()) return;
+  mailboxRedrained = true;
+  Promise.resolve(actorMessaging.redrain())
+    .then((r) => { if (r?.redrained) console.warn('[actor] redrained', r.redrained, 'pending message(s) after restart'); })
+    .catch((e) => console.error('[sw] actor redrain failed', e));
+};
+vault.subscribe(() => { maybeRedrainMailbox(); });
 
 // ---------------------------------------------------------------------------
 // 5b. /init — workspace scan → draft AGENTS.md → confirm → persist (V1.5)
@@ -2577,6 +3063,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
     startGoalRun, haltGoalRun, ensureSession,
+    // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
+    actorMessaging,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
@@ -2858,6 +3346,12 @@ vault.attemptResume().then((resumed) => {
     // No auto-resume here — it needs an unlocked vault to call the model.
     goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
   }
+  // DESIGN-17 P1: redrain any in-flight actor message→reply correlations the SW
+  // death interrupted. Once-guarded + internally gated on an unlocked vault (a
+  // re-queued actor turn needs the model key); also fires on the first vault
+  // unlock if the SW booted locked. resolveActor lazy-loads the registries, so
+  // no ordering vs goal/auto-resume above is needed (actor sessions are separate).
+  maybeRedrainMailbox();
 }).catch((e) => console.error('[sw] attemptResume failed', e));
 
 // One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote

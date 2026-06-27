@@ -153,6 +153,8 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   confirmActions?: boolean,
    *   customSystemPrompt?: string,
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
+   *   instanceId?: string,
+   *   actorType?: 'webvm' | 'notebook' | 'app' | 'web',
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -167,6 +169,8 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     confirmActions,
     customSystemPrompt,
     toolManifest,
+    instanceId,
+    actorType,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -187,6 +191,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
       ...(task ? { task } : {}),
+      // DESIGN-17: an actor self-describes the instance it owns + its kind.
+      ...(instanceId ? { instanceId } : {}),
+      ...(actorType ? { actorType } : {}),
     };
     await idb.put(STORE, record);
     return present(record, []);

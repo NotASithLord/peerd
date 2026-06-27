@@ -106,6 +106,26 @@ describe('session read routes', () => {
     expect(await makeSessionRoutes(deps)['agent/stop']()).toEqual({ ok: true });
     expect(audited).toBe(true);
   });
+  test('agent/stop CASCADES to the chat’s in-flight actors (DESIGN-17 P1)', async () => {
+    // The current chat is 'a'; it has two actors in flight. Stop must abort the
+    // orchestrator AND both actor slots (an actor runs on its own slot).
+    const stopped: string[] = [];
+    const { deps } = baseDeps({
+      turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
+      actorMessaging: { stopActorsFor: (sid: string) => (sid === 'a' ? ['res-1', 'res-2'] : []) },
+    });
+    expect(await makeSessionRoutes(deps)['agent/stop']()).toEqual({ ok: true });
+    expect(stopped).toEqual(['a', 'res-1', 'res-2']);   // orchestrator first, then its actors
+  });
+  test('agent/stop with no actors only stops the orchestrator', async () => {
+    const stopped: string[] = [];
+    const { deps } = baseDeps({
+      turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
+      actorMessaging: { stopActorsFor: () => [] },
+    });
+    await makeSessionRoutes(deps)['agent/stop']();
+    expect(stopped).toEqual(['a']);
+  });
   test('session/list filters out subagents', async () => {
     const { deps } = baseDeps();
     const res = await makeSessionRoutes(deps)['session/list']();

@@ -2,35 +2,21 @@
 // peerd-runtime/tools/web — public surface of the web wrappers.
 //
 // WEB_TOOLS is registered by the SW alongside BUILTIN_TOOLS and
-// CLOCK_TOOLS. The escalation policy is exposed for testing; the
-// primitives are intentionally NOT re-exported here — they're
-// internal to the wrappers.
+// CLOCK_TOOLS. Only `capture` remains here — a user-facing screenshot
+// of the active tab (its pixels are redacted before the model sees them).
+//
+// call_api, read_article, web_search, and submit_form were all REMOVED: the
+// web actor (kind:'web') is the single entry point for web work now. It READS
+// via fetch_url (sessionless / same-origin-scoped) or its drive-a-tab DOM
+// tools, SEARCHES by navigating to a search engine and reading the results,
+// and submits FORMS via its DOM tools (type/click/page_keys) — none of which
+// the orchestrator holds. The primitives (primitives.js) are intentionally NOT
+// re-exported here; they're internal to the wrappers (fetch_url + capture).
+export { captureTool } from './screenshot.js';
 
-export { callApiTool }      from './api.js';
-export { readArticleTool }  from './read.js';
-export { webSearchTool }    from './search.js';
-export { submitFormTool }   from './form.js';
-export { captureTool }      from './screenshot.js';
-
-import { callApiTool }     from './api.js';
-import { readArticleTool } from './read.js';
-import { webSearchTool }   from './search.js';
-import { submitFormTool }  from './form.js';
-import { captureTool }     from './screenshot.js';
+import { captureTool } from './screenshot.js';
 
 /** @type {import('/shared/tool-types.js').Tool[]} */
 export const WEB_TOOLS = [
-  callApiTool,
-  readArticleTool,
-  webSearchTool,
-  submitFormTool,
   captureTool,
 ];
-
-// Policy exposed for tests + future skill authors.
-export {
-  shouldEscalate,
-  looksLikeSpaShell,
-  matchesAntiBotTemplate,
-  satisfiesExpects,
-} from './policy.js';

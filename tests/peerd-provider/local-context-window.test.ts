@@ -19,7 +19,7 @@ describe('fetchLocalContextWindow', () => {
       .toBe(MODEL_SPECS[LOCAL_MODEL_ID].contextWindow);
   });
 
-  test('defaults the model to the resident id', async () => {
+  test('defaults the model to the actor id', async () => {
     expect(await fetchLocalContextWindow()).toBe(MODEL_SPECS[LOCAL_MODEL_ID].contextWindow);
   });
 

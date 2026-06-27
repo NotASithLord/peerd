@@ -4,7 +4,7 @@
 // Storage HYGIENE, not a security change: the blob (wrapped DK + wrap
 // metadata) is ciphertext either way, and both backends are unencrypted
 // extension-scoped disk. The blob simply joins everything else in IDB
-// instead of being the lone chrome.storage.local resident.
+// instead of being the lone chrome.storage.local actor.
 //
 // The migration must be loss-proof: the wrapped DK is the only path to
 // every stored secret, so the chrome.storage.local copy is deleted ONLY

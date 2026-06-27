@@ -93,6 +93,7 @@
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} actors
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
@@ -177,6 +178,11 @@ export const INITIAL_STATE = Object.freeze({
   // Subagent transcripts for inline rendering under spawn_subagent tool
   // cards (docs/SUBAGENTS.md).
   subagents: Object.freeze({ byToolUse: {}, sessions: {} }),
+  // DESIGN-17 P1 glass pane: actor DISPLAY cards, keyed by the message_actor
+  // tool_use id. Each is self-contained (its own sliced transcript) so a long-lived
+  // actor messaged N times shows N distinct exchanges, not its whole history.
+  // { sessionId, kind, instanceId, name, fromIndex, messages, streaming, error, cost }.
+  actors: Object.freeze({}),
   // In-flight async subagents (DESIGN-11), keyed by PARENT session id.
   asyncTasks: Object.freeze({}),
   // Goal mode (the mode-row Goal toggle) — active runs keyed by sessionId, so
@@ -273,6 +279,21 @@ const patchSubagentMessages = (state, sessionId, mapFn) => {
   return putSubagentSession(state, { ...session, messages: session.messages.map(mapFn) });
 };
 
+// DESIGN-17 P1 glass pane: merge a patch into an actor card (keyed by the
+// message_actor tool_use id). Drops a patch with no key (a boot redrain emits no
+// display events, so this is belt-and-braces).
+/**
+ * @param {ChatState} state
+ * @param {string | undefined} parentToolUseId
+ * @param {Record<string, unknown>} patch
+ * @returns {ChatState}
+ */
+const putActorCard = (state, parentToolUseId, patch) => {
+  if (!parentToolUseId) return state;
+  const cur = /** @type {any} */ (state.actors)[parentToolUseId] ?? {};
+  return { ...state, actors: { ...state.actors, [parentToolUseId]: { ...cur, ...patch } } };
+};
+
 /**
  * Fold one SW-pushed message into UI state. Pure; see the module header for
  * the side effects that deliberately stay in each surface.
@@ -339,6 +360,45 @@ export const reduceChat = (state, msg) => {
       // The turn/subagent-state pushes carry the authoritative message array;
       // these are live complements we don't fold separately.
       return state;
+    // DESIGN-17 P1 glass pane — the actor DISPLAY stream (parallel to subagents,
+    // keyed by the message_actor tool_use id). Each event carries parentToolUseId
+    // so there is no viewed-session guard: an actor card renders regardless of
+    // which chat is in view (it belongs to the orchestrator's transcript).
+    case 'turn/actor-start':
+      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
+        sessionId: msg.sessionId, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null, cost: null,
+      });
+    case 'turn/actor-state': {
+      // The full actor-session snapshot; slice to this card's exchange (fromIndex).
+      const existing = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
+      // Self-seed when the panel connected mid-turn and missed turn/actor-start
+      // (the state push carries fromIndex/kind/… for exactly this); without fromIndex
+      // we can't place the slice, so drop.
+      const fromIndex = existing?.fromIndex ?? msg.fromIndex;
+      if (fromIndex == null) return state;
+      const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(fromIndex) : (existing?.messages ?? []);
+      const seed = existing ? {} : { fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name, streaming: true, error: null, cost: null };
+      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages });
+    }
+    case 'turn/actor-error':
+      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { error: msg.error, streaming: false });
+    case 'turn/actor-done': {
+      // An ABORT (Stop cascade) → 'cancelled' card; a clean failure with no error
+      // already folded → mark failed; else just stop the spinner. Short-circuit when
+      // the card is already terminal (turn/actor-error folded first) to avoid churn.
+      const card = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
+      if (!card || card.streaming === false) return state;
+      /** @type {Record<string, unknown>} */
+      const patch = { streaming: false };
+      if (msg.aborted) patch.aborted = true;
+      else if (msg.ok === false && !card.error) patch.error = 'the actor turn did not complete';
+      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch);
+    }
+    case 'turn/actor-cost':
+      // Phase K: the actor turn's spend, surfaced on its card (delegated work
+      // isn't free — make it visible even though caps stay per-session).
+      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { cost: msg.cost });
     case 'async-tasks/update':
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };

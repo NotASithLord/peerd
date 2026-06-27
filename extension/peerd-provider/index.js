@@ -60,10 +60,10 @@ export {
 } from './adapters/openrouter.js';
 export { ollamaAdapter, DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL } from './adapters/ollama.js';
 // local WebGPU runner (FEATURE-LOCAL-WEBGPU B). setLocalGenerate wires the
-// offscreen engine bridge at SW boot; LOCAL_MODEL_ID is the resident model.
+// offscreen engine bridge at SW boot; LOCAL_MODEL_ID is the actor model.
 export {
   localWebgpuAdapter, LOCAL_MODEL_ID, setLocalGenerate,
-  // future-proof seam: lets the offscreen engine report the resident model's
+  // future-proof seam: lets the offscreen engine report the actor model's
   // live context window through the unified provider context-window seam.
   setLocalModelInfo,
 } from './adapters/local-webgpu.js';

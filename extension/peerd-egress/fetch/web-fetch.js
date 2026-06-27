@@ -3,9 +3,9 @@
 //
 // safeFetch is intentionally narrow: provider endpoints ONLY. That
 // invariant defends the "even if the agent is prompt-injected, it
-// can't exfiltrate the conversation" property. Web tools (read_article,
-// call_api, web_search) need to reach arbitrary HTTPS hosts the user
-// might be reading; they go through THIS function, not safeFetch.
+// can't exfiltrate the conversation" property. The web tools (fetch_url +
+// the web actor's drive-a-tab path) need to reach arbitrary HTTPS hosts the
+// user might be reading; they go through THIS function, not safeFetch.
 //
 // What webFetch DOES enforce:
 //   - http / https schemes only (no file://, chrome://, etc.)
@@ -38,6 +38,49 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 /** @param {Response} res */
 export const isRedirect = (res) =>
   res?.type === 'opaqueredirect' || REDIRECT_STATUSES.has(res?.status);
+
+// ── session scoping — the web actor's credential rule, AT THE BOUNDARY ──────
+//
+// peerd never uses raw fetch: every open-web request proxies through webFetch, so
+// the ONE place that can attach the user's cookies is the ONE place this rule lives.
+// The web actor (kind:'web') may carry the user's SESSION on a request ONLY when
+// the target is SAME-ORIGIN as the tab it owns — there it is already in the user's
+// session via the rendered tab, so a credentialed fetch to that origin is no
+// escalation (and the actor never holds a credential: the BROWSER attaches the
+// origin's cookies; keyless is intact). Everything CROSS-ORIGIN — or any request
+// with no owned tab — stays SESSIONLESS, so a prompt-injected actor can never point
+// a credentialed fetch at a DIFFERENT site the user is logged into and read it out.
+// The decision is the boundary's: a tool cannot opt a cross-origin request into
+// credentials, because it never supplies the credentials value at all.
+
+/**
+ * Should this request carry the user's session? Yes ONLY if it is same-origin to
+ * the actor's (trusted, SW-set) session origin. Pure.
+ * @param {string} targetUrl
+ * @param {string | null | undefined} sessionOrigin  the owned tab's origin
+ * @returns {'include' | 'omit'}
+ */
+export const sessionScopedCredentials = (targetUrl, sessionOrigin) => {
+  if (!sessionOrigin) return 'omit';                 // 0-tab state → sessionless
+  let origin;
+  try { origin = new URL(targetUrl).origin; } catch { return 'omit'; }
+  return origin === sessionOrigin ? 'include' : 'omit';
+};
+
+/**
+ * Wrap a webFetch so every request it carries is session-scoped (above). The
+ * caller's own `credentials` is IGNORED and overwritten — the boundary decides, by
+ * construction. getSessionOrigin is read PER CALL so a mid-turn tab adoption (the
+ * web actor opening its first tab) is reflected immediately.
+ * @param {(resource: any, init?: any) => Promise<Response>} webFetch
+ * @param {() => string | null | undefined} getSessionOrigin
+ * @returns {(resource: any, init?: any) => Promise<Response>}
+ */
+export const withSessionScopedCredentials = (webFetch, getSessionOrigin) => (resource, init = {}) => {
+  const url = resource instanceof Request ? resource.url : String(resource);
+  const credentials = sessionScopedCredentials(url, getSessionOrigin());
+  return webFetch(resource, { ...init, credentials });
+};
 
 /**
  * Factory for the web-tool fetch wrapper.

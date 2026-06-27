@@ -113,6 +113,58 @@ describe('reduceChat', () => {
     expect(folded.subagents.sessions.c1.messages).toHaveLength(1);
   });
 
+  test('actor display card: start seeds, state slices to fromIndex, done stops streaming', () => {
+    // DESIGN-17 P1 glass pane. An actor is long-lived; the card shows only THIS
+    // exchange (messages from fromIndex), not the actor's whole history.
+    const started = reduceChat(INITIAL_STATE, {
+      type: 'turn/actor-start', parentToolUseId: 'tu-1', sessionId: 'res-1',
+      fromIndex: 2, kind: 'app', instanceId: 'app-9', name: 'todo',
+    });
+    expect(started.actors['tu-1']).toMatchObject({ sessionId: 'res-1', kind: 'app', fromIndex: 2, streaming: true });
+    // A full actor-session snapshot (4 msgs) → the card keeps only msgs 2..end.
+    const stateMsg = { type: 'turn/actor-state', parentToolUseId: 'tu-1',
+      session: { sessionId: 'res-1', messages: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }] } };
+    const filled = reduceChat(started, stateMsg);
+    expect(filled.actors['tu-1'].messages.map((m: any) => m.id)).toEqual(['c', 'd']);
+    const done = reduceChat(filled, { type: 'turn/actor-done', parentToolUseId: 'tu-1', ok: true });
+    expect(done.actors['tu-1'].streaming).toBe(false);
+  });
+
+  test('actor done: an abort renders cancelled; an ok:false failure marks failed; churn is short-circuited', () => {
+    const started = reduceChat(INITIAL_STATE, { type: 'turn/actor-start', parentToolUseId: 'tu-a', sessionId: 'r', fromIndex: 0 });
+    const aborted = reduceChat(started, { type: 'turn/actor-done', parentToolUseId: 'tu-a', ok: true, aborted: true });
+    expect(aborted.actors['tu-a']).toMatchObject({ streaming: false, aborted: true });
+    // A done after a card is already terminal (error folded first) is a no-op (no churn).
+    const erroredThenDone = reduceChat(
+      reduceChat(started, { type: 'turn/actor-error', parentToolUseId: 'tu-a', error: 'boom' }),
+      { type: 'turn/actor-done', parentToolUseId: 'tu-a', ok: false });
+    expect(reduceChat(erroredThenDone, { type: 'turn/actor-done', parentToolUseId: 'tu-a', ok: false })).toBe(erroredThenDone);
+    // ok:false with no prior error → marked failed.
+    const s2 = reduceChat(INITIAL_STATE, { type: 'turn/actor-start', parentToolUseId: 'tu-b', sessionId: 'r2', fromIndex: 0 });
+    expect(reduceChat(s2, { type: 'turn/actor-done', parentToolUseId: 'tu-b', ok: false }).actors['tu-b'].error).toBeTruthy();
+  });
+
+  test('actor card self-seeds from a state push when start was missed (mid-turn reconnect)', () => {
+    const seeded = reduceChat(INITIAL_STATE, {
+      type: 'turn/actor-state', parentToolUseId: 'tu-c', fromIndex: 1, kind: 'app',
+      session: { messages: [{ id: 'a' }, { id: 'b' }] },
+    });
+    expect(seeded.actors['tu-c']).toMatchObject({ kind: 'app', fromIndex: 1, streaming: true });
+    expect(seeded.actors['tu-c'].messages.map((m: any) => m.id)).toEqual(['b']);
+    // A state push with no fromIndex and no existing card can't be placed → dropped.
+    expect(reduceChat(INITIAL_STATE, { type: 'turn/actor-state', parentToolUseId: 'x', session: { messages: [] } })).toBe(INITIAL_STATE);
+  });
+
+  test('actor card error + cost fold; a state push for an unknown card is a no-op', () => {
+    const started = reduceChat(INITIAL_STATE, { type: 'turn/actor-start', parentToolUseId: 'tu-2', sessionId: 'res-2', fromIndex: 0 });
+    const errored = reduceChat(started, { type: 'turn/actor-error', parentToolUseId: 'tu-2', error: 'tab closed' });
+    expect(errored.actors['tu-2']).toMatchObject({ error: 'tab closed', streaming: false });
+    const costed = reduceChat(errored, { type: 'turn/actor-cost', parentToolUseId: 'tu-2', cost: { cost: 0.0123 } });
+    expect(costed.actors['tu-2'].cost.cost).toBe(0.0123);
+    // A state push for a card that was never started is dropped (no crash).
+    expect(reduceChat(costed, { type: 'turn/actor-state', parentToolUseId: 'nope', session: { messages: [] } })).toBe(costed);
+  });
+
   test('goal/state tracks a run per session, and a terminal phase clears it', () => {
     const running: any = reduceChat(INITIAL_STATE, {
       type: 'goal/state', sessionId: 's1', phase: 'running', iteration: 3, maxIterations: 40, goal: 'ship it', summary: null,

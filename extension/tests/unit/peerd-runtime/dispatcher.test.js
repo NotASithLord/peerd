@@ -277,4 +277,29 @@ describe('gate composition order', () => {
     expect(exposure?.allowed).toBe(false);
     expect(exposure?.reason.includes('runner-only')).toBe(true);
   });
+
+  // DESIGN-17: the actor capability tier, end-to-end through the dispatcher.
+  // The full-chain analog of the actorTierGate unit proof (tests/peerd-runtime/
+  // exposure.test.ts). The actor model is unconditional, so this proves a
+  // subagent can't escalate into the mutating tier, while message_actor (the
+  // non-mutating delegation channel) passes the exposure gate on the main agent.
+  it('actor tier: a subagent can not escalate into the mutating tier', async () => {
+    clearTools();
+    registerTool(makeTool({ name: 'app_delete', sideEffect: 'destructive' }));
+    registerTool(makeTool({ name: 'message_actor', sideEffect: 'write' }));
+    // act + confirm-off so persona/confirmation don't pre-empt the exposure gate.
+    const permission = { mode: 'act', confirmActions: false };
+
+    // A subagent (exposure unset) trying the mutating tier by name is refused.
+    const sub = recorderCtx({ permission }).ctx;
+    const rDelete = await dispatchToolCall({ id: 'a', name: 'app_delete', args: { appId: 'app-x' } }, sub);
+    expect(rDelete.ok).toBe(false);
+    expect(errOf(rDelete).startsWith('gate_blocked:exposure:')).toBe(true);
+    expect(metaOf(rDelete).gates.find((g) => g.name === 'exposure')?.reason.includes('actor-only')).toBe(true);
+
+    // message_actor is non-mutating — the main agent's delegation channel passes.
+    const main = recorderCtx({ permission, exposure: 'main' }).ctx;
+    const rMsg = await dispatchToolCall({ id: 'b', name: 'message_actor', args: {} }, main);
+    expect(metaOf(rMsg).gates.find((g) => g.name === 'exposure')?.allowed).toBe(true);
+  });
 });

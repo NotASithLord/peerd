@@ -100,7 +100,7 @@ export function applyRealmSeal(global) {
     const url = typeof input === 'string' ? input : input && input.url;
     if (!url) return Promise.reject(new TypeError('fetch: url required'));
     // why method/headers/body now ride the bridge: full HTTP from inside a
-    // Notebook script ("code mode") at parity with the call_api tool — same
+    // Notebook script ("code mode") at parity with the fetch_url tool — same
     // host-side webFetch (SSRF block + denylist + audit) governs every method,
     // so a POST here is the SAME egress surface, not a new one. Body must be a
     // string (JSON/text); a stream/Blob can't cross postMessage, which keeps the

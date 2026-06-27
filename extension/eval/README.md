@@ -148,8 +148,8 @@ false-fail a correct refusal).
   `remember` and any other confirm-gated tool would stall waiting on a
   confirmation prompt this automated "user" can't answer; `app_*` rendered
   output isn't visible in the end state (the App runs in its own opaque-origin
-  iframe); live `web_search` / `call_api` / `read_article` are nondeterministic
-  and egress-allowlist-gated. These are better served by the LLM-judge variant
+  iframe); a live `fetch_url` (or the web actor driving a tab) is nondeterministic
+  and egress-gated. These are better served by the LLM-judge variant
   and a richer end-state capture — the "Tier 2 / comparison" direction.
 - The pure parts (`score.js` aggregate/compare) are unit-tested under Bun;
   the runner needs a real browser + unlocked vault, so it's run by hand

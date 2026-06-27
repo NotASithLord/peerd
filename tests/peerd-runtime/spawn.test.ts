@@ -102,7 +102,7 @@ describe('restrictCtxCapabilities', () => {
   });
 
   test('a capability is KEPT when a granted tool consumes it', () => {
-    expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['call_api']))).toBe(true);
+    expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']))).toBe(true);
     expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['vm_import']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
@@ -124,11 +124,11 @@ describe('restrictCtxCapabilities', () => {
 
   test('spawn closure is stripped for a non-recursive subagent (no spawn_subagent granted)', () => {
     // the inherit-all-but-spawn case: tools present but spawn_subagent narrowed out.
-    const allowed = new Set(['call_api', 'read_memory', 'request_review']);
+    const allowed = new Set(['fetch_url', 'read_memory', 'request_review']);
     const out = restrictCtxCapabilities(fullCtx(), allowed);
     expect('spawnSubagent' in out).toBe(false);
     expect('spawnSubagentAsync' in out).toBe(false);
-    expect('webFetch' in out).toBe(true);   // call_api needs it
+    expect('webFetch' in out).toBe(true);   // fetch_url needs it
     expect('memory' in out).toBe(true);     // read_memory needs it
   });
 

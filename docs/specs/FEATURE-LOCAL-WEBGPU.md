@@ -21,7 +21,7 @@
 > on-device WebGPU behind an **opt-in download**, hosted in the offscreen
 > doc (`offscreen/local-model.js`) and exposed via the `local-webgpu`
 > adapter (`peerd-provider/adapters/local-webgpu.js`). Broader model
-> support is **staged** (one resident model today). The §2.4 structured
+> support is **staged** (one actor model today). The §2.4 structured
 > `{ mode, id }` runner-model selector is **still open** — `runnerModel`
 > stays a bare string + resolver for now.
 
@@ -76,7 +76,7 @@ as a main-chat model option**, but is **NOT auto-defaulted** there — the main
 agent stays cloud/BYOK by default (the small-model-over-40-tools failure mode
 of §1/§5 still holds; the user opts in per chat if they want it). Onboarding
 mirrors **voice**: a Settings download card, SRI-pinned weights, IDB/OPFS
-cache, capability gate (`navigator.gpu` + `shader-f16`), engine resident in the
+cache, capability gate (`navigator.gpu` + `shader-f16`), engine actor in the
 offscreen doc. Everything else in §3 (offscreen `infer/*` engine, vendoring,
 OOM/fallback, M0 eval gate) stands.
 
@@ -162,7 +162,7 @@ that provider's own credentials:
 |---|---|
 | `anthropic` | `claude-haiku-4-5` (latest Haiku) |
 | `openrouter` | `anthropic/claude-haiku-4.5` (Haiku via OpenRouter) |
-| `local-webgpu` *(Deliverable B)* | the resident on-device runner model |
+| `local-webgpu` *(Deliverable B)* | the actor on-device runner model |
 | *(future)* `openai` | the small/fast tier (a mini model) |
 
 > Today this is "not a huge deal" (Anthropic + OpenRouter both serve
@@ -178,7 +178,7 @@ first match wins:
 1. **Explicit user pin**, if set *and* reachable with the active
    provider's credentials → use it.
 2. **Local WebGPU runner**, if enabled and available (WebGPU present +
-   model resident) → use it. Provider-independent (keyless, on-device), so
+   model actor) → use it. Provider-independent (keyless, on-device), so
    this works no matter what the main provider is. *(Deliverable B; until
    then this rung is absent.)*
 3. **`activeProvider.defaultRunnerModel`** — the per-provider fast default
@@ -249,7 +249,7 @@ tools," and it's a few days of work against existing infrastructure.
   headroom lever.
 - **Host in the offscreen document**, never the SW (the SW idles out;
   COEP/COOP + `wasm-unsafe-eval` are already in place per the parent doc).
-  Keep the model **resident** so do/get/check don't pay a reload.
+  Keep the model **actor** so do/get/check don't pay a reload.
 - **q4f16** weights; **SRI-pinned, OPFS-cached, shard-streamed** into GPU
   buffers (generalize `voice/model-store.js`) to avoid the 2× load spike.
 - **OOM guard:** an OOM in the offscreen doc takes the SW keepalive with
@@ -278,7 +278,7 @@ tools," and it's a few days of work against existing infrastructure.
 
 - **`local-webgpu` adapter** (`peerd-provider/adapters/local-webgpu.js`):
   `registerProvider`, `keyless: true`, a `defaultRunnerModel` = the
-  resident model (§2.2), zero-cost pricing entry; an **async-generator RPC
+  actor model (§2.2), zero-cost pricing entry; an **async-generator RPC
   shim** re-yielding `ProviderEvent`s from the offscreen host (the
   `voice/*` message routing is the template). `getSecret`/`safeFetch`
   accepted and ignored; synthetic `usage`.
@@ -296,7 +296,7 @@ tools," and it's a few days of work against existing infrastructure.
 | Milestone | Scope | Effort |
 |---|---|---|
 | **M0** | Eval A/B local-runner vs Haiku (pass-rate + latency) on target HW. Decision gate. | ~3–5 days |
-| **M1** | Offscreen engine + `infer/*` + max-limits device helper + OPFS shard-stream store + `local-webgpu` adapter; resident, q4f16, constrained output format. | ~1.5–2 wks |
+| **M1** | Offscreen engine + `infer/*` + max-limits device helper + OPFS shard-stream store + `local-webgpu` adapter; actor, q4f16, constrained output format. | ~1.5–2 wks |
 | **M2** | `resolveRunnerModel` step 2 wired (local-when-available) + Settings "Local (WebGPU)" option + capability gate + OOM/fallback. | ~3–5 days |
 | **M3** | Diff-prefill tuning, eval hardening, store-posture flag. | ~3–5 days |
 

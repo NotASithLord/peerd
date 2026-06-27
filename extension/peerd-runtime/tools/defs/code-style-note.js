@@ -16,6 +16,29 @@ export const CODE_STYLE_NOTE = [
   '</code-style>',
 ].join('\n');
 
+// App-runtime gotcha, NOT style: the sandboxed opaque-origin iframe has no file
+// server, so cross-file ES modules don't resolve and a Worker can't load by path
+// (composeApp rewrites `new Worker('worker.js')` to a blob worker). The agent
+// burned several turns hand-rolling workers before this was written down. Lives
+// HERE (with the other create-time notes) so it has ONE source: app_create
+// discloses it in its result (flag-OFF), and the App ACTOR — the agent that
+// actually writes the page files — gets it in its lore (flag-ON, system-prompt.js).
+export const APP_RUNTIME_NOTE = [
+  '<app-runtime>',
+  'The App runs in a sandboxed, opaque-origin iframe with NO file server, so your',
+  'page scripts CANNOT use cross-file ES modules: import/export BETWEEN your files',
+  "won't resolve (there's no URL to fetch ./other.js from) and the app silently",
+  'fails to start. Put your JS in classic <script> tags (multiple tags share ONE',
+  'global scope — define in one, use in the next) OR a single self-contained',
+  '<script type="module"> with no relative imports. Same for CSS: inline <style> or',
+  'tag-relative <link href="./x.css"> (peerd inlines those).',
+  'For heavy compute, put the work in its own file and use new Worker(\'worker.js\')',
+  "— it runs automatically (wired to a blob worker). Keep the worker self-contained:",
+  "a blob worker can't import other app files. Or tile work across",
+  'requestAnimationFrame frames; for pure no-UI compute, js_create/js_run are simpler.',
+  '</app-runtime>',
+].join('\n');
+
 // CORRECTNESS, not style: the JS footguns that yield a WRONG ANSWER (silently),
 // plus the nudge to reach for the stdlib instead of hand-rolling. Disclosed
 // where the agent writes compute JS — js_run (once per session) and js_create

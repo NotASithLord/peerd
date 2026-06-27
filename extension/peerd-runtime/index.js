@@ -90,11 +90,21 @@ export { makeTurnCostTracker } from './cost/turn-tracker.js';
 // --- subagents (orchestration over sessions; see docs/SUBAGENTS.md) ------
 export {
   makeSpawnSubagent, narrowTools, finalAssistantText,
+  restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
 } from './subagent/spawn.js';
 // DESIGN-11: async (non-blocking) subagents — spawn returns a handle, the
 // result re-enters the parent as a synthetic wake turn. Testable orchestrator.
 export { makeAsyncSubagents } from './subagent/async-subagents.js';
+// DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
+// instance's actor — the async-subagents shape, specialized).
+export { makeActorMessaging } from './subagent/actor-messaging.js';
+// DESIGN-17: the WEB actor — the disposable browser-runner folded into the
+// actor model as a fourth `kind:'web'` actor that owns one tab. Pure core:
+// the tab→session bindings, the action-log rolling-summary prompt, the self-fence.
+export {
+  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
+} from './subagent/web-actor.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
@@ -136,6 +146,9 @@ export {
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
+  // DESIGN-17: the actor capability tier vocabulary.
+  EXPOSURE_ACTOR, ACTOR_MUTATING_TOOLS, isActorMutatingTool,
+  actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.
@@ -232,11 +245,9 @@ export {
   CLOCK_TOOLS,
 } from './clock/index.js';
 
-// --- web (fetch vs tab policy + wrappers) -------------------------------
+// --- web (capture wrapper) ----------------------------------------------
 export {
-  WEB_TOOLS,
-  callApiTool, readArticleTool, webSearchTool, submitFormTool, captureTool,
-  shouldEscalate, looksLikeSpaShell, matchesAntiBotTemplate, satisfiesExpects,
+  WEB_TOOLS, captureTool,
 } from './tools/web/index.js';
 
 // --- voice (local transcription) ----------------------------------------

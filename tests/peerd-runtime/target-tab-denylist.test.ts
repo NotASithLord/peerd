@@ -50,6 +50,42 @@ describe('resolveTargetTab — denylist on the actual target', () => {
   });
 });
 
+describe('resolveTargetTab — DESIGN-17 web-actor fail-closed', () => {
+  // A web actor OWNS one tab via ctx.activeTab. If that tab vanished mid-turn
+  // (so ctx.activeTab is absent), it must NEVER fall back to the user's foreground
+  // tab — it refuses instead. The foreground query is the leak this closes.
+  test('an actor ctx with no activeTab refuses — never queries the foreground', async () => {
+    let foregroundQueried = false;
+    const ctx: any = {
+      actorType: 'web',
+      tabs: {
+        get: async () => { throw new Error('no tab'); },
+        query: async () => { foregroundQueried = true; return [{ id: 7, url: 'https://user-bank.com/' }]; },
+      },
+    };
+    expect(await resolveTargetTab({}, ctx)).toBeNull();
+    expect(foregroundQueried).toBe(false);   // the foreground was NOT touched
+  });
+
+  test('a NON-actor ctx with no activeTab still uses the foreground (unchanged)', async () => {
+    const ctx: any = {
+      denylist: [],
+      tabs: { get: async () => { throw new Error('x'); }, query: async () => [{ id: 7, url: 'https://example.com/' }] },
+    };
+    expect((await resolveTargetTab({}, ctx))?.id).toBe(7);
+  });
+
+  test('a web actor still drives its OWN tab via ctx.activeTab', async () => {
+    const ctx: any = {
+      actorType: 'web',
+      denylist: [],
+      activeTab: { id: 42, url: 'https://app.example/', origin: 'https://app.example' },
+      tabs: tabsApi({ 42: { id: 42, url: 'https://app.example/' } }),
+    };
+    expect((await resolveTargetTab({}, ctx))?.id).toBe(42);
+  });
+});
+
 describe('list_tabs — does not leak denylisted tab ids', () => {
   test('filters denylisted tabs and reports how many were hidden', async () => {
     const all = [

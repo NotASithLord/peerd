@@ -68,7 +68,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
       for (const name of [
         'vm_boot', 'vm_create', 'vm_delete', 'js_notebook', 'js_create',
         'app_create', 'app_update', 'edit_file', 'spawn_subagent',
-        'page_eval', 'page_exec', 'submit_form', 'request_review', 'load_skill',
+        'page_eval', 'page_exec', 'request_review', 'load_skill',
       ]) {
         expect(allow.has(name)).toBe(false);
       }
@@ -171,22 +171,32 @@ describe('filterDescriptorsByManifest', () => {
 
 describe('exposureGate — per-session manifest refusal at dispatch', () => {
   test('refuses a manifest-excluded tool BY NAME, naming the manifest in the reason', () => {
+    // call_api is a non-tiered tool, so the MANIFEST gate is what refuses it — a
+    // mutating tool (vm_boot) would be refused earlier by the actor tier, which
+    // precedes the manifest check in exposureGate.
     const ctx = { exposure: 'main', toolAllow: new Set(['get', 'check']), toolManifestLabel: 'browse-only' };
-    const r = eg({ name: 'vm_boot' }, {}, ctx);
+    const r = eg({ name: 'call_api' }, {}, ctx);
     expect(r.allowed).toBe(false);
     expect(r.reason).toContain('tool manifest');
     expect(r.reason).toContain('browse-only');
   });
 
   test('allows manifest-included tools; null toolAllow keeps today\'s behavior', () => {
-    expect(eg({ name: 'get' }, {}, { exposure: 'main', toolAllow: new Set(['get']) }).allowed).toBe(true);
-    expect(eg({ name: 'vm_boot' }, {}, { exposure: 'main', toolAllow: null }).allowed).toBe(true);
-    expect(eg({ name: 'vm_boot' }, {}, { exposure: 'main' }).allowed).toBe(true);
+    // js_run (a non-folded main tool) exercises the manifest allow-path; do/get/check
+    // would be refused earlier by the web-actor cutover, so they can't be used here.
+    expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: new Set(['js_run']) }).allowed).toBe(true);
+    // js_run stays on the main agent (not the actor-mutating tier), so a
+    // null/absent manifest leaves it allowed — the no-manifest status quo.
+    expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: null }).allowed).toBe(true);
+    expect(eg({ name: 'js_run' }, {}, { exposure: 'main' }).allowed).toBe(true);
   });
 
   test('applies to CHILD contexts too (exposure unset) — a child never escalates past the manifest', () => {
-    const r = eg({ name: 'js_notebook' }, {}, { toolAllow: new Set(['snapshot']), toolManifestLabel: 'research' });
+    // call_api is non-tiered, so this exercises the manifest refusal itself (a
+    // mutating tool would be refused earlier by the actor tier).
+    const r = eg({ name: 'call_api' }, {}, { toolAllow: new Set(['snapshot']), toolManifestLabel: 'research' });
     expect(r.allowed).toBe(false);
+    expect(r.reason).toContain('tool manifest');
   });
 
   test('the runner-only main check still wins even when the manifest allows the name', () => {

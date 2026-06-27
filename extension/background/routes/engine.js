@@ -39,7 +39,7 @@ export const makeEngineRoutes = (deps) => {
       // GET callers (the VM HTTP marker fast path) pass only { url } and behave
       // exactly as before; the rich VM path + the Notebook code-mode bridge pass
       // method/headers/body. webFetch applies denylist + SSRF + audit on EVERY
-      // method (parity with call_api), so a POST here is not a new egress surface.
+      // method (parity with fetch_url), so a POST here is not a new egress surface.
       // vmHttpFetch layers the IDB GET cache + optional git-auth on top.
       try {
         return await vmHttpFetch({ url, method, headers, body, gitAuth });
