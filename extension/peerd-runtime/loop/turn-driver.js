@@ -216,7 +216,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       activeTab: activeTabContext,
       // DESIGN-17: an actor gets a kind-specific tuned block appended (the base
       // template — incl. all the security/defense text — survives verbatim).
-      ...(isActor ? { actorType } : {}),
+      // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
+      // API actor (fetch-only origin lore) — both are actorType:'web'. instanceId lets
+      // an API actor's lore name the ONE origin it owns.
+      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId } : {}),
     });
   };
 

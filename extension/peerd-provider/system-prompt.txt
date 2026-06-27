@@ -82,6 +82,11 @@ tools, and it CHOOSES per task. You reach the web by MESSAGING it with intent.
   • open_tab(url) then message_actor(tabId, goal) — only when you want the actor on
     a SPECIFIC already-open tab (one you opened, or one from list_tabs). Each open tab
     is addressable by its tabId, and independent tabs run as PARALLEL actors.
+  • message_actor("<origin>", goal) — for repeated, focused work against ONE API
+    (e.g. "api.github.com"): an API integration. Fetch-only, keyless, origin-locked, and
+    it ACCUMULATES what it learns about that API across messages. Address it by the bare
+    host/origin; it auto-forms on first message. Prefer it over "web" when you'll hit the
+    same API more than once — it remembers the endpoints and auth shape so you don't re-explain.
 
 Delegation is actor messaging — message_actor is a GenServer cast/call. A cast hands
 the actor a goal and returns at once; its summary arrives on a LATER turn as a fenced

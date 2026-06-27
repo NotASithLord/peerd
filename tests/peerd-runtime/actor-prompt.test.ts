@@ -150,6 +150,24 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(block.includes('the owner of one tab-hosted instance')).toBe(true);
     expect(block.includes('<actor_agent>')).toBe(true);
   });
+
+  test('DESIGN-18: an API actor (web + backing:api) gets FETCH-only lore, names its origin, no DOM', () => {
+    const block = actorBlock('web', 'api', 'https://api.stripe.com');
+    expect(block.includes('API integration')).toBe(true);
+    expect(block.includes('fetch_url')).toBe(true);
+    expect(block.includes('https://api.stripe.com')).toBe(true);   // it knows its lock
+    expect(block.toLowerCase()).toContain('sessionless');
+    // It must NOT get the tab/DOM web lore (it has no tab).
+    expect(block.includes('snapshot')).toBe(false);
+    expect(block.includes('YOUR TAB')).toBe(false);
+    expect(block.includes('<actor_agent>')).toBe(true);
+  });
+
+  test('DESIGN-18: a tab-backed web actor (no backing) still gets the DOM lore', () => {
+    const block = actorBlock('web', 'tab');
+    expect(block.includes('snapshot')).toBe(true);
+    expect(block.includes('API integration')).toBe(false);
+  });
 });
 
 // Guard the always-on prompt stays lean: the deep per-kind lore lives in
