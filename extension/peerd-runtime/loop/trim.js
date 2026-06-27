@@ -142,7 +142,7 @@ const carriesToolResults = (m) =>
  *   Injected prompt-token estimator (default estimate.js char/4 heuristic).
  * @param {(summaryText: string) => string} [opts.wrapSummary]
  *   DESIGN-17: post-process the rendered summary text before it becomes the
- *   synthesised message content. The WEB resident injects fenceWebResidentSummary
+ *   synthesised message content. The WEB actor injects fenceWebActorSummary
  *   here to SELF-FENCE its own (100%-untrusted-provenance) rolling summary. Default
  *   identity — every other caller renders the summary verbatim, unchanged.
  * @returns {{

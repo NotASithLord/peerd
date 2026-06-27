@@ -1,17 +1,17 @@
 // @ts-check
 // Tool exposure policy — which tools the MAIN agent sees.
 //
-// After the DESIGN-17 resident cutover, the main agent's browser surface is
-// list_tabs / open_tab / message_resident (+ capture). The page itself is
-// reached by messaging the tab's web RESIDENT — do/get/check and the low-level
+// After the DESIGN-17 actor cutover, the main agent's browser surface is
+// list_tabs / open_tab / message_actor (+ capture). The page itself is
+// reached by messaging the tab's web ACTOR — do/get/check and the low-level
 // DOM/page tools (a11y snapshots, element refs, click/type/navigate, raw page
-// content, code-exec) all LEFT the main agent: the resident holds the DOM
+// content, code-exec) all LEFT the main agent: the actor holds the DOM
 // toolset, subagents still drive a page through do/get/check. This keeps
 // untrusted page content and ref noise out of the main context: the security +
-// long-task-reliability thesis. The strip is RUNNER_PAGE_TOOLS + the resident
-// mutating tier, applied by filterResidentSurface (below) + the gate.
+// long-task-reliability thesis. The strip is RUNNER_PAGE_TOOLS + the actor
+// mutating tier, applied by filterActorSurface (below) + the gate.
 //
-// The tools remain REGISTERED; the resident + subagents still receive them via
+// The tools remain REGISTERED; the actor + subagents still receive them via
 // tool narrowing (spawn.js). This module ONLY filters what the MAIN model SEES.
 // It is the realization of the V1.3 exposure manifest (gates.js exposureGate).
 //
@@ -29,16 +29,16 @@
 // is `capture`: a user-facing screenshot of the active tab, whose image is
 // redacted to a sentinel before the model sees it (loop/redact.js) — no page
 // content leaks. list_tabs/open_tab also stay (tab metadata only, no content).
-// Every web READ is the actor's, reached via message_resident.
+// Every web READ is the actor's, reached via message_actor.
 export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
   'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
-  // fetch_url is the web RESIDENT's secure fetch — its NON-render web mechanism (the
-  // other is drive-a-tab). It's resident-only: the orchestrator delegates web INTENT
-  // via message_resident and the web actor picks fetch-vs-render, so the main agent
+  // fetch_url is the web ACTOR's secure fetch — its NON-render web mechanism (the
+  // other is drive-a-tab). It's actor-only: the orchestrator delegates web INTENT
+  // via message_actor and the web actor picks fetch-vs-render, so the main agent
   // never holds it. With call_api/read_article/web_search/submit_form removed, the
   // web actor (fetch_url + drive-a-tab) is the single entry point for ALL web work.
   'fetch_url',
@@ -123,48 +123,48 @@ export const isInstanceGatedOut = (name, instanceState) => {
 export const filterByInstanceState = (descriptors, instanceState) =>
   descriptors.filter((t) => !isInstanceGatedOut(t.name, instanceState));
 
-// ── DESIGN-17: resident tab agents — the capability tier ────────────────────
+// ── DESIGN-17: actor tab agents — the capability tier ────────────────────
 //
-// A `kind:'resident'` session OWNS one tab-hosted instance and exclusively
+// A `kind:'actor'` session OWNS one tab-hosted instance and exclusively
 // holds that environment's MUTATING tools. The split has two sides, both
 // enforced at the dispatch gate (gates.js — the WALL, not just these
 // descriptor filters which are advisory):
 //
-//   - RESIDENT_MUTATING_TOOLS leave the MAIN agent. A non-resident ctx
+//   - ACTOR_MUTATING_TOOLS leave the MAIN agent. A non-actor ctx
 //     (main / subagent / runner / review / direct) is REFUSED any of them —
 //     so a one-line `spawn_subagent({tools:['app_delete']})` can't escalate.
 //     Only MUTATION is tiered; READS (app_read_file/app_list_files/
 //     js_read_file) stay GLOBAL + id-addressable, per the spec.
-//   - A resident is POSITIVELY constrained to its own kind's toolset
-//     (residentAllowedTools) — the keyless/narrow runner trust model
-//     generalized: a hallucinated/injected non-env tool from a resident
+//   - An actor is POSITIVELY constrained to its own kind's toolset
+//     (actorAllowedTools) — the keyless/narrow runner trust model
+//     generalized: a hallucinated/injected non-env tool from an actor
 //     fails closed at the gate, not just in the descriptor list.
 //
-// The exposure marker is a free string on ctx: 'main' (main turn) / 'resident'
-// (resident turn) / unset (subagent/runner). EXPOSURE_RESIDENT is a const so a
+// The exposure marker is a free string on ctx: 'main' (main turn) / 'actor'
+// (actor turn) / unset (subagent/runner). EXPOSURE_ACTOR is a const so a
 // typo can't silently widen authority at its (many) read sites; 'main' stays a
 // bare literal — it's only ever the gate's negative space, never matched by name.
-export const EXPOSURE_RESIDENT = 'resident';
+export const EXPOSURE_ACTOR = 'actor';
 
-// The tiered MUTATION set — refused for every non-resident ctx (the main agent
-// delegates these via message_resident). vm_boot/js_notebook are the RUN tools
+// The tiered MUTATION set — refused for every non-actor ctx (the main agent
+// delegates these via message_actor). vm_boot/js_notebook are the RUN tools
 // (they mutate instance state); edit_file is the cross-kind SEARCH/REPLACE write
 // path for App/Notebook files; the rest are write/delete ops. js_run (headless,
 // no instance) stays a parent tool and is deliberately ABSENT.
-export const RESIDENT_MUTATING_TOOLS = Object.freeze(new Set([
+export const ACTOR_MUTATING_TOOLS = Object.freeze(new Set([
   'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
   'js_notebook', 'js_write_file', 'js_delete',
   'app_update', 'app_write_file', 'app_delete_file', 'app_delete',
   'edit_file',
 ]));
 
-/** Is this a tiered mutating tool (resident-only, off the main agent)? Pure. @param {string} name */
-export const isResidentMutatingTool = (name) => RESIDENT_MUTATING_TOOLS.has(name);
+/** Is this a tiered mutating tool (actor-only, off the main agent)? Pure. @param {string} name */
+export const isActorMutatingTool = (name) => ACTOR_MUTATING_TOOLS.has(name);
 
-// DESIGN-17 web-resident cutover — the do/get/check page RUNNER, folded into the
+// DESIGN-17 web-actor cutover — the do/get/check page RUNNER, folded into the
 // actor model. The orchestrator reaches a page ONLY by messaging that tab's
-// resident (open_tab + message_resident), so these leave the MAIN agent.
-// Subagents (exposure unset) keep them — they can't message residents.
+// actor (open_tab + message_actor), so these leave the MAIN agent.
+// Subagents (exposure unset) keep them — they can't message actors.
 // The tools + the runner stay REGISTERED (a subagent still drives a page through
 // them) — only the main-agent surface narrows.
 export const RUNNER_PAGE_TOOLS = Object.freeze(new Set(['do', 'get', 'check']));
@@ -172,23 +172,23 @@ export const RUNNER_PAGE_TOOLS = Object.freeze(new Set(['do', 'get', 'check']));
 /** Is this one of the do/get/check page-runner tools? Pure. @param {string} name */
 export const isRunnerPageTool = (name) => RUNNER_PAGE_TOOLS.has(name);
 
-// DESIGN-17 web resident — the DOM toolset it owns. MUST mirror the runner's
-// DO_TOOLSET (`runner/index.js`): the web resident IS the runner's lineage with a
+// DESIGN-17 web actor — the DOM toolset it owns. MUST mirror the runner's
+// DO_TOOLSET (`runner/index.js`): the web actor IS the runner's lineage with a
 // tier marker + a tab pin, so it holds exactly the runner's tools. Kept as a
 // literal here (not imported) so exposure.js stays a leaf — a drift-guard test
 // (exposure.test.ts) asserts equality with DO_TOOLSET. why these and not
 // page_eval/page_exec: same as the runner — it ingests untrusted page text, so it
 // must not also wield code-exec (the exclusion IS the boundary).
-export const WEB_RESIDENT_DOM_TOOLS = Object.freeze([
+export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes',
   'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
 ]);
 
-// The POSITIVE allow-list a resident of each kind may call — its own kind's
+// The POSITIVE allow-list an actor of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
-// kinds' tools, browser/web/memory/spawn tools) is refused for a resident ctx.
-// Keys match the residentKind vocabulary { webvm, notebook, app, web }.
-const RESIDENT_KIND_TOOLS = Object.freeze({
+// kinds' tools, browser/web/memory/spawn tools) is refused for an actor ctx.
+// Keys match the actorType vocabulary { webvm, notebook, app, web }.
+const ACTOR_TYPE_TOOLS = Object.freeze({
   webvm: Object.freeze(new Set([
     'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
   ])),
@@ -199,32 +199,32 @@ const RESIDENT_KIND_TOOLS = Object.freeze({
     'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
     'app_delete_file', 'app_delete', 'edit_file',
   ])),
-  // The web resident owns a tab via the DOM toolset. The DOM mutators
-  // (click/type/navigate) are NOT in RESIDENT_MUTATING_TOOLS — they're contained
+  // The web actor owns a tab via the DOM toolset. The DOM mutators
+  // (click/type/navigate) are NOT in ACTOR_MUTATING_TOOLS — they're contained
   // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis), and the
   // runner (exposure unset) keeps using them. Putting them in this POSITIVE set
-  // is what lets a web-resident ctx call them (gate rule 2) — the reconciliation.
+  // is what lets a web-actor ctx call them (gate rule 2) — the reconciliation.
   // PLUS fetch_url: the web actor's SESSIONLESS non-render mechanism, added
-  // OUTSIDE WEB_RESIDENT_DOM_TOOLS so that set stays == the runner's DO_TOOLSET
+  // OUTSIDE WEB_ACTOR_DOM_TOOLS so that set stays == the runner's DO_TOOLSET
   // (the drift guard). The web actor is the only ctx allowed fetch_url, and the
   // capability strip (spawn.js) keeps it keyless: webFetch survives, getSecret /
   // safeFetch do not.
-  web: Object.freeze(new Set([...WEB_RESIDENT_DOM_TOOLS, 'fetch_url'])),
+  web: Object.freeze(new Set([...WEB_ACTOR_DOM_TOOLS, 'fetch_url'])),
 });
 
-/** The Set of tool names a resident of `kind` may call (empty for an unknown kind). Pure. @param {string} [kind] */
-export const residentAllowedTools = (kind) =>
-  RESIDENT_KIND_TOOLS[/** @type {keyof typeof RESIDENT_KIND_TOOLS} */ (kind)] ?? new Set();
+/** The Set of tool names an actor of `kind` may call (empty for an unknown kind). Pure. @param {string} [kind] */
+export const actorAllowedTools = (kind) =>
+  ACTOR_TYPE_TOOLS[/** @type {keyof typeof ACTOR_TYPE_TOOLS} */ (kind)] ?? new Set();
 
-/** May a resident of `kind` call this tool? Pure. @param {string} name @param {string} [kind] */
-export const isAllowedForResidentKind = (name, kind) => residentAllowedTools(kind).has(name);
+/** May an actor of `kind` call this tool? Pure. @param {string} name @param {string} [kind] */
+export const isAllowedForActorType = (name, kind) => actorAllowedTools(kind).has(name);
 
-// Per-tool target-id ARG field — what a resident-gated tool calls its instance
-// target. The resident dispatch wrapper force-injects the bound id here (the
+// Per-tool target-id ARG field — what an actor-gated tool calls its instance
+// target. The actor dispatch wrapper force-injects the bound id here (the
 // per-instance pin); the gate reads it for a defense-in-depth mismatch refusal.
 // null = no explicit id arg (the tool resolves the session-default instance,
-// which for a resident is its bound instance via setDefaultForSession).
-const RESIDENT_TARGET_ID_FIELD = Object.freeze({
+// which for an actor is its bound instance via setDefaultForSession).
+const ACTOR_TARGET_ID_FIELD = Object.freeze({
   vm_boot: 'vm',          // id OR name
   vm_delete: 'vmId',
   vm_write_file: null,
@@ -243,26 +243,26 @@ const RESIDENT_TARGET_ID_FIELD = Object.freeze({
 });
 
 /** The arg field holding this tool's instance target id, or null. Pure. @param {string} name @returns {string|null} */
-export const residentTargetIdField = (name) =>
-  /** @type {Record<string, string|null>} */ (RESIDENT_TARGET_ID_FIELD)[name] ?? null;
+export const actorTargetIdField = (name) =>
+  /** @type {Record<string, string|null>} */ (ACTOR_TARGET_ID_FIELD)[name] ?? null;
 
 /**
  * The EXPLICIT instance id/name a tool call names, or undefined when it names
  * none (relying on the session-default). Pure — read-only over args.
  * @param {string} name @param {Record<string, any> | null | undefined} args @returns {string | undefined}
  */
-export const residentTargetId = (name, args) => {
-  const field = residentTargetIdField(name);
+export const actorTargetId = (name, args) => {
+  const field = actorTargetIdField(name);
   if (!field || !args) return undefined;
   const v = args[field];
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 };
 
-// DESIGN-17 web resident — the tab pin. A web resident owns ONE tab; the DOM
+// DESIGN-17 web actor — the tab pin. A web actor owns ONE tab; the DOM
 // tools resolve their target via `resolveTargetTab`, which honors an explicit
 // numeric `args.tabId`. So the pin is on tabId (a number), not an instance-id
-// string — `residentTargetId` (string-only) can't express it. The web resident's
-// `residentInstanceId` is its owned tabId AS A STRING. The GATE runs before
+// string — `actorTargetId` (string-only) can't express it. The web actor's
+// `actorInstanceId` is its owned tabId AS A STRING. The GATE runs before
 // `resolveTargetTab` (async) and can only see the explicit arg, so this checks
 // the EXPLICIT `args.tabId`: absent → defaults to the bound tab (fine); present
 // and ≠ the owned tab → refused.
@@ -271,30 +271,30 @@ export const residentTargetId = (name, args) => {
  * @param {Record<string, any> | null | undefined} args
  * @returns {number | undefined}
  */
-export const residentWebTabTarget = (args) =>
+export const actorWebTabTarget = (args) =>
   args && typeof args.tabId === 'number' ? args.tabId : undefined;
 
 /**
- * The descriptor list a resident of `kind` should SEE — its own kind's toolset.
+ * The descriptor list an actor of `kind` should SEE — its own kind's toolset.
  * Pure. (The gate is the wall; this keeps the model's advertised list tight.)
  * @template {{ name: string }} T
  * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @returns {T[]}
  */
-export const residentDescriptors = (descriptors, kind) => {
-  const allow = residentAllowedTools(kind);
+export const actorDescriptors = (descriptors, kind) => {
+  const allow = actorAllowedTools(kind);
   return descriptors.filter((t) => allow.has(t.name));
 };
 
 /**
- * Re-shape the MAIN agent's descriptor list for the resident world: the instance-
+ * Re-shape the MAIN agent's descriptor list for the actor world: the instance-
  * mutating tier and the do/get/check page runner both LEAVE the main agent (it
- * bootstraps + delegates via message_resident, which it keeps). Pure; composes
+ * bootstraps + delegates via message_actor, which it keeps). Pure; composes
  * after mainAgentDescriptors()/the instance/dweb/goal filters.
  * @template {{ name: string }} T
  * @param {ReadonlyArray<T>} descriptors @returns {T[]}
  */
-export const filterResidentSurface = (descriptors) =>
-  descriptors.filter((t) => !RESIDENT_MUTATING_TOOLS.has(t.name) && !RUNNER_PAGE_TOOLS.has(t.name));
+export const filterActorSurface = (descriptors) =>
+  descriptors.filter((t) => !ACTOR_MUTATING_TOOLS.has(t.name) && !RUNNER_PAGE_TOOLS.has(t.name));
 
 // ── dweb tools: gated on the dweb being enabled ─────────────────────────────
 // The dweb network tools (publish/discover/install) are exposed to the agent

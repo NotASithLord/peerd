@@ -29,7 +29,7 @@ history (`/undo`, the transcript view), so nothing is destroyed; it's just
 no longer re-shipped to the model on every turn.
 
 ```
-BEFORE (resident every turn):
+BEFORE (actor every turn):
   user[tool_result tool_use_id=tu_42]:
     "<full read_page of example.com/pricing — 7,900 chars of DOM text …>"
 

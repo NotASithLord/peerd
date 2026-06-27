@@ -21,7 +21,7 @@ export const CODE_STYLE_NOTE = [
 // (composeApp rewrites `new Worker('worker.js')` to a blob worker). The agent
 // burned several turns hand-rolling workers before this was written down. Lives
 // HERE (with the other create-time notes) so it has ONE source: app_create
-// discloses it in its result (flag-OFF), and the App RESIDENT — the agent that
+// discloses it in its result (flag-OFF), and the App ACTOR — the agent that
 // actually writes the page files — gets it in its lore (flag-ON, system-prompt.js).
 export const APP_RUNTIME_NOTE = [
   '<app-runtime>',

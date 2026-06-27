@@ -55,11 +55,11 @@ Not all 66 reach the main agent:
 - **The low-level DOM/page tools are runner-only** — `read_page`,
   `snapshot`, `read_state`, `watch_changes`, `query_dom`, `page_eval`,
   `page_exec`, `page_keys`, `navigate`, `type`, `click`, `read_pdf`
-  (and `fetch_url`). They stay registered (the runner/web-resident gets
+  (and `fetch_url`). They stay registered (the runner/web-actor gets
   them via tool narrowing) but are hidden from the main agent at dispatch
   (`tools/exposure.js` `MAIN_AGENT_HIDDEN_TOOLS`). The main agent reaches
   the page only through `do` / `get` / `check` or by messaging a tab's
-  resident.
+  actor.
 - **7 dweb tools** reach the main agent on the **preview** build only;
   on the store build they're absent from the descriptor list.
 

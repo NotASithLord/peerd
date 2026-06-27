@@ -1,5 +1,5 @@
 // @ts-check
-// fetch_url — the web resident's secure fetch (its non-render web mechanism).
+// fetch_url — the web actor's secure fetch (its non-render web mechanism).
 //
 // The cheaper of the web actor's two mechanisms (the other is open + drive a tab).
 // A direct, denylist-gated, audited HTTP call with NO tab and NO rendering. It rides

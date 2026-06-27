@@ -207,7 +207,7 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
             // turn 1 is the user's real goal message; continuations are hidden.
             synthetic: !first,
             // DESIGN-17: a goal is USER-initiated, so each continuation is a
-            // TRUSTED first-party autonomous turn — allowed to message residents
+            // TRUSTED first-party autonomous turn — allowed to message actors
             // (so an autonomous goal can drive a VM/Notebook/App). The sender
             // gate's `=== active` check still requires the goal's chat be the
             // foreground one; a backgrounded goal stays blocked.

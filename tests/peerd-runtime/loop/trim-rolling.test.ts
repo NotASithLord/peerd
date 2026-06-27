@@ -61,8 +61,8 @@ describe('planTrim rolling summary', () => {
     expect(plan.messages[0].content).toContain('60 earlier messages elided');
   });
 
-  test('wrapSummary post-processes the rendered summary content (web-resident self-fence)', () => {
-    // DESIGN-17: a web resident injects fenceWebResidentSummary here so its own
+  test('wrapSummary post-processes the rendered summary content (web-actor self-fence)', () => {
+    // DESIGN-17: a web actor injects fenceWebActorSummary here so its own
     // page-derived summary re-enters as fenced DATA. The hook sees the FULL rendered
     // text and its output BECOMES the message content verbatim.
     const msgs = plainConversation(80);

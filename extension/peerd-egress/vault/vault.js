@@ -122,7 +122,7 @@ const SECRET_PREFIX = 'secret:';
  *                                                'vault' store (with a one-time,
  *                                                verified migration off
  *                                                chrome.storage.local). Absent →
- *                                                legacy kv-resident blob.
+ *                                                legacy kv-actor blob.
  * @property {Argon2Fn} [argon2]                  Argon2id derive — REQUIRED for any
  *                                                passphrase factor (the only KDF).
  *                                                Absent → the vault is PRF-only:

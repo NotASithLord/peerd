@@ -1,7 +1,7 @@
 // @ts-check
 // do — perform a high-level action on a tab via a browser-runner.
 //
-// The caller (a SUBAGENT — the main agent reaches a page through its resident
+// The caller (a SUBAGENT — the main agent reaches a page through its actor
 // after the DESIGN-17 cutover) issues INTENT ("compose an email to Mark about
 // Q3"). A disposable runner drives the page (snapshot → act → observe) and
 // returns a plain-text summary of what changed. The caller never sees the

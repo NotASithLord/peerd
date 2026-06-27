@@ -5,7 +5,7 @@
 // real chrome APIs; we stub ctx.tabs and assert on the result.
 //
 // web_search / submit_form / call_api / read_article were all REMOVED — the
-// web actor covers them now (fetch_url is the web resident's sessionless /
+// web actor covers them now (fetch_url is the web actor's sessionless /
 // same-origin-scoped fetch; the actor's drive-a-tab DOM tools read pages,
 // search by navigating to an engine, and submit forms via type/click).
 // fetch_url's own behavior is in tests/peerd-runtime/tools/fetch-url.test.ts.

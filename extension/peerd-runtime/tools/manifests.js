@@ -39,20 +39,20 @@
 // keep them.
 export const TOOL_MANIFEST_PRESETS = Object.freeze({
   research: Object.freeze({
-    description: 'web reads + search, page browsing (message a tab\'s resident), memory, introspection — no VM/JS/App, no file edits, no spawning',
+    description: 'web reads + search, page browsing (message a tab\'s actor), memory, introspection — no VM/JS/App, no file edits, no spawning',
     allow: Object.freeze([
-      // web surface: fetch_url (the web resident's sessionless fetch) + capture.
+      // web surface: fetch_url (the web actor's sessionless fetch) + capture.
       // web_search/call_api/read_article/submit_form were all removed — the web
       // actor searches by navigating to an engine + reading results, and reads via
       // fetch_url or its drive-a-tab DOM tools.
       'fetch_url', 'capture',
       // the main agent's browser surface: open/enumerate tabs + message a tab's
-      // web resident to read or act (do/get/check are folded into the resident).
-      'list_tabs', 'open_tab', 'message_resident',
-      // do/get/check stay for SUBAGENTS (they can't message residents); the main
-      // agent has them folded into the tab's resident by the cutover.
+      // web actor to read or act (do/get/check are folded into the actor).
+      'list_tabs', 'open_tab', 'message_actor',
+      // do/get/check stay for SUBAGENTS (they can't message actors); the main
+      // agent has them folded into the tab's actor by the cutover.
       'do', 'get', 'check',
-      // page DOM toolset (inherited by the web resident, which DOES the page work):
+      // page DOM toolset (inherited by the web actor, which DOES the page work):
       // DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
       'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
@@ -66,16 +66,16 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
     ]),
   }),
   'browse-only': Object.freeze({
-    description: 'passive browsing — read-only page access via a tab\'s resident, navigation, web reads; no page actions, no memory, no execution',
+    description: 'passive browsing — read-only page access via a tab\'s actor, navigation, web reads; no page actions, no memory, no execution',
     allow: Object.freeze([
-      // open/enumerate + message a tab's resident; the resident is held READ-ONLY
+      // open/enumerate + message a tab's actor; the actor is held READ-ONLY
       // by this manifest (only the READ DOM tools below are allowed, so it can
-      // observe but not click/type — the manifest constrains the resident too).
-      'list_tabs', 'open_tab', 'navigate', 'message_resident',
-      'get', 'check',   // subagent read path (the main agent reads via the resident)
-      // READ_TOOLSET only (observe, never mutate) — inherited by the web resident.
+      // observe but not click/type — the manifest constrains the actor too).
+      'list_tabs', 'open_tab', 'navigate', 'message_actor',
+      'get', 'check',   // subagent read path (the main agent reads via the actor)
+      // READ_TOOLSET only (observe, never mutate) — inherited by the web actor.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',
-      // web reads: fetch_url (the web resident's sessionless fetch)
+      // web reads: fetch_url (the web actor's sessionless fetch)
       'fetch_url',
       // temporal grounding (reads)
       'now',

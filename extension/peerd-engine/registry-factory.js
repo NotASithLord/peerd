@@ -62,13 +62,13 @@ const newId = (prefix) =>
  * @param {RegistryConfig<Rec>} config
  * @param {Object} deps
  * @param {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }} deps.storage
- * @param {(residentSessionId: string) => void} [deps.onResidentArchive]
- *   DESIGN-17: fired (fire-and-forget) when an instance with a bound resident is
- *   removed, so the SW can archive the now-orphaned resident session. Covers
+ * @param {(actorSessionId: string) => void} [deps.onActorArchive]
+ *   DESIGN-17: fired (fire-and-forget) when an instance with a bound actor is
+ *   removed, so the SW can archive the now-orphaned actor session. Covers
  *   EVERY delete path (the *_delete tools AND the Library UI route) because they
- *   all funnel through remove(). No-op when unset / no resident bound.
+ *   all funnel through remove(). No-op when unset / no actor bound.
  */
-export const createRegistry = (config, { storage, onResidentArchive }) => {
+export const createRegistry = (config, { storage, onActorArchive }) => {
   const {
     storageKey,
     collectionKey,
@@ -194,20 +194,20 @@ export const createRegistry = (config, { storage, onResidentArchive }) => {
    */
   const remove = async (id) => {
     await load();
-    const rec = /** @type {{ residentSessionId?: string } | undefined} */ (collection()[id]);
+    const rec = /** @type {{ actorSessionId?: string } | undefined} */ (collection()[id]);
     if (!rec) return false;
-    // DESIGN-17: the bound resident is orphaned once its instance is gone —
+    // DESIGN-17: the bound actor is orphaned once its instance is gone —
     // capture it BEFORE the delete so the SW can archive that session. Archiving
-    // only sets archivedAt (no abort), so it's safe even on a resident's own
+    // only sets archivedAt (no abort), so it's safe even on an actor's own
     // self-delete turn. Fire-and-forget; the binding itself dies with the record.
-    const orphanedResident = rec.residentSessionId;
+    const orphanedActor = rec.actorSessionId;
     delete collection()[id];
     for (const [sessionId, mappedId] of Object.entries(state.sessionDefaults)) {
       if (mappedId === id) delete state.sessionDefaults[sessionId];
     }
     await persist();
-    if (orphanedResident && onResidentArchive) {
-      try { onResidentArchive(orphanedResident); } catch { /* never block a delete on archive */ }
+    if (orphanedActor && onActorArchive) {
+      try { onActorArchive(orphanedActor); } catch { /* never block a delete on archive */ }
     }
     return true;
   };
@@ -244,36 +244,36 @@ export const createRegistry = (config, { storage, onResidentArchive }) => {
   };
 
   /**
-   * DESIGN-17: bind an instance to its resident session (the FORWARD pointer
-   * instance → resident). A direct field write + persist — NOT via update()/
+   * DESIGN-17: bind an instance to its actor session (the FORWARD pointer
+   * instance → actor). A direct field write + persist — NOT via update()/
    * applyPatch, whose per-kind allowlists deliberately don't carry it. Returns
    * the updated record, or null if the instance is gone. Distinct from
    * ownerSessionId (the CHAT that created the instance): a single instance can
-   * be owned by chat X yet driven by its own resident session R.
+   * be owned by chat X yet driven by its own actor session R.
    *
-   * @param {string} id @param {string} residentSessionId @returns {Promise<Rec | null>}
+   * @param {string} id @param {string} actorSessionId @returns {Promise<Rec | null>}
    */
-  const setResidentSession = async (id, residentSessionId) => {
+  const setActorSession = async (id, actorSessionId) => {
     await load();
     const cur = collection()[id];
     if (!cur) return null;
-    const next = { ...cur, residentSessionId };
+    const next = { ...cur, actorSessionId };
     collection()[id] = next;
     await persist();
     return next;
   };
 
   /**
-   * Read the instance's bound resident session id, or null when unbound (lazy
-   * minting: the first message_resident binds it). Survives registry.load()
+   * Read the instance's bound actor session id, or null when unbound (lazy
+   * minting: the first message_actor binds it). Survives registry.load()
    * because it rides the persisted record.
    *
    * @param {string} id @returns {Promise<string | null>}
    */
-  const getResidentSession = async (id) => {
+  const getActorSession = async (id) => {
     await load();
-    const rec = /** @type {{ residentSessionId?: string } | undefined} */ (collection()[id]);
-    return rec?.residentSessionId ?? null;
+    const rec = /** @type {{ actorSessionId?: string } | undefined} */ (collection()[id]);
+    return rec?.actorSessionId ?? null;
   };
 
   /**
@@ -301,8 +301,8 @@ export const createRegistry = (config, { storage, onResidentArchive }) => {
     delete: remove,
     getDefaultForSession,
     setDefaultForSession,
-    setResidentSession,
-    getResidentSession,
+    setActorSession,
+    getActorSession,
     snapshot,
   };
 };

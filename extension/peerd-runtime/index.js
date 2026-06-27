@@ -96,15 +96,15 @@ export {
 // DESIGN-11: async (non-blocking) subagents — spawn returns a handle, the
 // result re-enters the parent as a synthetic wake turn. Testable orchestrator.
 export { makeAsyncSubagents } from './subagent/async-subagents.js';
-// DESIGN-17: the message_resident orchestrator (the mailbox to a tab-hosted
-// instance's resident — the async-subagents shape, specialized).
-export { makeResidentMessaging } from './subagent/resident-messaging.js';
-// DESIGN-17: the WEB resident — the disposable browser-runner folded into the
-// actor model as a fourth `kind:'web'` resident that owns one tab. Pure core:
+// DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
+// instance's actor — the async-subagents shape, specialized).
+export { makeActorMessaging } from './subagent/actor-messaging.js';
+// DESIGN-17: the WEB actor — the disposable browser-runner folded into the
+// actor model as a fourth `kind:'web'` actor that owns one tab. Pure core:
 // the tab→session bindings, the action-log rolling-summary prompt, the self-fence.
 export {
-  makeWebResidentBindings, makeWebActorRegistry, WEB_RESIDENT_SUMMARY_PROMPT, fenceWebResidentSummary,
-} from './subagent/web-resident.js';
+  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
+} from './subagent/web-actor.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
@@ -146,9 +146,9 @@ export {
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
-  // DESIGN-17: the resident capability tier vocabulary.
-  EXPOSURE_RESIDENT, RESIDENT_MUTATING_TOOLS, isResidentMutatingTool,
-  residentAllowedTools, isAllowedForResidentKind, residentDescriptors, filterResidentSurface,
+  // DESIGN-17: the actor capability tier vocabulary.
+  EXPOSURE_ACTOR, ACTOR_MUTATING_TOOLS, isActorMutatingTool,
+  actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.

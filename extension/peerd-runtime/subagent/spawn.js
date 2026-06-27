@@ -119,7 +119,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // ctx — the SW-side clients + registries + tab trackers that the
   // vm_*/js_*/app_*/edit_file tools reach through. Listing them here strips them
   // from any narrowed child whose granted tools don't read them — the keyless tool
-  // ctx the resident relies on, and the confused-deputy close for plain subagents.
+  // ctx the actor relies on, and the confused-deputy close for plain subagents.
   // The reader lists are EXHAUSTIVE (an omitted reader silently loses its closure
   // and the tool returns `*_not_available`, never a crash — covered by tests).
   // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
@@ -136,10 +136,10 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
   appRegistry:        ['app_delete', 'app_list', 'edit_file'],
   appTabTracker:      ['app_list'],
-  messageResident:    ['message_resident'],
+  messageActor:    ['message_actor'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
-  // web resident (which has navigate), stripped from any kind whose toolset lacks it.
+  // web actor (which has navigate), stripped from any kind whose toolset lacks it.
   adoptWebTab:        ['navigate'],
 });
 

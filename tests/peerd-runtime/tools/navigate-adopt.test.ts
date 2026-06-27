@@ -22,7 +22,7 @@ describe('navigate — web-actor lazy tab adoption', () => {
   test('a web ctx with NO tab opens one via adoptWebTab and re-pins activeTab', async () => {
     let adopted = false;
     const ctx: any = {
-      residentKind: 'web',
+      actorType: 'web',
       tabs: makeTabs('https://shop.com/p'),
       adoptWebTab: async () => { adopted = true; return { tabId: 100, windowId: 1 }; },
       // no activeTab → the 0-tab state
@@ -45,7 +45,7 @@ describe('navigate — web-actor lazy tab adoption', () => {
     // repinActiveTab setter that writes the SHARED object; navigate must use it so the
     // rest of the turn's DOM tools + the session-scoped webFetch see the adopted tab.
     const shared: any = {
-      residentKind: 'web',
+      actorType: 'web',
       activeTab: undefined,
       tabs: makeTabs('https://shop.com/p'),
       adoptWebTab: async () => ({ tabId: 100, windowId: 1 }),
@@ -63,7 +63,7 @@ describe('navigate — web-actor lazy tab adoption', () => {
   });
 
   test('a web ctx with NO tab and NO adoptWebTab fails closed (never the foreground tab)', async () => {
-    const ctx: any = { residentKind: 'web', tabs: makeTabs() };
+    const ctx: any = { actorType: 'web', tabs: makeTabs() };
     const r = await navigateTool.execute({ url: 'https://shop.com/p' }, ctx);
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('expected failure');
@@ -72,7 +72,7 @@ describe('navigate — web-actor lazy tab adoption', () => {
 
   test('an unsupported scheme is rejected before any adoption', async () => {
     let adopted = false;
-    const ctx: any = { residentKind: 'web', tabs: makeTabs(), adoptWebTab: async () => { adopted = true; return { tabId: 1 }; } };
+    const ctx: any = { actorType: 'web', tabs: makeTabs(), adoptWebTab: async () => { adopted = true; return { tabId: 1 }; } };
     const r = await navigateTool.execute({ url: 'file:///etc/passwd' }, ctx);
     expect(r.ok).toBe(false);
     expect(adopted).toBe(false);

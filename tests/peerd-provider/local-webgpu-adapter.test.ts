@@ -79,7 +79,7 @@ describe('callLocalWebgpu', () => {
 });
 
 describe('localWebgpuAdapter descriptor', () => {
-  test('keyless, zero-secret, defaultRunnerModel = the resident model', () => {
+  test('keyless, zero-secret, defaultRunnerModel = the actor model', () => {
     expect(localWebgpuAdapter.keyless).toBe(true);
     expect(localWebgpuAdapter.vaultSecretName).toBe(null);
     expect(localWebgpuAdapter.defaultRunnerModel).toBe(LOCAL_MODEL_ID);

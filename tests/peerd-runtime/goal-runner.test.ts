@@ -38,7 +38,7 @@ describe('makeGoalRunner — the goal loop', () => {
 
     expect(calls.length).toBe(2);
     // Turn 1: the user's real goal, NOT synthetic (renders in the chat).
-    // trusted:true — a goal is user-initiated, so its turns may message residents.
+    // trusted:true — a goal is user-initiated, so its turns may message actors.
     expect(calls[0]).toEqual({ sessionId: 's1', userText: 'do the thing', synthetic: false, trusted: true });
     // Turn 2: a hidden continuation that still carries the goal text.
     expect(calls[1].synthetic).toBe(true);

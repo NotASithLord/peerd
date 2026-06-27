@@ -123,7 +123,7 @@ export const navigateTool = {
       // post-load block re-stamps the real origin on this same (shared) object.
       adoptedPin = { id: adopted.tabId, windowId: adopted.windowId, url: '', origin: '' };
       if (typeof c.repinActiveTab === 'function') c.repinActiveTab(adoptedPin);
-      else c.activeTab = adoptedPin;   // direct-execute / non-resident fallback
+      else c.activeTab = adoptedPin;   // direct-execute / non-actor fallback
       tab = { id: adopted.tabId };
     }
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };

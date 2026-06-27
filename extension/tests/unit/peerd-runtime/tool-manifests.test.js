@@ -14,7 +14,7 @@ import {
   TOOL_MANIFEST_PRESETS,
   resolveManifestAllow,
   filterDescriptorsByManifest,
-  filterResidentSurface,
+  filterActorSurface,
   manifestLabel,
   makeToolsCommand,
   mainAgentDescriptors,
@@ -65,32 +65,32 @@ describe('tool manifests — presets vs the real registry', () => {
 
 describe('tool manifests — main-turn descriptor pipeline (real tool list)', () => {
   // The REAL main-turn pipeline (turn-driver.js): the manifest filter THEN
-  // filterResidentSurface as the outermost cut. DESIGN-17 folded do/get/check +
-  // the mutating tier into the tab's resident, so they leave the MAIN agent even
+  // filterActorSurface as the outermost cut. DESIGN-17 folded do/get/check +
+  // the mutating tier into the tab's actor, so they leave the MAIN agent even
   // when a preset names them (the preset still lists them for the SUBAGENT path).
   /** @param {string} preset */
-  const mainListFor = (preset) => filterResidentSurface(
+  const mainListFor = (preset) => filterActorSurface(
     filterDescriptorsByManifest(mainAgentDescriptors(registered), resolveManifestAllow({ preset })),
   ).map((t) => t.name);
 
-  it('research: keeps the page-via-resident channel + memory, folds do/get/check away', () => {
+  it('research: keeps the page-via-actor channel + memory, folds do/get/check away', () => {
     const names = mainListFor('research');
-    // fetch_url is resident-only (correctly NOT in the main list); the main
-    // agent's web channel is the resident (message_resident) + tab management.
-    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'remember', 'read_memory', 'inspect_audit_log']) {
+    // fetch_url is actor-only (correctly NOT in the main list); the main
+    // agent's web channel is the actor (message_actor) + tab management.
+    for (const keep of ['message_actor', 'list_tabs', 'open_tab', 'remember', 'read_memory', 'inspect_audit_log']) {
       expect(names).toContain(keep);
     }
-    // do/get/check folded into the resident; execution/edit/spawn dropped by the preset.
+    // do/get/check folded into the actor; execution/edit/spawn dropped by the preset.
     for (const drop of ['do', 'get', 'check', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'spawn_subagent', 'request_review', 'load_skill']) {
       expect(names.indexOf(drop)).toBe(-1);
     }
   });
 
-  it('browse-only: keeps tabs + the resident channel, folds get/check away', () => {
+  it('browse-only: keeps tabs + the actor channel, folds get/check away', () => {
     const names = mainListFor('browse-only');
-    // fetch_url is resident-only (correctly NOT in the main list); the main
-    // agent reaches web reads via the resident (message_resident).
-    for (const keep of ['message_resident', 'list_tabs', 'open_tab']) {
+    // fetch_url is actor-only (correctly NOT in the main list); the main
+    // agent reaches web reads via the actor (message_actor).
+    for (const keep of ['message_actor', 'list_tabs', 'open_tab']) {
       expect(names).toContain(keep);
     }
     for (const drop of ['do', 'get', 'check', 'remember', 'read_memory', 'edit_file', 'vm_boot', 'capture']) {
@@ -148,15 +148,15 @@ describe('tool manifests — the /tools command flow (real session store)', () =
     expect(notes[0]).toContain('research');
 
     // what runAgentTurn does at the next turn start, against the REAL list (the
-    // manifest filter THEN filterResidentSurface — the production pipeline):
+    // manifest filter THEN filterActorSurface — the production pipeline):
     const record = present(await store.get(id(current())));
     const allow = resolveManifestAllow(record.toolManifest);
-    const descriptors = filterResidentSurface(
+    const descriptors = filterActorSurface(
       filterDescriptorsByManifest(mainAgentDescriptors(registered), allow),
     );
     expect(descriptors.length < mainAgentDescriptors(registered).length).toBe(true);
-    // the page-via-resident channel stays; do/get/check + vm_boot are off the main agent.
-    expect(descriptors.map((t) => t.name)).toContain('message_resident');
+    // the page-via-actor channel stays; do/get/check + vm_boot are off the main agent.
+    expect(descriptors.map((t) => t.name)).toContain('message_actor');
     expect(descriptors.map((t) => t.name).indexOf('do')).toBe(-1);
     expect(descriptors.map((t) => t.name).indexOf('vm_boot')).toBe(-1);
   });

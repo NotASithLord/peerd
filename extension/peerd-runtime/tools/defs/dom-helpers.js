@@ -39,7 +39,7 @@ import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
  * yields null, which every caller already surfaces as a refusal.
  *
  * @param {{ tabId?: number }} args
- * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, residentKind?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void }} ctx
+ * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void }} ctx
  */
 export const resolveTargetTab = async (args, ctx) => {
   let tab = null;
@@ -47,14 +47,14 @@ export const resolveTargetTab = async (args, ctx) => {
     try { tab = await ctx.tabs.get(args.tabId); } catch { return null; }
   } else if (ctx.activeTab?.id) {
     try { tab = await ctx.tabs.get(ctx.activeTab.id); } catch { return null; }
-  } else if (ctx.residentKind) {
-    // DESIGN-17 FAIL-CLOSED: a RESIDENT has no user-foreground context. A WEB
-    // resident OWNS exactly one tab and ctx.activeTab IS it; if that couldn't be
+  } else if (ctx.actorType) {
+    // DESIGN-17 FAIL-CLOSED: an ACTOR has no user-foreground context. A WEB
+    // actor OWNS exactly one tab and ctx.activeTab IS it; if that couldn't be
     // resolved (the owned tab closed mid-turn — the TOCTOU between mint and turn),
     // refuse rather than fall through to the foreground query below. Without this
-    // guard a web resident whose tab vanished would silently retarget the USER's
+    // guard a web actor whose tab vanished would silently retarget the USER's
     // active page. (The engine kinds never reach here — their toolset has no DOM
-    // tools — so this is the web resident's wall in practice.)
+    // tools — so this is the web actor's wall in practice.)
     return null;
   } else {
     const [t] = await ctx.tabs.query({ active: true, currentWindow: true });

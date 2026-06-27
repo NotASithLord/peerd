@@ -72,34 +72,34 @@ describe('Notebook + VM registries persist through IndexedDB too', () => {
     expect(got?.diskOverlayKey).toBe(rec.diskOverlayKey);
   });
 
-  // DESIGN-17 Move 1: the instance→resident forward pointer. The routing
-  // foundation resolveResident depends on — bind it, prove it survives a fresh
-  // registry (SW restart), and prove delete archives the orphaned resident.
-  test('the resident-session forward pointer binds, survives SW restart, and fires onResidentArchive on delete', async () => {
+  // DESIGN-17 Move 1: the instance→actor forward pointer. The routing
+  // foundation resolveActor depends on — bind it, prove it survives a fresh
+  // registry (SW restart), and prove delete archives the orphaned actor.
+  test('the actor-session forward pointer binds, survives SW restart, and fires onActorArchive on delete', async () => {
     const archived: string[] = [];
     const r1 = notebookRegistry.createNotebookRegistry({
       storage: idb.idbKV('notebooks'),
-      onResidentArchive: (sid: string) => { archived.push(sid); },
+      onActorArchive: (sid: string) => { archived.push(sid); },
     });
     const rec = await r1.create({ name: 'driven' });
-    // Unbound until the first message_resident binds it (lazy mint).
-    expect(await r1.getResidentSession(rec.id)).toBeNull();
-    await r1.setResidentSession(rec.id, 'resident-session-7');
-    expect(await r1.getResidentSession(rec.id)).toBe('resident-session-7');
+    // Unbound until the first message_actor binds it (lazy mint).
+    expect(await r1.getActorSession(rec.id)).toBeNull();
+    await r1.setActorSession(rec.id, 'actor-session-7');
+    expect(await r1.getActorSession(rec.id)).toBe('actor-session-7');
 
     // A fresh registry over the same store reads the persisted pointer.
     const r2 = notebookRegistry.createNotebookRegistry({
       storage: idb.idbKV('notebooks'),
-      onResidentArchive: (sid: string) => { archived.push(sid); },
+      onActorArchive: (sid: string) => { archived.push(sid); },
     });
-    expect(await r2.getResidentSession(rec.id)).toBe('resident-session-7');
+    expect(await r2.getActorSession(rec.id)).toBe('actor-session-7');
 
-    // Removing the instance archives its now-orphaned resident (every delete path
+    // Removing the instance archives its now-orphaned actor (every delete path
     // funnels through remove(), exposed as delete(), so the Library UI route is
     // covered too).
     await r2.delete(rec.id);
-    expect(archived).toEqual(['resident-session-7']);
-    expect(await r2.getResidentSession(rec.id)).toBeNull();   // instance gone
+    expect(archived).toEqual(['actor-session-7']);
+    expect(await r2.getActorSession(rec.id)).toBeNull();   // instance gone
   });
 });
 

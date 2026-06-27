@@ -172,7 +172,7 @@ describe('filterDescriptorsByManifest', () => {
 describe('exposureGate — per-session manifest refusal at dispatch', () => {
   test('refuses a manifest-excluded tool BY NAME, naming the manifest in the reason', () => {
     // call_api is a non-tiered tool, so the MANIFEST gate is what refuses it — a
-    // mutating tool (vm_boot) would be refused earlier by the resident tier, which
+    // mutating tool (vm_boot) would be refused earlier by the actor tier, which
     // precedes the manifest check in exposureGate.
     const ctx = { exposure: 'main', toolAllow: new Set(['get', 'check']), toolManifestLabel: 'browse-only' };
     const r = eg({ name: 'call_api' }, {}, ctx);
@@ -183,9 +183,9 @@ describe('exposureGate — per-session manifest refusal at dispatch', () => {
 
   test('allows manifest-included tools; null toolAllow keeps today\'s behavior', () => {
     // js_run (a non-folded main tool) exercises the manifest allow-path; do/get/check
-    // would be refused earlier by the web-resident cutover, so they can't be used here.
+    // would be refused earlier by the web-actor cutover, so they can't be used here.
     expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: new Set(['js_run']) }).allowed).toBe(true);
-    // js_run stays on the main agent (not the resident-mutating tier), so a
+    // js_run stays on the main agent (not the actor-mutating tier), so a
     // null/absent manifest leaves it allowed — the no-manifest status quo.
     expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: null }).allowed).toBe(true);
     expect(eg({ name: 'js_run' }, {}, { exposure: 'main' }).allowed).toBe(true);
@@ -193,7 +193,7 @@ describe('exposureGate — per-session manifest refusal at dispatch', () => {
 
   test('applies to CHILD contexts too (exposure unset) — a child never escalates past the manifest', () => {
     // call_api is non-tiered, so this exercises the manifest refusal itself (a
-    // mutating tool would be refused earlier by the resident tier).
+    // mutating tool would be refused earlier by the actor tier).
     const r = eg({ name: 'call_api' }, {}, { toolAllow: new Set(['snapshot']), toolManifestLabel: 'research' });
     expect(r.allowed).toBe(false);
     expect(r.reason).toContain('tool manifest');

@@ -43,7 +43,7 @@ export const isRedirect = (res) =>
 //
 // peerd never uses raw fetch: every open-web request proxies through webFetch, so
 // the ONE place that can attach the user's cookies is the ONE place this rule lives.
-// The web resident (kind:'web') may carry the user's SESSION on a request ONLY when
+// The web actor (kind:'web') may carry the user's SESSION on a request ONLY when
 // the target is SAME-ORIGIN as the tab it owns — there it is already in the user's
 // session via the rendered tab, so a credentialed fetch to that origin is no
 // escalation (and the actor never holds a credential: the BROWSER attaches the

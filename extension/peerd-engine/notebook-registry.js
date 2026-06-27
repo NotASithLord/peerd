@@ -35,7 +35,7 @@ const STORAGE_KEY = 'notebooks.v1';
  *
  * @param {Object} deps
  * @param {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }} deps.storage
- * @param {(residentSessionId: string) => void} [deps.onResidentArchive]  DESIGN-17: forwarded to createRegistry — archive a resident orphaned by delete.
+ * @param {(actorSessionId: string) => void} [deps.onActorArchive]  DESIGN-17: forwarded to createRegistry — archive an actor orphaned by delete.
  * @returns the registry; snapshot() returns { notebooks, currentId }.
  */
 export const createNotebookRegistry = (deps) =>

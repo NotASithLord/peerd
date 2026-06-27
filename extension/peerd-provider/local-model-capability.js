@@ -21,7 +21,7 @@ const GB = 2 ** 30;
  * provider context-window seam the API providers use (context-window.js).
  * It's a NOMINAL maximum: the on-device usable window is further bounded by
  * device memory (the KV cache grows with context), the same caveat as
- * Ollama's num_ctx — when the offscreen engine can report the resident
+ * Ollama's num_ctx — when the offscreen engine can report the actor
  * model's effective window, that LIVE value overrides this (see
  * setLocalModelInfo in local-webgpu.js).
  * @typedef {{ id: string, label: string, url: string, sizeGB: number, minStorageBufferBindingSizeGB: number, minBufferSizeGB: number, requiresShaderF16: boolean, contextWindow: number }} ModelSpec

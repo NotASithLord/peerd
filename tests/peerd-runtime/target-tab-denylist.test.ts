@@ -50,14 +50,14 @@ describe('resolveTargetTab — denylist on the actual target', () => {
   });
 });
 
-describe('resolveTargetTab — DESIGN-17 web-resident fail-closed', () => {
-  // A web resident OWNS one tab via ctx.activeTab. If that tab vanished mid-turn
+describe('resolveTargetTab — DESIGN-17 web-actor fail-closed', () => {
+  // A web actor OWNS one tab via ctx.activeTab. If that tab vanished mid-turn
   // (so ctx.activeTab is absent), it must NEVER fall back to the user's foreground
   // tab — it refuses instead. The foreground query is the leak this closes.
-  test('a resident ctx with no activeTab refuses — never queries the foreground', async () => {
+  test('an actor ctx with no activeTab refuses — never queries the foreground', async () => {
     let foregroundQueried = false;
     const ctx: any = {
-      residentKind: 'web',
+      actorType: 'web',
       tabs: {
         get: async () => { throw new Error('no tab'); },
         query: async () => { foregroundQueried = true; return [{ id: 7, url: 'https://user-bank.com/' }]; },
@@ -67,7 +67,7 @@ describe('resolveTargetTab — DESIGN-17 web-resident fail-closed', () => {
     expect(foregroundQueried).toBe(false);   // the foreground was NOT touched
   });
 
-  test('a NON-resident ctx with no activeTab still uses the foreground (unchanged)', async () => {
+  test('a NON-actor ctx with no activeTab still uses the foreground (unchanged)', async () => {
     const ctx: any = {
       denylist: [],
       tabs: { get: async () => { throw new Error('x'); }, query: async () => [{ id: 7, url: 'https://example.com/' }] },
@@ -75,9 +75,9 @@ describe('resolveTargetTab — DESIGN-17 web-resident fail-closed', () => {
     expect((await resolveTargetTab({}, ctx))?.id).toBe(7);
   });
 
-  test('a web resident still drives its OWN tab via ctx.activeTab', async () => {
+  test('a web actor still drives its OWN tab via ctx.activeTab', async () => {
     const ctx: any = {
-      residentKind: 'web',
+      actorType: 'web',
       denylist: [],
       activeTab: { id: 42, url: 'https://app.example/', origin: 'https://app.example' },
       tabs: tabsApi({ 42: { id: 42, url: 'https://app.example/' } }),

@@ -110,16 +110,16 @@ describe('store feature flags', () => {
     const flags = await import('../../extension/shared/flags.js');
     expect(flags.REMOTE_SKILL_INSTALL).toBe(false);
   });
-  // DESIGN-17: the resident model is UNCONDITIONAL — the source flags were removed
-  // (the branch was the flag; it landed wholesale). flags.js carries no resident
-  // flag to assert; the model is exercised by exposure/resident-messaging/resident-
-  // prompt tests. NOTE: the web-resident page path still needs live CDP verification
-  // before store ship. Pin that no resident flag lingers so a re-introduction is a
+  // DESIGN-17: the actor model is UNCONDITIONAL — the source flags were removed
+  // (the branch was the flag; it landed wholesale). flags.js carries no actor
+  // flag to assert; the model is exercised by exposure/actor-messaging/actor-
+  // prompt tests. NOTE: the web-actor page path still needs live CDP verification
+  // before store ship. Pin that no actor flag lingers so a re-introduction is a
   // conscious, test-visible decision.
-  test('no resident feature flags linger (model is unconditional)', async () => {
+  test('no actor feature flags linger (model is unconditional)', async () => {
     const flags = await import('../../extension/shared/flags.js');
-    expect('RESIDENT_TAB_AGENTS' in flags).toBe(false);
-    expect('WEB_RESIDENT' in flags).toBe(false);
+    expect('ACTOR_TAB_AGENTS' in flags).toBe(false);
+    expect('WEB_ACTOR' in flags).toBe(false);
   });
 });
 

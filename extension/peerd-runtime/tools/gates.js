@@ -17,8 +17,8 @@
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
 //                  runner-only tool even if the model emits its name. Also
-//                  carries the DESIGN-17 resident capability tier (flag-gated):
-//                  the instance-mutating set is resident-only, and a resident
+//                  carries the DESIGN-17 actor capability tier (flag-gated):
+//                  the instance-mutating set is actor-only, and an actor
 //                  is positively scoped to its own kind + pinned to its own
 //                  instance.
 //   origin       — active (denylist)
@@ -43,8 +43,8 @@
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
-  EXPOSURE_RESIDENT, isResidentMutatingTool, isAllowedForResidentKind, residentTargetId,
-  residentWebTabTarget, isRunnerPageTool,
+  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActorType, actorTargetId,
+  actorWebTabTarget, isRunnerPageTool,
 } from './exposure.js';
 import {
   decideAction,
@@ -70,8 +70,8 @@ import {
  *   instanceState?: { webvm?: boolean, notebook?: boolean, app?: boolean } | null,
  *   toolAllow?: Set<string> | null,
  *   toolManifestLabel?: string,
- *   residentInstanceId?: string,
- *   residentKind?: string,
+ *   actorInstanceId?: string,
+ *   actorType?: string,
  * }} GateContext
  */
 
@@ -110,59 +110,59 @@ const personaGate = (tool, _args, ctx) => {
 };
 
 /**
- * DESIGN-17 resident capability tier — pure. Returns a REFUSAL
+ * DESIGN-17 actor capability tier — pure. Returns a REFUSAL
  * `{allowed:false, reason}` when the call violates the tier, or `null` when the
  * tier has no opinion (the gate continues). The rules:
- *   (1) non-resident ctx → the instance-MUTATING set is refused (it's resident-
+ *   (1) non-actor ctx → the instance-MUTATING set is refused (it's actor-
  *       only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
  *   (2) main ctx → the do/get/check page runner is refused too (folded into the
- *       web resident); SUBAGENTS keep it (their page path; they can't message a
- *       resident), and the runner itself never calls it.
- *   (3) resident ctx → POSITIVELY constrained to its own kind's toolset (a
+ *       web actor); SUBAGENTS keep it (their page path; they can't message a
+ *       actor), and the runner itself never calls it.
+ *   (3) actor ctx → POSITIVELY constrained to its own kind's toolset (a
  *       hallucinated/injected non-env tool fails closed here, not just in the
  *       descriptor list — the keyless/narrow runner trust model).
- *   (4) resident ctx → per-instance pin: an EXPLICIT target that isn't this
- *       resident's instance is refused (defense in depth — the resident dispatch
+ *   (4) actor ctx → per-instance pin: an EXPLICIT target that isn't this
+ *       actor's instance is refused (defense in depth — the actor dispatch
  *       wrapper already force-injects the bound id).
  *
  * @param {Tool} tool @param {any} args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'> | null}
  */
-export const residentTierGate = (tool, args, ctx) => {
-  if (ctx?.exposure !== EXPOSURE_RESIDENT) {
-    if (isResidentMutatingTool(tool.name)) {
-      return { allowed: false, reason: `'${tool.name}' is resident-only — message the instance's resident (message_resident)` };
+export const actorTierGate = (tool, args, ctx) => {
+  if (ctx?.exposure !== EXPOSURE_ACTOR) {
+    if (isActorMutatingTool(tool.name)) {
+      return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
     }
     if (ctx?.exposure === 'main' && isRunnerPageTool(tool.name)) {
-      return { allowed: false, reason: `'${tool.name}' is folded into the web resident — open_tab, then message that tab's resident to read or act on the page` };
+      return { allowed: false, reason: `'${tool.name}' is folded into the web actor — open_tab, then message that tab's actor to read or act on the page` };
     }
     return null;
   }
-  if (!isAllowedForResidentKind(tool.name, ctx.residentKind)) {
-    return { allowed: false, reason: `'${tool.name}' is not in this resident's (${ctx.residentKind ?? 'unknown'}) toolset` };
+  if (!isAllowedForActorType(tool.name, ctx.actorType)) {
+    return { allowed: false, reason: `'${tool.name}' is not in this actor's (${ctx.actorType ?? 'unknown'}) toolset` };
   }
-  // The resident dispatch wrapper (turn-driver pinResidentCall) already FORCE-
+  // The actor dispatch wrapper (turn-driver pinActorCall) already FORCE-
   // normalizes any id/name arg to the bound instance id before dispatch, so by
   // the time the gate runs an explicit target is the bound id. This is the
   // defense-in-depth backstop: an explicit id that ISN'T the bound one (e.g. a
   // path that somehow skipped the wrapper) is refused.
-  const explicit = residentTargetId(tool.name, args);
-  if (explicit && explicit !== ctx.residentInstanceId) {
-    return { allowed: false, reason: `resident is pinned to ${ctx.residentInstanceId ?? 'its instance'}; refusing ${tool.name} targeting ${explicit}` };
+  const explicit = actorTargetId(tool.name, args);
+  if (explicit && explicit !== ctx.actorInstanceId) {
+    return { allowed: false, reason: `actor is pinned to ${ctx.actorInstanceId ?? 'its instance'}; refusing ${tool.name} targeting ${explicit}` };
   }
-  // DESIGN-17 web resident — the tab pin. The DOM tools resolve their tab from an
+  // DESIGN-17 web actor — the tab pin. The DOM tools resolve their tab from an
   // explicit numeric `args.tabId` (or the bound tab if absent), so the pin is on
   // tabId, not an instance-id string. An explicit tabId that isn't the owned tab
-  // is refused; absent → the bound tab (fine). residentInstanceId = owned tabId
+  // is refused; absent → the bound tab (fine). actorInstanceId = owned tabId
   // as a string. (Runs before resolveTargetTab, so it sees only the explicit arg
   // — the in-execute denylist re-check in resolveTargetTab is the second wall.)
-  if (ctx.residentKind === 'web') {
-    const tab = residentWebTabTarget(args);
-    // String() BOTH sides (M6): residentInstanceId SHOULD be the tabId as a
+  if (ctx.actorType === 'web') {
+    const tab = actorWebTabTarget(args);
+    // String() BOTH sides (M6): actorInstanceId SHOULD be the tabId as a
     // string, but coercing defensively means a numeric mint can't lock the
-    // resident out of its own tab ('42' !== 42).
-    if (tab !== undefined && String(tab) !== String(ctx.residentInstanceId)) {
-      return { allowed: false, reason: `web resident is pinned to tab ${ctx.residentInstanceId ?? '?'}; refusing ${tool.name} targeting tab ${tab}` };
+    // actor out of its own tab ('42' !== 42).
+    if (tab !== undefined && String(tab) !== String(ctx.actorInstanceId)) {
+      return { allowed: false, reason: `web actor is pinned to tab ${ctx.actorInstanceId ?? '?'}; refusing ${tool.name} targeting tab ${tab}` };
     }
   }
   return null;
@@ -210,12 +210,12 @@ export const exposureGate = (tool, args, ctx) => {
       return { allowed: false, reason: `'${tool.name}' needs a current ${kind} in this chat — create one first (${create})` };
     }
   }
-  // DESIGN-17: the resident capability tier (see tools/exposure.js). The WALL
+  // DESIGN-17: the actor capability tier (see tools/exposure.js). The WALL
   // behind the advisory descriptor filters — enforced for every dispatch path so a
   // `spawn_subagent({tools:['app_delete']})` can't escalate. Pure. null = no
-  // resident-tier opinion.
-  const resident = residentTierGate(tool, args, ctx);
-  if (resident) return resident;
+  // actor-tier opinion.
+  const actor = actorTierGate(tool, args, ctx);
+  if (actor) return actor;
   if (ctx?.toolAllow instanceof Set && !ctx.toolAllow.has(tool.name)) {
     const label = ctx.toolManifestLabel ?? 'manifest';
     return { allowed: false, reason: `'${tool.name}' is excluded by this session's tool manifest (${label})` };

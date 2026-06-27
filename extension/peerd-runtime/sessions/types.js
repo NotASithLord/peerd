@@ -4,20 +4,20 @@
 /** @typedef {import('/peerd-provider/types.js').InternalMessage} InternalMessage */
 
 /**
- * @typedef {'chat' | 'subagent' | 'resident'} SessionKind
+ * @typedef {'chat' | 'subagent' | 'actor'} SessionKind
  *   'chat'     — a top-level conversation the user drives. Shows in /chats.
  *   'subagent' — a session spawned by another session (the model via
  *                spawn_subagent, or Notebook code via peerd.runtime.runAgent).
  *                Hidden from /chats; discovered through its parent's
  *                transcript. See docs/SUBAGENTS.md.
- *   'resident' — a per-instance agent that OWNS one tab-hosted execution
+ *   'actor' — a per-instance agent that OWNS one tab-hosted execution
  *                instance (WebVM / Notebook / App): it exclusively holds that
  *                environment's mutating tools and is addressed only by
- *                `message_resident`. Hidden from /chats (reached via its
+ *                `message_actor`. Hidden from /chats (reached via its
  *                instance, not the chat list). Lazily minted; bound to the
- *                instance by `residentSessionId` on the engine registry record,
- *                and self-describes via `instanceId` + `residentKind` below.
- *                See docs/specs/DESIGN-17-resident-agents.md.
+ *                instance by `actorSessionId` on the engine registry record,
+ *                and self-describes via `instanceId` + `actorType` below.
+ *                See docs/specs/DESIGN-17-actor-agents.md.
  */
 
 /**
@@ -34,20 +34,20 @@
  * session with a parent — no new shape, four fields. Solo dev: no
  * migration code, so these default at read time (`kind ?? 'chat'`,
  * `depth ?? 0`) for sessions written before subagents landed.
- * @property {SessionKind} kind               'chat' (default) | 'subagent' | 'resident'
+ * @property {SessionKind} kind               'chat' (default) | 'subagent' | 'actor'
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
  * @property {string} [task]                  the spawning prompt (subagents only)
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
  *
- * Resident binding (DESIGN-17). A `kind:'resident'` session self-describes
+ * Actor binding (DESIGN-17). A `kind:'actor'` session self-describes
  * which instance it owns: `instanceId` (the WebVM/Notebook/App id it drives, or
- * — for a `web` resident — the owned tabId AS A STRING) and `residentKind` (the
+ * — for a `web` actor — the owned tabId AS A STRING) and `actorType` (the
  * kind, used to scope its toolset + prompt). The FORWARD pointer lives on the
- * engine registry record (`residentSessionId`) for the three engine kinds, or in
- * the tab→session bindings store (`subagent/web-resident.js`) for `web`. These
- * are the REVERSE pointer the resident turn reads. Absent on chat/subagent.
- * @property {string} [instanceId]            the instance (engine id) or owned tabId (String) this resident owns
- * @property {'webvm' | 'notebook' | 'app' | 'web'} [residentKind]  webvm/notebook/app = engine kinds; web = a browser tab
+ * engine registry record (`actorSessionId`) for the three engine kinds, or in
+ * the tab→session bindings store (`subagent/web-actor.js`) for `web`. These
+ * are the REVERSE pointer the actor turn reads. Absent on chat/subagent.
+ * @property {string} [instanceId]            the instance (engine id) or owned tabId (String) this actor owns
+ * @property {'webvm' | 'notebook' | 'app' | 'web'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

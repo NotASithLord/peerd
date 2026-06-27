@@ -114,8 +114,8 @@ export const appCreateTool = {
         fileCount: Object.keys(files).length,
         opened: true,
       }, null, 2);
-      // The App RESIDENT writes the files, so the code-style guidance rides ITS
-      // prompt (system-prompt.js residentBlock), not this orchestrator
+      // The App ACTOR writes the files, so the code-style guidance rides ITS
+      // prompt (system-prompt.js actorBlock), not this orchestrator
       // create-result. Only the runtime note (how the iframe behaves) belongs here.
       return {
         ok: true,

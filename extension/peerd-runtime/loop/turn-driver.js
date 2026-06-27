@@ -24,25 +24,25 @@ import {
 } from '/peerd-provider/index.js';
 import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
-// keeps the resident turn setup readable. Flag-gated so they're inert when off.
-import { EXPOSURE_RESIDENT, residentDescriptors, residentTargetIdField, filterResidentSurface } from '../tools/exposure.js';
+// keeps the actor turn setup readable. Flag-gated so they're inert when off.
+import { EXPOSURE_ACTOR, actorDescriptors, actorTargetIdField, filterActorSurface } from '../tools/exposure.js';
 
 /**
- * DESIGN-17 per-instance PIN. Before a resident's tool call dispatches, force
- * the instance-target arg to the resident's BOUND instance (overwriting any id
- * or NAME the model supplied) so a resident can only ever touch its own
- * instance — and lock edit_file to the resident's kind. The gate's pin check is
+ * DESIGN-17 per-instance PIN. Before an actor's tool call dispatches, force
+ * the instance-target arg to the actor's BOUND instance (overwriting any id
+ * or NAME the model supplied) so an actor can only ever touch its own
+ * instance — and lock edit_file to the actor's kind. The gate's pin check is
  * the defense-in-depth backstop; this is the normalization that makes it pass.
  * Mutates call.args in place (it's a per-turn call object).
- * @param {any} call @param {string|undefined} residentKind @param {string|undefined} instanceId
+ * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
  */
-const pinResidentCall = (call, residentKind, instanceId) => {
+const pinActorCall = (call, actorType, instanceId) => {
   if (!instanceId) return;
-  const field = residentTargetIdField(call?.name);
+  const field = actorTargetIdField(call?.name);
   if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
-  // edit_file is cross-kind — also lock it to the resident's own workspace kind.
-  if (call?.name === 'edit_file' && residentKind) {
-    call.args = { ...(call.args ?? {}), kind: residentKind === 'notebook' ? 'notebook' : 'app' };
+  // edit_file is cross-kind — also lock it to the actor's own workspace kind.
+  if (call?.name === 'edit_file' && actorType) {
+    call.args = { ...(call.args ?? {}), kind: actorType === 'notebook' ? 'notebook' : 'app' };
   }
 };
 
@@ -109,33 +109,33 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const { controller: abortController, release: releaseTurnSlot } = turnSlots.claim(sessionId);
 
   // DESIGN-17: resolve the session kind ONCE (authoritative, persisted — robust
-  // even when re-driven by auto-resume). A resident turn runs the SAME wrapper
+  // even when re-driven by auto-resume). An actor turn runs the SAME wrapper
   // (cost/clamp/scheduler/key/egress below) but a kind-aware per-turn SETUP: no
-  // user-tab/memory context, a resident-only descriptor list + tuned prompt, the
-  // 'resident' exposure marker, and the per-instance pin. Reused for cost.
+  // user-tab/memory context, an actor-only descriptor list + tuned prompt, the
+  // 'actor' exposure marker, and the per-instance pin. Reused for cost.
   const turnSession = sessionId ? await sessions.get(sessionId) : null;
-  const isResident = turnSession?.kind === 'resident';
+  const isActor = turnSession?.kind === 'actor';
   /** @type {string|undefined} */
-  const residentKind = isResident ? turnSession.residentKind : undefined;
+  const actorType = isActor ? turnSession.actorType : undefined;
   /** @type {string|undefined} */
-  const residentInstanceId = isResident ? turnSession.instanceId : undefined;
+  const actorInstanceId = isActor ? turnSession.instanceId : undefined;
 
-  // DESIGN-17 P1 glass pane. When a resident turn was triggered by a LIVE
-  // message_resident (display set; absent on a boot redrain), re-emit its stream as
-  // a turn/resident-* family keyed to that tool_use card — the orchestrator renders
-  // the resident's work inline (the subagent live-view, for a resident). The plain
-  // turn/* below are dropped anyway (a resident session is never the viewed chat);
-  // these carry the card correlation. fromIndex is the resident session length
+  // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
+  // message_actor (display set; absent on a boot redrain), re-emit its stream as
+  // a turn/actor-* family keyed to that tool_use card — the orchestrator renders
+  // the actor's work inline (the subagent live-view, for an actor). The plain
+  // turn/* below are dropped anyway (an actor session is never the viewed chat);
+  // these carry the card correlation. fromIndex is the actor session length
   // BEFORE this turn appends its message, so the card shows just THIS exchange —
-  // not the resident's whole accumulated history (it is a long-lived actor).
-  const residentDisplay = (display && isResident) ? display : null;
-  const displayFromIndex = residentDisplay ? (turnSession?.messages?.length ?? 0) : 0;
-  if (residentDisplay && uiConnected()) {
+  // not the actor's whole accumulated history (it is a long-lived actor).
+  const actorDisplay = (display && isActor) ? display : null;
+  const displayFromIndex = actorDisplay ? (turnSession?.messages?.length ?? 0) : 0;
+  if (actorDisplay && uiConnected()) {
     uiPorts.broadcast({
-      type: 'turn/resident-start',
-      parentToolUseId: residentDisplay.parentToolUseId,
+      type: 'turn/actor-start',
+      parentToolUseId: actorDisplay.parentToolUseId,
       sessionId, fromIndex: displayFromIndex,
-      kind: residentDisplay.kind, instanceId: residentDisplay.instanceId, name: residentDisplay.name,
+      kind: actorDisplay.kind, instanceId: actorDisplay.instanceId, name: actorDisplay.name,
     });
   }
 
@@ -165,12 +165,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // vanishes (the user's "back on home → gone" requirement, by construction).
   // Re-derived per turn from the live active tab; never persisted to history.
   let activeTabContext = null;
-  // why: a RESIDENT has no user-workspace memory and no foreground-tab
+  // why: an ACTOR has no user-workspace memory and no foreground-tab
   // reorientation — its context is its INSTANCE, not the user's browsing. Pulling
-  // the user's current page + that origin's memory into a resident turn would be
-  // both wrong context AND a leak (esp. for an App resident rendering attacker
-  // content). So a resident turn skips the foreground query entirely.
-  if (!isResident) {
+  // the user's current page + that origin's memory into an actor turn would be
+  // both wrong context AND a leak (esp. for an App actor rendering attacker
+  // content). So an actor turn skips the foreground query entirely.
+  if (!isActor) {
     try {
       const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
       const ws = activeTab?.url ? originOfTabUrl(activeTab.url) : '';
@@ -186,9 +186,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // Progressive disclosure, cheap half: build the skill DESCRIPTIONS
   // block once per turn (names + one-line descriptions only — bodies stay
   // on disk until load_skill fetches one). Collapses to '' when no skills
-  // are installed, so the prompt placeholder costs nothing. A resident gets
+  // are installed, so the prompt placeholder costs nothing. An actor gets
   // none — its prompt is the tuned, kind-specific block, not the user's skills.
-  const skillsBlock = isResident ? '' : await skillRegistry.describeForPrompt().catch((/** @type {any} */ e) => {
+  const skillsBlock = isActor ? '' : await skillRegistry.describeForPrompt().catch((/** @type {any} */ e) => {
     console.error('[sw] skill descriptions failed', e);
     return '';
   });
@@ -207,11 +207,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       skillsBlock,
       customSystemPrompt: promptSession?.customSystemPrompt,
       // Ephemeral active-tab reorientation (null on home / non-web tabs; always
-      // null for a resident).
+      // null for an actor).
       activeTab: activeTabContext,
-      // DESIGN-17: a resident gets a kind-specific tuned block appended (the base
+      // DESIGN-17: an actor gets a kind-specific tuned block appended (the base
       // template — incl. all the security/defense text — survives verbatim).
-      ...(isResident ? { residentKind } : {}),
+      ...(isActor ? { actorType } : {}),
     });
   };
 
@@ -243,14 +243,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // Built BEFORE the descriptor list so refreshMainTools (below) can restamp
   // its instanceState each step — progressive disclosure.
   //
-  // DESIGN-17: a resident turn builds a 'resident' ctx instead — the keyless,
+  // DESIGN-17: an actor turn builds a 'actor' ctx instead — the keyless,
   // kind-scoped, instance-pinned tool context (buildToolContext applies the
-  // capability strip + sets residentInstanceId/residentKind). `synthetic` +
+  // capability strip + sets actorInstanceId/actorType). `synthetic` +
   // `trusted` ride onto BOTH: buildToolContext folds them into ctx.inbound, the
-  // message_resident sender gate's untrusted-origin signal (synthetic AND not a
+  // message_actor sender gate's untrusted-origin signal (synthetic AND not a
   // trusted first-party continuation → inbound → refused).
-  const toolContext = await buildToolContext(isResident
-    ? { exposure: EXPOSURE_RESIDENT, sessionId, activeTabId, synthetic, trusted, residentInstanceId, residentKind }
+  const toolContext = await buildToolContext(isActor
+    ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
 
   // THIRD cut: progressive disclosure. The vm/js/app SECONDARY ops are hidden
@@ -276,10 +276,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // SIXTH cut: goal mode. complete_goal is registered always but revealed to
     // the model ONLY while a goal run is live for this session (goalActiveFor),
     // so a normal chat never sees it. Outermost so it composes over the rest.
-    // SEVENTH cut (DESIGN-17): the resident surface. The instance-mutating tier and
+    // SEVENTH cut (DESIGN-17): the actor surface. The instance-mutating tier and
     // the do/get/check page runner LEAVE the main agent (it delegates via
-    // message_resident, which it keeps). Outermost so it composes over everything else.
-    const descriptors = filterResidentSurface(
+    // message_actor, which it keeps). Outermost so it composes over everything else.
+    const descriptors = filterActorSurface(
       filterByGoalActive(
         filterByDwebActive(
           filterByDwebEnabled(
@@ -297,23 +297,23 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     toolContext.instanceState = instanceState;
     return descriptors;
   };
-  // DESIGN-17: a resident sees a FIXED set — its own kind's toolset (no
-  // progressive disclosure; the resident gate is the wall). REPLACE both the
-  // initial descriptors AND the per-step refresh below — otherwise the resident
-  // would lose all its instance tools on step 2+. Intersected with the resident's
+  // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
+  // progressive disclosure; the actor gate is the wall). REPLACE both the
+  // initial descriptors AND the per-step refresh below — otherwise the actor
+  // would lose all its instance tools on step 2+. Intersected with the actor's
   // inherited tool MANIFEST (sessionToolAllow, above) so the list is honest: a
-  // browse-only chat's web resident is shown only the read DOM tools, matching the
+  // browse-only chat's web actor is shown only the read DOM tools, matching the
   // gate (which refuses click/type for it). null manifest passes through unchanged.
-  const refreshResidentTools = async () =>
-    filterDescriptorsByManifest(residentDescriptors(listTools(), residentKind), sessionToolAllow)
+  const refreshActorTools = async () =>
+    filterDescriptorsByManifest(actorDescriptors(listTools(), actorType), sessionToolAllow)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
-  const refreshTools = isResident ? refreshResidentTools : refreshMainTools;
+  const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
-    // DESIGN-17 per-instance pin: force a resident's instance-target arg to its
+    // DESIGN-17 per-instance pin: force an actor's instance-target arg to its
     // BOUND instance before dispatch, so it can only ever touch its own (the gate
     // is the backstop). Runs first — before the gate chain sees the args.
-    if (isResident) pinResidentCall(call, residentKind, residentInstanceId);
+    if (isActor) pinActorCall(call, actorType, actorInstanceId);
     // Engagement trigger: any dweb tool call marks the session dweb-engaged, so
     // refreshMainTools reveals the SECONDARY dweb tools on the next step. The
     // entry tools (discover/share/install) are dweb_* too, so the first one the
@@ -357,8 +357,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // loop unwinds through its existing branch — persists partial, yields
   // stopReason='aborted').
   // why: reuse the record resolved at turn start (also the kind source) — a
-  // resident is a SEPARATE session, so makeTurnCostTracker's per-session limitUsd
-  // gives N residents N independent caps (the documented P0 cost posture).
+  // actor is a SEPARATE session, so makeTurnCostTracker's per-session limitUsd
+  // gives N actors N independent caps (the documented P0 cost posture).
   const costSession = turnSession;
   // why: keyless providers (Ollama) run on the user's own hardware — an
   // unknown local model id still costs $0, so the pricing fold is told
@@ -382,12 +382,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // sessionId rides along so the panel only ticks the meter of the
       // chat actually being viewed (turns can stream in the background).
       uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/cost', ...info, sessionId }));
-      // DESIGN-17 P1: surface a resident turn's spend on its card — delegated work
+      // DESIGN-17 P1: surface an actor turn's spend on its card — delegated work
       // is not free. Caps stay per-session (the spec's posture); this only makes the
-      // spend VISIBLE. info.turn is THIS exchange's tally (the resident accumulates
+      // spend VISIBLE. info.turn is THIS exchange's tally (the actor accumulates
       // across messages; the card shows just this turn).
-      if (residentDisplay) {
-        uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/resident-cost', parentToolUseId: residentDisplay.parentToolUseId, cost: info.turn }));
+      if (actorDisplay) {
+        uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/actor-cost', parentToolUseId: actorDisplay.parentToolUseId, cost: info.turn }));
       }
     },
     onLimitExceeded: (/** @type {any} */ { sessionId: sid, spent, limitUsd }) => {
@@ -486,7 +486,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // why: progressive disclosure — the loop calls this each step to get the
       // current tool list, so an instance created mid-turn reveals its ops on
       // the next step (and restamps toolContext.instanceState for the gate). A
-      // resident uses a fixed-set refresh (no disclosure; the gate is the wall).
+      // actor uses a fixed-set refresh (no disclosure; the gate is the wall).
       refreshTools,
       toolDispatch,
       classifyToolCall,
@@ -538,12 +538,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         case 'state':
           lastSession = ev.session;
           uiPorts.broadcast({ type: 'turn/state', session: ev.session });
-          // Glass pane: the full resident-session snapshot drives the inline card
-          // (collapsed, per-step — not per-delta, to keep the resident's micro-
+          // Glass pane: the full actor-session snapshot drives the inline card
+          // (collapsed, per-step — not per-delta, to keep the actor's micro-
           // actions low-noise as the spec's display stream prescribes). Carry the
           // card meta (fromIndex/kind/…) too, so a panel that connects mid-turn and
-          // MISSED turn/resident-start can still self-seed the card from this push.
-          if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-state', parentToolUseId: residentDisplay.parentToolUseId, session: ev.session, fromIndex: displayFromIndex, kind: residentDisplay.kind, instanceId: residentDisplay.instanceId, name: residentDisplay.name });
+          // MISSED turn/actor-start can still self-seed the card from this push.
+          if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: actorDisplay.parentToolUseId, session: ev.session, fromIndex: displayFromIndex, kind: actorDisplay.kind, instanceId: actorDisplay.instanceId, name: actorDisplay.name });
           break;
         case 'delta':
           uiPorts.broadcast({
@@ -586,7 +586,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
             messageId: ev.messageId,
             error: ev.error,
           });
-          if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-error', parentToolUseId: residentDisplay.parentToolUseId, sessionId: ev.sessionId, error: ev.error });
+          if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId, sessionId: ev.sessionId, error: ev.error });
           break;
         case 'stop':
           uiPorts.broadcast({
@@ -625,9 +625,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/error', sessionId, error });
       // Glass pane: a LOOP-level failure (provider error etc.) never reached the
-      // stream's 'error' case, so the resident card would otherwise close as 'ok'.
+      // stream's 'error' case, so the actor card would otherwise close as 'ok'.
       // Surface it as a failed card.
-      if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-error', parentToolUseId: residentDisplay.parentToolUseId, sessionId, error });
+      if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId, sessionId, error });
     }
   } finally {
     // Self-scoped: a superseded (steered) turn unwinding late can only
@@ -640,11 +640,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       .catch((/** @type {any} */ e) => console.warn('[sw] trim enrichment failed', e));
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
-      // Glass pane: close the resident card's live state (stops its spinner). An
+      // Glass pane: close the actor card's live state (stops its spinner). An
       // ABORT (Stop cascade / spend-limit) yields a clean stopReason='aborted' with
       // turnOk still true, so carry `aborted` explicitly — the reducer renders it as
       // a 'cancelled' card (not a misleading green 'ok'). ok=false marks a failure.
-      if (residentDisplay) uiPorts.broadcast({ type: 'turn/resident-done', parentToolUseId: residentDisplay.parentToolUseId, sessionId, ok: turnOk, aborted: lastStopReason === 'aborted' });
+      if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: actorDisplay.parentToolUseId, sessionId, ok: turnOk, aborted: lastStopReason === 'aborted' });
     }
     // --- Feature 02: per-turn workspace snapshot ----------------------
     // why: snapshot AFTER every turn that could have touched files so

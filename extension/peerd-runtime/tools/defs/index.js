@@ -55,7 +55,7 @@ import { editFileTool }               from './edit-file.js';
 import { spawnSubagentTool }          from './spawn-subagent.js';
 import { subagentTasksTool }          from './subagent-tasks.js';
 import { subagentCancelTool }         from './subagent-cancel.js';
-import { messageResidentTool }        from './message-resident.js';
+import { messageActorTool }        from './message-actor.js';
 import { doTool }                      from './do.js';
 import { getTool }                     from './get.js';
 import { checkTool }                   from './check.js';
@@ -126,7 +126,7 @@ export {
   spawnSubagentTool,
   subagentTasksTool,
   subagentCancelTool,
-  messageResidentTool,
+  messageActorTool,
   // high-level browser tools (do/get/check — runner layer over the DOM engine)
   doTool,
   getTool,
@@ -174,9 +174,9 @@ export const BUILTIN_TOOLS = Object.freeze([
   typeTool,
   clickTool,
   readPdfTool,
-  // the web resident's SESSIONLESS secure fetch (its non-render web mechanism).
-  // Registered + hidden from main (resident-only, like the DOM tools); allowed
-  // for kind:'web' in RESIDENT_KIND_TOOLS.web and keyless by construction.
+  // the web actor's SESSIONLESS secure fetch (its non-render web mechanism).
+  // Registered + hidden from main (actor-only, like the DOM tools); allowed
+  // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
   // engine (WebVM)
   vmListTool,
@@ -210,10 +210,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   spawnSubagentTool,
   subagentTasksTool,
   subagentCancelTool,
-  // resident (DESIGN-17 — message the agent that owns a tab-hosted instance).
-  // Registered always; the exposure gate refuses it on a resident session, so a
-  // resident can't recursively message another resident.
-  messageResidentTool,
+  // actor (DESIGN-17 — message the agent that owns a tab-hosted instance).
+  // Registered always; the exposure gate refuses it on an actor session, so a
+  // actor can't recursively message another actor.
+  messageActorTool,
   // high-level browser tools — the runner layer over the DOM engine. After the
   // exposure cutover these are the ONLY browser tools the MAIN agent sees.
   doTool,
