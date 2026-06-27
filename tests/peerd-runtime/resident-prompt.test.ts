@@ -16,7 +16,8 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   });
 
   test('introduces message_resident and the orchestrator framing', () => {
-    expect(base.includes("message_resident — hand a focused GOAL to a tab's resident")).toBe(true);
+    expect(base.includes('message_resident — CAST a focused GOAL to a tab')).toBe(true);
+    expect(base.includes('a virtual actor — a "grain"')).toBe(true);   // residents named as grains
     expect(base.includes('sandboxes: you bootstrap, the resident runs')).toBe(true);
     expect(base.includes('you do NOT drive them')).toBe(true);
   });

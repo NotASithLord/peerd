@@ -1,10 +1,12 @@
 // @ts-check
 // DESIGN-17 — message_resident: the channel to a tab-hosted instance's resident.
 //
-// You don't mutate an instance; you message its RESIDENT (the per-instance agent
-// that exclusively holds that environment's tools). This orchestrator is the
-// direct analog of async-subagents (subagent/async-subagents.js): a serializing
-// mailbox over turnSlots that NEVER interrupts an in-flight turn, a SW-captured
+// You don't mutate an instance; you message its RESIDENT — a VIRTUAL ACTOR (an
+// Orleans-style grain: lazily activated, addressed by a stable id, the resolved
+// resident session as its ActorRef) that exclusively holds that environment's
+// tools. This orchestrator is the direct analog of async-subagents
+// (subagent/async-subagents.js): a TURN-BASED mailbox over turnSlots (one message
+// at a time per actor; never interrupts an in-flight turn), a SW-captured
 // correlation (the sender is closed over, not trusted from the resident), a
 // wrapUntrusted-fenced reply that re-enters the sender as a synthetic wake, and
 // a per-sender runaway guard. Functional core / imperative shell: every IO
