@@ -221,8 +221,9 @@ import {
   // DESIGN-17: the message_resident orchestrator + the resident capability-tier
   // helpers the resident tool context is built from (keyless strip + kind scope).
   makeResidentMessaging, restrictCtxCapabilities, residentAllowedTools, EXPOSURE_RESIDENT,
-  // DESIGN-17: web-resident core — tab→session bindings + the self-fenced summary.
-  makeWebResidentBindings, fenceWebResidentSummary,
+  // DESIGN-17: web-resident core — tab→session bindings, the chat→web-actor
+  // registry (the 0-or-1-tab actor), + the self-fenced summary.
+  makeWebResidentBindings, makeWebActorRegistry, fenceWebResidentSummary,
   finalAssistantText,
   // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
   pullInHintInjected,
@@ -1178,6 +1179,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // "pull peerd in" reminder to inject once the page is visible (SW-side; no
     // page→SW route). Engine tabs don't use it — they carry the real button.
     hintPullIn: (/** @type {number} */ tabId, /** @type {string} */ url) => scheduleWebTabHint(tabId, url),
+    // DESIGN-17: the web ACTOR's render-decision hook. A web resident with NO tab
+    // (the 0-tab fetch state) calls this from navigate to lazily OPEN + ADOPT its one
+    // tab, bound to THIS resident's session. Injected ONLY for the web kind; the
+    // capability strip drops it from any resident whose toolset lacks navigate, and
+    // it's absent on the main/runner/subagent ctx (residentKind unset). adoptWebTab
+    // is defined later in the file — referenced lazily here (called at turn time),
+    // the same late-bound pattern as noteAgentTab.
+    ...(residentKind === 'web' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
     // why: web tools (read_article, call_api, ...) reach arbitrary
     // HTTPS hosts. They use webFetch (denylist + audit) NOT safeFetch
@@ -2446,6 +2455,20 @@ Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
   .then((e) => { if (Array.isArray(e)) webResidentBindings.load(/** @type {any} */ (e)); })
   .catch(() => {});
 
+// The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
+// the SINGLE entry point for web work). Separate from webResidentBindings because
+// the actor exists BEFORE it owns a tab; its tab (when it renders) is read back
+// from webResidentBindings.tabFor (one source of truth). Persisted/rehydrated like
+// the tab bindings — ephemeral is fine (re-mint on loss).
+const webActorRegistry = makeWebActorRegistry();
+const WEB_ACTOR_KEY = 'webActorRegistry';
+const persistWebActors = () => {
+  sessionCache.sessionSet(WEB_ACTOR_KEY, webActorRegistry.entries()).catch(() => {});
+};
+Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
+  .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
+  .catch(() => {});
+
 // DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
 // correlation persists here, so an SW death between accept and deliver() doesn't
 // silently drop the reply-wake; redrain() re-queues it on boot. chrome.storage.
@@ -2535,16 +2558,99 @@ const resolveWebResident = async (/** @type {number} */ tabId) => {
   return { instanceId: String(tabId), kind: 'web', residentSessionId, tabId };
 };
 
-// Prune a web resident's binding when its tab closes (the resident is then
-// unreachable; the orphaned session is harmless and ages out). Separate listener
-// from the agent-tab-card cleanup so the two concerns stay independent.
+// Lazily mint the active CHAT's web actor (the 0-or-1-tab web operator, addressed by
+// `to:'web'`). Mirrors mintWebResident but binds to the OWNER CHAT, not a tab:
+// instanceId is the literal 'web' — non-numeric, so the gate's tab-pin refuses any
+// explicit tabId (the actor may only ever drive the tab it lazily adopts). Starts
+// with NO tab; adoptWebTab binds one on the render decision.
+const mintWebActor = async (/** @type {string} */ ownerChatId) => {
+  const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
+  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  const created = await sessions.create({
+    kind: 'resident',
+    ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
+    instanceId: 'web',
+    residentKind: 'web',
+    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    permissionMode: perm.mode,
+    confirmActions: perm.confirmActions,
+    // Inherit the owner chat's tool MANIFEST (as mintWebResident does): a browse-only
+    // chat's web actor is held to the read DOM tools (+ fetch_url, a read), so the
+    // gate refuses click/type for it.
+    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+  });
+  webActorRegistry.bind(ownerChatId, created.sessionId);
+  persistWebActors();
+  auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId: 'web', kind: 'web' } }).catch(() => {});
+  return created.sessionId;
+};
+
+// Resolve (+ lazy-mint) the active chat's web actor. Owns 0-OR-1 tab: its owned tab
+// (if it has rendered) is read back from webResidentBindings.tabFor and threaded as
+// residentTabId — undefined in the 0-tab state, where buildToolContext leaves
+// activeTab unset so fetch_url works and the DOM tools fail closed (the pin) until
+// navigate adopts a tab. Re-mints when the bound session vanished (SW death cleared
+// session storage). why currentSessionId as owner: the sender gate guarantees the
+// sender IS the active chat, so the active chat is the owner. (On a post-restart
+// redrain the active chat may differ — best-effort, like every web binding here; the
+// reply still routes to the original sender via deliver().)
+const resolveWebActor = async () => {
+  const ownerChatId = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+  if (!ownerChatId) return null;
+  let actorSessionId = webActorRegistry.resolve(ownerChatId);
+  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+    webActorRegistry.drop(ownerChatId);
+    persistWebActors();
+    actorSessionId = null;
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce(`web-actor:${ownerChatId}`, () => mintWebActor(ownerChatId));
+  // The owned tab (0-or-1). Verify it still exists — a tab can close between the
+  // onRemoved drop and here; if it's gone, fall back to the 0-tab (fetch) state.
+  let tabId = webResidentBindings.tabFor(actorSessionId);
+  if (tabId != null && !(await browser.tabs.get(tabId).catch(() => null))) {
+    webResidentBindings.drop(tabId); persistWebBindings(); tabId = undefined;
+  }
+  // name left undefined (like resolveWebResident): a tab title is page-controlled,
+  // and the actor's trusted identity is the literal 'web', not page-derived prose.
+  return { instanceId: 'web', kind: 'web', residentSessionId: actorSessionId, tabId };
+};
+
+// The render-decision hook: a web actor in the 0-tab state OPENS its tab here (called
+// from navigate via ctx.adoptWebTab when the actor owns no tab). Opens BLANK in the
+// BACKGROUND (never yanks the user's focus — the resident-stays-in-background policy);
+// navigate then drives it to the URL with its normal wait. Binds tab→actor in
+// webResidentBindings (so the next turn pins it, and `to:'<tabId>'` reaches the SAME
+// actor), and tracks it as an agent-tab card. Returns the new tab so navigate can
+// re-pin ctx.activeTab for the rest of THIS turn.
+const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
+  const created = await browser.tabs.create({ active: false });
+  const tabId = created?.id;
+  if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
+  webResidentBindings.bind(tabId, actorSessionId);
+  persistWebBindings();
+  noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
+  return { tabId, windowId: created?.windowId };
+};
+
+// Prune a web resident's binding when its tab closes — for a per-tab resident it then
+// becomes unreachable, and for the chat-scoped web actor this RELEASES its owned tab
+// (tabFor → undefined → the actor falls back to the 0-tab fetch state). The orphaned
+// session is harmless and ages out. Separate listener from the agent-tab-card cleanup
+// so the two concerns stay independent.
 browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   if (webResidentBindings.drop(tabId)) persistWebBindings();
 });
 
 const residentMessaging = makeResidentMessaging({
   resolveResident: async (/** @type {string} */ instanceId) => {
-    // A WEB resident is addressed by its tabId-as-string (purely numeric, no
+    // The chat's WEB ACTOR — the 0-or-1-tab SINGLE entry point for web work,
+    // addressed by the literal 'web'. It decides fetch-vs-render itself: a
+    // pure-fetch task never opens a tab; navigate adopts one on the render path.
+    // (A numeric tabId, below, targets the resident owning that SPECIFIC existing
+    // tab — e.g. a tab the orchestrator opened with open_tab.)
+    if (String(instanceId) === 'web') return resolveWebActor();
+    // A per-tab WEB resident is addressed by its tabId-as-string (purely numeric, no
     // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
     // match, so the branch is unambiguous.
     if (/^\d+$/.test(String(instanceId))) {

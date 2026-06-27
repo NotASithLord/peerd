@@ -101,7 +101,24 @@ export const navigateTool = {
       };
     }
 
-    const tab = await resolveTargetTab(args, ctx);
+    let tab = await resolveTargetTab(args, ctx);
+    // DESIGN-17 lazy tab adoption: the web ACTOR (kind:'web') may own 0 tabs — a
+    // pure-fetch task never rendered. navigate IS the render decision made concrete:
+    // when it owns no tab, open + adopt one now (SW-side ctx.adoptWebTab) and re-pin
+    // ctx.activeTab IN PLACE so the rest of THIS turn's DOM tools drive it (the ctx is
+    // shared across the turn — same restamp pattern as instanceState). Only the web
+    // kind gets adoptWebTab; every other no-tab path still fails closed.
+    if (!tab?.id && typeof (/** @type {any} */ (ctx).adoptWebTab) === 'function') {
+      let adopted;
+      try { adopted = await (/** @type {any} */ (ctx).adoptWebTab)(); }
+      catch (e) { return { ok: false, error: `tab_open_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? 'could not open a tab'}` }; }
+      if (!adopted?.tabId) return { ok: false, error: 'tab_open_failed' };
+      // why id/windowId only (url/origin blank): the tab is freshly opened to
+      // about:blank and navigate is about to drive it; resolveTargetTab below targets
+      // it by id, and the post-load block re-pins the real origin for the next call.
+      /** @type {any} */ (ctx).activeTab = { id: adopted.tabId, windowId: adopted.windowId, url: '', origin: '' };
+      tab = { id: adopted.tabId };
+    }
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
     const tabId = tab.id;
 
@@ -123,6 +140,17 @@ export const navigateTool = {
     let finalTab;
     try { finalTab = await tabsApi.get(tabId); }
     catch { finalTab = tab; }
+
+    // Keep the turn's activeTab pin fresh: if it points at the tab we just drove,
+    // re-stamp its url/origin to where the page LANDED so the next tool's origin gate
+    // sees the live origin, not the turn-start one (matters most for a freshly-adopted
+    // web-actor tab, which started blank). resolveTargetTab's in-execute denylist
+    // re-check is still the second wall on the landing.
+    const pin = /** @type {any} */ (ctx).activeTab;
+    if (pin && pin.id === tabId && finalTab?.url) {
+      pin.url = finalTab.url;
+      pin.origin = originOfUrl(finalTab.url) ?? pin.origin;
+    }
 
     return {
       ok: true,

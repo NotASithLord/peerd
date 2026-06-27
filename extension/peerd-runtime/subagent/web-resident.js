@@ -69,6 +69,7 @@ export const WEB_RESIDENT_SUMMARY_PROMPT = [
  *   drop: (tabId: number) => boolean,
  *   has: (tabId: number) => boolean,
  *   entries: () => Array<[number, string]>,
+ *   tabFor: (residentSessionId: string) => number | undefined,
  *   load: (entries: Array<[number, string]>) => void,
  * }}
  */
@@ -81,7 +82,50 @@ export const makeWebResidentBindings = () => {
     drop: (tabId) => byTab.delete(tabId),
     has: (tabId) => byTab.has(tabId),
     entries: () => [...byTab.entries()],
+    // The tab (0-or-1) a given web actor currently OWNS — the reverse of bind().
+    // Single source of truth for tab ownership: the chat-scoped actor (below) has
+    // no tab of its own; it reads its owned tab from HERE, and onRemoved cleanup
+    // (which drops the tab here) is the ONLY place ownership ends.
+    tabFor: (residentSessionId) => {
+      for (const [t, s] of byTab) if (s === residentSessionId) return t;
+      return undefined;
+    },
     // Rehydrate from persisted entries on SW boot (the SW reads chrome.storage.session).
     load: (entries) => { for (const [t, s] of entries ?? []) byTab.set(t, s); },
+  };
+};
+
+/**
+ * The chat→web-actor registry. DESIGN-17 mints "one resident per tab"; the web
+ * actor is the deliberate exception (see DELIVERABLE-3 in the task that added this):
+ * it is CHAT-scoped and owns 0-OR-1 tab. A pure-fetch task (fetch_url, sessionless)
+ * never renders, so the actor never opens a tab; it lazily OPENS/ADOPTS one only on
+ * the render decision (navigate → ctx.adoptWebTab in the SW). This maps an owner
+ * chat to its single web-actor session; the actor's owned tab is read from the
+ * tab→session bindings above (tabFor) so there is ONE source of truth and the
+ * existing onRemoved lifecycle already cleans it up. Pure core — the SW mirrors it
+ * to chrome.storage.session and re-mints on loss (an ephemeral binding is fine: the
+ * actor's memory is re-derivable and its tab, if any, re-binds on next navigate).
+ *
+ * why a SEPARATE map (not a key in makeWebResidentBindings): that store is keyed by
+ * numeric tabId; the actor exists BEFORE it has a tab, so it must be keyed by chat.
+ *
+ * @returns {{
+ *   resolve: (ownerChatId: string) => string | null,
+ *   bind: (ownerChatId: string, actorSessionId: string) => void,
+ *   drop: (ownerChatId: string) => boolean,
+ *   entries: () => Array<[string, string]>,
+ *   load: (entries: Array<[string, string]>) => void,
+ * }}
+ */
+export const makeWebActorRegistry = () => {
+  /** @type {Map<string, string>} ownerChatId → web-actor sessionId */
+  const byChat = new Map();
+  return {
+    resolve: (ownerChatId) => byChat.get(ownerChatId) ?? null,
+    bind: (ownerChatId, actorSessionId) => { byChat.set(ownerChatId, actorSessionId); },
+    drop: (ownerChatId) => byChat.delete(ownerChatId),
+    entries: () => [...byChat.entries()],
+    load: (entries) => { for (const [c, a] of entries ?? []) byChat.set(c, a); },
   };
 };

@@ -319,12 +319,20 @@ describe('DESIGN-17 web resident — the fourth kind (DOM toolset + tab pin)', (
     expect([...WEB_RESIDENT_DOM_TOOLS].sort()).toEqual([...DO_TOOLSET].sort());
   });
 
-  test('a web resident may call its DOM tools (read + mutate)', () => {
-    for (const n of ['snapshot', 'read_page', 'click', 'type', 'navigate', 'query_dom']) {
+  test('a web resident may call its DOM tools (read + mutate) + the sessionless fetch_url', () => {
+    for (const n of ['snapshot', 'read_page', 'click', 'type', 'navigate', 'query_dom', 'fetch_url']) {
       expect(rt({ name: n }, {}, web())).toBeNull();
     }
     expect(isAllowedForResidentKind('click', 'web')).toBe(true);
-    expect(residentAllowedTools('web').size).toBe(WEB_RESIDENT_DOM_TOOLS.length);
+    // fetch_url is the web actor's NON-render mechanism — allowed for it, and the
+    // ONLY ctx allowed it (it's hidden from main, refused for every other kind).
+    expect(isAllowedForResidentKind('fetch_url', 'web')).toBe(true);
+    expect(isAllowedForResidentKind('fetch_url', 'app')).toBe(false);
+    // call_api stays OUT — the web actor's open-web read is fetch_url (sessionless),
+    // not the credential-capable call_api.
+    expect(isAllowedForResidentKind('call_api', 'web')).toBe(false);
+    // == DOM toolset + the one fetch_url addition (drift: bump if the set grows).
+    expect(residentAllowedTools('web').size).toBe(WEB_RESIDENT_DOM_TOOLS.length + 1);
   });
 
   test('a web resident is positively scoped — foreign + powerful tools refused', () => {

@@ -39,6 +39,14 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
+  // fetch_url is the web RESIDENT's SESSIONLESS secure fetch — its NON-render web
+  // mechanism (the other is drive-a-tab). It's resident-only: the orchestrator
+  // delegates web INTENT via message_resident and the web actor picks
+  // fetch-vs-render, so the main agent never holds it. why hidden where the OTHER
+  // 'web' tools (read_article/call_api) are NOT: those stay the orchestrator's
+  // own open-web reads; fetch_url is part of the web actor's surface, the single
+  // entry point for web work this design routes everything through.
+  'fetch_url',
 ]));
 
 /** Is this tool hidden from the main agent (runner-only)? Pure. @param {string} name */
@@ -201,7 +209,12 @@ const RESIDENT_KIND_TOOLS = Object.freeze({
   // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis), and the
   // runner (exposure unset) keeps using them. Putting them in this POSITIVE set
   // is what lets a web-resident ctx call them (gate rule 2) — the reconciliation.
-  web: Object.freeze(new Set(WEB_RESIDENT_DOM_TOOLS)),
+  // PLUS fetch_url: the web actor's SESSIONLESS non-render mechanism, added
+  // OUTSIDE WEB_RESIDENT_DOM_TOOLS so that set stays == the runner's DO_TOOLSET
+  // (the drift guard). The web actor is the only ctx allowed fetch_url, and the
+  // capability strip (spawn.js) keeps it keyless: webFetch survives, getSecret /
+  // safeFetch do not.
+  web: Object.freeze(new Set([...WEB_RESIDENT_DOM_TOOLS, 'fetch_url'])),
 });
 
 /** The Set of tool names a resident of `kind` may call (empty for an unknown kind). Pure. @param {string} [kind] */

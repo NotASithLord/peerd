@@ -3,6 +3,7 @@ import {
   fenceWebResidentSummary,
   WEB_RESIDENT_SUMMARY_PROMPT,
   makeWebResidentBindings,
+  makeWebActorRegistry,
 } from '../../extension/peerd-runtime/subagent/web-resident.js';
 import { stripUntrustedFences } from '../../extension/shared/util.js';
 
@@ -47,5 +48,34 @@ describe('makeWebResidentBindings — tab→session store (the tab is the durabl
     const b2 = makeWebResidentBindings();
     b2.load(b.entries());
     expect(b2.resolve(2)).toBe('b');
+  });
+  test('tabFor — the reverse lookup (the web actor reads its owned tab from here)', () => {
+    const b = makeWebResidentBindings();
+    expect(b.tabFor('actor-1')).toBeUndefined();   // 0-tab state
+    b.bind(42, 'actor-1');
+    expect(b.tabFor('actor-1')).toBe(42);          // 1-tab state
+    // a tab close (drop) returns the actor to the 0-tab state — no separate bookkeeping.
+    b.drop(42);
+    expect(b.tabFor('actor-1')).toBeUndefined();
+  });
+});
+
+describe('makeWebActorRegistry — the chat→web-actor map (0-or-1-tab actor)', () => {
+  test('resolve / bind / drop, keyed by owner chat', () => {
+    const r = makeWebActorRegistry();
+    expect(r.resolve('chat-1')).toBeNull();
+    r.bind('chat-1', 'actor-web-1');
+    expect(r.resolve('chat-1')).toBe('actor-web-1');
+    // a DIFFERENT chat is a different actor (web actors are chat-scoped).
+    expect(r.resolve('chat-2')).toBeNull();
+    expect(r.drop('chat-1')).toBe(true);
+    expect(r.resolve('chat-1')).toBeNull();
+  });
+  test('entries + load (rehydrate on SW boot)', () => {
+    const r = makeWebActorRegistry();
+    r.bind('chat-1', 'a'); r.bind('chat-2', 'b');
+    const r2 = makeWebActorRegistry();
+    r2.load(r.entries());
+    expect(r2.resolve('chat-2')).toBe('b');
   });
 });

@@ -25,6 +25,7 @@ import { clickTool }                 from './click.js';
 import { typeTool }                  from './type.js';
 import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
+import { fetchUrlTool }              from './fetch-url.js';
 import { listTabsTool }              from './list-tabs.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
@@ -173,6 +174,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   typeTool,
   clickTool,
   readPdfTool,
+  // the web resident's SESSIONLESS secure fetch (its non-render web mechanism).
+  // Registered + hidden from main (resident-only, like the DOM tools); allowed
+  // for kind:'web' in RESIDENT_KIND_TOOLS.web and keyless by construction.
+  fetchUrlTool,
   // engine (WebVM)
   vmListTool,
   vmCreateTool,

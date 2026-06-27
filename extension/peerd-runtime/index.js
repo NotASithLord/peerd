@@ -103,7 +103,7 @@ export { makeResidentMessaging } from './subagent/resident-messaging.js';
 // actor model as a fourth `kind:'web'` resident that owns one tab. Pure core:
 // the tab→session bindings, the action-log rolling-summary prompt, the self-fence.
 export {
-  makeWebResidentBindings, WEB_RESIDENT_SUMMARY_PROMPT, fenceWebResidentSummary,
+  makeWebResidentBindings, makeWebActorRegistry, WEB_RESIDENT_SUMMARY_PROMPT, fenceWebResidentSummary,
 } from './subagent/web-resident.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold

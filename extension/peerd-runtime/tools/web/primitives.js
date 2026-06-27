@@ -64,7 +64,10 @@ export const landedHostDenial = (finalUrl, ctx) => {
  * redirect) — the gate-blocked path already returns a typed error elsewhere.
  *
  * @param {string} url
- * @param {{ method?: string, headers?: Record<string,string>, body?: string }} opts
+ * @param {{ method?: string, headers?: Record<string,string>, body?: string, credentials?: RequestCredentials }} opts
+ *   `credentials` defaults to the platform default (omitted from the init when
+ *   unset). The web resident's sessionless fetch passes `'omit'` to guarantee no
+ *   cookies ride along; the orchestrator's web tools leave it unset (unchanged).
  * @param {ToolContext} ctx
  * @returns {Promise<{ status: number, body: string, headers: Record<string,string>, finalUrl: string }>}
  */
@@ -84,6 +87,9 @@ export const fetchUrl = async (url, opts, ctx) => {
       headers: opts?.headers ?? {},
       body:    opts?.body,
       signal:  controller.signal,
+      // why: only set credentials when the caller asks — leaving it undefined
+      // preserves the existing web tools' platform-default behavior exactly.
+      ...(opts?.credentials ? { credentials: opts.credentials } : {}),
     });
     const body = await res.text();
     /** @type {Record<string, string>} */

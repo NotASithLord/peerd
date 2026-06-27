@@ -16,7 +16,7 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   });
 
   test('introduces message_resident and the orchestrator framing', () => {
-    expect(base.includes('message_resident — CAST a focused GOAL to a tab')).toBe(true);
+    expect(base.includes('message_resident — CAST a focused GOAL to a resident')).toBe(true);
     expect(base.includes('a GenServer — an OTP process')).toBe(true);   // residents named in OTP terms
     expect(base.includes('sandboxes: you bootstrap, the resident runs')).toBe(true);
     expect(base.includes('you do NOT drive them')).toBe(true);
@@ -36,9 +36,13 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('reads stay global')).toBe(true);
   });
 
-  test('the browsing section folds do/get/check into the tabs-are-residents model', () => {
+  test('the browsing section makes the web actor the single entry point (fetch-vs-render is its call)', () => {
     expect(base.includes('browsing — every tab is a resident')).toBe(true);
-    expect(base.includes('Reuse vs. open')).toBe(true);              // the enumerate judgment
+    // The web actor — addressed by "web", picks its own mechanism (sessionless fetch
+    // or drive-a-tab); the orchestrator delegates INTENT, not the mechanism.
+    expect(base.includes('message_resident("web", goal)')).toBe(true);
+    expect(base.includes('SINGLE entry point for web work')).toBe(true);
+    expect(base.includes('Do NOT pick')).toBe(true);                // mechanism is the actor's call
     expect(base.includes("The tab's RESIDENT is your page-content boundary")).toBe(true);
     expect(base.includes('do                       — perform an action')).toBe(false); // runner listing gone
   });
@@ -79,13 +83,21 @@ describe('residentBlock (the per-kind tuned prompt)', () => {
     }
   });
 
-  test('the web resident carries DOM-driving lore, the injection drill, and no code notes', () => {
+  test('the web resident carries the fetch-vs-render decision rule, the 0-or-1 tab model, DOM lore, the injection drill, and no code notes', () => {
     const web = residentBlock('web');
-    expect(web.includes('browser-page operator')).toBe(true);
+    // The two mechanisms + the decision rule (the single-entry-point design).
+    expect(web.includes('fetch_url')).toBe(true);
+    expect(web.includes('SESSIONLESS')).toBe(true);
+    expect(web.includes('cheaper path')).toBe(true);
+    // 0-or-1 tab lazy ownership + the fail-closed pin (never the user's foreground tab).
+    expect(web.includes('0-OR-1 tab')).toBe(true);
+    expect(web.includes('fail closed')).toBe(true);
+    // DOM-driving lore still present.
     expect(web.includes('re-snapshot')).toBe(true);
     expect(web.includes('UNTRUSTED')).toBe(true);
     // the full IGNORE/FLAG/EXCLUDE injection drill (mirrored from RUNNER_PROMPT,
-    // which keeps its own copy for subagents driving a page through the runner)
+    // which keeps its own copy for subagents driving a page through the runner) —
+    // and it now fences FETCH responses too, not just page content.
     expect(web.includes('IGNORE it')).toBe(true);
     expect(web.includes('FLAG it')).toBe(true);
     expect(web.includes('EXCLUDE it')).toBe(true);

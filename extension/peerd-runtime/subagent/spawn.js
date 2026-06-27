@@ -102,7 +102,7 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
 export const CAPABILITY_CONSUMERS = Object.freeze({
   getSecret:          [],
   safeFetch:          [],
-  webFetch:           ['call_api', 'read_article', 'web_search', 'vm_import'],
+  webFetch:           ['call_api', 'read_article', 'web_search', 'vm_import', 'fetch_url'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect_storage'],
   idb:                ['inspect_audit_log'],
@@ -137,6 +137,10 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   appRegistry:        ['app_delete', 'app_list', 'edit_file'],
   appTabTracker:      ['app_list'],
   messageResident:    ['message_resident'],
+  // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
+  // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
+  // web resident (which has navigate), stripped from any kind whose toolset lacks it.
+  adoptWebTab:        ['navigate'],
 });
 
 /**

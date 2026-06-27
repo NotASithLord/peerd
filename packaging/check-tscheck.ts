@@ -33,7 +33,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // sessions/store.js, vm-tab.js). The dev-only peerd-distributed/demo/
 // harness (pruned from every package, wired into nothing) was removed
 // rather than typed.
-const COVERED_FLOOR = 476;
+const COVERED_FLOOR = 477;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
