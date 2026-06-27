@@ -26,6 +26,7 @@ import { BehaviorSection } from '../sections/behavior.js';
 import { VoiceSection } from '../sections/voice.js';
 import { VaultSection } from '../sections/vault.js';
 import { GitCredentialsSection } from '../sections/git-credentials.js';
+import { ApiIntegrationsSection } from '../sections/api-integrations.js';
 import { CostsSection } from '../sections/costs.js';
 import { TransferSection } from '../sections/transfer.js';
 import { MemoryView } from '../sections/memory.js';
@@ -60,6 +61,7 @@ const NAV = [
     items: [
       ['vault', 'Vault & unlock'],
       ['git-credentials', 'Git credentials'],
+      ['api-integrations', 'API integrations'],
       ['denylist', 'Denylist'],
       ['activity', 'Activity'],
     ],
@@ -247,6 +249,7 @@ export const OptionsApp = {
       case 'transfer':  return m(TransferSection, { send });
       case 'vault':     return m(VaultSection, { state, send });
       case 'git-credentials': return m(GitCredentialsSection, { send });
+      case 'api-integrations': return m(ApiIntegrationsSection, { send });
       case 'denylist':  return m(DenylistView, { send });
       case 'activity':  return m(ActivityView, { send });
       case 'dweb':      return DWEB_ENABLED ? m(DwebSection, { state, send }) : null;

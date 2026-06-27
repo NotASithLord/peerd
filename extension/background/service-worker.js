@@ -50,6 +50,10 @@ import {
   makeSafeFetch,
   makeWebFetch,
   withSessionScopedCredentials,
+  // DESIGN-18 P1: the API actor's credentialed boundary fetch (session scope + the
+  // keyless origin:<origin> key injection) + the Settings → API integrations routes.
+  withApiCredentials,
+  makeOriginCredentialRoutes,
   HARDCODED_ALLOWLIST,
   matchesDenylist,
   // audit
@@ -747,6 +751,15 @@ const gitCredentialRoutes = makeGitCredentialRoutes({
   audit: (e) => { auditLog.append(e).catch(() => {}); },
 });
 
+// DESIGN-18 P1 — Settings → API integrations: list/set/delete origin:<origin> API keys,
+// the same vault + write-only-from-the-UI shape as git credentials. The value is
+// decrypted just-in-time at the egress boundary (withApiCredentials), never shown.
+const originCredentialRoutes = makeOriginCredentialRoutes({
+  vault,
+  isLockedError: (e) => e instanceof VaultLockedError,
+  audit: (e) => { auditLog.append(e).catch(() => {}); },
+});
+
 // ---------------------------------------------------------------------------
 // 2. Layer 2 — runtime owns sessions + agent loop
 // ---------------------------------------------------------------------------
@@ -1277,7 +1290,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     //   - api   → the FIXED bound origin (actorInstanceId) — no tab, never changes.
     if (actorType === 'web' && actorBacking === 'api') {
       const ownedOrigin = typeof actorInstanceId === 'string' ? actorInstanceId : undefined;
-      resCtx.webFetch = withSessionScopedCredentials(webFetch, () => ownedOrigin);
+      // DESIGN-18 P1: session-scope cookies AND inject the vault origin:<origin> key
+      // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
+      resCtx.webFetch = withApiCredentials(webFetch, () => ownedOrigin, {
+        getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+        audit: (/** @type {any} */ e) => auditLog.append(e),
+      });
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
     } else if (actorType === 'web') {
       resCtx.webFetch = withSessionScopedCredentials(
@@ -3176,6 +3194,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // time, never shown to the agent or the VM. `list` returns HOST NAMES ONLY.
   // Built by makeGitCredentialRoutes (vm-net) — see the const above.
   ...(/** @type {any} */ (gitCredentialRoutes)),
+
+  // --- DESIGN-18 API integrations (origin-bound API keys) ---
+  // Stored under origin:<origin>, decrypted only in withApiCredentials at request
+  // time, never shown to the agent. `list` returns origins + header NAME only.
+  ...(/** @type {any} */ (originCredentialRoutes)),
 })));
 
 // ---------------------------------------------------------------------------
