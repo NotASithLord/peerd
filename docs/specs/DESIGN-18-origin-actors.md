@@ -3,254 +3,249 @@
 > Status: DESIGN (forward record — not yet built). Feature 18, the 0.2-defining
 > change. Builds directly on DESIGN-17 (`DESIGN-17-actor-agents.md` +
 > `DESIGN-17-DEV-NOTES.md`) — read those first; this generalizes the web actor
-> landed there. Owner decisions (2026-06-27): **unify** (one origin actor, a tab
-> is an optional backing — NOT a sibling `actorType:'api'`); **boundary-injected
-> keyless** credentials; **auto-form from use + explicit key grant**.
+> landed there. Owner decisions (2026-06-27): **unify at the orchestrator
+> surface** (one mental model, one `actorType:'web'`, addressed the same way — NOT
+> a sibling `actorType:'api'`); **boundary-injected keyless** credentials;
+> **auto-form from use + explicit key grant**.
+>
+> This spec was hardened by two adversarial reviews (security + architecture)
+> before a line was written. Their findings are folded in as NORMATIVE rules and
+> an honest scope. The single biggest correction: **the binding is two stores, not
+> one** — tab actors stay tabId-keyed (a tab's origin is mutable as it navigates),
+> API actors are origin-keyed; they unify at the *addressing surface*, not the
+> binding layer.
 
 ## The thesis
 
 A browser tab and an API integration are the same thing: **an endpoint to one
 origin.** A tab additionally renders a DOM; an API endpoint does not. That is the
-*only* difference. Today (DESIGN-17) the web actor already owns 0-or-1 tab and
-already reaches origins two ways — a sessionless/`session-scoped` `fetch_url` and a
-driven tab. DESIGN-18 finishes the thought: the web actor owns an **origin**, the
-tab is one optional way to back that origin with a DOM, and an **API integration**
-is simply an origin actor that has no tab — a first-class, addressable,
-memory-accumulating citizen, tracked exactly like a tab.
+*only* difference the orchestrator should have to think about. Today (DESIGN-17)
+the web actor already owns 0-or-1 tab and already reaches origins two ways — a
+sessionless/session-scoped `fetch_url` and a driven tab. DESIGN-18 finishes the
+thought: an **API integration is a web actor that has no tab** — a first-class,
+addressable, memory-accumulating citizen, reached through `message_actor` exactly
+like a tab.
 
-No new actor type. The `web` actor IS the origin actor. "API integration" is a
-*state* of it (origin-backed, tabless), not a new kind.
+No new actor type. `actorType` stays `'web'`. "API integration" is a *backing* of a
+web actor (origin-backed, tabless), distinguished by a `backing` discriminator
+that matters in exactly two places — the DOM-tool gate and the display label —
+not a new kind with its own prompt/toolset/mint duplication.
 
-## Goals
+## What "unify" means (and doesn't)
 
-1. **One abstraction.** An origin actor owns one origin. It always holds
-   `fetch_url`. It holds the DOM toolset *only when* it has a tab backing. APIs
-   and web pages stop being different machinery.
-2. **Addressable like a tab.** The orchestrator reaches an API integration the
-   same way it reaches a tab — `message_actor`, by a stable handle. Origin IS the
-   handle (and the security lock).
-3. **Memory that accumulates.** An origin actor learns its origin — endpoints,
-   auth shape, pagination, rate limits, quirks — and carries that forward across
-   messages, the same self-fenced rolling summary the web actor already uses, but
-   tuned to "what I learned about this API."
-4. **Authenticated, still keyless.** An origin actor can call a keyed API
-   (Stripe, GitHub) without ever holding the key. The vault binds a secret to the
-   origin; the **egress boundary** injects it, same-origin only. A
-   prompt-injected actor can't exfiltrate a key it never sees.
-5. **No churn to the security invariants.** Origin-lock, fail-closed, the
-   untrusted-content fence, and the `web:write` confirm all carry over unchanged —
-   they generalize for free, because they were already origin-shaped.
+**Unify at the surface — real.** The orchestrator addresses every origin actor
+through one channel, `message_actor(to:…)`, by a handle. Tabs and APIs look like
+one kind of thing (a web/origin endpoint) and are tracked the same way. This is
+the whole of the owner's thesis and it holds completely.
 
-## The unified model
+**Unify the binding store — NOT done, by design.** A tab actor's owned origin is
+**mutable**: it changes every time the tab navigates (shop.com → checkout.com), so
+its binding is keyed by the stable **tabId** and the origin is a *derived field
+read live, per request*. An API actor's owned origin is **fixed for its whole
+life**, so its binding is keyed by the **origin**. Forcing both into one
+origin-keyed store would re-key a tab actor on every navigation and orphan its
+accumulated memory — so we don't. Two parallel stores, unified only where the
+orchestrator looks.
 
-### An origin actor owns a *current origin*
+This keeps the DESIGN-17 tab machinery **untouched** (it just landed and is
+correct) and makes the API actor purely **additive** — a second store, a second
+mint path, a second resolve branch.
 
-The web actor's credential rule today is already the whole design: cookies ride a
+## The model
+
+### An origin actor owns a *current origin*; the boundary scopes to it
+
+The web actor's credential rule today is already the design: cookies ride a
 request **only when same-origin to the actor's owned origin**, decided at the
-egress boundary (`withSessionScopedCredentials`, reading `activeTab.origin`). The
-generalization is one line of conceptual change:
+egress boundary (`withSessionScopedCredentials`, reading the owned origin via a
+`getOwnedOrigin()` closure). The generalization is one line:
 
-> The actor's **owned origin** is whatever its backing says it is.
-> - **Tab backing** → the owned origin is the tab's *live* origin (mutable: it
->   changes as the tab navigates; credentials follow).
-> - **API binding** → the owned origin is a *fixed* origin (immutable: no tab, no
->   navigation; the key/cookies are scoped to that one origin for the actor's
->   life).
+> `getOwnedOrigin()` reads the tab's **live** origin for a tab actor, or the
+> **fixed** bound origin for an API actor. Same boundary question ("is this
+> request same-origin to the owned origin?"), different origin source.
 
-The boundary doesn't care which. It asks one question — "is this request
-same-origin to the owned origin?" — and the answer comes from a `getOwnedOrigin()`
-closure that reads `activeTab.origin` for a tab actor or the bound origin for an
-API actor. **Same boundary, different origin source.** That is the entire unify.
+### Backings, addressing, identity
 
-### Backings, not types
+| Backing | Handle (`to:`) | Owned origin | Binding key | `instanceId` | `fetch_url` | DOM tools |
+|---|---|---|---|---|---|---|
+| **Unpinned** | `'web'` | none yet | (chat → session) | `'web'` (literal) | yes, sessionless | only after it adopts a tab |
+| **Tab** | `'<tabId>'` | tab's **live** origin | **tabId** | `String(tabId)` | yes, session-scoped | yes |
+| **API** | `'<origin>'` | **fixed** origin | **origin** | the origin | yes, session-scoped (+key, P1) | **never** |
 
-| Backing | Owned origin | `fetch_url` | DOM tools | Identity |
-|---|---|---|---|---|
-| **Unpinned** (`to:'web'`) | none yet | yes (sessionless) | no | the chat's web actor |
-| **Tab** | tab's live origin | yes (session-scoped) | yes | tabId → origin |
-| **API binding** | fixed origin | yes (session-scoped + key) | **no** | the origin |
+The three handle shapes are disjoint by construction — the literal `'web'`, a
+numeric tabId, an origin string — so `resolveActor` dispatches with no ambiguity.
+The unpinned `'web'` actor and a tab actor are the **same DESIGN-17 machinery,
+unchanged**; the API actor is the new, parallel, origin-keyed path.
 
-An origin actor moves between backings over its life: `to:'web'` starts unpinned;
-its first `fetch_url` pins nothing (sessionless), its first `navigate` adopts a
-*tab* backing (DESIGN-17 lazy adoption), and an API integration is *born* with a
-fixed-origin backing. DOM tools are gated on "do I have a tab right now"; the gate
-already refuses them for the wrong ctx — it just learns one more reason (no tab →
-no DOM).
+### No collision between the chat actor and an API actor
 
-### Why no `actorType:'api'`
+A subtlety the architecture review surfaced: the chat `to:'web'` actor can
+`fetch_url` an API origin sessionlessly *without* that forming an integration —
+and that's correct. **An API integration forms only when first addressed by its
+origin handle** (`to:'<origin>'`), the same lazy-mint shape as `to:'web'`. A
+one-off `fetch_url` from the chat actor is ephemeral and forms nothing; reaching
+for `to:'<origin>'` is the deliberate "use" that auto-forms the durable,
+memory-bearing, (P1) keyed integration. The two never compete for one handle, and
+no incidental fetch mints a parallel session.
 
-The recon showed ~90% of the web-actor machinery is already generic
-(mint/resolve/registry/memory/redrain/egress) or cleanly gated on
-`actorType === 'web'`. A sibling type would duplicate all of it and create two
-things to keep in sync. Unifying keeps one type (`web`), one mint path, one
-memory path, one egress path — the backing is a property of the binding, read
-where it matters (DOM-tool gate; `getOwnedOrigin`; the orchestrator's display
-label). This is the owner's "they're effectively the same, one just has a DOM
-option" made literal.
+### instanceId stays distinct per backing
 
-## Credentials: boundary-injected, origin-scoped, keyless
+The unpinned chat actor keeps `instanceId:'web'` (load-bearing: the `deliver()`
+namer special-cases it, and it must stay a non-origin literal so the trusted turn
+lead never carries a derived string). A tab actor keeps `String(tabId)`. An API
+actor's `instanceId` is its origin — and since the orchestrator *chose* that
+origin (it's not page-controlled, unlike a tab title), it's safe in the lead, but
+it is normalized through `new URL(x).origin` before it ever reaches the namer (no
+raw agent string in the trusted lead).
+
+## Credentials: boundary-injected, origin-scoped, keyless (P1)
 
 The actor stays **keyless** — the capability strip leaves it no `getSecret`. A
-keyed API works without breaking that:
+keyed API works without breaking that, by **copying the already-shipped
+`git:<host>` precedent verbatim** (`peerd-engine/vm-net/git-credentials.js` +
+`makeInjectGitAuth` in `vm-http-fetch.js`). That precedent is battle-tested and
+implements this exact shape correctly; DESIGN-18 builds its `origin:<origin>`
+analog. The security review confirmed the design **holds** *provided these become
+NORMATIVE rules* (each is where a naive implementation would regress vs. the git
+precedent):
 
-1. **The vault gains origin-bound secrets.** A secret stored under
-   `origin:<origin>` (mirroring the existing `git:<host>` scoping the WebVM
-   already uses), carrying `{ header, scheme, value }` — default
-   `Authorization: Bearer <value>`, but `X-API-Key`/custom supported because real
-   APIs differ.
-2. **The boundary injects it, same-origin only.** The session-scoped `webFetch`
-   wrapper gains an injection step: for a request **same-origin to the owned
-   origin**, if a vault `origin:<origin>` secret exists, it adds the configured
-   auth header. The injection reads the vault *inside the boundary closure* (the
-   SW has vault access); the actor's ctx never holds the secret. Cross-origin
-   requests get nothing — same wall as cookies.
-3. **The actor cannot launder it.** It has no `getSecret`, can't set the auth
-   header itself (the same header-strip that blocks a forged `Cookie` blocks a
-   forged `Authorization`), and the boundary refuses to inject cross-origin — so
-   even a fully prompt-injected actor can neither read the key nor send it
-   anywhere but its own origin. Non-GET writes still hit the `web:write` confirm.
+1. **Origin-bound vault secret.** Stored under `origin:<origin>` carrying
+   `{ header, scheme, value }` — default `Authorization: Bearer <value>`;
+   `X-API-Key`/custom supported.
+2. **https-only — a RULE at both grant and send.** Reject storing an
+   `origin:<origin>` secret unless the origin is `https:` (grant time). At the
+   boundary, inject **only** when the *resolved request URL* is `https:` (send
+   time), independent of the stored origin. A key never rides cleartext. (Mirrors
+   `authHostForRequestUrl`'s `protocol !== 'https:'` → null.)
+3. **Same-origin via `URL.origin`, never a synthesized form.** The owned origin
+   for an API actor is `new URL(x).origin` of an https URL — never the
+   `originOfTabUrl` chrome:/about: synthesized string. The comparison is
+   origin-equality, immune to `api.stripe.com.evil.com` / userinfo / port tricks.
+4. **Single-shot, pre-fetch injection; redirects refused.** Inject once against
+   the original same-origin URL *before* `webFetch`; `webFetch` already forces
+   `redirect:'manual'` and throws `redirect_blocked` on any 3xx, so a same-origin
+   request that 302s to an attacker never carries the header off-origin. Never add
+   a "follow + re-inject" path.
+5. **Strip set is computed, merge is last-wins.** The header strip must include
+   the *configured* header name for the owned origin (not just the fixed
+   Cookie/Authorization/Proxy-Authorization set) so the actor can't pre-seed an
+   `X-API-Key` slot; injection overwrites last (`{ ...actorHeaders,
+   ...injectedAuth }`) so an actor-supplied value can never win or suppress.
+6. **Value only on the wire.** The injected secret appears in exactly one place —
+   the outbound request. It is NEVER logged, audited, error-messaged, or returned.
+   The injection audits the header **NAME** and origin only (`{ type:
+   'origin_auth_attached', details: { origin, header } }`), exactly as
+   `git_auth_attached` logs `{ host }`.
+7. **Fail closed, silently.** Locked or missing vault → no header, no thrown
+   error; the request proceeds **unauthenticated** (and likely 401s). Copy the
+   `catch { /* anonymous */ }; if (!token) return headers` shape verbatim — never
+   surface the lock state as a value-bearing failure.
+8. **Write confirm unchanged, value-free.** A non-GET to the owned origin still
+   hits the shared `web:write` confirm (it fires on *method*, before injection),
+   and the confirm summary stays value-free — never "keyed ⇒ safe."
 
-The unification pays off again: this is the *same* same-origin rule as cookies,
-extended from "the browser's cookie jar" to "the vault's key for this origin." A
-tab actor benefits identically — render `github.com`, and `fetch_url` to
-`api.github.com`'s endpoints carries the GitHub key if one is vaulted, no special
-case.
+**Accepted residual (named honestly):** a key is only as contained as its owned
+origin. An open-redirect or SSRF *on the owned origin itself* can launder it — this
+is inherent to bearer auth and out of the boundary's scope, the same exposure
+cookies and `git:<host>` already accept. The `web:write` confirm still gates the
+non-GET exfil channel.
 
 ### The grant is the user's, never the agent's
 
-Because the actor is keyless, the key must come from the **user**, not the model.
-The flow:
+Because the actor is keyless, the key comes from the **user**. The agent may
+*request* a connection (surface a "connect <origin>" card on a 401/403 or when
+asked to work a keyed API); the user supplies the key through a confirmed vault
+write; Settings → API Integrations is the management surface (list, add, revoke).
+Thereafter the actor authenticates transparently and the model never touches the
+key.
 
-- The agent can *request* a connection — surface a "connect <origin>" card when it
-  hits a 401/403 or is asked to work a keyed API.
-- The user supplies the key through a secure gesture (a vault write, confirmed
-  like any secret). Settings → API Integrations is the management surface (list,
-  add, revoke).
-- Thereafter the origin actor authenticates transparently and the model never
-  touches the key.
+## Lifecycle & memory
 
-This is "explicit key grant": the *credential* is always an explicit, confirmed,
-user-owned act; only the *addressing + memory* auto-form (below).
+- **Auto-form.** An API integration is lazily minted the first time it's addressed
+  by `to:'<origin>'` (the DESIGN-17 `mintOnce` / let-it-crash / boot-redrain
+  machinery, generic, carries origin handles verbatim).
+- **Per-origin memory — free for API actors.** An API actor has exactly one origin
+  for its whole life, so per-session memory *is* per-origin: it gets the rolling
+  self-fenced summary "what I learned about this API" with no cardinality change.
+  This is the honest subset that ships.
+- **Deferred: per-origin memory for the cross-origin chat actor.** The `to:'web'`
+  chat actor spans origins on one session (one memory blob today). True per-origin
+  memory for it would require one session per (chat, origin) — a session-cardinality
+  rework, explicitly **out of P0/P1** (rides Profiles, "still ahead"). The chat
+  actor keeps its single cross-origin summary; only the fixed-origin API actor gets
+  the per-origin one for now.
+- **Memory scope.** v1 API-actor memory is chat-scoped (re-learned per chat); the
+  vaulted **key** is global (the vault isn't chat-scoped), so auth is durable from
+  the first grant. Profile-scoped learned memory is the forward "first-class
+  citizen" end state.
 
-## Lifecycle: auto-form from use, persist when it matters
+## The seams — what actually changes
 
-- **Auto-form.** The first time the orchestrator does origin work — a `fetch_url`
-  or a `navigate` to origin X — an origin actor for X is tracked. Address it again
-  by origin and you reach the *same* actor, with its accumulated memory. No
-  ceremony; integrations form from use.
-- **Promote to durable.** An origin actor becomes a first-class, persisted
-  integration when it has something worth keeping: accumulated memory and/or a
-  vaulted key. (Ephemeral, memory-less touches don't clutter the integration
-  list.)
-- **Supervisor restart.** Lost session + live binding → re-mint on next message
-  (the DESIGN-17 let-it-crash pattern, unchanged). The durable mailbox + boot
-  redrain are already generic and carry origin handles verbatim.
+Honest scope (the architecture review corrected the spec's first draft here):
+adding the API actor is **additive** because it's a parallel path, but it is **not
+"just branches"** — it adds a store, a mint path, a resolve branch, a session
+discriminator, and one piece of genuine gate plumbing. The DESIGN-17 tab path is
+**not modified**.
 
-### Memory scope (v1 vs forward)
-
-v1: per-origin memory is **chat-scoped** (like today's web actor) — re-learned per
-chat. The vaulted **key** is global (the vault isn't chat-scoped), so auth is
-durable from the first grant. Forward (rides Profiles, "still ahead"): promote the
-*learned memory* to profile-scoped so an integration carries its knowledge across
-chats — the genuinely "first-class citizen" end state. Flagged, not built here.
-
-## Addressing & the orchestrator surface
-
-- **Origin is the handle.** `message_actor(to:'<origin>', goal)` — e.g.
-  `to:'https://api.stripe.com'` (normalized; a bare host accepted and normalized to
-  `https://`). The origin is identity *and* lock — one source of truth.
-- **Back-compat handles stay.** `to:'web'` = the chat's unpinned origin actor (open
-  web work; it picks origins). `to:'<tabId>'` = the tab-backed origin actor for
-  that tab (resolves to its live origin). These are the same actor reached by
-  different handles.
-- **Discovery.** A `list_integrations` tool (sibling of `list_tabs` / `vm_list`)
-  enumerates the origin actors the orchestrator can address — origin, label,
-  whether keyed, last-used. Tabs stay in `list_tabs`; integrations (tabless origin
-  actors) list here. The home UI surfaces durable integrations as cards alongside
-  agent-tab cards.
-
-## Security model (carried over, generalized)
-
-- **Origin lock.** Credentials (cookies *and* the vaulted key) ride only
-  same-origin to the owned origin — enforced at the egress boundary, not the tool.
-  Cross-origin is sessionless and keyless. (Generalizes DESIGN-17 verbatim.)
-- **Keyless actor.** No `getSecret`, no allowlist-locked `safeFetch`; only the
-  origin-scoped `webFetch`. The key is injected at the boundary, never held.
-- **Fail-closed.** An API actor has no tab, ever — DOM tools refuse at the gate
-  (no foreground-tab fallback). A missing/locked vault → no injection, the request
-  goes unauthenticated (and likely 401s) rather than leaking anything.
-- **Untrusted fence.** Every byte of an API response is DATA, wrapped
-  `<untrusted_web_content>`, never instructions — the same fence `fetch_url` already
-  applies.
-- **Write confirm.** Non-GET to any origin still routes through the shared
-  `web:write` confirm — one approval governs `fetch_url`, the WebVM bridge, and
-  keyed API writes alike.
-
-## The seams — what changes (from the recon map)
-
-Most of this is *additive branches*, not rewrites — the web-actor machinery is the
-template.
-
-1. **Binding store** (`subagent/web-actor.js`, SW ~2470). Generalize the tab→session
-   binding to an **origin→session** binding that also keys tabless origins. One
-   store, keyed by an origin handle; a tab actor's handle derives from its live
-   origin, an API actor's from its fixed origin.
-2. **Addressing** (`subagent/actor-messaging.js`, `tools/defs/message-actor.js`, SW
-   `resolveActor`). New resolve branch: an origin-shaped `to` → resolve/lazy-mint
-   the origin actor for that origin. Naming: "The <origin> integration".
-3. **Session shape** (`sessions/types.js`). `instanceId` for an origin actor = its
-   origin; a `backing: 'tab' | 'api'` discriminator (or derive from "has a live
-   tab"). `actorType` stays `'web'`.
-4. **Tool scoping** (`tools/exposure.js`, `tools/gates.js`). `ACTOR_TYPE_TOOLS.web`
-   unchanged; the gate gains "DOM tools require a tab backing" so a tabless origin
-   actor is `fetch_url`-only.
-5. **Memory** (`subagent/web-actor.js`, `loop/rolling-summary.js`). A second
-   summary prompt tuned to "what I learned about this API"; the fence + state shape
-   reused as-is. Selected by backing.
-6. **Origin-lock + key injection** (`peerd-egress/fetch/web-fetch.js`,
-   `tools/defs/fetch-url.js`, SW `buildToolContext`). `getOwnedOrigin()` reads tab
-   origin OR fixed origin; the wrapper gains the same-origin vault-key injection
-   step. The vault gains `origin:<origin>` secrets.
-7. **Orchestrator visibility** (`tools/defs/list-integrations.js` new; home UI
-   cards). Enumerate durable integrations.
-8. **Lifecycle** (SW `mintActor`/`mintOnce`/redrain). One more mint path
-   (origin-backed); redrain already generic.
+1. **New origin-keyed store** (`subagent/web-actor.js`). A new
+   `makeApiActorOriginBindings()` — `Map<origin, sessionId>` with bind/resolve/
+   drop/load + reverse lookup; persisted to `chrome.storage.session` like the tab
+   store. Eviction is NOT `tabs.onRemoved` (no tab) — an API actor lives until its
+   chat ends or the integration is revoked.
+2. **New mint + resolve** (`background/service-worker.js`). `mintApiActor(ownerChat,
+   origin)` (reuses `mintWebSession`'s inheritance) + a resolve branch in
+   `resolveActor`: an origin-shaped `to` → resolve/lazy-mint the origin actor.
+   New persisted store rehydrated on boot.
+3. **Session discriminator** (`sessions/types.js`). Add `backing: 'tab' | 'api'`
+   (or derive "has a live tab"); `instanceId` for an API actor = its origin.
+   `actorType` stays `'web'`.
+4. **DOM-tool gate plumbing** (`tools/gates.js`, `background/service-worker.js`).
+   The gate is a pure function reading `ctx` — it has **no tab-presence signal
+   today**. Add a `backing`/`hasTab` field to the gate ctx (supplied by
+   `buildToolContext`) so DOM tools refuse for an API backing *at the gate* (today
+   a tabless web actor only fails at execute-time via `no_target_tab`). This is the
+   one real new input to a pure function; small but not a predicate tweak.
+5. **`getOwnedOrigin` + key injection** (`peerd-egress/fetch/web-fetch.js`,
+   `background/service-worker.js`). The session-scoped wrapper reads a fixed origin
+   for an API actor; P1 adds the same-origin vault-key injection step (the
+   `origin:<origin>` analog of `makeInjectGitAuth`). New pure module
+   `peerd-egress/.../origin-credentials.js` mirroring `git-credentials.js`.
+6. **Memory** (`subagent/web-actor.js`). A second summary prompt + fence tuned to
+   "what I learned about this API," selected for the API backing. State shape reused.
+7. **Addressing surface** (`tools/defs/message-actor.js`). `to` accepts an origin;
+   `deliver()` names it "The <origin> integration."
+8. **Discovery + UI** (`tools/defs/list-integrations.js` new; home cards). Enumerate
+   durable integrations alongside agent-tab cards.
 9. **The grant flow** (a connect tool + Settings → API Integrations + vault writes).
    User-owned, confirmed.
 
-### Spots that assume "an actor has (or may get) a tab"
-
-These need an explicit "API backing has no tab, ever" branch (the recon flagged
-each): `buildToolContext` active-tab resolution; the DOM-tool gate; `adoptWebTab`
-(already web-gated — must NOT be offered to an API backing); `fenceActorSummary`
-injection (add the API summary); `noteAgentTab` tracking (add an integration card
-path). `fetch_url` itself is already tab-agnostic.
-
 ## Phasing
 
-- **P0 — the unify (keyless).** Generalize the web actor to own an origin; the
-  origin→session binding; origin addressing + lazy auto-form; the DOM-tools-need-a-
-  tab gate; per-origin memory prompt; `getOwnedOrigin` for fixed-origin actors.
-  Ships first-class API integrations for **public + same-origin-cookie** APIs. No
-  vault changes. Fully gateable end-to-end (bun + in-browser + e2e).
-- **P1 — credentials.** Vault `origin:<origin>` secrets; the boundary key-injection
-  step; the connect/grant flow + Settings surface. Ships **authenticated** APIs.
-- **P2 — surface & polish.** `list_integrations`, home cards, cost per integration,
-  the orchestrator prompt lore for "address an API by origin," docs.
-- **Forward (not 0.2).** Profile-scoped integration memory (cross-chat learning);
+- **P0 — the API actor (keyless).** New origin-keyed store + mint + resolve branch;
+  origin addressing + lazy auto-form; the `backing` discriminator + the
+  DOM-tools-need-a-tab gate; `getOwnedOrigin` for fixed-origin actors; the
+  per-origin "what I learned" memory (free for the API backing). Ships first-class
+  API integrations for **public + same-origin-cookie** APIs. No vault changes. The
+  DESIGN-17 tab path is untouched. Gateable end-to-end (bun + in-browser + e2e).
+- **P1 — credentials.** The `origin:<origin>` vault secret + the pure
+  `origin-credentials.js` (https-only gate, header shape) + the boundary injection
+  step (normative rules 1–8) + the connect/grant flow + Settings surface. Ships
+  **authenticated** APIs.
+- **P2 — surface & polish.** `list_integrations`, home cards, per-integration cost,
+  orchestrator prompt lore ("address an API by its origin"), docs.
+- **Forward (not 0.2).** Profile-scoped integration memory (cross-chat learning) +
+  the cross-origin chat actor's per-origin memory (the session-cardinality rework);
   schema/endpoint discovery tools; an alias layer (`to:'stripe'` → origin).
 
 ## Open questions
 
-1. **Origin normalization.** Accept bare host and normalize to `https://`? Reject
-   non-https origins for keyed integrations (a key must never ride http)? (Lean:
-   yes to both — https-only for any keyed origin.)
-2. **One integration per origin per chat, or global?** v1 chat-scoped memory,
-   global key (above). Revisit with Profiles.
-3. **Key header variety.** Default `Authorization: Bearer`; support `X-API-Key` and
-   query-param auth? (Lean: header-based v1; query-param auth deferred — it leaks
-   into URLs/logs and wants more care.)
-4. **Tab actor + vaulted key.** Should rendering `github.com` auto-inject a vaulted
-   `api.github.com`-adjacent key? Origins differ (`github.com` ≠ `api.github.com`),
-   so no by the strict same-origin rule — correct and safe. Cross-subdomain key
-   sharing is explicitly out (a deliberate non-goal).
+1. **Origin normalization.** Accept a bare host and normalize to `https://`; reject
+   non-https for any keyed integration (rule 2 above). Lean: yes to both.
+2. **Key header variety.** Default `Authorization: Bearer`; support `X-API-Key`
+   (rule 5 covers the strip). Query-param auth deferred — it leaks into URLs/logs
+   and wants more care.
+3. **Tab actor + vaulted key.** Rendering `github.com` does NOT auto-inject an
+   `api.github.com` key — different origins, strict same-origin rule, correct and
+   safe. Cross-subdomain key sharing is an explicit non-goal.
+4. **Per-origin memory cardinality** (deferred): the cross-origin chat actor's
+   per-origin memory rides the Profiles session-cardinality rework, not 0.2.
