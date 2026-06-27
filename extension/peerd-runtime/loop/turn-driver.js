@@ -119,6 +119,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const actorType = isActor ? turnSession.actorType : undefined;
   /** @type {string|undefined} */
   const actorInstanceId = isActor ? turnSession.instanceId : undefined;
+  // DESIGN-18: a web actor's backing — 'api' (origin-owned, fetch-only, no tab) vs the
+  // default tab backing. Threaded to buildToolContext so the gate refuses DOM tools and
+  // the egress boundary scopes to the FIXED origin for an API actor.
+  /** @type {'tab'|'api'|undefined} */
+  const actorBacking = isActor ? turnSession.backing : undefined;
 
   // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
   // message_actor (display set; absent on a boot redrain), re-emit its stream as
@@ -250,7 +255,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // message_actor sender gate's untrusted-origin signal (synthetic AND not a
   // trusted first-party continuation → inbound → refused).
   const toolContext = await buildToolContext(isActor
-    ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType }
+    ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
 
   // THIRD cut: progressive disclosure. The vm/js/app SECONDARY ops are hidden

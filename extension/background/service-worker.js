@@ -221,10 +221,13 @@ import {
   makeAsyncSubagents,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
-  makeActorMessaging, restrictCtxCapabilities, actorAllowedTools, EXPOSURE_ACTOR,
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
+  // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
+  makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
   finalAssistantText,
   // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
   pullInHintInjected,
@@ -912,7 +915,7 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
@@ -1025,6 +1028,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // + positive kind-scope read these; absent on non-actor ctx).
     ...(actorInstanceId ? { actorInstanceId } : {}),
     ...(actorType ? { actorType } : {}),
+    // DESIGN-18: a web actor's backing (the gate reads it to refuse DOM tools for an
+    // API actor, which has no tab). Absent = tab backing (the DESIGN-17 default).
+    ...(actorBacking ? { backing: actorBacking } : {}),
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -1032,7 +1038,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // DATA, not a command. (Survives restrictCtxCapabilities below: this is not a
     // CAPABILITY_CONSUMERS key, so the keyless narrowing leaves it in place.)
     ...(actorType === 'web'
-      ? { fenceActorSummary: (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl: activeTab?.url }) }
+      ? {
+        // DESIGN-18: an API actor self-fences its learned memory tagged with its FIXED
+        // owned origin (actorInstanceId); a tab actor tags its current tab url.
+        fenceActorSummary: actorBacking === 'api'
+          ? (/** @type {string} */ text) => fenceApiActorSummary(text, { origin: actorInstanceId })
+          : (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl: activeTab?.url }),
+      }
       : {}),
     // why: the exposure gate's SECOND check — the session's resolved tool
     // manifest (Set | null) plus the label its refusal reason names, so
@@ -1187,7 +1199,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // it's absent on the main/runner/subagent ctx (actorType unset). adoptWebTab
     // is defined later in the file — referenced lazily here (called at turn time),
     // the same late-bound pattern as noteAgentTab.
-    ...(actorType === 'web' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
+    // DESIGN-18: an API actor (backing:'api') never renders — no tab, ever — so it
+    // does NOT get the render hook (only a tab-backed web actor lazily adopts a tab).
+    ...(actorType === 'web' && actorBacking !== 'api' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
     // why: web tools (fetch_url) reach arbitrary
     // HTTPS hosts. They use webFetch (denylist + audit) NOT safeFetch
@@ -1249,17 +1263,23 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // still gets the provider key via the turn driver's injected getSecret (off
   // this ctx), exactly like a subagent. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
-    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedTools(actorType)));
+    // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
+    // capability strip drops the DOM capabilities (scripting/debuggerPool) it can't use.
+    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking)));
     // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
-    // the user's session ONLY for a request same-origin to the tab it owns (where it's
-    // already in that session via the rendered tab — no escalation, and it never holds
-    // a credential: the browser attaches the origin's cookies, keyless intact). Every
-    // cross-origin request — and the whole 0-tab state — stays sessionless, so an
-    // injected actor can't point a credentialed fetch at a DIFFERENT logged-in site.
-    // why bound HERE on resCtx (the ctx tools receive AND mutate): navigate re-pins
-    // resCtx.activeTab on a mid-turn tab adoption, and the wrapper reads that SAME
-    // object live — so a same-origin fetch right after a render is correctly in-session.
-    if (actorType === 'web') {
+    // the user's session ONLY for a request same-origin to the ORIGIN it owns (where it's
+    // already in that session — no escalation, and it never holds a credential: the
+    // browser attaches the origin's cookies, keyless intact). Every cross-origin request
+    // stays sessionless, so an injected actor can't point a credentialed fetch at a
+    // DIFFERENT logged-in site. The owned origin differs by backing:
+    //   - tab   → the tab's LIVE origin (mutable; navigate re-pins resCtx.activeTab
+    //             mid-turn, and the wrapper reads that SAME object live).
+    //   - api   → the FIXED bound origin (actorInstanceId) — no tab, never changes.
+    if (actorType === 'web' && actorBacking === 'api') {
+      const ownedOrigin = typeof actorInstanceId === 'string' ? actorInstanceId : undefined;
+      resCtx.webFetch = withSessionScopedCredentials(webFetch, () => ownedOrigin);
+      // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
+    } else if (actorType === 'web') {
       resCtx.webFetch = withSessionScopedCredentials(
         webFetch,
         () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
@@ -2493,6 +2513,21 @@ Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
   .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
   .catch(() => {});
 
+// DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
+// tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
+// origin) — origin-keyed (vs the tab store's tabId key) because an API origin never
+// moves, and chat-scoped (v1 memory is per-chat). Persisted/rehydrated like the web
+// stores; ephemeral is fine (re-mint on loss; the integration auto-forms on first
+// address). No onRemoved lifecycle — there is no tab to close; it ages out with its chat.
+const apiActorBindings = makeApiActorBindings();
+const API_ACTOR_KEY = 'apiActorBindings';
+const persistApiActors = () => {
+  sessionCache.sessionSet(API_ACTOR_KEY, apiActorBindings.entries()).catch(() => {});
+};
+Promise.resolve(sessionCache.sessionGet(API_ACTOR_KEY))
+  .then((e) => { if (Array.isArray(e)) apiActorBindings.load(/** @type {any} */ (e)); })
+  .catch(() => {});
+
 // DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
 // correlation persists here, so an SW death between accept and deliver() doesn't
 // silently drop the reply-wake; redrain() re-queues it on boot. chrome.storage.
@@ -2539,8 +2574,8 @@ const actorMailbox = {
 // inherited field is a one-site edit, not two that can silently drift.
 // why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
-/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void }} o */
-const mintWebSession = async ({ instanceId, ownerChatId, bind }) => {
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api' }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   const created = await sessions.create({
@@ -2548,6 +2583,8 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind }) => {
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
     instanceId,
     actorType: 'web',
+    // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
+    ...(backing ? { backing } : {}),
     ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
     ...(ownerChat?.model ? { model: ownerChat.model } : {}),
     permissionMode: perm.mode,
@@ -2555,7 +2592,7 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind }) => {
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
   bind(created.sessionId);
-  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web' } }).catch(() => {});
+  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web', backing: backing ?? 'tab' } }).catch(() => {});
   return created.sessionId;
 };
 
@@ -2630,6 +2667,36 @@ const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOve
   return { instanceId: 'web', kind: 'web', actorSessionId, tabId };
 };
 
+// DESIGN-18 — lazily mint an API actor (a fetch-only origin actor) for (chat, origin).
+// The origin IS the instanceId (the egress boundary reads the owned origin straight off
+// the ctx) and backing:'api' scopes its toolset to fetch_url + denies it a tab.
+const mintApiActor = async (/** @type {string} */ ownerChatId, /** @type {string} */ origin) => mintWebSession({
+  instanceId: origin,
+  ownerChatId,
+  backing: 'api',
+  bind: (sessionId) => { apiActorBindings.bind(ownerChatId, origin, sessionId); persistApiActors(); },
+});
+
+// Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
+// AUTO-FORMS on first address (the same lazy-mint shape as the web actor). Re-mints when
+// the bound session vanished (SW death cleared session storage). Owner is the SENDER chat
+// (threaded by the messaging layer) so a boot redrain re-attaches to the right integration.
+const resolveApiActor = async (/** @type {string} */ origin, /** @type {string | null | undefined} */ ownerOverride) => {
+  const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+  if (!ownerChatId) return null;
+  let actorSessionId = apiActorBindings.resolve(ownerChatId, origin);
+  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+    apiActorBindings.drop(ownerChatId, origin);
+    persistApiActors();
+    actorSessionId = null;
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce(`api:${ownerChatId}:${origin}`, () => mintApiActor(ownerChatId, origin));
+  // instanceId IS the origin — non-numeric, non-'web', so the gate's tab-pin never
+  // fires and deliver() names it "The <origin> integration". The origin is canonical
+  // (URL.origin), so it carries no newline/bracket into the trusted lead — safe un-fenced.
+  return { instanceId: origin, kind: 'web', actorSessionId };
+};
+
 // The render-decision hook: a web actor in the 0-tab state OPENS its tab here (called
 // from navigate via ctx.adoptWebTab when the actor owns no tab). Opens BLANK in the
 // BACKGROUND (never yanks the user's focus — the actor-stays-in-background policy);
@@ -2671,6 +2738,12 @@ const actorMessaging = makeActorMessaging({
     if (/^\d+$/.test(String(instanceId))) {
       return resolveWebActorForTab(Number(instanceId));
     }
+    // DESIGN-18: an API integration is addressed by its ORIGIN (a bare host or a full
+    // URL). normalizeApiOrigin canonicalizes it and REJECTS anything that isn't a public
+    // dotted host — so 'web', a tabId, and engine ids (vm-/notebook-/app-, no dot) all
+    // fall through to the engine branch below. The origin is the integration's identity.
+    const apiOrigin = normalizeApiOrigin(instanceId);
+    if (apiOrigin) return resolveApiActor(apiOrigin, opts.senderSessionId);
     const prefix = String(instanceId).split('-')[0];
     const entry = /** @type {Record<string, { reg: any, kind: string }>} */ (ACTOR_REGISTRY_BY_PREFIX)[prefix];
     if (!entry) return null;

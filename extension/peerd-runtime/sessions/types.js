@@ -46,8 +46,9 @@
  * engine registry record (`actorSessionId`) for the three engine kinds, or in
  * the tab→session bindings store (`subagent/web-actor.js`) for `web`. These
  * are the REVERSE pointer the actor turn reads. Absent on chat/subagent.
- * @property {string} [instanceId]            the instance (engine id) or owned tabId (String) this actor owns
- * @property {'webvm' | 'notebook' | 'app' | 'web'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab
+ * @property {string} [instanceId]            the instance (engine id), the owned tabId (String), or — for a DESIGN-18 API actor — the owned ORIGIN
+ * @property {'webvm' | 'notebook' | 'app' | 'web'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab OR (DESIGN-18) an API origin
+ * @property {'tab' | 'api'} [backing]         DESIGN-18: a `web` actor's backing — 'tab' (default; absent = tab) drives a DOM at a MUTABLE origin; 'api' owns ONE FIXED origin, fetch-only, no tab ever
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

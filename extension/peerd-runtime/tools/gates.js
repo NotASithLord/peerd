@@ -43,7 +43,7 @@
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
-  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActorType, actorTargetId,
+  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActor, actorTargetId,
   actorWebTabTarget, isRunnerPageTool,
 } from './exposure.js';
 import {
@@ -72,6 +72,7 @@ import {
  *   toolManifestLabel?: string,
  *   actorInstanceId?: string,
  *   actorType?: string,
+ *   backing?: 'tab' | 'api',
  * }} GateContext
  */
 
@@ -138,8 +139,12 @@ export const actorTierGate = (tool, args, ctx) => {
     }
     return null;
   }
-  if (!isAllowedForActorType(tool.name, ctx.actorType)) {
-    return { allowed: false, reason: `'${tool.name}' is not in this actor's (${ctx.actorType ?? 'unknown'}) toolset` };
+  // DESIGN-18: an API actor (actorType:'web', backing:'api') is fetch-only — its
+  // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
+  // refuses HERE, at the gate, not just at execute-time.
+  if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing)) {
+    const scope = ctx.backing === 'api' ? 'API integration (no tab — fetch_url only)' : `${ctx.actorType ?? 'unknown'}`;
+    return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
   }
   // The actor dispatch wrapper (turn-driver pinActorCall) already FORCE-
   // normalizes any id/name arg to the bound instance id before dispatch, so by
@@ -156,7 +161,7 @@ export const actorTierGate = (tool, args, ctx) => {
   // is refused; absent → the bound tab (fine). actorInstanceId = owned tabId
   // as a string. (Runs before resolveTargetTab, so it sees only the explicit arg
   // — the in-execute denylist re-check in resolveTargetTab is the second wall.)
-  if (ctx.actorType === 'web') {
+  if (ctx.actorType === 'web' && ctx.backing !== 'api') {
     const tab = actorWebTabTarget(args);
     // String() BOTH sides (M6): actorInstanceId SHOULD be the tabId as a
     // string, but coercing defensively means a numeric mint can't lock the

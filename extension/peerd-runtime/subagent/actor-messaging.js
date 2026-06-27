@@ -153,9 +153,14 @@ export const makeActorMessaging = (deps) => {
     // The chat-scoped web actor has instanceId === kind === 'web'; naming both would
     // double the word ("the web actor web …"). Render it as "the web actor". A per-tab
     // web actor keeps "the web actor 42 …" (instanceId is the meaningful tabId).
+    // DESIGN-18: an API actor is a web actor whose instanceId is its ORIGIN — render it
+    // "The <origin> integration". The origin is canonical (URL.origin: no space/newline/
+    // bracket), so it's safe un-fenced in this trusted lead.
     const subject = (kind === 'web' && instanceId === 'web')
       ? 'The web actor'
-      : `The ${kind} actor ${safeName ? `${safeName} (${instanceId})` : instanceId}`;
+      : (kind === 'web' && /^https?:\/\//.test(String(instanceId)))
+        ? `The ${instanceId} integration`
+        : `The ${kind} actor ${safeName ? `${safeName} (${instanceId})` : instanceId}`;
     const lead = failed
       ? `${subject} could not complete your request:`
       : `${subject} you messaged has replied:`;
@@ -276,7 +281,9 @@ export const makeActorMessaging = (deps) => {
 
     const recipient = (kind === 'web' && instanceId === 'web')
       ? 'the web actor'
-      : `the ${kind} actor (${name ?? instanceId})`;
+      : (kind === 'web' && /^https?:\/\//.test(String(instanceId)))
+        ? `the ${instanceId} integration`
+        : `the ${kind} actor (${name ?? instanceId})`;
     return {
       ok: true,
       content: `Message delivered to ${recipient}. Its reply will arrive on a LATER turn as a fenced note — do NOT wait or poll; continue or end your turn.`,

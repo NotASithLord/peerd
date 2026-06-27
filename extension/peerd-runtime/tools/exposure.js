@@ -219,6 +219,24 @@ export const actorAllowedTools = (kind) =>
 /** May an actor of `kind` call this tool? Pure. @param {string} name @param {string} [kind] */
 export const isAllowedForActorType = (name, kind) => actorAllowedTools(kind).has(name);
 
+// DESIGN-18: an API actor is a `web` actor with `backing:'api'` — it owns ONE origin
+// and has NO tab, so the whole DOM toolset (which needs a tab it never has) is removed
+// from its allow-set. It keeps only the keyless, tab-free fetch_url. Used by BOTH the
+// gate (refuse a DOM tool for an API backing) and the capability strip (drop the DOM
+// capabilities), so an API actor is genuinely fetch-only, not just gated.
+const WEB_API_TOOLS = Object.freeze(new Set(['fetch_url']));
+
+/**
+ * The Set an actor may call given its kind AND (for a web actor) its backing — the
+ * full web toolset for a tab backing, fetch_url-only for an API backing. Pure.
+ * @param {string} [kind] @param {'tab' | 'api'} [backing]
+ */
+export const actorAllowedToolsFor = (kind, backing) =>
+  (kind === 'web' && backing === 'api') ? WEB_API_TOOLS : actorAllowedTools(kind);
+
+/** May an actor of `kind`/`backing` call this tool? Pure. @param {string} name @param {string} [kind] @param {'tab' | 'api'} [backing] */
+export const isAllowedForActor = (name, kind, backing) => actorAllowedToolsFor(kind, backing).has(name);
+
 // Per-tool target-id ARG field — what an actor-gated tool calls its instance
 // target. The actor dispatch wrapper force-injects the bound id here (the
 // per-instance pin); the gate reads it for a defense-in-depth mismatch refusal.

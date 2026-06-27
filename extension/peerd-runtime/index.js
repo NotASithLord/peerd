@@ -152,6 +152,8 @@ export {
   // DESIGN-17: the actor capability tier vocabulary.
   EXPOSURE_ACTOR, ACTOR_MUTATING_TOOLS, isActorMutatingTool,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
+  // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
+  actorAllowedToolsFor, isAllowedForActor,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.

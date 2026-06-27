@@ -5,6 +5,7 @@ import {
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool,
   isActorMutatingTool, actorAllowedTools, isAllowedForActorType,
+  actorAllowedToolsFor, isAllowedForActor,
   actorTargetId, actorTargetIdField, actorDescriptors, filterActorSurface,
   EXPOSURE_ACTOR,
   WEB_ACTOR_DOM_TOOLS, actorWebTabTarget,
@@ -333,6 +334,33 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(isAllowedForActorType('call_api', 'web')).toBe(false);
     // == DOM toolset + the one fetch_url addition (drift: bump if the set grows).
     expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 1);
+  });
+
+  test('DESIGN-18: an API backing (web actor, no tab) is fetch_url-ONLY', () => {
+    // fetch_url is in; the whole DOM toolset is OUT (it needs a tab the API actor
+    // never has). The gate refuses a DOM tool for backing:'api' at the gate.
+    expect(isAllowedForActor('fetch_url', 'web', 'api')).toBe(true);
+    for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_pdf']) {
+      expect(isAllowedForActor(n, 'web', 'api')).toBe(false);
+    }
+    expect(actorAllowedToolsFor('web', 'api').size).toBe(1);   // fetch_url only
+    // A tab backing (and an absent backing — the DESIGN-17 default) keeps the FULL set.
+    expect(isAllowedForActor('click', 'web', 'tab')).toBe(true);
+    expect(isAllowedForActor('click', 'web', undefined)).toBe(true);
+    expect(actorAllowedToolsFor('web', 'tab').size).toBe(actorAllowedTools('web').size);
+    // backing is web-only — it doesn't change an engine kind's set.
+    expect(actorAllowedToolsFor('webvm', 'api').size).toBe(actorAllowedTools('webvm').size);
+  });
+
+  test('DESIGN-18: actorTierGate refuses DOM tools for an API backing, allows fetch_url', () => {
+    const apiCtx = { exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'api', actorInstanceId: 'https://api.stripe.com' };
+    // fetch_url passes; click is refused with an API-shaped reason.
+    expect(rt({ name: 'fetch_url' }, { url: 'https://api.stripe.com/v1/charges' }, apiCtx)).toBeNull();
+    const refused = rt({ name: 'click' }, { ref: 'a1' }, apiCtx);
+    expect(refused?.allowed).toBe(false);
+    expect(refused?.reason).toContain('API integration');
+    // The same DOM tool is fine for a tab-backed web actor.
+    expect(rt({ name: 'click' }, {}, { exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42' })).toBeNull();
   });
 
   test('a web actor is positively scoped — foreign + powerful tools refused', () => {

@@ -47,7 +47,7 @@ export const messageActorTool = {
     properties: {
       to: {
         type: 'string',
-        description: 'Who to address: "web" for general web work (the web actor picks fetch-vs-render — prefer this for web tasks); a specific open page\'s tabId (from list_tabs / open_tab); OR a vm/notebook/app instance id (from vm_list / js_list / app_list). An actor is minted on first message.',
+        description: 'Who to address: "web" for general web work (the web actor picks fetch-vs-render — prefer this for open-ended web tasks); an API integration\'s ORIGIN (a bare host like "api.github.com" or a full origin) for repeated, focused work against ONE API — it is fetch-only, keyless, origin-locked, and ACCUMULATES what it learns about that API across messages; a specific open page\'s tabId (from list_tabs / open_tab); OR a vm/notebook/app instance id (from vm_list / js_list / app_list). An actor is minted on first message; an API integration auto-forms the first time you address its origin.',
       },
       message: {
         type: 'string',
