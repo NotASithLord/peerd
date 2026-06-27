@@ -50,8 +50,9 @@ describe('fetch_url — sessionless secure fetch', () => {
     const p = unwrap(r.content!);
     expect(p.status).toBe(200);
     expect(p.json.price).toBe(9);
-    // SESSIONLESS: credentials omitted so no cookies ride along.
-    expect((seen as any).init.credentials).toBe('omit');
+    // The TOOL never sets credentials — the SESSION decision is the boundary's
+    // (ctx.webFetch is session-scoped). So a tool can't opt a request into the session.
+    expect('credentials' in (seen as any).init).toBe(false);
   });
 
   test('strips Cookie / Authorization / Proxy-Authorization (no laundered credential)', async () => {
@@ -65,7 +66,9 @@ describe('fetch_url — sessionless secure fetch', () => {
     expect(sent.authorization).toBeUndefined();
     expect(sent['Proxy-Authorization']).toBeUndefined();
     expect(sent['X-Keep']).toBe('ok');               // non-session headers pass through
-    expect(seen.init.credentials).toBe('omit');
+    // The real same-origin cookies come from the browser jar via the boundary, never
+    // a tool-supplied header — so the tool sets no credentials of its own.
+    expect('credentials' in seen.init).toBe(false);
   });
 
   test('a non-GET write is confirm-gated (shared web:write key); declines on "no"', async () => {
@@ -97,7 +100,7 @@ describe('fetch_url — sessionless secure fetch', () => {
     expect(r.ok).toBe(true);
     expect(seen.init.body).toBe('{"a":1}');
     expect(seen.init.headers['Content-Type']).toBe('application/json');
-    expect(seen.init.credentials).toBe('omit');      // sessionless even on a write
+    expect('credentials' in seen.init).toBe(false);  // the boundary decides, not the tool
   });
 
   test('rejects a non-http(s) scheme and an invalid url before any fetch', async () => {

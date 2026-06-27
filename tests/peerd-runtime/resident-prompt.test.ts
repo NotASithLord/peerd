@@ -87,11 +87,14 @@ describe('residentBlock (the per-kind tuned prompt)', () => {
     const web = residentBlock('web');
     // The two mechanisms + the decision rule (the single-entry-point design).
     expect(web.includes('fetch_url')).toBe(true);
+    expect(web.includes('cheapest path')).toBe(true);
+    // Session scoping: fetch carries the user's session ONLY same-origin to its tab;
+    // cross-site is sessionless. Both halves stated.
+    expect(web.includes('same-origin')).toBe(true);
     expect(web.includes('SESSIONLESS')).toBe(true);
-    expect(web.includes('cheaper path')).toBe(true);
     // 0-or-1 tab lazy ownership + the fail-closed pin (never the user's foreground tab).
     expect(web.includes('0-OR-1 tab')).toBe(true);
-    expect(web.includes('fail closed')).toBe(true);
+    expect(web.includes('FAIL CLOSED')).toBe(true);
     // DOM-driving lore still present.
     expect(web.includes('re-snapshot')).toBe(true);
     expect(web.includes('UNTRUSTED')).toBe(true);

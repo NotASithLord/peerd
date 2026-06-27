@@ -49,6 +49,7 @@ import {
   // fetch / egress
   makeSafeFetch,
   makeWebFetch,
+  withSessionScopedCredentials,
   HARDCODED_ALLOWLIST,
   matchesDenylist,
   // audit
@@ -1248,7 +1249,23 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // still gets the provider key via the turn driver's injected getSecret (off
   // this ctx), exactly like a subagent. Non-resident ctx is unchanged.
   if (exposure === EXPOSURE_RESIDENT) {
-    return restrictCtxCapabilities(ctx, new Set(residentAllowedTools(residentKind)));
+    const resCtx = restrictCtxCapabilities(ctx, new Set(residentAllowedTools(residentKind)));
+    // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
+    // the user's session ONLY for a request same-origin to the tab it owns (where it's
+    // already in that session via the rendered tab — no escalation, and it never holds
+    // a credential: the browser attaches the origin's cookies, keyless intact). Every
+    // cross-origin request — and the whole 0-tab state — stays sessionless, so an
+    // injected actor can't point a credentialed fetch at a DIFFERENT logged-in site.
+    // why bound HERE on resCtx (the ctx tools receive AND mutate): navigate re-pins
+    // resCtx.activeTab on a mid-turn tab adoption, and the wrapper reads that SAME
+    // object live — so a same-origin fetch right after a render is correctly in-session.
+    if (residentKind === 'web') {
+      resCtx.webFetch = withSessionScopedCredentials(
+        webFetch,
+        () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
+      );
+    }
+    return resCtx;
   }
   return ctx;
 };

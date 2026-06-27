@@ -1,18 +1,20 @@
 // @ts-check
-// fetch_url — the web resident's SESSIONLESS secure fetch.
+// fetch_url — the web resident's secure fetch (its non-render web mechanism).
 //
-// The cheaper of the web actor's two mechanisms (the other is open + drive a
-// tab). A direct, denylist-gated, audited HTTP call with NO tab, NO rendering,
-// and — by construction — NO session: credentials are omitted (no cookies) and
-// Cookie/Authorization headers are stripped, so there is no credential for an
-// injected page to exfil. That sessionlessness is what keeps the web resident
-// KEYLESS even though it now reaches egress: it rides ctx.webFetch (the open-web
-// path — scheme + SSRF/private-network + denylist + redirect-block + audit), the
-// SAME chain call_api uses, and the capability strip (spawn.js
-// restrictCtxCapabilities) leaves the web ctx NO getSecret / NO safeFetch.
-// why: carrying the user's session INTO a fetch is OUT of scope here — that is
-// the separate credentialed-fetch design, gated behind the Phase-2 worker
-// relocation. This tool must never become credentialed.
+// The cheaper of the web actor's two mechanisms (the other is open + drive a tab).
+// A direct, denylist-gated, audited HTTP call with NO tab and NO rendering. It rides
+// ctx.webFetch — scheme + SSRF/private-network + denylist + redirect-block + audit,
+// the SAME chain call_api uses — and the capability strip (spawn.js
+// restrictCtxCapabilities) leaves the web ctx NO getSecret / NO safeFetch (keyless).
+//
+// SESSION is decided AT THE BOUNDARY, not here: ctx.webFetch is session-scoped
+// (peerd-egress withSessionScopedCredentials) so the user's cookies ride ONLY on a
+// request same-origin to the tab the actor owns — where it is already in that session
+// via the rendered tab — and EVERY cross-origin request (and the whole 0-tab state)
+// stays sessionless. This tool never sets credentials, so it cannot opt a cross-origin
+// request into the session. why still strip Cookie/Authorization here: those are
+// tool-supplied HEADERS (a laundered injection forging a credential); the real
+// same-origin cookies come from the browser's jar via the boundary, never a header.
 
 import { fetchUrl } from '../web/primitives.js';
 import { originOfUrl } from './dom-helpers.js';
@@ -102,11 +104,12 @@ export const fetchUrlTool = {
     }
 
     try {
-      // credentials:'omit' = SESSIONLESS by construction: no cookies ride along,
-      // so the keyless actor stays keyless even with an egress surface.
+      // No credentials arg: the SESSION decision is the boundary's (ctx.webFetch is
+      // session-scoped) — same-origin to the owned tab carries the session, every
+      // cross-origin request stays sessionless. The tool can't override it.
       const res = await fetchUrl(
         args.url,
-        { method, headers, body: /** @type {string | undefined} */ (body), credentials: 'omit' },
+        { method, headers, body: /** @type {string | undefined} */ (body) },
         ctx,
       );
       const truncated = res.body.length > MAX_BODY_CHARS;

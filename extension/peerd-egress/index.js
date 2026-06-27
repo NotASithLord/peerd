@@ -53,7 +53,7 @@ export {
   originOf,
   isAllowed,
 } from './fetch/safe-fetch.js';
-export { makeWebFetch } from './fetch/web-fetch.js';
+export { makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials } from './fetch/web-fetch.js';
 export { EgressDeniedError } from './fetch/errors.js';
 
 // --- denylist -----------------------------------------------------------
