@@ -27,6 +27,7 @@ import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { fetchUrlTool }              from './fetch-url.js';
 import { listTabsTool }              from './list-tabs.js';
+import { listIntegrationsTool }      from './list-integrations.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
 import { vmImportTool }               from './vm-import.js';
@@ -93,6 +94,7 @@ export {
   readPdfTool,
   // sessions
   listTabsTool,
+  listIntegrationsTool,
   openTabTool,
   // engine (WebVM)
   vmBootTool,
@@ -160,6 +162,7 @@ export const BUILTIN_TOOLS = Object.freeze([
   inspectAuditLogTool,
   // sessions
   listTabsTool,
+  listIntegrationsTool,
   openTabTool,
   // DOM
   readPageTool,

@@ -87,6 +87,8 @@ tools, and it CHOOSES per task. You reach the web by MESSAGING it with intent.
     it ACCUMULATES what it learns about that API across messages. Address it by the bare
     host/origin; it auto-forms on first message. Prefer it over "web" when you'll hit the
     same API more than once — it remembers the endpoints and auth shape so you don't re-explain.
+    list_integrations shows the ones you've formed + the ones the user has stored an API key
+    for (keyed: the key rides automatically, same-origin, and you never see it).
 
 Delegation is actor messaging — message_actor is a GenServer cast/call. A cast hands
 the actor a goal and returns at once; its summary arrives on a LATER turn as a fenced

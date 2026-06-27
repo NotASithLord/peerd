@@ -54,6 +54,8 @@ import {
   // keyless origin:<origin> key injection) + the Settings → API integrations routes.
   withApiCredentials,
   makeOriginCredentialRoutes,
+  // DESIGN-18 P2: map a vault secret name → its origin (list_integrations discovery).
+  originFromSecretName,
   HARDCODED_ALLOWLIST,
   matchesDenylist,
   // audit
@@ -1216,6 +1218,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // does NOT get the render hook (only a tab-backed web actor lazily adopts a tab).
     ...(actorType === 'web' && actorBacking !== 'api' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
+    // DESIGN-18 P2: list_integrations reads this — the chat's API integrations
+    // (formed ∪ keyed). Referenced lazily (defined later, called at turn time, like
+    // adoptWebTab). Only the orchestrator calls it (the gate refuses it for actors).
+    listApiIntegrations: () => listApiIntegrations(sessionId),
     // why: web tools (fetch_url) reach arbitrary
     // HTTPS hosts. They use webFetch (denylist + audit) NOT safeFetch
     // (provider-allowlist, locked down). safeFetch is still in ctx for
@@ -2545,6 +2551,26 @@ const persistApiActors = () => {
 Promise.resolve(sessionCache.sessionGet(API_ACTOR_KEY))
   .then((e) => { if (Array.isArray(e)) apiActorBindings.load(/** @type {any} */ (e)); })
   .catch(() => {});
+
+// DESIGN-18 P2 — the list_integrations discovery surface (injected as ctx.listApiIntegrations
+// for the orchestrator). The addressable set is the chat's FORMED integrations (origins it
+// already worked, from the binding store) UNION the KEYED origins (vault origin:<origin>
+// secrets — global, usable by any chat). keyed=true tells the agent an API key rides
+// automatically; formed=true that it has state/memory here. A locked vault degrades to
+// formed-only (no throw). The KEY VALUE is never read — only the secret NAMES (origins).
+const listApiIntegrations = async (/** @type {string | null | undefined} */ chatId) => {
+  const formed = chatId ? apiActorBindings.originsFor(chatId) : [];
+  /** @type {string[]} */
+  let keyed = [];
+  try {
+    const names = await vault.listSecretNames();
+    keyed = /** @type {string[]} */ (names.map(originFromSecretName).filter(Boolean));
+  } catch { keyed = []; }   // locked → formed-only
+  const formedSet = new Set(formed);
+  const keyedSet = new Set(keyed);
+  const origins = [...new Set([...formed, ...keyed])].sort();
+  return origins.map((origin) => ({ origin, keyed: keyedSet.has(origin), formed: formedSet.has(origin) }));
+};
 
 // DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
 // correlation persists here, so an SW death between accept and deliver() doesn't
