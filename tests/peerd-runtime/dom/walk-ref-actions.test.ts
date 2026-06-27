@@ -112,4 +112,24 @@ describe('click/type — walk-ref dispatch', () => {
     expect(r.error).toContain('debugger_unavailable');
     expect(r.error).toContain('Re-run snapshot');
   });
+
+  test('click {selector, expectedCount} forwards a pre-action cardinality guard', async () => {
+    const { ctx, injections } = makeCtx((req: any) => [{ result: { ok: true, clicked: true, tag: 'button', text: 'Delete', matchedCount: 3, nth: 0 } }]);
+    const r = await clickTool.execute({ selector: '.delete-row', expectedCount: 3 }, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok result');
+    // [selector, nth, walkId=null, expectedCount]
+    expect(injections[0].args).toEqual(['.delete-row', 0, null, 3]);
+    expect(r.content).toContain('"matchedCount": 3');
+  });
+
+  test('type {selector, expectedCount} forwards a pre-action cardinality guard', async () => {
+    const { ctx, injections } = makeCtx((req: any) => [{ result: { ok: true, typed: 'Ada', submitted: false, tag: 'input', matchedCount: 1 } }]);
+    const r = await typeTool.execute({ selector: 'input[name="assignee"]', text: 'Ada', expectedCount: 1 }, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok result');
+    // [selector, text, submit, walkId=null, expectedCount]
+    expect(injections[0].args).toEqual(['input[name="assignee"]', 'Ada', false, null, 1]);
+    expect(r.content).toContain('"matchedCount": 1');
+  });
 });
