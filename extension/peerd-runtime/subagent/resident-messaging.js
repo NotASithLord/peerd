@@ -1,16 +1,15 @@
 // @ts-check
 // DESIGN-17 — message_resident: the channel to a tab-hosted instance's resident.
 //
-// You don't mutate an instance; you message its RESIDENT — a VIRTUAL ACTOR (an
-// Orleans-style grain: lazily activated, addressed by a stable id, the resolved
-// resident session as its ActorRef) that exclusively holds that environment's
-// tools. This orchestrator is the direct analog of async-subagents
-// (subagent/async-subagents.js): a TURN-BASED mailbox over turnSlots (one message
-// at a time per actor; never interrupts an in-flight turn), a SW-captured
-// correlation (the sender is closed over, not trusted from the resident), a
-// wrapUntrusted-fenced reply that re-enters the sender as a synthetic wake, and
-// a per-sender runaway guard. Functional core / imperative shell: every IO
-// surface is injected, so the spawn → run → reply flow is unit-testable.
+// You don't mutate an instance; you message its RESIDENT — a GenServer-style OTP
+// process (started on demand, addressed by a registered name, the resolved resident
+// session its live PID) that exclusively holds that environment's tools. This
+// orchestrator is the direct analog of async-subagents (subagent/async-subagents.js):
+// a MAILBOX over turnSlots processed one message at a time (never interrupts an
+// in-flight turn), a SW-captured correlation (the sender is closed over, not trusted
+// from the resident), a wrapUntrusted-fenced reply that re-enters the sender as a
+// synthetic wake, and a per-sender runaway guard. Functional core / imperative shell:
+// every IO surface is injected, so the spawn → run → reply flow is unit-testable.
 //
 // ONE reply shape for EVERY kind (web included). The orchestrator NEVER blocks: it
 // hands a task to a resident and gets woken with the reply on a later turn via

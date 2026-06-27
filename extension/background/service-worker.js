@@ -2390,15 +2390,15 @@ const mintOnce = (key, fn) => {
   return p;
 };
 
-// Activate the virtual actor: lazily mint a resident session for an instance (on
-// the first message_resident). Inherits the spawning chat's RESOLVED Plan/Act
-// posture — resolved + stored EXPLICITLY so it can't silently widen to the global
-// default (the subagent guardrail-3 precedent). Binds BOTH directions:
-// residentSessionId on the registry record (the actor's REGISTERED NAME — the
-// stable instance id → live session pointer resolveResident reads), and the
-// resident session as the instance's session-default so id-less tools
-// (vm_write_file / vm_import / edit_file) resolve the bound instance. A lost
-// session is re-minted on the next message — supervisor restart (resolveResident).
+// Start the resident process on demand: lazily mint a resident session for an
+// instance (on the first message_resident). Inherits the spawning chat's RESOLVED
+// Plan/Act posture — resolved + stored EXPLICITLY so it can't silently widen to the
+// global default (the subagent guardrail-3 precedent). Binds BOTH directions:
+// residentSessionId on the registry record (the REGISTERED NAME — the stable
+// instance id → live session pointer resolveResident reads, like a Registry entry),
+// and the resident session as the instance's session-default so id-less tools
+// (vm_write_file / vm_import / edit_file) resolve the bound instance. Lost session?
+// re-minted on the next message — let-it-crash / supervisor restart (resolveResident).
 const mintResident = async (/** @type {{ reg: any, kind: string }} */ entry, /** @type {any} */ record) => {
   const activeId = await sessionCache.sessionGet('currentSessionId');
   const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
