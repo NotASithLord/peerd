@@ -100,10 +100,13 @@ export { makeAsyncSubagents } from './subagent/async-subagents.js';
 // instance's actor — the async-subagents shape, specialized).
 export { makeActorMessaging } from './subagent/actor-messaging.js';
 // DESIGN-17: the WEB actor — the disposable browser-runner folded into the
-// actor model as a fourth `kind:'web'` actor that owns one tab. Pure core:
+// actor model as a fourth `actorType:'web'` actor that owns one tab. Pure core:
 // the tab→session bindings, the action-log rolling-summary prompt, the self-fence.
+// DESIGN-18: the API actor is the same origin actor with NO tab (fetch-only) — its
+// origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
+  makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
 } from './subagent/web-actor.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
