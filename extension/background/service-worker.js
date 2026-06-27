@@ -684,7 +684,7 @@ export const safeFetch = makeSafeFetch({
   audit: /** @type {any} */ (auditLog.append),
 });
 
-// why: separate egress wrapper for web tools (fetch_url, web_search) and
+// why: separate egress wrapper for web tools (fetch_url) and
 // the web actor. Provider allowlist would be too narrow — those tools
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
 // in depth alongside the dispatcher's origin gate.
@@ -1189,7 +1189,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // the same late-bound pattern as noteAgentTab.
     ...(residentKind === 'web' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
-    // why: web tools (fetch_url, web_search, ...) reach arbitrary
+    // why: web tools (fetch_url) reach arbitrary
     // HTTPS hosts. They use webFetch (denylist + audit) NOT safeFetch
     // (provider-allowlist, locked down). safeFetch is still in ctx for
     // any future tool that legitimately needs to hit a provider.

@@ -73,9 +73,11 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
     filterDescriptorsByManifest(mainAgentDescriptors(registered), resolveManifestAllow({ preset })),
   ).map((t) => t.name);
 
-  it('research: keeps the page-via-resident channel + web search + memory, folds do/get/check away', () => {
+  it('research: keeps the page-via-resident channel + memory, folds do/get/check away', () => {
     const names = mainListFor('research');
-    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'web_search', 'remember', 'read_memory', 'inspect_audit_log']) {
+    // fetch_url is resident-only (correctly NOT in the main list); the main
+    // agent's web channel is the resident (message_resident) + tab management.
+    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'remember', 'read_memory', 'inspect_audit_log']) {
       expect(names).toContain(keep);
     }
     // do/get/check folded into the resident; execution/edit/spawn dropped by the preset.
@@ -84,9 +86,11 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
     }
   });
 
-  it('browse-only: keeps tabs + the resident channel + web reads, folds get/check away', () => {
+  it('browse-only: keeps tabs + the resident channel, folds get/check away', () => {
     const names = mainListFor('browse-only');
-    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'web_search']) {
+    // fetch_url is resident-only (correctly NOT in the main list); the main
+    // agent reaches web reads via the resident (message_resident).
+    for (const keep of ['message_resident', 'list_tabs', 'open_tab']) {
       expect(names).toContain(keep);
     }
     for (const drop of ['do', 'get', 'check', 'remember', 'read_memory', 'edit_file', 'vm_boot', 'capture']) {

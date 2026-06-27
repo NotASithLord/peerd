@@ -41,10 +41,11 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
   research: Object.freeze({
     description: 'web reads + search, page browsing (message a tab\'s resident), memory, introspection — no VM/JS/App, no file edits, no spawning',
     allow: Object.freeze([
-      // web surface: web_search (orchestrator URL discovery) + fetch_url (the web
-      // resident's sessionless fetch — call_api/read_article were removed). submit_form
-      // stays out: research is read-shaped and form submission mutates the world.
-      'web_search', 'fetch_url', 'capture',
+      // web surface: fetch_url (the web resident's sessionless fetch) + capture.
+      // web_search/call_api/read_article/submit_form were all removed — the web
+      // actor searches by navigating to an engine + reading results, and reads via
+      // fetch_url or its drive-a-tab DOM tools.
+      'fetch_url', 'capture',
       // the main agent's browser surface: open/enumerate tabs + message a tab's
       // web resident to read or act (do/get/check are folded into the resident).
       'list_tabs', 'open_tab', 'message_resident',
@@ -74,8 +75,8 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       'get', 'check',   // subagent read path (the main agent reads via the resident)
       // READ_TOOLSET only (observe, never mutate) — inherited by the web resident.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',
-      // web reads: web_search (orchestrator) + fetch_url (the web resident's fetch)
-      'web_search', 'fetch_url',
+      // web reads: fetch_url (the web resident's sessionless fetch)
+      'fetch_url',
       // temporal grounding (reads)
       'now',
     ]),

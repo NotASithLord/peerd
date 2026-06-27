@@ -124,7 +124,7 @@
  *                                     web tools + DOM-walk fallbacks read it
  * @property {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} [webFetch]
  *                                     denylist-gated fetch for the web tools
- *                                     (fetch_url / web_search)
+ *                                     (fetch_url)
  * @property {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} [safeFetch]
  *                                     provider-allowlist fetch (locked down;
  *                                     for tools that legitimately hit a provider)

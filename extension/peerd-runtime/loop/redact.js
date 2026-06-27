@@ -17,7 +17,7 @@
 //
 //   2. Anything over MAX_CHARS chars → head + ellipsis + tail.
 //      Affects verbose `read_page` on big SPAs, `vm_boot` stdout
-//      bursts, `web_search` results that pull a long page. The
+//      bursts, `fetch_url` bodies that pull a long page. The
 //      head keeps the bit the model needs for context; the tail
 //      preserves the very-end (often a status line or summary).
 //

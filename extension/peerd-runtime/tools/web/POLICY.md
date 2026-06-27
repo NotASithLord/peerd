@@ -27,36 +27,30 @@ different purposes and have different costs.
 - Visual context matters (screenshot, computed styles)
 - Content is lazy-loaded
 
-## Three tab variants, in order of cost
+## Two tab variants, in order of cost
 
 1. **Offscreen document** (`chrome.offscreen`) — headless page, no tab strip.
-   Default for non-navigation parsing.
-2. **Inactive tab** (`chrome.tabs.create({ active: false })`) — real tab,
-   loads JS, no focus steal. Used for TRANSIENT scrapes (read_article /
-   web_search escalation) that open, read, and close.
-3. **Active tab** — focus moves to it. The default for `open_tab` and new
+   Used for non-navigation parsing / the headless worker.
+2. **Active tab** — focus moves to it. The default for `open_tab` and new
    VM/Notebook/App tabs: a tab peerd opens for the user to SEE takes focus
    (DECISIONS #20, 2026-06-14). Acting on an existing tab never re-focuses.
 
-## Escalation default
+> Historical note: the original V1 wrappers (`web_search`, `read_article`,
+> `call_api`, `submit_form`) and the `safeFetch`-vs-tab ESCALATION heuristic
+> (`policy.js` `shouldEscalate`) have been REMOVED. The web actor (`kind:'web'`)
+> is the single entry point for web work now: it READS via `fetch_url`
+> (denylist-gated, sessionless / same-origin-scoped) or its drive-a-tab DOM
+> tools, SEARCHES by navigating to a search engine and reading the results, and
+> submits FORMS via those DOM tools. The actor PICKS fetch-vs-render itself —
+> there is no longer a heuristic that auto-escalates a fetch to a tab.
 
-Try `safeFetch` first. If response is SPA shell, 403/challenge, or
-`expects` schema fails → escalate to inactive tab. Per-tool overrides
-exist (`web_search` always tab; `call_api` always safeFetch).
+## The remaining wrapper
 
-## V1 wrapper tools
-
-The five wrappers below cover the common cases. Each encodes the right
-choice; the agent should reach for these first and only drop down to
-the raw primitives (`safeFetch` via `call_api`, `open_tab` for
-arbitrary tab work) when none of the wrappers fit.
+Only one web wrapper survives in `WEB_TOOLS`. Everything else moved to the
+web actor (`fetch_url` + the DOM toolset).
 
 | Tool          | Default        | Escalates? | sideEffect       |
 |---------------|----------------|------------|------------------|
-| `web_search`  | visible tab    | never      | read             |
-| `read_article`| safeFetch      | tab        | read             |
-| `call_api`    | safeFetch      | never      | read             |
-| `submit_form` | active tab     | never      | mutate_external  |
 | `capture`     | active tab     | never      | read             |
 
 ## V1 visibility default

@@ -45,7 +45,7 @@ export const PERMISSION_MODES = Object.freeze({
   // navigation carve-out below), but may NOT mutate anything: no
   // file/workspace writes, no shell, no side-effecting fetch, and — the
   // browser-native part — no side-effecting DOM actions (click/type/
-  // submit_form/page_exec). Bigger blast radius than a terminal's
+  // navigate/page_exec). Bigger blast radius than a terminal's
   // "plan", so the block list is bigger too.
   PLAN: /** @type {const} */ ('plan'),
   // ACT — writes allowed, subject to the confirmActions toggle.

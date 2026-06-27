@@ -245,11 +245,9 @@ export {
   CLOCK_TOOLS,
 } from './clock/index.js';
 
-// --- web (fetch vs tab policy + wrappers) -------------------------------
+// --- web (capture wrapper) ----------------------------------------------
 export {
-  WEB_TOOLS,
-  webSearchTool, submitFormTool, captureTool,
-  shouldEscalate, looksLikeSpaShell, matchesAntiBotTemplate, satisfiesExpects,
+  WEB_TOOLS, captureTool,
 } from './tools/web/index.js';
 
 // --- voice (local transcription) ----------------------------------------

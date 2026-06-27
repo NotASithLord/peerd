@@ -68,7 +68,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
       for (const name of [
         'vm_boot', 'vm_create', 'vm_delete', 'js_notebook', 'js_create',
         'app_create', 'app_update', 'edit_file', 'spawn_subagent',
-        'page_eval', 'page_exec', 'submit_form', 'request_review', 'load_skill',
+        'page_eval', 'page_exec', 'request_review', 'load_skill',
       ]) {
         expect(allow.has(name)).toBe(false);
       }

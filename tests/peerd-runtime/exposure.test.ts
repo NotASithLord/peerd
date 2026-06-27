@@ -59,7 +59,7 @@ describe('dweb tool exposure (progressive disclosure of the SECONDARY surface)',
 
 describe('tool exposure (main-agent cutover)', () => {
   test('hides the low-level DOM/page tools from the main agent', () => {
-    for (const name of ['snapshot', 'read_page', 'read_state', 'watch_changes', 'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click', 'submit_form', 'read_pdf']) {
+    for (const name of ['snapshot', 'read_page', 'read_state', 'watch_changes', 'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click', 'read_pdf']) {
       expect(isHiddenFromMain(name)).toBe(true);
     }
   });

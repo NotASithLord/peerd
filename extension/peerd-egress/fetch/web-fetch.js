@@ -3,9 +3,9 @@
 //
 // safeFetch is intentionally narrow: provider endpoints ONLY. That
 // invariant defends the "even if the agent is prompt-injected, it
-// can't exfiltrate the conversation" property. Web tools (read_article,
-// call_api, web_search) need to reach arbitrary HTTPS hosts the user
-// might be reading; they go through THIS function, not safeFetch.
+// can't exfiltrate the conversation" property. The web tools (fetch_url +
+// the web actor's drive-a-tab path) need to reach arbitrary HTTPS hosts the
+// user might be reading; they go through THIS function, not safeFetch.
 //
 // What webFetch DOES enforce:
 //   - http / https schemes only (no file://, chrome://, etc.)

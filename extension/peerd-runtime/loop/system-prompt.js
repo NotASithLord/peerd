@@ -292,6 +292,8 @@ JS-rendered DOM → render: navigate opens your tab, drive it; then you may fetc
 SAME site's endpoints WITH the session instead of re-scraping. Try fetch first when the
 data looks API-reachable; render if it's gated, needs auth, or comes back empty
 (fetch_url returns served html/json, not what JS builds).
+To SEARCH, navigate to a search engine (e.g. https://duckduckgo.com/?q=...) and read the
+results — there is no search tool.
 
 YOUR TAB — you own 0-OR-1 tab. You start with NONE (fetch needs no tab); navigate OPENS
 it on the render decision. Every DOM tool then drives THAT one tab — you never pass a tab

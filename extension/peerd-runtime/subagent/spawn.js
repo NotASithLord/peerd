@@ -102,7 +102,7 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
 export const CAPABILITY_CONSUMERS = Object.freeze({
   getSecret:          [],
   safeFetch:          [],
-  webFetch:           ['web_search', 'vm_import', 'fetch_url'],
+  webFetch:           ['vm_import', 'fetch_url'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect_storage'],
   idb:                ['inspect_audit_log'],

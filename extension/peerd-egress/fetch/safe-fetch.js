@@ -13,8 +13,8 @@
 //   - A tool that holds the vault key trying to phone home
 //
 // What this DOES NOT govern — be honest, this is a partial control:
-//   - The OPEN-WEB tool path. call_api / read_article / web_search /
-//     vm_import go through webFetch (peerd-egress/fetch/web-fetch.js),
+//   - The OPEN-WEB tool path. fetch_url / vm_import go through webFetch
+//     (peerd-egress/fetch/web-fetch.js),
 //     which is allowlist-FREE by design — it reaches arbitrary public
 //     HTTPS hosts. webFetch enforces a scheme check, an SSRF/private-
 //     network block, the sensitive-site denylist, and audit, but NOT a

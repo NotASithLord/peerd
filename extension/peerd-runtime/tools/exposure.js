@@ -23,27 +23,24 @@
 // the runner-side allow-list; this is the main-side deny-list).
 //
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
-// submit_form is hidden too: it's a 'tab' tool that opens a tab, submits a form,
-// and returns raw post-submit PAGE TEXT to the caller — a content leak that
-// bypasses the runner. do() covers form submission now (and respects the
-// single-tab model submit_form's own-tab-open would break). NOT hidden, and
-// deliberately so: list_tabs/open_tab (tab metadata only, no page content) and
-// capture (its image is redacted to a sentinel before the model sees it —
-// loop/redact.js). web_search stays on the orchestrator too (URL discovery;
-// results-page text fenced) — it's the one direct web tool the main agent keeps.
+// web_search and submit_form are GONE (deleted, not hidden) — the web actor
+// covers search (navigate to an engine + read results) and form submission (its
+// DOM type/click tools) now. The ONE direct web-ish tool the orchestrator keeps
+// is `capture`: a user-facing screenshot of the active tab, whose image is
+// redacted to a sentinel before the model sees it (loop/redact.js) — no page
+// content leaks. list_tabs/open_tab also stay (tab metadata only, no content).
+// Every web READ is the actor's, reached via message_resident.
 export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
   'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
-  'submit_form',
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
   // fetch_url is the web RESIDENT's secure fetch — its NON-render web mechanism (the
   // other is drive-a-tab). It's resident-only: the orchestrator delegates web INTENT
   // via message_resident and the web actor picks fetch-vs-render, so the main agent
-  // never holds it. With call_api/read_article removed, the web actor (fetch_url +
-  // drive-a-tab) is the single entry point for web reads — only web_search stays on
-  // the orchestrator (URL discovery, not page-content reads).
+  // never holds it. With call_api/read_article/web_search/submit_form removed, the
+  // web actor (fetch_url + drive-a-tab) is the single entry point for ALL web work.
   'fetch_url',
 ]));
 

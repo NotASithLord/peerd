@@ -59,7 +59,7 @@ export const doTool = {
     required: ['instruction'],
   },
   // why: write, NOT mutate_external — the egress-allowlist hook gates only
-  // mutate_external tools (submit_form, vm_boot, …); do/get/check are spawn
+  // mutate_external tools (vm_boot, …); do/get/check are spawn
   // wrappers, so any network/DOM effect happens INSIDE the runner's child
   // session and is gated by the child's own six gates (incl. the denylist
   // origin gate, pinned to this tab). 'write' also means Plan mode blocks `do`.

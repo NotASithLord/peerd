@@ -51,7 +51,6 @@ import './unit/peerd-runtime/trim.test.js';
 import './unit/peerd-runtime/clock/now.test.js';
 import './unit/peerd-runtime/clock/context.test.js';
 import './unit/peerd-runtime/clock/tools.test.js';
-import './unit/peerd-runtime/web/policy.test.js';
 import './unit/peerd-runtime/web/tools.test.js';
 import './unit/peerd-runtime/voice/model-store.test.js';
 import './unit/peerd-runtime/voice/manager.test.js';

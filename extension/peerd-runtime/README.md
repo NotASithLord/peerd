@@ -46,19 +46,20 @@ provider concern, not a runtime one.
 |---|---|---|
 | `BUILTIN_TOOLS` | 58 | inspect, DOM/page, sessions, VM/Notebook/App, edit, subagent, do/get/check, memory, review, dweb |
 | Clock | 2 | `now`, `wait_until` |
-| Web | 5 | `call_api`, `read_article`, `web_search`, `submit_form`, `capture` |
+| Web | 1 | `capture` (the only remaining web wrapper — see `WEB_TOOLS`; `fetch_url` is a `BUILTIN_TOOLS` def). `call_api`/`read_article`/`web_search`/`submit_form` were all removed — the web actor covers web work via `fetch_url` + its DOM tools |
 | `load_skill` | 1 | registered like a built-in |
 | **Total registered** | **66** | |
 
 Not all 66 reach the main agent:
 
-- **12 are runner-only** — the low-level DOM/page tools (`read_page`,
+- **The low-level DOM/page tools are runner-only** — `read_page`,
   `snapshot`, `read_state`, `watch_changes`, `query_dom`, `page_eval`,
-  `page_exec`, `page_keys`, `navigate`, `type`, `click`) plus
-  `submit_form`. They stay registered (the runner gets them via tool
-  narrowing) but are hidden from the main agent at dispatch
-  (`tools/exposure.js`). The main agent reaches the page only through
-  `do` / `get` / `check`.
+  `page_exec`, `page_keys`, `navigate`, `type`, `click`, `read_pdf`
+  (and `fetch_url`). They stay registered (the runner/web-resident gets
+  them via tool narrowing) but are hidden from the main agent at dispatch
+  (`tools/exposure.js` `MAIN_AGENT_HIDDEN_TOOLS`). The main agent reaches
+  the page only through `do` / `get` / `check` or by messaging a tab's
+  resident.
 - **7 dweb tools** reach the main agent on the **preview** build only;
   on the store build they're absent from the descriptor list.
 
