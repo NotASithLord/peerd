@@ -1,7 +1,9 @@
-// fetch_url is the web actor's SESSIONLESS secure fetch — its non-render web
-// mechanism. These tests pin the security invariants that keep the (keyless) web
-// resident keyless even with an egress surface:
-//   - SESSIONLESS by construction: credentials:'omit' + Cookie/Authorization stripped
+// fetch_url is the web actor's secure, non-render web mechanism. These tests pin the
+// invariants that keep the (keyless) web resident keyless even with an egress surface:
+//   - the TOOL never sets credentials of its own (no `credentials` key) and strips
+//     tool-supplied Cookie/Authorization — it cannot opt a request into a session. The
+//     SESSION decision is the egress BOUNDARY's (same-origin to the owned tab → include,
+//     else omit), exercised in tests/peerd-egress/session-scoped-fetch.test.ts.
 //   - rides ctx.webFetch (the denylist + SSRF + audit chain), NOT a raw fetch
 //   - a non-GET write is confirm-gated (shared web:write key) and FAILS CLOSED with
 //     no confirm channel

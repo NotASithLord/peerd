@@ -38,9 +38,12 @@ import { escapeAttr } from '/shared/util.js';
 
 /**
  * @param {Object} deps
- * @param {(instanceId: string) => Promise<{ instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number } | null>} deps.resolveResident
+ * @param {(instanceId: string, opts?: { senderSessionId?: string | null }) => Promise<{ instanceId: string, kind: string, residentSessionId: string, name?: string, tabId?: number } | null>} deps.resolveResident
  *   Resolve an instance id to its (lazily-minted) resident. Returns null when no
- *   instance with that id exists across the three registries.
+ *   instance with that id exists across the three registries. `senderSessionId` is the
+ *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
+ *   so it must be threaded (not re-derived from the ambient active chat, which is wrong
+ *   on a boot redrain). Engine/per-tab kinds ignore it (globally/tab keyed).
  * @param {(opts: { residentSessionId: string, message: string, residentTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string }) => Promise<{ result: string, stopped?: boolean }>} deps.runResidentTurn
  *   Drive ONE resident turn (runAgentTurn against the resident session) and
  *   resolve with its final assistant text. parentToolUseId (the message_resident
@@ -147,10 +150,15 @@ export const makeResidentMessaging = (deps) => {
     // Collapse whitespace (kill the newline vector), clamp, then escapeAttr (no
     // surviving angle bracket → no forged fence/close tag).
     const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : '';
-    const who = safeName ? `${safeName} (${instanceId})` : instanceId;
+    // The chat-scoped web actor has instanceId === kind === 'web'; naming both would
+    // double the word ("the web resident web …"). Render it as "the web actor". A per-tab
+    // web resident keeps "the web resident 42 …" (instanceId is the meaningful tabId).
+    const subject = (kind === 'web' && instanceId === 'web')
+      ? 'The web actor'
+      : `The ${kind} resident ${safeName ? `${safeName} (${instanceId})` : instanceId}`;
     const lead = failed
-      ? `The ${kind} resident ${who} could not complete your request:`
-      : `The ${kind} resident ${who} you messaged has replied:`;
+      ? `${subject} could not complete your request:`
+      : `${subject} you messaged has replied:`;
     turnSlots.runWhenIdle(senderSessionId, () => {
       // trusted:true — the reply-wake is a FIRST-PARTY continuation (the sender's
       // own resident replied), so the sender's turn that reads it MAY fire a
@@ -234,10 +242,12 @@ export const makeResidentMessaging = (deps) => {
       return { ok: false, error: `message_resident: ${OUTSTANDING_CAP} resident messages already in flight for this chat — await their replies before sending more.` };
     }
 
-    // Resolve (+ lazy-mint) the resident for this instance.
+    // Resolve (+ lazy-mint) the resident for this instance. Thread the sender so the
+    // chat-scoped web actor (to:'web') is owned by the SENDER, not the ambient active
+    // chat (live path: they're equal — the gate above proved it; redrain: they differ).
     let resident;
     try {
-      resident = await resolveResident(to);
+      resident = await resolveResident(to, { senderSessionId });
     } catch (e) {
       return { ok: false, error: `message_resident: could not resolve instance '${to}': ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
@@ -264,9 +274,12 @@ export const makeResidentMessaging = (deps) => {
     await Promise.resolve(mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs })).catch(() => {});
     runEngineDelivery({ correlationId, senderSessionId, resident, message, parentToolUseId: toolUseId });
 
+    const recipient = (kind === 'web' && instanceId === 'web')
+      ? 'the web actor'
+      : `the ${kind} resident (${name ?? instanceId})`;
     return {
       ok: true,
-      content: `Message delivered to the ${kind} resident (${name ?? instanceId}). Its reply will arrive on a LATER turn as a fenced note — do NOT wait or poll; continue or end your turn.`,
+      content: `Message delivered to ${recipient}. Its reply will arrive on a LATER turn as a fenced note — do NOT wait or poll; continue or end your turn.`,
     };
   };
 
@@ -290,7 +303,9 @@ export const makeResidentMessaging = (deps) => {
         continue;
       }
       let resident = null;
-      try { resident = await resolveResident(e.to); }
+      // Thread the ORIGINAL sender so a web-actor (to:'web') redrain re-attaches to the
+      // sender's actor, not whatever chat is focused at boot.
+      try { resident = await resolveResident(e.to, { senderSessionId: e.senderSessionId }); }
       catch { resident = null; }
       // The instance is gone (engine instance deleted, or a web resident's tab
       // closed) → abandon it; wake the sender so it isn't left waiting on a reply

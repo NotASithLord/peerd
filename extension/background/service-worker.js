@@ -1264,6 +1264,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
         webFetch,
         () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
       );
+      // navigate adopts the actor's tab MID-TURN (0->1). It re-pins through this setter
+      // — which closes over the SHARED resCtx — NOT a direct activeTab= on the per-call
+      // {...ctx} copy the dispatcher hands each tool (that write would die with the copy),
+      // so the rest of the turn's DOM tools + the session-scoped webFetch above see the
+      // adopted tab. (The >=1-tab case mutates activeTab in place, which the shallow copy
+      // already shares; only the 0->1 reassignment needs the setter.)
+      resCtx.repinActiveTab = (/** @type {any} */ tab) => { resCtx.activeTab = tab; };
     }
     return resCtx;
   }
@@ -2525,29 +2532,38 @@ const residentMailbox = {
 // record + no session-default to bind (id-less engine tools don't apply); the
 // only binding is tab→session, persisted so the resident's accumulated memory
 // survives an SW restart while the tab lives.
-const mintWebResident = async (/** @type {number} */ tabId) => {
-  const activeId = await sessionCache.sessionGet('currentSessionId');
-  const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
+// Shared web-resident session mint. The per-tab resident (mintWebResident) and the
+// chat-scoped actor (mintWebActor) differ ONLY in instanceId, the owner source, and
+// which binding store they write; the create body (inherited provider/model/permission/
+// toolManifest) + the audit append are identical, so they live here ONCE — a new
+// inherited field is a one-site edit, not two that can silently drift.
+// why inherit the owner chat's tool MANIFEST: a browse-only chat's web resident is held
+// to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind }) => {
+  const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   const created = await sessions.create({
     kind: 'resident',
-    ...(activeId ? { parentSessionId: /** @type {string} */ (activeId) } : {}),
-    instanceId: String(tabId),
+    ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
+    instanceId,
     residentKind: 'web',
     ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
     ...(ownerChat?.model ? { model: ownerChat.model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
-    // The web resident inherits the owner chat's tool MANIFEST (see mintResident):
-    // a browse-only chat's page resident is held to the read DOM tools, so the gate
-    // refuses click/type for it and the read-only preset means what it says.
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
-  webResidentBindings.bind(tabId, created.sessionId);
-  persistWebBindings();
-  auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId: String(tabId), kind: 'web' } }).catch(() => {});
+  bind(created.sessionId);
+  auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web' } }).catch(() => {});
   return created.sessionId;
 };
+
+const mintWebResident = async (/** @type {number} */ tabId) => mintWebSession({
+  instanceId: String(tabId),
+  ownerChatId: /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId')),
+  bind: (sessionId) => { webResidentBindings.bind(tabId, sessionId); persistWebBindings(); },
+});
 
 // Resolve (+ lazy-mint) the web resident that owns `tabId`. FAIL CLOSED: the tab
 // must still exist (a web resident with no tab is unreachable, and we must never
@@ -2575,45 +2591,26 @@ const resolveWebResident = async (/** @type {number} */ tabId) => {
   return { instanceId: String(tabId), kind: 'web', residentSessionId, tabId };
 };
 
-// Lazily mint the active CHAT's web actor (the 0-or-1-tab web operator, addressed by
-// `to:'web'`). Mirrors mintWebResident but binds to the OWNER CHAT, not a tab:
-// instanceId is the literal 'web' — non-numeric, so the gate's tab-pin refuses any
-// explicit tabId (the actor may only ever drive the tab it lazily adopts). Starts
-// with NO tab; adoptWebTab binds one on the render decision.
-const mintWebActor = async (/** @type {string} */ ownerChatId) => {
-  const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
-  const perm = await resolvePermission(/** @type {any} */ (ownerChat));
-  const created = await sessions.create({
-    kind: 'resident',
-    ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
-    instanceId: 'web',
-    residentKind: 'web',
-    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
-    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
-    permissionMode: perm.mode,
-    confirmActions: perm.confirmActions,
-    // Inherit the owner chat's tool MANIFEST (as mintWebResident does): a browse-only
-    // chat's web actor is held to the read DOM tools (+ fetch_url, a read), so the
-    // gate refuses click/type for it.
-    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
-  });
-  webActorRegistry.bind(ownerChatId, created.sessionId);
-  persistWebActors();
-  auditLog.append({ type: 'resident_minted', sessionId: created.sessionId, details: { instanceId: 'web', kind: 'web' } }).catch(() => {});
-  return created.sessionId;
-};
+// Lazily mint a CHAT's web actor (the 0-or-1-tab web operator, addressed by `to:'web'`).
+// Binds to the OWNER CHAT, not a tab; instanceId is the literal 'web' — non-numeric, so
+// the gate's tab-pin refuses any explicit tabId (the actor may only ever drive the tab
+// it lazily adopts). Starts with NO tab; adoptWebTab binds one on the render decision.
+const mintWebActor = async (/** @type {string} */ ownerChatId) => mintWebSession({
+  instanceId: 'web',
+  ownerChatId,
+  bind: (sessionId) => { webActorRegistry.bind(ownerChatId, sessionId); persistWebActors(); },
+});
 
-// Resolve (+ lazy-mint) the active chat's web actor. Owns 0-OR-1 tab: its owned tab
-// (if it has rendered) is read back from webResidentBindings.tabFor and threaded as
-// residentTabId — undefined in the 0-tab state, where buildToolContext leaves
-// activeTab unset so fetch_url works and the DOM tools fail closed (the pin) until
-// navigate adopts a tab. Re-mints when the bound session vanished (SW death cleared
-// session storage). why currentSessionId as owner: the sender gate guarantees the
-// sender IS the active chat, so the active chat is the owner. (On a post-restart
-// redrain the active chat may differ — best-effort, like every web binding here; the
-// reply still routes to the original sender via deliver().)
-const resolveWebActor = async () => {
-  const ownerChatId = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+// Resolve (+ lazy-mint) a chat's web actor. Owns 0-OR-1 tab: its owned tab (if it has
+// rendered) is read back from webResidentBindings.tabFor and threaded as residentTabId —
+// undefined in the 0-tab state, where buildToolContext leaves activeTab unset so fetch_url
+// works and the DOM tools fail closed (the pin) until navigate adopts a tab. Re-mints when
+// the bound session vanished (SW death cleared session storage). The owner is the SENDER
+// chat (threaded by the messaging layer), NOT the ambient active chat — equal on the live
+// path (the sender gate proves it), but on a boot redrain the focused chat may differ, so
+// resolving by sender is what re-attaches a redrained message to its real actor.
+const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOverride) => {
+  const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
   let actorSessionId = webActorRegistry.resolve(ownerChatId);
   if (actorSessionId && !(await sessions.get(actorSessionId))) {
@@ -2660,13 +2657,14 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 });
 
 const residentMessaging = makeResidentMessaging({
-  resolveResident: async (/** @type {string} */ instanceId) => {
-    // The chat's WEB ACTOR — the 0-or-1-tab SINGLE entry point for web work,
-    // addressed by the literal 'web'. It decides fetch-vs-render itself: a
-    // pure-fetch task never opens a tab; navigate adopts one on the render path.
-    // (A numeric tabId, below, targets the resident owning that SPECIFIC existing
-    // tab — e.g. a tab the orchestrator opened with open_tab.)
-    if (String(instanceId) === 'web') return resolveWebActor();
+  resolveResident: async (/** @type {string} */ instanceId, /** @type {{ senderSessionId?: string | null }} */ opts = {}) => {
+    // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
+    // work, addressed by the literal 'web'. It decides fetch-vs-render itself: a
+    // pure-fetch task never opens a tab; navigate adopts one on the render path. Owned by
+    // the SENDER chat (opts.senderSessionId), not the ambient active chat — so a boot
+    // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
+    // resident owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
+    if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
     // A per-tab WEB resident is addressed by its tabId-as-string (purely numeric, no
     // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
     // match, so the branch is unambiguous.

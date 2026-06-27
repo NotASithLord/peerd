@@ -39,6 +39,29 @@ describe('navigate — web-actor lazy tab adoption', () => {
     expect(ctx.activeTab.origin).toBe('https://shop.com');
   });
 
+  test('adoption re-pins the SHARED turn ctx via repinActiveTab, not the dispatcher per-call copy', async () => {
+    // The dispatcher hands each tool a fresh `{ ...ctx }` copy (dispatcher.js), so a bare
+    // `ctx.activeTab = …` would die with the copy. buildToolContext gives the web ctx a
+    // repinActiveTab setter that writes the SHARED object; navigate must use it so the
+    // rest of the turn's DOM tools + the session-scoped webFetch see the adopted tab.
+    const shared: any = {
+      residentKind: 'web',
+      activeTab: undefined,
+      tabs: makeTabs('https://shop.com/p'),
+      adoptWebTab: async () => ({ tabId: 100, windowId: 1 }),
+      repinActiveTab: (t: any) => { shared.activeTab = t; },
+      noteTab: () => {},
+      hintPullIn: () => {},
+    };
+    const execCtx = { ...shared };   // the dispatcher's per-call shallow copy
+    const r = await navigateTool.execute({ url: 'https://shop.com/p' }, execCtx);
+    expect(r.ok).toBe(true);
+    // Without the setter, shared.activeTab would still be undefined (the bug). With it,
+    // the adopted tab + landed origin land on the SHARED ctx the next call reads.
+    expect(shared.activeTab?.id).toBe(100);
+    expect(shared.activeTab?.origin).toBe('https://shop.com');
+  });
+
   test('a web ctx with NO tab and NO adoptWebTab fails closed (never the foreground tab)', async () => {
     const ctx: any = { residentKind: 'web', tabs: makeTabs() };
     const r = await navigateTool.execute({ url: 'https://shop.com/p' }, ctx);

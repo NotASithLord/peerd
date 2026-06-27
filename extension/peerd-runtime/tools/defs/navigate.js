@@ -101,22 +101,29 @@ export const navigateTool = {
       };
     }
 
+    const c = /** @type {any} */ (ctx);
     let tab = await resolveTargetTab(args, ctx);
     // DESIGN-17 lazy tab adoption: the web ACTOR (kind:'web') may own 0 tabs — a
     // pure-fetch task never rendered. navigate IS the render decision made concrete:
-    // when it owns no tab, open + adopt one now (SW-side ctx.adoptWebTab) and re-pin
-    // ctx.activeTab IN PLACE so the rest of THIS turn's DOM tools drive it (the ctx is
-    // shared across the turn — same restamp pattern as instanceState). Only the web
+    // when it owns no tab, open + adopt one now (SW-side ctx.adoptWebTab). Only the web
     // kind gets adoptWebTab; every other no-tab path still fails closed.
-    if (!tab?.id && typeof (/** @type {any} */ (ctx).adoptWebTab) === 'function') {
+    // why repinActiveTab (not a direct ctx.activeTab = …): the dispatcher hands each
+    // tool a per-call SHALLOW COPY ({ ...ctx }), so reassigning activeTab on THIS object
+    // dies with the copy. repinActiveTab closes over the SHARED turn ctx, so the rest of
+    // the turn's DOM tools + the session-scoped webFetch see the adopted tab. We keep a
+    // local ref (adoptedPin === the shared object) to re-stamp the landed origin below.
+    /** @type {{ id: number, windowId?: number, url: string, origin: string } | null} */
+    let adoptedPin = null;
+    if (!tab?.id && typeof c.adoptWebTab === 'function') {
       let adopted;
-      try { adopted = await (/** @type {any} */ (ctx).adoptWebTab)(); }
+      try { adopted = await c.adoptWebTab(); }
       catch (e) { return { ok: false, error: `tab_open_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? 'could not open a tab'}` }; }
       if (!adopted?.tabId) return { ok: false, error: 'tab_open_failed' };
-      // why id/windowId only (url/origin blank): the tab is freshly opened to
-      // about:blank and navigate is about to drive it; resolveTargetTab below targets
-      // it by id, and the post-load block re-pins the real origin for the next call.
-      /** @type {any} */ (ctx).activeTab = { id: adopted.tabId, windowId: adopted.windowId, url: '', origin: '' };
+      // url/origin blank: freshly opened to about:blank; navigate drives it next and the
+      // post-load block re-stamps the real origin on this same (shared) object.
+      adoptedPin = { id: adopted.tabId, windowId: adopted.windowId, url: '', origin: '' };
+      if (typeof c.repinActiveTab === 'function') c.repinActiveTab(adoptedPin);
+      else c.activeTab = adoptedPin;   // direct-execute / non-resident fallback
       tab = { id: adopted.tabId };
     }
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
@@ -144,12 +151,21 @@ export const navigateTool = {
     // Keep the turn's activeTab pin fresh: if it points at the tab we just drove,
     // re-stamp its url/origin to where the page LANDED so the next tool's origin gate
     // sees the live origin, not the turn-start one (matters most for a freshly-adopted
-    // web-actor tab, which started blank). resolveTargetTab's in-execute denylist
+    // web-actor tab, which started blank). adoptedPin IS the shared object (set via
+    // repinActiveTab); for an already-owned tab, ctx.activeTab is the same object the
+    // shallow copy shares — both mutate in place. resolveTargetTab's in-execute denylist
     // re-check is still the second wall on the landing.
-    const pin = /** @type {any} */ (ctx).activeTab;
+    const pin = adoptedPin ?? c.activeTab;
     if (pin && pin.id === tabId && finalTab?.url) {
       pin.url = finalTab.url;
       pin.origin = originOfUrl(finalTab.url) ?? pin.origin;
+    }
+    // A freshly-adopted web-actor tab is a peerd-opened web page, same as open_tab —
+    // give it the agent-tab card (the landed URL as its label, not a blank "a tab") and
+    // schedule the "pull peerd in" orientation hint, matching the open_tab path.
+    if (adoptedPin && finalTab?.url) {
+      try { c.noteTab?.(tabId, finalTab.url, { opened: true }); } catch { /* best-effort */ }
+      try { c.hintPullIn?.(tabId, finalTab.url); } catch { /* best-effort */ }
     }
 
     return {
