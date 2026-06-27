@@ -115,7 +115,7 @@ export const normalizeSettingsPatch = (patch, {
     next.autoMemoryEnabled = patch.autoMemoryEnabled;
   }
   if (typeof patch.confirmWebWrites === 'boolean') {
-    // #53: anti-exfil gate. When OFF, non-GET web egress (call_api + the WebVM
+    // #53: anti-exfil gate. When OFF, non-GET web egress (fetch_url + the WebVM
     // bridge) is auto-approved (risk-acknowledged); ON (default) confirms.
     next.confirmWebWrites = patch.confirmWebWrites;
   }

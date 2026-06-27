@@ -1,9 +1,14 @@
 // @ts-check
-// Web tools — call_api, read_article, web_search, submit_form, capture.
+// Web tools — web_search, submit_form, capture.
 //
 // Tests exercise the wrappers with mock ctx objects. We don't drive
 // real chrome APIs; for tool calls that escalate to a tab we stub
 // ctx.tabs / ctx.scripting and assert on the resulting call sequence.
+//
+// call_api / read_article were REMOVED — the web actor covers them now
+// (fetch_url is the web resident's sessionless/same-origin-scoped fetch in
+// place of call_api; the actor's drive-a-tab path replaces read_article).
+// fetch_url's own behavior is in tests/peerd-runtime/tools/fetch-url.test.ts.
 //
 // NOTE: this is the IN-BROWSER suite (open tests/runner.html). It is NOT
 // run by `bun test ./tests` (CI). The <untrusted_web_content> wrapping
@@ -11,8 +16,6 @@
 // tests/peerd-runtime/web-tools-wrap.test.ts.
 
 import { describe, it, expect } from '../../../framework.js';
-import { callApiTool }     from '/peerd-runtime/tools/web/api.js';
-import { readArticleTool } from '/peerd-runtime/tools/web/read.js';
 import { webSearchTool }   from '/peerd-runtime/tools/web/search.js';
 import { submitFormTool }  from '/peerd-runtime/tools/web/form.js';
 import { captureTool }     from '/peerd-runtime/tools/web/screenshot.js';
@@ -38,31 +41,10 @@ const mockCtx = (overrides = {}) => /** @type {import('/shared/tool-types.js').T
 });
 
 /**
- * Build a mock Response-like object with the headers + body shape that
- * primitives.fetchUrl reads.
- */
-/**
- * @param {{ status?: number, body?: string, headers?: Record<string, string>, url?: string }} [opts]
- * @returns {Response} the slice of Response that primitives.fetchUrl reads,
- *   cast to the full type (deliberately-minimal stand-in).
- */
-const mockResponse = ({ status = 200, body = '', headers = {}, url = 'https://x.com/' } = {}) => /** @type {Response} */ (/** @type {unknown} */ ({
-  status,
-  text: async () => body,
-  headers: {
-    /** @param {string} k */
-    get: (k) => headers[k.toLowerCase()],
-    /** @param {(v: string, k: string) => void} cb */
-    forEach: (cb) => Object.entries(headers).forEach(([k, v]) => cb(v, k)),
-  },
-  url,
-}));
-
-/**
- * call_api / read_article / web_search wrap their JSON payload in the
- * <untrusted_web_content> fence (the prompt-injection boundary). Assert
- * the fence is present and return the inner JSON payload so each test can
- * keep asserting on the structured fields.
+ * web_search wraps its JSON payload in the <untrusted_web_content> fence
+ * (the prompt-injection boundary). Assert the fence is present and return
+ * the inner JSON payload so each test can keep asserting on the structured
+ * fields.
  */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
 /** Narrow a ToolResult to its ok-content (tests assert ok first). @param {ToolResult} r */
@@ -89,153 +71,6 @@ const unwrap = (content) => {
 };
 
 describe('web.tools', () => {
-  describe('call_api', () => {
-    it('returns the response body and parses JSON when content-type matches', async () => {
-      const ctx = mockCtx({
-        webFetch: async () => mockResponse({
-          status: 200,
-          body: '{"hello":"world"}',
-          headers: { 'content-type': 'application/json' },
-        }),
-      });
-      const r = await callApiTool.execute({ url: 'https://api.example.com/x' }, ctx);
-      expect(r.ok).toBe(true);
-      const payload = unwrapWebContent(contentOf(r));
-      expect(payload.status).toBe(200);
-      expect(payload.json.hello).toBe('world');
-    });
-
-    it('errors on missing url', async () => {
-      const r = await callApiTool.execute({}, mockCtx());
-      expect(r.ok).toBe(false);
-      expect(errorOf(r)).toBe('url_required');
-    });
-
-    it('rejects non-http schemes', async () => {
-      const r = await callApiTool.execute({ url: 'file:///etc/passwd' }, mockCtx());
-      expect(r.ok).toBe(false);
-      expect(errorOf(r).startsWith('unsupported_scheme')).toBe(true);
-    });
-
-    it('truncates very large bodies', async () => {
-      const big = 'x'.repeat(20_000);
-      const ctx = mockCtx({
-        webFetch: async () => mockResponse({ body: big, headers: { 'content-type': 'text/plain' } }),
-      });
-      const r = await callApiTool.execute({ url: 'https://api.example.com' }, ctx);
-      const payload = unwrapWebContent(contentOf(r));
-      expect(payload.truncated).toBe(true);
-      expect(payload.body.length).toBe(16_000);
-    });
-  });
-
-  describe('read_article', () => {
-    it('returns the safeFetch result when the response is a real article', async () => {
-      const body = `${'<html><body><article>'.repeat(1)}A real post${'words '.repeat(80)}</article></body></html>`;
-      const ctx = mockCtx({
-        webFetch: async () => mockResponse({ status: 200, body }),
-      });
-      const r = await readArticleTool.execute({ url: 'https://blog.example.com/post' }, ctx);
-      expect(r.ok).toBe(true);
-      const payload = unwrapWebContent(contentOf(r));
-      expect(payload.via).toBe('safeFetch');
-      expect(payload.text.includes('A real post')).toBe(true);
-    });
-
-    it('escalates to a tab on SPA shell and cleans it up', async () => {
-      const shell = '<html><body><div id="root"></div><script>x</script></body></html>';
-      /** @type {boolean | null | undefined} */
-      let createdActive = null;
-      let tabRemoved = false;
-      const ctx = mockCtx({
-        webFetch: async () => mockResponse({ status: 200, body: shell }),
-        tabs: {
-          /** @param {{ url?: string, active?: boolean }} props */
-          create: async ({ url, active }) => { createdActive = active; return { id: 99, url }; },
-          get: async () => ({ id: 99, url: 'https://spa.example.com/page' }),
-          remove: async () => { tabRemoved = true; },
-          onUpdated: {
-            /** @param {(tabId: number, info: { status?: string }) => void} fn */
-            addListener: (fn) => { setTimeout(() => fn(99, { status: 'complete' }), 0); },
-            removeListener: () => {},
-          },
-        },
-        scripting: {
-          executeScript: async () => [{ result: { url: 'https://spa.example.com/page', title: 'SPA', text: 'real rendered content' } }],
-        },
-      });
-      const r = await readArticleTool.execute({ url: 'https://spa.example.com/page' }, ctx);
-      expect(r.ok).toBe(true);
-      const payload = unwrapWebContent(contentOf(r));
-      expect(payload.via).toBe('background_tab');
-      expect(createdActive).toBe(false);             // never-steal-focus policy
-      expect(payload.escalation_reason).toBe('spa_shell');
-      expect(payload.text).toBe('real rendered content');
-      expect(tabRemoved).toBe(true);
-    });
-
-    it('opens its escalation tab in the BACKGROUND, unconditionally', async () => {
-      const shell = '<html><body><div id="root"></div><script>x</script></body></html>';
-      /** @type {boolean | null | undefined} */
-      let createdActive = null;
-      const ctx = mockCtx({
-        webFetch: async () => mockResponse({ status: 200, body: shell }),
-        tabs: {
-          /** @param {{ url?: string, active?: boolean }} props */
-          create: async ({ url, active }) => { createdActive = active; return { id: 77, url }; },
-          get: async () => ({ id: 77, url: 'https://spa.example.com/page' }),
-          remove: async () => {},
-          onUpdated: {
-            /** @param {(tabId: number, info: { status?: string }) => void} fn */
-            addListener: (fn) => { setTimeout(() => fn(77, { status: 'complete' }), 0); },
-            removeListener: () => {},
-          },
-        },
-        scripting: {
-          executeScript: async () => [{ result: { url: 'https://spa.example.com/page', title: 'SPA', text: 'bg content' } }],
-        },
-      });
-      const r = await readArticleTool.execute({ url: 'https://spa.example.com/page' }, ctx);
-      expect(r.ok).toBe(true);
-      const payload = unwrapWebContent(contentOf(r));
-      expect(payload.via).toBe('background_tab');
-      expect(createdActive).toBe(false);             // background as requested
-    });
-
-    it('escalates when expects substrings are missing', async () => {
-      const body = `<html><body><p>completely different content</p>${'word '.repeat(80)}</body></html>`;
-      let tabCreated = false;
-      const ctx = mockCtx({
-        webFetch: async () => mockResponse({ status: 200, body }),
-        tabs: {
-          create: async () => { tabCreated = true; return { id: 88 }; },
-          get: async () => ({ id: 88, url: 'https://x.com/' }),
-          remove: async () => {},
-          onUpdated: {
-            /** @param {(tabId: number, info: { status?: string }) => void} fn */
-            addListener: (fn) => { setTimeout(() => fn(88, { status: 'complete' }), 0); },
-            removeListener: () => {},
-          },
-        },
-        scripting: {
-          executeScript: async () => [{ result: { url: 'https://x.com/', title: '', text: 'from tab' } }],
-        },
-      });
-      const r = await readArticleTool.execute(
-        { url: 'https://x.com/', expects: ['my sentinel string'] }, ctx,
-      );
-      expect(r.ok).toBe(true);
-      const payload = unwrapWebContent(contentOf(r));
-      expect(payload.via).toBe('background_tab');
-      expect(tabCreated).toBe(true);
-    });
-
-    it('rejects invalid URLs', async () => {
-      const r = await readArticleTool.execute({ url: 'not a url' }, mockCtx());
-      expect(r.ok).toBe(false);
-    });
-  });
-
   describe('web_search', () => {
     it('builds the search URL and reads the results tab', async () => {
       /** @type {string | null | undefined} */

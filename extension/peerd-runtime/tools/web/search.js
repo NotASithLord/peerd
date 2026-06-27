@@ -24,10 +24,10 @@ export const webSearchTool = {
   primitive: 'web',
   description: [
     'Search the user\'s default engine in a background tab; returns the',
-    'results-page text. Always a tab (not safeFetch): results are',
+    'results-page text. Always a tab (not a bare fetch): results are',
     'personalized and anti-bot-protected, and the user\'s session shapes',
-    'them. ✅ a query like "best X 2026". ❌ a known URL (use call_api or',
-    'read_article).',
+    'them. ✅ a query like "best X 2026". ❌ a known URL — message the "web"',
+    'actor to fetch or read it.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -56,7 +56,7 @@ export const webSearchTool = {
       // Defense-in-depth: a results page can meta-refresh / JS-redirect into a
       // denylisted or private host. Re-validate the landed host before reading
       // (the query is agent-controlled, the destination is not — but the same
-      // one-line guard read_article uses applies here too).
+      // one-line guard the web actor's drive-a-tab read uses applies here too).
       const denial = landedHostDenial(opened.finalUrl, ctx);
       if (denial) {
         ctx.audit?.({ type: 'egress_denied', details: { origin: denial.host, reason: `landed:${denial.reason}` } })?.catch?.(() => {});

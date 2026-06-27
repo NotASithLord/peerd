@@ -721,7 +721,7 @@ const formatResultContent = (toolResult) => {
     }
   } catch { /* leave as-is */ }
   // Display-only: hide the <untrusted_*> fence WRAPPER tags from the rendered
-  // card (do/get/check runner summaries + read_article/call_api, at every nested
+  // card (do/get/check runner summaries + fetch_url/web_search, at every nested
   // transcript depth) — the body stays, the model still receives the fence in
   // the persisted tool_result. The single chokepoint for every tool-result card.
   return stripUntrustedFences(content);

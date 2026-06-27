@@ -73,9 +73,9 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
     filterDescriptorsByManifest(mainAgentDescriptors(registered), resolveManifestAllow({ preset })),
   ).map((t) => t.name);
 
-  it('research: keeps the page-via-resident channel + web reads + memory, folds do/get/check away', () => {
+  it('research: keeps the page-via-resident channel + web search + memory, folds do/get/check away', () => {
     const names = mainListFor('research');
-    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'read_article', 'web_search', 'remember', 'read_memory', 'inspect_audit_log']) {
+    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'web_search', 'remember', 'read_memory', 'inspect_audit_log']) {
       expect(names).toContain(keep);
     }
     // do/get/check folded into the resident; execution/edit/spawn dropped by the preset.
@@ -86,7 +86,7 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
 
   it('browse-only: keeps tabs + the resident channel + web reads, folds get/check away', () => {
     const names = mainListFor('browse-only');
-    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'read_article', 'call_api', 'web_search']) {
+    for (const keep of ['message_resident', 'list_tabs', 'open_tab', 'web_search']) {
       expect(names).toContain(keep);
     }
     for (const drop of ['do', 'get', 'check', 'remember', 'read_memory', 'edit_file', 'vm_boot', 'capture']) {

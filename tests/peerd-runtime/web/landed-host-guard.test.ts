@@ -9,7 +9,6 @@
 
 import { describe, it, expect } from 'bun:test';
 import { landedHostDenial } from '/peerd-runtime/tools/web/primitives.js';
-import { readArticleTool } from '/peerd-runtime/tools/web/read.js';
 import { webSearchTool } from '/peerd-runtime/tools/web/search.js';
 
 const baseCtx = (over: Record<string, any> = {}) => ({
@@ -56,51 +55,6 @@ describe('landedHostDenial (pure)', () => {
   });
   it('allows an ordinary public host', () => {
     expect(landedHostDenial('https://example.com/x', { denylist: ['denylisted.example'] } as any)).toBe(null);
-  });
-});
-
-describe('read_article re-validates the landed host', () => {
-  it('does NOT escalate a webFetch redirect refusal (terminal — no tab opened)', async () => {
-    const calls: any = {};
-    const ctx = baseCtx({
-      webFetch: async () => { const e: any = new Error('blocked'); e.reason = 'redirect_blocked'; throw e; },
-      tabs: tabsThatLandOn('https://denylisted.example/', calls),
-      scripting: scriptingThatReads(calls),
-      denylist: ['denylisted.example'],
-    });
-    const r: any = await readArticleTool.execute({ url: 'https://redirector.example/x' }, ctx);
-    expect(r.ok).toBe(false);
-    expect(calls.createdUrl).toBeUndefined(); // no tab opened
-    expect(calls.executed).toBeUndefined();   // no content read
-  });
-
-  it('opens a tab on a transient failure but REFUSES a denylisted landing (no read)', async () => {
-    const calls: any = {};
-    const ctx = baseCtx({
-      webFetch: async () => { throw new Error('network down'); }, // transient → escalate
-      tabs: tabsThatLandOn('https://denylisted.example/account', calls),
-      scripting: scriptingThatReads(calls),
-      denylist: ['denylisted.example'],
-    });
-    const r: any = await readArticleTool.execute({ url: 'https://redirector.example/x' }, ctx);
-    expect(r.ok).toBe(false);
-    expect(String(r.error)).toContain('egress_denied');
-    expect(calls.createdUrl).toBe('https://redirector.example/x'); // tab WAS opened
-    expect(calls.executed).toBeUndefined();                        // but content NEVER read
-    expect(calls.removed).toBe(42);                                // tab closed
-  });
-
-  it('reads normally when the landing is an allowed public host', async () => {
-    const calls: any = {};
-    const ctx = baseCtx({
-      webFetch: async () => { throw new Error('network down'); },
-      tabs: tabsThatLandOn('https://example.com/article', calls),
-      scripting: scriptingThatReads(calls),
-      denylist: ['denylisted.example'],
-    });
-    const r: any = await readArticleTool.execute({ url: 'https://example.com/x' }, ctx);
-    expect(r.ok).toBe(true);
-    expect(calls.executed).toBe(true); // content read
   });
 });
 

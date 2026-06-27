@@ -684,8 +684,8 @@ export const safeFetch = makeSafeFetch({
   audit: /** @type {any} */ (auditLog.append),
 });
 
-// why: separate egress wrapper for web tools (read_article, call_api,
-// web_search). Provider allowlist would be too narrow — those tools
+// why: separate egress wrapper for web tools (fetch_url, web_search) and
+// the web actor. Provider allowlist would be too narrow — those tools
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
 // in depth alongside the dispatcher's origin gate.
 export const webFetch = makeWebFetch({
@@ -1189,7 +1189,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // the same late-bound pattern as noteAgentTab.
     ...(residentKind === 'web' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
-    // why: web tools (read_article, call_api, ...) reach arbitrary
+    // why: web tools (fetch_url, web_search, ...) reach arbitrary
     // HTTPS hosts. They use webFetch (denylist + audit) NOT safeFetch
     // (provider-allowlist, locked down). safeFetch is still in ctx for
     // any future tool that legitimately needs to hit a provider.
@@ -1972,7 +1972,7 @@ const confirmCoordinator = makeConfirmCoordinator({
 /** @type {Map<string, Set<string>>} */
 const sessionConfirmGrants = new Map();
 
-// Shared confirm key for non-GET web egress (call_api + the WebVM HTTP bridge),
+// Shared confirm key for non-GET web egress (fetch_url + the WebVM HTTP bridge),
 // so "approve all writes this session" and the confirmWebWrites setting apply
 // uniformly across both paths. Imported from vm-net so the bridge fetch and
 // this confirm filter can't drift on the literal.
@@ -1987,7 +1987,7 @@ const sessionConfirmGrants = new Map();
  */
 const confirmAction = async (prompt) => {
   const sid = prompt.sessionId ?? null;
-  // Web-write gate (shared key for call_api + the WebVM bridge): when the user
+  // Web-write gate (shared key for fetch_url + the WebVM bridge): when the user
   // has turned confirmWebWrites OFF, non-GET egress is auto-approved — their
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.

@@ -49,14 +49,14 @@ export const BehaviorSection = {
       ]),
 
       m('.settings-divider'),
-      // Anti-exfiltration gate for NON-GET web egress (call_api + the WebVM
+      // Anti-exfiltration gate for NON-GET web egress (fetch_url + the WebVM
       // bridge) — independent of the Plan/Act confirm toggle above, which is OFF
       // by default. This one is ON by default: it's the seatbelt against a
       // prompt-injected agent silently POSTing in-context data to an attacker.
       ((webWritesOn) => [
         m('h3', 'Confirm before sending data out'),
         m('p', webWritesOn
-          ? 'ON — peerd asks before any request that can transmit a BODY out of the browser (POST/PUT/PATCH/DELETE/OPTIONS) — from the call_api tool or inside a WebVM (curl, etc.). You can approve a single write or all writes for that chat. This is the main guard against a prompt-injected agent exfiltrating data via a write. (Plain reads — GET/HEAD — are never gated; the denylist is the guard there.)'
+          ? 'ON — peerd asks before any request that can transmit a BODY out of the browser (POST/PUT/PATCH/DELETE/OPTIONS) — from the web actor\'s fetch or inside a WebVM (curl, etc.). You can approve a single write or all writes for that chat. This is the main guard against a prompt-injected agent exfiltrating data via a write. (Plain reads — GET/HEAD — are never gated; the denylist is the guard there.)'
           : 'OFF — peerd can send POST/PUT/DELETE requests to any non-denylisted host WITHOUT asking, including under prompt injection. The denylist still blocks known-sensitive sites, but everything else is open. Not recommended.'),
         m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
           m('button.secondary', {

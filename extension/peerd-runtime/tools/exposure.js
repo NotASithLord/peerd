@@ -29,9 +29,8 @@
 // single-tab model submit_form's own-tab-open would break). NOT hidden, and
 // deliberately so: list_tabs/open_tab (tab metadata only, no page content) and
 // capture (its image is redacted to a sentinel before the model sees it —
-// loop/redact.js). The web-fetch tools read_article/call_api are a SEPARATE
-// primitive ('web') with their own <untrusted_web_content> wrapping; the runner
-// is the BROWSER-page boundary, not the web-fetch boundary.
+// loop/redact.js). web_search stays on the orchestrator too (URL discovery;
+// results-page text fenced) — it's the one direct web tool the main agent keeps.
 export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
   'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
@@ -39,13 +38,12 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
-  // fetch_url is the web RESIDENT's SESSIONLESS secure fetch — its NON-render web
-  // mechanism (the other is drive-a-tab). It's resident-only: the orchestrator
-  // delegates web INTENT via message_resident and the web actor picks
-  // fetch-vs-render, so the main agent never holds it. why hidden where the OTHER
-  // 'web' tools (read_article/call_api) are NOT: those stay the orchestrator's
-  // own open-web reads; fetch_url is part of the web actor's surface, the single
-  // entry point for web work this design routes everything through.
+  // fetch_url is the web RESIDENT's secure fetch — its NON-render web mechanism (the
+  // other is drive-a-tab). It's resident-only: the orchestrator delegates web INTENT
+  // via message_resident and the web actor picks fetch-vs-render, so the main agent
+  // never holds it. With call_api/read_article removed, the web actor (fetch_url +
+  // drive-a-tab) is the single entry point for web reads — only web_search stays on
+  // the orchestrator (URL discovery, not page-content reads).
   'fetch_url',
 ]));
 

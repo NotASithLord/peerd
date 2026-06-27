@@ -2,7 +2,7 @@
 // Internal helpers for the web wrapper tools.
 //
 // These are NOT tools — they're composable building blocks called from
-// read_article, call_api, web_search, submit_form, capture. The agent
+// web_search, submit_form, capture (and fetch_url / the web actor). The agent
 // reaches the underlying capabilities (open_tab, navigate, read_page)
 // when it wants raw control; the wrappers reach into here when they
 // want the standard escalation pipeline.
@@ -100,8 +100,8 @@ export const fetchUrl = async (url, opts, ctx) => {
  * id and final URL. Caller is responsible for closing the tab when
  * done (via closeTab).
  *
- * Visibility: this primitive backs the TRANSIENT scrape tools
- * (read_article / web_search), which open a tab, read it, and close it
+ * Visibility: this primitive backs the TRANSIENT scrape path
+ * (web_search / the web actor's drive-a-tab read), which opens a tab, reads it, and closes it
  * immediately — so it opens in the BACKGROUND, always. Focusing a tab
  * that's about to vanish would just flash the user (DECISIONS #20). Tabs
  * the user is meant to SEE go through open_tab, which takes focus.

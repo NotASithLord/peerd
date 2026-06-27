@@ -3,7 +3,7 @@
 //
 // webFetch is allowlist-FREE by design (the open web is open). But "open web"
 // must NOT include the user's LAN, loopback, or link-local space: a
-// prompt-injected agent calling call_api / read_article / vm_import with a
+// prompt-injected agent calling fetch_url / vm_import with a
 // private URL could scan the LAN or hit localhost services. The denylist can't
 // express this — it matches host strings / *.suffix, not IP ranges — so we
 // block private + loopback + link-local hosts here, ahead of the denylist.

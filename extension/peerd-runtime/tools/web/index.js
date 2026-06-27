@@ -6,22 +6,20 @@
 // primitives are intentionally NOT re-exported here — they're
 // internal to the wrappers.
 
-export { callApiTool }      from './api.js';
-export { readArticleTool }  from './read.js';
+// call_api + read_article were REMOVED: the web actor (kind:'web') is the single entry
+// point for web reads now — fetch_url (sessionless / same-origin-scoped) covers
+// call_api's function, and the actor's drive-a-tab path covers read_article's. The
+// orchestrator keeps web_search (URL discovery) + the page-action wrappers below.
 export { webSearchTool }    from './search.js';
 export { submitFormTool }   from './form.js';
 export { captureTool }      from './screenshot.js';
 
-import { callApiTool }     from './api.js';
-import { readArticleTool } from './read.js';
 import { webSearchTool }   from './search.js';
 import { submitFormTool }  from './form.js';
 import { captureTool }     from './screenshot.js';
 
 /** @type {import('/shared/tool-types.js').Tool[]} */
 export const WEB_TOOLS = [
-  callApiTool,
-  readArticleTool,
   webSearchTool,
   submitFormTool,
   captureTool,

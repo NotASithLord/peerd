@@ -248,7 +248,7 @@ export {
 // --- web (fetch vs tab policy + wrappers) -------------------------------
 export {
   WEB_TOOLS,
-  callApiTool, readArticleTool, webSearchTool, submitFormTool, captureTool,
+  webSearchTool, submitFormTool, captureTool,
   shouldEscalate, looksLikeSpaShell, matchesAntiBotTemplate, satisfiesExpects,
 } from './tools/web/index.js';
 

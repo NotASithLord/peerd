@@ -27,7 +27,7 @@ const NOTEBOOK_NOTE = [
   'CODE MODE: for multi-step work, write ONE script that orchestrates it and',
   'return just the result — loop/filter/transform in code instead of many',
   'separate tool calls. peerd.egress.fetch(url, { method, headers, body }) is',
-  'audited HTTP (denylist + SSRF + audit, same as call_api). peerd.runtime.',
+  'audited HTTP (denylist + SSRF + audit, same as fetch_url). peerd.runtime.',
   'runAgent({ task }) embeds an agent inside a Notebook you BUILD FOR THE USER',
   '(e.g. a chat box that reasons); for your own work use the spawn_subagent tool.',
   'Keep approval-needing / money-spending actions as discrete tools, not buried',
