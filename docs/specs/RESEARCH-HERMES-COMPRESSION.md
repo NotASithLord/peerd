@@ -29,7 +29,7 @@ The spike's first four adoptions are now **implemented** on this branch
   configured `num_ctx` (the *usable* window, preferred over the model's
   max), and the **local WebGPU** runner reports its window through the same
   seam — canonical value in `MODEL_SPECS`, with a `setLocalModelInfo` hook
-  so the offscreen engine can report the actor model's real config when
+  so the offscreen engine can report the resident model's real config when
   it matures (future-proofed; nascent today). All providers — cloud and
   on-device — flow through one `providerModelContextWindow` dispatch and
   `resolveContextWindow`'s `live` input (cached 6h, fetched non-blocking so

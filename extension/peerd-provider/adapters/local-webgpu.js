@@ -24,7 +24,7 @@
 import { MODEL_SPECS } from '../local-model-capability.js';
 import { asWindow } from '../model-window.js';
 
-// The actor on-device model id (also the adapter's defaultRunnerModel). The
+// The resident on-device model id (also the adapter's defaultRunnerModel). The
 // offscreen engine answers to it; pricing is $0.
 export const LOCAL_MODEL_ID = 'gemma-4-e2b';
 
@@ -43,7 +43,7 @@ let generateLocal = null;
 export const setLocalGenerate = (fn) => { generateLocal = fn; };
 
 /**
- * Optional bridge to the actor model's LIVE config — the on-device analog
+ * Optional bridge to the resident model's LIVE config — the on-device analog
  * of the cloud Models APIs. When the offscreen engine is loaded it knows the
  * model's real `max_position_embeddings` (and could expose an effective,
  * memory-bounded window), so this lets the on-device runner report its
@@ -210,10 +210,10 @@ export async function* callLocalWebgpu({ messages, system, model = LOCAL_MODEL_I
 }
 
 /**
- * Adapter descriptor. keyless + zero-cost; `defaultRunnerModel` = the actor
+ * Adapter descriptor. keyless + zero-cost; `defaultRunnerModel` = the resident
  * model so resolveRunnerModel step 2 (local-when-available) resolves to it with
  * no per-provider key. `available` is flipped by the SW once the engine reports
- * the model actor (it's NOT a static catalog).
+ * the model resident (it's NOT a static catalog).
  */
 export const localWebgpuAdapter = Object.freeze({
   name: 'local-webgpu',

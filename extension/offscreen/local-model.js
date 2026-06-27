@@ -2,7 +2,7 @@
 // offscreen/local-model.js — the on-device inference engine (FEATURE-LOCAL-WEBGPU
 // B / M1). Gemma-4-E2B runs here in the OFFSCREEN doc via Transformers.js +
 // ONNX-Runtime-Web on WebGPU — never the SW (which idles out; WebGPU + the
-// actor model need a long-lived document). The SW's local-webgpu adapter
+// resident model need a long-lived document). The SW's local-webgpu adapter
 // drives this over runtime messages; this module owns load + streaming generate.
 //
 // VENDORED, not CDN: the offscreen CSP is `script-src 'self'`, so Transformers.js

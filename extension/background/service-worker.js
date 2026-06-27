@@ -70,7 +70,7 @@ import {
   // page-reader (do/get/check) runner-model resolution: pin → local → provider
   // default → inherit. Pure; the SW resolves it per tool-context build.
   resolveRunnerModel,
-  // local WebGPU runner: the offscreen-engine bridge + the actor model id.
+  // local WebGPU runner: the offscreen-engine bridge + the resident model id.
   setLocalGenerate, LOCAL_MODEL_ID,
   // live model inventory (Ollama /api/tags) for the model picker.
   listProviderModels,
@@ -506,7 +506,7 @@ const MODEL_CATALOG = Object.freeze({
     { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
     { model: 'openai/gpt-4o',         label: 'GPT-4o' },
   ],
-  // Local WebGPU — only surfaced once downloaded/actor (gated in buildModelOptions).
+  // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
   'local-webgpu': [
     { model: LOCAL_MODEL_ID, label: 'Gemma 4 E2B' },
   ],
@@ -614,7 +614,7 @@ const buildModelOptions = async ({ sessionId = null } = {}) => {
     // still surface that provider's models (and the current one) rather than
     // render an empty picker; the missing-key skip applies to fresh chats only.
     if (!hasKey && !lockProvider) continue;
-    // The local WebGPU model only appears once downloaded + actor (the
+    // The local WebGPU model only appears once downloaded + resident (the
     // offscreen engine reports `available`); otherwise selecting it would error
     // on the first turn ("local model not loaded"). Hardware capability is gated
     // earlier, at download time (Settings → WebGPU models).
@@ -1841,7 +1841,7 @@ const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
 // drives the offscreen engine (offscreen/local-model.js) and streams its tokens
 // back. local-model/{status,init} flip localModelAvailable, which feeds
 // resolveRunnerModel step 2 (local-when-available) — so once the model is
-// actor it becomes the page-reader runner default with no pin.
+// resident it becomes the page-reader runner default with no pin.
 // Local-model residency + progress live in a store (background/local-model-state.js)
 // so the local-model/* routes reach them via deps. available() feeds
 // resolveRunnerModel; progress() is polled by Settings.

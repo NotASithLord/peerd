@@ -41,7 +41,7 @@ Two problems, one shape:
 ## Goals
 
 **Set up a clearer actor structure.** Each tab-hosted instance is owned by one
-agent — a **actor** — that holds that environment's tools and is the only thing
+agent — an **actor** — that holds that environment's tools and is the only thing
 that drives it. You don't mutate an instance; you **message its actor**
 (`message_actor`). That one move solves both problems: the per-environment
 tooling leaves the main agent (context optimized, and *non-eroding* because it
@@ -67,7 +67,7 @@ per-tab worker) without a re-architecture.
 
 ## What an actor IS
 
-A **actor** is a persistent session — `kind:'actor'`, a third `SessionKind`
+An **actor** is a persistent session — `kind:'actor'`, a third `SessionKind`
 member — **one per tab-hosted instance**. Its loop runs **on the SW heap**,
 through the existing `turn-driver.js` → `runUserTurn` path. The instance lives in
 its tab, driven by the existing `vm-client`/`notebook-client`/`app-client` RPC.

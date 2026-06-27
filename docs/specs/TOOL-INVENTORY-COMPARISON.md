@@ -192,7 +192,7 @@ For each genuine gap: add or not, where it lives, security, thesis fit.
 1. **File upload through `do()`, sandbox-sourced** — *~1 week.* Closes the
    biggest concrete agentic hole (any flow with a file input). Security
    hinges on **never accepting a host path** — only user-picked or
-   sandbox-actor files. **Highest value.**
+   sandbox-resident files. **Highest value.**
 2. **Bookmarks + history *read* (+ confirm-gated bookmark create)** —
    *~1 week.* Cheap, broadly useful, thesis-neutral, no new egress. Skip
    all deletion.

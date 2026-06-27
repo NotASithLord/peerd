@@ -17,7 +17,7 @@
 //   1. Explicit user pin (Settings → Page-reader model), if set.
 //   2. Local WebGPU runner, when downloaded + available — on-device, keyless,
 //      provider-independent. This is the rung the local Gemma runner plugs
-//      into: once the model is actor it becomes the runner default for
+//      into: once the model is resident it becomes the runner default for
 //      every provider. (Absent until the local-webgpu adapter ships.)
 //   3. The active provider's defaultRunnerModel (e.g. Haiku on Anthropic).
 //   4. Inherit the main session model ('').
@@ -29,7 +29,7 @@
  *   the active provider descriptor (from listProviders()).
  * @property {{ available?: boolean, model?: string } | null} [localRunner]
  *   the on-device WebGPU runner, when one is downloaded and ready. `available`
- *   gates it; `model` is the actor model id the local adapter answers to.
+ *   gates it; `model` is the resident model id the local adapter answers to.
  */
 
 /**

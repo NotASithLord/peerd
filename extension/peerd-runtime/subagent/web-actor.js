@@ -1,6 +1,6 @@
 // @ts-check
 // DESIGN-17 — the WEB ACTOR: the disposable browser-runner folded into the
-// actor model as a fourth actor kind (`kind:'web'`) that OWNS one tab.
+// actor model as a fourth actor type (`actorType:'web'`) that OWNS one tab.
 //
 // This module is the PURE core (functional core / imperative shell): the
 // tab→session binding store, the action-log rolling-summary prompt, and the
@@ -57,7 +57,7 @@ export const WEB_ACTOR_SUMMARY_PROMPT = [
 
 /**
  * The in-memory tab→session binding store for web actors. The web actor is
- * a STATEFUL `kind:'web'` session bound to ONE tab; the TAB is the durable handle
+ * a STATEFUL `actorType:'web'` session bound to ONE tab; the TAB is the durable handle
  * (addressing rides tabId; the session holds the trimmed, self-fenced memory).
  * Pure core — the SW mirrors it to chrome.storage.session (an ephemeral binding
  * is fine: re-mint on next address; the bound tab's live DOM re-derives state) and

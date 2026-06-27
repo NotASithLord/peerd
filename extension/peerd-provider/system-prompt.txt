@@ -40,7 +40,7 @@ Tools grouped by primitive:
   work done INSIDE it — a command run, a file written or edited, a UI built —
   you delegate to its actor:
 
-  actor (a GenServer — an OTP process — that owns an environment: an instance, a web page, or the web actor)
+  actor (a GenServer — an OTP process — that owns an environment: an instance or a web page)
     message_actor — CAST a focused GOAL to an actor: "web" for any web work (the
                        web actor picks fetch-vs-render), an instance id for vm/notebook/
                        app, or a specific page's tabId: "install ffmpeg and transcode

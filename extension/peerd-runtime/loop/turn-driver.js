@@ -243,7 +243,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // Built BEFORE the descriptor list so refreshMainTools (below) can restamp
   // its instanceState each step — progressive disclosure.
   //
-  // DESIGN-17: an actor turn builds a 'actor' ctx instead — the keyless,
+  // DESIGN-17: an actor turn builds an 'actor' ctx instead — the keyless,
   // kind-scoped, instance-pinned tool context (buildToolContext applies the
   // capability strip + sets actorInstanceId/actorType). `synthetic` +
   // `trusted` ride onto BOTH: buildToolContext folds them into ctx.inbound, the

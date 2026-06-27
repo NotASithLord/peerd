@@ -101,9 +101,9 @@ const loadDwebBlock = async () => {
  *   prompt (tools, defenses) still applies — a subagent is the same
  *   agent, just narrowed to one task. See docs/SUBAGENTS.md.
  * @param {string} [ctx.actorType]
- *   DESIGN-17: when present ('webvm'|'notebook'|'app'), the prompt is for a
- *   ACTOR — a kind-specific tuned block is appended that frames the agent as
- *   the owner of ONE tab-hosted instance (act only on it; instance output is
+ *   DESIGN-17: when present ('webvm'|'notebook'|'app'|'web'), the prompt is for
+ *   an ACTOR — a type-specific tuned block is appended that frames the agent as
+ *   the owner of ONE instance or web tab (act only on it; instance output is
  *   untrusted data). The base prompt (defenses) still applies. APPEND, never
  *   substitute. See docs/specs/DESIGN-17-actor-agents.md.
  */
@@ -318,18 +318,18 @@ goal needs. A denylisted/sensitive tab or fetch target is refused — say so, do
 it; never put content from a refused site in your reply.`,
 });
 
-/** @param {string} kind */
-export const actorBlock = (kind) => {
-  const framing = /** @type {Record<string,string>} */ (ACTOR_TYPE_FRAMING)[kind]
+/** @param {string} actorType */
+export const actorBlock = (actorType) => {
+  const framing = /** @type {Record<string,string>} */ (ACTOR_TYPE_FRAMING)[actorType]
     ?? 'the owner of one tab-hosted instance.';
-  const lore = /** @type {Record<string,string>} */ (ACTOR_TYPE_LORE)[kind] ?? '';
+  const lore = /** @type {Record<string,string>} */ (ACTOR_TYPE_LORE)[actorType] ?? '';
   // The actor is the agent that WRITES the code, so the style (and, for a
   // Notebook, the correctness; for an App, the iframe-runtime gotcha) guidance
   // rides HERE — not the orchestrator's create-result (js_create/app_create stop
   // appending these when the flag is on, but app_create still discloses
   // APP_RUNTIME_NOTE to the orchestrator flag-OFF, from the same source).
-  const codeNotes = kind === 'app' ? [CODE_STYLE_NOTE, APP_RUNTIME_NOTE]
-    : kind === 'notebook' ? [CODE_STYLE_NOTE, JS_PITFALLS_NOTE]
+  const codeNotes = actorType === 'app' ? [CODE_STYLE_NOTE, APP_RUNTIME_NOTE]
+    : actorType === 'notebook' ? [CODE_STYLE_NOTE, JS_PITFALLS_NOTE]
     : [];
   return [
     '',
