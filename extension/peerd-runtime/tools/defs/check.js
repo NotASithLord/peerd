@@ -4,7 +4,7 @@
 // You state an assertion ("the form was submitted successfully", "the cart has
 // 3 items"); a read-only runner observes the page and returns a boolean verdict
 // + a one-sentence rationale grounded in what it saw. This is also the
-// LLM-judge primitive the eval harness uses. See docs/DO-GET-CHECK-DESIGN.md.
+// LLM-judge primitive the eval harness uses.
 
 import { runRunner, READ_TOOLSET, READ_MAX_STEPS, CHECK_SUFFIX, parseCheckVerdict } from '../../runner/index.js';
 import { wrapUntrustedRunner } from '../prompt-wrap.js';

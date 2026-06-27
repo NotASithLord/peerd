@@ -4,11 +4,11 @@
 # ============================ SCAFFOLD ====================================
 # THIS IS A DOCUMENTED SKELETON, NOT A FINISHED TOOL. It encodes the
 # CheerpX custom-image flow (Dockerfile -> OCI image -> mounted rootfs ->
-# mkfs.ext2 -d) from docs/engine/VM-IMAGE.md §2/§5 and fails fast with a
+# mkfs.ext2 -d) and fails fast with a
 # clear message wherever a prerequisite is missing. It has NOT been run
 # end-to-end; treat every step past the prerequisite checks as a recipe
 # to verify, then harden. Remove this banner only once a real image built
-# by this script has booted in the extension (VM-IMAGE.md §5 steps 10-11).
+# by this script has booted in the extension.
 # ==========================================================================
 #
 # Why this flow
@@ -28,7 +28,7 @@
 #   - Linux host (buildah userns + ext2 tooling do not exist on macOS)
 #   - buildah        (rootless OK; the mount step runs under `buildah unshare`)
 #   - mkfs.ext2      (e2fsprogs)
-#   - a Dockerfile at build/vm-image/Dockerfile (see VM-IMAGE.md §2)
+#   - a Dockerfile at build/vm-image/Dockerfile
 #   - ~3x IMAGE_SIZE free disk in the working directory
 
 set -euo pipefail
@@ -48,7 +48,7 @@ die() { echo "build-vm-image: ERROR: $*" >&2; exit 1; }
 [ "$(uname -s)" = "Linux" ] || die \
   "this script needs a Linux host (found: $(uname -s)). buildah's rootless \
 mount namespace and mkfs.ext2 -d are Linux-only — run this on a Linux box \
-or a CI runner (see docs/engine/VM-IMAGE.md §5)."
+or a CI runner."
 
 command -v buildah >/dev/null 2>&1 || die \
   "buildah not found. Install it (Debian/Ubuntu: 'apt install buildah'; \
@@ -62,8 +62,8 @@ image CheerpX streams."
 
 [ -f "$DOCKERFILE" ] || die \
   "no Dockerfile at ${DOCKERFILE}. Create it first — the reference \
-package set (python3/pip/pandas/requests/jq/curl/git/ripgrep on an \
-i386 Debian base, pandas via apt NOT pip) is in docs/engine/VM-IMAGE.md §2."
+package set is python3/pip/pandas/requests/jq/curl/git/ripgrep on an \
+i386 Debian base, with pandas via apt NOT pip."
 
 case "$IMAGE_SIZE" in
   *M|*G) : ;;
@@ -109,12 +109,12 @@ echo "==> built: ${FINAL} (${BYTES} bytes)"
 echo "==> sha256: $(cut -d' ' -f1 "${FINAL}.sha256")"
 cat <<EOF
 
-NEXT STEPS (manual — see docs/engine/VM-IMAGE.md §5):
+NEXT STEPS (manual):
   1. Attach ${FINAL} + .sha256 to a GitHub release (archive/provenance).
   2. Upload to R2 with: cache-control "public, max-age=31536000, immutable"
-     (the bytes behind a published URL must NEVER change — §4).
+     (the bytes behind a published URL must NEVER change).
   3. Verify the origin: curl -r 0-1023 must return 206 + accept-ranges
-     + access-control-allow-origin (§5 step 9).
+     + access-control-allow-origin.
   4. Boot test in the extension with a FRESH VM (never reuse an overlay
-     from another image — §4 rule 2).
+     from another image).
 EOF

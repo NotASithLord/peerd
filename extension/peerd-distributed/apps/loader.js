@@ -20,7 +20,7 @@ import { unpackBundleText } from '../content/bundle.js';
 
 // The dweb-install ceiling is SEPARATE from the agent's app_create cap (2 MB /
 // 64 files): a peer-installed app may carry WASM + assets, so it gets a larger
-// bound (PROPAGATION.md "big apps"). It is still bounded — a malicious bundle
+// bound (the "big apps" case). It is still bounded — a malicious bundle
 // can't be unbounded — and the Library warns from the card's `size` before the
 // fetch even starts. why 50 MB / 256 files: WASM-friendly, still well under what
 // a swarm fetch + OPFS store handle comfortably.

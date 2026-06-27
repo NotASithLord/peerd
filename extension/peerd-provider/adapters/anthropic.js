@@ -5,7 +5,7 @@
 // secret lookup, error mapping). The adapter's `call` is an async
 // generator yielding internal ProviderEvent values.
 //
-// Dependency injection (architecture.md §2.1): the adapter takes
+// Dependency injection: the adapter takes
 // `safeFetch` and `getSecret` from its caller — it does NOT import
 // peerd-egress. This is enforced at the type level (caller passes
 // concrete functions) and at the architectural level (provider is

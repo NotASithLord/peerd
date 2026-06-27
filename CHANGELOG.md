@@ -1,9 +1,9 @@
 # Changelog
 
 All notable changes to peerd are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
-follows `VERSIONING.md` — **`0.MINOR.PATCH`**, minor = milestone,
-patch = fix, with `store`/`preview`/`dev` channels as an orthogonal axis.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
+**`0.MINOR.PATCH`** — minor = milestone, patch = fix, with
+`store`/`preview`/`dev` channels as an orthogonal axis.
 
 peerd is **0.x — experimental preview**: breaking changes are likely and
 storage formats may move until the surface stabilizes.
@@ -20,8 +20,7 @@ The staged integration of the open-PR backlog onto one verified branch
 - **On-device OCR for scanned PDFs** — render→recognize pipeline wired
   (Tesseract), `auto` escalates when a PDF looks scanned and the opt-in
   engine is installed. Fail-closed: falls back to the text layer until
-  the driver is vendored and the asset SRIs are pinned. See
-  `docs/PDF-READING.md`.
+  the driver is vendored and the asset SRIs are pinned.
 - **Browser-native VM networking** — full HTTP, multi-host `git clone`,
   npm/pip/gem install via host-side resolution, response cache.
 - **Session robustness** — auto-resume after a service-worker restart,

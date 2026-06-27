@@ -2,9 +2,7 @@
 // peerd-distributed — public surface.
 //
 // The decentralized web (dweb) between separate peerd instances:
-// identity, transport, content addressing, discovery, messaging. See
-// docs/distributed/ for the full architecture, protocol, threat
-// model, and roadmap.
+// identity, transport, content addressing, discovery, messaging.
 //
 // Every import from outside this module goes through this file (ESLint
 // no-restricted-imports forbids deep cross-module paths). Within the
@@ -13,8 +11,8 @@
 // PHASE 0 (the V1-launch wedge): two peers exchange a signed dwapp bundle
 // over WebRTC with manual paste-code pairing — no DHT, no async
 // messaging, no discovery. The surface grows per ROADMAP phase. Sub-areas
-// not yet built (identity subkeys, DHT, messaging, curation) live in
-// docs/distributed and land in later phases.
+// not yet built (identity subkeys, DHT, messaging, curation) land in
+// later phases.
 
 // --- identity (Ed25519, did:key) ----------------------------------------
 export { generateIdentity, createPersistentIdentity, importIdentity, verifySignature } from './identity/keypair.js';

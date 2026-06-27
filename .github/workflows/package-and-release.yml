@@ -1,4 +1,4 @@
-# Dual-distribution CI (PACKAGING.md):
+# Dual-distribution CI:
 #
 #   every push/PR   → tests, lint, dweb-boundary check, generated-
 #                     file drift check, then the FULL 2-channel × 2-browser
@@ -96,8 +96,8 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         run: bun scripts/cdp/run-inbrowser-tests.mjs
 
-  # Additive job — the headless TWO-PEER dweb integration test (TESTING.md
-  # §B–F), previously a manual two-Chrome-profile checklist. Stands up the local
+  # Additive job — the headless TWO-PEER dweb integration test,
+  # previously a manual two-Chrome-profile checklist. Stands up the local
   # signaling node and opens two real browser contexts that must form a WebRTC
   # mesh and exchange gossip — the live peer-to-peer seam no other job covers.
   twopeer:
@@ -322,7 +322,7 @@ jobs:
 
       # The feeds are committed so the repo (and the peerd.ai site deploy,
       # which serves update-feeds/ at /updates/) always reflects the
-      # latest release. See PACKAGING.md §"Update feeds".
+      # latest release.
       - name: Commit regenerated update feeds to main
         run: |
           git config user.name "github-actions[bot]"

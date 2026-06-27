@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Headless TWO-PEER dweb integration harness.
 //
-// The honest boundary in docs/distributed/TESTING.md §B–F: real WebRTC bytes
+// The honest boundary: real WebRTC bytes
 // between real browser contexts can't run under bun, so the live peer-to-peer
 // flows (join a room → see each other → messages flow) were verified by hand in
 // two Chrome profiles every release. This harness automates that beat: it stands

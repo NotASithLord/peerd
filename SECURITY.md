@@ -70,8 +70,7 @@ Understanding the boundaries helps you scope a report:
 - Anything requiring an already-compromised OS/browser or a malicious
   extension installed alongside peerd.
 - The **dweb / `peerd-distributed` preview** is explicitly research-grade
-  and ships only in the preview channel (see
-  `docs/distributed/THREAT-MODEL.md`). Report issues, but understand the
+  and ships only in the preview channel. Report issues, but understand the
   protocol is pre-hardening.
 - Self-inflicted config (e.g. removing your own denylist entries).
 - Social engineering, spam, missing best-practice headers without a

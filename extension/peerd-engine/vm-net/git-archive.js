@@ -9,7 +9,7 @@
 // Scope: GitHub and GitLab (the two that matter), plus a best-effort fallback
 // for an unrecognized host that tries both layouts. This is a SNAPSHOT clone —
 // no `.git`, no history, no push (full-history smart-HTTP is a documented
-// follow-up; docs/engine/VM-NETWORKING.md). Snapshot-of-any-ref with private-
+// follow-up). Snapshot-of-any-ref with private-
 // repo auth covers the common "get me this code so I can read/build it" case.
 //
 // This module is PURE: it turns a clone URL + optional ref into the ordered

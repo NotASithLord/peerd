@@ -1,7 +1,7 @@
 // @ts-check
 // peerd-distributed/apps/library.js — the bounded discovery cache.
 //
-// Where DWAPP_META cards LAND (PROPAGATION.md, Plane 1). This is today's
+// Where DWAPP_META cards LAND (Plane 1). This is today's
 // in-memory `heardDwapps` grown up: a bounded, no-downgrade, blocklist-gated
 // store with the popularity=availability eviction rule. The host swaps the Map
 // for an IDB-backed store with the SAME surface (the functional-core rule —

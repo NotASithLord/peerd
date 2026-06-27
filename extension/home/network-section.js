@@ -474,7 +474,7 @@ export const NetworkSection = () => {
           })),
         // Kill switch — symmetric to "Start the network" in the offline view.
         // Drops every live connection and persists dweb off (won't auto-restart
-        // on unlock) — docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2.
+        // on unlock).
         m('button.peerd-net-btn', {
           disabled: stopping,
           style: 'margin-top:10px; font-size:12px; opacity:.75;',

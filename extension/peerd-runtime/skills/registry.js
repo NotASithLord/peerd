@@ -176,7 +176,7 @@ export const createSkillRegistry = ({ store, audit }) => {
   /**
    * Enabled skills surfaced as composer slash commands — the feature-04
    * integration point (composer/command-sources.js skillRegistrySource
-   * depends only on this method; see docs/COMMANDS-DESIGN.md).
+   * depends only on this method).
    *
    * why the body routes through load_skill instead of inlining the skill
    * body: progressive disclosure is the whole point of the skills tier —

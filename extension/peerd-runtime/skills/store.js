@@ -8,7 +8,7 @@
 // it at feature 01's store by replacing the four functions below with
 // calls into the workspace store under the `skills/` namespace — the
 // registry only ever touches `createSkillStore()`'s returned interface,
-// never IDB directly. See DEV-NOTES.md "01 adapter".
+// never IDB directly.
 //
 // PROGRESSIVE DISCLOSURE shows up in the storage shape too. A skill is
 // persisted as two records under the same id:

@@ -2,7 +2,7 @@
 // CHANNEL_DEFAULTS are generated from. PACKAGE-TIME INPUT ONLY: nothing in
 // the extension imports this file; packaging/gen-channel-config.ts flattens it
 // per channel into extension/shared/channel-config.js (and into the staged
-// copy of each artifact). See PACKAGING.md §"Channel-aware defaults".
+// copy of each artifact).
 //
 // Each key maps to { store, preview } values. A key present for only one
 // channel is OMITTED from the other channel's CHANNEL_DEFAULTS entirely —

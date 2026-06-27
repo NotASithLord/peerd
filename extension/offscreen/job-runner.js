@@ -21,7 +21,7 @@
 //     postMessage-bridged fetch (the seal tests prove it can't be unseated from
 //     inside the realm). The CSP only ever mattered as a seal-ESCAPE backstop.
 //   • Do NOT run UNTRUSTED code here — that needs a real origin boundary (the
-//     opaque-origin iframe / "App without UI", DESIGN.md §8.5), not a Worker.
+//     opaque-origin iframe / "App without UI"), not a Worker.
 //   • Hardening path if the backstop is wanted: spawn the worker from a
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 

@@ -1,7 +1,7 @@
 // @ts-check
 // http-bridge — the pure wire codec for the VM↔host HTTP channel.
 //
-// The WebVM has no sockets (DESIGN.md §8.5; CheerpX networking would mean
+// The WebVM has no sockets (CheerpX networking would mean
 // lwIP-over-Tailscale, an out-of-browser dependency we deliberately reject).
 // So every byte of network the VM does rides ONE channel: a sentinel line on
 // the VM's stdout that the host (vm-tab.js) parses, turns into a denylist-gated

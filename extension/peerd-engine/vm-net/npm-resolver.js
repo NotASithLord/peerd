@@ -8,7 +8,7 @@
 // registry-doc fetcher, it produces a flat, deduped install plan (name →
 // version → tarball). IO is injected, so it's fully unit-testable.
 //
-// Deliberate scope (documented in VM-NETWORKING.md): runtime `dependencies`
+// Deliberate scope: runtime `dependencies`
 // only (no dev/peer/optional), no install scripts, no native builds. That
 // covers the common "pull a JS library so I can read/run it" case; it is NOT a
 // full npm. Correctness over coverage — an unsupported range fails loudly.

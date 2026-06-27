@@ -3,8 +3,7 @@
 // These scripts are PACKAGING TOOLING — they run in Bun on a dev machine or
 // CI, never inside the extension. The extension itself stays vanilla JS
 // with no build step; "packaging" here means generating a manifest +
-// channel-config, pruning the tree per channel, and zipping. See
-// PACKAGING.md for the architecture.
+// channel-config, pruning the tree per channel, and zipping.
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
