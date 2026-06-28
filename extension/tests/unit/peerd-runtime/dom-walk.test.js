@@ -165,6 +165,22 @@ describe('snapshot → click/type over walk refs — full chain', () => {
     });
   });
 
+  it('click {selector, expectedCount} reports the real matchedCount on success', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      let clicks = 0;
+      for (const btn of host.querySelectorAll('button')) {
+        /** @type {HTMLButtonElement} */ (btn).disabled = false;
+        btn.addEventListener('click', () => { clicks += 1; });
+      }
+      const r = await clickTool.execute({ selector: '#dom-walk-fixture button', expectedCount: 2, nth: 1 }, ctx);
+      expect(r.ok).toBe(true);
+      expect(contentOf(r)).toContain('"matchedCount": 2');
+      expect(contentOf(r)).toContain('"nth": 1');
+      expect(clicks).toBe(1);
+    });
+  });
+
   it('type {ref} sets the value and fires input events', async () => {
     await withFixture(async (host) => {
       const ctx = makeCtx();
