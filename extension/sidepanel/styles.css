@@ -878,7 +878,10 @@ button.icon:hover { background: var(--bg); }
 .message .role {
   font-size: 11px;
   color: var(--fg-muted);
-  text-transform: uppercase;
+  /* why no text-transform: the assistant role label renders the brand name
+     (peerName || 'peerd'), and the brand is ALWAYS lowercase — uppercasing it
+     to "PEERD" breaks that rule. The matched 'you' label drops the caps too so
+     the pair stays consistent. */
   letter-spacing: 0.05em;
 }
 .message .bubble {
