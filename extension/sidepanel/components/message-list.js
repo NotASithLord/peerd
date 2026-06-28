@@ -622,8 +622,14 @@ const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, actor
 const renderActorCard = ({ toolUse, toolResult, interrupted, actors, subagents, loadSubagent, peerName, depth, ui }) => {
   const card = actors?.[toolUse.id] ?? null;
   const task = String(toolUse.input?.message ?? '');
-  const kindLabel = card?.kind ? `${card.kind} actor` : 'actor';
   const who = card?.name ?? card?.instanceId ?? toolUse.input?.to ?? '';
+  // DESIGN-18: an API actor is a web actor whose instance is an ORIGIN — label it
+  // "<origin> integration" to match deliver()/ack + the prompt lore (not "web actor",
+  // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
+  const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
+  const cardLabel = isApiIntegration
+    ? `${who} integration`
+    : `${card?.kind ? `${card.kind} actor` : 'actor'}${who ? ` · ${who}` : ''}`;
   // The actor's own live state drives the status (the tool result is the async
   // "delivered" ack, not the actor outcome). No card yet → fall back to the ack.
   const status = card?.error ? 'failed'
@@ -639,7 +645,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, subagents, 
       m(`span.tool-status-dot.dot-${status}`,
         { title: status === 'failed' ? 'failed' : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'message_actor'),
-      m('span.tool-args', `${kindLabel}${who ? ` · ${who}` : ''}: "${truncate(task, 40)}"`),
+      m('span.tool-args', `${cardLabel}: "${truncate(task, 40)}"`),
       m('.spacer'),
       status === 'pending' ? m('span.tool-pending', 'working…')
         // Show the spend chip whenever a tally is present — incl. $0.00 for a

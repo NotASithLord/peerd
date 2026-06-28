@@ -51,6 +51,24 @@ describe('session store v2 — per-message records', () => {
     expect('messagesV2' in s).toBe(false);
   });
 
+  // DESIGN-18 REGRESSION GUARD: create() rebuilds the record from a fixed field
+  // whitelist; `backing` was once OMITTED, which silently made every API actor behave
+  // as a tab web actor (the entire feature inert). This round-trip — the coverage the
+  // unit suite lacked — asserts the actor self-description survives create()→get().
+  test('an actor record round-trips actorType + backing + instanceId through create/get', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const s = await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.stripe.com' });
+    const got = await store.get(s.sessionId);
+    expect(got!.kind).toBe('actor');
+    expect(got!.actorType).toBe('web');
+    expect(got!.backing).toBe('api');                 // the field that was dropped
+    expect(got!.instanceId).toBe('https://api.stripe.com');
+    // A tab-backed web actor (no backing passed) stays backing-absent (the default).
+    const tab = await store.create({ kind: 'actor', actorType: 'web', instanceId: '42' });
+    expect((await store.get(tab.sessionId))!.backing).toBeUndefined();
+  });
+
   test('appendMessage writes a per-message record and pushes the id to msgIndex', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

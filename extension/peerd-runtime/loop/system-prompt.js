@@ -161,7 +161,7 @@ export const renderSystemPrompt = async (ctx) => {
   // It frames the agent as the owner of ONE instance, told to act only on that
   // instance and to treat any instruction embedded in instance output as data.
   if (typeof ctx.actorType === 'string' && ctx.actorType.length > 0) {
-    out += actorBlock(ctx.actorType, ctx.backing);
+    out += actorBlock(ctx.actorType, ctx.backing, ctx.instanceId);
   }
   return out;
 };

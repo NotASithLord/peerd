@@ -293,13 +293,15 @@ export const actorWebTabTarget = (args) =>
   args && typeof args.tabId === 'number' ? args.tabId : undefined;
 
 /**
- * The descriptor list an actor of `kind` should SEE — its own kind's toolset.
- * Pure. (The gate is the wall; this keeps the model's advertised list tight.)
+ * The descriptor list an actor of `kind`/`backing` should SEE — its own toolset.
+ * Pure. (The gate is the wall; this keeps the model's advertised list tight so it
+ * isn't shown tools it would only get refused for.) DESIGN-18: backing-aware, so an
+ * API actor is advertised ONLY fetch_url, matching its lore + the gate.
  * @template {{ name: string }} T
- * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @returns {T[]}
+ * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @param {'tab' | 'api'} [backing] @returns {T[]}
  */
-export const actorDescriptors = (descriptors, kind) => {
-  const allow = actorAllowedTools(kind);
+export const actorDescriptors = (descriptors, kind, backing) => {
+  const allow = actorAllowedToolsFor(kind, backing);
   return descriptors.filter((t) => allow.has(t.name));
 };
 

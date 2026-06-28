@@ -395,4 +395,13 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     const all = [{ name: 'click' }, { name: 'app_update' }, { name: 'do' }, { name: 'snapshot' }];
     expect(actorDescriptors(all, 'web').map((t) => t.name).sort()).toEqual(['click', 'snapshot']);
   });
+
+  test('DESIGN-18: actorDescriptors is backing-aware — an API actor is advertised ONLY fetch_url', () => {
+    const all = [{ name: 'click' }, { name: 'snapshot' }, { name: 'navigate' }, { name: 'fetch_url' }, { name: 'app_update' }];
+    // An API backing drops the DOM tools from the ADVERTISED list (matching the gate +
+    // the actor's own "no DOM" lore — so the model isn't shown tools it'd only be refused).
+    expect(actorDescriptors(all, 'web', 'api').map((t) => t.name)).toEqual(['fetch_url']);
+    // A tab backing (and an absent backing) keep the full web surface.
+    expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'snapshot']);
+  });
 });

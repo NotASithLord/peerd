@@ -155,6 +155,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
    *   instanceId?: string,
    *   actorType?: 'webvm' | 'notebook' | 'app' | 'web',
+   *   backing?: 'tab' | 'api',
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -171,6 +172,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     toolManifest,
     instanceId,
     actorType,
+    backing,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -194,6 +196,11 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // DESIGN-17: an actor self-describes the instance it owns + its kind.
       ...(instanceId ? { instanceId } : {}),
       ...(actorType ? { actorType } : {}),
+      // DESIGN-18: a web actor's backing — 'api' (fetch-only origin actor) vs the
+      // default tab backing. MUST be persisted: every backing-aware branch (gate,
+      // egress, prompt, no-tab) reads turnSession.backing, so dropping it here silently
+      // makes an API actor behave as a tab actor.
+      ...(backing ? { backing } : {}),
     };
     await idb.put(STORE, record);
     return present(record, []);

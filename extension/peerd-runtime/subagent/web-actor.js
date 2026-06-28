@@ -229,6 +229,11 @@ export const fenceApiActorSummary = (summary, opts = {}) => {
 // knowledge is the one thing it alone holds (its intent arrives fresh each message;
 // there is no live DOM to re-derive from, so the summary is its only memory). Keep it
 // tight and untrusted-provenance — never carry an instruction that rode in a response.
+// NOT-YET-WIRED (honest): like WEB_ACTOR_SUMMARY_PROMPT, this content-shaping prompt is
+// not yet threaded into the summarizer (buildSummarizationTask uses a generic handoff
+// template). The actor's memory IS still generated AND self-fenced (fenceApiActorSummary
+// is wired); only the API-tuned SHAPE is pending. Wiring a backing-selected summary
+// prompt closes this for both the web and API actor at once.
 export const API_ACTOR_SUMMARY_PROMPT = [
   'Summarize what you have learned about this API so far as a compact note for your',
   'own next call. Keep ONLY: (a) the endpoints you used and what they returned',

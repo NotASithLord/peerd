@@ -1283,7 +1283,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // this ctx), exactly like a subagent. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
     // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
-    // capability strip drops the DOM capabilities (scripting/debuggerPool) it can't use.
+    // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
+    // (getSecret/safeFetch/adoptWebTab/engine/spawn/…). NB scripting + debuggerPool are
+    // NOT in CAPABILITY_CONSUMERS (shared with the do/get/check runner), so they survive
+    // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
+    // tool (isAllowedForActor → fetch_url only), not on this strip.
     const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking)));
     // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
     // the user's session ONLY for a request same-origin to the ORIGIN it owns (where it's
@@ -2540,9 +2544,15 @@ Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
 // origin) — origin-keyed (vs the tab store's tabId key) because an API origin never
-// moves, and chat-scoped (v1 memory is per-chat). Persisted/rehydrated like the web
-// stores; ephemeral is fine (re-mint on loss; the integration auto-forms on first
-// address). No onRemoved lifecycle — there is no tab to close; it ages out with its chat.
+// moves, and chat-scoped (v1 memory is per-chat). No onRemoved lifecycle — there is no
+// tab to close; it ages out with its chat.
+// KNOWN LIMIT (tracked): this binding lives in chrome.storage.session, so it is CLEARED
+// on a full browser restart. Unlike a tab actor (which re-derives from the live DOM, so
+// re-mint-on-loss is free), an API actor's accumulated memory is its ONLY state — so a
+// browser restart currently orphans that memory and the next address mints an empty
+// actor. The fix (durable binding, or an instanceId→session reconnection in
+// resolveApiActor on a miss — the record carries instanceId=origin + parentSessionId)
+// is a deliberate follow-up; within one browser session, memory accumulates correctly.
 const apiActorBindings = makeApiActorBindings();
 const API_ACTOR_KEY = 'apiActorBindings';
 const persistApiActors = () => {

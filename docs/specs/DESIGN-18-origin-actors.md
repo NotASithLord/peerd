@@ -178,6 +178,15 @@ key.
   vaulted **key** is global (the vault isn't chat-scoped), so auth is durable from
   the first grant. Profile-scoped learned memory is the forward "first-class
   citizen" end state.
+- **KNOWN LIMIT — memory does not survive a full browser restart (tracked).** The
+  (chat, origin)→session binding lives in `chrome.storage.session`, cleared on
+  browser close, while the memory-bearing session record is durable in IDB. So on
+  restart, re-addressing the origin finds no binding and mints a fresh EMPTY actor —
+  the prior memory orphans. (A tab actor tolerates this because it re-derives from
+  the live DOM; an API actor has no such fallback, so this is a real degradation,
+  not a free re-mint.) The fix — promote the binding to durable storage, or
+  reconnect by `instanceId`(=origin)+`parentSessionId` on a binding miss — is a
+  deliberate follow-up; within one browser session memory accumulates correctly.
 
 ## The seams — what actually changes
 

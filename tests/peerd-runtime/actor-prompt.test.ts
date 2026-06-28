@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { actorBlock } from '../../extension/peerd-runtime/loop/system-prompt.js';
+import { actorBlock, renderSystemPrompt, _setTemplateForTests } from '../../extension/peerd-runtime/loop/system-prompt.js';
 
 // The base template IS the orchestrator prompt now: an earlier transform
 // (applyActorOrchestration) generated the orchestrator-framed regions, and
@@ -167,6 +167,16 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     const block = actorBlock('web', 'tab');
     expect(block.includes('snapshot')).toBe(true);
     expect(block.includes('API integration')).toBe(false);
+  });
+
+  // REGRESSION GUARD: actorBlock works in isolation, but renderSystemPrompt once CALLED
+  // it as actorBlock(actorType, backing) — dropping instanceId — so in production the API
+  // actor was never told the origin it owns. This drives the real call site.
+  test('DESIGN-18: renderSystemPrompt threads instanceId so the API actor knows its origin', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const out = await renderSystemPrompt({ actorType: 'web', backing: 'api', instanceId: 'https://api.stripe.com' });
+    expect(out.includes('API integration')).toBe(true);
+    expect(out.includes('You own the origin https://api.stripe.com')).toBe(true);
   });
 });
 
