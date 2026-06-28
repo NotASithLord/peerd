@@ -29,7 +29,7 @@
 //   allowed to DO in a session, mirroring personas (Read/Act) which the
 //   ARCHITECTURE already homes in peerd-runtime. The denylist stays in
 //   egress because it's about the network/origin security boundary.
-//   ARCHITECTURE.md §2.4 reserves peerd-runtime/personas for exactly
+//   peerd-runtime/personas is reserved for exactly
 //   this "whether the agent can act at all" axis; Plan/Act is its V1
 //   realization, generalized from terminal Build/Plan to the browser's
 //   bigger surface (DOM + tabs + fetch + shell, not just files).
@@ -147,7 +147,7 @@ export const classifyAction = (tool) => {
   return ACTION_CLASSES.EXTERNAL;
 };
 
-// Plan-mode navigation carve-out (decision 2026-06-12; docs/DECISIONS.md).
+// Plan-mode navigation carve-out (decision 2026-06-12).
 // why: the owner wants Plan to support "go look at X" workflows, and a
 // pure URL load mutates no page state — but at the tool layer "click a
 // hyperlink" is indistinguishable from "click Delete", so a click

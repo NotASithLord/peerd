@@ -54,7 +54,7 @@ const STOCK_DEBIAN_IMAGE_HTTP = STOCK_DEBIAN_IMAGE.replace(/^wss:\/\//, 'https:/
 // export/import routes read the same key to carry the pin inside
 // vm-recipe envelopes (DESIGN-10). Pins stay global, not per-VM:
 // a published image URL must never change bytes for ANY consumer
-// (VM-IMAGE.md §4 rule 1) — a legitimate new image ships under a new
+// — a legitimate new image ships under a new
 // URL and pins fresh automatically.
 
 /** @type {Record<string, any>} the tab owns these known-present elements */
@@ -355,7 +355,7 @@ export -f wget
 # git clone — SNAPSHOT clone of ANY ref on github/gitlab (and a best-effort
 # github/gitlab-layout guess for self-hosted hosts), host-side default-branch + auth.
 # The host runs the tested archive planner (peerd://git-clone control op) and
-# returns the zip; we unzip it. No .git/history/push — see VM-NETWORKING.md.
+# returns the zip; we unzip it. No .git/history/push (snapshot clone only).
 git() {
   if [ "$1" != "clone" ]; then
     /usr/bin/git "$@"
@@ -485,7 +485,7 @@ __peerd_node_add() {
 export -f __peerd_node_add
 
 # npm / yarn / pnpm — same npm registry, same node_modules install. We intercept
-# add|install (named packages only — no package.json; VM-NETWORKING.md) and pass
+# add|install (named packages only — no package.json) and pass
 # every other subcommand through to a real binary if the image ships one.
 npm() {
   case "$1" in
@@ -1131,7 +1131,7 @@ const installWrappers = async () => {
 // CLOSED on the failure mode that destroys user data — the bytes behind
 // the pinned URL changing under existing per-VM overlays (CheerpX
 // caches base blocks by block number with NO invalidation; a changed
-// base silently corrupts every overlay — VM-IMAGE.md §4). It does NOT
+// base silently corrupts every overlay). It does NOT
 // defend a fully malicious host serving a faithful head + tampered
 // tail; that residual trust in disks.webvm.io is the documented gap.
 // ---------------------------------------------------------------------------
@@ -1322,7 +1322,6 @@ const boot = async () => {
   // Unverified: CheerpX doesn't document overlay nesting / per-layer
   // read-through caching / multi-tab IDB sharing — needs real boot testing.
   // Revisit if we ever add a v86 backend too (same dedupe question there).
-  // See ROADMAP.md "Shared WebVM base-image cache".
   setStage('Mounting disk', `Streaming Debian image to ${diskOverlayKey}…`);
   let baseDev, idbDev, overlayDev;
   try {

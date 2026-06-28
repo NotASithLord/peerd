@@ -234,7 +234,7 @@ export const makeSessionRoutes = (deps) => {
         // why: subagent sessions are inspectable through their parent's
         // transcript, not the chat list — filter them out of /chats so
         // decomposition work doesn't clutter the user's conversations.
-        // See docs/SUBAGENTS.md. DESIGN-17: actor sessions are reached only
+        // DESIGN-17: actor sessions are reached only
         // by message (via their instance), never as a chat — keep them out too.
         sessions: all.filter((/** @type {any} */ s) => {
           const kind = s.kind ?? 'chat';
@@ -262,7 +262,7 @@ export const makeSessionRoutes = (deps) => {
     // Fetch any single session by id — including subagents (which are
     // hidden from session/list). The side panel calls this lazily when the
     // user expands a spawn_subagent tool card to render the child's
-    // transcript inline. See docs/SUBAGENTS.md + message-list.js.
+    // transcript inline. See message-list.js.
     'session/get': async ({ sessionId }) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       if (typeof sessionId !== 'string' || !sessionId) {

@@ -3,7 +3,7 @@
 //
 // The lobby connection (mesh, gossip, DHT, presence) lives HERE, in the
 // offscreen document, not in a tab — so the network outlives any single tab,
-// which is the whole point of S1 (GLOBAL-NETWORK.md). The SW forwards
+// which is the whole point of S1. The SW forwards
 // `dweb/base-host/*` messages here (after ensureOffscreen); we answer.
 //
 // VERBOSE by design: every step logs with an [offscreen/dweb] tag so a

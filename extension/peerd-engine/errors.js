@@ -23,8 +23,8 @@ export class VMNotReadyError extends TypedError {
 /**
  * The VM tried to reach a network endpoint that's not on the
  * per-session allowlist (or network is fully off). Distinct from the
- * egress denylist — VM network is its own gate, off by default per
- * DECISIONS.md §6. Sandboxed-VM V1 always throws this from inside the
+ * egress denylist — VM network is its own gate, off by default.
+ * Sandboxed-VM V1 always throws this from inside the
  * VM's socket layer; agent must use vm_write_file to seed artifacts.
  */
 export class VMNetworkDeniedError extends TypedError {

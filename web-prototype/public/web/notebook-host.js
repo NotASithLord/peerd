@@ -7,7 +7,7 @@
 // bridges (subagent → SW orchestrator, fetch → SW webFetch, dweb info) are
 // stubbed for this slice; OPFS is real (the standard navigator.storage API).
 //
-// Contract (see docs/specs/PEERD-WEB-SURFACE.md): user code is baked into the
+// Contract: user code is baked into the
 // worker source and runs on spawn; the worker posts log/display/done plus
 // bridge requests; we render via the real output-render.js and reply to bridges.
 

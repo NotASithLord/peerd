@@ -22,7 +22,7 @@ export {
 
 // Pure resolution of the page-reader runner model (do/get/check). The SW
 // resolves it per tool-context build; once the local WebGPU runner ships it
-// slots in as the on-device rung. See runner-model.js / FEATURE-LOCAL-WEBGPU.md.
+// slots in as the on-device rung. See runner-model.js.
 export { resolveRunnerModel } from './runner-model.js';
 
 export {

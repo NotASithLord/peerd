@@ -76,7 +76,7 @@ export { createKeyedQueue } from './command-queue.js';
 
 // --- WebVM HTTP-native networking (pure cores; vm-tab.js injects IO) ------
 // The wire codec, archive-clone planner, cache policy, and socket stubs
-// behind the VM's one networking chokepoint (vm-net/README + VM-NETWORKING.md).
+// behind the VM's one networking chokepoint.
 export {
   GET_MARKER,
   REQ_MARKER,

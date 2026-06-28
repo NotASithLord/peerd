@@ -13,7 +13,7 @@
 //
 // SECURITY: INFORMATIONAL ONLY — it never messages the service worker (just
 // points at the shortcut/icon), so it needs NO content-script-reachable SW route
-// and NO new permission (docs/PULL-IN-PEERD-WEB-SCOPE.md).
+// and NO new permission.
 //
 // Serialized by chrome.scripting.executeScript and re-evaluated in the page's
 // classic-script world, so it is fully self-contained: 'use strict', ES5, no

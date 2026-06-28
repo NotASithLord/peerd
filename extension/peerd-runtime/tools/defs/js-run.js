@@ -8,7 +8,7 @@
 // result) — when the user needn't watch a tab. EACH CALL is a FRESH worker with
 // an EPHEMERAL OPFS scratch that is nuked after; for durable files or a visible
 // editor/output, use a Notebook (js_create/js_notebook). Own-code threat model — NOT
-// for untrusted code (that needs an opaque-origin iframe, DESIGN.md §8.5).
+// for untrusted code (that needs an opaque-origin iframe).
 
 import { clamp } from '/shared/util.js';
 import { JS_PITFALLS_NOTE } from './code-style-note.js';

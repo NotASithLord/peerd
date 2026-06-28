@@ -6,7 +6,7 @@
 // answers first, then chunks STRIPED across providers (α concurrent) with
 // per-chunk failover — a provider that NOCHUNKs or stalls just loses that chunk
 // to another. This is what makes a big WASM bundle feasible: you don't depend on
-// one seeder's uplink (PROPAGATION.md "big apps").
+// one seeder's uplink (the "big apps" case).
 //
 // Channels are INJECTED (channelFor(did) → a content channel, or null if we hold
 // no link to that provider). In the sim + today's mesh that's the linked peers;

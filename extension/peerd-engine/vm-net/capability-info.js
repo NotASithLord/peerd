@@ -8,8 +8,6 @@
 // explain themselves instead of hanging. All pure text/bash generation — IO is
 // the caller's (vm-tab.js prints the banner, sources the bash).
 
-const DOC = 'docs/engine/VM-NETWORKING.md';
-
 /** The capability matrix, structured so it can render as text or drive tests. */
 export const NET_CAPABILITIES = Object.freeze({
   works: Object.freeze([
@@ -47,9 +45,7 @@ export const capabilitiesText = () => {
     'Tips:',
     '  • private git: store a vault secret named  git:<host>  (token stays host-side)',
     '  • slow/large downloads: raise  PEERD_HTTP_TIMEOUT  (seconds, default 120)',
-    '  • need a tool preinstalled? build a custom image (see the doc)',
-    '',
-    `Full details: ${DOC}`,
+    '  • need a tool preinstalled? build a custom image',
   ].join('\n');
 };
 
@@ -82,8 +78,8 @@ const APT_NETWORK_SUBCOMMANDS = ['update', 'upgrade', 'install', 'remove', 'dist
 /** @param {string} tool */
 const aptMessage = (tool) =>
   `peerd: '${tool}' can't reach Debian's repos — this sandbox has no live network `
-  + 'for package managers. Options: (1) bake the package into a custom image '
-  + `(${DOC} → custom image), (2) for language packages use 'pip install' / `
+  + 'for package managers. Options: (1) bake the package into a custom image, '
+  + "(2) for language packages use 'pip install' / "
   + "'npm install' (resolved host-side), (3) fetch a .deb with curl and 'dpkg -i' it.";
 
 /**

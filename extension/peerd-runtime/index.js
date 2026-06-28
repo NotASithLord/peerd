@@ -2,13 +2,11 @@
 // peerd-runtime — public surface.
 //
 // V1 — agent loop (no tools) + sessions. Profiles land V1.2. Tool
-// registry/dispatcher land V1 step 7. See ARCHITECTURE.md §2.4
-// and TODO.md.
+// registry/dispatcher land V1 step 7.
 //
 // Runtime takes every Layer 1 capability via dependency injection
 // (callModel from provider, vault/safeFetch/appendAudit from egress,
-// vmRun from engine). It never imports concrete adapters — see
-// ARCHITECTURE.md §2.4 dependencies.
+// vmRun from engine). It never imports concrete adapters.
 
 // --- agent loop ---------------------------------------------------------
 export { runUserTurn } from './loop/agent-loop.js';
@@ -87,7 +85,7 @@ export {
 // halt once. All IO injected; the SW's streaming switch stays two lines.
 export { makeTurnCostTracker } from './cost/turn-tracker.js';
 
-// --- subagents (orchestration over sessions; see docs/SUBAGENTS.md) ------
+// --- subagents (orchestration over sessions) ------
 export {
   makeSpawnSubagent, narrowTools, finalAssistantText,
   restrictCtxCapabilities, CAPABILITY_CONSUMERS,
@@ -126,7 +124,7 @@ export { createCheckpointManager } from './edit/checkpoint.js';
 export {
   defaultWritePermissions, resolveCanWrite,
 } from './edit/permissions-adapter.js';
-// --- review (clean-context read-only reviewer; see docs/REVIEW.md) ------
+// --- review (clean-context read-only reviewer) ------
 export {
   makeRequestReview,
   parseReviewSummary, worstSeverity, SEVERITIES,
