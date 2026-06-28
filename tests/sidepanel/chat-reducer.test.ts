@@ -181,3 +181,53 @@ describe('reduceChat', () => {
     expect(done.goalRuns.s2).toBeDefined();
   });
 });
+
+// DESIGN-18: an agent-tab notice anchors to the message_actor turn DRIVING its actor
+// (tab.parentToolUseId), not the wall-clock-latest user message — so a card flows to its
+// actor's most-recent message turn and resurfaces there when re-messaged, instead of all
+// cards clumping at the chat's end (async actor work fires tab touches during later turns).
+describe('reduceChat — agent-tab anchoring by message_actor turn', () => {
+  // turn 1 (install) → vm delegation tu-vm-1; turn 2 (search) → web tu-web-1;
+  // turn 3 (clone+run) → vm RE-delegation tu-vm-2.
+  const convo = () => withSession('s1', [
+    { id: 'u1', role: 'user', content: 'install cowpy' },
+    { id: 'a1', role: 'assistant', toolUses: [{ id: 'tu-vm-1', name: 'message_actor' }] },
+    { id: 'u2', role: 'user', content: 'search for a node app' },
+    { id: 'a2', role: 'assistant', toolUses: [{ id: 'tu-web-1', name: 'message_actor' }] },
+    { id: 'u3', role: 'user', content: 'clone + run it on the vm' },
+    { id: 'a3', role: 'assistant', toolUses: [{ id: 'tu-vm-2', name: 'message_actor' }] },
+  ]);
+  const tab = (over: any) => ({ type: 'agent/tab', tab: { tabId: 100, opened: true, noted: true, ...over } });
+
+  test('anchors to the INVOKING turn, not the wall-clock-latest user message', () => {
+    // The VM tab physically opens during turn 3 (async), but it was invoked in turn 1.
+    const s = reduceChat(convo(), tab({ parentToolUseId: 'tu-vm-1' }));
+    expect(s.agentTabEvents).toHaveLength(1);
+    expect(s.agentTabEvents[0].turnId).toBe('u1');   // turn 1, NOT u3 (latest)
+  });
+
+  test('resurfaces to the newer turn when the SAME actor is re-messaged', () => {
+    const s1 = reduceChat(convo(), tab({ parentToolUseId: 'tu-vm-1' }));      // anchored turn 1
+    const s2 = reduceChat(s1, tab({ parentToolUseId: 'tu-vm-2' }));           // re-messaged turn 3
+    expect(s2.agentTabEvents).toHaveLength(1);                                // same notice
+    expect(s2.agentTabEvents[0].turnId).toBe('u3');                           // moved to turn 3
+  });
+
+  test('a DIFFERENT actor anchors to ITS own turn (cards do not clump)', () => {
+    let s = reduceChat(convo(), tab({ tabId: 100, parentToolUseId: 'tu-vm-2' }));   // vm → turn 3
+    s = reduceChat(s, tab({ tabId: 200, parentToolUseId: 'tu-web-1' }));            // web → turn 2
+    const byTab = Object.fromEntries(s.agentTabEvents.map((e: any) => [e.tabId, e.turnId]));
+    expect(byTab[100]).toBe('u3');   // vm at its latest message turn
+    expect(byTab[200]).toBe('u2');   // web at its own turn — not pulled to the end
+  });
+
+  test('an orchestrator-opened tab (no parentToolUseId) keeps the wall-clock anchor', () => {
+    const s = reduceChat(convo(), tab({ tabId: 300 }));   // open_tab, no driving actor
+    expect(s.agentTabEvents[0].turnId).toBe('u3');        // latest user message (synchronous)
+  });
+
+  test('an unknown/late parentToolUseId falls back to wall-clock (no crash)', () => {
+    const s = reduceChat(convo(), tab({ parentToolUseId: 'tu-not-in-view-yet' }));
+    expect(s.agentTabEvents[0].turnId).toBe('u3');        // graceful fallback
+  });
+});

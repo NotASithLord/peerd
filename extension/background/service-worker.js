@@ -2827,6 +2827,21 @@ const actorMessaging = makeActorMessaging({
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
   runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name }) => {
+    // DESIGN-18 tab-card anchoring: pin this actor's OWNED tab to the message_actor turn
+    // driving it NOW (parentToolUseId), so its inline notice flows to this message's turn
+    // (and resurfaces here when re-messaged) rather than to whatever user message is latest
+    // when the actor's async tab touches physically fire. Resolve the owned tab per kind;
+    // set BEFORE the turn so the touches it makes (engine ensureTab / web DOM noteTab) read
+    // it. A not-yet-opened tab (first boot) maps nothing → that first touch keeps the
+    // wall-clock anchor, which IS this turn for a first message.
+    if (parentToolUseId) {
+      const ownedTab = kind === 'web' ? (actorTabId ?? webActorTabBindings.tabFor(actorSessionId) ?? null)
+        : kind === 'webvm' ? vmTabTracker.getTabId(instanceId)
+        : kind === 'notebook' ? jsTabTracker.getTabId(instanceId)
+        : kind === 'app' ? appTabTracker.getTabId(instanceId)
+        : null;
+      if (typeof ownedTab === 'number') tabMsgAnchor.set(ownedTab, parentToolUseId);
+    }
     // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_actor
     // call (parentToolUseId present — absent on a boot redrain), pass a `display`
     // descriptor so the turn driver re-emits the actor's stream as turn/actor-*
@@ -2899,6 +2914,16 @@ const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = nu
 // p·cyan e·red e·amber r·green d·magenta — the home agent-tab card's Open button
 // draws a fresh one each time the card is (re)generated.
 const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
+// DESIGN-17/18 tab-card anchoring: maps an agent tab → the message_actor tool_use that
+// LAST drove it. The inline "peerd opened …" notice anchors to THAT message's turn, not
+// the wall-clock-latest user message — actor work is async, so a physical tab touch
+// (engine ensureTab / web DOM noteTab) often lands during a later turn, which would clump
+// the cards at the chat's end. Set at each actor-turn start (runActorTurn) for the actor's
+// owned tab; never cleared — overwritten only when a NEW message re-drives that tab, which
+// is exactly when the card should resurface to the newer turn. Orchestrator-opened tabs
+// (open_tab) are absent here → they keep the wall-clock anchor (correct; they're synchronous).
+/** @type {Map<number, string>} tabId → parentToolUseId */
+const tabMsgAnchor = new Map();
 /** @type {number | null} */ let agentTabId = null;
 /** @type {any} */ let agentTabInfo = null;   // the last { tabId, windowId, kind, name, label, color } noted
 /** @type {number | null} */ let activeTabId = null;    // the currently-active tab — hide the card when you're ON it
@@ -2914,7 +2939,11 @@ const broadcastAgentTab = (noted = false) => {
 };
 const noteAgentTab = async (/** @type {number} */ tabId, /** @type {any} */ info = {}) => {
   if (typeof tabId !== 'number') return;
-  const { kind = null, name = null, label = null, opened = true } = (typeof info === 'string' ? { label: info } : info);
+  const { kind = null, name = null, label = null, opened = true, parentToolUseId: ptuArg = null } = (typeof info === 'string' ? { label: info } : info);
+  // The message_actor turn driving this tab (see tabMsgAnchor) — caller-supplied or the
+  // last actor-turn-start mapping. Flows to the agent/tab event so the notice anchors to
+  // that message's turn instead of the wall-clock-latest user message.
+  const parentToolUseId = ptuArg ?? tabMsgAnchor.get(tabId) ?? null;
   let windowId; let title = null;
   try { const t = await browser.tabs.get(tabId); windowId = t.windowId; title = t.title || t.url || null; }
   catch { return; } // tab already gone — don't point the card at a dead tab
@@ -2931,7 +2960,7 @@ const noteAgentTab = async (/** @type {number} */ tabId, /** @type {any} */ info
   // tab via do/get/check (the runner), which resurfaces an existing notice but
   // never invents one for a tab the USER opened. `noted: true` marks this as a
   // real agent touch (vs. a passive current-flag refresh on tab activation).
-  agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened };
+  agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened, parentToolUseId };
   broadcastAgentTab(true);
 };
 // Track the active tab so the card hides when you're on the agent tab, and shows

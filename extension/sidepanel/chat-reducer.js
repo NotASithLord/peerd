@@ -191,6 +191,24 @@ export const INITIAL_STATE = Object.freeze({
   goalRuns: Object.freeze({}),
 });
 
+// The turn a tool_use belongs to: find the assistant message carrying it (by tool_use
+// id), then walk back to the nearest non-synthetic, non-toolResult-only user message —
+// that turn's starting message id. null if the tool_use isn't in view yet. Used to anchor
+// an agent-tab notice to the message_actor turn that drives its actor (DESIGN-18).
+/** @param {any[]} messages @param {string} toolUseId @returns {string|null} */
+const turnIdForToolUse = (messages, toolUseId) => {
+  let i = (messages ?? []).findIndex((/** @type {any} */ m) =>
+    Array.isArray(m?.toolUses) && m.toolUses.some((/** @type {any} */ tu) => tu && tu.id === toolUseId));
+  if (i < 0) return null;
+  for (; i >= 0; i--) {
+    const mm = messages[i];
+    const toolResultOnly = (!mm.content || mm.content === '')
+      && Array.isArray(mm.toolResults) && mm.toolResults.length > 0;
+    if (mm.role === 'user' && !mm.synthetic && !toolResultOnly) return mm.id;
+  }
+  return null;
+};
+
 // ---- streaming reducers (patch one message in place) ----------------------
 
 /**
@@ -489,16 +507,23 @@ export const reduceChat = (state, msg) => {
       // Only a real agent touch (noted) creates/resurfaces — a passive current-flag
       // refresh (you clicking a tab) must never move a notice.
       if (tab.noted !== true) return { ...state, agentTab: tab };
-      // The turn the agent is acting in RIGHT NOW — its starting user message. The
-      // notice anchors here and renders at that turn's END, so later messages push
-      // it down.
+      // Where the notice anchors (it renders at that turn's END, so later messages push
+      // it down). Prefer the turn that owns the message_actor tool_use DRIVING this tab
+      // (tab.parentToolUseId) — so the card flows to its actor's most-recent MESSAGE turn
+      // and resurfaces there when re-messaged. why not the wall-clock-latest user message:
+      // actor work is async, so a physical tab touch often fires during a LATER turn than
+      // the one that invoked the actor, which clumps every card at the chat's end. Fall
+      // back to wall-clock for an orchestrator-opened tab (no parentToolUseId) or before
+      // the tool_use is in view.
       const msgs = state.session.messages;
-      let turnId = null;
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        const mm = msgs[i];
-        const toolResultOnly = (!mm.content || mm.content === '')
-          && Array.isArray(mm.toolResults) && mm.toolResults.length > 0;
-        if (mm.role === 'user' && !mm.synthetic && !toolResultOnly) { turnId = mm.id; break; }
+      let turnId = tab.parentToolUseId ? turnIdForToolUse(msgs, tab.parentToolUseId) : null;
+      if (turnId == null) {
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const mm = msgs[i];
+          const toolResultOnly = (!mm.content || mm.content === '')
+            && Array.isArray(mm.toolResults) && mm.toolResults.length > 0;
+          if (mm.role === 'user' && !mm.synthetic && !toolResultOnly) { turnId = mm.id; break; }
+        }
       }
       const idx = state.agentTabEvents.findIndex((e) => e.sessionId === sid && e.tabId === tab.tabId);
       if (idx >= 0) {
