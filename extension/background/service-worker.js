@@ -2546,13 +2546,12 @@ Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
 // origin) — origin-keyed (vs the tab store's tabId key) because an API origin never
 // moves, and chat-scoped (v1 memory is per-chat). No onRemoved lifecycle — there is no
 // tab to close; it ages out with its chat.
-// KNOWN LIMIT (tracked): this binding lives in chrome.storage.session, so it is CLEARED
-// on a full browser restart. Unlike a tab actor (which re-derives from the live DOM, so
-// re-mint-on-loss is free), an API actor's accumulated memory is its ONLY state — so a
-// browser restart currently orphans that memory and the next address mints an empty
-// actor. The fix (durable binding, or an instanceId→session reconnection in
-// resolveApiActor on a miss — the record carries instanceId=origin + parentSessionId)
-// is a deliberate follow-up; within one browser session, memory accumulates correctly.
+// why the binding stays EPHEMERAL (chrome.storage.session) yet memory survives a browser
+// restart: the binding is just a routing CACHE; the API actor's accumulated memory lives
+// durably on its session record (IDB). On a binding miss (post-restart), resolveApiActor
+// RECONNECTS to the durable actor via sessions.findActorSession (instanceId=origin +
+// parentSessionId) before minting — so the cache stays bounded (auto-clears on restart,
+// no unbounded growth + no cleanup hook needed) while the durable session is the truth.
 const apiActorBindings = makeApiActorBindings();
 const API_ACTOR_KEY = 'apiActorBindings';
 const persistApiActors = () => {
@@ -2743,6 +2742,20 @@ const resolveApiActor = async (/** @type {string} */ origin, /** @type {string |
     apiActorBindings.drop(ownerChatId, origin);
     persistApiActors();
     actorSessionId = null;
+  }
+  // DESIGN-18: RECONNECT before minting. The (chat,origin) binding is ephemeral
+  // (chrome.storage.session, cleared on browser restart), but an API actor's MEMORY is
+  // its only state and lives durably on the session record. On a binding miss, find the
+  // existing durable actor for (this chat, this origin) and re-bind to it — so re-opening
+  // a chat and re-addressing the origin resumes the accumulated memory instead of minting
+  // empty. (A tab actor needs none of this — it re-derives from the live DOM.)
+  if (!actorSessionId) {
+    const reconnected = await sessions.findActorSession({ parentSessionId: ownerChatId, instanceId: origin, actorType: 'web', backing: 'api' });
+    if (reconnected) {
+      apiActorBindings.bind(ownerChatId, origin, reconnected);
+      persistApiActors();
+      actorSessionId = reconnected;
+    }
   }
   if (!actorSessionId) actorSessionId = await mintOnce(`api:${ownerChatId}:${origin}`, () => mintApiActor(ownerChatId, origin));
   // instanceId IS the origin — non-numeric, non-'web', so the gate's tab-pin never

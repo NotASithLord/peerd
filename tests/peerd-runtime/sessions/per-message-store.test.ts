@@ -69,6 +69,26 @@ describe('session store v2 — per-message records', () => {
     expect((await store.get(tab.sessionId))!.backing).toBeUndefined();
   });
 
+  // DESIGN-18: reconnect-on-miss. An API actor's routing binding is ephemeral, but its
+  // memory is durable on the session — findActorSession re-finds it by (origin, chat) so
+  // a post-restart re-address resumes accumulated memory instead of minting empty.
+  test('findActorSession re-finds a live API actor by instanceId + parent, skipping archived', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const a = await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.x.com', parentSessionId: 'chat-1' });
+    // wrong origin / wrong chat / wrong backing don't match
+    await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.y.com', parentSessionId: 'chat-1' });
+    await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.x.com', parentSessionId: 'chat-2' });
+    await store.create({ kind: 'actor', actorType: 'web', instanceId: '42', parentSessionId: 'chat-1' });   // tab backing
+
+    expect(await store.findActorSession({ parentSessionId: 'chat-1', instanceId: 'https://api.x.com', actorType: 'web', backing: 'api' })).toBe(a.sessionId);
+    expect(await store.findActorSession({ parentSessionId: 'chat-9', instanceId: 'https://api.x.com', backing: 'api' })).toBeNull();
+
+    // an archived actor is NOT reconnected (the chat is gone)
+    await store.archive(a.sessionId);
+    expect(await store.findActorSession({ parentSessionId: 'chat-1', instanceId: 'https://api.x.com', backing: 'api' })).toBeNull();
+  });
+
   test('appendMessage writes a per-message record and pushes the id to msgIndex', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

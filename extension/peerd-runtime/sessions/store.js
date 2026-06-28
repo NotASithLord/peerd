@@ -254,6 +254,29 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
   };
 
   /**
+   * Metadata-only lookup of a live actor session by its self-description — used to
+   * RECONNECT to a durable actor whose (ephemeral) routing binding was lost. The
+   * DESIGN-18 case: an API actor after a browser restart — its accumulated memory is
+   * durable on the session record, but the chrome.storage.session (chat,origin) binding
+   * cleared, so without this the next address mints an empty actor and orphans the
+   * memory. Scans ONLY the session metadata store (idb.getAll(STORE) — NO message
+   * load), newest-first, skips archived, returns the sessionId or null.
+   * @param {{ parentSessionId?: string, instanceId?: string, actorType?: string, backing?: string }} [q]
+   * @returns {Promise<string | null>}
+   */
+  const findActorSession = async ({ parentSessionId, instanceId, actorType, backing } = {}) => {
+    const records = await idb.getAll(STORE);
+    const match = records
+      .filter((r) => r && r.kind === 'actor' && !r.archivedAt
+        && (parentSessionId === undefined || r.parentSessionId === parentSessionId)
+        && (instanceId === undefined || r.instanceId === instanceId)
+        && (actorType === undefined || r.actorType === actorType)
+        && (backing === undefined || r.backing === backing))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return match.length ? match[0].sessionId : null;
+  };
+
+  /**
    * Append a message: write its own record, push its id to the session's
    * order index, persist the (small) session record. Auto-derives the title
    * from the first user message. Returns the assembled session.
@@ -386,6 +409,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     create,
     get,
     list,
+    findActorSession,
     archive,
     appendMessage,
     updateAssistantMessage,
