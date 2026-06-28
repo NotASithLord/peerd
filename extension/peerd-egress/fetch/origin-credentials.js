@@ -109,16 +109,19 @@ export const buildOriginSecret = ({ key, header, scheme } = {}) => {
  */
 export const parseOriginAuth = (stored) => {
   if (typeof stored !== 'string' || !stored.trim()) return null;
-  try {
-    const o = JSON.parse(stored);
-    if (o && typeof o.header === 'string' && o.header.trim() && typeof o.value === 'string' && o.value) {
-      return { header: o.header.trim(), value: o.value };
-    }
-    // JSON that isn't our shape → fall through to bearer-of-the-string below is wrong
-    // (it's structured but malformed); treat as no usable secret.
-    return null;
-  } catch {
-    // Not JSON → a raw token; default to Authorization: Bearer (the common case).
-    return { header: 'Authorization', value: `Bearer ${stored.trim()}` };
+  const raw = stored.trim();
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch { return { header: 'Authorization', value: `Bearer ${raw}` }; }   // not JSON → raw token
+  // A JSON OBJECT is meant to be our {header,value} shape — honor it, or reject if
+  // malformed (structured but wrong is "no usable secret", not a token).
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return (typeof parsed.header === 'string' && parsed.header.trim() && typeof parsed.value === 'string' && parsed.value)
+      ? { header: parsed.header.trim(), value: parsed.value }
+      : null;
   }
+  // A JSON PRIMITIVE / array (an all-digit key like "12345678", "true", a quoted string)
+  // is still a bare hand-entered token → Authorization: Bearer, matching the contract for
+  // every bare-token case (not just the ones JSON.parse happens to reject).
+  return { header: 'Authorization', value: `Bearer ${raw}` };
 };

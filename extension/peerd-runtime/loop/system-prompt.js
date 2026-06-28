@@ -332,6 +332,9 @@ const ACTOR_API_LORE = `You reach your API with ONE tool: fetch_url — a direct
 GET/POST. No tab, no DOM, no page-driving (you have none). fetch_url carries the user's session
 ONLY for your OWN origin (same-origin); any cross-origin fetch is SESSIONLESS (no cookies). Work
 the API directly: GET to read, POST (confirm-gated) to write, and read the JSON it returns.
+AUTH: a key for your origin (if the user stored one) is attached automatically — you never
+hold it. If a request comes back 401/403, the user has NOT connected this API: say so plainly
+and point them to Settings → API integrations to add a key; don't keep retrying.
 
 LEARN the API as you go — its endpoints, auth, pagination, filters, rate limits, and error shapes.
 You PERSIST across messages, so keep a compact note of what you learned and build on it; the goal

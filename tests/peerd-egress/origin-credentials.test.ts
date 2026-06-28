@@ -74,6 +74,14 @@ describe('secret naming + build/parse', () => {
     expect(parseOriginAuth('')).toBeNull();
     expect(parseOriginAuth(undefined)).toBeNull();
   });
+  test('a bare token that is also a valid JSON primitive still falls back to Bearer (not dropped)', () => {
+    // all-digit / true / array / quoted — JSON.parse accepts these, but they are bare
+    // hand-entered tokens, not our {header,value} shape → Bearer, never null.
+    expect(parseOriginAuth('12345678')).toEqual({ header: 'Authorization', value: 'Bearer 12345678' });
+    expect(parseOriginAuth('true')).toEqual({ header: 'Authorization', value: 'Bearer true' });
+    // A structured-but-malformed JSON object is "no usable secret" → null (not a token).
+    expect(parseOriginAuth('{"foo":1}')).toBeNull();
+  });
 });
 
 // A recording webFetch + a vault stub to assert the boundary behavior end to end.
@@ -124,6 +132,20 @@ describe('withApiCredentials — the keyless credentialed boundary fetch', () =>
     const sent = seen.init.headers;
     const authVals = Object.entries(sent).filter(([k]) => k.toLowerCase() === 'authorization').map(([, v]) => v);
     expect(authVals).toEqual(['Bearer sk_live_abcdefgh']);
+  });
+
+  test('rule 5 (custom header): a forged X-API-Key is stripped, the vault value wins last', async () => {
+    const { webFetch, seen } = mkFetch();
+    const wf = withApiCredentials(webFetch, () => owned, {
+      getSecret: vault({ 'origin:https://api.stripe.com': buildOriginSecret({ key: 'abcdefgh12', header: 'X-API-Key', scheme: 'raw' })! }).getSecret,
+    });
+    await wf('https://api.stripe.com/v1/charges', { headers: { 'x-api-key': 'FORGED', 'X-API-Key': 'ALSO' } });
+    const sent = seen.init.headers;
+    // The CONFIGURED header name (not just Authorization) is stripped case-insensitively
+    // then injected last-wins — exactly one X-API-Key survives, with the vault value.
+    const keyVals = Object.entries(sent).filter(([k]) => k.toLowerCase() === 'x-api-key').map(([, v]) => v);
+    expect(keyVals).toEqual(['abcdefgh12']);
+    expect(sent.Authorization).toBeUndefined();   // a non-configured auth scheme isn't added
   });
 
   test('rule 7: a locked vault → NO header, NO throw (request proceeds anonymous)', async () => {

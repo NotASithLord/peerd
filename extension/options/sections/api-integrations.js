@@ -123,7 +123,10 @@ export const ApiIntegrationsSection = {
             oninput: (/** @type {any} */ e) => { ui.keyInput = e.target.value; },
           }),
         ]),
-        m('.input-row', [
+        // why margin-top here (not the shared .provider-card-form .input-row, which is
+        // margin:0 and is reused by the single-row git section): this form has TWO stacked
+        // rows, so the second needs its own vertical gap from the first.
+        m('.input-row', { style: 'margin-top:8px;' }, [
           m('input', {
             type: 'text', spellcheck: false, autocapitalize: 'none', autocomplete: 'off',
             placeholder: 'Header (blank = Authorization: Bearer)', value: ui.headerInput, disabled: ui.busy,
