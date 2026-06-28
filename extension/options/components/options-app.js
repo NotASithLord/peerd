@@ -25,7 +25,6 @@ import { ProvidersSection } from '../sections/providers.js';
 import { BehaviorSection } from '../sections/behavior.js';
 import { VoiceSection } from '../sections/voice.js';
 import { VaultSection } from '../sections/vault.js';
-import { GitCredentialsSection } from '../sections/git-credentials.js';
 import { ApiIntegrationsSection } from '../sections/api-integrations.js';
 import { CostsSection } from '../sections/costs.js';
 import { TransferSection } from '../sections/transfer.js';
@@ -60,7 +59,6 @@ const NAV = [
     label: 'Security',
     items: [
       ['vault', 'Vault & unlock'],
-      ['git-credentials', 'Git credentials'],
       ['api-integrations', 'API integrations'],
       ['denylist', 'Denylist'],
       ['activity', 'Activity'],
@@ -248,7 +246,9 @@ export const OptionsApp = {
       case 'costs':     return m(CostsSection, { state, send });
       case 'transfer':  return m(TransferSection, { send });
       case 'vault':     return m(VaultSection, { state, send });
-      case 'git-credentials': return m(GitCredentialsSection, { send });
+      // Git credentials are folded UNDER API integrations (both are host/origin-bound
+      // vault secrets) — ApiIntegrationsSection renders the GitCredentialsSection as a
+      // subsection, so there is no standalone git-credentials route/nav entry.
       case 'api-integrations': return m(ApiIntegrationsSection, { send });
       case 'denylist':  return m(DenylistView, { send });
       case 'activity':  return m(ActivityView, { send });

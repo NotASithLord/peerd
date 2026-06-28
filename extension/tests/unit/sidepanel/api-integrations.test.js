@@ -38,6 +38,8 @@ const makeSend = (overrides = {}) => {
       switch (msg.type) {
         case 'origin-cred/list':
           return { ok: true, integrations: [{ origin: 'https://api.stripe.com', header: 'Authorization' }] };
+        case 'git-cred/list':       // the folded-in Git credentials subsection loads on mount
+          return { ok: true, hosts: [] };
         default:
           return { ok: true };
       }
@@ -65,10 +67,22 @@ describe('options.api-integrations', () => {
       const card = need(root, '.provider-card');
       expect(card.textContent).toContain('https://api.stripe.com');
       expect(card.textContent).toContain('Authorization');     // the header NAME badge
-      // The add-key form renders: origin + key (password) + header inputs, and a Save.
-      expect(root.querySelectorAll('.provider-card-form input').length).toBe(3);
+      // The API add-key form (the FIRST form — git's is folded in below) has origin +
+      // key (password) + header inputs, and a Save.
+      const apiForm = root.querySelectorAll('.provider-card-form')[0];
+      expect(apiForm.querySelectorAll('input').length).toBe(3);
       expect(need(root, 'input[type=password]')).toBeTruthy();
       expect(root.textContent).toContain('Save');
+    } finally { unmount(); }
+  });
+
+  it('folds the Git credentials subsection in under API integrations', async () => {
+    const { root, unmount } = await mountView(makeSend());
+    try {
+      expect(root.textContent).toContain('Git credentials');
+      expect(root.textContent).toContain('No git tokens yet');   // the git list's empty state
+      // Two forms now: API keys + git tokens, both under the one API-integrations section.
+      expect(root.querySelectorAll('.provider-card-form').length).toBe(2);
     } finally { unmount(); }
   });
 
@@ -83,13 +97,14 @@ describe('options.api-integrations', () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);
     try {
-      const inputs = root.querySelectorAll('.provider-card-form input');
+      const apiForm = root.querySelectorAll('.provider-card-form')[0];
+      const inputs = apiForm.querySelectorAll('input');
       const origin = /** @type {HTMLInputElement} */ (inputs[0]);
       const key = /** @type {HTMLInputElement} */ (inputs[1]);
       origin.value = 'api.github.com'; origin.dispatchEvent(new Event('input'));
       key.value = 'ghp_abcdefgh1234'; key.dispatchEvent(new Event('input'));
       await flush();
-      need(root, '.provider-card-form').dispatchEvent(new Event('submit'));
+      apiForm.dispatchEvent(new Event('submit'));
       await flush();
       const set = send.calls.find((c) => c.type === 'origin-cred/set');
       expect(set).toBeTruthy();
