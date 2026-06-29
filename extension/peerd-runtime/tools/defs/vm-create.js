@@ -20,7 +20,7 @@ export const vmCreateTool = {
     'shouldn\'t share state with the chat\'s prior VM.',
     '',
     'Optional: pass a name to label the VM (visible in the tab strip',
-    'and in vm_list output). Defaults to a generated name.',
+    'and in actor_list output). Defaults to a generated name.',
   ].join(' '),
   schema: {
     type: 'object',

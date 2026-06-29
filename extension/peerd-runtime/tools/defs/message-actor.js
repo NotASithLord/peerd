@@ -30,12 +30,11 @@ export const messageActorTool = {
     'entry point and PICKS THE MECHANISM itself: a sessionless secure fetch (no tab)',
     'for data reachable without login, or opening + driving a tab for logged-in /',
     'JS-rendered pages. Don\'t pre-open a tab or pick fetch-vs-render for it. (To act',
-    'on a SPECIFIC already-open tab, address its tabId from list_tabs / open_tab.) For',
-    'a WebVM / Notebook / App, address the instance id from vm_list / js_list /',
-    'app_list. Each actor is a GenServer (an OTP process): a registered name,',
-    'started on first message, holding that environment\'s tools and doing the work in',
-    'its own focused context. message_actor is a cast: you hand off the goal and',
-    'don\'t wait; the reply lands as a fenced note on a LATER turn. When your next step',
+    'on a SPECIFIC already-open tab, address its tabId from actor_list / open_tab.) For',
+    'a WebVM / Notebook / App, address the instance id from actor_list. Each actor is',
+    'started on first message, holds that environment\'s tools, and does the work in',
+    'its own focused context. You SEND a goal and don\'t wait; the reply lands as a',
+    'fenced note on a LATER turn. When your next step',
     'needs a value back ("read the price") it\'s a call — same later-turn reply, you',
     'just await it. Nothing to poll either way. An actor is STATEFUL and handles one',
     'message at a time (its mailbox): reuse the same `to` for follow-up (no',
@@ -47,7 +46,7 @@ export const messageActorTool = {
     properties: {
       to: {
         type: 'string',
-        description: 'Who to address: "web" for general web work (the web actor picks fetch-vs-render — prefer this for open-ended web tasks); an API integration\'s ORIGIN (a bare host like "api.github.com" or a full origin) for repeated, focused work against ONE API — it is fetch-only, keyless, origin-locked, and ACCUMULATES what it learns about that API across messages; a specific open page\'s tabId (from list_tabs / open_tab); OR a vm/notebook/app instance id (from vm_list / js_list / app_list). An actor is minted on first message; an API integration auto-forms the first time you address its origin.',
+        description: 'Who to address: "web" for general web work (the web actor picks fetch-vs-render — prefer this for open-ended web tasks); an API integration\'s ORIGIN (a bare host like "api.github.com" or a full origin) for repeated, focused work against ONE API — it is fetch-only, keyless, origin-locked, and ACCUMULATES what it learns about that API across messages; a specific open page\'s tabId; OR a vm/notebook/app instance id. Every addressable handle (tabId, instance id, formed origin) is listed by actor_list. An actor is minted on first message; an API integration auto-forms the first time you address its origin.',
       },
       message: {
         type: 'string',

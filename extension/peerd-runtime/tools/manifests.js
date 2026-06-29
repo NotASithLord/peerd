@@ -46,9 +46,10 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // actor searches by navigating to an engine + reading results, and reads via
       // fetch_url or its drive-a-tab DOM tools.
       'fetch_url', 'capture',
-      // the main agent's browser surface: open/enumerate tabs + message a tab's
-      // web actor to read or act (do/get/check are folded into the actor).
-      'list_tabs', 'open_tab', 'message_actor',
+      // the main agent's browser surface: enumerate actors (instances/tabs/
+      // integrations) + open a tab + message a tab's web actor to read or act
+      // (do/get/check are folded into the actor).
+      'actor_list', 'open_tab', 'message_actor',
       // do/get/check stay for SUBAGENTS (they can't message actors); the main
       // agent has them folded into the tab's actor by the cutover.
       'do', 'get', 'check',
@@ -68,10 +69,10 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
   'browse-only': Object.freeze({
     description: 'passive browsing — read-only page access via a tab\'s actor, navigation, web reads; no page actions, no memory, no execution',
     allow: Object.freeze([
-      // open/enumerate + message a tab's actor; the actor is held READ-ONLY
-      // by this manifest (only the READ DOM tools below are allowed, so it can
-      // observe but not click/type — the manifest constrains the actor too).
-      'list_tabs', 'open_tab', 'navigate', 'message_actor',
+      // enumerate actors + open + message a tab's actor; the actor is held
+      // READ-ONLY by this manifest (only the READ DOM tools below are allowed, so
+      // it can observe but not click/type — the manifest constrains the actor too).
+      'actor_list', 'open_tab', 'navigate', 'message_actor',
       'get', 'check',   // subagent read path (the main agent reads via the actor)
       // READ_TOOLSET only (observe, never mutate) — inherited by the web actor.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',

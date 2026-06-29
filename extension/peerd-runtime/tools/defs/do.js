@@ -53,7 +53,7 @@ export const doTool = {
       },
       tabId: {
         type: 'integer',
-        description: 'Optional tab id to act on; defaults to the active tab. Get ids from list_tabs.',
+        description: 'Optional tab id to act on; defaults to the active tab. Get ids from actor_list.',
       },
     },
     required: ['instruction'],

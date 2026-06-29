@@ -125,17 +125,20 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
   // (edit-file.js: ctx[kind==='app'?'appRegistry':'jsRegistry']), so it must be
   // listed in BOTH despite not matching a `.appRegistry` grep.
+  // actor_list reads the registries + tab trackers of ALL three engine kinds
+  // (plus tabs + listApiIntegrations, which are ungated/always present) to build
+  // the unified catalog — so it appears in every engine registry+tracker list.
   vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
-  vmRegistry:         ['vm_create', 'vm_delete', 'vm_boot', 'vm_list'],
-  vmTabTracker:       ['vm_create', 'vm_delete', 'vm_list'],
+  vmRegistry:         ['vm_create', 'vm_delete', 'vm_boot', 'actor_list'],
+  vmTabTracker:       ['vm_create', 'vm_delete', 'actor_list'],
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
-  jsRegistry:         ['js_notebook', 'js_create', 'js_delete', 'js_list', 'edit_file'],
-  jsTabTracker:       ['js_create', 'js_delete', 'js_list'],
+  jsRegistry:         ['js_notebook', 'js_create', 'js_delete', 'edit_file', 'actor_list'],
+  jsTabTracker:       ['js_create', 'js_delete', 'actor_list'],
   jsOffscreenClient:  ['js_run'],
   appClient:          ['app_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
-  appRegistry:        ['app_delete', 'app_list', 'edit_file'],
-  appTabTracker:      ['app_list'],
+  appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
+  appTabTracker:      ['actor_list'],
   messageActor:    ['message_actor'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the

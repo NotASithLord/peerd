@@ -61,7 +61,7 @@ describe('makeApiActorBindings — (chat, origin)→session, origin-keyed becaus
     expect(b.drop('chat-1', 'https://api.stripe.com')).toBe(true);
     expect(b.resolve('chat-1', 'https://api.stripe.com')).toBeNull();
   });
-  test('originsFor — a chat\'s integrations (feeds list_integrations + cleanup)', () => {
+  test('originsFor — a chat\'s integrations (feeds actor_list + cleanup)', () => {
     const b = makeApiActorBindings();
     b.bind('chat-1', 'https://api.stripe.com', 'a');
     b.bind('chat-1', 'https://api.github.com', 'b');

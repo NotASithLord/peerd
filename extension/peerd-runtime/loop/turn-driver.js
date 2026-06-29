@@ -227,8 +227,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // JSON-schema. The Anthropic adapter rewrites these into Anthropic's
   // `tools` array shape.
   //
-  // EXPOSURE CUTOVER: the MAIN agent's browser surface is do/get/check (+
-  // list_tabs/open_tab). The low-level DOM/page tools are hidden here so a11y
+  // EXPOSURE CUTOVER: the MAIN agent's browser surface is message_actor (+
+  // actor_list/open_tab). The low-level DOM/page tools are hidden here so a11y
   // trees, refs, and raw page content never enter the main context — they're
   // the runner's, reached only through do/get/check. The tools stay REGISTERED
   // (listTools is full); the runner still narrows from the full set via

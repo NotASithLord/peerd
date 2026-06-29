@@ -322,14 +322,18 @@ fourth, the headless worker (`js_run`), runs the Notebook's sealed worker
 offscreen with no tab: ephemeral, for the agent's own quick compute. The
 orchestrator picks the lightest kind that fits the task, bootstraps the
 instance, and then delegates the work to that instance's actor; the
-tool lists below are the surface an actor drives, not the main agent.
+tool lists below are the surface an actor drives, not the main agent. One
+main-agent tool spans all of them: **`actor_list`** enumerates every
+addressable actor — WebVMs, Notebooks, Apps, open tabs, and API
+integrations — each tagged with its `type` and the handle to pass to
+`message_actor`, so discovery is one call instead of five.
 
 **WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB
 overlay), own bash, own POSIX. ~10s first boot. Use it when you need
 real binaries, a shell, or multi-language stacks.
 
 ```
-vm_list   vm_create   vm_boot   vm_import   vm_write_file   vm_delete
+vm_create   vm_boot   vm_import   vm_write_file   vm_delete
 ```
 
 HTTP egress from the VM (curl / wget / git clone) is intercepted by
@@ -344,7 +348,7 @@ worker's only network, routed through `peerd-egress` so it's honest. Each
 `peerd.self.writeFile`/`readFile` to the OPFS file tree.
 
 ```
-js_list   js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
+js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
 ```
 
 **Headless worker** is the same sealed worker as a Notebook, but headless:
@@ -360,7 +364,7 @@ search across name, tags, and body. `app_update` auto-reloads the open
 tab so iterations show live.
 
 ```
-app_list   app_create   app_update   app_open   app_search   app_delete
+app_create   app_update   app_open   app_search   app_delete
 ```
 
 ## Tests

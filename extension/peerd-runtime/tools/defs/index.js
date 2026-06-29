@@ -26,23 +26,19 @@ import { typeTool }                  from './type.js';
 import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { fetchUrlTool }              from './fetch-url.js';
-import { listTabsTool }              from './list-tabs.js';
-import { listIntegrationsTool }      from './list-integrations.js';
+import { actorListTool }             from './actor-list.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
 import { vmImportTool }               from './vm-import.js';
 import { vmWriteFileTool }           from './vm-write-file.js';
-import { vmListTool }                 from './vm-list.js';
 import { vmCreateTool }               from './vm-create.js';
 import { vmDeleteTool }               from './vm-delete.js';
-import { jsListTool }                 from './js-list.js';
 import { jsCreateTool }               from './js-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { jsRunTool }                  from './js-run.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
-import { appListTool }                from './app-list.js';
 import { appCreateTool }              from './app-create.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
@@ -93,18 +89,15 @@ export {
   navigateTool,
   readPdfTool,
   // sessions
-  listTabsTool,
-  listIntegrationsTool,
+  actorListTool,
   openTabTool,
   // engine (WebVM)
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
-  vmListTool,
   vmCreateTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsListTool,
   jsCreateTool,
   jsNotebookTool,
   jsRunTool,
@@ -112,7 +105,6 @@ export {
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appListTool,
   appCreateTool,
   appUpdateTool,
   appOpenTool,
@@ -160,9 +152,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   inspectSessionAccessTool,
   inspectDenylistTool,
   inspectAuditLogTool,
-  // sessions
-  listTabsTool,
-  listIntegrationsTool,
+  // sessions — actor_list is the single discovery surface (instances + open
+  // tabs + API integrations) that collapsed vm_list/js_list/app_list/list_tabs/
+  // list_integrations into one columnar result keyed by `type`.
+  actorListTool,
   openTabTool,
   // DOM
   readPageTool,
@@ -182,14 +175,12 @@ export const BUILTIN_TOOLS = Object.freeze([
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
   // engine (WebVM)
-  vmListTool,
   vmCreateTool,
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsListTool,
   jsCreateTool,
   jsNotebookTool,
   jsRunTool,
@@ -197,7 +188,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appListTool,
   appCreateTool,
   appUpdateTool,
   appOpenTool,

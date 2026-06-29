@@ -2,7 +2,7 @@
 // Tool exposure policy — which tools the MAIN agent sees.
 //
 // After the DESIGN-17 actor cutover, the main agent's browser surface is
-// list_tabs / open_tab / message_actor (+ capture). The page itself is
+// actor_list / open_tab / message_actor (+ capture). The page itself is
 // reached by messaging the tab's web ACTOR — do/get/check and the low-level
 // DOM/page tools (a11y snapshots, element refs, click/type/navigate, raw page
 // content, code-exec) all LEFT the main agent: the actor holds the DOM
@@ -28,7 +28,7 @@
 // DOM type/click tools) now. The ONE direct web-ish tool the orchestrator keeps
 // is `capture`: a user-facing screenshot of the active tab, whose image is
 // redacted to a sentinel before the model sees it (loop/redact.js) — no page
-// content leaks. list_tabs/open_tab also stay (tab metadata only, no content).
+// content leaks. actor_list/open_tab also stay (handle/metadata only, no content).
 // Every web READ is the actor's, reached via message_actor.
 export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
@@ -61,10 +61,11 @@ export const mainAgentDescriptors = (descriptors) =>
 //
 // The webvm/notebook/app families are large, but most of their tools only make
 // sense once the chat HAS an instance of that kind. We always expose the entry +
-// auto-creating tools (vm_create/vm_list/vm_boot, js_create/js_list/js_notebook,
-// app_create/app_list/app_open/app_search) so every family is discoverable and
+// auto-creating tools (vm_create/vm_boot, js_create/js_notebook,
+// app_create/app_open/app_search) so every family is discoverable and
 // bootstrappable in one call — vm_boot/js_notebook auto-create, app_create IS the
-// create. The SECONDARY ops below are hidden from the main agent UNTIL a current
+// create — and the unified actor_list enumerates existing instances across all
+// kinds. The SECONDARY ops below are hidden from the main agent UNTIL a current
 // instance of their kind exists in the chat; they appear the step after one is
 // created (the SW recomputes the descriptor list per step — agent-loop's
 // refreshTools — and every create path sets the session default). This shrinks

@@ -1,8 +1,8 @@
 // @ts-check
 // columnar.js — lossless densification of uniform record lists.
 //
-// why: the catalog/inspect tools (vm_list, app_list, js_list, list_tabs,
-// inspect_session_access, app_list_files, app_search) each serialize an
+// why: the catalog/inspect tools (actor_list, inspect_session_access,
+// app_list_files, app_search) each serialize an
 // ARRAY OF IDENTICALLY-SHAPED record objects. Pretty-printed JSON repeats
 // every key name AND its indentation once PER record — a 30-VM list prints
 // the same seven keys thirty times. That blob is persisted in message

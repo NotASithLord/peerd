@@ -33,7 +33,12 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // sessions/store.js, vm-tab.js). The dev-only peerd-distributed/demo/
 // harness (pruned from every package, wired into nothing) was removed
 // rather than typed.
-const COVERED_FLOOR = 478;
+//
+// 478 → 474: actor_list collapsed five separate list tools (vm-list / js-list /
+// app-list / list-tabs / list-integrations — all // @ts-check'd) into one
+// (actor-list.js), a net −4 CHECKED FILES. This is a legitimate decrease (files
+// deleted, not directives dropped) — coverage stays 100% of the non-ES5 set.
+const COVERED_FLOOR = 474;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

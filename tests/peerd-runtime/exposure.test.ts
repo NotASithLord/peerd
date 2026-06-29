@@ -66,14 +66,14 @@ describe('tool exposure (main-agent cutover)', () => {
   });
 
   test('keeps do/get/check + tab management + non-browser tools', () => {
-    for (const name of ['do', 'get', 'check', 'list_tabs', 'open_tab', 'spawn_subagent', 'vm_boot', 'remember']) {
+    for (const name of ['do', 'get', 'check', 'actor_list', 'open_tab', 'spawn_subagent', 'vm_boot', 'remember']) {
       expect(isHiddenFromMain(name)).toBe(false);
     }
   });
 
   test('mainAgentDescriptors removes exactly the hidden set, order preserved', () => {
-    const all = [{ name: 'do' }, { name: 'snapshot' }, { name: 'click' }, { name: 'get' }, { name: 'list_tabs' }, { name: 'page_exec' }, { name: 'check' }];
-    expect(mainAgentDescriptors(all).map((t) => t.name)).toEqual(['do', 'get', 'list_tabs', 'check']);
+    const all = [{ name: 'do' }, { name: 'snapshot' }, { name: 'click' }, { name: 'get' }, { name: 'actor_list' }, { name: 'page_exec' }, { name: 'check' }];
+    expect(mainAgentDescriptors(all).map((t) => t.name)).toEqual(['do', 'get', 'actor_list', 'check']);
   });
 });
 
@@ -91,7 +91,7 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
 
   test('always allows a non-hidden tool, even on the main turn', () => {
     expect(eg({ name: 'open_tab' }, {}, { exposure: 'main' }).allowed).toBe(true);
-    expect(eg({ name: 'list_tabs' }, {}, { exposure: 'main' }).allowed).toBe(true);
+    expect(eg({ name: 'actor_list' }, {}, { exposure: 'main' }).allowed).toBe(true);
   });
 
   // DESIGN-17 web-actor cutover: the do/get/check page runner leaves the MAIN
@@ -190,7 +190,7 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
     // The create/list/open entry tools stay on the main agent (it bootstraps an
     // instance, then delegates). The RUN tools (vm_boot/js_notebook) are now
     // actor-only — proven in the actor-tier gate tests below.
-    for (const n of ['app_create', 'vm_create', 'vm_list', 'js_create', 'app_open']) {
+    for (const n of ['app_create', 'vm_create', 'actor_list', 'js_create', 'app_open']) {
       expect(eg({ name: n }, {}, { exposure: 'main', instanceState: none }).allowed).toBe(true);
     }
   });
@@ -212,8 +212,8 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     }
     // Reads + entry/catalog tools + js_run stay GLOBAL — NOT tiered (spec).
     for (const n of ['js_read_file', 'app_read_file', 'app_list_files',
-      'vm_create', 'vm_list', 'js_create', 'js_list', 'js_run',
-      'app_create', 'app_list', 'app_open', 'app_search', 'message_actor']) {
+      'vm_create', 'actor_list', 'js_create', 'js_run',
+      'app_create', 'app_open', 'app_search', 'message_actor']) {
       expect(isActorMutatingTool(n)).toBe(false);
     }
   });

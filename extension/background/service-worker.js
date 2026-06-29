@@ -54,7 +54,7 @@ import {
   // keyless origin:<origin> key injection) + the Settings → API integrations routes.
   withApiCredentials,
   makeOriginCredentialRoutes,
-  // DESIGN-18 P2: map a vault secret name → its origin (list_integrations discovery).
+  // DESIGN-18 P2: map a vault secret name → its origin (actor_list integration discovery).
   originFromSecretName,
   HARDCODED_ALLOWLIST,
   matchesDenylist,
@@ -1218,7 +1218,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // does NOT get the render hook (only a tab-backed web actor lazily adopts a tab).
     ...(actorType === 'web' && actorBacking !== 'api' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
-    // DESIGN-18 P2: list_integrations reads this — the chat's API integrations
+    // DESIGN-18 P2: actor_list reads this for its integration rows — the chat's API integrations
     // (formed ∪ keyed). Referenced lazily (defined later, called at turn time, like
     // adoptWebTab). Only the orchestrator calls it (the gate refuses it for actors).
     listApiIntegrations: () => listApiIntegrations(sessionId),
@@ -2561,8 +2561,8 @@ Promise.resolve(sessionCache.sessionGet(API_ACTOR_KEY))
   .then((e) => { if (Array.isArray(e)) apiActorBindings.load(/** @type {any} */ (e)); })
   .catch(() => {});
 
-// DESIGN-18 P2 — the list_integrations discovery surface (injected as ctx.listApiIntegrations
-// for the orchestrator). The addressable set is the chat's FORMED integrations (origins it
+// DESIGN-18 P2 — the API-integration discovery surface (injected as ctx.listApiIntegrations,
+// the integration rows of actor_list). The addressable set is the chat's FORMED integrations (origins it
 // already worked, from the binding store) UNION the KEYED origins (vault origin:<origin>
 // secrets — global, usable by any chat). keyed=true tells the agent an API key rides
 // automatically; formed=true that it has state/memory here. A locked vault degrades to
