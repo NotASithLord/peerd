@@ -29,6 +29,7 @@
     "e2e:chrome": "bun scripts/cdp/ensure-chrome-for-testing.mjs",
     "eval:bench": "bun scripts/cdp/run-eval-bench.mjs",
     "eval:bench:smoke": "bun scripts/cdp/run-eval-bench.mjs --smoke",
+    "eval:context": "bun scripts/cdp/run-eval-context.mjs",
     "typecheck": "tsc",
     "lint": "eslint extension",
     "package": "bun packaging/package.ts",
@@ -40,6 +41,8 @@
     "gen:badge": "bun packaging/gen-tscheck-badge.ts",
     "check:boundary": "bun packaging/check-dweb-boundary.ts",
     "check:tscheck": "bun packaging/check-tscheck.ts",
+    "check:imports": "bun packaging/check-packaged-imports.ts",
+    "check:pages": "bun scripts/cdp/check-packaged-pages.mjs",
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
     "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"
