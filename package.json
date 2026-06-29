@@ -41,6 +41,7 @@
     "check:boundary": "bun packaging/check-dweb-boundary.ts",
     "check:tscheck": "bun packaging/check-tscheck.ts",
     "check:imports": "bun packaging/check-packaged-imports.ts",
+    "check:pages": "bun scripts/cdp/check-packaged-pages.mjs",
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
     "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"

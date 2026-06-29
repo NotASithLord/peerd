@@ -179,6 +179,14 @@ jobs:
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
+      - name: Packaged page boot (each #app page mounts in the PRUNED build)
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # The runtime backstop to check:imports — loads the actual PACKAGED tree
+        # (both channels) and asserts every #app page mounts. e2e above loads the
+        # UNPACKED source, so this is the only tier that observes prune-induced
+        # blank pages (the v0.2.0 home black-screen class).
+        run: bun run check:pages
 
   package:
     name: package ${{ matrix.channel }}/${{ matrix.browser }}
