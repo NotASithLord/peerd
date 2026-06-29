@@ -27,6 +27,8 @@
     "test:e2e:visual": "bun scripts/cdp/run-e2e-verify.mjs --visual",
     "test:e2e:visual:update": "UPDATE_BASELINES=1 bun scripts/cdp/run-e2e-verify.mjs --visual",
     "e2e:chrome": "bun scripts/cdp/ensure-chrome-for-testing.mjs",
+    "eval:bench": "bun scripts/cdp/run-eval-bench.mjs",
+    "eval:bench:smoke": "bun scripts/cdp/run-eval-bench.mjs --smoke",
     "typecheck": "tsc",
     "lint": "eslint extension",
     "package": "bun packaging/package.ts",

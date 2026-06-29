@@ -379,6 +379,23 @@ export async function unlockAndReady(page, { provider = 'ollama', model = 'qwen3
   log(`provider set to ${provider} (keyless)`);
 }
 
+/**
+ * Open an arbitrary extension page (e.g. the eval harness) as a new tab and
+ * return an attached page CDP connection — same `/json/new` + attach +
+ * Runtime/Page.enable dance launchPeerd uses for the side panel, so any
+ * in-extension page can be driven, not just the panel.
+ * @param {object} ctx   the launchPeerd ctx (uses ctx.sw.id + ctx.port)
+ * @param {string} path  extension-relative path, e.g. 'eval/runner.html'
+ */
+export async function openExtPage(ctx, path) {
+  const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
+  const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?${encodeURI(url)}`, { method: 'PUT' })).json();
+  const page = await attach(created.webSocketDebuggerUrl);
+  await page.send('Runtime.enable');
+  await page.send('Page.enable');
+  return page;
+}
+
 // ---- check reporting --------------------------------------------------------
 
 /** A small named-check collector; finish(ctx) reports + throws on any failure. */
