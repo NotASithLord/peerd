@@ -37,6 +37,9 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
+  // Playwright-vocabulary page tools — runner-only, same as the ref tools they
+  // mirror; the runner reaches them through do/get/check in playwright mode.
+  'page_goto', 'page_click', 'page_fill',
 ]));
 
 /** Is this tool hidden from the main agent (runner-only)? Pure. @param {string} name */

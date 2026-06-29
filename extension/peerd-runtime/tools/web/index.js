@@ -11,12 +11,14 @@ export { readArticleTool }  from './read.js';
 export { webSearchTool }    from './search.js';
 export { submitFormTool }   from './form.js';
 export { captureTool }      from './screenshot.js';
+export { pageGotoTool, pageClickTool, pageFillTool, PLAYWRIGHT_TOOLS } from './playwright.js';
 
 import { callApiTool }     from './api.js';
 import { readArticleTool } from './read.js';
 import { webSearchTool }   from './search.js';
 import { submitFormTool }  from './form.js';
 import { captureTool }     from './screenshot.js';
+import { PLAYWRIGHT_TOOLS } from './playwright.js';
 
 /** @type {import('/shared/tool-types.js').Tool[]} */
 export const WEB_TOOLS = [
@@ -25,6 +27,7 @@ export const WEB_TOOLS = [
   webSearchTool,
   submitFormTool,
   captureTool,
+  ...PLAYWRIGHT_TOOLS,
 ];
 
 // Policy exposed for tests + future skill authors.

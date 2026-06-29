@@ -6,7 +6,7 @@
 // + a one-sentence rationale grounded in what it saw. This is also the
 // LLM-judge primitive the eval harness uses. See docs/DO-GET-CHECK-DESIGN.md.
 
-import { runRunner, READ_TOOLSET, READ_MAX_STEPS, CHECK_SUFFIX, parseCheckVerdict } from '../../runner/index.js';
+import { runRunner, readToolsetFor, READ_MAX_STEPS, CHECK_SUFFIX, parseCheckVerdict } from '../../runner/index.js';
 import { wrapUntrustedRunner } from '../prompt-wrap.js';
 
 /**
@@ -62,7 +62,7 @@ export const checkTool = {
     const runnerModel = /** @type {{ runnerModel?: string }} */ (ctx).runnerModel;
     const r = /** @type {RunnerResult} */ (await runRunner(args, ctx, {
       goal: args.assertion,
-      toolset: READ_TOOLSET,
+      toolset: readToolsetFor(ctx),
       promptSuffix: CHECK_SUFFIX,
       maxSteps: READ_MAX_STEPS,
       fastPath: true,

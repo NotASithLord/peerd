@@ -6,7 +6,7 @@
 // returns just that value. You never see the accessibility tree or page text —
 // only the answer. See docs/DO-GET-CHECK-DESIGN.md.
 
-import { runRunner, READ_TOOLSET, READ_MAX_STEPS, GET_SUFFIX } from '../../runner/index.js';
+import { runRunner, readToolsetFor, READ_MAX_STEPS, GET_SUFFIX } from '../../runner/index.js';
 import { wrapUntrustedRunner } from '../prompt-wrap.js';
 
 /**
@@ -62,7 +62,7 @@ export const getTool = {
     const runnerModel = /** @type {{ runnerModel?: string }} */ (ctx).runnerModel;
     const r = /** @type {RunnerResult} */ (await runRunner(args, ctx, {
       goal: args.query,
-      toolset: READ_TOOLSET,
+      toolset: readToolsetFor(ctx),
       promptSuffix: GET_SUFFIX,
       maxSteps: READ_MAX_STEPS,
       fastPath: true,
