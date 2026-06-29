@@ -72,9 +72,8 @@ let pdaToolResultBody = '';
 let actorState = { delegates: 0, seen: [] };
 
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
-// An authenticated-shaped order page, DOM-walk-friendly: the order lines are
-// ANCHOR text so walk-injected.js emits real interactable refs (refCount > 0, or
-// captureSeedSnapshot returns null and the runner can't fast-path).
+// An order page served over localhost. The order lines are ANCHOR text so the
+// web actor's read_page returns the item names + prices as visible page text.
 const ORDERS_HTML = [
   '<!doctype html><html><head><title>My Orders</title></head><body>',
   '<h1>My Orders</h1><ul>',
@@ -97,13 +96,18 @@ const rows = (await peerd.self.readFile('records/orders.jsonl')).split('\\n').fi
 return { total: rows.reduce((a, r) => a + r.amount, 0), count: rows.length, source: 'harvested on-device index' };
 `;
 
-// The harvest discriminator: a RUNNER (do/get) model request carries RUNNER_PROMPT
-// as its system message; the main agent's does not. We capture the runner's
-// request to PROVE it really read the fixture (the DOM-walk snapshot of the order
-// page rides in that request), and sequence the main agent's turns separately so
-// a variable runner-call count never shifts them.
-let harvestRunnerSawPage = '';
-let harvestMainTurn = 0;
+// harvest sequencing (post-#61 actor flow). The orchestrator delegates the read
+// to the WEB ACTOR via message_actor; the web actor OWNS a tab, opens the fixture
+// itself (navigate — not under the SSRF guard, which is fetch_url-only) and reads
+// it (read_page). We capture the actor request that carries the read_page RESULT
+// to PROVE the actor genuinely read the live page, and sequence the actor's
+// navigate→read→report turns and the orchestrator's post-reply index→answer turns
+// independently (interleaving slots make callIndex fragile).
+let harvestActorSawPage = '';
+let harvestActorTurn = 0;
+let harvestOrchTurn = 0;
+let harvestDelegated = false;
+let harvestFixtureUrl = '';
 
 export const STATES = [
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
@@ -210,61 +214,78 @@ export const STATES = [
   {
     name: 'harvest', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
-      let sys = '';
-      try { sys = JSON.parse(request?.postData || '{}')?.messages?.[0]?.content || ''; } catch { /* keep '' */ }
-      // A do/get RUNNER turn: it ran against the fixture tab and its model request
-      // carries the REAL DOM-walk snapshot of the order page. Capture it (proof of
-      // a real read) and answer as the runner would for a get (final text = the
-      // extracted value; fastPath + a seed ends the runner in this one call).
-      if (sys.includes('You are a browser-runner')) {
-        harvestRunnerSawPage = (request && request.postData) || '';
-        return { sse: sseText('Order #1001 — Coffee Mug — $12.00\nOrder #1002 — Notebook — $8.50\nOrder #1003 — Pen Set — $15.00') };
+      const body = (request && request.postData) || '';
+      // The WEB ACTOR sub-loop (post-#61): the orchestrator delegated the read to
+      // it, and it OWNS a tab. Drive it navigate → read_page → report. Capture the
+      // request that carries the read_page RESULT (the page's own order text rides
+      // back here) as the load-bearing proof it genuinely read the live page.
+      if (body.includes('<actor_agent>')) {
+        if (body.includes('Coffee Mug')) harvestActorSawPage = body;
+        const t = harvestActorTurn++;
+        if (t === 0) return { sse: sseToolCall('navigate', { url: harvestFixtureUrl }) };
+        if (t === 1) return { sse: sseToolCall('read_page', {}) };
+        return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
       }
-      // Main agent turns (sequenced independently so a variable runner-call count
-      // can't shift them): read the orders → index them on-device → report.
-      const t = harvestMainTurn++;
-      if (t === 0) return { sse: sseToolCall('get', { query: 'List every order shown on this page, with its item and price' }) };
-      if (t === 1) return { sse: sseToolCall('js_run', { code: HARVEST_SCRIPT }) };
+      // ORCHESTRATOR: delegate the read to the web actor ONCE (it opens + reads the
+      // page itself), end the turn (the ack says the reply lands later). When the
+      // reply re-enters as a fenced wake, index the orders on-device, then report.
+      if (!harvestDelegated) {
+        harvestDelegated = true;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: `Open ${harvestFixtureUrl} and list every order with its item and price` }) };
+      }
+      if (!body.includes('you messaged has replied')) {
+        return { sse: sseText('Delegated to the web actor; awaiting the page read.') };
+      }
+      const ot = harvestOrchTurn++;
+      if (ot === 0) return { sse: sseToolCall('js_run', { code: HARVEST_SCRIPT }) };
       return { sse: sseText('You spent $35.50 across 3 orders — Coffee Mug, Notebook, Pen Set — harvested from the page and indexed on-device.') };
     },
     async run(ctx, rec) {
-      harvestRunnerSawPage = '';
-      harvestMainTurn = 0;
-      // Serve the order page over localhost HTTP and open it as a REAL active tab
-      // (data: URLs are refused by chrome.scripting, so the DOM-walk snapshot the
-      // runner needs would be empty). Same createServer + /json/new + /json/activate
-      // pattern the harness uses for the side panel.
+      harvestActorSawPage = '';
+      harvestActorTurn = 0;
+      harvestOrchTurn = 0;
+      harvestDelegated = false;
+      // Serve the order page over localhost; the WEB ACTOR opens + reads it ITSELF
+      // through the real actor-model path. navigate is NOT under the private-network
+      // SSRF guard (that's fetch_url-only) and localhost isn't denylisted, so the
+      // actor's own tab really loads the fixture — no out-of-band /json/new tab.
       const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
-      let fxTab = null;
+      harvestFixtureUrl = `http://127.0.0.1:${fxPort}/`;
       try {
-        fxTab = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?http://127.0.0.1:${fxPort}/`, { method: 'PUT' })).json();
-        await fetch(`http://127.0.0.1:${ctx.port}/json/activate/${fxTab.id}`);
-        await new Promise((r) => setTimeout(r, 800)); // let the page load + tabs.onActivated settle
-
-        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Index my orders from the page I have open and tell me what I spent.' });
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Index my orders from my orders page and tell me what I spent.' });
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
-        // get needs the fixture tab ACTIVE to read it; once the runner HAS read it
-        // (its request captured), bring the side panel back to front so its Mithril
-        // view un-throttles and renders the rest of the turn — a backgrounded tab
-        // throttles rAF-driven redraws, so the panel DOM would otherwise stay stale.
-        await waitFor(() => harvestRunnerSawPage.length > 0, { budgetMs: 25_000, pollMs: 100 });
+        // Wait until the actor has READ the page (its read_page result captured).
+        await waitFor(() => harvestActorSawPage.length > 0, { budgetMs: 30_000, pollMs: 100 });
+        // The actor opens its OWN tab, which can background the side panel; bring it
+        // back to front so its Mithril view un-throttles and renders the rest of the
+        // turn (a backgrounded tab throttles rAF-driven redraws, staling the DOM).
         await ctx.page.send('Page.bringToFront').catch(() => {});
         let out = {};
-        await waitFor(async () => { out = await probe(ctx); return out.assistantText && !out.busy; }, { budgetMs: 30_000 });
+        await waitFor(async () => {
+          out = await evalIn(ctx.page, `(() => {
+            const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+            const busy = !!document.querySelector('form.input-bar button.stop');
+            return { bubbles, busy };
+          })()`) || {};
+          // Wait for the FINAL answer specifically: the orchestrator renders an
+          // intermediate "delegated; awaiting" bubble and goes idle BEFORE the
+          // actor's reply wakes it to index + report, so a generic idle check is
+          // too eager and would settle on the intermediate bubble.
+          return (out.bubbles || []).some((b) => /35\.50/.test(b)) && !out.busy;
+        }, { budgetMs: 40_000 });
 
-        const calls = ctx.modelCallCount();
-        rec.check('agent ran the get→js_run loop incl. the runner subagent (>=4 model calls)', calls >= 4, `model calls: ${calls}`);
-        // load-bearing harvest proof: the REAL runner read the fixture — the page's
-        // own order data rode into the runner's model request via the DOM-walk snapshot.
-        rec.check('the runner REALLY read the page (real order data in its DOM-walk snapshot)',
-          harvestRunnerSawPage.includes('Coffee Mug') && harvestRunnerSawPage.includes('12.00'),
-          harvestRunnerSawPage.slice(0, 220));
-        rec.check('the harvested on-device answer renders', !!out.assistantText && /35\.50/.test(out.assistantText), JSON.stringify(out.assistantText));
+        rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
+        rec.check('the web-actor sub-loop ran (navigate → read_page, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
+        // load-bearing proof: the web actor REALLY read the live page — the page's
+        // own order text rode back into the actor's model request via read_page.
+        rec.check('the web actor REALLY read the live page (real order data in its read result)',
+          harvestActorSawPage.includes('Coffee Mug') && harvestActorSawPage.includes('12.00'),
+          harvestActorSawPage.slice(0, 220));
+        rec.check('the harvested on-device answer renders', (out.bubbles || []).some((b) => /35\.50/.test(b)), JSON.stringify(out.bubbles));
         await rec.shot('final');
       } finally {
-        try { if (fxTab?.id) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${fxTab.id}`); } catch { /* */ }
         server.close();
       }
     },
