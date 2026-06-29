@@ -40,6 +40,11 @@ const walkNodes = (out) => /** @type {WalkNode[]} */ (/** @type {unknown} */ (ou
 
 // A fixture corner of the test page: a small form with the roles the
 // walk must classify. withFixture() removes it after each test.
+// why type="button" on the hidden button: a bare <button> defaults to type=submit, and
+// it sits inside this <form>. The click-tool test below targets it (nth:1), and
+// clickInjected fires a native el.click() — a submit button would submit the form and
+// NAVIGATE the test-runner page, reloading runner.html mid-suite so the result marker is
+// never written (the in-browser run hangs at "Loading…" instead of failing cleanly).
 const FIXTURE_HTML = `
   <h2>Pizza order</h2>
   <form aria-label="Order form">
@@ -51,7 +56,7 @@ const FIXTURE_HTML = `
     </select>
     <a id="dw-help" href="#help">Help</a>
     <button id="dw-send" type="button" disabled>Send order</button>
-    <div id="dw-hidden-wrap" hidden><button>Invisible</button></div>
+    <div id="dw-hidden-wrap" hidden><button type="button">Invisible</button></div>
     <input id="dw-secret" type="password" aria-label="Passphrase" value="hunter2">
   </form>`;
 
@@ -162,6 +167,27 @@ describe('snapshot → click/type over walk refs — full chain', () => {
       expect(r.ok).toBe(true);
       expect(contentOf(r)).toContain('"via": "dom-walk"');
       expect(clicks > 0).toBe(true);
+    });
+  });
+
+  it('click {selector, expectedCount} reports the real matchedCount on success', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      let clicks = 0;
+      for (const btn of host.querySelectorAll('button')) {
+        /** @type {HTMLButtonElement} */ (btn).disabled = false;
+        btn.addEventListener('click', () => { clicks += 1; });
+      }
+      const r = await clickTool.execute({ selector: '#dom-walk-fixture button', expectedCount: 2, nth: 1 }, ctx);
+      expect(r.ok).toBe(true);
+      expect(contentOf(r)).toContain('"matchedCount": 2');
+      expect(contentOf(r)).toContain('"nth": 1');
+      // why >0, not ===1: clickInjected deliberately dispatches a synthetic click event
+      // AND calls native el.click() (so it activates both framework listeners and native
+      // behaviour), so a plain addEventListener('click') counter fires more than once per
+      // tool-click. The test only needs to confirm the nth:1 element actually received the
+      // click — not pin the dispatch count.
+      expect(clicks).toBeGreaterThan(0);
     });
   });
 

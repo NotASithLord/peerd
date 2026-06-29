@@ -60,6 +60,7 @@ import './unit/peerd-runtime/vm-tools.test.js';
 
 // --- peerd-engine ---
 import './unit/peerd-engine/overlay.test.js';
+import './unit/peerd-engine/personal-index-durability.test.js';
 
 // --- chassis: notebook-tab ---
 import './unit/notebook-tab/notebook-seal.test.js';

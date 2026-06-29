@@ -26,7 +26,7 @@
 // why: wrap.js re-exports the ONE canonical wrapUntrusted from
 // tools/prompt-wrap.js, so the lethal-trifecta wrap here is literally
 // read_page's wrap — it cannot drift.
-import { wrapUntrusted } from './wrap.js';
+import { wrapUntrusted, neutralizeFence } from './wrap.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 // why: ONE origin-extraction helper. This used to be a hand-kept copy of
 // dom-helpers.originOfUrl (the @-tab gate must match read_page's origin
@@ -122,7 +122,11 @@ export const buildTabPayload = ({ snapshot, origin, retrievedAt }) => {
  * @returns {string}
  */
 export const buildFilePayload = ({ path, content }) =>
-  `<peerd_file path="${escAttr(path)}">\n${content}\n</peerd_file>`;
+  // Defang the closing fence in the body — a file whose content is scraped web
+  // text must not be able to emit a literal </peerd_file> and smuggle the text
+  // after it back as un-fenced, model-trusted instructions (the same structural
+  // break-out defense wrapUntrusted gives @tab).
+  `<peerd_file path="${escAttr(path)}">\n${neutralizeFence(content)}\n</peerd_file>`;
 
 /** @param {unknown} s */
 const escAttr = (s) => String(s)

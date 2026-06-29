@@ -30,7 +30,10 @@ import { escapeAttr } from '/shared/util.js';
 // This is a STRUCTURAL break-out defense (attacker bytes can't forge the
 // delimiter), distinct from the soft "treat the inside as data" rule the
 // system prompt teaches the model.
-const FENCE_TAGS = ['untrusted_web_content', 'untrusted_runner_summary'];
+// peerd_file is the @-mention file fence (composer/resolvers.js): an inlined
+// App/Notebook file is reference DATA, and its body may itself be scraped web
+// text, so it gets the same structural break-out defense.
+const FENCE_TAGS = ['untrusted_web_content', 'untrusted_runner_summary', 'peerd_file'];
 const FENCE_RE = new RegExp(`<(\\s*/?\\s*)(${FENCE_TAGS.join('|')})\\b`, 'gi');
 
 /**
@@ -44,7 +47,7 @@ const FENCE_RE = new RegExp(`<(\\s*/?\\s*)(${FENCE_TAGS.join('|')})\\b`, 'gi');
  * @param {unknown} body
  * @returns {string}
  */
-const neutralizeFence = (body) =>
+export const neutralizeFence = (body) =>
   typeof body === 'string' ? body.replace(FENCE_RE, '&lt;$1$2') : '';
 
 /**

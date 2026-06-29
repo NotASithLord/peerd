@@ -66,6 +66,11 @@ export const clickTool = {
         type: 'integer',
         description: 'Optional 0-indexed match to click when the SELECTOR matches multiple elements (default 0 = first match). Ignored for ref.',
       },
+      expectedCount: {
+        type: 'integer',
+        minimum: 1,
+        description: 'Optional deterministic guard for selector actions: fail before clicking unless the selector resolves to exactly this many elements.',
+      },
       tabId: {
         type: 'integer',
         description: 'Optional tab id; defaults to the active tab.',
@@ -155,13 +160,16 @@ export const clickTool = {
       return { ok: false, error: 'selector_or_ref_required' };
     }
     const nth = Number.isInteger(args.nth) && args.nth >= 0 ? args.nth : 0;
+    const expectedCount = Number.isInteger(args.expectedCount) && args.expectedCount > 0
+      ? args.expectedCount
+      : null;
 
     let scriptResult;
     try {
       const results = await scripting.executeScript({
         target: { tabId: tab.id },
         func: clickInjected,
-        args: [args.selector, nth],
+        args: [args.selector, nth, null, expectedCount],
       });
       scriptResult = results[0]?.result;
     } catch (e) {
@@ -191,8 +199,9 @@ export const clickTool = {
  * @param {string | null} selector
  * @param {number} nth
  * @param {number | null} [walkId]
+ * @param {number | null} [expectedCount]
  */
-function clickInjected(selector, nth, walkId) {
+function clickInjected(selector, nth, walkId, expectedCount) {
   'use strict';
   /** @type {HTMLElement | null} */
   let el;
@@ -218,6 +227,14 @@ function clickInjected(selector, nth, walkId) {
 
     if (nodes.length === 0) {
       return { ok: false, error: `no_match: ${selector}` };
+    }
+    if (expectedCount != null && nodes.length !== expectedCount) {
+      return {
+        ok: false,
+        error: `matched_count_mismatch: selector matched ${nodes.length} element(s), expected ${expectedCount}`,
+        matchedCount: nodes.length,
+        expectedCount,
+      };
     }
     if (nth >= nodes.length) {
       return {

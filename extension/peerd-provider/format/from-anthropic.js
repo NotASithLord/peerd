@@ -133,8 +133,14 @@ export async function* fromAnthropicStream(body) {
             ...(cb.type === 'redacted_thinking' ? { data: cb.data } : {}),
             ...(cb.type === 'thinking' ? { thinkingBuf: '', signature: '' } : {}),
           });
-          if (cb.type === 'tool_use' && typeof cb.id === 'string' && typeof cb.name === 'string') {
-            yield { type: 'tool-use-start', id: cb.id, name: cb.name };
+          if (cb.type === 'tool_use' && typeof cb.id === 'string') {
+            // A tool_use with a non-string name is malformed, but START it anyway
+            // (with a sentinel name) so the loop tracks this id — otherwise its
+            // input_json_delta / content_block_stop reference a call the loop never
+            // saw a start for, and the tool call VANISHES silently on a tool_use
+            // stop. With a start emitted, dispatch rejects the unknown name as a
+            // surfaced error instead of a lost action.
+            yield { type: 'tool-use-start', id: cb.id, name: typeof cb.name === 'string' ? cb.name : '__malformed_tool_name__' };
           }
         }
         break;

@@ -62,6 +62,11 @@ export const typeTool = {
         type: 'boolean',
         description: 'If true, dispatch an Enter keydown after typing (submits search boxes).',
       },
+      expectedCount: {
+        type: 'integer',
+        minimum: 1,
+        description: 'Optional deterministic guard for selector actions: fail before typing unless the selector resolves to exactly this many elements.',
+      },
       tabId: {
         type: 'integer',
         description: 'Optional tab id; defaults to the active tab.',
@@ -157,10 +162,13 @@ export const typeTool = {
 
     let scriptResult;
     try {
+      const expectedCount = Number.isInteger(args.expectedCount) && args.expectedCount > 0
+        ? args.expectedCount
+        : null;
       const results = await scripting.executeScript({
         target: { tabId: tab.id },
         func: typeInjected,
-        args: [args.selector, args.text, !!args.submit],
+        args: [args.selector, args.text, !!args.submit, null, expectedCount],
       });
       scriptResult = results[0]?.result;
     } catch (e) {
@@ -175,6 +183,7 @@ export const typeTool = {
         typed: scriptResult.typed,
         submitted: scriptResult.submitted,
         tag: scriptResult.tag,
+        matchedCount: scriptResult.matchedCount,
       }, null, 2),
     };
   },
@@ -185,14 +194,16 @@ export const typeTool = {
  * @param {string} text
  * @param {boolean} submit
  * @param {number | null} [walkId]
+ * @param {number | null} [expectedCount]
  */
-function typeInjected(selector, text, submit, walkId) {
+function typeInjected(selector, text, submit, walkId, expectedCount) {
   // why: serialized by chrome.scripting.executeScript and re-evaluated
   // in the page's classic-script world; the calling module's strict
   // mode doesn't carry across. Opt in here.
   'use strict';
   /** @type {HTMLElement | null} */
   let el;
+  let matchedCount = 1;
   if (walkId != null) {
     // DOM-walk ref resolution: the walk (walk-injected.js) registered
     // walkId → element in this same isolated world. Element gone or
@@ -207,8 +218,21 @@ function typeInjected(selector, text, submit, walkId) {
   } else {
     // why: erased cast — this branch is reached only when walkId is null, so a
     // selector is always present.
-    el = /** @type {HTMLElement | null} */ (document.querySelector(/** @type {string} */ (selector)));
-    if (!el) return { ok: false, error: `no_match: ${selector}` };
+    /** @type {NodeListOf<HTMLElement>} */
+    let nodes;
+    try { nodes = document.querySelectorAll(/** @type {string} */ (selector)); }
+    catch (e) { return { ok: false, error: `invalid_selector: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` }; }
+    if (nodes.length === 0) return { ok: false, error: `no_match: ${selector}` };
+    if (expectedCount != null && nodes.length !== expectedCount) {
+      return {
+        ok: false,
+        error: `matched_count_mismatch: selector matched ${nodes.length} element(s), expected ${expectedCount}`,
+        matchedCount: nodes.length,
+        expectedCount,
+      };
+    }
+    matchedCount = nodes.length;
+    el = nodes[0];
   }
   try {
     if (typeof el.focus === 'function') el.focus();
@@ -278,6 +302,7 @@ function typeInjected(selector, text, submit, walkId) {
       typed: text.slice(0, 200),
       submitted,
       tag,
+      matchedCount,
     };
   } catch (e) {
     return { ok: false, error: `type_threw: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };

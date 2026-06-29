@@ -96,3 +96,26 @@ describe('SSE parser — property fuzz', () => {
     }
   });
 });
+
+describe('SSE parser — overflow caps (a malformed/oversized stream is bounded)', () => {
+  const drainWith = async (stream: ReadableStream<Uint8Array>, opts: any) => {
+    const out: any[] = [];
+    for await (const e of parseSSE(stream, opts)) out.push(e);
+    return out;
+  };
+
+  test('a line that never terminates throws past maxLine (not unbounded growth)', async () => {
+    const chunk = enc.encode('x'.repeat(200)); // no newline, ever
+    await expect(drainWith(streamOf([chunk]), { maxLine: 50 })).rejects.toThrow(/line buffer exceeded/);
+  });
+
+  test('a record that never completes throws past maxRecord', async () => {
+    const chunk = enc.encode(`data: ${'y'.repeat(200)}\n`); // a data line with no blank-line terminator
+    await expect(drainWith(streamOf([chunk]), { maxRecord: 50 })).rejects.toThrow(/record exceeded/);
+  });
+
+  test('a well-formed stream is unaffected by the caps', async () => {
+    const ok = await drainWith(streamOf([enc.encode('data: hello\n\n')]), { maxLine: 1e6, maxRecord: 1e6 });
+    expect(ok).toEqual([{ event: 'message', data: 'hello' }]);
+  });
+});
