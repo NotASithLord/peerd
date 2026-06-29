@@ -68,7 +68,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -526,6 +526,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         overrides: settingsStore.get().contextWindowOverrides,
         live: liveContextWindow(/** @type {any} */ (costSession?.provider), /** @type {any} */ (costSession?.model)),
       })),
+      // why: one-shot actor delegations (message_actor oneShot) — after the first
+      // clean tool round the loop synthesizes the reply from the result and stops,
+      // skipping the redundant summarize inference. false for every normal turn.
+      oneShot,
     })) {
       // Cost telemetry (feature 06) — handled BEFORE the panel guard so
       // the persisted session total and the hard-limit halt stay correct

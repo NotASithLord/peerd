@@ -44,7 +44,7 @@ import { escapeAttr } from '/shared/util.js';
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
  *   so it must be threaded (not re-derived from the ambient active chat, which is wrong
  *   on a boot redrain). Engine/per-tab kinds ignore it (globally/tab keyed).
- * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string }) => Promise<{ result: string, stopped?: boolean }>} deps.runActorTurn
+ * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string, oneShot?: boolean }) => Promise<{ result: string, stopped?: boolean }>} deps.runActorTurn
  *   Drive ONE actor turn (runAgentTurn against the actor session) and
  *   resolve with its final assistant text. parentToolUseId (the message_actor
  *   tool_use id, absent on a boot redrain) keys the actor's live DISPLAY stream
@@ -179,8 +179,8 @@ export const makeActorMessaging = (deps) => {
   // boot redrain() so the in-flight bookkeeping (count, Stop-cascade tracking,
   // durable entry) stays identical on both paths. parentToolUseId (absent on a
   // redrain — the orchestrator card is gone) keys the actor's display stream.
-  /** @param {{ correlationId: string, senderSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string }} o */
-  const runEngineDelivery = ({ correlationId, senderSessionId, actor, message, parentToolUseId }) => {
+  /** @param {{ correlationId: string, senderSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, actor, message, parentToolUseId, oneShot }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(senderSessionId, actorSessionId);
     // Capture the sender's Stop generation NOW — if the user Stops while this turn is
@@ -208,7 +208,7 @@ export const makeActorMessaging = (deps) => {
       // result, which (with the orchestrator's own turn) is the two-inference cost
       // a simple "run X and report" pays over running it inline.
       const turnStartedAt = now();
-      Promise.resolve(runActorTurn({ actorSessionId, message, actorTabId: tabId, instanceId, kind, parentToolUseId, name }))
+      Promise.resolve(runActorTurn({ actorSessionId, message, actorTabId: tabId, instanceId, kind, parentToolUseId, name, oneShot }))
         .then((res) => {
           log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
           return deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the actor produced no text reply)').slice(0, RESULT_CHARS), res?.stopped === true);
@@ -219,11 +219,11 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean }} req
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageActor = async (req) => {
-    const { to, message, senderSessionId, inbound, toolUseId } = req;
+    const { to, message, senderSessionId, inbound, toolUseId, oneShot } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
     }
@@ -286,8 +286,11 @@ export const makeActorMessaging = (deps) => {
     // page-derived reply is fenced like any other untrusted content. A storage
     // failure degrades to heap-only rather than throwing.
     const correlationId = `${instanceId}:${++seq}:${nowMs}`;
-    await Promise.resolve(mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs })).catch(() => {});
-    runEngineDelivery({ correlationId, senderSessionId, actor, message, parentToolUseId: toolUseId });
+    // Persist oneShot too, so a redrain after an SW restart re-runs the turn in the
+    // same mode (a dropped flag would just fall back to a full summarize turn — safe,
+    // but inconsistent). Older entries without the field redrain as full turns.
+    await Promise.resolve(mailbox.append({ id: correlationId, senderSessionId, to: instanceId, message, createdAt: nowMs, ...(oneShot === true ? { oneShot: true } : {}) })).catch(() => {});
+    runEngineDelivery({ correlationId, senderSessionId, actor, message, parentToolUseId: toolUseId, oneShot: oneShot === true });
 
     const recipient = (kind === 'web' && instanceId === 'web')
       ? 'the web actor'
@@ -335,7 +338,7 @@ export const makeActorMessaging = (deps) => {
         continue;
       }
       inFlight.set(e.senderSessionId, (inFlight.get(e.senderSessionId) ?? 0) + 1);
-      runEngineDelivery({ correlationId: e.id, senderSessionId: e.senderSessionId, actor, message: e.message });
+      runEngineDelivery({ correlationId: e.id, senderSessionId: e.senderSessionId, actor, message: e.message, oneShot: e.oneShot === true });
       redrained += 1;
     }
     log('redrained', redrained);

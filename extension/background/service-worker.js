@@ -2826,7 +2826,7 @@ const actorMessaging = makeActorMessaging({
   // actorTabId threads the WEB actor's owned tab into the turn so its DOM
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
-  runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name }) => {
+  runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name, oneShot }) => {
     // DESIGN-18 tab-card anchoring: pin this actor's OWNED tab to the message_actor turn
     // driving it NOW (parentToolUseId), so its inline notice flows to this message's turn
     // (and resurfaces here when re-messaged) rather than to whatever user message is latest
@@ -2856,7 +2856,10 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
-    await runAgentTurn({ sessionId: actorSessionId, userText: message, synthetic: false, activeTabId: actorTabId, display });
+    // oneShot: the loop synthesizes the reply from the first clean tool round and
+    // stops (no summarize inference) — finalAssistantText below reads that synthetic
+    // assistant message exactly like a normal reply, so nothing else changes here.
+    await runAgentTurn({ sessionId: actorSessionId, userText: message, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
     return fresh

@@ -14,7 +14,7 @@
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
  * @property {{ sessionId?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
@@ -52,6 +52,10 @@ export const messageActorTool = {
         type: 'string',
         description: 'The request for the actor, in natural language. Self-contained — the actor sees only this, not your conversation.',
       },
+      oneShot: {
+        type: 'boolean',
+        description: 'Set true when ONE round settles it — a concrete command or read whose raw result IS the answer ("run `python3 …`", "fetch this URL\'s JSON"). The actor does the single action and hands its result straight back, skipping the extra turn it would otherwise spend re-summarizing — faster and cheaper. Leave false (default) for open-ended or multi-step work where you want the actor to do several things and report back in its own words. If the action errors, the actor recovers normally regardless.',
+      },
     },
     required: ['to', 'message'],
   },
@@ -69,6 +73,9 @@ export const messageActorTool = {
     const res = await c.messageActor({
       to: args?.to,
       message: args?.message,
+      // one round suffices (concrete command / read) → the actor returns its raw
+      // result without a summarize turn. The loop falls back to a full turn on error.
+      oneShot: args?.oneShot === true,
       senderSessionId: c.session?.sessionId,
       // The sender gate keys on this — an untrusted-origin (inbound) turn is
       // refused. ctx.inbound = synthetic && !trusted (folded by the turn driver):

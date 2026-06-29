@@ -87,6 +87,18 @@ describe('message_actor — happy path + correlation', () => {
     await tick();
     expect(reentries.length).toBe(0);
   });
+  test('threads oneShot through to the actor turn (defaulting to false)', async () => {
+    const seen: Array<boolean | undefined> = [];
+    const mk = () => harness({
+      runActorTurn: async (o: any) => { seen.push(o.oneShot); return { result: 'r' }; },
+    });
+    await mk().messageActor({ to: 'app-1', message: 'run it', senderSessionId: 'chat-1', oneShot: true });
+    await tick();
+    await mk().messageActor({ to: 'app-1', message: 'open-ended', senderSessionId: 'chat-1' });
+    await tick();
+    // true threads through; an absent flag normalizes to false (never undefined).
+    expect(seen).toEqual([true, false]);
+  });
 });
 
 describe('message_actor — error path still wakes the sender', () => {

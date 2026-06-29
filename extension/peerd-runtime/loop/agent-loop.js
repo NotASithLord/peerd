@@ -179,6 +179,11 @@ export async function* asCompleted(promises) {
  *   When false, skip the per-delta IDB rewrite of the partial transcript
  *   (browser-runners opt out — an ephemeral child's partial reply dies with
  *   the SW anyway). Defaults to true; finalization writes are unaffected.
+ * @param {boolean} [ctx.oneShot]
+ *   One-shot turn (actor delegations): after the FIRST clean tool round,
+ *   synthesize the reply from the tool results and stop — no second model call
+ *   to summarize. An errored round falls through to the normal loop. The caller
+ *   (the orchestrator, via message_actor) sets it when one round suffices.
  * @returns {AsyncGenerator<LoopEvent>}
  */
 export async function* runUserTurn(ctx) {
@@ -840,6 +845,35 @@ export async function* runUserTurn(ctx) {
     };
     session = await sessions.appendMessage(sessionId, resultMessage);
     yield { type: 'state', session };
+
+    // One-shot turn (DESIGN-17 `oneShot`, actor delegations): the caller asserted
+    // a single round suffices, so hand the tool result(s) straight back WITHOUT a
+    // second model call to summarize them — that summarize inference is the
+    // redundant cost a "run X and report" delegation otherwise pays. Synthesize the
+    // reply from the results (deterministic, no inference) as a NORMAL assistant
+    // message: it keeps the history ending on an assistant turn (a bare trailing
+    // tool-result user message would collide with the next user message — the
+    // converter only merges adjacent STRING content), and the caller reads it via
+    // finalAssistantText exactly like any turn. why the no-error guard: if a tool
+    // FAILED, one round did NOT suffice — fall through so the model gets its normal
+    // turn to recover or explain. Only the first clean round short-circuits;
+    // multi-step work simply never sets the flag.
+    if (ctx.oneShot && toolResults.length > 0 && !toolResults.some((b) => b.is_error)) {
+      const replyText = toolResults
+        .map((b) => (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)))
+        .join('\n').trim() || '(the tool produced no output)';
+      /** @type {InternalMessage} */
+      const oneShotReply = {
+        role: 'assistant', content: replyText,
+        id: uuidv7(now), when: now(),
+        model: session.model, provider: session.provider,
+        streaming: false, stopReason: 'one_shot',
+      };
+      session = await sessions.appendMessage(sessionId, oneShotReply);
+      yield { type: 'state', session };
+      yield { type: 'stop', sessionId, messageId: oneShotReply.id, stopReason: 'one_shot' };
+      return;
+    }
     // Continue outer loop — next iteration calls the model with the
     // tool results in the history.
   }
