@@ -69,6 +69,30 @@ export const DO_TOOLSET = [
 // snapshot/read_page, and get/check must be able to read it.
 export const READ_TOOLSET = ['snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf'];
 
+// Playwright mode (settings.runnerWebMode === 'playwright'): the A/B alternative
+// to the ref-first toolsets above. SELECTOR-first driving with Playwright-named
+// tools and NO a11y snapshot/refs — the model finds selectors via read_page /
+// query_dom and acts with page_goto/page_click/page_fill (which mirror
+// navigate/click/type with locator strictness). Lets us measure whether the
+// Playwright API the model knows from training beats peerd's ref-first tools,
+// instead of guessing. (No 'view' here — it lives on its own branch; add it when
+// the two land together.)
+export const PLAYWRIGHT_DO_TOOLSET = [
+  'read_page', 'read_state', 'query_dom', 'watch_changes',
+  'page_goto', 'page_click', 'page_fill', 'page_keys', 'read_pdf',
+];
+export const PLAYWRIGHT_READ_TOOLSET = ['read_page', 'read_state', 'query_dom', 'read_pdf'];
+
+// why {any}: settings rides on the dispatch/runner ctx (service-worker spreads
+// settingsStore.get() onto it) but isn't on the typed ToolContext spine — read
+// it loosely, the same erased-cast style the rest of this file uses for ctx.
+/** @param {any} ctx */
+export const isPlaywrightMode = (ctx) => ctx?.settings?.runnerWebMode === 'playwright';
+/** Resolve the do toolset for the active web mode. @param {any} ctx */
+export const doToolsetFor = (ctx) => (isPlaywrightMode(ctx) ? PLAYWRIGHT_DO_TOOLSET : DO_TOOLSET);
+/** Resolve the read toolset for the active web mode. @param {any} ctx */
+export const readToolsetFor = (ctx) => (isPlaywrightMode(ctx) ? PLAYWRIGHT_READ_TOOLSET : READ_TOOLSET);
+
 // Tools that ONLY work via CDP and have NO scripting fallback. On the
 // no-CDP channel (Firefox, store-Chrome, or advanced automation off) they
 // can only ever return `debugger_unavailable`, so we drop them from the
@@ -193,6 +217,53 @@ export const RUNNER_PROMPT = [
   'You do not persist anything for a future call. This is a fresh, single-shot',
   'run.',
 ].join('\n');
+
+// PLAYWRIGHT mode prompt: swap ONLY the identity/tools/how-to head for the
+// selector-first workflow, and reuse RUNNER_PROMPT's security tail (UNTRUSTED
+// CONTENT → injection drill → REFUSALS → WHAT TO RETURN) VERBATIM by slicing it
+// off the assembled string. Deriving the tail (not copying it) makes drift
+// impossible: the injection defense is byte-identical in both modes, and editing
+// it in RUNNER_PROMPT updates both. The double newline rejoins the head to the
+// tail exactly as the original blank line did.
+const PLAYWRIGHT_RUNNER_HEAD = [
+  'You are a browser-runner: a focused sub-agent that operates ONE browser tab',
+  'on behalf of a primary agent. You were spawned with a single goal (the user',
+  'message) and a single tab. When you finish, you return ONE thing: a concise',
+  'plain-text summary. Nothing you return is shown to a human directly — it is',
+  'read by the primary agent as data.',
+  '',
+  'YOUR TOOLS',
+  'You operate your one tab with a Playwright-style API: read_page, read_state,',
+  'query_dom, watch_changes, page_goto, page_click, page_fill, page_keys,',
+  'read_pdf. You have NO other capabilities — no memory, no file access, no',
+  'network beyond your tab, no ability to spawn agents, no code execution. You',
+  'cannot switch tabs or open new ones. The tools default to your one tab.',
+  '',
+  'HOW TO WORK',
+  '- This is the SELECTOR-first mode: target elements by CSS selector, the way',
+  '  Playwright does — there is no accessibility-tree snapshot or element refs.',
+  '- read_page to see the page HTML/text and find the selectors you need; use',
+  '  query_dom to probe a selector (it reports how many elements match, with',
+  '  roles/labels) before acting.',
+  '- page_goto(url) navigates. page_click(selector) clicks. page_fill(selector,',
+  '  text) types into a field. After each action, OBSERVE (read_page or',
+  '  watch_changes) before the next step.',
+  '- Selectors are STRICT: page_click/page_fill fail unless the selector matches',
+  '  exactly one element. If query_dom shows several matches, narrow the selector',
+  '  — or pass nth (0-indexed) to page_click to choose one deliberately.',
+  '- If an action returns "debugger_unavailable", the trusted-input path is off',
+  '  on this channel — page_click/page_fill still work via the scripting',
+  '  fallback, but a site demanding real user input may ignore synthetic events.',
+  '- If the tab is a PDF (URL ends in .pdf, or read_page comes back empty on what',
+  '  is clearly a document), use read_pdf to get its text.',
+  '- For a native <select>, page_fill the option\'s visible LABEL; the tool',
+  '  resolves it to the right option.',
+  '- Work step by step. Do NOT guess element identities — read_page / query_dom',
+  '  and observe. Be efficient: shortest path to the goal, then stop.',
+].join('\n');
+
+export const PLAYWRIGHT_RUNNER_PROMPT =
+  `${PLAYWRIGHT_RUNNER_HEAD}\n\n${RUNNER_PROMPT.slice(RUNNER_PROMPT.indexOf('UNTRUSTED CONTENT'))}`;
 
 // do: VERIFY the outcome against the goal before reporting done. Acting and then
 // claiming success without re-observing is the premature-"done" failure where
@@ -394,6 +465,10 @@ export const runRunner = async (args, toolCtx, { goal, toolset, promptSuffix = '
   const hasCdp = !!ctx.debuggerPool;
   const channelNote = hasCdp ? '' : NO_CDP_CHANNEL_NOTE;
   const taskContext = [channelNote, seed].filter(Boolean).join('\n\n');
+  // why: the system prompt teaches the toolset the runner was given — so it must
+  // match the web mode (selector-first playwright vs ref-first). The toolset
+  // itself is chosen by the caller (doToolsetFor/readToolsetFor in do/get/check).
+  const basePrompt = isPlaywrightMode(ctx) ? PLAYWRIGHT_RUNNER_PROMPT : RUNNER_PROMPT;
 
   /**
    * @param {{ tools: string[] | undefined, suffix: string, modelOverride?: string, steps?: number }} p
@@ -407,7 +482,7 @@ export const runRunner = async (args, toolCtx, { goal, toolset, promptSuffix = '
     // never invoke runRunner without a toolset), so the filtered shape is
     // behavior-identical to passing `tools` straight through.
     tools: hasCdp ? tools : (tools ?? []).filter((t) => !CDP_ONLY_NO_FALLBACK.includes(t)),
-    systemPromptOverride: RUNNER_PROMPT + suffix,
+    systemPromptOverride: basePrompt + suffix,
     tabId: tab.id,
     maxSteps: steps,
     ...(modelOverride ? { model: modelOverride } : {}),

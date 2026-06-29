@@ -145,6 +145,13 @@ export const normalizeSettingsPatch = (patch, {
     // on the inherited model if this one underperforms.
     next.runnerModel = patch.runnerModel.trim().slice(0, 200);
   }
+  if (typeof patch.runnerWebMode === 'string') {
+    // How the do/get/check runner drives the web: 'ref' (default — a11y-tree
+    // snapshot + element refs) or 'playwright' (selector-first page_* tools).
+    // An A/B knob for measuring which the model drives better; anything but the
+    // exact 'playwright' opt-in falls back to 'ref' (fail-safe to the default).
+    next.runnerWebMode = patch.runnerWebMode === 'playwright' ? 'playwright' : 'ref';
+  }
   // Idle vault auto-lock interval (ms). 0 = never; otherwise clamp to a
   // sane range [1min, 24h]. The caller applies this to the live vault so
   // the change takes effect without an SW restart.

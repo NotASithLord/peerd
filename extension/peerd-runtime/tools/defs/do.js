@@ -7,7 +7,7 @@
 // element refs, or the action trace — only the summary. See
 // docs/DO-GET-CHECK-DESIGN.md and peerd-runtime/runner/index.js.
 
-import { runRunner, DO_TOOLSET, DO_MAX_STEPS, DO_SUFFIX } from '../../runner/index.js';
+import { runRunner, doToolsetFor, DO_MAX_STEPS, DO_SUFFIX } from '../../runner/index.js';
 import { wrapUntrustedRunner } from '../prompt-wrap.js';
 
 /**
@@ -73,7 +73,7 @@ export const doTool = {
     }
     // DO_SUFFIX makes the runner re-observe and verify the end state before it
     // reports done — closes the premature-"done" failure (DO-GET-CHECK §8.1).
-    const r = /** @type {RunnerResult} */ (await runRunner(args, ctx, { goal: args.instruction, toolset: DO_TOOLSET, promptSuffix: DO_SUFFIX, maxSteps: DO_MAX_STEPS }));
+    const r = /** @type {RunnerResult} */ (await runRunner(args, ctx, { goal: args.instruction, toolset: doToolsetFor(ctx), promptSuffix: DO_SUFFIX, maxSteps: DO_MAX_STEPS }));
     if (!r.ok) return { ok: false, error: r.error };
     // why: the runner's summary is UNTRUSTED — wrap it so the main agent treats
     // it as data, not commands (a prompt-injected page can steer what it says).

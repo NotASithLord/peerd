@@ -21,7 +21,9 @@ import { makeToolsCommand } from '../../extension/peerd-runtime/tools/manifest-c
 import { exposureGate as exposureGateRaw } from '../../extension/peerd-runtime/tools/gates.js';
 import { mainAgentDescriptors } from '../../extension/peerd-runtime/tools/exposure.js';
 import { narrowTools, makeSpawnSubagent } from '../../extension/peerd-runtime/subagent/spawn.js';
-import { DO_TOOLSET, READ_TOOLSET } from '../../extension/peerd-runtime/runner/index.js';
+import {
+  DO_TOOLSET, READ_TOOLSET, PLAYWRIGHT_DO_TOOLSET, PLAYWRIGHT_READ_TOOLSET,
+} from '../../extension/peerd-runtime/runner/index.js';
 import { createSessionStore } from '../../extension/peerd-runtime/sessions/store.js';
 // why: real JSDoc contracts from source — LoopEvent shapes the mock loop's
 // yields, Session widens setToolManifest's inferred union return.
@@ -51,13 +53,21 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
   test('research carries the FULL runner toolset — do/get/check dispatch to a runner whose set intersects the manifest', () => {
     const allow = new Set(TOOL_MANIFEST_PRESETS.research.allow);
     for (const name of ['do', 'get', 'check']) expect(allow.has(name)).toBe(true);
-    for (const name of [...DO_TOOLSET, ...READ_TOOLSET]) expect(allow.has(name)).toBe(true);
+    // BOTH web modes' runner internals — else `do` spawns action-less when a
+    // manifested session is in that mode (ref OR playwright).
+    for (const name of [
+      ...DO_TOOLSET, ...READ_TOOLSET, ...PLAYWRIGHT_DO_TOOLSET, ...PLAYWRIGHT_READ_TOOLSET,
+    ]) expect(allow.has(name)).toBe(true);
   });
 
   test('browse-only carries the READ runner toolset for get/check, and no do/mutating internals', () => {
     const allow = new Set(TOOL_MANIFEST_PRESETS['browse-only'].allow);
-    for (const name of ['get', 'check', ...READ_TOOLSET]) expect(allow.has(name)).toBe(true);
-    for (const name of ['do', 'click', 'type', 'page_keys', 'watch_changes']) {
+    for (const name of ['get', 'check', ...READ_TOOLSET, ...PLAYWRIGHT_READ_TOOLSET]) {
+      expect(allow.has(name)).toBe(true);
+    }
+    // read-only: no action internals from EITHER mode.
+    for (const name of ['do', 'click', 'type', 'page_keys', 'watch_changes',
+      'page_goto', 'page_click', 'page_fill']) {
       expect(allow.has(name)).toBe(false);
     }
   });

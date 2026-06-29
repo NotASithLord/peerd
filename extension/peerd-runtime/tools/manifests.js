@@ -49,6 +49,11 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // runner internals: DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
       'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
+      // playwright-mode runner internals: PLAYWRIGHT_DO_TOOLSET's action tools
+      // (the read tools above are shared). Both modes' internals coexist in the
+      // allow-set so `do` can act whichever web mode is on — otherwise a
+      // manifested session in playwright mode spawns the runner action-less.
+      'page_goto', 'page_click', 'page_fill',
       // memory
       'remember', 'read_memory',
       // sovereignty / sessions introspection
