@@ -145,7 +145,10 @@ const makeHarness = () => {
   }));
   const tracker = /** @type {ReturnType<typeof import('/background/vm-tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ (
     { ensureTab: async () => 7, getTabId: () => 7 }));
-  const client = createVmClient({ registry, tracker, sendTabMessage });
+  // now:()=>1 keeps the idle-reuse freeze probe dormant (idleMs stays tiny), so these
+  // serialization/interrupt tests exercise only the command lane — the freeze gate has
+  // its own harness + cases below.
+  const client = createVmClient({ registry, tracker, sendTabMessage, now: () => 1 });
   /** @param {string} stdout */
   const okRun = (stdout) => ({
     ok: true,
@@ -255,29 +258,34 @@ describe('vm-client — per-VM command queue', () => {
   });
 });
 
-// --- vm-client: wedged-tab self-heal --------------------------------------
+// --- vm-client: wedged / frozen-tab self-heal -----------------------------
 
 /**
- * Reboot harness: a tracker recording reloadTab/markReloading, and a
- * sendTabMessage driven by `plan` (one entry per send): 'hang' never settles —
- * the round-trip timeout fires — anything else resolves as the reply.
- * messageTimeoutMs is short so the timeout path runs without a real 90s wait.
- * @param {{ plan: (string | object)[], timeoutMs?: number }} cfg
+ * Reboot harness. `plan` is consumed one entry per send (probe + run included):
+ * 'hang' never settles (→ the round-trip timeout fires), anything else resolves as
+ * the reply. `fresh:true` makes getTabId report no tab until ensureTab runs (a fresh
+ * create → the idle-reuse probe is skipped). `now` drives idle accounting; lastUsed
+ * starts empty, so idleMs === now() — a small now() reads as "recently used".
+ * @param {{ plan: (string | object)[], timeoutMs?: number, readyProbeMs?: number,
+ *           idleProbeMs?: number, fresh?: boolean, now?: () => number }} cfg
  */
-const makeRebootHarness = ({ plan, timeoutMs = 25 }) => {
+const makeRebootHarness = ({ plan, timeoutMs = 40, readyProbeMs = 40, idleProbeMs = 1000, fresh = false, now }) => {
   let sends = 0;
+  let created = false;
+  /** @type {{ tabId: number, message: any }[]} */ const calls = [];
   /** @type {string[]} */ const reloads = [];
   /** @type {string[]} */ const marked = [];
-  /** @param {number} _tabId @param {object} _message */
-  const sendTabMessage = (_tabId, _message) => {
+  /** @param {number} tabId @param {object} message */
+  const sendTabMessage = (tabId, message) => {
+    calls.push({ tabId, message: /** @type {any} */ (message) });
     const step = plan[sends];
     sends += 1;
     if (step === 'hang' || step === undefined) return new Promise(() => {});
     return Promise.resolve(step);
   };
   const tracker = /** @type {ReturnType<typeof import('/background/vm-tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ ({
-    ensureTab: async () => 7,
-    getTabId: () => 7,
+    ensureTab: async () => { created = true; return 7; },
+    getTabId: () => (fresh && !created ? null : 7),
     /** @param {string} id */ reloadTab: async (id) => { reloads.push(id); return true; },
     /** @param {string} id */ markReloading: (id) => { marked.push(id); },
   }));
@@ -287,35 +295,85 @@ const makeRebootHarness = ({ plan, timeoutMs = 25 }) => {
     setDefaultForSession: async () => {},
     create: async () => ({ id: 'vm-1' }),
   }));
-  const client = createVmClient({ registry, tracker, sendTabMessage, messageTimeoutMs: timeoutMs });
-  return { client, reloads, marked, sendCount: () => sends };
+  const client = createVmClient({
+    registry, tracker, sendTabMessage,
+    messageTimeoutMs: timeoutMs, readyProbeMs, idleProbeMs,
+    ...(now ? { now } : {}),
+  });
+  return { client, calls, reloads, marked, sendCount: () => sends };
 };
 
 const OK_RUN = { ok: true, result: { stdout: 'ok\n', stderr: '', exitCode: 0, durationMs: 1 } };
 
-describe('vm-client — wedged-tab self-heal', () => {
-  it('reloads a wedged tab once on an unresponsive timeout, then retries the command', async () => {
-    const h = makeRebootHarness({ plan: ['hang', OK_RUN] });   // 1st send wedges; 2nd (post-reload) ok
+describe('vm-client — mid-call freeze (reactive reload)', () => {
+  // now:()=>1 → idleMs tiny → the idle-reuse PROBE is skipped; these isolate the
+  // reactive channel-timeout backstop.
+  it('reloads a tab that goes dark mid-call, then retries the command', async () => {
+    const h = makeRebootHarness({ plan: ['hang', OK_RUN], now: () => 1 });
     const out = await h.client.run('echo hi', { vmId: 'vm-a' });
     expect(out.stdout).toBe('ok\n');
-    expect(h.reloads).toEqual(['vm-a']);    // reloaded exactly once
+    expect(h.reloads).toEqual(['vm-a']);
     expect(h.marked).toEqual(['vm-a']);     // reset readiness so ensureTab waits for re-boot
     expect(h.sendCount()).toBe(2);          // original + one retry
   });
 
-  it('gives a terminal error (no infinite loop) when still unresponsive after the reload', async () => {
-    const h = makeRebootHarness({ plan: ['hang', 'hang'] });   // wedged before AND after the reload
+  it('gives a terminal error (no loop) when still unresponsive after the reload', async () => {
+    const h = makeRebootHarness({ plan: ['hang', 'hang'], now: () => 1 });
     const err = await h.client.run('echo hi', { vmId: 'vm-a' }).then(() => null, (e) => e);
     expect(err?.message).toContain('unresponsive');
-    expect(h.reloads).toEqual(['vm-a']);    // tried a reload once
+    expect(h.reloads).toEqual(['vm-a']);
     expect(h.sendCount()).toBe(2);          // original + one retry, then stop — not a loop
   });
 
   it('the liveness probe never reboots — isReady returns false on a wedged tab', async () => {
-    const h = makeRebootHarness({ plan: ['hang'] });
+    const h = makeRebootHarness({ plan: ['hang'], now: () => 1 });
     const ready = await h.client.isReady({ vmId: 'vm-a' });
     expect(ready).toBe(false);
     expect(h.reloads).toEqual([]);          // reboot:false — a probe must not recreate a tab
+    expect(h.sendCount()).toBe(1);
+  });
+});
+
+describe('vm-client — idle-reuse freeze gate', () => {
+  const READY = { ok: true, ready: true };
+  const NOT_READY = { ok: true, ready: false };
+
+  it('probes a long-idle reused tab and recreates it BEFORE the command when frozen', async () => {
+    // now()=50000 > idleProbeMs(1000) → idle; reused (getTabId→7); probe says frozen.
+    const h = makeRebootHarness({ plan: [NOT_READY, OK_RUN], now: () => 50_000 });
+    const out = await h.client.run('echo hi', { vmId: 'vm-a' });
+    expect(out.stdout).toBe('ok\n');
+    expect(h.calls[0].message.type).toBe('vm/is-ready');   // probed first
+    expect(h.reloads).toEqual(['vm-a']);                   // recreated BEFORE the run
+    expect(h.calls[1].message.type).toBe('vm/run');
+    expect(h.sendCount()).toBe(2);
+  });
+
+  it('probes but does NOT recreate when the idle tab is still alive', async () => {
+    const h = makeRebootHarness({ plan: [READY, OK_RUN], now: () => 50_000 });
+    const out = await h.client.run('echo hi', { vmId: 'vm-a' });
+    expect(out.stdout).toBe('ok\n');
+    expect(h.calls[0].message.type).toBe('vm/is-ready');
+    expect(h.reloads).toEqual([]);                         // alive → no reload
+    expect(h.sendCount()).toBe(2);
+  });
+
+  it('skips the probe for a recently-used VM (no per-command overhead)', async () => {
+    // now()=100 < idleProbeMs(1000) → not idle → no probe; the run is the only send.
+    const h = makeRebootHarness({ plan: [OK_RUN], now: () => 100 });
+    const out = await h.client.run('echo hi', { vmId: 'vm-a' });
+    expect(out.stdout).toBe('ok\n');
+    expect(h.calls[0].message.type).toBe('vm/run');        // no is-ready probe
+    expect(h.reloads).toEqual([]);
+    expect(h.sendCount()).toBe(1);
+  });
+
+  it('skips the probe for a freshly created VM (not a reuse)', async () => {
+    const h = makeRebootHarness({ plan: [OK_RUN], now: () => 50_000, fresh: true });
+    const out = await h.client.run('echo hi', { vmId: 'vm-a' });
+    expect(out.stdout).toBe('ok\n');
+    expect(h.calls[0].message.type).toBe('vm/run');        // fresh create → no probe
+    expect(h.reloads).toEqual([]);
     expect(h.sendCount()).toBe(1);
   });
 });
