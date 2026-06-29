@@ -686,7 +686,7 @@ let httpMarkerPending = '';
 // newline) can't grow memory unbounded. Comfortably above a max-size body's
 // base64 (8MB body → ~11MB line); past this we flush it as literal output.
 const MAX_MARKER_PENDING = 24 * 1024 * 1024;
-/** @type {{ marker: string, buffer: string, resolve: (r: {exitCode: number, stdout: string}) => void } | null} */
+/** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: (r: {exitCode: number, stdout: string, timing: {totalMs: number, tailMs: number}}) => void } | null} */
 let activeRunCapture = null;
 /** @type {string[] | null} */
 let preTerminalBuffer = [];
@@ -723,7 +723,24 @@ const emitStripped = (/** @type {string} */ text) => {
         .replace(PEERD_PRINTF_RE, '');
       const capture = activeRunCapture;
       activeRunCapture = null;
-      capture.resolve({ exitCode: markerLine.exitCode, stdout });
+      // why timing: localize the "output showed, result lagged" gap. tailMs is the
+      // time from the last output-only chunk to this completion marker — a large
+      // tail means CheerpX stalled between producing output and the marker (a VM-
+      // side cost); a near-zero tail means the lag is DOWNSTREAM (the actor's reply
+      // turn + the orchestrator turn), not the VM. totalMs is the whole run.
+      const doneAt = Date.now();
+      capture.resolve({
+        exitCode: markerLine.exitCode,
+        stdout,
+        timing: {
+          totalMs: doneAt - capture.startedAt,
+          tailMs: capture.lastChunkAt ? doneAt - capture.lastChunkAt : 0,
+        },
+      });
+    } else {
+      // An output chunk with no marker yet — stamp it so the marker chunk can
+      // measure how far behind the visible output the completion marker arrived.
+      activeRunCapture.lastChunkAt = Date.now();
     }
   }
   emitToTerminal(text);
@@ -958,8 +975,8 @@ const serveVmHttpInner = async (/** @type {any} */ parsed) => {
 const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = {}) => {
   if (shellExit !== null) throw new Error(`persistent shell is dead (exit ${shellExit})`);
   const marker = makeMarker();
-  /** @type {{ marker: string, buffer: string, resolve: ((r: any) => void) | null }} */
-  const capture = { marker, buffer: '', resolve: null };
+  /** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: ((r: any) => void) | null }} */
+  const capture = { marker, buffer: '', startedAt: Date.now(), lastChunkAt: 0, resolve: null };
   let abortListener;
   const completion = new Promise((resolve, reject) => {
     capture.resolve = resolve;
@@ -1465,6 +1482,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
                 stderr: '',
                 exitCode: result.exitCode,
                 durationMs: Date.now() - start,
+                // VM-side timing breadcrumb (totalMs run, tailMs = output→marker lag);
+                // the SW logs it so a slow report can be split VM-tail vs downstream.
+                timing: result.timing,
               },
             });
           } catch (e) {

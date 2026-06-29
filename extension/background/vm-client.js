@@ -83,7 +83,7 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
 /**
  * Reply shape from the VM tab's vm/* handlers. Dynamic over the message
  * channel — typed to the fields the client reads back.
- * @typedef {{ ok?: boolean, error?: string, result?: { stdout: string, stderr: string, exitCode: number, durationMs: number }, ready?: boolean }} VmTabReply
+ * @typedef {{ ok?: boolean, error?: string, result?: { stdout: string, stderr: string, exitCode: number, durationMs: number, timing?: { totalMs: number, tailMs: number } }, ready?: boolean }} VmTabReply
  */
 
 /**
@@ -320,6 +320,12 @@ export const createVmClient = ({
       // vm/run always carries result — this expresses that invariant to tsc
       // (result is optional on the shared reply shape) without changing flow.
       if (!response.result) throw new VMNotReadyError('vm/run returned no result');
+      // Instrumentation (temporary): the VM-side wall-clock. totalMs is the whole
+      // run; tailMs is the gap from the last visible-output chunk to the completion
+      // marker. A small total here against a slow user-observed reply pins the delay
+      // DOWNSTREAM (the actor's reply turn + the orchestrator turn), not the VM.
+      const t = response.result.timing;
+      if (t) console.info('[vm.timing]', { vmId: targetVmId, totalMs: t.totalMs, tailMs: t.tailMs });
       return response.result;
     },
 

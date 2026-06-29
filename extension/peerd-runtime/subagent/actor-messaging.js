@@ -201,8 +201,18 @@ export const makeActorMessaging = (deps) => {
       // Stopped after we queued → don't start the turn; just clean up silently (the
       // sender was stopped, so a wake would re-start unwanted post-Stop activity).
       if ((stopGen.get(senderSessionId) ?? 0) !== genAtQueue) { clear(); return; }
+      // Instrumentation (temporary): the actor turn's wall-clock. It spans the
+      // tool work (e.g. a VM command — logged separately as [vm.timing]) PLUS the
+      // model inference to compose the reply. (actorTurnMs − the tool's own ms) is
+      // that reply inference — the extra turn a delegation spends to summarize one
+      // result, which (with the orchestrator's own turn) is the two-inference cost
+      // a simple "run X and report" pays over running it inline.
+      const turnStartedAt = now();
       Promise.resolve(runActorTurn({ actorSessionId, message, actorTabId: tabId, instanceId, kind, parentToolUseId, name }))
-        .then((res) => deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the actor produced no text reply)').slice(0, RESULT_CHARS), res?.stopped === true))
+        .then((res) => {
+          log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
+          return deliver(senderSessionId, instanceId, kind, name, (res?.result || '(the actor produced no text reply)').slice(0, RESULT_CHARS), res?.stopped === true);
+        })
         .catch((e) => deliver(senderSessionId, instanceId, kind, name, `the actor turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
         .finally(clear);
     });
