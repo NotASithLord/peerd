@@ -233,6 +233,15 @@ export async function* runUserTurn(ctx) {
   const liveAttachments = !resume && Array.isArray(ctx.attachments) && ctx.attachments.length > 0
     ? ctx.attachments
     : null;
+  // Tool-result images (view screenshots): send-once-then-strip, tool-side. A
+  // tool that returns `images` (tools/web/view.js) has its bytes stashed HERE,
+  // keyed by tool_use_id — the PERSISTED result block stays bytes-free metadata.
+  // The pixels are spliced into the wire history for the ONE model call that
+  // consumes the result (the step right after capture), then cleared, so a
+  // ~30k-token screenshot ships exactly once and never persists or re-ships (the
+  // rate-limit cliff redact.js guards against for text, here for images).
+  /** @type {Map<string, Array<{ mediaType: string, data: string }>>} */
+  const liveToolImages = new Map();
   // Thinking-only truncation recovery: when a step ends at max_tokens
   // with NO text and NO tool_use (the model burned the whole output
   // ceiling on reasoning), the turn used to end SILENTLY — nothing in
@@ -425,6 +434,27 @@ export async function* runUserTurn(ctx) {
         historyForModel = historyForModel.map((msg) =>
           msg.id === userMsg.id ? { ...msg, attachments: liveAttachments } : msg);
       }
+      // why: deliver a freshly-captured screenshot's PIXELS to the model on the
+      // ONE call that consumes its tool_result (the step after capture) by
+      // splicing the live bytes into the wire copy of the result block. The
+      // stash is cleared AFTER this model call succeeds (below the stream), not
+      // here — so a transient call failure doesn't silently drop the image
+      // before it was ever delivered (mirrors how liveAttachments survives a
+      // failed step). The persisted block holds only bytes-free metadata.
+      if (liveToolImages.size > 0) {
+        historyForModel = historyForModel.map((msg) => {
+          if (msg.role !== 'user') return msg;
+          const trs = msg.toolResults;
+          if (!Array.isArray(trs) || trs.length === 0) return msg;
+          let changed = false;
+          const toolResults = trs.map((tr) => {
+            const imgs = liveToolImages.get(tr.tool_use_id);
+            if (imgs && imgs.length > 0) { changed = true; return { ...tr, images: imgs }; }
+            return tr;
+          });
+          return changed ? { ...msg, toolResults } : msg;
+        });
+      }
       // didTrim true ⇒ summaryState non-null (planTrim's contract); the
       // extra truthiness check is runtime-identical and narrows the type.
       if (trimPlan.didTrim && trimPlan.summaryState && trimPlan.newlyDropped.length > 0) {
@@ -577,6 +607,11 @@ export async function* runUserTurn(ctx) {
             break;
         }
       }
+      // why: the screenshot bytes spliced above rode THIS model call, which
+      // completed — clear now so the image ships exactly once and never re-ships
+      // on a later step. A throw skips this (handled in catch) and the turn ends;
+      // the turn-local stash is discarded either way, so bytes never persist.
+      if (liveToolImages.size > 0) liveToolImages.clear();
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       // AbortError when the user clicks Stop or sends a new message
@@ -740,6 +775,15 @@ export async function* runUserTurn(ctx) {
             ? dispatchResult.content
             : JSON.stringify(dispatchResult.content))
         : (dispatchResult.error ?? 'tool failed');
+      // why: a tool that returned vision blocks (view) — stash the bytes for the
+      // one-shot splice into the NEXT model call (above). The persisted block
+      // stays bytes-free; only content (metadata) is kept here.
+      if (dispatchResult.ok && Array.isArray(dispatchResult.images)) {
+        const imgs = dispatchResult.images.filter(
+          (im) => im && typeof im.mediaType === 'string'
+            && typeof im.data === 'string' && im.data.length > 0);
+        if (imgs.length > 0) liveToolImages.set(tu.id, imgs);
+      }
       const block = {
         tool_use_id: tu.id,
         content: redactToolResult(rawContent),

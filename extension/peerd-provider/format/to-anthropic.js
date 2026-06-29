@@ -140,12 +140,32 @@ const toAnthropicMessage = (m, thinkingEnabled = false) => {
   if (Array.isArray(m.toolResults) && m.toolResults.length > 0) {
     return {
       role: 'user',
-      content: m.toolResults.map((tr) => ({
-        type: 'tool_result',
-        tool_use_id: tr.tool_use_id,
-        content: tr.content,
-        ...(tr.is_error ? { is_error: true } : {}),
-      })),
+      content: m.toolResults.map((tr) => {
+        // Anthropic tool_result content takes a STRING or a block ARRAY. When a
+        // tool returned vision blocks (view), emit the text + image blocks
+        // together so the model SEES the screenshot in-place. The bytes are
+        // spliced in for one call only (agent-loop liveToolImages); history
+        // keeps the metadata text, never the image.
+        const images = (Array.isArray(tr.images) ? tr.images : []).filter(
+          (im) => im && typeof im.mediaType === 'string' && im.mediaType
+            && typeof im.data === 'string' && im.data);
+        const content = images.length > 0
+          ? [
+              ...(typeof tr.content === 'string' && tr.content.length > 0
+                ? [{ type: 'text', text: tr.content }] : []),
+              ...images.map((im) => ({
+                type: 'image',
+                source: { type: 'base64', media_type: im.mediaType, data: im.data },
+              })),
+            ]
+          : tr.content;
+        return {
+          type: 'tool_result',
+          tool_use_id: tr.tool_use_id,
+          content,
+          ...(tr.is_error ? { is_error: true } : {}),
+        };
+      }),
     };
   }
   if (typeof m.content !== 'string') return null;
