@@ -17,6 +17,7 @@
 // The recorder is what makes the loop legible to an agent: every state leaves a
 // screenshot to look at and a structured pass/fail with the "why".
 
+import { createServer } from 'node:http';
 import { rpc, evalIn, waitFor, sseText, sseToolCall, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
@@ -69,6 +70,40 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+
+// --- harvest: the FULL personal-data flow, incl. reading a real page ---------
+// An authenticated-shaped order page, DOM-walk-friendly: the order lines are
+// ANCHOR text so walk-injected.js emits real interactable refs (refCount > 0, or
+// captureSeedSnapshot returns null and the runner can't fast-path).
+const ORDERS_HTML = [
+  '<!doctype html><html><head><title>My Orders</title></head><body>',
+  '<h1>My Orders</h1><ul>',
+  '<li><a href="/o/1001">Order #1001 - Coffee Mug - $12.00</a></li>',
+  '<li><a href="/o/1002">Order #1002 - Notebook - $8.50</a></li>',
+  '<li><a href="/o/1003">Order #1003 - Pen Set - $15.00</a></li>',
+  '</ul></body></html>',
+].join('\n');
+
+// The append+query the agent runs AFTER reading the page (records shaped from the
+// harvested orders; total = 12 + 8.50 + 15 = 35.50).
+const HARVEST_SCRIPT = `
+const records = [
+  { id: 'order:1001', item: 'Coffee Mug', amount: 12 },
+  { id: 'order:1002', item: 'Notebook', amount: 8.5 },
+  { id: 'order:1003', item: 'Pen Set', amount: 15 },
+];
+await peerd.self.writeFile('records/orders.jsonl', records.map((r) => JSON.stringify(r)).join('\\n'));
+const rows = (await peerd.self.readFile('records/orders.jsonl')).split('\\n').filter(Boolean).map((l) => JSON.parse(l));
+return { total: rows.reduce((a, r) => a + r.amount, 0), count: rows.length, source: 'harvested on-device index' };
+`;
+
+// The harvest discriminator: a RUNNER (do/get) model request carries RUNNER_PROMPT
+// as its system message; the main agent's does not. We capture the runner's
+// request to PROVE it really read the fixture (the DOM-walk snapshot of the order
+// page rides in that request), and sequence the main agent's turns separately so
+// a variable runner-call count never shifts them.
+let harvestRunnerSawPage = '';
+let harvestMainTurn = 0;
 
 export const STATES = [
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
@@ -168,6 +203,70 @@ export const STATES = [
         `js_run tool result: ${pdaResult.slice(0, 200)}`);
       rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
       await rec.shot('final');
+    },
+  },
+
+  // --- functional: HARVEST — the agent reads a real page, then indexes it ------
+  {
+    name: 'harvest', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      let sys = '';
+      try { sys = JSON.parse(request?.postData || '{}')?.messages?.[0]?.content || ''; } catch { /* keep '' */ }
+      // A do/get RUNNER turn: it ran against the fixture tab and its model request
+      // carries the REAL DOM-walk snapshot of the order page. Capture it (proof of
+      // a real read) and answer as the runner would for a get (final text = the
+      // extracted value; fastPath + a seed ends the runner in this one call).
+      if (sys.includes('You are a browser-runner')) {
+        harvestRunnerSawPage = (request && request.postData) || '';
+        return { sse: sseText('Order #1001 — Coffee Mug — $12.00\nOrder #1002 — Notebook — $8.50\nOrder #1003 — Pen Set — $15.00') };
+      }
+      // Main agent turns (sequenced independently so a variable runner-call count
+      // can't shift them): read the orders → index them on-device → report.
+      const t = harvestMainTurn++;
+      if (t === 0) return { sse: sseToolCall('get', { query: 'List every order shown on this page, with its item and price' }) };
+      if (t === 1) return { sse: sseToolCall('js_run', { code: HARVEST_SCRIPT }) };
+      return { sse: sseText('You spent $35.50 across 3 orders — Coffee Mug, Notebook, Pen Set — harvested from the page and indexed on-device.') };
+    },
+    async run(ctx, rec) {
+      harvestRunnerSawPage = '';
+      harvestMainTurn = 0;
+      // Serve the order page over localhost HTTP and open it as a REAL active tab
+      // (data: URLs are refused by chrome.scripting, so the DOM-walk snapshot the
+      // runner needs would be empty). Same createServer + /json/new + /json/activate
+      // pattern the harness uses for the side panel.
+      const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      const fxPort = /** @type {{ port: number }} */ (server.address()).port;
+      let fxTab = null;
+      try {
+        fxTab = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?http://127.0.0.1:${fxPort}/`, { method: 'PUT' })).json();
+        await fetch(`http://127.0.0.1:${ctx.port}/json/activate/${fxTab.id}`);
+        await new Promise((r) => setTimeout(r, 800)); // let the page load + tabs.onActivated settle
+
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Index my orders from the page I have open and tell me what I spent.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        // get needs the fixture tab ACTIVE to read it; once the runner HAS read it
+        // (its request captured), bring the side panel back to front so its Mithril
+        // view un-throttles and renders the rest of the turn — a backgrounded tab
+        // throttles rAF-driven redraws, so the panel DOM would otherwise stay stale.
+        await waitFor(() => harvestRunnerSawPage.length > 0, { budgetMs: 25_000, pollMs: 100 });
+        await ctx.page.send('Page.bringToFront').catch(() => {});
+        let out = {};
+        await waitFor(async () => { out = await probe(ctx); return out.assistantText && !out.busy; }, { budgetMs: 30_000 });
+
+        const calls = ctx.modelCallCount();
+        rec.check('agent ran the get→js_run loop incl. the runner subagent (>=4 model calls)', calls >= 4, `model calls: ${calls}`);
+        // load-bearing harvest proof: the REAL runner read the fixture — the page's
+        // own order data rode into the runner's model request via the DOM-walk snapshot.
+        rec.check('the runner REALLY read the page (real order data in its DOM-walk snapshot)',
+          harvestRunnerSawPage.includes('Coffee Mug') && harvestRunnerSawPage.includes('12.00'),
+          harvestRunnerSawPage.slice(0, 220));
+        rec.check('the harvested on-device answer renders', !!out.assistantText && /35\.50/.test(out.assistantText), JSON.stringify(out.assistantText));
+        await rec.shot('final');
+      } finally {
+        try { if (fxTab?.id) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${fxTab.id}`); } catch { /* */ }
+        server.close();
+      }
     },
   },
 
