@@ -33,7 +33,13 @@ const walk = (dir: string, out: string[] = []): string[] => {
 // STATIC import specifiers only — `import … from "x"` / `import "x"`. Deliberately
 // excludes `import("x")` (dynamic, runtime-guarded). Two alternations: the
 // from-form and the bare side-effect form.
-const STATIC_IMPORT = /(?:import|export)[^"'\n]*?from\s*["']([^"']+)["']|(?:^|[;\s])import\s*["']([^"']+)["']/g;
+// Static import specifiers, ANCHORED to line start (m flag) so a mid-line or
+// commented "import"/"from" can't bridge into a false match. The head allows
+// newlines (a static import can span lines: `import {\n a,\n b\n} from '/x'`) but
+// is bounded by `;` and quotes so it can't run across statements. `import(…)`
+// (dynamic) has a `(` after import + no `from`, so neither alternation matches —
+// dynamic imports are runtime-guarded and intentionally skipped.
+const STATIC_IMPORT = /^[ \t]*(?:import|export)\b[^;"']*?\bfrom\s*["']([^"']+)["']|^[ \t]*import\s*["']([^"']+)["']/gm;
 
 /** Resolve a module specifier to an on-disk path under the staged build root. */
 const resolveSpec = (spec: string, fromFile: string, root: string): string | null => {
