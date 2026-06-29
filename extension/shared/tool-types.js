@@ -75,6 +75,11 @@
  * @typedef {Object} ToolResultOk
  * @property {true} ok
  * @property {any} content
+ * @property {Array<{ mediaType: string, data: string }>} [images]  optional vision
+ *   blocks (base64, no data: prefix) — e.g. a page screenshot from `view`. The
+ *   agent loop delivers them to the model ONCE (the step after capture) and never
+ *   persists the bytes (send-once-then-strip, like attachments). content carries
+ *   the bytes-free metadata.
  * @property {ToolMeta} [meta]         populated by the dispatcher, not by tools
  */
 

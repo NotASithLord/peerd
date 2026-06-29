@@ -329,14 +329,18 @@ function submitFormInjected(fields, submitSelector) {
 }
 
 /**
- * Capture the visible region of the given window as a base64 PNG.
+ * Capture the visible region of the given window as a base64 data URL.
  * Requires the activeTab or <all_urls> permission for the source tab.
+ * NOTE: captureVisibleTab can only grab the window's FOREGROUND tab — callers
+ * that must capture a specific (possibly backgrounded) tab use the CDP
+ * debugger-pool captureScreenshot path instead.
  *
  * @param {number | undefined} windowId
  * @param {ToolContext} ctx
- * @returns {Promise<string>}     data URL ("data:image/png;base64,...")
+ * @param {{ format?: 'png'|'jpeg', quality?: number }} [opts]
+ * @returns {Promise<string>}     data URL ("data:image/<fmt>;base64,...")
  */
-export const captureVisible = async (windowId, ctx) => {
+export const captureVisible = async (windowId, ctx, { format = 'png', quality } = {}) => {
   const tabs = tabsOf(ctx);
   if (typeof tabs?.captureVisibleTab !== 'function') {
     throw new Error('web/primitives: ctx.tabs.captureVisibleTab is missing.');
@@ -347,6 +351,6 @@ export const captureVisible = async (windowId, ctx) => {
   // call shape without changing behavior.
   return tabs.captureVisibleTab(
     /** @type {number} */ (/** @type {unknown} */ (windowId ?? null)),
-    { format: 'png' },
+    { format, ...(format === 'jpeg' && typeof quality === 'number' ? { quality } : {}) },
   );
 };

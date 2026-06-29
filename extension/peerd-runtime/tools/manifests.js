@@ -48,7 +48,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       'do', 'get', 'check', 'list_tabs', 'open_tab',
       // runner internals: DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
-      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
+      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
       // memory
       'remember', 'read_memory',
       // sovereignty / sessions introspection
@@ -63,7 +63,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
     allow: Object.freeze([
       'get', 'check', 'list_tabs', 'open_tab', 'navigate',
       // get/check runner internals: READ_TOOLSET (observe, never mutate)
-      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',
+      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'view',
       // web reads
       'read_article', 'call_api', 'web_search',
       // temporal grounding (reads)

@@ -37,6 +37,11 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
+  // view returns an UNTRUSTED page screenshot as a model-visible image — same
+  // boundary as read_page (raw page content), so it stays runner-only; the
+  // runner sees the pixels and reports back. (capture is NOT here: its image is
+  // redacted to a sentinel before the model sees it.)
+  'view',
 ]));
 
 /** Is this tool hidden from the main agent (runner-only)? Pure. @param {string} name */
