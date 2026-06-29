@@ -57,6 +57,7 @@ const main = () => {
   run('typecheck (bun suite + // @ts-check extension files)', 'bun', ['run', 'typecheck']);
   run('typecheck coverage floor', 'bun', ['run', 'check:tscheck']);
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
+  run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   run('bun tests', 'bun', ['test', './tests']);
   if (args.matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);

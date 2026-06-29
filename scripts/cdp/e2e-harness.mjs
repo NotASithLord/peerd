@@ -175,9 +175,12 @@ async function findPeerdSw(port) {
  *   Default: a single assistant text turn ('e2e-smoke-ok').
  * @param {string} [opts.tagsModel]  model name returned by GET /api/tags.
  */
-export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {}) {
-  if (!existsSync(join(EXT, 'manifest.json'))) {
-    throw new Error(`extension/manifest.json missing — run \`bun run gen:dev\` first (${EXT})`);
+export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT } = {}) {
+  // extensionDir defaults to the raw source (the dev/e2e tree); pass a packaged
+  // STAGING dir to load a PRUNED build instead (check-packaged-pages.ts) — the
+  // only way to observe packaged-build-only breakage like the v0.2.0 home blank.
+  if (!existsSync(join(extensionDir, 'manifest.json'))) {
+    throw new Error(`manifest.json missing in ${extensionDir} — run \`bun run gen:dev\` (or package first)`);
   }
   const CHROME = resolveChrome();
   log('chrome:', CHROME);
@@ -188,8 +191,8 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b' } = {
     '--disable-gpu', '--no-sandbox',
     `--user-data-dir=${profile}`,
     '--remote-debugging-port=0',
-    `--disable-extensions-except=${EXT}`,
-    `--load-extension=${EXT}`,
+    `--disable-extensions-except=${extensionDir}`,
+    `--load-extension=${extensionDir}`,
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   let chromeErr = '';

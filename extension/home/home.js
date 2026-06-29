@@ -20,7 +20,7 @@ import { LibrarySection } from './library-section.js';
 import { NetworkSection } from './network-section.js';
 import { DiscoverSection } from './discover-section.js';
 import { ContactsSection } from './contacts-section.js';
-import { EvalSection } from './eval-section.js';
+// EvalSection (the Lab) is LAZY-loaded — see loadEvalSection below.
 import { INITIAL_STATE, reduceChat, putSubagentSession } from '../sidepanel/chat-reducer.js';
 import { ChatView } from '../sidepanel/components/chat-view.js';
 import { ConfirmModal, NoticeBar } from '../sidepanel/components/app.js';
@@ -47,6 +47,24 @@ let booted = false;          // first state push arrived — until then, show "L
 // were on. Dweb views only restore where DWEB_ENABLED; anything unknown → 'chat'.
 const VIEW_KEY = 'peerd.home.activeView';
 const DWEB_VIEWS = new Set(['discover', 'contacts', 'network']);
+// The Lab (eval-section.js) is loaded ON DEMAND. why: it statically imports the
+// eval/ dir, which packaging prunes from the store build — a static import at the
+// top of home.js would 404 and black-screen the ENTIRE home page (the whole
+// module graph fails to load). Importing it only when the Lab view opens keeps
+// home always-mountable and degrades the Lab to "unavailable" where eval/ is
+// absent (store), while preview (eval/ shipped) loads it normally.
+/** @type {any} */
+let EvalSection = null;
+/** @type {'idle'|'loading'|'ready'|'unavailable'} */
+let evalLoadState = 'idle';
+const loadEvalSection = () => {
+  if (evalLoadState !== 'idle') return;
+  evalLoadState = 'loading';
+  import('./eval-section.js')
+    .then((mod) => { EvalSection = mod.EvalSection; evalLoadState = 'ready'; m.redraw(); })
+    .catch(() => { evalLoadState = 'unavailable'; m.redraw(); });
+};
+
 const ALL_VIEWS = new Set(['chat', 'chats', 'library', 'eval', 'discover', 'contacts', 'network']);
 /** @param {string | null | undefined} v */
 const isValidView = (v) => !!v && ALL_VIEWS.has(v) && (!DWEB_VIEWS.has(v) || DWEB_ENABLED);
@@ -507,7 +525,12 @@ const content = (showDweb) => {
     ]);
   }
   if (activeView === 'library') return m(LibrarySection, { send, dweb: showDweb });
-  if (activeView === 'eval') return m(EvalSection, { send });
+  if (activeView === 'eval') {
+    loadEvalSection();
+    if (evalLoadState === 'ready' && EvalSection) return m(EvalSection, { send });
+    return m('div', { style: 'padding:24px;color:#9ba3ad' },
+      evalLoadState === 'unavailable' ? 'The Lab is not available in this build.' : 'Loading the Lab…');
+  }
   if (activeView === 'discover' && showDweb) return m(DiscoverSection, { send });
   if (activeView === 'contacts' && showDweb) return m(ContactsSection, { send });
   if (activeView === 'network' && showDweb) return m(NetworkSection, { send });

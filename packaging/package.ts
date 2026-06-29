@@ -35,12 +35,17 @@ import { signPreviewArtifact } from './sign.ts';
 const STORE_LOADER_TEMPLATE = join(REPO_ROOT, 'packaging', 'templates', 'dweb-loader.store.js');
 
 // Paths (relative to extension/) that never ship in ANY artifact.
-const PRUNE_ALWAYS = ['tests', 'eval', 'manifest.json', 'shared/channel-config.js'];
-// Additionally pruned from store artifacts: the entire dweb module,
-// plus the system-prompt paragraph that describes it (the loader inserts
-// it only when DWEB_ENABLED — a store prompt must make no
-// dweb claims).
-const PRUNE_STORE = ['peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
+// why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
+// eval/ at module load, so pruning it from a channel 404s home.js's import
+// graph and black-screens the home tab. The Lab is a dev tool, so it's pruned
+// from STORE only (below), and eval-section lazy-loads it + degrades gracefully
+// when absent — so store's home still mounts.
+const PRUNE_ALWAYS = ['tests', 'manifest.json', 'shared/channel-config.js'];
+// Additionally pruned from store artifacts: the home Lab (eval/, a preview-only
+// dev tool), the entire dweb module, plus the system-prompt paragraph that
+// describes it (the loader inserts it only when DWEB_ENABLED — a store prompt
+// must make no dweb claims).
+const PRUNE_STORE = ['eval', 'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
 
 const shouldCopy = (src: string, channel: Channel): boolean => {
   const rel = relative(EXTENSION_DIR, src);
