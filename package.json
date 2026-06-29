@@ -2,7 +2,7 @@
   "name": "peerd",
   "private": true,
   "type": "module",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Browser-native AI agent harness. Solo dev — Bun is for tests + one-shot vendor scripts only; the extension itself runs no build step.",
   "license": "Apache-2.0",
   "homepage": "https://peerd.ai",

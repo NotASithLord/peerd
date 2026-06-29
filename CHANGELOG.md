@@ -10,10 +10,57 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
-The staged integration of the open-PR backlog onto one verified branch
-(the next milestone). Highlights:
+_Nothing yet._
+
+---
+
+## [0.2.0] — 2026-06-29
+
+The big change is how peerd's agent is structured, landing with the
+staged backlog of open PRs on one verified branch. Three things get
+better:
+
+- **Less context on the main agent.** Each environment's operating
+  details (VM shell quirks, notebook isolation rules, app iframe gotchas,
+  whether to fetch or render a page) used to sit in the main prompt on
+  every turn, mostly unused. Now they live with the sub-agent that uses
+  them and load only when work is handed off. The main agent also drops
+  the web tools it no longer needs: web_search, read_article, call_api,
+  and submit_form all fold into the web actor.
+- **Fewer tool calls.** actor_list replaces five separate list tools with
+  one, so the agent makes one call and carries one list instead of five.
+  message_actor's oneShot skips a whole model turn when one round of work
+  is enough.
+- **Real isolation, not just convention.** The tools that operate
+  environments are no longer on the main agent at all, so even a confused
+  or prompt-injected agent can't reach them; it has to send a
+  permission-gated message. Page text, fetch bodies, and command output
+  stay inside the sub-agent and come back as a quoted, untrusted reply,
+  never as raw text the agent could be steered by.
 
 ### Added
+- **The actor architecture** (DESIGN-17 / DESIGN-18). The main agent now
+  acts as an orchestrator. It opens an environment (a WebVM, a notebook, a
+  built app, or the open web) and hands the work to that environment's own
+  sub-agent, called an actor, which holds only that environment's tools.
+  There is one way to delegate, message_actor. The web actor is the single
+  entry point for all web work and picks per task between a sessionless
+  fetch (fetch_url) and driving a real tab. Delegations run in the
+  background and in parallel, show up as cards in the chat you can watch
+  and stop, report their own cost, and survive a service-worker restart
+  because pending work is written to storage.
+- **API integrations (origin actors).** Send a message to a bare origin
+  like api.github.com and peerd forms a fetch-only, keyless,
+  origin-locked actor for it that remembers what it learns about that API
+  across messages.
+- **actor_list.** One tool that lists everything you can message: every
+  WebVM, notebook, app, open tab, and API integration, each with its type
+  and the handle to pass to message_actor. Replaces five separate list
+  tools.
+- **message_actor oneShot.** Set it when one round of work settles the
+  request, like a specific command or a read. The actor does the action
+  and hands back the raw result instead of spending an extra model turn to
+  restate it.
 - **PDF reading** (`read_pdf`) — pdf.js text-layer extraction in the
   offscreen document for born-digital PDFs; runner-only, output wrapped
   as untrusted web content.
@@ -32,6 +79,17 @@ The staged integration of the open-PR backlog onto one verified branch
   into the WebVM bridge.
 
 ### Changed
+- The main agent's browser tools are now just actor_list, open_tab, and
+  message_actor (plus capture). The low-level page tools and the tools
+  that write to an environment moved to the actors.
+- WebVM self-heal. When the browser freezes a backgrounded VM tab, peerd
+  now checks it and reloads it before a command lands on a dead shell. The
+  terminal output stripping was also fixed so output is not eaten when it
+  splits across a chunk.
+- The thinking and boot spinner is now the brand orb ring, one rainbow
+  sweep masked to a hollow ring.
+- The prose docs were removed. The code is the spec, and CLAUDE.md is the
+  short orientation map.
 - Service worker restructured into per-route modules with injected
   per-module state stores; handlers stay thin.
 - README reordered to lead with install + project conventions; Tesseract
