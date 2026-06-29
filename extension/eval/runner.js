@@ -322,13 +322,13 @@ const scoreLine = (card) => `passRate ${card.passRate}%  (${card.passed}/${card.
 // The selected suite's tasks (simple = the fast 30; robust = +25 precision probes).
 const selectedTasks = () => /** @type {Record<string, { tasks: any[] }>} */ (SUITES)[$('suite')?.value || 'simple']?.tasks ?? TASKS;
 
-/** @param {string} [runnerCfg] */
-async function runSuite(runnerCfg) {
+/** @param {string} [runnerCfg] @param {any[]} [tasksOverride] */
+async function runSuite(runnerCfg, tasksOverride) {
   wireListeners();
   await ensureSubject();
   /** @type {any[]} */
   const results = [];
-  const tasks = selectedTasks();
+  const tasks = tasksOverride ?? selectedTasks();
   log(`  suite: ${$('suite')?.value || 'simple'} (${tasks.length} tasks)`);
   for (const task of tasks) {
     try { results.push(await runTask(task, runnerCfg)); }
@@ -648,6 +648,58 @@ $('clearBaseline').addEventListener('click', () => {
   if (lastCard) renderDelta(lastCard);
   refreshBaselineUi();
 });
+
+// ---- programmatic driver hook (build-over-build benchmark loop) -----------
+// why: the in-house CDP harness (scripts/cdp/run-eval-bench.mjs) needs to START
+// a run and READ the structured scorecard WITHOUT scraping the DOM, so it can
+// score one BUILD against a baseline in default settings — "drive eval/lab to
+// measure builds, not just models." The buttons stay the human path; this is the
+// one automation seam. A full suite outlasts a single awaited CDP call, so the
+// driver fires run() then POLLS lastCard/lastError — hence the result lands on
+// the object, not a return value. `taskIds` runs an exact subset (deterministic
+// smoke); `limit` runs a first-N subset (cost control). No-ops if a run is
+// already in flight.
+const evalDriver = {
+  ready: true,
+  running: false,
+  /** @type {ReturnType<typeof aggregate> | null} */
+  lastCard: null,
+  /** @type {any[] | null} */
+  lastResults: null,
+  /** @type {string | null} */
+  lastError: null,
+  /** @param {{ suite?: string, limit?: number, taskIds?: string[], runnerCfg?: string }} [opts] */
+  run(opts = {}) {
+    if (evalDriver.running) return;
+    const { suite, limit, taskIds, runnerCfg } = opts;
+    evalDriver.running = true;
+    evalDriver.lastCard = null; evalDriver.lastResults = null; evalDriver.lastError = null;
+    if (suite) { const sel = $('suite'); if (sel) sel.value = suite; }
+    void (async () => {
+      try {
+        /** @type {any[] | undefined} */
+        let tasks;
+        if (Array.isArray(taskIds) && taskIds.length) {
+          const all = selectedTasks();
+          tasks = taskIds.map((id) => all.find((t) => t.id === id)).filter(Boolean);
+        } else if (typeof limit === 'number' && limit > 0) {
+          tasks = selectedTasks().slice(0, limit);
+        }
+        const { card, results } = await runSuite(runnerCfg, tasks);
+        lastCard = card; // module-level too → the Pin button can pin a driver run
+        evalDriver.lastResults = results;
+        evalDriver.lastCard = card;
+        refreshBaselineUi();
+      } catch (e) {
+        evalDriver.lastError = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+      } finally {
+        evalDriver.running = false;
+      }
+    })();
+  },
+};
+/** @type {any} */ (window).__peerdEval = evalDriver;
+
 preflight();
 populateModelSelects(); // fills cloud models, then refreshLocalStatus() adds the local model if downloaded
 refreshBaselineUi();
