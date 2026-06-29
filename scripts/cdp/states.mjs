@@ -136,9 +136,11 @@ export const STATES = [
       const calls = ctx.modelCallCount();
       rec.check('the agent ran the js_run tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
       // the load-bearing proof: the sealed worker actually built + queried the
-      // OPFS index — its result marker rode back to the model in call 1.
-      rec.check('js_run REALLY computed on-device (worker result marker in the tool reply)',
-        pdaToolResultBody.includes('on-device OPFS index'), pdaToolResultBody.slice(0, 160));
+      // OPFS index — the computed total/count only exist in the worker's result
+      // JSON, not in PDA_SCRIPT's source text or the code argument echoed back.
+      rec.check('js_run REALLY computed on-device (computed total in tool result, not script source)',
+        pdaToolResultBody.includes('"total":50') && pdaToolResultBody.includes('"count":3'),
+        pdaToolResultBody.slice(0, 200));
       rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
       await rec.shot('final');
     },
