@@ -92,7 +92,7 @@ const scrollIfNearBottom = (el) => {
 
 // How many levels of nested subagent transcript to render inline before
 // stopping. Deeper runs still exist and are inspectable, but rendering
-// them inline would explode the layout. See docs/SUBAGENTS.md.
+// them inline would explode the layout.
 const MAX_NESTED_DEPTH = 5;
 
 // Render one transcript (a flat message array) as keyed user/assistant
@@ -743,7 +743,7 @@ const formatResultContent = (toolResult) => {
 //                     web     — outbound HTTP through safeFetch/webFetch
 //   runtime (green)   tab     — DOM/page/tab driving
 //                     time    — clock / temporal grounding
-//                     subagent— agent-loop orchestration (docs/SUBAGENTS.md)
+//                     subagent— agent-loop orchestration
 //   engine  (amber)   webvm    — WebVM execution kind
 //                     notebook — Notebook execution kind
 //                     app      — App execution kind

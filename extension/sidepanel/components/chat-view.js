@@ -125,7 +125,7 @@ export const ChatView = {
             // The AI peer's display name (default profile, set during
             // onboarding) — labels assistant rows, and ONLY there.
             peerName: state.profile?.peerName,
-            // subagent nested-transcript wiring (docs/SUBAGENTS.md)
+            // subagent nested-transcript wiring
             subagents: state.subagents,
             // DESIGN-17 P1: actor display cards (glass pane) — keyed by the
             // message_actor tool_use id; rendered inline under that card.

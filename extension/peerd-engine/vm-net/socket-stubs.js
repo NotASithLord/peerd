@@ -3,7 +3,7 @@
 // peerd-branded error instead of a confusing libc failure.
 //
 // The sandbox has no raw TCP/UDP (no sockets without an out-of-browser relay,
-// which we reject — see git-archive.js / DESIGN.md §8.5). So `ssh`, `nc`,
+// which we reject — see git-archive.js). So `ssh`, `nc`,
 // `ping`, a raw `psql` over the wire, etc. CAN'T work and never will. Today
 // they fail deep in the C library with "Network unreachable" or a silent hang,
 // which reads like a bug. We replace them with shims that exit non-zero and
@@ -30,8 +30,6 @@ export const UNSUPPORTED_NET_COMMANDS = Object.freeze([
   { cmd: 'rsync', reason: 'rsync-over-ssh needs a raw socket', instead: 'fetch archives with curl/wget, or git clone' },
 ]);
 
-const SANDBOX_DOC = 'docs/engine/VM-NETWORKING.md';
-
 /**
  * The peerd error a stubbed command prints (to stderr) before exiting 1.
  * @param {{ cmd: string, reason: string, instead: string }} entry
@@ -41,7 +39,7 @@ export const stubMessage = (entry) =>
   `peerd: '${entry.cmd}' is not available in this sandbox — ${entry.reason}. ` +
   `This WebVM is HTTP(S)-native: curl, wget, and git clone work (routed through ` +
   `peerd's audited egress); raw TCP/UDP/ICMP do not. Try: ${entry.instead}. ` +
-  `See ${SANDBOX_DOC}.`;
+  `Run peerd-net for the full networking capability list.`;
 
 /**
  * Generate the bash that defines every stub as a shell function. Each function

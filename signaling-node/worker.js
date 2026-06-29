@@ -11,7 +11,7 @@
 // need. The room holds up to ROOM_CAP=16 members (the reducer's cap —
 // NORTH-STAR D-9); rooms are ephemeral and low-volume.
 //
-// WebSocket Hibernation (HIBERNATION-SPEC.md): the sockets are handed to the
+// WebSocket Hibernation: the sockets are handed to the
 // runtime via `ctx.acceptWebSocket`, so the DO can be evicted while idle and
 // re-instantiated on the next event WITH its sockets intact. That removes the
 // cold-start / idle-eviction resets that surfaced in the client as

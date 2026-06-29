@@ -1,7 +1,6 @@
 // @ts-check
 // Personal-data index — durable OPFS round-trip (live, real-browser). The STORE
-// half of the local-first personal-data agent
-// (docs/specs/LOCAL-FIRST-PERSONAL-DATA-AGENT.md): the agent appends harvested
+// half of the local-first personal-data agent: the agent appends harvested
 // records as JSONL to a STABLE Notebook's OPFS subtree ['peerd-notebooks', <id>],
 // and a LATER worker run reads + queries them — the index lives on device and
 // never touches the network. The durability claim (the subtree survives across

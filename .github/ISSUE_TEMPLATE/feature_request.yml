@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        peerd's direction lives in `ROADMAP.md` and `docs/DECISIONS.md` — a quick skim
-        there may show your idea is already planned (or deliberately out of scope).
+        Thanks for the idea! Check the open issues first — your idea may already be
+        planned (or deliberately out of scope).
   - type: textarea
     id: problem
     attributes:

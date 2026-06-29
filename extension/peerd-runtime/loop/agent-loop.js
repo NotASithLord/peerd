@@ -22,8 +22,8 @@
 //   │  yield state                                             │
 //   └─ continue ────────────────────────────────────────────── ┘
 //
-// MAX_STEPS guards against pathological loops; we cap at 100 per
-// DECISIONS.md §4 (raised from 25 — real agentic browser tasks
+// MAX_STEPS guards against pathological loops; we cap at 100
+// (raised from 25 — real agentic browser tasks
 // routinely want 30+ steps, and 25 false-positived on genuine work).
 
 import { uuidv7 } from '/shared/util.js';
@@ -144,7 +144,7 @@ export async function* asCompleted(promises) {
  * @param {number} [ctx.maxSteps]
  *   Per-turn step cap. Defaults to MAX_STEPS. Subagents pass a smaller
  *   value (default 20) so a runaway child can't burn the parent's whole
- *   budget — see docs/SUBAGENTS.md. Hitting it yields the same clean
+ *   budget. Hitting it yields the same clean
  *   stopReason='max_steps' the default cap does.
  * @param {(req: { sessionId: string, state: object, newlyDropped: object[] }) => void} [ctx.enrichTrimSummary]
  *   Optional seam for model-quality trim-summary enrichment. Called

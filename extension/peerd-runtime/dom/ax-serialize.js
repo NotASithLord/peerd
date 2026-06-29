@@ -5,8 +5,7 @@
 // ref-annotated text snapshot the model reasons over, plus the ref table
 // the harness uses to resolve an action back to a real DOM node.
 //
-// This is the keystone of the a11y-tree-+-refs paradigm shift (see
-// docs/DOM-NAVIGATION-ASSESSMENT.md). The model NEVER authors a CSS
+// This is the keystone of the a11y-tree-+-refs paradigm shift. The model NEVER authors a CSS
 // selector — it picks `@e<n>` refs from this output; the ref registry maps
 // each ref to a `backendDOMNodeId` for CDP dispatch. That kills the entire
 // "model generated a selector that doesn't exist" failure class.

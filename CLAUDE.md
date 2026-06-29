@@ -1,7 +1,32 @@
 # CLAUDE.md — peerd
 
 > Persistent project context for Claude Code. Read this first on every
-> session. Equivalent to OpenCode's `AGENTS.md` pattern.
+> session. This is the only orientation doc; the code is the spec.
+
+---
+
+## Code is the spec
+
+peerd carries no design, architecture, or dev-notes docs. They were
+removed because prose that describes code drifts from it. The rationale
+lives where it can't go stale: inline `// why:` comments next to the code
+they explain. So:
+
+- To learn how something works, read the code and its comments. Start
+  from the module's `index.js` (the public API) and follow the imports.
+- When you change behavior, update the adjacent `// why:` comment in the
+  same edit. A comment is part of the code, held to the same bar.
+- Comments explain *why*, not *what*. Every architectural choice earns a
+  `// why:` line. Code without rationale rots fast.
+- `DESIGN-NN` / `DECISIONS #N` tags in comments are historical labels for
+  a past decision. The reasoning is in the surrounding code, not a
+  separate file. Treat the tag as a name for the decision, not a pointer.
+
+This file holds the things that aren't local to one piece of code: the
+shape of the system, the invariants that span modules, and the house
+style. Keep it short. If a fact is dynamic (test counts, tool counts,
+the model inventory, channel behavior, release artifacts), do not pin it
+here; point at the code, generated file, or CI command that computes it.
 
 ---
 
@@ -9,67 +34,85 @@
 
 A browser-native AI agent harness, shipped as a Chrome/Firefox extension.
 The agent runs entirely in the user's browser. It talks to a model API
-directly (BYOK — bring your own key), drives the browser's tabs and
-DOM, and can run shell commands in a sandboxed Linux VM compiled to
+directly (BYOK — bring your own key), drives the browser's tabs and DOM,
+and can run shell commands in a sandboxed Linux VM compiled to
 WebAssembly. No backend, no telemetry, no account.
 
-peerd is **0.x — experimental beta** (breaking changes likely; no "V1"
-commitment — versions stay 0.x until the surface stabilizes). The
-initial feature buildout is complete and integrated (see `STATUS.md`);
-current work is store-readiness polish and field hardening. Stack:
-Manifest V3, Chrome and Firefox (via `webextension-polyfill`), vanilla
-JS, **no
-build step**.
+peerd is **0.x — experimental beta** (breaking changes likely; versions
+stay 0.x until the surface stabilizes). Stack: Manifest V3, Chrome and
+Firefox (via `webextension-polyfill`), vanilla JS, **no build step**.
 
 ---
 
-## The codebase is five modules
+## The five modules
 
-Each maps to one letter and color in the brand wordmark:
+The brand **is** the architecture: five colored letters in the wordmark,
+five modules, one dependency direction (higher depends on lower). If you
+find yourself adding a sixth top-level `peerd-*` directory, stop and
+reconsider.
 
-| Letter | Color | Module | Role |
-|---|---|---|---|
-| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic + OpenRouter + Ollama shipped; OpenAI later; local WebGPU deferred — `docs/LOCAL-INFERENCE.md`) |
-| `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
-| `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. Three kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). A fourth, the **headless worker** (`js_run`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute. The sandbox is the isolate; a tab is one way to host it (DECISIONS #25; full taxonomy in DESIGN.md §8.5). |
-| `r` | green   | `peerd-runtime/`      | Agent loop, tools + do/get/check runner, sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
-| `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
+```
+p  cyan     peerd-provider/      model adapters (Anthropic · OpenRouter · Ollama; OpenAI later)
+e  red      peerd-egress/        security: vault · safeFetch allowlist · denylist · audit
+e  amber    peerd-engine/        execution sandboxes (WebVM · Notebook · App · headless worker)
+r  green    peerd-runtime/       the orchestrator: agent loop · tools · sessions · the rest
+d  magenta  peerd-distributed/   the dweb (P2P mesh · DHT · dwapps) — preview channel only
+                                   └ nothing outside this dir imports it; the store build prunes it
+```
 
-The extension *chassis* lives outside these modules: `background/`,
-`offscreen/`, `sidepanel/`, `vm-tab/`, `notebook-tab/`, `app-tab/`,
-`permissions/`, `eval/`, `shared/`, `tests/`, `vendor/`, `icons/`. Each
-`peerd-engine` execution kind owns a dedicated tab page under its
-`*-tab/` directory; `permissions/` hosts user-gesture surfaces such as
-the mic-permission grant page; `eval/` is the live end-to-end eval
-harness. (There is no `content/` directory — DOM work happens via
-injected functions, not a persistent content script.) Outside
-`extension/`, the repo also carries `signaling-node/` (the dweb
-rendezvous server shells sharing the pure signaling reducer). The
-peerd.ai site lives in its own repo now (`NotASithLord/peerd-site`); it
-vendors snapshots of the VM-demo runtime + the `peerd-distributed`
-transport, and the auto-update feeds are still generated here
-(`update-feeds/`), then copied there to deploy.
+The chassis lives outside the modules: `background/` (service worker —
+message routing + DI + lifecycle), `offscreen/` (long-lived work with no
+tab: voice, headless `js_run`, the dweb mesh), `sidepanel/` (the Mithril
+chat UI), `home/` + `options/`, the per-execution-kind tab pages
+(`vm-tab/` · `notebook-tab/` · `app-tab/`), `permissions/` (user-gesture
+grant pages), `eval/` (the live end-to-end eval harness), `shared/`
+(cross-cutting glue: the dweb stub, the generated `channel-config.js`),
+`vendor/` (third-party code, each with a `SOURCE.txt`; no npm runtime),
+and `tests/` (in-browser tests). There is no `content/` directory: DOM
+work happens via injected functions, not a persistent content script.
 
-The brand IS the architecture. If you find yourself adding a sixth
-top-level peerd-* directory, stop and reconsider.
+Outside `extension/`: `signaling-node/` (the dweb rendezvous server,
+sharing the pure signaling reducer), `manifests/` + `packaging/` (the
+dual-distribution build, store vs preview; `bun run gen:dev` generates
+`manifest.json` + `shared/channel-config.js`), `tests/` (Bun, pure
+logic), `scripts/`, and `update-feeds/` (the auto-update feeds, copied to
+the site repo `NotASithLord/peerd-site` to deploy).
 
----
+### The tree, annotated
 
-## What to read, in order
+```
+extension/peerd-provider/   [p]  adapters/ (Anthropic · OpenRouter · Ollama) · format/ (schema + streaming)
+extension/peerd-egress/     [e]  vault/ (passphrase + WebAuthn-PRF; idle auto-lock) · fetch/ (safeFetch, the
+                                 egress chokepoint: provider allowlist + SSRF guard) · denylist/ · confirm/
+                                 (async policy-driven) · audit/ (append-only, capped) · storage/ (IDB/chrome.storage)
+extension/peerd-engine/     [e]  registries for the isolates (a tab hosts one): vm · notebook · app ·
+                                 module-resolver · opfs. The isolate is the sandbox; a tab is one way to host it.
+extension/peerd-runtime/    [r]  loop/ (turns, streaming, dispatch; goal-runner.js runs unattended) ·
+                                 tools/ (defs/ one file each · dispatcher.js lineage+hooks+audit · exposure.js
+                                 registration-vs-exposure split · manifests.js capability presets · hooks/ ·
+                                 web/) · runner/ + dom/ (do/get/check, the disposable browser-runner) ·
+                                 sessions/ · subagent/ (depth-bounded recursion, tool narrowing) ·
+                                 permissions/ (Plan/Act — decideAction) · memory/ · edit/ (SEARCH/REPLACE +
+                                 checkpoints) · skills/ · review/ · composer/ · cost/ · clock/ · voice/ ·
+                                 transfer/ · profiles/ (partly backlog)
+extension/peerd-distributed/[d]  identity/ (Ed25519 did:key) · codec/ + content/ (signed content addressing +
+                                 chunked transfer) · transport/ (WebRTC mesh) · dht/ + gossip/ · messaging/
+                                 (signed direct channels) · apps/ (dwapps + the p2p app store). Preview only.
+```
 
-0. **`MAP.md`** — the one-screen orientation map: the annotated directory
-   tree (what each part is, where it lives, when it acts on its own). Skim
-   it first to navigate; read the rest for the *why*.
-1. **`CLAUDE.md`** (this file) — orientation.
-2. **`ARCHITECTURE.md`** — full module breakdown. Where files go, what
-   each module owns, the dependency graph, the migration table.
-3. **`ARCHITECTURE-CHANGES.md`** — recent changes. Read if continuing
-   prior work — tells you what moved since earlier versions of the
-   architecture doc.
-4. **`DESIGN.md`** — the technical design record. Concrete
-   implementation details: vault crypto, denylist matcher, agent loop,
-   tool dispatcher, prompt-injection defenses, the manifest, the MV3
-   keepalive trick.
+### When does it act on its own?
+
+Almost everything is synchronous with an attended browser: a turn runs
+because the user sent a message. The shipped exception is **Goal mode**
+(`peerd-runtime/loop/goal-runner.js`): started attended via the Goal
+toggle, then autonomous turns toward a goal, re-driven each service-worker
+cold start, until the agent calls `complete_goal` (or Stop, or a cap).
+The **actors** also drive their own turns: the orchestrator delegates a
+goal to a per-tab/instance actor via `message_actor` and gets woken
+with a fenced summary; the actor never blocks the orchestrator. The
+rule for anything unattended: it can never widen its own permissions,
+every byte it reads from the web is `wrapUntrusted`-fenced, and it routes
+through the same egress policy as an attended turn.
 
 ---
 
@@ -77,300 +120,127 @@ top-level peerd-* directory, stop and reconsider.
 
 - **Vanilla JS, ES modules, no build step.** No bundler, no transpiler.
   Code runs as the browser loaded it. The dev loop is *load unpacked →
-  refresh*. (The dual-distribution ARTIFACTS — store + preview — are
-  produced by `packaging/*.ts` via staging/pruning/zipping, not bundling.
-  See `PACKAGING.md`.)
+  refresh*. (The store + preview ARTIFACTS are produced by `packaging/*.ts`
+  via staging/pruning/zipping, not bundling.)
 - **Generated files — don't hand-edit.** `extension/manifest.json` and
   `extension/shared/channel-config.js` are generated by `bun run gen:dev`
   from `manifests/*.json` and `packaging/default-settings.mjs`. CI fails on
   drift. Versions live in `package.json` only.
-- **Docs defer to code and CI for live state.** Do not hard-code dynamic
-  facts in prose: test pass counts, tool counts, gate matrices, release
-  artifact lists, generated-file contents, extension IDs, channel behavior,
-  or provider/model inventories. Point readers at the source file, script,
-  generated artifact, or CI/preflight command that computes the answer.
-  Static architectural invariants are fine; operational state belongs in
-  code, generated output, or the release itself.
-- **The dweb boundary.** Nothing outside `peerd-distributed/`
-  imports it — not even its `index.js` (stricter than the per-module
-  rule below; the store package prunes the module entirely). Core code
-  uses the types + stub in `shared/dweb-interface.js` and
-  `loadDweb()` from `shared/dweb-loader.js`. Channel
-  behavior flows only through `CHANNEL_DEFAULTS` / `DWEB_ENABLED`
-  from `/shared/channel-config.js` — never a runtime channel probe, and
-  never exposed to the agent or skills.
-- **All JS runs under strict mode.** ES modules are strict by default,
-  so no `'use strict'` directive in module files (it would just be
-  noise). Classic-script contexts get an explicit `'use strict'` at
-  the top — currently `extension/tests/bootstrap.js`,
+- **The dweb boundary.** Nothing outside `peerd-distributed/` imports it,
+  not even its `index.js` (the store package prunes the module entirely).
+  Core code uses the types + stub in `shared/dweb-interface.js` and
+  `loadDweb()` from `shared/dweb-loader.js`. Channel behavior flows only
+  through `CHANNEL_DEFAULTS` / `DWEB_ENABLED` from
+  `/shared/channel-config.js`, never a runtime channel probe, and never
+  exposed to the agent or skills. `bun run check:boundary` enforces it.
+- **All JS runs under strict mode.** ES modules are strict by default, so
+  no `'use strict'` in module files. Classic-script contexts get an
+  explicit directive: currently `extension/tests/bootstrap.js`,
   `extension/permissions/mic.js`, and any function body injected via
-  `chrome.scripting.executeScript` (the source is serialized and
-  re-evaluated in the target page's classic-script world). If you add
-  a new non-module entry point, the directive is mandatory.
+  `chrome.scripting.executeScript` (serialized and re-evaluated in the
+  target page's classic-script world). A new non-module entry point needs
+  the directive.
 - **No npm runtime inside the extension.** Third-party code lives in
-  `vendor/` with a `SOURCE.txt` documenting where it came from and what
-  version. Audit before vendoring.
-- **Functional core, imperative shell.** Reducers are pure. Policy
-  steps are pure functions. IO is *injected* as a parameter, never
-  imported directly inside a module. This is the testability lever.
+  `vendor/` with a `SOURCE.txt`. Audit before vendoring.
+- **Functional core, imperative shell.** Reducers are pure. Policy steps
+  are pure functions. IO is *injected* as a parameter, never imported
+  directly inside a module. This is the testability lever.
 - **Mithril.js for UI.** Already vendored. Don't swap frameworks.
-- **Three test surfaces, different jobs.**
-    - **In-browser** at `extension/tests/runner.html` (tiny custom
-      framework). Tests that need a browser: DOM, chrome.*,
-      real IDB lifecycle, side panel components, SW behavior, the
-      voice transcribers. These catch real integration breakage. KEEP
-      these as the extension grows -- don't migrate to Bun. They also
-      run HEADLESS via the CDP harness
-      (`scripts/cdp/run-inbrowser-tests.mjs`) — and CI runs that
-      harness as its own job, alongside bun tests, ESLint, the
-      strict typecheck of the bun suite, the dweb-boundary check,
-      generated-file drift, and the 2×2 channel/browser artifact
-      matrix.
-    - **Bun** at `tests/**/*.test.ts` (run with `bun test ./tests`).
-      Tests for pure logic that can be exercised without a browser:
-      registries (storage abstractions), the module resolver
-      (source-transformation), other pure helpers. Fast (<1s),
-      runnable from the terminal, good for solo-dev TDD. The suite is
-      typechecked STRICT (`bun run typecheck`, a CI + preflight gate) —
-      Bun itself strips types without checking, so the gate is what
-      makes the annotations real. `allowJs` pulls the extension's
-      JSDoc typedefs into the check: tests double as drift detectors
-      for the JSDoc contracts. The SAME `tsc` run now also checks the
-      extension itself, file-by-file via an opt-in ratchet: `checkJs`
-      stays OFF at the config level, so an extension `.js` file is
-      type-checked only once it carries a `// @ts-check` directive
-      (unannotated files are still parsed for their JSDoc but their
-      bodies aren't checked — no flag-day on a 72k-line no-build
-      codebase). `chrome` is typed by `@types/chrome`; `browser` (the
-      vendored webextension-polyfill) by the sidecar
-      `extension/vendor/browser-polyfill.d.ts` — both dev-only,
-      type-only, no runtime/build cost. `bun run check:tscheck`
-      enforces a coverage FLOOR (count of `// @ts-check` files) so the
-      checked set only grows; the deliberately-ES5 injected bodies are
-      never annotated and don't count. To add coverage: add the
-      directive, make the file pass `bun run typecheck`, bump the floor.
-    Rule of thumb: if a test would mock half the world to run, it
-    wants the browser. If it operates on values in and values out,
-    it wants Bun.
-    - **Live E2E + the verify loop** at `scripts/cdp/run-e2e-verify.mjs`
-      (`bun run e2e:verify`). Loads the REAL unpacked extension in
-      Chrome for Testing and drives the live side panel through every
-      "state" in `scripts/cdp/states.mjs` (smoke, goal mode, stop,
-      error + visual snapshots) against ONE Chrome — the seam the other
-      two surfaces can't reach (SW + port + vault + agent loop end to
-      end; only the model wire bytes are faked, over CDP Fetch). It
-      writes `scripts/cdp/artifacts/` (gitignored): a **screenshot per
-      state** to LOOK at, a structured **`result.json`** (per-check
-      pass/fail + the why), and a **diff-highlight PNG** on a visual
-      miss. This is built for an AGENT to self-drive a change→verify→fix
-      loop: edit, `bun run e2e:verify`, read `result.json` + the
-      screenshots, fix, repeat until `ok:true`. See
-      `docs/E2E-VERIFY-LOOP.md`. (`--functional` skips the
-      per-machine visual baselines; CI runs that via `test:e2e:all`.)
-- **UI work runs through the verify loop — never call a rendered change
-  done on assertions alone.** When you touch a side-panel / home /
-  component surface, iterate edit → `bun run e2e:verify` → read
-  `scripts/cdp/artifacts/result.json` AND **`Read` the screenshots** →
-  fix, until `ok:true`. Looking at the PNGs is mandatory, not optional:
-  for *new* UI there's no baseline, so your eyes are the test; on a
-  regression read the `*-diff.png` to see what moved. Tighten the loop
-  with `--only=<state>` or `--visual`. If you change a flow no state
-  covers, ADD one to `scripts/cdp/states.mjs` (seed a new visual
-  baseline with `UPDATE_BASELINES=1 … --visual` and commit it) — an
-  uncovered UI change is an unfinished one. why: the unit tiers can
-  assert structure but can't SEE the render; this loop is how an agent
-  closes that gap on its own before pushing.
 - **`index.js` is the public API per module.** ESLint
   `no-restricted-imports` forbids deep paths from outside the module.
   Inside the module, deep imports are fine.
-- **Comments explain *why*, not *what*.** Every architectural choice
-  gets a `// why:` comment. Code without rationale rots fast.
 - **Modern, functional JS — lint-enforced.** `eslint.config.js`'s
-  "stylistic modernization" block makes the house style a gate (autofix
-  with `eslint extension --fix`): `const`/`let` never `var`, arrow
-  callbacks, template literals, object shorthand, spread, `Object.hasOwn`,
-  array methods / `for…of` over C-style `for(;;)` (a counting loop is fine
-  for byte/codec work, reverse iteration, retry loops, or early-exit).
-  Name things in full so identifiers read like the docs. **Exception: the
-  injected-into-page classic-script bodies** (`dom/walk-injected.js`,
-  `dom/framework-state.js`, `background/debugger-pool.js`,
-  `tools/defs/watch-changes.js`) are deliberately ES5 — `var`, `function`
-  bound to a caller `this` — and are exempted in the config. Don't
-  "modernize" them. The same one-paragraph reminder rides the `js_create`
-  / `app_create` tool results (`tools/defs/code-style-note.js`) so the
-  agent writes Notebook/App code to this bar too.
+  "stylistic modernization" block is a gate (autofix with
+  `eslint extension --fix`): `const`/`let` never `var`, arrow callbacks,
+  template literals, object shorthand, spread, `Object.hasOwn`, array
+  methods / `for…of` over C-style loops (a counting loop is fine for
+  byte/codec work, reverse iteration, retry loops, early-exit). Name things
+  in full. **Exception: the injected-into-page classic-script bodies**
+  (`dom/walk-injected.js`, `dom/framework-state.js`,
+  `background/debugger-pool.js`, `tools/defs/watch-changes.js`) are
+  deliberately ES5 and exempted in the config; don't "modernize" them.
+
+---
+
+## Three test surfaces, different jobs
+
+- **In-browser** at `extension/tests/runner.html` (tiny custom framework).
+  Tests that need a browser: DOM, chrome.*, real IDB lifecycle, side panel
+  components, SW behavior, the voice transcribers. They also run HEADLESS
+  via the CDP harness (`scripts/cdp/run-inbrowser-tests.mjs`), which CI runs
+  as its own job. Keep these as the extension grows; don't migrate to Bun.
+- **Bun** at `tests/**/*.test.ts` (run with `bun test ./tests`). Pure logic
+  exercisable without a browser: registries, the module resolver, other
+  pure helpers. Fast, terminal-runnable. Typechecked STRICT
+  (`bun run typecheck`, a CI + preflight gate) — Bun strips types without
+  checking, so the gate makes the annotations real. `allowJs` pulls the
+  extension's JSDoc typedefs into the check. The same `tsc` run checks the
+  extension file-by-file via an opt-in ratchet: an extension `.js` file is
+  type-checked once it carries `// @ts-check`. `bun run check:tscheck`
+  enforces a coverage FLOOR so the checked set only grows.
+  Rule of thumb: if a test would mock half the world, it wants the browser.
+  If it operates on values in and values out, it wants Bun.
+- **Live E2E + the verify loop** at `scripts/cdp/run-e2e-verify.mjs`
+  (`bun run e2e:verify`). Loads the REAL unpacked extension in Chrome for
+  Testing and drives the live side panel through every state in
+  `scripts/cdp/states.mjs` (smoke, goal mode, stop, error + visual
+  snapshots) against ONE Chrome — the seam the other two surfaces can't
+  reach (SW + port + vault + agent loop end to end; only the model wire
+  bytes are faked). It writes `scripts/cdp/artifacts/` (gitignored): a
+  screenshot per state, a structured `result.json`, and a diff PNG on a
+  visual miss. Built for an agent to self-drive a change→verify→fix loop.
+
+**UI work runs through the verify loop — never call a rendered change done
+on assertions alone.** When you touch a side-panel / home / component
+surface, iterate edit → `bun run e2e:verify` → read
+`scripts/cdp/artifacts/result.json` AND **`Read` the screenshots** → fix,
+until `ok:true`. Looking at the PNGs is mandatory: for *new* UI there's no
+baseline, so your eyes are the test; on a regression read the `*-diff.png`.
+If you change a flow no state covers, ADD one to `scripts/cdp/states.mjs`.
+The unit tiers assert structure but can't SEE the render; this loop closes
+that gap.
 
 ---
 
 ## How the system is layered
 
-This was the original build order; it's kept because it IS the
-dependency graph (Layer 1 → Layer 2 → Layer 3) — everything below
-exists today:
+This was the original build order; it IS the dependency graph
+(Layer 1 → 2 → 3):
 
 1. **Chassis skeleton.** Manifest, SW entry, offscreen doc, sidepanel
    shell. Get "load unpacked" working with an empty UI.
 2. **`peerd-egress`** — vault, storage wrappers, `safeFetch`, denylist.
    Everything depends on this; build it first.
-3. **`peerd-provider`** — Anthropic + OpenRouter adapters. Schema
-   conversions, streaming, error handling.
-4. **`peerd-engine`** — Sandboxes: four execution kinds (taxonomy in
-   DESIGN.md §8.5). Three are hosted in their own visible tab — WebVM
-   (CheerpX), Notebook (sealed JS worker + OPFS), App (opaque-origin
-   iframe) — each with a registry in `peerd-engine`, a runtime in its tab
-   page (`vm-tab/`, `notebook-tab/`, `app-tab/`), and a tab tracker + RPC
-   client in `background/`. The fourth, the **headless worker** (`js_run`),
-   runs the Notebook's sealed worker in the offscreen document with no tab
-   (`offscreen/job-runner.js`) — the agent's own quick compute, same
-   substrate as a Notebook, different host.
-5. **`peerd-runtime`** — agent loop, tool dispatcher, and the tool
-   inventory. Registered tools are assembled from `BUILTIN_TOOLS`, clock,
-   web tools, and service-worker wiring; do not pin the live counts in
-   prose. Exposure is decided in `tools/exposure.js`: low-level DOM/page
-   tools are runner-only, the main agent reaches the page through
-   `do`/`get`/`check`, and dweb tools are invisible where `DWEB_ENABLED`
-   is false. Plus sessions, clock (temporal grounding), subagent
-   orchestrator, voice (Moonshine WASM + Web Speech fallback).
+3. **`peerd-provider`** — model adapters. Schema conversions, streaming.
+4. **`peerd-engine`** — the four execution kinds. Three hosted in their own
+   tab (WebVM · Notebook · App), the fourth a headless worker (`js_run`)
+   run offscreen with no tab.
+5. **`peerd-runtime`** — agent loop, tool dispatcher, tool inventory.
+   Exposure is decided in `tools/exposure.js`: low-level DOM/page tools are
+   runner-only, the main agent reaches a page through `message_actor` (a
+   tab's actor), and dweb tools are invisible where `DWEB_ENABLED` is
+   false. Plus sessions, clock, subagent orchestrator, voice.
 6. **Wire it together** in `background/service-worker.js` — message
-   routing, dependency injection, lifecycle wiring. The SW is wiring
-   plus per-route message handlers (one per RPC the side panel /
-   offscreen doc / tab pages dispatch in); the logic lives in
-   modules. If a new handler needs more than a few lines of glue,
-   push the logic INTO a module and keep the handler thin.
-
----
-
-## What's shipped vs what's still ahead
-
-**Already shipped** (don't re-implement; extend instead). The full
-itemized, module-categorized catalog is `FEATURES.md` (canonical) — read
-it before assuming something isn't built; the bullets here are the
-postures and gotchas to know going in:
-
-- Anthropic provider with streaming, adaptive extended thinking on
-  4.6+ models, 3-of-4 prompt-cache breakpoints, 429/500/503/529 retry,
-  and the `anthropic-dangerous-direct-browser-access` ack — plus an
-  OpenRouter adapter (OpenAI-compatible gateway) and a keyless Ollama
-  adapter (local inference; live `/api/tags` model inventory; GPU-fit
-  model recommendation in Settings) (`peerd-provider/`).
-- Vault with passphrase unlock AND WebAuthn PRF (Touch ID / Windows
-  Hello) — same DK from either path (`peerd-egress/vault/`). Idle
-  auto-lock ON by default (45min, user-settable); manual Lock button
-  in the top bar.
-- `chrome.debugger` usage (CDP) — a CHANNEL-GATED required permission,
-  NOT the default. Chrome forbids `debugger` under `optional_permissions`
-  (it's silently omitted), so where CDP ships it's required at install.
-  It ships in the **preview/dev** channels — where CDP is the default
-  automation path — and is STRIPPED from the initial **store** Chrome
-  package and from every Firefox package (`packaging/gen-manifest.ts`
-  `STORE_STRIPPED_PERMISSIONS`; re-added to a store update post-approval —
-  a one-line flip; `docs/store/OPEN-DECISIONS.md` §1). The DEFAULT
-  browser-subagent path on store-Chrome AND Firefox is
-  `chrome.scripting`: a DOM-walk pseudo-a11y snapshot
-  (`peerd-runtime/dom/walk-injected.js`) feeding the SAME serializer as
-  CDP, with selector/`walkId` click/type and a `world:'MAIN'` `read_state`
-  fallback (`peerd-runtime/dom/framework-state.js`). Gating: the CDP pool
-  is wired into a tool context only when `advancedAutomationOn()` =
-  `debuggerApiAvailable()` (namespace present) AND the
-  `advancedAutomationEnabled` SETTING (default ON preview/dev, OFF store;
-  Settings → Advanced). Genuinely CDP-only (correctly NOT faked):
-  `page_exec`'s `Runtime.evaluate` with `allowUnsafeEvalBlockedByCSP:
-  true` on Trusted-Types pages (Gmail/Notion/Slack), and `page_keys`'
-  trusted (`isTrusted`) input. Pool lives in
-  `background/debugger-pool.js`.
-- Subagents — depth-bounded recursion (default `MAX_DEPTH=5`), tool
-  narrowing, output cap. Real implementation at
-  `peerd-runtime/subagent/spawn.js` — not a stub. See
-  `docs/SUBAGENTS.md`.
-- Voice — local transcription via Moonshine (WASM, SRI-pinned model
-  download, OPFS-cached) with a Web Speech API fallback. Hosted in the
-  offscreen doc (`peerd-runtime/voice/`).
-- Sandboxes — four execution kinds (DESIGN.md §8.5). Three run in their
-  own browser tab — WebVM (CheerpX), Notebook (sealed JS worker + OPFS),
-  App (opaque-origin iframe) — each with its own registry + tab tracker +
-  RPC client. The fourth, the headless worker (`js_run`), is the same
-  sealed worker run offscreen with no tab, for the agent's own quick
-  compute (code mode).
-- Policy-gated dispatcher with full lineage attached to every tool
-  result. The live stack is defined in `gates.js` plus the default
-  pre/post tool-use hooks; keep prose at the invariant level so it does
-  not drift. Current posture in code: Plan/Act enforcement, main-vs-runner
-  exposure checks, sensitive-origin blocking, async confirmation, egress
-  enforcement in the allowlist hook and fetch wrappers, and append-only
-  audit. The legacy permission-mode axis was REMOVED
-  2026-06-12 — Plan/Act + the denylist carry the safety weight; Plan
-  permits pure URL loads only, never clicks (`docs/DECISIONS.md` #16).
-- The ten-feature buildout — memory, edit + checkpoints, Plan/Act,
-  composer (slash commands + @-refs), goal mode (autonomous loop), cost telemetry, skills,
-  review subagent, hooks, and do/get/check — all integrated. Per-feature
-  detail is in `FEATURES.md`; the landing record is
-  `v1-deliverables/INTEGRATION-LOG.md`.
-- Dual distribution: store (no dweb) + preview channels, generated
-  `manifest.json` / `channel-config.js` (`bun run gen:dev`). `package.json`,
-  `packaging/preflight.ts`, and CI are the source of truth for release
-  checks. See `PACKAGING.md`.
-- `peerd-distributed/` — REAL code, well past the Phase 0 primitives
-  (Ed25519 did:key identity, codec, content addressing + chunked
-  signed-bundle transfer, the pure signaling reducer shared with
-  `signaling-node/`). Now live: an **always-on base network** in the
-  offscreen doc (a WebRTC mesh introduced by a bootstrap node, gossip,
-  presence, and a Kademlia DHT — the content directory); **dwapps** as
-  namespaced sub-protocols on that shared mesh (commons rides it, no
-  per-app rendezvous); a **peer-to-peer app store** (Share → Discover →
-  Install over the mesh, no server); and the **agent reaches all of it**
-  through the `dweb_share`/`dweb_discover`/`dweb_install` tools + the
-  dwapp bridge (it builds p2p dwapps that users and agents both use).
-  Preview-channel only (the store package prunes the module and CI
-  verifies zero dweb traces). See `docs/distributed/`.
-
-**Still ahead** (backlog — not version-pinned;
-forward-looking specs live in `docs/specs/`. Don't front-run; let each
-land with deliberate design work):
-
-- Profiles — per-profile vault namespacing, denylist, skills, memory,
-  sessions; the default profile uses the same shape.
-- Per-*profile* tool manifests — the per-SESSION layer already shipped
-  (the `/tools` presets + `session.toolManifest`; `tools/manifests.js`,
-  `tools/manifest-command.js`, enforced in `gates.js`), on top of the
-  registration/exposure split. What's still ahead is binding a manifest to
-  a *profile* (rides the Profiles item above). Note: the do/get/check
-  browser-runner is already trimmed to a tight allow-list by
-  construction (`runner/index.js` READ_TOOLSET / DO_TOOLSET) — it never
-  sees the full surface.
-- OpenAI provider adapter — the file doesn't exist yet (OpenRouter
-  covers most vendors meanwhile; Ollama shipped 2026-06-12 with its
-  `http://localhost:11434` CSP connect-src entry restored in
-  `manifests/base.json`). The manifest still does NOT pre-declare
-  hosts for unshipped adapters (store policy: never request what the
-  shipped version doesn't use); `<all_urls>` already covers HTTPS API
-  hosts.
-- The dweb's next reach — agent-to-agent over the mesh (one agent's
-  peer talking p2p to another's), richer dwapps, global discovery — per
-  `docs/distributed/ROADMAP.md`. The base network + signed direct
-  channels are in place; this is fleshing out what rides them.
+   routing, DI, lifecycle. The SW is wiring plus thin per-route handlers;
+   the logic lives in modules. If a handler needs more than a few lines of
+   glue, push the logic INTO a module.
 
 ---
 
 ## Stylistic shorthand
 
-- **The brand color rule (owner direction, 2026-06-12): one rainbow
-  accent on monochrome.** Surfaces are grayscale; the ONLY color
-  carriers are the five-color brand marks — the spinning orb
-  (spinners) and the wordmark letters (p cyan, e red, e amber,
-  r green, d magenta — on letterforms in terminal surfaces, on blocks
-  in the side panel). They mirror each other. Don't introduce other
-  accent colors; failure/error red is the one semantic exception.
-  Spinner cadence is brand-wide: 0.85s (was 1s) and proportional
-  elsewhere. One sanctioned accent moment: the composer's send disc
-  draws ONE random brand color per draft (mic→send morph,
-  `SEND_ACCENTS` in sidepanel/components/input-bar.js — owner
-  experiment 2026-06-12; still never more than one color at a time).
+- **One rainbow accent on monochrome (owner direction).** Surfaces are
+  grayscale; the ONLY color carriers are the five-color brand marks — the
+  spinning orb and the wordmark letters (p cyan, e red, e amber, r green,
+  d magenta). Don't introduce other accent colors; failure/error red is the
+  one semantic exception. One sanctioned accent moment: the composer's send
+  disc draws ONE random brand color per draft (`SEND_ACCENTS` in
+  `sidepanel/components/input-bar.js`), never more than one at a time.
 - Filenames: lowercase, hyphenated (`safe-fetch.js`, not `safeFetch.js`).
-- Exports: camelCase for functions and instances; PascalCase for
-  classes and union members; SCREAMING_SNAKE for constants.
-- Errors: named subclasses (`VaultLockedError`, `EgressDeniedError`),
-  not generic `Error` with a message.
+- Exports: camelCase for functions/instances; PascalCase for classes and
+  union members; SCREAMING_SNAKE for constants.
+- Errors: named subclasses (`VaultLockedError`, `EgressDeniedError`), not
+  generic `Error` with a message.
 - Tests: `<file>.test.js`, colocated with or under the file under test.
 - When in doubt, push functionality *down* the dependency graph, not
-  across it. A module reaching sideways is usually a sign it doesn't
-  belong where it is.
+  across it. A module reaching sideways usually doesn't belong where it is.

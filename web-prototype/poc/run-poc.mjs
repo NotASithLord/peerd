@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Headless validation for the peerd-lite Notebook-substrate PoC.
 //
-// Proves the central claim of docs/specs/PEERD-WEB-SURFACE.md: the sealed
+// Proves the central claim: the sealed
 // Notebook worker substrate runs in a PLAIN web page (no extension) via the web
 // host adapter (notebook-host.js), with the substrate files imported VERBATIM
 // from the extension tree. We serve extension/ as the web root (so the worker's

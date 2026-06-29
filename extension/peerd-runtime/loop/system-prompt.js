@@ -99,13 +99,13 @@ const loadDwebBlock = async () => {
  *   appended that reframes the session as a one-shot job whose final
  *   assistant message IS the value returned to the parent. The base
  *   prompt (tools, defenses) still applies — a subagent is the same
- *   agent, just narrowed to one task. See docs/SUBAGENTS.md.
+ *   agent, just narrowed to one task.
  * @param {string} [ctx.actorType]
  *   DESIGN-17: when present ('webvm'|'notebook'|'app'|'web'), the prompt is for
  *   an ACTOR — a type-specific tuned block is appended that frames the agent as
  *   the owner of ONE instance or web tab (act only on it; instance output is
  *   untrusted data). The base prompt (defenses) still applies. APPEND, never
- *   substitute. See docs/specs/DESIGN-17-actor-agents.md.
+ *   substitute.
  * @param {'tab'|'api'} [ctx.backing]
  *   DESIGN-18: for an actorType:'web' actor, which backing — 'tab' (DOM lore) or
  *   'api' (fetch-only origin lore). Absent = tab.

@@ -1,9 +1,7 @@
 // @ts-check
 // peerd-runtime/dom — DOM navigation layer (Phase 1).
 //
-// Public surface for the a11y-tree-+-refs paradigm. See
-// docs/DOM-NAVIGATION-ASSESSMENT.md (assessment + plan) and
-// docs/DOM-NAVIGATION-DESIGN.md (the layer's design).
+// Public surface for the a11y-tree-+-refs paradigm.
 //
 // Phase 1 ships the pure core: serialize a CDP a11y tree into a
 // ref-annotated snapshot, and a harness-owned ref→node registry. The CDP
@@ -20,7 +18,7 @@ export { summarizeMutations } from './action-result.js';
 export { captureSnapshot, describeSource } from './capture.js';
 export { domWalkInjected } from './walk-injected.js';
 // The "pull peerd in" reminder injected into a regular web page peerd opens
-// (informational only — no SW route; docs/PULL-IN-PEERD-WEB-SCOPE.md).
+// (informational only — no SW route).
 export { pullInHintInjected } from './pull-in-hint-injected.js';
 // No-CDP framework-state introspection (read_state's scripting fallback):
 // a MAIN-world injectable, the scripting twin of debugger-pool's CDP path.

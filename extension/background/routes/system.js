@@ -69,7 +69,7 @@ export const makeSystemRoutes = (deps) => {
           // DESIGN-17 actors DO (they run the full turn-driver wrapper) — skip
           // them, else every minted actor would inflate the chat count and
           // hide its spend under a phantom "chat". (A cross-session spend rollup
-          // is a deliberate open question — DESIGN-17-DEV-NOTES.md.)
+          // is a deliberate open question.)
           const kind = s.kind ?? 'chat';
           if (kind === 'actor' || kind === 'subagent') continue;
           const c = s.cost;

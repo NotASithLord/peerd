@@ -78,7 +78,7 @@ import {
 
 /**
  * Persona / Plan-Act (Feature 03). This is the realization of the
- * persona axis ARCHITECTURE.md §2.4 reserved ("whether the agent can act
+ * reserved persona axis ("whether the agent can act
  * at all", orthogonal to which origins it may touch). It enforces the
  * SYNCHRONOUS half of the permission policy: PLAN mode blocks every
  * non-read action outright (allowed:false). The CONFIRMATION half (auto

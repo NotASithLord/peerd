@@ -8,7 +8,7 @@
 //
 // The reviewer is a SECOND agent with a CLEAN context (it never sees this
 // conversation) and READ-ONLY tools (it cannot edit — the writer stays the
-// single writer). See docs/REVIEW.md and DESIGN additions.
+// single writer).
 
 // why: the summary is re-sent on every subsequent parent turn, so cap the
 // rendered text. The full reviewer transcript is in the side panel by

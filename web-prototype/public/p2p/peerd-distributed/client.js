@@ -6,8 +6,7 @@
 // loadDweb() (preview packages only — the store package ships the stub
 // and prunes this whole module).
 //
-// Keep the surface minimal. Growing it is a deliberate act — see
-// PACKAGING.md §"Adding dweb-only code". PHASE 1 grows it with exactly
+// Keep the surface minimal. Growing it is a deliberate act. PHASE 1 grows it with exactly
 // what the hosting PAGES need — never the SW, which cannot import this
 // module (a ServiceWorker can't dynamic-import, and must not reference the
 // module path). All of these run in a page (options / app-tab via

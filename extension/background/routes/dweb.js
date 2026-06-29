@@ -201,8 +201,8 @@ export const makeDwebRoutes = (deps) => {
       await ensureOffscreen();
       return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
     },
-    // The master OFF — the user-facing kill switch, symmetric to start
-    // (docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2). Persist the preference
+    // The master OFF — the user-facing kill switch, symmetric to start.
+    // Persist the preference
     // FIRST so it won't auto-restart on the next unlock (maybeStartBaseNetwork
     // gates on dwebEnabled), then tear down a live host. NOT gated on dwebOn():
     // we must be able to stop precisely as we flip the setting off. Gated only on

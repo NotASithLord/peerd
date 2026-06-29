@@ -5,7 +5,7 @@
 // why this exists: everything BELOW the WebRTC line is already automated — pure
 // logic in `bun test`, emergent N-node behaviour in the in-memory sim, and
 // cross-process nodes in the netproc cluster. The one tier left manual was real
-// WebRTC bytes between real browser contexts (docs/distributed/TESTING.md §B–F):
+// WebRTC bytes between real browser contexts:
 // two Chrome profiles, by hand, every release. This page is that flow made
 // scriptable. It runs the SAME runtime composition production does —
 // `joinRoom` (rendezvous + WebRTC mesh) feeding `createBaseNetwork` (the

@@ -1,7 +1,7 @@
 // @ts-check
 // peerd-distributed/apps/discovery.js — the sovereign metadata subscription plane.
 //
-// Plane 1 of PROPAGATION.md, and the spine of the whole propagation model: a
+// Plane 1 of the propagation model, and the spine of the whole model: a
 // node NEVER receives discovery metadata it didn't ask for. There is no ambient
 // flood. A peer SUBSCRIBES to a neighbor's discovery feed; the neighbor replies
 // with a SNAPSHOT (the whole Library it's willing to share) and from then on
@@ -25,7 +25,7 @@ import { verifyMeta, metaDwappId } from './meta.js';
 
 export const DISCOVERY = Object.freeze({ CH: 5, SUB: 0, SNAPSHOT: 1, ITEM: 2, UNSUB: 3 });
 
-// Reasoned defaults (PROPAGATION.md caps table) — validate under load.
+// Reasoned defaults (the caps table) — validate under load.
 const DEFAULTS = Object.freeze({
   relayPerMin: 60,    // distinct new cards accepted from one peer per minute
   snapshotMax: 200,   // cards served in a snapshot (the most-recent tail)

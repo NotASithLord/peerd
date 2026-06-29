@@ -51,7 +51,7 @@ const DB_VERSION = 1;
 //
 // why English only to start: the traineddata is ~per-language and large; we
 // ship the one most-requested model and add a language picker later (the
-// catalog shape already supports more rows). See docs/PDF-READING.md.
+// catalog shape already supports more rows).
 export const OCR_ASSETS = Object.freeze([
   // sizeBytes are exact (from the pinned download); the SRI is the gate.
   // URLs are EXACT-version-pinned (not @6/@1) so the SRI stays valid — a

@@ -122,7 +122,7 @@ const renderPageToCanvas = async (page, scale) => {
  * VALIDATE LOCALLY (can only be confirmed with the real driver vendored + a
  * browser): the corePath/langPath wiring (blob: URLs standing in for the cached
  * bytes) and the offscreen CSP's worker-src for the tesseract worker. See the
- * ping on PR #76 and docs/PDF-READING.md.
+ * ping on PR #76.
  *
  * @param {Uint8Array} bytes
  * @param {{ dev?: boolean }} [opts]

@@ -1,5 +1,5 @@
 // @ts-check
-// Service worker — wiring + dependency-injection assembly (architecture.md §6).
+// Service worker — wiring + dependency-injection assembly.
 //
 // The SW imports each peerd-* module's public surface, creates concrete
 // instances (vault, audit log, session store), assembles the per-call
@@ -351,7 +351,7 @@ const loadUserEndpoints = async () => {
  * file carries the per-key rationale and the store/preview divergences.
  * The store package's copy has no dweb keys at all.
  *
- * Migration semantics (Option A, PACKAGING.md): presence of a stored
+ * Migration semantics (Option A): presence of a stored
  * value always wins over CHANNEL_DEFAULTS, even if it equals an old
  * default; absence means "use the channel default". Upgrades therefore
  * never silently change behavior a user may be relying on.
@@ -1691,7 +1691,7 @@ const commandSources = mergeSources([
 //
 // Notebook scratch is also OPFS but only reachable through its tab's
 // worker; snapshotting it would require spawning a tab per turn, so it's
-// a documented V1.x gap (DEV-NOTES.md). The manager already accepts any
+// a documented V1.x gap. The manager already accepts any
 // scope, so adding a `notebook:<id>` adapter later is purely additive.
 const SNAPSHOT_SCOPE_APP = (/** @type {string} */ appId) => `app:${appId}`;
 const appWorkspaceAdapter = (/** @type {string} */ appId) => {
@@ -2166,7 +2166,7 @@ const buildStateSnapshot = async () => {
       // first send). The panel gates provider-specific affordances on
       // it — e.g. the reasoning-effort dial only renders where effort
       // is actually honored (Anthropic adapter; OpenRouter ignores
-      // the reasoning object entirely today, see TODO.md).
+      // the reasoning object entirely today).
       provider: session?.provider ?? null,
       // Cost/usage tally for the meter (feature 06). Normalized so the
       // UI always gets a full shape, even for pre-feature sessions.
@@ -2982,7 +2982,7 @@ browser.tabs?.onRemoved?.addListener((tabId) => {
 // "Press <shortcut> to pull peerd in" — engine tabs carry the real button, a
 // third-party page can't, so this points you at the shortcut/icon. INFORMATIONAL
 // ONLY (it never messages the SW back), so it crosses no boundary and needs no
-// new permission (docs/PULL-IN-PEERD-WEB-SCOPE.md). One-shot, on first load, via
+// new permission. One-shot, on first load, via
 // chrome.scripting; never on a denylisted/sensitive origin; the injected script
 // itself waits until the tab is actually visible before it shows.
 // Peerd-opened web tabs (tabId → origin), tracked persistently so we can show
@@ -3292,7 +3292,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
 // the chat into the window-global side panel (Chrome) / sidebar (Firefox) so the
 // chat follows you onto ANY tab — including a plain web page peerd opened, the
 // case the engine-tab "pull in peerd" button couldn't reach without breaching the
-// fail-closed SW boundary (docs/PULL-IN-PEERD-WEB-SCOPE.md). The Alt+Shift+P
+// fail-closed SW boundary. The Alt+Shift+P
 // command is the dedicated twin: it ALWAYS pulls the panel in, from anywhere.
 //
 // Hard constraint: sidePanel.open()/sidebarAction.open() must run SYNCHRONOUSLY

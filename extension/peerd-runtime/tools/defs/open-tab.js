@@ -4,7 +4,7 @@
 // This is mutate_external in spirit (it changes user-visible browser
 // state), so it's gated: Plan refuses it (clicks/new tabs aren't pure
 // reads — pure URL loads via navigate/open_tab are the lone Plan
-// exception, see docs/DECISIONS.md #16), and Act can route it through a
+// exception, DECISIONS #16), and Act can route it through a
 // confirmation prompt per the denylist + confirmActions policy.
 
 import { originOfUrl } from './dom-helpers.js';

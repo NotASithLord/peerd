@@ -1,5 +1,5 @@
 // @ts-check
-// Untrusted-content wrapping (per DESIGN.md §4.3).
+// Untrusted-content wrapping.
 //
 // Web tool output (read_page, screenshot, anything that pulls text from
 // a page the user/agent navigated to) gets wrapped in a structured tag

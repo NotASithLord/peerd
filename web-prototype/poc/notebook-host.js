@@ -1,7 +1,7 @@
 // A WEB host adapter for peerd's sealed Notebook worker substrate — the page-side
 // equivalent of the extension's offscreen/job-runner.js + notebook-tab.js host.
 //
-// This is the PoC for the central claim of docs/specs/PEERD-WEB-SURFACE.md: the
+// This is the PoC for the central claim: the
 // substrate ships VERBATIM. Everything the worker runs — the realm seal, the
 // peerd.* surface, the module resolver, peerd:std — is imported UNMODIFIED from
 // the extension tree (/notebook-tab/worker-source.js, /peerd-engine/index.js).

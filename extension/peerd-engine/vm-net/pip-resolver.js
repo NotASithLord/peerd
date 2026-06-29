@@ -6,7 +6,7 @@
 // staged wheels in the VM. This module turns PyPI JSON (injected fetcher) into
 // a flat wheel-download plan.
 //
-// Deliberate scope (VM-NETWORKING.md): PURE-PYTHON wheels (py3-none-any),
+// Deliberate scope: PURE-PYTHON wheels (py3-none-any),
 // transitive over Requires-Dist, latest compatible release. No sdists, no
 // native/C-extension builds (no toolchain for the 32-bit image), no extras,
 // markers evaluated only enough to drop `extra ==` deps. A package whose tree

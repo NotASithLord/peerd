@@ -68,7 +68,7 @@ if (violations.length > 0) {
     'DWEB BOUNDARY VIOLATION — code outside extension/peerd-distributed/ '
     + 'references the dweb module. Program against '
     + '/shared/dweb-interface.js and obtain the client via '
-    + '/shared/dweb-loader.js instead (see PACKAGING.md):\n',
+    + '/shared/dweb-loader.js instead:\n',
   );
   for (const v of violations) console.error('  ' + v);
   process.exit(1);

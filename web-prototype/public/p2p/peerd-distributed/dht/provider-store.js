@@ -2,7 +2,7 @@
 //
 // What a node holds of "who serves what": for each content key (H(content_addr))
 // a set of self-signed provider claims, each with its own TTL. This is the
-// directory half of Plane 2 (PROPAGATION.md) — the DHT stores WHO has the bytes,
+// directory half of Plane 2 — the DHT stores WHO has the bytes,
 // never the bytes (the liability firewall, THREAT-MODEL §2). A provider re-PUTs
 // periodically (BEP-44 self-healing); a provider that leaves stops re-PUTting and
 // ages out — popularity = availability, enforced at the directory.

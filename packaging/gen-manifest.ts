@@ -1,6 +1,6 @@
 // Manifest generator — produces the final manifest.json for a
 // (channel, browser) pair from manifests/base.json + the channel's
-// patch document. See PACKAGING.md §"Manifest variants".
+// patch document.
 //
 // Channels:
 //   store    → "peerd"          (Chrome Web Store / AMO; no dweb)

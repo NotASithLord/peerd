@@ -1,7 +1,7 @@
 // @ts-check
 // Browser-runner — the configuration (system prompt + toolsets + a spawn
 // helper) for the disposable sub-agent that the do/get/check tools drive a tab
-// with. See docs/DO-GET-CHECK-DESIGN.md.
+// with.
 //
 // The runner IS a subagent (peerd-runtime/subagent/spawn.js), spawned with:
 //   - systemPromptOverride = RUNNER_PROMPT (+ a return-shaping suffix)
@@ -207,9 +207,8 @@ export const RUNNER_PROMPT = [
 
 // do: VERIFY the outcome against the goal before reporting done. Acting and then
 // claiming success without re-observing is the premature-"done" failure where
-// multi-step browser agents lose reliability in the wild
-// (docs/DO-GET-CHECK-DESIGN.md §8.1). RUNNER_PROMPT already mandates an honest
-// partial-completion summary; this adds the missing discipline of a FINAL
+// multi-step browser agents lose reliability in the wild. RUNNER_PROMPT already
+// mandates an honest partial-completion summary; this adds the missing discipline of a FINAL
 // observation pass — the runner's OWN re-look (reusing snapshot diff:true), NOT
 // a separate verifier and NOT a machine-trusted status field (independent
 // check() is still the way to confirm an outcome the agent must rely on; see the

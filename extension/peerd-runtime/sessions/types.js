@@ -9,7 +9,7 @@
  *   'subagent' — a session spawned by another session (the model via
  *                spawn_subagent, or Notebook code via peerd.runtime.runAgent).
  *                Hidden from /chats; discovered through its parent's
- *                transcript. See docs/SUBAGENTS.md.
+ *                transcript.
  *   'actor' — a per-instance agent that OWNS one tab-hosted execution
  *                instance (WebVM / Notebook / App): it exclusively holds that
  *                environment's mutating tools and is addressed only by
@@ -17,7 +17,6 @@
  *                instance, not the chat list). Lazily minted; bound to the
  *                instance by `actorSessionId` on the engine registry record,
  *                and self-describes via `instanceId` + `actorType` below.
- *                See docs/specs/DESIGN-17-actor-agents.md.
  */
 
 /**
@@ -30,7 +29,7 @@
  * @property {number} [archivedAt]            present when archived
  * @property {string} [title]                 V1.x — derived from first message
  *
- * Subagent parentage (see docs/SUBAGENTS.md). A subagent is just a
+ * Subagent parentage. A subagent is just a
  * session with a parent — no new shape, four fields. Solo dev: no
  * migration code, so these default at read time (`kind ?? 'chat'`,
  * `depth ?? 0`) for sessions written before subagents landed.

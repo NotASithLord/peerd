@@ -1,12 +1,12 @@
 # peerd pre-baked WebVM image — the "warm" dev rootfs.
 #
-# Consumed by scripts/build-vm-image.sh (Dockerfile -> OCI -> mkfs.ext2 -d),
-# per docs/engine/VM-IMAGE.md §2/§5. The point: bake the toolchain + the bytes
+# Consumed by scripts/build-vm-image.sh (Dockerfile -> OCI -> mkfs.ext2 -d).
+# The point: bake the toolchain + the bytes
 # that the in-VM network bridge would otherwise fetch on every boot, so a fresh
 # VM can `git clone` / `npm install` / `pip install` against the (HTTP-only,
 # denylist-gated) bridge instead of apt-getting a compiler under emulation.
 #
-# HARD CONSTRAINTS (VM-IMAGE.md §3):
+# HARD CONSTRAINTS:
 #   - 32-bit x86 ONLY (CheerpX emulates i386) — note the --platform below.
 #   - ext2 image, 2 GB max. Keep the install lean; per-VM writes land in the
 #     IDB overlay, not here.

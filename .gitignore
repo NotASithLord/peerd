@@ -42,7 +42,7 @@ npm-debug.log*
 *.crx
 *.pem
 web-ext-artifacts/
-# Channel artifacts staged + zipped by packaging/package.ts (see PACKAGING.md).
+# Channel artifacts staged + zipped by packaging/package.ts.
 # key.pem (matched by *.pem above) is the CRX preview signing key: NEVER
 # commit it; back it up offline and mirror it into the CRX_PRIVATE_KEY
 # GitHub Actions secret.

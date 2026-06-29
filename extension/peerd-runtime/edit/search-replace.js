@@ -11,7 +11,7 @@
 //   the text to replace it with
 //   >>>>>>> REPLACE
 //
-// Matching semantics (deliberately strict — see DESIGN.md §2):
+// Matching semantics (deliberately strict):
 //   • The SEARCH text must appear EXACTLY (byte-for-byte after newline
 //     normalization) in the source. We do not fuzzy-match. A miss is a
 //     hard error, not a silent no-op: silent no-ops are how agents

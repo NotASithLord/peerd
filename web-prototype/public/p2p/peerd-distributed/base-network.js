@@ -4,7 +4,7 @@
 // universal layer: keep a healthy mesh, carry the base announcements, and let
 // apps plug in as SUB-PROTOCOLS — namespaced overlays on the SHARED mesh links,
 // so many dwapps ride one network instead of each spinning up its own. A "room"
-// is just a sub-protocol generalized (GLOBAL-NETWORK.md).
+// is just a sub-protocol generalized.
 //
 // Hosted in the offscreen document in production (so it outlives any tab); the
 // mesh is injected, so the SAME logic runs over WebRTC, memoryPair, or the
@@ -42,7 +42,7 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
 
-  // --- discovery: the metadata plane (PROPAGATION.md) -----------------------
+  // --- discovery: the metadata plane ----------------------------------------
   // Sovereign + event-driven: no node receives a card it didn't subscribe for.
   // The Library is the bounded discovery cache; the discovery plane runs the
   // SUBSCRIBE/SNAPSHOT/stream/UNSUBSCRIBE/ban protocol over the shared mesh. This
@@ -212,7 +212,7 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
   // composed over the SHARED base mesh by NAMESPACING every topic to dwapp/<id>/.
   // This is room-host.js's composition WITHOUT a second rendezvous + mesh: the
   // base network already supplies connectivity, so "join a room" is just "open a
-  // namespaced overlay" (GLOBAL-NETWORK.md — a room is a sub-protocol generalized).
+  // namespaced overlay" (a room is a sub-protocol generalized).
   // Many rooms ride one mesh; a dwapp is a sub-protocol id, never tied to a signaler.
   const openRoom = (roomId, { meta: roomMeta = () => ({}) } = {}) => {
     const id = String(roomId);

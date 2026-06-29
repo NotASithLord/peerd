@@ -4,7 +4,7 @@
 // You ask for a value in plain language ("the price of the cheapest item",
 // "the count of unread emails"); a read-only runner observes the page and
 // returns just that value. You never see the accessibility tree or page text —
-// only the answer. See docs/DO-GET-CHECK-DESIGN.md.
+// only the answer.
 
 import { runRunner, READ_TOOLSET, READ_MAX_STEPS, GET_SUFFIX } from '../../runner/index.js';
 import { wrapUntrustedRunner } from '../prompt-wrap.js';

@@ -6,7 +6,7 @@
 // the offline tail (`gem install --local`). This turns the RubyGems JSON API
 // into a flat .gem-download plan.
 //
-// Deliberate scope (VM-NETWORKING.md): PURE-RUBY gems (platform "ruby"),
+// Deliberate scope: PURE-RUBY gems (platform "ruby"),
 // transitive over runtime dependencies, latest version. No native-extension
 // gems (no 32-bit build toolchain story), no Bundler/Gemfile resolution. A gem
 // whose tree needs a native build fails loudly, naming it.

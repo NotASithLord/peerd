@@ -1,4 +1,4 @@
 # CODEOWNERS — default reviewers, auto-requested on matching PRs.
-# Module layout is in MAP.md; refine per-path as the team grows, e.g.:
+# Refine per-path as the team grows, e.g.:
 #   /extension/peerd-egress/  @NotASithLord   # security-sensitive
 * @NotASithLord
