@@ -29,6 +29,7 @@
     "e2e:chrome": "bun scripts/cdp/ensure-chrome-for-testing.mjs",
     "eval:bench": "bun scripts/cdp/run-eval-bench.mjs",
     "eval:bench:smoke": "bun scripts/cdp/run-eval-bench.mjs --smoke",
+    "eval:context": "bun scripts/cdp/run-eval-context.mjs",
     "typecheck": "tsc",
     "lint": "eslint extension",
     "package": "bun packaging/package.ts",
