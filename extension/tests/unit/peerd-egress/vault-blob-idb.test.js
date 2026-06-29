@@ -55,7 +55,7 @@ describe('vault blob in IndexedDB', () => {
     expect(rec?.value?.wrappedDK_prf !== undefined).toBe(true);
     expect(await kv.get(VAULT_KEY)).toBe(undefined);
 
-    // Full lock/unlock cycle against the IDB-resident blob.
+    // Full lock/unlock cycle against the IDB-actor blob.
     v.lock();
     expect(v.isLocked()).toBe(true);
     await v.unlockWithPrf(PRF);

@@ -51,6 +51,44 @@ describe('session store v2 — per-message records', () => {
     expect('messagesV2' in s).toBe(false);
   });
 
+  // DESIGN-18 REGRESSION GUARD: create() rebuilds the record from a fixed field
+  // whitelist; `backing` was once OMITTED, which silently made every API actor behave
+  // as a tab web actor (the entire feature inert). This round-trip — the coverage the
+  // unit suite lacked — asserts the actor self-description survives create()→get().
+  test('an actor record round-trips actorType + backing + instanceId through create/get', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const s = await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.stripe.com' });
+    const got = await store.get(s.sessionId);
+    expect(got!.kind).toBe('actor');
+    expect(got!.actorType).toBe('web');
+    expect(got!.backing).toBe('api');                 // the field that was dropped
+    expect(got!.instanceId).toBe('https://api.stripe.com');
+    // A tab-backed web actor (no backing passed) stays backing-absent (the default).
+    const tab = await store.create({ kind: 'actor', actorType: 'web', instanceId: '42' });
+    expect((await store.get(tab.sessionId))!.backing).toBeUndefined();
+  });
+
+  // DESIGN-18: reconnect-on-miss. An API actor's routing binding is ephemeral, but its
+  // memory is durable on the session — findActorSession re-finds it by (origin, chat) so
+  // a post-restart re-address resumes accumulated memory instead of minting empty.
+  test('findActorSession re-finds a live API actor by instanceId + parent, skipping archived', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const a = await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.x.com', parentSessionId: 'chat-1' });
+    // wrong origin / wrong chat / wrong backing don't match
+    await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.y.com', parentSessionId: 'chat-1' });
+    await store.create({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.x.com', parentSessionId: 'chat-2' });
+    await store.create({ kind: 'actor', actorType: 'web', instanceId: '42', parentSessionId: 'chat-1' });   // tab backing
+
+    expect(await store.findActorSession({ parentSessionId: 'chat-1', instanceId: 'https://api.x.com', actorType: 'web', backing: 'api' })).toBe(a.sessionId);
+    expect(await store.findActorSession({ parentSessionId: 'chat-9', instanceId: 'https://api.x.com', backing: 'api' })).toBeNull();
+
+    // an archived actor is NOT reconnected (the chat is gone)
+    await store.archive(a.sessionId);
+    expect(await store.findActorSession({ parentSessionId: 'chat-1', instanceId: 'https://api.x.com', backing: 'api' })).toBeNull();
+  });
+
   test('appendMessage writes a per-message record and pushes the id to msgIndex', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

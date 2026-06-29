@@ -3,9 +3,9 @@
 //
 // safeFetch is intentionally narrow: provider endpoints ONLY. That
 // invariant defends the "even if the agent is prompt-injected, it
-// can't exfiltrate the conversation" property. Web tools (read_article,
-// call_api, web_search) need to reach arbitrary HTTPS hosts the user
-// might be reading; they go through THIS function, not safeFetch.
+// can't exfiltrate the conversation" property. The web tools (fetch_url +
+// the web actor's drive-a-tab path) need to reach arbitrary HTTPS hosts the
+// user might be reading; they go through THIS function, not safeFetch.
 //
 // What webFetch DOES enforce:
 //   - http / https schemes only (no file://, chrome://, etc.)
@@ -29,6 +29,7 @@
 
 import { EgressDeniedError } from './errors.js';
 import { isPrivateOrLocalHost } from './private-network.js';
+import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './origin-credentials.js';
 
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
@@ -38,6 +39,101 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 /** @param {Response} res */
 export const isRedirect = (res) =>
   res?.type === 'opaqueredirect' || REDIRECT_STATUSES.has(res?.status);
+
+// ── session scoping — the web actor's credential rule, AT THE BOUNDARY ──────
+//
+// peerd never uses raw fetch: every open-web request proxies through webFetch, so
+// the ONE place that can attach the user's cookies is the ONE place this rule lives.
+// The web actor (kind:'web') may carry the user's SESSION on a request ONLY when
+// the target is SAME-ORIGIN as the tab it owns — there it is already in the user's
+// session via the rendered tab, so a credentialed fetch to that origin is no
+// escalation (and the actor never holds a credential: the BROWSER attaches the
+// origin's cookies; keyless is intact). Everything CROSS-ORIGIN — or any request
+// with no owned tab — stays SESSIONLESS, so a prompt-injected actor can never point
+// a credentialed fetch at a DIFFERENT site the user is logged into and read it out.
+// The decision is the boundary's: a tool cannot opt a cross-origin request into
+// credentials, because it never supplies the credentials value at all.
+
+/**
+ * Should this request carry the user's session? Yes ONLY if it is same-origin to
+ * the actor's (trusted, SW-set) session origin. Pure.
+ * @param {string} targetUrl
+ * @param {string | null | undefined} sessionOrigin  the owned tab's origin
+ * @returns {'include' | 'omit'}
+ */
+export const sessionScopedCredentials = (targetUrl, sessionOrigin) => {
+  if (!sessionOrigin) return 'omit';                 // 0-tab state → sessionless
+  let origin;
+  try { origin = new URL(targetUrl).origin; } catch { return 'omit'; }
+  return origin === sessionOrigin ? 'include' : 'omit';
+};
+
+/**
+ * Wrap a webFetch so every request it carries is session-scoped (above). The
+ * caller's own `credentials` is IGNORED and overwritten — the boundary decides, by
+ * construction. getSessionOrigin is read PER CALL so a mid-turn tab adoption (the
+ * web actor opening its first tab) is reflected immediately.
+ * @param {(resource: any, init?: any) => Promise<Response>} webFetch
+ * @param {() => string | null | undefined} getSessionOrigin
+ * @returns {(resource: any, init?: any) => Promise<Response>}
+ */
+export const withSessionScopedCredentials = (webFetch, getSessionOrigin) => (resource, init = {}) => {
+  const url = resource instanceof Request ? resource.url : String(resource);
+  const credentials = sessionScopedCredentials(url, getSessionOrigin());
+  return webFetch(resource, { ...init, credentials });
+};
+
+// Remove any header whose name case-insensitively matches `name` (rule 5: the actor
+// must not be able to pre-seed the slot the boundary injects). fetch_url hands a plain
+// object; a non-object (Headers/array) passes through (the api actor only sends plain).
+/** @param {any} headers @param {string} name @returns {any} */
+const stripHeaderName = (headers, name) => {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return headers;
+  const lower = name.toLowerCase();
+  /** @type {Record<string, any>} */
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() !== lower) out[k] = v;
+  return out;
+};
+
+/**
+ * DESIGN-18 P1 — the API actor's CREDENTIALED boundary fetch. Composes the two
+ * boundary credential rules for a `backing:'api'` actor, both keyed off its FIXED
+ * owned origin:
+ *   (a) SESSION SCOPING (cookies) — same as the tab web actor (sessionScopedCredentials).
+ *   (b) ORIGIN-KEY INJECTION — same-origin + https + a vault `origin:<origin>` secret →
+ *       inject the configured auth header. SINGLE-SHOT, PRE-FETCH (rule 4: webFetch keeps
+ *       refusing redirects, so the header never rides a cross-origin hop); the configured
+ *       header is STRIPPED from the caller then set LAST-WINS (rule 5); the value rides
+ *       ONLY the wire — the audit logs the header NAME + origin, never the value (rule 6);
+ *       a locked/missing vault yields no header and NO throw (rule 7).
+ * The actor stays KEYLESS: getSecret/audit are the SW's, closed over HERE, never on the
+ * actor's ctx (which the capability strip already leaves without getSecret).
+ * @param {(resource:any, init?:any)=>Promise<Response>} webFetch
+ * @param {()=>string|null|undefined} getOwnedOrigin  the actor's fixed owned origin
+ * @param {{ getSecret:(name:string)=>Promise<string|null>, audit?:(e:any)=>void }} deps
+ * @returns {(resource:any, init?:any)=>Promise<Response>}
+ */
+export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit }) => async (resource, init = {}) => {
+  const url = resource instanceof Request ? resource.url : String(resource);
+  const owned = getOwnedOrigin();
+  const credentials = sessionScopedCredentials(url, owned);
+  let headers = init.headers;
+  const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
+  if (authOrigin) {
+    let secret = null;
+    try { secret = await getSecret(originSecretName(authOrigin)); }
+    catch { /* rule 7: vault locked → anonymous (public / cookie requests still work) */ }
+    const auth = secret ? parseOriginAuth(secret) : null;
+    if (auth) {
+      headers = stripHeaderName(headers, auth.header);                  // rule 5: drop caller's
+      headers = { ...(headers || {}), [auth.header]: auth.value };      // last-wins
+      try { audit?.({ type: 'origin_auth_attached', details: { origin: authOrigin, header: auth.header } }); }
+      catch { /* best effort — never let auditing leak the value or throw */ }
+    }
+  }
+  return webFetch(resource, { ...init, headers, credentials });
+};
 
 /**
  * Factory for the web-tool fetch wrapper.

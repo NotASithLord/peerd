@@ -63,13 +63,27 @@ const reviveError = (error) => {
 // this is the belt-and-suspenders against a hung message channel.
 const MESSAGE_TIMEOUT_MS = 90_000;
 
+// A reused VM tab idle longer than this may have been frozen by the browser's
+// background-tab throttling (CheerpX execution stops while the tab still half-
+// answers). On reuse past this window, probe it before sending the real command.
+const IDLE_REUSE_PROBE_MS = 60_000;
+// The cheap liveness probe's CEILING — not a fixed wait: an alive tab answers
+// vm/is-ready in milliseconds (the probe resolves the instant it replies), so a short
+// ceiling never false-fails a healthy idle tab — it just needs margin over the
+// round-trip for a momentarily-busy SW. Kept aggressive on purpose: a frozen CheerpX
+// shell often stays wedged even after the tab resumes, so a fresh reload is MORE
+// reliable than waiting to resurrect it — and a needless reload of a slow-to-wake tab
+// costs only the idle in-memory bash session (disk persists via the IDB overlay).
+// recreateTab then does the real up-to-30s boot wait.
+const READY_PROBE_TIMEOUT_MS = 700;
+
 /** Group title used when auto-grouping VM tabs in the tab strip. */
 export const VM_TAB_GROUP_TITLE = 'peerd';
 
 /**
  * Reply shape from the VM tab's vm/* handlers. Dynamic over the message
  * channel — typed to the fields the client reads back.
- * @typedef {{ ok?: boolean, error?: string, result?: { stdout: string, stderr: string, exitCode: number, durationMs: number }, ready?: boolean }} VmTabReply
+ * @typedef {{ ok?: boolean, error?: string, result?: { stdout: string, stderr: string, exitCode: number, durationMs: number, timing?: { totalMs: number, tailMs: number } }, ready?: boolean }} VmTabReply
  */
 
 /**
@@ -79,6 +93,15 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
  * @param {(tabId: number, message: object) => Promise<any>} [deps.sendTabMessage]
  *   Injected message IO (defaults to browser.tabs.sendMessage) so the
  *   queue/interrupt behavior is testable without live VM tabs.
+ * @param {number} [deps.messageTimeoutMs]
+ *   Round-trip timeout before a tab is declared wedged (default 90s). Injected
+ *   short in tests so the self-heal path runs without a real 90s wait.
+ * @param {number} [deps.idleProbeMs]
+ *   Idle window past which a REUSED tab is liveness-probed before use (default 60s).
+ * @param {number} [deps.readyProbeMs]
+ *   Timeout for that cheap liveness probe (default 4s).
+ * @param {() => number} [deps.now]
+ *   Clock for idle tracking (default Date.now); injected in tests.
  * @returns {{
  *   run(cmd: string, opts?: { sessionId?: string, vmId?: string, toolUseId?: string, timeoutMs?: number }):
  *     Promise<{ stdout: string, stderr: string, exitCode: number, durationMs: number }>,
@@ -93,6 +116,10 @@ export const createVmClient = ({
   registry,
   tracker,
   sendTabMessage = (tabId, message) => browser.tabs.sendMessage(tabId, message),
+  messageTimeoutMs = MESSAGE_TIMEOUT_MS,
+  idleProbeMs = IDLE_REUSE_PROBE_MS,
+  readyProbeMs = READY_PROBE_TIMEOUT_MS,
+  now = () => Date.now(),
 }) => {
   // One keyed queue, two key namespaces:
   //   cmd:<vmId>          — the per-VM command lane (run/writeFile).
@@ -102,6 +129,8 @@ export const createVmClient = ({
   //     land on different lanes and the serialization above would be
   //     moot for the very calls it exists for).
   const queue = createKeyedQueue();
+  /** @type {Map<string, number>} last successful round-trip per vmId, for the idle-reuse freeze probe. */
+  const lastUsed = new Map();
   /** @param {string} vmId */
   const commandKey = (vmId) => `cmd:${vmId}`;
 
@@ -146,42 +175,129 @@ export const createVmClient = ({
   };
 
   /**
-   * Ensure a tab exists + ready for vmId. Sends the message. Wraps the
-   * round-trip with a hard timeout.
-   * @param {string} vmId @param {{ type: string, [k: string]: unknown }} message
+   * One round-trip to the tab, raced against a hard timeout. A timeout here means
+   * the PAGE stopped answering (distinct from the tab's own per-run timeout, which
+   * comes back as a normal error reply) — tag it so callers can tell a wedged tab
+   * from a slow command. timeoutMs defaults to the full channel timeout; the cheap
+   * liveness probe passes a short one.
+   * @param {number} tabId @param {string} vmId
+   * @param {{ type: string, [k: string]: unknown }} message
+   * @param {number} [timeoutMs]
    * @returns {Promise<VmTabReply>}
    */
-  const callTab = async (vmId, message) => {
-    // background: agent-driven VM tabs never steal focus (DESIGN-12, 2026-06-18).
-    // vm_create already dropped a "go there" card; an auto-create here (run before
-    // create) opens quietly too. ensureTab early-returns for a live tab.
-    await tracker.ensureTab(vmId, { active: false, groupTitle: VM_TAB_GROUP_TITLE });
-    const tabId = tracker.getTabId(vmId);
-    if (tabId == null) throw new VMNotReadyError(`no live tab for ${vmId} after ensureTab`);
+  const sendRaced = async (tabId, vmId, message, timeoutMs = messageTimeoutMs) => {
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timeoutId;
     /** @type {Promise<never>} */
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
-        reject(new Error(
-          `vm ${message.type} timed out after ${MESSAGE_TIMEOUT_MS / 1000}s `
-          + `(tab ${tabId} unresponsive). Reload or reset the VM.`,
+        const err = /** @type {Error & { vmUnresponsive?: boolean }} */ (new Error(
+          `vm ${message.type} timed out after ${timeoutMs / 1000}s (tab ${tabId} unresponsive).`,
         ));
-      }, MESSAGE_TIMEOUT_MS);
+        err.vmUnresponsive = true;
+        reject(err);
+      }, timeoutMs);
     });
-    /** @type {VmTabReply} */
-    let response;
     try {
-      response = /** @type {VmTabReply} */ (await Promise.race([
+      return /** @type {VmTabReply} */ (await Promise.race([
         sendTabMessage(tabId, { ...message, vmId }),
         timeoutPromise,
       ]));
     } finally {
       clearTimeout(timeoutId);
     }
+  };
+
+  /**
+   * Reload a wedged/frozen tab in place and wait for the fresh boot. why reload,
+   * not close: a tab removal fires onTabClosed → queue.interrupt on the command
+   * lane, which would reject the very call we're recovering; reload recycles the
+   * page (same tabId, the IDB overlay re-mounts so disk persists) and never touches
+   * the lane. markReloading first so ensureTab waits for the re-boot's tab-ready
+   * instead of early-returning on the stale ready flag.
+   * @param {string} vmId @returns {Promise<number>} the (same) tabId, now re-ready
+   */
+  const recreateTab = async (vmId) => {
+    tracker.markReloading(vmId);
+    await tracker.reloadTab(vmId).catch(() => {});
+    await tracker.ensureTab(vmId, { active: false, groupTitle: VM_TAB_GROUP_TITLE });
+    const tabId = tracker.getTabId(vmId);
+    if (tabId == null) throw new VMNotReadyError(`no live tab for ${vmId} after reload`);
+    return tabId;
+  };
+
+  /**
+   * Cheap, shell-INDEPENDENT liveness check. vm/is-ready only reports whether the
+   * tab's event loop is alive, so a frozen tab fails it (no answer) while a tab
+   * merely busy running a long command still passes — unlike a shell probe it can't
+   * be confused with a slow command. Short timeout; any error reads as "not alive".
+   * @param {number} tabId @param {string} vmId @returns {Promise<boolean>}
+   */
+  const probeAlive = async (tabId, vmId) => {
+    try {
+      const r = await sendRaced(tabId, vmId, { type: 'vm/is-ready' }, readyProbeMs);
+      return r?.ready === true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * @param {string} vmId
+   * @param {{ type: string, [k: string]: unknown }} message
+   * @param {{ reboot?: boolean }} [opts] reboot:false for the liveness probe itself,
+   *   so a probe never recreates a tab (it just answers "not ready").
+   */
+  const callTab = async (vmId, message, { reboot = true } = {}) => {
+    // background: agent-driven VM tabs never steal focus (DESIGN-12, 2026-06-18).
+    // vm_create already dropped a "go there" card; an auto-create here (run before
+    // create) opens quietly too. ensureTab early-returns for a live tab.
+    const reusedExisting = tracker.getTabId(vmId) != null;
+    const idleMs = now() - (lastUsed.get(vmId) ?? 0);
+    await tracker.ensureTab(vmId, { active: false, groupTitle: VM_TAB_GROUP_TITLE });
+    let tabId = tracker.getTabId(vmId);
+    if (tabId == null) throw new VMNotReadyError(`no live tab for ${vmId} after ensureTab`);
+
+    // Idle-reuse freeze gate (mechanical, no agent involvement): a REUSED tab idle
+    // past the browser's freeze window may be frozen — it half-answers but CheerpX
+    // execution has stopped. Probe it cheaply and recreate it BEFORE the real command
+    // face-plants on a dead shell, turning a ~90s stall into a ~4s probe. Skipped for
+    // a freshly created tab (not reused → not frozen), for recently-active VMs (no
+    // freeze risk → no probe overhead), and for the probe message itself.
+    if (reboot && message.type !== 'vm/is-ready' && reusedExisting && idleMs > idleProbeMs) {
+      if (!(await probeAlive(tabId, vmId))) {
+        tabId = await recreateTab(vmId);
+      }
+    }
+
+    /** @type {VmTabReply} */
+    let response;
+    try {
+      response = await sendRaced(tabId, vmId, message);
+    } catch (e) {
+      // Reactive backstop: a tab that freezes MID-call hits the channel timeout (its
+      // event loop is dead, so even its per-run timer can't fire — distinct from a
+      // slow command, which the tab answers at its cmd-timeout). Recreate once and
+      // retry; a second timeout is terminal.
+      const unresponsive = !!(/** @type {{ vmUnresponsive?: boolean }} */ (e)?.vmUnresponsive);
+      if (!unresponsive || !reboot) throw e;
+      tabId = await recreateTab(vmId);
+      try {
+        response = await sendRaced(tabId, vmId, message);
+      } catch (e2) {
+        if (/** @type {{ vmUnresponsive?: boolean }} */ (e2)?.vmUnresponsive) {
+          throw new VMNotReadyError(
+            `vm ${vmId} is unresponsive — reloaded its tab and it still did not answer `
+            + `${message.type} after ${messageTimeoutMs / 1000}s. The VM may be wedged; create a fresh one.`,
+          );
+        }
+        throw e2;
+      }
+    }
     if (!response || response.ok !== true) {
       throw reviveError(response?.error ?? 'vm call returned no response');
     }
+    lastUsed.set(vmId, now());
     return response;
   };
 
@@ -204,6 +320,12 @@ export const createVmClient = ({
       // vm/run always carries result — this expresses that invariant to tsc
       // (result is optional on the shared reply shape) without changing flow.
       if (!response.result) throw new VMNotReadyError('vm/run returned no result');
+      // Instrumentation (temporary): the VM-side wall-clock. totalMs is the whole
+      // run; tailMs is the gap from the last visible-output chunk to the completion
+      // marker. A small total here against a slow user-observed reply pins the delay
+      // DOWNSTREAM (the actor's reply turn + the orchestrator turn), not the VM.
+      const t = response.result.timing;
+      if (t) console.info('[vm.timing]', { vmId: targetVmId, totalMs: t.totalMs, tailMs: t.tailMs });
       return response.result;
     },
 
@@ -229,7 +351,9 @@ export const createVmClient = ({
         const targetVmId = await resolveVmId(opts);
         const tabId = tracker.getTabId(targetVmId);
         if (tabId == null) return false;
-        const response = await callTab(targetVmId, { type: 'vm/is-ready' });
+        // reboot:false — a liveness probe must never recreate a tab; a wedged
+        // probe just answers "not ready".
+        const response = await callTab(targetVmId, { type: 'vm/is-ready' }, { reboot: false });
         return response.ready === true;
       } catch {
         return false;

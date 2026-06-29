@@ -123,6 +123,31 @@ export const createTabTracker = ({
   };
 
   /**
+   * Reset an id's entry to "reloading": not-ready, with a FRESH readyPromise the
+   * reloaded tab resolves when it re-announces <kind>/tab-ready. why: a wedged
+   * tab is recovered with tabs.reload — same tabId, but the old readyPromise is
+   * already settled, so without this an ensureTab after the reload would early-
+   * return on the stale `ready` flag and race the re-boot. The tab is NOT removed,
+   * so no onTabRemoved / command-queue interrupt fires. No-op if the entry is gone.
+   * @param {string} id
+   */
+  const markReloading = (id) => {
+    const entry = byId.get(id);
+    if (!entry) return;
+    /** @type {(tabId: number) => void} */
+    let resolveReady = () => {};
+    /** @type {(err: Error) => void} */
+    let rejectReady = () => {};
+    /** @type {Promise<number>} */
+    const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    readyPromise.catch(() => {});          // see recordEntry: keep a bare reject handled
+    entry.ready = false;
+    entry.readyPromise = readyPromise;
+    entry.resolveReady = resolveReady;
+    entry.rejectReady = rejectReady;
+  };
+
+  /**
    * Walk existing tabs at SW boot. Any instance tab still alive in the
    * browser gets re-registered. They've already booted, so they're
    * considered ready immediately.
@@ -292,6 +317,7 @@ export const createTabTracker = ({
     ensureTab,
     closeTab,
     reloadTab,
+    markReloading,
     listLive,
   };
 };

@@ -6,9 +6,9 @@
 // without an explicit `notebook` arg route here.
 
 import { JS_TAB_GROUP_TITLE } from '/background/notebook-client.js';
-import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE } from './code-style-note.js';
 
-// why a Notebook-specific note (CODE_STYLE_NOTE is shared with app_create): the
+// why a Notebook-specific note (the shared CODE_STYLE_NOTE rides the Notebook
+// actor's own prompt now): the
 // fresh-realm + file-tree + OPFS-state guidance holds for Notebooks, not Apps.
 // Every run is a clean realm, so durable state must be explicit — an OPFS file,
 // never a module global — which keeps Notebook code pure and functional.
@@ -27,7 +27,7 @@ const NOTEBOOK_NOTE = [
   'CODE MODE: for multi-step work, write ONE script that orchestrates it and',
   'return just the result — loop/filter/transform in code instead of many',
   'separate tool calls. peerd.egress.fetch(url, { method, headers, body }) is',
-  'audited HTTP (denylist + SSRF + audit, same as call_api). peerd.runtime.',
+  'audited HTTP (denylist + SSRF + audit, same as fetch_url). peerd.runtime.',
   'runAgent({ task }) embeds an agent inside a Notebook you BUILD FOR THE USER',
   '(e.g. a chat box that reasons); for your own work use the spawn_subagent tool.',
   'Keep approval-needing / money-spending actions as discrete tools, not buried',
@@ -103,9 +103,11 @@ export const jsCreateTool = {
       name: record.name,
       isCurrent: !!sessionId,
     }, null, 2);
+    // The Notebook ACTOR writes + runs the code, so the style + correctness
+    // guidance rides ITS prompt (actorBlock), not this orchestrator create-result.
     return {
       ok: true,
-      content: `${summary}\n\n${NOTEBOOK_NOTE}\n\n${CODE_STYLE_NOTE}\n\n${JS_PITFALLS_NOTE}`,
+      content: `${summary}\n\n${NOTEBOOK_NOTE}`,
     };
   },
 };

@@ -151,6 +151,11 @@ export async function* asCompleted(promises) {
  *   fire-and-forget when the history trim drops NEW messages; the SW
  *   queues the request and runs the cheap summarisation call after the
  *   turn. Never awaited — the loop must never block on summarization.
+ * @param {(summaryText: string) => string} [ctx.fenceActorSummary]
+ *   DESIGN-17: present ONLY on a WEB-actor ctx (the SW injects it). Wraps the
+ *   rolling trim-summary as untrusted data before it's folded back into history —
+ *   the web actor self-fences its own page-derived accumulation. Passed straight
+ *   through to planTrim's wrapSummary; absent everywhere else (verbatim summary).
  * @param {number} [ctx.contextWindow]
  *   The active model's context window in tokens (SW resolves it from
  *   session.model via peerd-provider/context-window.js). Enables the
@@ -174,6 +179,11 @@ export async function* asCompleted(promises) {
  *   When false, skip the per-delta IDB rewrite of the partial transcript
  *   (browser-runners opt out — an ephemeral child's partial reply dies with
  *   the SW anyway). Defaults to true; finalization writes are unaffected.
+ * @param {boolean} [ctx.oneShot]
+ *   One-shot turn (actor delegations): after the FIRST clean tool round,
+ *   synthesize the reply from the tool results and stop — no second model call
+ *   to summarize. An errored round falls through to the normal loop. The caller
+ *   (the orchestrator, via message_actor) sets it when one round suffices.
  * @returns {AsyncGenerator<LoopEvent>}
  */
 export async function* runUserTurn(ctx) {
@@ -296,6 +306,10 @@ export async function* runUserTurn(ctx) {
 
   // ---- Outer loop: model call → maybe tools → model call → ... -----------
   let step = 0;
+  // One-shot latch: a clean first tool round short-circuits (no summarize turn);
+  // an errored round clears this so the rest of the turn runs normally. Loop-scoped
+  // so the latch survives across steps.
+  let oneShotArmed = ctx.oneShot === true;
   /** @type {string | null} */
   let lastAssistantId = null;
   while (step < maxSteps) {
@@ -380,6 +394,13 @@ export async function* runUserTurn(ctx) {
         // estimate since it's part of the prompt the window must hold.
         contextWindow: ctx.contextWindow,
         system,
+        // DESIGN-17: a WEB actor self-fences its OWN rolling summary on
+        // re-insertion (its accumulation is 100% untrusted-provenance — every byte
+        // is page-derived). The SW injects ctx.fenceActorSummary on a web-actor
+        // ctx; absent everywhere else, so the summary renders verbatim as before.
+        ...(typeof ctx.fenceActorSummary === 'function'
+          ? { wrapSummary: ctx.fenceActorSummary }
+          : {}),
       });
       // why: turns interrupted mid-reasoning (abort / max_tokens /
       // provider error) persist partial `thinking`, but the API strips
@@ -828,6 +849,43 @@ export async function* runUserTurn(ctx) {
     };
     session = await sessions.appendMessage(sessionId, resultMessage);
     yield { type: 'state', session };
+
+    // One-shot turn (DESIGN-17 `oneShot`, actor delegations): the caller asserted
+    // a single round suffices, so hand the tool result(s) straight back WITHOUT a
+    // second model call to summarize them — that summarize inference is the
+    // redundant cost a "run X and report" delegation otherwise pays. Synthesize the
+    // reply from the results (deterministic, no inference) as a NORMAL assistant
+    // message: it keeps the history ending on an assistant turn (a bare trailing
+    // tool-result user message would collide with the next user message — the
+    // converter only merges adjacent STRING content), and the caller reads it via
+    // finalAssistantText exactly like any turn. why the no-error guard: if a tool
+    // FAILED, one round did NOT suffice — disarm one-shot (below) so the model gets
+    // its normal recover/explain turns for the REST of this turn. The first CLEAN
+    // round short-circuits; multi-step work simply never sets the flag.
+    if (oneShotArmed && toolResults.length > 0 && !toolResults.some((b) => b.is_error)) {
+      const toolOut = toolResults
+        .map((b) => (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)))
+        .join('\n').trim();
+      // Keep the model's OWN prose (a preamble or a direct answer it wrote alongside
+      // the tool call this round) ahead of the raw tool output — don't silently drop it.
+      const replyText = [textBuf.trim(), toolOut].filter(Boolean).join('\n\n')
+        || '(the tool produced no output)';
+      /** @type {InternalMessage} */
+      const oneShotReply = {
+        role: 'assistant', content: replyText,
+        id: uuidv7(now), when: now(),
+        model: session.model, provider: session.provider,
+        streaming: false, stopReason: 'one_shot',
+      };
+      session = await sessions.appendMessage(sessionId, oneShotReply);
+      yield { type: 'state', session };
+      yield { type: 'stop', sessionId, messageId: oneShotReply.id, stopReason: 'one_shot' };
+      return;
+    }
+    // This round did not cleanly short-circuit (a tool errored) — latch one-shot OFF
+    // so a later recovery round runs as a NORMAL turn (recover AND explain) instead of
+    // being silently short-circuited too.
+    oneShotArmed = false;
     // Continue outer loop — next iteration calls the model with the
     // tool results in the history.
   }

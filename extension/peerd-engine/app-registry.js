@@ -56,6 +56,7 @@ const truncTags = (tags) => (Array.isArray(tags) ? tags.slice(0, 16) : []);
 /**
  * @param {Object} deps
  * @param {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }} deps.storage
+ * @param {(actorSessionId: string) => void} [deps.onActorArchive]  DESIGN-17: forwarded to createRegistry — archive an actor orphaned by delete.
  * @returns the registry; snapshot() returns { apps, currentId }.
  */
 export const createAppRegistry = (deps) => {

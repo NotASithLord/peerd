@@ -55,7 +55,7 @@ export const isWriteMethod = (method) =>
 // Methods that read without transmitting a body — the only ones the anti-exfil
 // web-write confirm gate exempts. EVERYTHING else (POST/PUT/PATCH/DELETE AND
 // OPTIONS, which can carry a body) is gated. The single source of truth for
-// both gate call sites (call_api + the WebVM bridge), so they can't drift.
+// both gate call sites (fetch_url + the WebVM bridge), so they can't drift.
 export const NON_GATED_METHODS = Object.freeze(['GET', 'HEAD']);
 
 /** @param {string} [method] @returns {boolean} */

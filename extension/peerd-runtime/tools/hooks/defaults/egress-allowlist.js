@@ -25,7 +25,7 @@
 // provider endpoints are honored without rebuilding the hook.
 //
 // Scope: the agent's OWN outbound fetches only. Browser-session tools
-// (primitive 'tab' — open_tab, navigate, submit_form, click…) are EXEMPT:
+// (primitive 'tab' — open_tab, navigate, type, click…) are EXEMPT:
 // they act on the user's logged-in browser (peerd's whole thesis), gated
 // by the denylist + confirmation, not the provider allowlist. Of the rest,
 // only sideEffect 'mutate_external' is in scope; read/write tools that
@@ -68,7 +68,7 @@ export const egressAllowlistHook = {
     const tool = ctx.getToolMeta?.(toolName);
     // why: the egress allowlist governs the agent's OWN outbound fetches
     // (safeFetch). Browser-session tools (primitive 'tab' — open_tab,
-    // navigate, submit_form, click, …) act on the USER's logged-in browser:
+    // navigate, type, click, …) act on the USER's logged-in browser:
     // reaching their own apps is peerd's whole thesis, governed by the
     // DENYLIST (origin gate) + the confirmation gate, NOT the provider
     // allowlist. Gating them here wrongly blocked the user from opening

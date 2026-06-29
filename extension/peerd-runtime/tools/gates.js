@@ -16,7 +16,11 @@
 //                  passes here and defers auto-vs-ask to the dispatcher.
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
-//                  runner-only tool even if the model emits its name.
+//                  runner-only tool even if the model emits its name. Also
+//                  carries the DESIGN-17 actor capability tier (flag-gated):
+//                  the instance-mutating set is actor-only, and an actor
+//                  is positively scoped to its own kind + pinned to its own
+//                  instance.
 //   origin       — active (denylist)
 //   confirmation — active as a lineage placeholder: computes the policy's
 //                  PLANNED verdict; the dispatcher resolves the real
@@ -37,7 +41,11 @@
 // module unimportable under the bun test runner). Same pattern as
 // composer/resolvers.js and tools/defs/dom-helpers.js.
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
-import { isHiddenFromMain, isInstanceGatedOut, instanceGateKind } from './exposure.js';
+import {
+  isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
+  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActor, actorTargetId,
+  actorWebTabTarget, isRunnerPageTool,
+} from './exposure.js';
 import {
   decideAction,
   PERMISSION_MODES,
@@ -62,6 +70,9 @@ import {
  *   instanceState?: { webvm?: boolean, notebook?: boolean, app?: boolean } | null,
  *   toolAllow?: Set<string> | null,
  *   toolManifestLabel?: string,
+ *   actorInstanceId?: string,
+ *   actorType?: string,
+ *   backing?: 'tab' | 'api',
  * }} GateContext
  */
 
@@ -100,6 +111,69 @@ const personaGate = (tool, _args, ctx) => {
 };
 
 /**
+ * DESIGN-17 actor capability tier — pure. Returns a REFUSAL
+ * `{allowed:false, reason}` when the call violates the tier, or `null` when the
+ * tier has no opinion (the gate continues). The rules:
+ *   (1) non-actor ctx → the instance-MUTATING set is refused (it's actor-
+ *       only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
+ *   (2) main ctx → the do/get/check page runner is refused too (folded into the
+ *       web actor); SUBAGENTS keep it (their page path; they can't message a
+ *       actor), and the runner itself never calls it.
+ *   (3) actor ctx → POSITIVELY constrained to its own kind's toolset (a
+ *       hallucinated/injected non-env tool fails closed here, not just in the
+ *       descriptor list — the keyless/narrow runner trust model).
+ *   (4) actor ctx → per-instance pin: an EXPLICIT target that isn't this
+ *       actor's instance is refused (defense in depth — the actor dispatch
+ *       wrapper already force-injects the bound id).
+ *
+ * @param {Tool} tool @param {any} args @param {GateContext} ctx
+ * @returns {Omit<GateResult, 'name'> | null}
+ */
+export const actorTierGate = (tool, args, ctx) => {
+  if (ctx?.exposure !== EXPOSURE_ACTOR) {
+    if (isActorMutatingTool(tool.name)) {
+      return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
+    }
+    if (ctx?.exposure === 'main' && isRunnerPageTool(tool.name)) {
+      return { allowed: false, reason: `'${tool.name}' is folded into the web actor — open_tab, then message that tab's actor to read or act on the page` };
+    }
+    return null;
+  }
+  // DESIGN-18: an API actor (actorType:'web', backing:'api') is fetch-only — its
+  // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
+  // refuses HERE, at the gate, not just at execute-time.
+  if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing)) {
+    const scope = ctx.backing === 'api' ? 'API integration (no tab — fetch_url only)' : `${ctx.actorType ?? 'unknown'}`;
+    return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
+  }
+  // The actor dispatch wrapper (turn-driver pinActorCall) already FORCE-
+  // normalizes any id/name arg to the bound instance id before dispatch, so by
+  // the time the gate runs an explicit target is the bound id. This is the
+  // defense-in-depth backstop: an explicit id that ISN'T the bound one (e.g. a
+  // path that somehow skipped the wrapper) is refused.
+  const explicit = actorTargetId(tool.name, args);
+  if (explicit && explicit !== ctx.actorInstanceId) {
+    return { allowed: false, reason: `actor is pinned to ${ctx.actorInstanceId ?? 'its instance'}; refusing ${tool.name} targeting ${explicit}` };
+  }
+  // DESIGN-17 web actor — the tab pin. The DOM tools resolve their tab from an
+  // explicit numeric `args.tabId` (or the bound tab if absent), so the pin is on
+  // tabId, not an instance-id string. An explicit tabId that isn't the owned tab
+  // is refused; absent → the bound tab (fine). actorInstanceId = owned tabId
+  // as a string. (Runs before resolveTargetTab, so it sees only the explicit arg
+  // — the in-execute denylist re-check in resolveTargetTab is the second wall.)
+  if (ctx.actorType === 'web' && ctx.backing !== 'api') {
+    const tab = actorWebTabTarget(args);
+    // String() BOTH sides (M6): actorInstanceId SHOULD be the tabId as a
+    // string, but coercing defensively means a numeric mint can't lock the
+    // actor out of its own tab ('42' !== 42).
+    if (tab !== undefined && String(tab) !== String(ctx.actorInstanceId)) {
+      return { allowed: false, reason: `web actor is pinned to tab ${ctx.actorInstanceId ?? '?'}; refusing ${tool.name} targeting tab ${tab}` };
+    }
+  }
+  return null;
+};
+
+/**
  * Exposure — enforces the main-agent tool boundary at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
  * (snapshot, click, type, page_exec, …) are hidden from the main agent and
@@ -121,10 +195,10 @@ const personaGate = (tool, _args, ctx) => {
  * effective set can intersect with, but never escalate past, its
  * parent's manifest.
  *
- * @param {Tool} tool @param {any} _args @param {GateContext} ctx
+ * @param {Tool} tool @param {any} args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'>}
  */
-export const exposureGate = (tool, _args, ctx) => {
+export const exposureGate = (tool, args, ctx) => {
   if (ctx?.exposure === 'main') {
     if (isHiddenFromMain(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is runner-only, not available to the main agent` };
@@ -141,6 +215,12 @@ export const exposureGate = (tool, _args, ctx) => {
       return { allowed: false, reason: `'${tool.name}' needs a current ${kind} in this chat — create one first (${create})` };
     }
   }
+  // DESIGN-17: the actor capability tier (see tools/exposure.js). The WALL
+  // behind the advisory descriptor filters — enforced for every dispatch path so a
+  // `spawn_subagent({tools:['app_delete']})` can't escalate. Pure. null = no
+  // actor-tier opinion.
+  const actor = actorTierGate(tool, args, ctx);
+  if (actor) return actor;
   if (ctx?.toolAllow instanceof Set && !ctx.toolAllow.has(tool.name)) {
     const label = ctx.toolManifestLabel ?? 'manifest';
     return { allowed: false, reason: `'${tool.name}' is excluded by this session's tool manifest (${label})` };

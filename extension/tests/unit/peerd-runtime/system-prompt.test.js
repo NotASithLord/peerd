@@ -45,12 +45,15 @@ describe('renderSystemPrompt', () => {
     expect(out.includes('<memory>')).toBe(false);
   });
 
-  it('always emits the tab focus policy', async () => {
+  it('always emits the tab focus policy (tabs open in the background)', async () => {
     _setTemplateForTests(TEMPLATE);
     const out = await renderSystemPrompt({});
-    expect(out.includes('take focus by default')).toBe(true);
-    expect(out.includes('never steals focus')).toBe(true);
-    expect(out.includes('active:false')).toBe(true);
+    // DESIGN-12: tabs open in the BACKGROUND with a "go there" card — they never
+    // steal focus (the old "take focus by default" / "active:false" wording was
+    // stale; open_tab has no active arg and always opens quietly).
+    expect(out.includes('stays in the BACKGROUND')).toBe(true);
+    expect(out.includes('go there')).toBe(true);
+    expect(out.includes('never yank them across')).toBe(true);
   });
 
   describe('customSystemPrompt (/system session instructions)', () => {

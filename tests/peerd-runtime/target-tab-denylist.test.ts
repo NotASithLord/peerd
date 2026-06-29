@@ -1,11 +1,11 @@
 // The denylist must guard the RESOLVED target tab, not just ctx.activeTab.
 // A DOM tool driven with args.tabId pointing at a denylisted tab must be
-// refused, and list_tabs must not leak denylisted tab ids (the enumeration
-// primitive that feeds the args.tabId bypass).
+// refused. (The matching enumeration-leak fence — that the tab catalog never
+// surfaces a denylisted tab's id — is covered in tools/actor-list.test.ts,
+// since actor_list replaced list_tabs as the enumeration primitive.)
 
 import { describe, test, expect } from 'bun:test';
 import { resolveTargetTab, isDenylistedTab } from '../../extension/peerd-runtime/tools/defs/dom-helpers.js';
-import { listTabsTool } from '../../extension/peerd-runtime/tools/defs/list-tabs.js';
 
 const DENYLIST = ['chase.com', '*.chase.com', '*.proton.me'];
 
@@ -50,33 +50,39 @@ describe('resolveTargetTab — denylist on the actual target', () => {
   });
 });
 
-describe('list_tabs — does not leak denylisted tab ids', () => {
-  test('filters denylisted tabs and reports how many were hidden', async () => {
-    const all = [
-      { id: 1, url: 'https://example.com/', title: 'Example', active: true, windowId: 1 },
-      { id: 9, url: 'https://chase.com/accounts', title: 'Chase', active: false, windowId: 1 },
-      { id: 12, url: 'https://mail.proton.me/inbox', title: 'Proton', active: false, windowId: 1 },
-    ];
-    const ctx: any = { denylist: DENYLIST, tabs: { query: async () => all } };
-    const r = await listTabsTool.execute({}, ctx);
-    if (!r.ok) throw new Error('expected ok result'); // narrow ToolResultOk | ToolResultErr
-    const payload = JSON.parse(r.content);
-    expect(payload.tabs.map((t: any) => t.id)).toEqual([1]);   // only the public tab
-    expect(payload.count).toBe(1);
-    expect(payload.denylisted_tabs_hidden).toBe(2);
-    // the denylisted ids/origins must appear NOWHERE in the output
-    expect(r.content).not.toContain('chase.com');
-    expect(r.content).not.toContain('"id": 9');
+describe('resolveTargetTab — DESIGN-17 web-actor fail-closed', () => {
+  // A web actor OWNS one tab via ctx.activeTab. If that tab vanished mid-turn
+  // (so ctx.activeTab is absent), it must NEVER fall back to the user's foreground
+  // tab — it refuses instead. The foreground query is the leak this closes.
+  test('an actor ctx with no activeTab refuses — never queries the foreground', async () => {
+    let foregroundQueried = false;
+    const ctx: any = {
+      actorType: 'web',
+      tabs: {
+        get: async () => { throw new Error('no tab'); },
+        query: async () => { foregroundQueried = true; return [{ id: 7, url: 'https://user-bank.com/' }]; },
+      },
+    };
+    expect(await resolveTargetTab({}, ctx)).toBeNull();
+    expect(foregroundQueried).toBe(false);   // the foreground was NOT touched
   });
 
-  test('omits the hidden-count field when nothing is denylisted', async () => {
+  test('a NON-actor ctx with no activeTab still uses the foreground (unchanged)', async () => {
     const ctx: any = {
-      denylist: DENYLIST,
-      tabs: { query: async () => [{ id: 1, url: 'https://example.com/', title: 'x', active: true, windowId: 1 }] },
+      denylist: [],
+      tabs: { get: async () => { throw new Error('x'); }, query: async () => [{ id: 7, url: 'https://example.com/' }] },
     };
-    const r = await listTabsTool.execute({}, ctx);
-    if (!r.ok) throw new Error('expected ok result'); // narrow ToolResultOk | ToolResultErr
-    const payload = JSON.parse(r.content);
-    expect(payload.denylisted_tabs_hidden).toBeUndefined();
+    expect((await resolveTargetTab({}, ctx))?.id).toBe(7);
+  });
+
+  test('a web actor still drives its OWN tab via ctx.activeTab', async () => {
+    const ctx: any = {
+      actorType: 'web',
+      denylist: [],
+      activeTab: { id: 42, url: 'https://app.example/', origin: 'https://app.example' },
+      tabs: tabsApi({ 42: { id: 42, url: 'https://app.example/' } }),
+    };
+    expect((await resolveTargetTab({}, ctx))?.id).toBe(42);
   });
 });
+

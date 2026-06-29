@@ -6,8 +6,8 @@
 // restriction. Flip a flag here and reload the extension (there's no
 // build step, and no runtime toggle).
 //
-// why these are OFF for the store V1 (see docs/store/OPEN-DECISIONS.md):
-// each is a shipped-but-not-yet-V1 capability we deliberately keep out of
+// why a flag is OFF for the store V1 (see docs/store/OPEN-DECISIONS.md):
+// it guards a shipped-but-not-yet-V1 capability we deliberately keep out of
 // the user's reach so the Chrome Web Store review has a smaller, honest
 // surface. The code stays in the tree (and under test) so the feature
 // returns in a later version with its own review — we just don't expose

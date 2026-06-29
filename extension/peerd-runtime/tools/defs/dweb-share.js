@@ -37,14 +37,14 @@ export const dwebShareTool = {
   dweb: true,
   description: [
     'Publish one of the user\'s Apps to the dweb app store so peers can discover',
-    'and install it peer-to-peer (no server). Pass the app id (from app_list). The',
+    'and install it peer-to-peer (no server). Pass the app id (from actor_list). The',
     'app travels as a signed bundle over the base network and shows up in peers\'',
     'Discover view. Use after building an app the user wants to share. CONFIRMS',
     'with the user every time — it is public and outward-facing.',
   ].join(' '),
   schema: {
     type: 'object',
-    properties: { appId: { type: 'string', description: 'The app id to publish (from app_list).' } },
+    properties: { appId: { type: 'string', description: 'The app id to publish (from actor_list).' } },
     required: ['appId'],
   },
   sideEffect: 'mutate_external',

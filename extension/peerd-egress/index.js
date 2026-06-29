@@ -53,7 +53,14 @@ export {
   originOf,
   isAllowed,
 } from './fetch/safe-fetch.js';
-export { makeWebFetch } from './fetch/web-fetch.js';
+export { makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials, withApiCredentials } from './fetch/web-fetch.js';
+// DESIGN-18 P1: origin-bound API-key policy (the origin:<origin> analog of git:<host>).
+export {
+  ORIGIN_SECRET_PREFIX, originSecretName, originFromSecretName,
+  normalizeKeyedOrigin, authOriginForRequestUrl, isPlausibleApiKey,
+  buildOriginSecret, parseOriginAuth,
+} from './fetch/origin-credentials.js';
+export { makeOriginCredentialRoutes } from './fetch/origin-credential-routes.js';
 export { EgressDeniedError } from './fetch/errors.js';
 
 // --- denylist -----------------------------------------------------------

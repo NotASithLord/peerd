@@ -33,7 +33,10 @@ export const openTabTool = {
     'Open a new browser tab. Pass url to pre-load it; omit for a blank',
     'new tab. The tab opens in the BACKGROUND and a "go there" card appears in',
     'the chat — peerd never yanks the user to a new tab; they click to go.',
-    'Returns the new tab id, which you can pass to read_page or other DOM tools.',
+    "Returns the new tab id. To have the web actor work this tab, message_actor",
+    "with to:'<that tabId>' — do NOT combine open_tab with to:'web', which opens its",
+    "OWN tab. For a fresh web task, skip open_tab and just message_actor to:'web'",
+    'with the goal (it opens a tab itself only if it decides to render).',
   ].join(' '),
   schema: {
     type: 'object',

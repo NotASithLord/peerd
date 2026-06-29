@@ -117,8 +117,11 @@ if (!root) throw new Error('options: #app missing from HTML');
 // REMOUNT OptionsApp on every section click (replaying the wordmark intro and
 // resetting the hand-off phase). Pointing all routes at the SAME `Root` makes
 // Mithril DIFF the shell in place; the active section is read from the route.
+// NB: every nav id MUST appear here — Mithril's router bounces an unregistered
+// route to the default (/providers), which reads as a dead nav item. (That is
+// exactly why git-credentials + api-integrations were un-clickable.)
 const SECTIONS = ['providers', 'behavior', 'voice', 'skills', 'hooks',
-  'memory', 'costs', 'transfer', 'vault', 'denylist', 'activity'];
+  'memory', 'costs', 'transfer', 'vault', 'api-integrations', 'denylist', 'activity'];
 const Root = {
   view: () => {
     const section = (m.route.get().replace(/^\//, '').split(/[/?]/)[0]) || 'providers';

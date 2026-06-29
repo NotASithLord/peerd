@@ -40,7 +40,7 @@ const SMALL_PARAMS = Object.freeze({
 const newVault = (kv, extra = {}) =>
   createVault({ kv, argon2: deriveArgon2id, argon2Params: SMALL_PARAMS, autoLockMs: 0, ...extra });
 
-// Seed a passphrase vault with a stored secret (kv-resident blob).
+// Seed a passphrase vault with a stored secret (kv-actor blob).
 /** @param {ReturnType<typeof makeMockKV>} kv */
 const seedVault = async (kv) => {
   const v = newVault(kv);
@@ -151,7 +151,7 @@ describe('vault.kdf (argon2id, real WASM)', () => {
     const kv = makeMockKV();
     await seedVault(kv);
 
-    // idb wired: first blob access migrates the kv-resident blob into
+    // idb wired: first blob access migrates the kv-actor blob into
     // IDB (verified copy) and the passphrase still unlocks against it.
     const v = newVault(kv, { idb });
     await v.unlock(PASS);

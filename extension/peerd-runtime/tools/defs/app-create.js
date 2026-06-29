@@ -5,31 +5,9 @@
 // agent's HTML body lives at index.html (default entry). If you only
 // have one file, pass `html` for back-compat.
 
-import { CODE_STYLE_NOTE } from './code-style-note.js';
+import { APP_RUNTIME_NOTE } from './code-style-note.js';
 
 const MAX_TOTAL_CHARS = 2_000_000;
-
-// App-specific runtime note, disclosed in the create RESULT. why: the sandboxed
-// opaque-origin iframe can't load a Worker by path, but composeApp transparently
-// rewrites `new Worker('worker.js')` to a blob: worker (peerd-engine/app-compose
-// inlineWorkerFiles + the manifest sandbox CSP's worker-src blob:). The agent
-// burned several turns hand-rolling workers on a Mandelbrot app — tell it the
-// working pattern (a plain file Worker) up front.
-const APP_RUNTIME_NOTE = [
-  '<app-runtime>',
-  'The App runs in a sandboxed, opaque-origin iframe with NO file server, so your',
-  'page scripts CANNOT use cross-file ES modules: import/export BETWEEN your files',
-  "won't resolve (there's no URL to fetch ./other.js from) and the app silently",
-  'fails to start. Put your JS in classic <script> tags (multiple tags share ONE',
-  'global scope — define in one, use in the next) OR a single self-contained',
-  '<script type="module"> with no relative imports. Same for CSS: inline <style> or',
-  'tag-relative <link href="./x.css"> (peerd inlines those).',
-  'For heavy compute, put the work in its own file and use new Worker(\'worker.js\')',
-  "— it runs automatically (wired to a blob worker). Keep the worker self-contained:",
-  "a blob worker can't import other app files. Or tile work across",
-  'requestAnimationFrame frames; for pure no-UI compute, js_create/js_run are simpler.',
-  '</app-runtime>',
-].join('\n');
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const appCreateTool = {
@@ -136,9 +114,12 @@ export const appCreateTool = {
         fileCount: Object.keys(files).length,
         opened: true,
       }, null, 2);
+      // The App ACTOR writes the files, so the code-style guidance rides ITS
+      // prompt (system-prompt.js actorBlock), not this orchestrator
+      // create-result. Only the runtime note (how the iframe behaves) belongs here.
       return {
         ok: true,
-        content: `${summary}\n\n${CODE_STYLE_NOTE}\n\n${APP_RUNTIME_NOTE}`,
+        content: `${summary}\n\n${APP_RUNTIME_NOTE}`,
       };
     } catch (e) {
       return { ok: false, error: `app_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };

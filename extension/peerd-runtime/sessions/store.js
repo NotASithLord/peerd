@@ -153,6 +153,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   confirmActions?: boolean,
    *   customSystemPrompt?: string,
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
+   *   instanceId?: string,
+   *   actorType?: 'webvm' | 'notebook' | 'app' | 'web',
+   *   backing?: 'tab' | 'api',
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -167,6 +170,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     confirmActions,
     customSystemPrompt,
     toolManifest,
+    instanceId,
+    actorType,
+    backing,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -187,6 +193,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
       ...(task ? { task } : {}),
+      // DESIGN-17: an actor self-describes the instance it owns + its kind.
+      ...(instanceId ? { instanceId } : {}),
+      ...(actorType ? { actorType } : {}),
+      // DESIGN-18: a web actor's backing — 'api' (fetch-only origin actor) vs the
+      // default tab backing. MUST be persisted: every backing-aware branch (gate,
+      // egress, prompt, no-tab) reads turnSession.backing, so dropping it here silently
+      // makes an API actor behave as a tab actor.
+      ...(backing ? { backing } : {}),
     };
     await idb.put(STORE, record);
     return present(record, []);
@@ -237,6 +251,29 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     const updated = { ...record, archivedAt: now() };
     await idb.put(STORE, updated);
     return assemble(updated);
+  };
+
+  /**
+   * Metadata-only lookup of a live actor session by its self-description — used to
+   * RECONNECT to a durable actor whose (ephemeral) routing binding was lost. The
+   * DESIGN-18 case: an API actor after a browser restart — its accumulated memory is
+   * durable on the session record, but the chrome.storage.session (chat,origin) binding
+   * cleared, so without this the next address mints an empty actor and orphans the
+   * memory. Scans ONLY the session metadata store (idb.getAll(STORE) — NO message
+   * load), newest-first, skips archived, returns the sessionId or null.
+   * @param {{ parentSessionId?: string, instanceId?: string, actorType?: string, backing?: string }} [q]
+   * @returns {Promise<string | null>}
+   */
+  const findActorSession = async ({ parentSessionId, instanceId, actorType, backing } = {}) => {
+    const records = await idb.getAll(STORE);
+    const match = records
+      .filter((r) => r && r.kind === 'actor' && !r.archivedAt
+        && (parentSessionId === undefined || r.parentSessionId === parentSessionId)
+        && (instanceId === undefined || r.instanceId === instanceId)
+        && (actorType === undefined || r.actorType === actorType)
+        && (backing === undefined || r.backing === backing))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return match.length ? match[0].sessionId : null;
   };
 
   /**
@@ -372,6 +409,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     create,
     get,
     list,
+    findActorSession,
     archive,
     appendMessage,
     updateAssistantMessage,

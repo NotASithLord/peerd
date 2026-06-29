@@ -48,7 +48,8 @@
       "/options/*": ["./extension/options/*"],
       "/home/*": ["./extension/home/*"],
       "/offscreen/*": ["./extension/offscreen/*"],
-      "/notebook-tab/*": ["./extension/notebook-tab/*"]
+      "/notebook-tab/*": ["./extension/notebook-tab/*"],
+      "/vm-tab/*": ["./extension/vm-tab/*"]
     }
   },
   // Vendor is third-party (own SOURCE.txt, never // @ts-check'd); its

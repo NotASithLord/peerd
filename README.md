@@ -39,9 +39,14 @@ peerd uses *the browser* as its runtime and its security model. It builds
 on decades of hardened browser platform work (V8 isolates for sandboxing,
 WebCrypto for the vault, WebAuthn passkeys to unlock it, opaque-origin
 iframes, Subresource Integrity) and writes none of its own cryptographic
-or process-isolation code. The agent that holds your keys never reads a
-raw page; a disposable runner with no keys and no network does, and its
-output comes back fenced as untrusted. Every action the agent drives is
+or process-isolation code. The agent that holds your keys never operates
+an environment itself: each browser tab, VM, notebook, and app is driven
+by its own keyless actor sub-agent that exclusively holds that
+environment's tools. The main agent acts as an orchestrator. It delegates
+a goal to an actor and gets back a summary fenced as untrusted, so raw
+page text and command output never reach the context that holds your
+keys, and a confused or prompt-injected main agent has no tool to touch
+an environment with in the first place. Every action an actor drives is
 verified against the live page before it counts as done. (More at
 [peerd.ai](https://peerd.ai).)
 
@@ -214,7 +219,7 @@ works today, its public API, known limitations, and TODOs:
 | **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/README.md) | Model adapters — Anthropic, OpenRouter, Ollama (streaming, caching, cost, retries) |
 | **`e`** · red | [`peerd-egress`](extension/peerd-egress/README.md) | Security — the vault, the egress chokepoint, the denylist, the audit log |
 | **`e`** · amber | [`peerd-engine`](extension/peerd-engine/README.md) | Sandboxes — WebVMs, Notebooks, Apps, and the headless worker |
-| **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/README.md) | The agent — loop, tools, do/get/check, memory, skills, review, goal mode, voice |
+| **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/README.md) | The orchestrator — agent loop, tools, the `message_actor` delegation channel, actors, sessions, memory, skills, review, goal mode, voice |
 | **`d`** · magenta | [`peerd-distributed`](extension/peerd-distributed/README.md) | The dweb — the peer-to-peer network (preview channel only) |
 
 The brand IS the architecture: cross-module imports go through each
@@ -227,15 +232,24 @@ module's `index.js`, never deep paths; nothing outside
 peerd's safety is *who is allowed to do what*: small boundaries
 enforced by the browser platform, not by peerd's own crypto. Two
 principles run through all of it: **the agent that holds your keys never
-touches a raw page or runs untrusted code**, and **the agent never gets the
-final word on correctness; every action is verified against the live page
-before it counts as done.**
+touches a raw page or runs untrusted code** — the environment-operating
+tools are not even attached to it, they belong to per-environment actor
+sub-agents — and **the agent never gets the final word on correctness;
+every action is verified against the live page before it counts as done.**
+
+The orchestrator delegates; an actor does the work. Each tab, VM,
+notebook, and app is owned by one actor that holds only that
+environment's tools, runs without keys, and hands back a fenced summary.
+So isolation between environments is structural, not a convention: even a
+fully prompt-injected main agent cannot reach an environment it was not
+asked to, because it never held the tool.
 
 | Actor | Trusted with | Never |
 |---|---|---|
 | **The vault** (`peerd-egress/vault`) | your API keys + secrets, decrypted only after Touch ID / passkey / passphrase unlock; idle auto-lock | leaving the device — keys go only to the provider you chose |
-| **The main agent** (`peerd-runtime/loop`) | the conversation, planning, tool dispatch | reading raw page bytes or running untrusted code directly |
-| **The disposable runner** (`peerd-runtime/runner`) | driving + reading the page via do/get/check | holding keys or its own network; its output returns `wrapUntrusted`-fenced |
+| **The orchestrator** (`peerd-runtime/loop`) | the conversation, planning, delegating a goal to an actor via `message_actor` | holding any environment's tools, reading raw page bytes, or running untrusted code directly |
+| **An actor** (`peerd-runtime/subagent`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| **The disposable runner** (`peerd-runtime/runner`) | driving + reading a page keyless via do/get/check — the lineage a web actor and subagents use | holding keys or its own network; its output returns `wrapUntrusted`-fenced |
 | **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
 | **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
@@ -306,14 +320,20 @@ see, focus, and close, grouped under "peerd" in the tab strip and
 surviving browser restarts: the WebVM, the Notebook, and the App. The
 fourth, the headless worker (`js_run`), runs the Notebook's sealed worker
 offscreen with no tab: ephemeral, for the agent's own quick compute. The
-agent picks the lightest kind that fits the task.
+orchestrator picks the lightest kind that fits the task, bootstraps the
+instance, and then delegates the work to that instance's actor; the
+tool lists below are the surface an actor drives, not the main agent. One
+main-agent tool spans all of them: **`actor_list`** enumerates every
+addressable actor — WebVMs, Notebooks, Apps, open tabs, and API
+integrations — each tagged with its `type` and the handle to pass to
+`message_actor`, so discovery is one call instead of five.
 
 **WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB
 overlay), own bash, own POSIX. ~10s first boot. Use it when you need
 real binaries, a shell, or multi-language stacks.
 
 ```
-vm_list   vm_create   vm_boot   vm_import   vm_write_file   vm_delete
+vm_create   vm_boot   vm_import   vm_write_file   vm_delete
 ```
 
 HTTP egress from the VM (curl / wget / git clone) is intercepted by
@@ -328,7 +348,7 @@ worker's only network, routed through `peerd-egress` so it's honest. Each
 `peerd.self.writeFile`/`readFile` to the OPFS file tree.
 
 ```
-js_list   js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
+js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
 ```
 
 **Headless worker** is the same sealed worker as a Notebook, but headless:
@@ -344,7 +364,7 @@ search across name, tags, and body. `app_update` auto-reloads the open
 tab so iterations show live.
 
 ```
-app_list   app_create   app_update   app_open   app_search   app_delete
+app_create   app_update   app_open   app_search   app_delete
 ```
 
 ## Tests

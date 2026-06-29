@@ -44,6 +44,10 @@ export const createVmTabTracker = ({ tabs, announce } = {}) => {
     isReady: tracker.isReady,
     ensureTab: tracker.ensureTab,
     closeTab: tracker.closeTab,
+    // reloadTab + markReloading: the wedged-VM self-heal in vm-client recycles a
+    // hung tab in place (reload, not close — close would interrupt the command lane).
+    reloadTab: tracker.reloadTab,
+    markReloading: tracker.markReloading,
     listLive: tracker.listLive,
   };
 };

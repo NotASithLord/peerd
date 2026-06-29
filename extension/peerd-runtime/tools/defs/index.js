@@ -25,22 +25,20 @@ import { clickTool }                 from './click.js';
 import { typeTool }                  from './type.js';
 import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
-import { listTabsTool }              from './list-tabs.js';
+import { fetchUrlTool }              from './fetch-url.js';
+import { actorListTool }             from './actor-list.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
 import { vmImportTool }               from './vm-import.js';
 import { vmWriteFileTool }           from './vm-write-file.js';
-import { vmListTool }                 from './vm-list.js';
 import { vmCreateTool }               from './vm-create.js';
 import { vmDeleteTool }               from './vm-delete.js';
-import { jsListTool }                 from './js-list.js';
 import { jsCreateTool }               from './js-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { jsRunTool }                  from './js-run.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
-import { appListTool }                from './app-list.js';
 import { appCreateTool }              from './app-create.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
@@ -54,6 +52,7 @@ import { editFileTool }               from './edit-file.js';
 import { spawnSubagentTool }          from './spawn-subagent.js';
 import { subagentTasksTool }          from './subagent-tasks.js';
 import { subagentCancelTool }         from './subagent-cancel.js';
+import { messageActorTool }        from './message-actor.js';
 import { doTool }                      from './do.js';
 import { getTool }                     from './get.js';
 import { checkTool }                   from './check.js';
@@ -90,17 +89,15 @@ export {
   navigateTool,
   readPdfTool,
   // sessions
-  listTabsTool,
+  actorListTool,
   openTabTool,
   // engine (WebVM)
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
-  vmListTool,
   vmCreateTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsListTool,
   jsCreateTool,
   jsNotebookTool,
   jsRunTool,
@@ -108,7 +105,6 @@ export {
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appListTool,
   appCreateTool,
   appUpdateTool,
   appOpenTool,
@@ -124,6 +120,7 @@ export {
   spawnSubagentTool,
   subagentTasksTool,
   subagentCancelTool,
+  messageActorTool,
   // high-level browser tools (do/get/check — runner layer over the DOM engine)
   doTool,
   getTool,
@@ -155,8 +152,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   inspectSessionAccessTool,
   inspectDenylistTool,
   inspectAuditLogTool,
-  // sessions
-  listTabsTool,
+  // sessions — actor_list is the single discovery surface (instances + open
+  // tabs + API integrations) that collapsed vm_list/js_list/app_list/list_tabs/
+  // list_integrations into one columnar result keyed by `type`.
+  actorListTool,
   openTabTool,
   // DOM
   readPageTool,
@@ -171,15 +170,17 @@ export const BUILTIN_TOOLS = Object.freeze([
   typeTool,
   clickTool,
   readPdfTool,
+  // the web actor's SESSIONLESS secure fetch (its non-render web mechanism).
+  // Registered + hidden from main (actor-only, like the DOM tools); allowed
+  // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
+  fetchUrlTool,
   // engine (WebVM)
-  vmListTool,
   vmCreateTool,
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsListTool,
   jsCreateTool,
   jsNotebookTool,
   jsRunTool,
@@ -187,7 +188,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appListTool,
   appCreateTool,
   appUpdateTool,
   appOpenTool,
@@ -203,6 +203,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   spawnSubagentTool,
   subagentTasksTool,
   subagentCancelTool,
+  // actor (DESIGN-17 — message the agent that owns a tab-hosted instance).
+  // Registered always; the exposure gate refuses it on an actor session, so a
+  // actor can't recursively message another actor.
+  messageActorTool,
   // high-level browser tools — the runner layer over the DOM engine. After the
   // exposure cutover these are the ONLY browser tools the MAIN agent sees.
   doTool,
