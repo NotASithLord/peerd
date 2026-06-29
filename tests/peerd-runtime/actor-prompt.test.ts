@@ -16,10 +16,21 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   });
 
   test('introduces message_actor and the orchestrator framing', () => {
-    expect(base.includes('message_actor — CAST a focused GOAL to an actor')).toBe(true);
-    expect(base.includes('a GenServer — an OTP process')).toBe(true);   // actors named in OTP terms
+    expect(base.includes('message_actor — SEND a focused GOAL to an actor')).toBe(true);
+    expect(base.includes('owns an environment — an instance or a web page')).toBe(true);   // actors framed by what they own, in plain terms
     expect(base.includes('sandboxes: you bootstrap, the actor runs')).toBe(true);
     expect(base.includes('you do NOT drive them')).toBe(true);
+  });
+
+  test('the voice section enforces terseness and keeps the internal metaphor out of replies', () => {
+    // why: the orchestrator was leaking its own mental model ("separate GenServer
+    // processes (OTP-style)", "mailboxes") into user-facing replies, and narrating
+    // every dispatch. The voice rule must be present, and the OTP/GenServer framing
+    // must survive ONLY as a prohibition — never as positive framing of an actor.
+    expect(base.includes('Stay terse')).toBe(true);
+    expect(base.includes('LEAD WITH THE ANSWER')).toBe(true);
+    expect(base.includes('a GenServer — an OTP process')).toBe(false);
+    expect(base.includes('GenServer cast/call')).toBe(false);
   });
 
   test('the top app instruction delegates the build instead of writing files itself', () => {
