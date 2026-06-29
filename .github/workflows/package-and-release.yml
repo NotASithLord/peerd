@@ -65,6 +65,8 @@ jobs:
         run: bun run check:tscheck
       - name: Dweb import boundary
         run: bun run check:boundary
+      - name: Packaged import graph (no pruned-but-imported file black-screens a page)
+        run: bun run check:imports
       - name: Generated-file drift (dev manifest + channel-config + tscheck badge)
         run: |
           bun run gen:dev
