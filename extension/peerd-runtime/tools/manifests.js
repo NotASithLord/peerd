@@ -56,7 +56,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // page DOM toolset (inherited by the web actor, which DOES the page work):
       // DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
-      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
+      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
       // memory
       'remember', 'read_memory',
       // sovereignty / sessions introspection
@@ -75,7 +75,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       'actor_list', 'open_tab', 'navigate', 'message_actor',
       'get', 'check',   // subagent read path (the main agent reads via the actor)
       // READ_TOOLSET only (observe, never mutate) — inherited by the web actor.
-      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf',
+      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'view',
       // web reads: fetch_url (the web actor's sessionless fetch)
       'fetch_url',
       // temporal grounding (reads)

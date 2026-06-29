@@ -38,7 +38,8 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // app-list / list-tabs / list-integrations — all // @ts-check'd) into one
 // (actor-list.js), a net −4 CHECKED FILES. This is a legitimate decrease (files
 // deleted, not directives dropped) — coverage stays 100% of the non-ES5 set.
-const COVERED_FLOOR = 474;
+// 474 → 475: the view tool (tools/web/view.js) added one // @ts-check'd file.
+const COVERED_FLOOR = 475;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
