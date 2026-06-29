@@ -40,7 +40,8 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // deleted, not directives dropped) — coverage stays 100% of the non-ES5 set.
 // 474 → 475: the view tool (tools/web/view.js) added one // @ts-check'd file.
 // 475 → 476: the web-actor page-API translation core (subagent/page-api.js).
-const COVERED_FLOOR = 476;
+// 476 → 477: the page-call handler (subagent/page-call-handler.js).
+const COVERED_FLOOR = 477;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
