@@ -67,12 +67,15 @@ const MESSAGE_TIMEOUT_MS = 90_000;
 // background-tab throttling (CheerpX execution stops while the tab still half-
 // answers). On reuse past this window, probe it before sending the real command.
 const IDLE_REUSE_PROBE_MS = 60_000;
-// The cheap liveness probe's CEILING — not a fixed wait. An alive tab answers
-// vm/is-ready in milliseconds (the probe resolves the instant it replies); a frozen
-// one never does. The only gray zone is a tab waking from a freeze — a sub-second
-// resume — so a short ceiling is plenty: anything slower is effectively dead and
-// we'd rather reload now (recreateTab then does the real up-to-30s boot wait).
-const READY_PROBE_TIMEOUT_MS = 1_500;
+// The cheap liveness probe's CEILING — not a fixed wait: an alive tab answers
+// vm/is-ready in milliseconds (the probe resolves the instant it replies), so a short
+// ceiling never false-fails a healthy idle tab — it just needs margin over the
+// round-trip for a momentarily-busy SW. Kept aggressive on purpose: a frozen CheerpX
+// shell often stays wedged even after the tab resumes, so a fresh reload is MORE
+// reliable than waiting to resurrect it — and a needless reload of a slow-to-wake tab
+// costs only the idle in-memory bash session (disk persists via the IDB overlay).
+// recreateTab then does the real up-to-30s boot wait.
+const READY_PROBE_TIMEOUT_MS = 750;
 
 /** Group title used when auto-grouping VM tabs in the tab strip. */
 export const VM_TAB_GROUP_TITLE = 'peerd';
