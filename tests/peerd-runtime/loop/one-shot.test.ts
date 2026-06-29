@@ -123,6 +123,69 @@ describe('runUserTurn — one-shot', () => {
     expect(calls).toBe(1);
   });
 
+  test('keeps the model\'s own prose ahead of the tool output (no silent loss)', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    // round 1 emits TEXT and a tool call together.
+    let calls = 0;
+    const model = () => {
+      calls += 1;
+      if (calls === 1) {
+        return (async function* () {
+          yield { type: 'text-delta', text: 'here you go:' };
+          yield { type: 'tool-use-start', id: 't1', name: 'vm_boot' };
+          yield { type: 'tool-use-delta', id: 't1', partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: 't1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        })();
+      }
+      return (async function* () { yield { type: 'message-stop', stopReason: 'end_turn' }; })();
+    };
+    const ctx = baseCtx(store, {
+      callModel: model,
+      oneShot: true,
+      toolDispatch: async () => ({ ok: true, content: '5050', meta: {} }),
+    });
+    await drain(runUserTurn(ctx));
+    const s = await store.get('s1');
+    expect(s.messages[s.messages.length - 1].content).toBe('here you go:\n\n5050');
+    expect(calls).toBe(1);
+  });
+
+  test('an errored round DISARMS one-shot: a later clean round runs a normal turn', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    // round 1 → tool (will error); round 2 → tool (clean); round 3 → text.
+    let calls = 0;
+    const model = () => {
+      calls += 1;
+      if (calls <= 2) {
+        return (async function* () {
+          yield { type: 'tool-use-start', id: `t${calls}`, name: 'vm_boot' };
+          yield { type: 'tool-use-delta', id: `t${calls}`, partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: `t${calls}` };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        })();
+      }
+      return (async function* () {
+        yield { type: 'text-delta', text: 'recovered and explained' };
+        yield { type: 'message-stop', stopReason: 'end_turn' };
+      })();
+    };
+    let disp = 0;
+    const ctx = baseCtx(store, {
+      callModel: model,
+      oneShot: true,
+      toolDispatch: async () => { disp += 1; if (disp === 1) throw new Error('boom'); return { ok: true, content: 'retry-ok', meta: {} }; },
+    });
+    await drain(runUserTurn(ctx));
+    // round 1 errored → disarmed → the clean round 2 does NOT short-circuit → round 3 summarizes.
+    expect(calls).toBe(3);
+    const s = await store.get('s1');
+    expect(s.messages[s.messages.length - 1].content).toBe('recovered and explained');
+    expect(s.messages.some((m: any) => m.stopReason === 'one_shot')).toBe(false);
+  });
+
   test('an errored first tool FALLS THROUGH to a normal turn (recovery)', async () => {
     const store = makeStore();
     store.seed('s1');

@@ -306,6 +306,10 @@ export async function* runUserTurn(ctx) {
 
   // ---- Outer loop: model call → maybe tools → model call → ... -----------
   let step = 0;
+  // One-shot latch: a clean first tool round short-circuits (no summarize turn);
+  // an errored round clears this so the rest of the turn runs normally. Loop-scoped
+  // so the latch survives across steps.
+  let oneShotArmed = ctx.oneShot === true;
   /** @type {string | null} */
   let lastAssistantId = null;
   while (step < maxSteps) {
@@ -855,13 +859,17 @@ export async function* runUserTurn(ctx) {
     // tool-result user message would collide with the next user message — the
     // converter only merges adjacent STRING content), and the caller reads it via
     // finalAssistantText exactly like any turn. why the no-error guard: if a tool
-    // FAILED, one round did NOT suffice — fall through so the model gets its normal
-    // turn to recover or explain. Only the first clean round short-circuits;
-    // multi-step work simply never sets the flag.
-    if (ctx.oneShot && toolResults.length > 0 && !toolResults.some((b) => b.is_error)) {
-      const replyText = toolResults
+    // FAILED, one round did NOT suffice — disarm one-shot (below) so the model gets
+    // its normal recover/explain turns for the REST of this turn. The first CLEAN
+    // round short-circuits; multi-step work simply never sets the flag.
+    if (oneShotArmed && toolResults.length > 0 && !toolResults.some((b) => b.is_error)) {
+      const toolOut = toolResults
         .map((b) => (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)))
-        .join('\n').trim() || '(the tool produced no output)';
+        .join('\n').trim();
+      // Keep the model's OWN prose (a preamble or a direct answer it wrote alongside
+      // the tool call this round) ahead of the raw tool output — don't silently drop it.
+      const replyText = [textBuf.trim(), toolOut].filter(Boolean).join('\n\n')
+        || '(the tool produced no output)';
       /** @type {InternalMessage} */
       const oneShotReply = {
         role: 'assistant', content: replyText,
@@ -874,6 +882,10 @@ export async function* runUserTurn(ctx) {
       yield { type: 'stop', sessionId, messageId: oneShotReply.id, stopReason: 'one_shot' };
       return;
     }
+    // This round did not cleanly short-circuit (a tool errored) — latch one-shot OFF
+    // so a later recovery round runs as a NORMAL turn (recover AND explain) instead of
+    // being silently short-circuited too.
+    oneShotArmed = false;
     // Continue outer loop — next iteration calls the model with the
     // tool results in the history.
   }
