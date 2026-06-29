@@ -60,6 +60,16 @@ return { total, count: rows.length, source: 'on-device OPFS index' };
 // answer — not that the faked final turn merely claims it.
 let pdaToolResultBody = '';
 
+// Per-call capture for the actor-delegation probes. The ONE shared responder
+// serves BOTH orchestrator and actor model calls, so we record each call's
+// system-prompt markers to PROVE the cross-process flow (orchestrator delegate
+// -> web-actor sub-loop -> async fenced reply re-entering the orchestrator).
+// `delegates` is responder-side because the delegate is in the RESPONSE, not the
+// request — and after the ack tool_result the orchestrator loop CONTINUES, so a
+// real model delegates once then ends its turn (the ack says the reply lands
+// later). We mirror that: delegate once, then return plain text.
+let actorState = { delegates: 0, seen: [] };
+
 export const STATES = [
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
   {
@@ -273,6 +283,120 @@ export const STATES = [
       await rpc(ctx.page, { type: 'agent/send', text: 'hello there' });
       await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
       await rec.visual('completed-turn');
+    },
+  },
+
+  // --- functional: the actor-model delegation flow (message_actor end to end) --
+  // The headline of #61: the orchestrator delegates a web read to the chat's web
+  // actor via message_actor, gets a SYNC ack and ends its turn (async-everything,
+  // never blocks), the web-actor sub-loop runs on its own slot and replies, and
+  // deliver() re-enters the orchestrator on a LATER synthetic+trusted wake turn
+  // carrying the fenced reply. The actor reply is plain text (no fetch_url) so
+  // there is ZERO real egress — the whole cross-process path runs under the
+  // faked wire. The responder tells orchestrator vs actor turns apart by the
+  // actor system-prompt marker (callIndex is fragile — the two slots interleave).
+  {
+    name: 'actor-delegate', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      const isActor = body.includes('<actor_agent>');
+      actorState.seen.push({
+        isActor,
+        isWebActor: body.includes("You are peerd's web actor"),
+        hasReplyLead: body.includes('you messaged has replied'),
+        hasFence: body.includes('<untrusted_web_content'),
+        hasActorText: body.includes('PRICE_IS_42'),
+      });
+      // ACTOR sub-loop turn: plain text, no tool call → no fetch_url → no egress.
+      if (isActor) return { sse: sseText('PRICE_IS_42') };
+      // ORCHESTRATOR — the async wake turn carrying the fenced reply: final answer.
+      if (body.includes('you messaged has replied')) return { sse: sseText('FINAL-ORCH-REPLY') };
+      // ORCHESTRATOR — delegate ONCE; then the post-ack step ends the turn (the
+      // ack tells the model the reply arrives later, so a real model stops here).
+      if (actorState.delegates === 0) {
+        actorState.delegates += 1;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: 'get the price of widget X' }) };
+      }
+      return { sse: sseText('Delegated to the web actor; awaiting its reply.') };
+    },
+    async run(ctx, rec) {
+      actorState = { delegates: 0, seen: [] };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'find the cheapest widget X' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const cardSeen = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.message-assistant .tool-call.tool-actor')`),
+        { budgetMs: 15_000, pollMs: 100 });
+      rec.check('an inline message_actor card mounts under the orchestrator turn', !!cardSeen);
+      if (cardSeen) await rec.shot('actor-card');
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const cardOk = !!document.querySelector('.tool-call.tool-actor.tool-ok');
+          const name = document.querySelector('.tool-actor .tool-name')?.textContent || '';
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          const users = [...document.querySelectorAll('.message-user')].map((u) => u.textContent.trim());
+          return { bubbles, cardOk, name, busy, users };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-ORCH-REPLY') && !out.busy;
+      }, { budgetMs: 30_000 });
+
+      const seen = actorState.seen;
+      const actor = seen.filter((s) => s.isActor && s.isWebActor);
+      const wake = seen.filter((s) => !s.isActor && s.hasReplyLead && s.hasFence);
+      rec.check('the orchestrator delegated via message_actor exactly once', actorState.delegates === 1, `delegates=${actorState.delegates}`);
+      rec.check('the web-actor sub-loop ran (actor_agent + web-actor prompt)', actor.length >= 1, `actorCalls=${actor.length}`);
+      rec.check('the card header names message_actor', out.name === 'message_actor', JSON.stringify(out.name));
+      rec.check('the reply re-entered the orchestrator ASYNC as a fenced wake turn', wake.length >= 1, `wakeCalls=${wake.length}`);
+      rec.check('the fenced wake carried the actor reply text (cross-process proof)', wake.some((s) => s.hasActorText));
+      rec.check('the actor card flipped pending → ok after the reply landed', out.cardOk === true);
+      rec.check('the synthetic wake stays hidden (only the original user bubble shows)',
+        (out.users || []).length === 1 && (out.users[0] || '').includes('find the cheapest widget X'), JSON.stringify(out.users));
+      rec.check('the orchestrator emitted the final user-visible answer', (out.bubbles || []).includes('FINAL-ORCH-REPLY'));
+      rec.check('the turn settles idle', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: Stop cascades to an in-flight actor -----------------------
+  // The orchestrator delegates and ends its turn; the web actor hangs mid-run.
+  // agent/stop must cascade to the in-flight actor (DESIGN-17 Stop-cascade), so
+  // the actor card flips to cancelled and the chat returns to idle.
+  {
+    name: 'actor-stop', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>')) return { delayMs: 20_000, sse: sseText('this-never-renders') };
+      if (body.includes('you messaged has replied')) return { sse: sseText('should-not-reach-wake') };
+      // delegate once, then end the orchestrator turn (so it doesn't re-delegate
+      // on the post-ack step) — leaving exactly one hung actor for Stop to cancel.
+      if (actorState.delegates === 0) {
+        actorState.delegates += 1;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: 'do a slow web read' }) };
+      }
+      return { sse: sseText('Delegated; awaiting the slow web read.') };
+    },
+    async run(ctx, rec) {
+      actorState = { delegates: 0, seen: [] };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'slowly read the page' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const pending = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-pending')`),
+        { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the actor card is working (pending) before Stop', !!pending);
+      if (pending) await rec.shot('actor-working');
+      const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+      rec.check('agent/stop accepted', !!stopped?.ok, JSON.stringify(stopped));
+      const cancelled = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-cancelled')`),
+        { budgetMs: 15_000, pollMs: 100 });
+      rec.check('Stop cascades to the in-flight actor — card flips to cancelled', !!cancelled);
+      let busy = true;
+      await waitFor(async () => { busy = await evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`); return !busy; }, { budgetMs: 12_000 });
+      rec.check('Stop returns the chat to idle', busy === false);
+      const noLeak = await evalIn(ctx.page, `![...document.querySelectorAll('.message-assistant .bubble')].some((b) => b.textContent.includes('this-never-renders'))`);
+      rec.check('the hung actor reply never renders', noLeak === true);
+      await rec.shot('final');
     },
   },
 ];
