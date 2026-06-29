@@ -355,10 +355,10 @@ const AssistantMessage = {
 
 // ─── Thinking spinner ────────────────────────────────────────────────────
 //
-// The peerd beachball: a classic-Mac rainbow wheel where the five brand
-// colors meld into each other in one conic gradient (see .peerd-spinner
-// in styles.css). A single div — the gradient and spin are CSS-only and
-// disabled under prefers-reduced-motion.
+// The peerd orb: a rainbow RING where the five brand colors sweep through one
+// conic gradient, masked to a hollow ring (see .peerd-spinner in styles.css).
+// A single div — the gradient, mask, and spin are CSS-only and disabled under
+// prefers-reduced-motion.
 //
 // attrs.sm → a smaller variant for inline use (the Reasoning header).
 const ThinkingSpinner = {

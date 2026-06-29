@@ -905,23 +905,19 @@ button.icon:hover { background: var(--bg); }
 /* While waiting on the first token the bubble shows the spinner instead —
    no blinking caret on top of it. */
 
-/* peerd beachball — the classic-Mac rainbow wheel in the brand palette.
-   One conic sweep through all five brand colors, each melding into the
-   next, under a soft hub highlight; the whole disc spins. Sized by --size.
-   why: stops are hue-ordered and interpolated in HSL so neighbours blend
-   through the in-between hues like the old glassy beachball — default
-   sRGB interpolation would cut gray through the wheel's complements. */
+/* peerd orb — a rainbow RING that spins: one conic sweep through the five brand
+   colors (looping cyan→magenta→amber→green→red→cyan), masked to a hollow ring.
+   Sized by --size; ring thickness is the mask's transparent→opaque cutover (58%/60%
+   — raise for a thinner ring, lower for chunkier). Brand cadence 0.85s. */
 .peerd-spinner {
   --size: 17px;
   display: inline-block; vertical-align: middle;
   width: var(--size); height: var(--size);
   border-radius: 50%;
-  background:
-    radial-gradient(circle,
-      rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.2) 25%,
-      transparent 55%),
-    conic-gradient(in hsl, var(--red), var(--amber), var(--green),
-      var(--cyan), var(--magenta), var(--red));
+  background: conic-gradient(from 0deg,
+    var(--cyan), var(--magenta), var(--amber), var(--green), var(--red), var(--cyan));
+  -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 60%);
+          mask: radial-gradient(closest-side, transparent 58%, #000 60%);
   animation: peerd-spin 0.85s linear infinite;
 }
 .peerd-spinner--sm { --size: 12px; }

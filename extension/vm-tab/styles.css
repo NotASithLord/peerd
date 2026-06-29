@@ -130,13 +130,10 @@ html, body {
 #boot-detail { color: var(--fg-muted); }
 #boot-detail:not(:empty)::before { content: ' — '; }
 
-/* The peerd beachball — mirrors .peerd-spinner in sidepanel/styles.css
-   (the chat "thinking" spinner): one conic sweep melding the five brand
-   colors, soft hub highlight, whole disc spinning. Here it sits inline
-   as the prompt glyph.
-   why: stops are hue-ordered and interpolated in HSL so neighbours blend
-   through the in-between hues like the old glassy Mac beachball — default
-   sRGB interpolation would cut gray through the wheel's complements. */
+/* The peerd orb — mirrors .peerd-spinner in sidepanel/styles.css (the chat
+   "thinking" spinner): a rainbow RING, one conic sweep through the five brand
+   colors (cyan→magenta→amber→green→red→cyan) masked to a hollow ring. Here it
+   sits inline as the prompt glyph. */
 .boot-spinner {
   display: inline-block;
   width: 15px;
@@ -144,12 +141,10 @@ html, body {
   margin-right: 9px;
   vertical-align: -3px;
   border-radius: 50%;
-  background:
-    radial-gradient(circle,
-      rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.2) 25%,
-      transparent 55%),
-    conic-gradient(in hsl, var(--red), var(--amber), var(--green),
-      var(--cyan), var(--magenta), var(--red));
+  background: conic-gradient(from 0deg,
+    var(--cyan), var(--magenta), var(--amber), var(--green), var(--red), var(--cyan));
+  -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 60%);
+          mask: radial-gradient(closest-side, transparent 58%, #000 60%);
   /* why 0.85s: brand-wide spinner cadence — 15% faster than the original
      1s feels alive without strobing; keep all peerd spinners in step. */
   animation: spin 0.85s linear infinite;
