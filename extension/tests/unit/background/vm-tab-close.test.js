@@ -254,3 +254,68 @@ describe('vm-client — per-VM command queue', () => {
     await r2;
   });
 });
+
+// --- vm-client: wedged-tab self-heal --------------------------------------
+
+/**
+ * Reboot harness: a tracker recording reloadTab/markReloading, and a
+ * sendTabMessage driven by `plan` (one entry per send): 'hang' never settles —
+ * the round-trip timeout fires — anything else resolves as the reply.
+ * messageTimeoutMs is short so the timeout path runs without a real 90s wait.
+ * @param {{ plan: (string | object)[], timeoutMs?: number }} cfg
+ */
+const makeRebootHarness = ({ plan, timeoutMs = 25 }) => {
+  let sends = 0;
+  /** @type {string[]} */ const reloads = [];
+  /** @type {string[]} */ const marked = [];
+  /** @param {number} _tabId @param {object} _message */
+  const sendTabMessage = (_tabId, _message) => {
+    const step = plan[sends];
+    sends += 1;
+    if (step === 'hang' || step === undefined) return new Promise(() => {});
+    return Promise.resolve(step);
+  };
+  const tracker = /** @type {ReturnType<typeof import('/background/vm-tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ ({
+    ensureTab: async () => 7,
+    getTabId: () => 7,
+    /** @param {string} id */ reloadTab: async (id) => { reloads.push(id); return true; },
+    /** @param {string} id */ markReloading: (id) => { marked.push(id); },
+  }));
+  const registry = /** @type {ReturnType<typeof import('/peerd-engine/index.js').createVmRegistry>} */ (/** @type {unknown} */ ({
+    /** @param {string} id */ get: async (id) => ({ id }),
+    getDefaultForSession: async () => null,
+    setDefaultForSession: async () => {},
+    create: async () => ({ id: 'vm-1' }),
+  }));
+  const client = createVmClient({ registry, tracker, sendTabMessage, messageTimeoutMs: timeoutMs });
+  return { client, reloads, marked, sendCount: () => sends };
+};
+
+const OK_RUN = { ok: true, result: { stdout: 'ok\n', stderr: '', exitCode: 0, durationMs: 1 } };
+
+describe('vm-client — wedged-tab self-heal', () => {
+  it('reloads a wedged tab once on an unresponsive timeout, then retries the command', async () => {
+    const h = makeRebootHarness({ plan: ['hang', OK_RUN] });   // 1st send wedges; 2nd (post-reload) ok
+    const out = await h.client.run('echo hi', { vmId: 'vm-a' });
+    expect(out.stdout).toBe('ok\n');
+    expect(h.reloads).toEqual(['vm-a']);    // reloaded exactly once
+    expect(h.marked).toEqual(['vm-a']);     // reset readiness so ensureTab waits for re-boot
+    expect(h.sendCount()).toBe(2);          // original + one retry
+  });
+
+  it('gives a terminal error (no infinite loop) when still unresponsive after the reload', async () => {
+    const h = makeRebootHarness({ plan: ['hang', 'hang'] });   // wedged before AND after the reload
+    const err = await h.client.run('echo hi', { vmId: 'vm-a' }).then(() => null, (e) => e);
+    expect(err?.message).toContain('unresponsive');
+    expect(h.reloads).toEqual(['vm-a']);    // tried a reload once
+    expect(h.sendCount()).toBe(2);          // original + one retry, then stop — not a loop
+  });
+
+  it('the liveness probe never reboots — isReady returns false on a wedged tab', async () => {
+    const h = makeRebootHarness({ plan: ['hang'] });
+    const ready = await h.client.isReady({ vmId: 'vm-a' });
+    expect(ready).toBe(false);
+    expect(h.reloads).toEqual([]);          // reboot:false — a probe must not recreate a tab
+    expect(h.sendCount()).toBe(1);
+  });
+});

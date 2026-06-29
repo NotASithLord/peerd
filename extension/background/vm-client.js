@@ -79,6 +79,9 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
  * @param {(tabId: number, message: object) => Promise<any>} [deps.sendTabMessage]
  *   Injected message IO (defaults to browser.tabs.sendMessage) so the
  *   queue/interrupt behavior is testable without live VM tabs.
+ * @param {number} [deps.messageTimeoutMs]
+ *   Round-trip timeout before a tab is declared wedged (default 90s). Injected
+ *   short in tests so the self-heal path runs without a real 90s wait.
  * @returns {{
  *   run(cmd: string, opts?: { sessionId?: string, vmId?: string, toolUseId?: string, timeoutMs?: number }):
  *     Promise<{ stdout: string, stderr: string, exitCode: number, durationMs: number }>,
@@ -93,6 +96,7 @@ export const createVmClient = ({
   registry,
   tracker,
   sendTabMessage = (tabId, message) => browser.tabs.sendMessage(tabId, message),
+  messageTimeoutMs = MESSAGE_TIMEOUT_MS,
 }) => {
   // One keyed queue, two key namespaces:
   //   cmd:<vmId>          — the per-VM command lane (run/writeFile).
@@ -151,33 +155,83 @@ export const createVmClient = ({
    * @param {string} vmId @param {{ type: string, [k: string]: unknown }} message
    * @returns {Promise<VmTabReply>}
    */
-  const callTab = async (vmId, message) => {
-    // background: agent-driven VM tabs never steal focus (DESIGN-12, 2026-06-18).
-    // vm_create already dropped a "go there" card; an auto-create here (run before
-    // create) opens quietly too. ensureTab early-returns for a live tab.
-    await tracker.ensureTab(vmId, { active: false, groupTitle: VM_TAB_GROUP_TITLE });
-    const tabId = tracker.getTabId(vmId);
-    if (tabId == null) throw new VMNotReadyError(`no live tab for ${vmId} after ensureTab`);
+  /**
+   * One round-trip to the tab, raced against the wedged-channel timeout. A
+   * timeout here means the PAGE stopped answering (distinct from the tab's own
+   * per-run timeout, which comes back as a normal error reply) — tag it so the
+   * caller can tell a wedged tab from a slow command.
+   * @param {number} tabId @param {string} vmId
+   * @param {{ type: string, [k: string]: unknown }} message
+   * @returns {Promise<VmTabReply>}
+   */
+  const sendRaced = async (tabId, vmId, message) => {
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timeoutId;
     /** @type {Promise<never>} */
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
-        reject(new Error(
-          `vm ${message.type} timed out after ${MESSAGE_TIMEOUT_MS / 1000}s `
-          + `(tab ${tabId} unresponsive). Reload or reset the VM.`,
+        const err = /** @type {Error & { vmUnresponsive?: boolean }} */ (new Error(
+          `vm ${message.type} timed out after ${messageTimeoutMs / 1000}s (tab ${tabId} unresponsive).`,
         ));
-      }, MESSAGE_TIMEOUT_MS);
+        err.vmUnresponsive = true;
+        reject(err);
+      }, messageTimeoutMs);
     });
-    /** @type {VmTabReply} */
-    let response;
     try {
-      response = /** @type {VmTabReply} */ (await Promise.race([
+      return /** @type {VmTabReply} */ (await Promise.race([
         sendTabMessage(tabId, { ...message, vmId }),
         timeoutPromise,
       ]));
     } finally {
       clearTimeout(timeoutId);
+    }
+  };
+
+  /**
+   * @param {string} vmId
+   * @param {{ type: string, [k: string]: unknown }} message
+   * @param {{ reboot?: boolean }} [opts] reboot:false for the liveness probe so a
+   *   probe never recreates a tab (it just answers "not ready").
+   */
+  const callTab = async (vmId, message, { reboot = true } = {}) => {
+    // background: agent-driven VM tabs never steal focus (DESIGN-12, 2026-06-18).
+    // vm_create already dropped a "go there" card; an auto-create here (run before
+    // create) opens quietly too. ensureTab early-returns for a live tab.
+    await tracker.ensureTab(vmId, { active: false, groupTitle: VM_TAB_GROUP_TITLE });
+    let tabId = tracker.getTabId(vmId);
+    if (tabId == null) throw new VMNotReadyError(`no live tab for ${vmId} after ensureTab`);
+
+    /** @type {VmTabReply} */
+    let response;
+    try {
+      response = await sendRaced(tabId, vmId, message);
+    } catch (e) {
+      const unresponsive = !!(/** @type {{ vmUnresponsive?: boolean }} */ (e)?.vmUnresponsive);
+      // Self-heal a WEDGED tab (alive but not answering): reload it once, wait for
+      // it to re-announce ready, and retry. why reload, not close: a tab removal
+      // fires onTabClosed → queue.interrupt on THIS lane, which would reject the
+      // very retry we're issuing; reload recycles the page in place (same tabId,
+      // the IDB overlay re-mounts so disk persists) and never touches the lane.
+      // markReloading first so ensureTab waits for the re-boot's tab-ready instead
+      // of early-returning on the stale ready flag.
+      if (!unresponsive || !reboot) throw e;
+      tracker.markReloading(vmId);
+      await tracker.reloadTab(vmId).catch(() => {});
+      await tracker.ensureTab(vmId, { active: false, groupTitle: VM_TAB_GROUP_TITLE });
+      tabId = tracker.getTabId(vmId);
+      if (tabId == null) throw new VMNotReadyError(`no live tab for ${vmId} after reload`);
+      try {
+        response = await sendRaced(tabId, vmId, message);
+      } catch (e2) {
+        // Reloaded and STILL wedged → a clear, terminal error instead of looping.
+        if (/** @type {{ vmUnresponsive?: boolean }} */ (e2)?.vmUnresponsive) {
+          throw new VMNotReadyError(
+            `vm ${vmId} is unresponsive — reloaded its tab and it still did not answer `
+            + `${message.type} after ${messageTimeoutMs / 1000}s. The VM may be wedged; create a fresh one.`,
+          );
+        }
+        throw e2;
+      }
     }
     if (!response || response.ok !== true) {
       throw reviveError(response?.error ?? 'vm call returned no response');
@@ -229,7 +283,9 @@ export const createVmClient = ({
         const targetVmId = await resolveVmId(opts);
         const tabId = tracker.getTabId(targetVmId);
         if (tabId == null) return false;
-        const response = await callTab(targetVmId, { type: 'vm/is-ready' });
+        // reboot:false — a liveness probe must never recreate a tab; a wedged
+        // probe just answers "not ready".
+        const response = await callTab(targetVmId, { type: 'vm/is-ready' }, { reboot: false });
         return response.ready === true;
       } catch {
         return false;

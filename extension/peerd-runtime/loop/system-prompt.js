@@ -266,7 +266,11 @@ vm_boot timeoutMs (default 60s, max 300s). CheerpX quirks (work around, don't de
 /dev/null & /dev/stdout deny writes (redirect to /tmp/err, never 2>/dev/null); chmod
 denies on user-created files; stdout+exit come back merged. "Could not resolve host" =
 the wrappers didn't install (check the boot log), not "no network"; a "denylisted:
-<host>" or HTTP 4xx/5xx is peerd-side — surface it literally.`,
+<host>" or HTTP 4xx/5xx is peerd-side — surface it literally. A command that TIMES OUT
+("cmd timed out" / VMRunTimeoutError) on something that should be quick means the VM is
+wedged, not busy — do NOT re-run it in a loop (that piles unexecuted commands onto a dead
+shell). Report the timeout plainly and stop; a wedged VM clears with a reset or a fresh
+vm_create, not retries.`,
   notebook: `Your Notebook is a sealed Web Worker + OPFS — vanilla JS, no DOM, network
 via peerd.egress.fetch. Each run is a FRESH worker: module-level state does NOT carry —
 persist via peerd.self.writeFile/readFile. Static \`import\`, \`export … from\`, and dynamic
