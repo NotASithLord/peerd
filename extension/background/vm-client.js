@@ -75,7 +75,7 @@ const IDLE_REUSE_PROBE_MS = 60_000;
 // reliable than waiting to resurrect it — and a needless reload of a slow-to-wake tab
 // costs only the idle in-memory bash session (disk persists via the IDB overlay).
 // recreateTab then does the real up-to-30s boot wait.
-const READY_PROBE_TIMEOUT_MS = 750;
+const READY_PROBE_TIMEOUT_MS = 700;
 
 /** Group title used when auto-grouping VM tabs in the tab strip. */
 export const VM_TAB_GROUP_TITLE = 'peerd';
