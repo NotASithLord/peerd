@@ -2,8 +2,8 @@
 
 All notable changes to peerd are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
-follows `VERSIONING.md` — **`0.MINOR.PATCH`**, minor = milestone,
-patch = fix, with `store`/`preview`/`dev` channels as an orthogonal axis.
+is **`0.MINOR.PATCH`** (minor = milestone, patch = fix), with
+`store`/`preview`/`dev` channels as an orthogonal axis.
 
 peerd is **0.x — experimental preview**: breaking changes are likely and
 storage formats may move until the surface stabilizes.
@@ -11,6 +11,23 @@ storage formats may move until the surface stabilizes.
 ## [Unreleased]
 
 _Nothing yet._
+
+---
+
+## [0.2.1] — 2026-06-29
+
+The code is the spec: the standalone prose-doc corpus is removed. Deleted
+DESIGN.md, ARCHITECTURE.md, ARCHITECTURE-CHANGES.md, MAP.md, FEATURES.md,
+PACKAGING.md, STATUS.md, TODO.md, VERSIONING.md, CONTRIBUTING.md, the whole
+`docs/` tree of specs and distributed-design notes, and the per-module
+DESIGN/DEV-NOTES files. Orientation now lives in README.md, CLAUDE.md, the
+per-module READMEs, and the code. SECURITY.md and the store-listing /
+compliance docs (`docs/store/`) are kept. No runtime behavior change; the
+extension's user-facing behavior is identical to 0.2.0.
+
+### Removed
+- The standalone prose design docs (see above). README.md and CLAUDE.md now
+  point at the per-module READMEs and the code instead of the deleted files.
 
 ---
 
