@@ -274,6 +274,19 @@ export const createDebuggerPool = () => {
     return res?.nodes ?? [];
   };
 
+  // Screenshot the viewport of a SPECIFIC tab by id — even a backgrounded one,
+  // with NO focus steal (unlike chrome.tabs.captureVisibleTab, which only ever
+  // grabs the window's foreground tab). This is what lets the `view` tool
+  // capture the runner's pinned tab and gate the captured pixels to THAT tab.
+  // JPEG keeps a viewport shot small enough to ship as a model vision block.
+  /** @param {number} tabId @param {{ format?: 'jpeg'|'png', quality?: number }} [opts] */
+  const captureScreenshot = async (tabId, { format = 'jpeg', quality = 70 } = {}) => {
+    await attach(tabId);
+    const params = format === 'jpeg' ? { format, quality } : { format };
+    const res = await browser.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', params);
+    return { data: res?.data ?? '', mediaType: format === 'jpeg' ? 'image/jpeg' : 'image/png' };
+  };
+
   // Click a node by its backendDOMNodeId (from a ref, never a selector).
   // CDP resolves the exact node → no ambiguity, no "selector not found".
   // Synthetic el.click(); a real-event upgrade (DOM.getBoxModel +
@@ -417,7 +430,8 @@ export const createDebuggerPool = () => {
   };
 
   return {
-    attach, detach, evaluate, dispatchKeys, getAxTree, clickBackendNode, setValueBackendNode,
+    attach, detach, evaluate, dispatchKeys, getAxTree, captureScreenshot,
+    clickBackendNode, setValueBackendNode,
     readFrameworkState,
     isAttached: (tabId) => attached.has(tabId),
   };

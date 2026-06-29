@@ -36,6 +36,11 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
   // runner reaches it through get/do.
   'read_pdf',
+  // view returns an UNTRUSTED page screenshot as a model-visible image — same
+  // boundary as read_page (raw page content), so it stays runner-only; the runner
+  // sees the pixels and reports back. (capture is NOT here: its image is redacted
+  // to a sentinel before the model sees it.)
+  'view',
   // fetch_url is the web ACTOR's secure fetch — its NON-render web mechanism (the
   // other is drive-a-tab). It's actor-only: the orchestrator delegates web INTENT
   // via message_actor and the web actor picks fetch-vs-render, so the main agent
@@ -182,7 +187,7 @@ export const isRunnerPageTool = (name) => RUNNER_PAGE_TOOLS.has(name);
 // must not also wield code-exec (the exclusion IS the boundary).
 export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes',
-  'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf',
+  'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
 ]);
 
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
