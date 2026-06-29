@@ -138,9 +138,24 @@ export const STATES = [
       // the load-bearing proof: the sealed worker actually built + queried the
       // OPFS index — the computed total/count only exist in the worker's result
       // JSON, not in PDA_SCRIPT's source text or the code argument echoed back.
+      // why parse, not substring-match the raw body: pdaToolResultBody is the
+      // raw request postData, where the js_run result is a JSON string NESTED in
+      // the request JSON — so its quotes are escaped (\"total\":50) and a raw
+      // `"total":50` check never matches (this is why the check was red). Parse
+      // the request, pull the tool-result message content (now unescaped), and
+      // assert the computed values live THERE — the load-bearing proof the
+      // sealed worker built + queried the OPFS index (total/count exist only in
+      // its result, not in PDA_SCRIPT's source or the echoed code arg).
+      let pdaResult = '';
+      try {
+        const reqBody = JSON.parse(pdaToolResultBody);
+        pdaResult = (reqBody.messages || [])
+          .map((m) => (typeof m.content === 'string' ? m.content : ''))
+          .find((c) => c.includes('on-device OPFS index')) || '';
+      } catch { /* leave '' — the check fails with a clear detail */ }
       rec.check('js_run REALLY computed on-device (computed total in tool result, not script source)',
-        pdaToolResultBody.includes('"total":50') && pdaToolResultBody.includes('"count":3'),
-        pdaToolResultBody.slice(0, 200));
+        /"total"\s*:\s*50\b/.test(pdaResult) && /"count"\s*:\s*3\b/.test(pdaResult),
+        `js_run tool result: ${pdaResult.slice(0, 200)}`);
       rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
       await rec.shot('final');
     },
