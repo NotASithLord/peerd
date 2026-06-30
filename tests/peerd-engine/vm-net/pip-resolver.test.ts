@@ -14,6 +14,57 @@ describe('normalizeName / parseSpec', () => {
   });
 });
 
+// Edge cases (#126). These pin parseSpec's ACTUAL behavior (read off the regex
+// + normalizeName, then verified against the source), not what a full PEP 440
+// parser would do — the resolver only pins exact `==` versions and otherwise
+// resolves latest, so every other specifier intentionally yields version null.
+describe('parseSpec — edge cases', () => {
+  test('trims surrounding whitespace', () => {
+    expect(parseSpec('  requests  ')).toEqual({ name: 'requests', version: null });
+  });
+
+  test('tolerates whitespace around ==', () => {
+    expect(parseSpec('PyYAML == 6.0.1')).toEqual({ name: 'pyyaml', version: '6.0.1' });
+  });
+
+  test('normalizes the name (case, underscores, dots → -)', () => {
+    expect(parseSpec('Flask-Login')).toEqual({ name: 'flask-login', version: null });
+    expect(parseSpec('flask_login')).toEqual({ name: 'flask-login', version: null });
+    expect(parseSpec('zope.interface')).toEqual({ name: 'zope-interface', version: null });
+  });
+
+  // why: the regex only captures a version after `==`. Every other PEP 440
+  // operator falls through to the trailing `.*`, so the name is kept but the
+  // version is null (the resolver then takes latest). Pin that contract.
+  test('only == captures a version — every other operator yields null', () => {
+    expect(parseSpec('numpy~=1.21')).toEqual({ name: 'numpy', version: null });
+    expect(parseSpec('django!=4.0')).toEqual({ name: 'django', version: null });
+    expect(parseSpec('pkg<=1.0')).toEqual({ name: 'pkg', version: null });
+    expect(parseSpec('pkg>1.0')).toEqual({ name: 'pkg', version: null });
+    expect(parseSpec('pkg<1.0')).toEqual({ name: 'pkg', version: null });
+  });
+
+  test('== with no version after it is treated as unpinned', () => {
+    expect(parseSpec('requests==')).toEqual({ name: 'requests', version: null });
+  });
+
+  test('an environment marker after the pin is ignored', () => {
+    expect(parseSpec('pkg==1.0; python_version<3')).toEqual({ name: 'pkg', version: '1.0' });
+  });
+
+  // A spec with no leading name char misses the main pattern and falls to the
+  // `!m` branch: the whole string is normalized as the "name". Documents the
+  // malformed-input behavior rather than asserting it's desirable.
+  test('a version-only / malformed spec normalizes the whole string as the name', () => {
+    expect(parseSpec('==1.0')).toEqual({ name: '==1-0', version: null });
+  });
+
+  test('empty / whitespace-only input yields an empty name', () => {
+    expect(parseSpec('')).toEqual({ name: '', version: null });
+    expect(parseSpec('   ')).toEqual({ name: '', version: null });
+  });
+});
+
 describe('selectWheel', () => {
   test('prefers a pure-python wheel', () => {
     const files = [
