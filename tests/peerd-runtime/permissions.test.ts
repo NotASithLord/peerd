@@ -45,6 +45,7 @@ const TOOLS = {
   navigate:      { name: 'navigate',      sideEffect: 'write',           primitive: 'tab' },
   open_tab:      { name: 'open_tab',      sideEffect: 'mutate_external',  primitive: 'tab' },
   vm_delete:     { name: 'vm_delete',     sideEffect: 'destructive',      primitive: 'webvm' },
+  message_actor: { name: 'message_actor', sideEffect: 'write',            primitive: 'subagent' },
 } as const; // why: keep sideEffect as the SideEffect literal union, not string
 
 // ---- classifyAction: the taxonomy --------------------------------------
@@ -120,6 +121,27 @@ describe('PLAN mode is read-only (plus the navigation carve-out)', () => {
 
   test('the carve-out does not weaken ACT — confirmations on still confirms navigate', () => {
     const v = decideAction({ mode: PERMISSION_MODES.ACT, confirmActions: true, tool: TOOLS.navigate });
+    expect(v.allowed).toBe(true);
+    expect(v.confirm).toBe(true);
+  });
+
+  // Delegation carve-out: message_actor is the orchestrator's ONLY page-content
+  // path (do/get/check folded into the actor). Plan must allow the DELEGATION —
+  // the actor it mints inherits Plan, so its inner turn is the real write barrier
+  // (its read_page runs, its click/type still block). Without this, Plan can't
+  // read a single character of a page ("go look at X and tell me Y").
+  test('allows message_actor in Plan — the actor inherits Plan; its inner turn is the barrier', () => {
+    const v = decideAction({ mode: PERMISSION_MODES.PLAN, confirmActions: true, tool: TOOLS.message_actor });
+    expect(v.allowed).toBe(true);
+    expect(v.confirm).toBe(false);
+    expect(v.reason).toContain('delegation carve-out');
+  });
+
+  // Scope guard (#7 deliberately NOT in this change): the delegation carve-out is
+  // Plan-only. In ACT + confirm-ON a delegation still round-trips — the
+  // write-classification stands for confirmation until #7 is tackled.
+  test('the delegation carve-out is Plan-only — ACT + confirm still confirms message_actor', () => {
+    const v = decideAction({ mode: PERMISSION_MODES.ACT, confirmActions: true, tool: TOOLS.message_actor });
     expect(v.allowed).toBe(true);
     expect(v.confirm).toBe(true);
   });
