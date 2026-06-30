@@ -137,7 +137,8 @@ export const listProviderModels = async (name, deps) => {
  *
  * @param {string} name
  * @param {string} model
- * @param {{ getSecret: Function, safeFetch: Function, signal?: AbortSignal }} deps
+ * @param {{ getSecret: Function, safeFetch: Function, signal?: AbortSignal, ollamaHost?: string }} deps
+ *   ollamaHost (issue #104) routes the live /api/show window to a remote daemon.
  * @returns {Promise<number | null>}
  */
 export const providerModelContextWindow = async (name, model, deps) => {

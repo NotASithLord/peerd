@@ -577,7 +577,10 @@ const liveContextWindow = (/** @type {string} */ provider, /** @type {string} */
   if (hit && typeof hit.window === 'number') return hit.window; // learned → keep for SW lifetime
   if (hit && hit.fetching) return undefined;                    // in-flight → don't fire a second
   contextWindowCache.set(key, { fetching: true });
-  providerModelContextWindow(provider, model, { getSecret, safeFetch })
+  // ollamaHost (issue #104): the live per-model window comes from the daemon's
+  // /api/show, so a remote Ollama needs its host or it would query localhost and
+  // silently fall back to the static table; other adapters ignore it.
+  providerModelContextWindow(provider, model, { getSecret, safeFetch, ollamaHost: settingsStore.get().ollamaHost })
     .then((w) => {
       if (typeof w === 'number') contextWindowCache.set(key, { window: w });
       else contextWindowCache.delete(key); // miss → drop so the next turn retries

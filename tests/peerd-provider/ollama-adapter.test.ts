@@ -11,6 +11,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   callOllama,
   listOllamaModels,
+  fetchOllamaContextWindow,
   ollamaAdapter,
 } from '../../extension/peerd-provider/adapters/ollama.js';
 import {
@@ -238,5 +239,18 @@ describe('remote host — ollamaHost (issue #104)', () => {
       }); },
     } as any);
     expect(url).toBe('http://192.168.1.4:11434/api/tags');
+  });
+
+  test('fetchOllamaContextWindow queries /api/show on the configured host', async () => {
+    let url = '';
+    const w = await fetchOllamaContextWindow({
+      model: 'qwen3:8b',
+      ollamaHost: 'http://192.168.1.4:11434',
+      safeFetch: async (u: any) => { url = String(u); return /** @type {any} */ ({
+        ok: true, status: 200, headers: new Headers(), json: async () => ({ parameters: 'num_ctx 8192' }),
+      }); },
+    } as any);
+    expect(url).toBe('http://192.168.1.4:11434/api/show');
+    expect(w).toBe(8192);
   });
 });
