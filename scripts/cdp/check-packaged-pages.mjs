@@ -55,7 +55,11 @@ const isAppPage = (root, page) => readFileSync(join(root, page), 'utf8').include
 // references but didn't ship. Ignore favicon (Chrome auto-requests it; extensions
 // ship none) and cross-origin misses (test-env noise, not our artifact).
 const sameOriginNetFails = (events) => (events || [])
-  .filter((e) => e.startsWith('NETFAIL') && e.includes('chrome-extension://') && !e.includes('/favicon.ico'));
+  .filter((e) => e.startsWith('NETFAIL') && e.includes('chrome-extension://')
+    && !e.includes('/favicon.ico')
+    // .map sourcemaps aren't shipped + are only fetched under the Debugger domain
+    // (we don't enable it) — exclude them so adding Debugger later can't red the gate.
+    && !/\.map(\?|#|$)/.test(e));
 const exceptions = (events) => (events || []).filter((e) => /^EXC |^ERR /.test(e));
 
 let failed = false;

@@ -407,14 +407,20 @@ export async function unlockAndReady(page, { provider = 'ollama', model = 'qwen3
  */
 export async function openExtPage(ctx, path) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
-  const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?${encodeURI(url)}`, { method: 'PUT' })).json();
+  // Create the tab at about:blank FIRST, enable Network, THEN navigate. why: if we
+  // open straight at the page URL, the document and its synchronous HEAD resources
+  // (the page's primary <link> stylesheet, <script src>) have already committed by
+  // the time we attach + Network.enable — so a pruned HEAD asset would emit no
+  // captured loadingFailed and slip the packaged-page boot check. Enabling Network
+  // before navigation captures the FULL load. (Same pattern as run-inbrowser-tests.)
+  const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
   const page = await attach(created.webSocketDebuggerUrl);
   await page.send('Runtime.enable');
   await page.send('Page.enable');
-  // why: the packaged-page boot check (check-packaged-pages.mjs) needs to see
-  // failed subresource loads (a pruned CSS/font/wasm/dynamic-import 404), which
-  // surface only as Network events — never as console errors.
+  // The packaged-page boot check needs failed subresource loads (a pruned CSS/font/
+  // wasm/dynamic-import 404), which surface only as Network events, never console.
   await page.send('Network.enable');
+  await page.send('Page.navigate', { url });
   return page;
 }
 

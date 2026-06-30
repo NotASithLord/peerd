@@ -105,7 +105,15 @@ const entryPoints = (root: string): string[] => {
  * neither the import walk nor a page boot would catch. Returns the missing paths.
  */
 const missingManifestAssets = (root: string): string[] => {
-  let manifest: { icons?: Record<string, string>; action?: { default_icon?: string | Record<string, string> }; web_accessible_resources?: Array<{ resources?: string[] }> };
+  let manifest: {
+    icons?: Record<string, string>;
+    action?: { default_icon?: string | Record<string, string>; default_popup?: string };
+    web_accessible_resources?: Array<{ resources?: string[] }>;
+    side_panel?: { default_path?: string };
+    options_ui?: { page?: string };
+    sidebar_action?: { default_panel?: string };
+    sandbox?: { pages?: string[] };
+  };
   try { manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')); }
   catch { return []; }
   const miss: string[] = [];
@@ -117,6 +125,14 @@ const missingManifestAssets = (root: string): string[] => {
   const di = manifest.action?.default_icon;
   if (typeof di === 'string') check(di, 'action.default_icon');
   else for (const p of Object.values(di ?? {})) check(p, 'action.default_icon');
+  // HTML ENTRY POINTERS — a manifest field aiming at a page that doesn't ship is a
+  // blank surface when the browser opens it (the entryPoints walk only finds pages
+  // that EXIST, so it can't see a pointer at a pruned one).
+  check(manifest.action?.default_popup, 'action.default_popup');
+  check(manifest.side_panel?.default_path, 'side_panel.default_path');
+  check(manifest.options_ui?.page, 'options_ui.page');
+  check(manifest.sidebar_action?.default_panel, 'sidebar_action.default_panel');
+  for (const p of manifest.sandbox?.pages ?? []) check(p, 'sandbox.pages');
   for (const war of manifest.web_accessible_resources ?? []) {
     for (const r of war?.resources ?? []) {
       if (typeof r !== 'string') continue;
