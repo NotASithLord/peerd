@@ -413,10 +413,19 @@ export const reduceChat = (state, msg) => {
       else if (msg.ok === false && !card.error) patch.error = 'the actor turn did not complete';
       return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch);
     }
-    case 'turn/actor-cost':
+    case 'turn/actor-cost': {
       // Phase K: the actor turn's spend, surfaced on its card (delegated work
       // isn't free — make it visible even though caps stay per-session).
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { cost: msg.cost });
+      // why the guard: a cost event must only UPDATE an existing card, never
+      // create one. onCost fires on every usage event, so a panel that connects
+      // mid-turn can see cost before turn/actor-start; self-seeding a card with
+      // {cost} and no `streaming` renders a premature green 'ok' and then blocks
+      // turn/actor-state's seed (its `existing ? {} : …` gate) from ever applying
+      // streaming/kind/name. Let turn/actor-start|state own creation.
+      const id = /** @type {string} */ (msg.parentToolUseId);
+      if (!(/** @type {any} */ (state.actors)[id])) return state;
+      return putActorCard(state, id, { cost: msg.cost });
+    }
     case 'async-tasks/update':
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
@@ -442,7 +451,16 @@ export const reduceChat = (state, msg) => {
       const sessionChanged = msg.state?.session?.sessionId !== state.session.sessionId;
       const stillHalted = !sessionChanged && state.cost.limitReached;
       const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
-      return { ...state, ...msg.state, pendingConfirm: state.pendingConfirm,
+      // why prune on switch: actors/subagents/asyncTasks are keyed by tool_use id
+      // and belong to the orchestrator transcript being navigated AWAY from — the
+      // state snapshot never carries them, so without this they survive into the
+      // new chat (never rendering — renderActorCard matches by viewed tool_use id —
+      // but accumulating for the panel's lifetime). A still-live one re-seeds via
+      // turn/actor-state on switch-back. Only on an ACTUAL switch, not every push.
+      const pruneProjections = sessionChanged
+        ? { actors: INITIAL_STATE.actors, subagents: INITIAL_STATE.subagents, asyncTasks: INITIAL_STATE.asyncTasks }
+        : {};
+      return { ...state, ...msg.state, ...pruneProjections, pendingConfirm: state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
