@@ -426,7 +426,31 @@ export const ProvidersSection = {
         // "Which local model fits this machine?" — only meaningful when
         // local inference is the selected provider.
         effectiveProvider === 'ollama'
-          ? [m('.settings-divider'), m(OllamaRecommendation, { send })]
+          ? [
+              m('.settings-divider'),
+              // Remote Ollama host (issue #104). Empty/default = local loopback.
+              m('.input-row', [
+                m('label', { for: 'ollama-host' }, 'Ollama host'),
+                m('input', {
+                  id: 'ollama-host',
+                  type: 'text',
+                  spellcheck: false,
+                  placeholder: 'http://localhost:11434',
+                  value: state.settings?.ollamaHost ?? '',
+                  onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+                    await send({ type: 'settings/update', patch: { ollamaHost: e.target.value } });
+                    m.redraw();
+                  },
+                }),
+              ]),
+              m('p.hint', [
+                'The Ollama daemon URL — default ', m('code', 'http://localhost:11434'),
+                '. For a daemon on another machine, enter its address (e.g. ',
+                m('code', 'http://192.168.1.4:11434'), '). Over plain HTTP only the standard ',
+                m('code', '11434'), ' port is reachable; an HTTPS-fronted host works on any port.',
+              ]),
+              m(OllamaRecommendation, { send }),
+            ]
           : null,
         m('.input-row', [
           m('label', { for: 'runner-model' }, 'Page-reader model'),
