@@ -86,31 +86,77 @@ const entryPoints = (root: string): string[] => {
     }
   }
   try {
-    const sw = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'))?.background?.service_worker;
-    if (typeof sw === 'string') entries.add(join(root, sw));
+    const bg = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'))?.background;
+    // Chrome: background.service_worker (string). Firefox: gen-manifest rewrites
+    // it to background.scripts (array) — so the Firefox SW import graph would be
+    // silently never walked if we only read service_worker. Handle both shapes.
+    if (typeof bg?.service_worker === 'string') entries.add(join(root, bg.service_worker));
+    if (Array.isArray(bg?.scripts)) {
+      for (const s of bg.scripts) if (typeof s === 'string') entries.add(join(root, s));
+    }
   } catch { /* no manifest — staging always writes one */ }
   return [...entries];
 };
 
-let failed = false;
-for (const channel of ['preview', 'store'] as const) {
-  await packageArtifact({ channel, browser: 'chrome', version, sign: false, verify: false });
-  const root = join(REPO_ROOT, 'artifacts', 'staging', `${channel}-chrome`);
-  const entries = entryPoints(root);
-  let chMiss = 0;
-  for (const entry of entries) {
-    const miss = unresolved(entry, root);
-    if (!miss.length) continue;
-    failed = true;
-    chMiss += miss.length;
-    console.error(`✗ [${channel}] ${relative(root, entry)} — ${miss.length} pruned-but-imported:`);
-    for (const m of miss) console.error(`    ${m.spec}  (from ${m.from})`);
+/**
+ * Manifest-declared asset paths that must ship in the pruned tree: icons,
+ * action.default_icon, and web_accessible_resources. A channel patch pointing any
+ * of these at a pruned/missing file ships a broken icon or a 404'd resource that
+ * neither the import walk nor a page boot would catch. Returns the missing paths.
+ */
+const missingManifestAssets = (root: string): string[] => {
+  let manifest: { icons?: Record<string, string>; action?: { default_icon?: string | Record<string, string> }; web_accessible_resources?: Array<{ resources?: string[] }> };
+  try { manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')); }
+  catch { return []; }
+  const miss: string[] = [];
+  const check = (p: unknown, where: string): void => {
+    if (typeof p !== 'string' || /^(https?:|data:)/.test(p)) return;
+    if (!existsSync(join(root, p.replace(/^\//, '')))) miss.push(`${p}  (${where})`);
+  };
+  for (const p of Object.values(manifest.icons ?? {})) check(p, 'icons');
+  const di = manifest.action?.default_icon;
+  if (typeof di === 'string') check(di, 'action.default_icon');
+  else for (const p of Object.values(di ?? {})) check(p, 'action.default_icon');
+  for (const war of manifest.web_accessible_resources ?? []) {
+    for (const r of war?.resources ?? []) {
+      if (typeof r !== 'string') continue;
+      // Literal path → check directly; glob → check its base dir still ships (a
+      // glob into a fully-pruned dir, e.g. tests/**, then matches nothing).
+      if (r.includes('*')) {
+        const base = r.split('*')[0].replace(/\/$/, '').replace(/^\//, '');
+        if (base && !existsSync(join(root, base))) miss.push(`${r}  (web_accessible_resources — base '${base}' pruned)`);
+      } else check(r, 'web_accessible_resources');
+    }
   }
-  console.log(`[${channel}/chrome] ${entries.length} entry points · ${chMiss} unresolved static import(s)`);
+  return miss;
+};
+
+let failed = false;
+// The full 2×2 release matrix. Firefox diverges most (manifest transform strips
+// sidePanel/offscreen/debugger and rewrites the SW shape), so its import graph
+// needs its own walk — the static resolver needs no browser to run.
+for (const channel of ['preview', 'store'] as const) {
+  for (const browser of ['chrome', 'firefox'] as const) {
+    await packageArtifact({ channel, browser, version, sign: false, verify: false });
+    const root = join(REPO_ROOT, 'artifacts', 'staging', `${channel}-${browser}`);
+    const entries = entryPoints(root);
+    let chMiss = 0;
+    for (const entry of entries) {
+      const miss = unresolved(entry, root);
+      if (!miss.length) continue;
+      failed = true;
+      chMiss += miss.length;
+      console.error(`✗ [${channel}/${browser}] ${relative(root, entry)} — ${miss.length} pruned-but-imported:`);
+      for (const m of miss) console.error(`    ${m.spec}  (from ${m.from})`);
+    }
+    const assetMiss = missingManifestAssets(root);
+    for (const a of assetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] manifest asset missing — ${a}`); }
+    console.log(`[${channel}/${browser}] ${entries.length} entry points · ${chMiss} unresolved import(s) · ${assetMiss.length} missing manifest asset(s)`);
+  }
 }
 
 if (failed) {
   console.error('\nPACKAGED IMPORT CHECK FAILED — a pruned file is still statically imported; that page will 404 + blank in the packaged build. Lazy-import it (guarded) or stop pruning it for that channel.');
   process.exit(1);
 }
-console.log('packaged import check OK — every page\'s static import graph resolves in both channels.');
+console.log('packaged import check OK — every page\'s static import graph resolves in all channel×browser builds.');
