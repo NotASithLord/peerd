@@ -190,3 +190,53 @@ describe('listOllamaModels', () => {
     expect(err.status).toBe(403);
   });
 });
+
+describe('remote host — ollamaHost (issue #104)', () => {
+  test('callOllama posts to the CONFIGURED host, not localhost', async () => {
+    let url = '';
+    await drain(callOllama({
+      ...baseArgs,
+      ollamaHost: 'http://192.168.1.4:11434',
+      safeFetch: async (u: any) => { url = String(u); return okStreamingResponse([
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ]); },
+    } as any));
+    expect(url).toBe('http://192.168.1.4:11434/v1/chat/completions');
+  });
+
+  test('listOllamaModels reads /api/tags on the configured host', async () => {
+    let url = '';
+    const models = await listOllamaModels({
+      ollamaHost: 'http://192.168.1.4:11434',
+      safeFetch: async (u: any) => { url = String(u); return /** @type {any} */ ({
+        ok: true, status: 200, headers: new Headers(),
+        json: async () => ({ models: [{ name: 'qwen3:8b', size: 1 }] }),
+      }); },
+    } as any);
+    expect(url).toBe('http://192.168.1.4:11434/api/tags');
+    expect(models[0].model).toBe('qwen3:8b');
+  });
+
+  test('defaults to the local loopback when no host is given (back-compat)', async () => {
+    let url = '';
+    await listOllamaModels({
+      safeFetch: async (u: any) => { url = String(u); return /** @type {any} */ ({
+        ok: true, status: 200, headers: new Headers(), json: async () => ({ models: [] }),
+      }); },
+    } as any);
+    expect(url).toBe('http://localhost:11434/api/tags');
+  });
+
+  test('a trailing slash on the host is stripped, not doubled', async () => {
+    let url = '';
+    await listOllamaModels({
+      ollamaHost: 'http://192.168.1.4:11434/',
+      safeFetch: async (u: any) => { url = String(u); return /** @type {any} */ ({
+        ok: true, status: 200, headers: new Headers(), json: async () => ({ models: [] }),
+      }); },
+    } as any);
+    expect(url).toBe('http://192.168.1.4:11434/api/tags');
+  });
+});
