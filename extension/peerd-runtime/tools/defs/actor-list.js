@@ -21,9 +21,19 @@
 
 import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
 import { serializeListResult } from './columnar.js';
+import { escapeAttr } from '/shared/util.js';
 
 /** @param {string} s @param {number} n @returns {string} */
 const truncate = (s, n) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
+
+// A tab's `name` is the page-controlled document.title — UNTRUSTED. Harden it the
+// same way the message_actor reply lead does (actor-messaging.js deliver): collapse
+// whitespace (kill the newline vector), then escapeAttr (no surviving angle bracket
+// → no forged fence/close tag laundered into the orchestrator's trusted context).
+// why: this list is a TRUSTED tool result, not fenced — an un-sanitized title is
+// the same injection source deliver and the web-actor naming already neutralize.
+/** @param {string | undefined} title @returns {string} */
+const safeTitle = (title) => escapeAttr(truncate((title || '').replace(/\s+/g, ' ').trim(), 60));
 
 /**
  * One addressable actor, in the uniform shape every row shares.
@@ -137,7 +147,7 @@ export const actorListTool = {
           actors.push({
             type: 'tab',
             handle: t.id,
-            name: truncate(t.title || '', 60),
+            name: safeTitle(t.title),
             live: true,                 // it's an open tab by construction
             current: !!t.active,
             detail: originOfUrl(t.url),
