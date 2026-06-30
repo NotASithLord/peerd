@@ -38,6 +38,39 @@
 
 import globals from 'globals';
 
+// no-restricted-imports patterns, shared so the eval-bridge exemption below can
+// re-list every rule EXCEPT the eval one (a flat-config override REPLACES the
+// whole rule, so the patterns it keeps must be spelled out).
+const CROSS_MODULE_IMPORT = {
+  // any `peerd-<name>/<deeper>` path that isn't the module's own top-level index.js
+  regex: '(^|/)peerd-[a-z]+/(?!index\\.js$).+',
+  message: 'Cross-module imports must go through /peerd-<name>/index.js. See docs/architecture.md §4.',
+};
+// The dweb module is stricter: NOTHING outside it may import it — not even its
+// index.js. Core code programs against /shared/dweb-interface.js + loadDweb()
+// (whose gated dynamic import this rule can't see — check-dweb-boundary.ts covers
+// that). The store package prunes it; a static import would break the store SW.
+const DWEB_IMPORT = {
+  regex: '(^|/)peerd-distributed/.*',
+  message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly. See PACKAGING.md.',
+};
+// tests/ is PRUNE_ALWAYS (pruned from every package). A shipped file that
+// statically imports it 404s + blanks the page in a real install. Tests import
+// each other (extension/tests/** is exempt below); runtime code must not.
+const TESTS_IMPORT = {
+  regex: '(^|/)tests/.*',
+  message: 'tests/ is pruned from every package — a shipped file importing it would 404 in a real install. Runtime code must not import test files.',
+};
+// eval/ (the Lab) is pruned from the STORE build. A shipped page that STATICALLY
+// imports it black-screens the store install — this is the v0.2.0 bug. Lazy-load
+// it via a guarded dynamic import (home/home.js → home/eval-section.js). The eval
+// module + that one sanctioned bridge are exempt below; check:imports + check:pages
+// enforce the same invariant against the real artifact.
+const EVAL_IMPORT = {
+  regex: '(^|/)eval/.*',
+  message: 'The Lab (eval/) is pruned from the store build — never STATICALLY import it from a shipped page (the v0.2.0 black-screen). Lazy-load it via a guarded dynamic import; see home/home.js.',
+};
+
 export default [
   // --- global ignores (was: `ignorePatterns`) ---------------------------
   // A config object with ONLY `ignores` sets global ignores.
@@ -112,26 +145,7 @@ export default [
       // own top-level `index.js`.
       'no-restricted-imports': [
         'error',
-        {
-          patterns: [
-            {
-              regex: '(^|/)peerd-[a-z]+/(?!index\\.js$).+',
-              message: 'Cross-module imports must go through /peerd-<name>/index.js. See docs/architecture.md §4.',
-            },
-            // The dweb module is stricter still: NOTHING outside it
-            // may import it — not even its index.js. Core code programs
-            // against /shared/dweb-interface.js and obtains the live
-            // client via loadDweb() in /shared/dweb-loader.js
-            // (whose gated dynamic import this rule can't see — the CI
-            // gate packaging/check-dweb-boundary.ts covers that). The
-            // store package prunes the module entirely; a static import here
-            // would break the store service worker outright.
-            {
-              regex: '(^|/)peerd-distributed/.*',
-              message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly. See PACKAGING.md.',
-            },
-          ],
-        },
+        { patterns: [CROSS_MODULE_IMPORT, DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] },
       ],
 
       // --- shadow / TDZ class (new — warnings) -------------------------
@@ -274,16 +288,12 @@ export default [
   {
     files: ['extension/peerd-*/**'],
     rules: {
+      // Drop the cross-module rule (deep imports inside a module are fine) but
+      // KEEP the dweb + prune-only-dir guards: a peerd-* file must not import
+      // peerd-distributed, eval/, or tests/ either (all pruned in some channel).
       'no-restricted-imports': [
         'error',
-        {
-          patterns: [
-            {
-              regex: '(^|/)peerd-distributed/.*',
-              message: 'Dweb is channel-gated. Import /shared/dweb-interface.js types + loadDweb() from /shared/dweb-loader.js — never peerd-distributed directly. See PACKAGING.md.',
-            },
-          ],
-        },
+        { patterns: [DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] },
       ],
     },
   },
@@ -303,6 +313,19 @@ export default [
   {
     files: ['extension/tests/**'],
     rules: { 'no-restricted-imports': 'off' },
+  },
+  // The eval module imports itself, and home/eval-section.js is the SANCTIONED
+  // bridge — it ships only where eval/ ships (preview; both pruned together from
+  // store) and is itself only ever LAZILY imported (home/home.js guarded dynamic
+  // import). So these may statically import eval/; every OTHER rule still applies.
+  {
+    files: ['extension/eval/**', 'extension/home/eval-section.js'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [CROSS_MODULE_IMPORT, DWEB_IMPORT, TESTS_IMPORT] },
+      ],
+    },
   },
 
   // --- injected classic-script bodies: keep them ES5 --------------------
