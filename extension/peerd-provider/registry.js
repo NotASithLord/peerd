@@ -116,7 +116,9 @@ export const listProviders = () =>
  * callers can surface the legible message.
  *
  * @param {string} name
- * @param {{ safeFetch: Function, signal?: AbortSignal }} deps
+ * @param {{ safeFetch: Function, signal?: AbortSignal, ollamaHost?: string }} deps
+ *   ollamaHost (issue #104) routes the live inventory to a remote daemon; other
+ *   adapters ignore it.
  * @returns {Promise<Array<{ model: string, label: string }> | null>}
  */
 export const listProviderModels = async (name, deps) => {

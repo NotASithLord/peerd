@@ -86,6 +86,13 @@ export const defaults = {
   providerName: { store: '', preview: '' },
   providerModel: { store: '', preview: '' },
 
+  // Ollama daemon base URL (issue #104). Default is the local loopback; a user
+  // running Ollama on a separate box (a dedicated Mac mini, a LAN server) points
+  // this at it (e.g. http://192.168.1.4:11434). Validated to an http(s) origin
+  // at write (settings-patch), added to the egress allowlist, and reached by the
+  // adapter for /v1/chat/completions, /api/tags, and /api/show.
+  ollamaHost: { store: 'http://localhost:11434', preview: 'http://localhost:11434' },
+
   // Curated OpenRouter model ids the chat model-picker offers (OpenRouter is
   // a gateway to hundreds of models — too many to dump in a dropdown, so the
   // user checks the ones they want in Settings). Empty = fall back to the

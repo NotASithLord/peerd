@@ -533,7 +533,9 @@ const liveProviderModels = async (/** @type {string} */ name) => {
   const hit = liveModelsCache.get(name);
   if (hit && Date.now() - hit.at < LIVE_MODELS_TTL_MS) return hit.list;
   let list = null;
-  try { list = await listProviderModels(name, { safeFetch }); }
+  // ollamaHost (issue #104) lets the live inventory fetch a remote daemon's
+  // /api/tags; non-ollama adapters ignore it.
+  try { list = await listProviderModels(name, { safeFetch, ollamaHost: settingsStore.get().ollamaHost }); }
   catch { list = null; }
   liveModelsCache.set(name, { at: Date.now(), list });
   return list;
@@ -688,8 +690,26 @@ const buildModelOptions = async ({ sessionId = null } = {}) => {
   return { options, selected, sessionProvider };
 };
 
+// The user-configured Ollama host (issue #104). Its exact origin joins the
+// allowlist so safeFetch permits a remote daemon — the loopback default is
+// already hardcoded, so this only ever adds a custom host. why origin-only +
+// try/catch: settings-patch already stores it as a validated origin, but the
+// allowlist is the security boundary, so read it defensively and contribute
+// nothing on a bad/missing value. (The SSRF/private-network guard is on the
+// open-web path, not this credentialed provider path — so a LAN host is fine
+// here, and exact-origin matching keeps it to the one host the user set.)
+const ollamaAllowedOrigin = () => {
+  try { return new URL(settingsStore.get().ollamaHost || '').origin; }
+  catch { return null; }
+};
+
 export const safeFetch = makeSafeFetch({
-  getAllowlist: () => [...HARDCODED_ALLOWLIST, ...userEndpoints],
+  getAllowlist: () => {
+    const ollama = ollamaAllowedOrigin();
+    return ollama
+      ? [...HARDCODED_ALLOWLIST, ...userEndpoints, ollama]
+      : [...HARDCODED_ALLOWLIST, ...userEndpoints];
+  },
   audit: /** @type {any} */ (auditLog.append),
 });
 

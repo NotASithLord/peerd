@@ -432,12 +432,16 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
     const start = failoverLastGood ?? { provider: modelArgs.provider, model: modelArgs.model };
     const chain = resolveFailoverChain(start);
+    // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
+    // #104). Thread it from settings for every candidate; non-ollama adapters
+    // ignore the extra arg. (The configured host is also on the egress allowlist.)
+    const ollamaHost = settingsStore.get().ollamaHost;
     let lastErr;
     for (let i = 0; i < chain.length; i++) {
       const cand = chain[i];
       let streamedContent = false;
       try {
-        for await (const ev of callModel({ ...modelArgs, provider: cand.provider, model: cand.model })) {
+        for await (const ev of callModel({ ...modelArgs, ollamaHost, provider: cand.provider, model: cand.model })) {
           // rate-limit-pause is the adapter's pre-stream backoff signal, not
           // model output — failover stays safe while only those have flowed.
           if (ev.type !== 'rate-limit-pause') streamedContent = true;
