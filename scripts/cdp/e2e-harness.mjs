@@ -90,6 +90,7 @@ async function attach(wsUrl, onEvent) {
   let id = 0;
   const pending = new Map();
   const events = [];
+  const reqUrl = new Map();   // requestId → url; loadingFailed carries no url of its own
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); return; }
@@ -98,6 +99,20 @@ async function attach(wsUrl, onEvent) {
     }
     if (m.method === 'Runtime.consoleAPICalled' && m.params?.type === 'error') {
       events.push('ERR ' + (m.params.args || []).map((a) => a.value || a.description || a.type).join(' '));
+    }
+    // Failed / 4xx-5xx subresource loads. Only populated when Network.enable was
+    // sent on this connection (openExtPage does, for the packaged-page boot check).
+    // why: Chrome emits NO console error for a failed subresource (CSS/font/wasm/
+    // img/dynamic-import), so this is the ONLY signal that a packaged build is
+    // missing a file it references — the silent half of the black-screen class.
+    if (m.method === 'Network.requestWillBeSent') {
+      reqUrl.set(m.params?.requestId, m.params?.request?.url);
+    }
+    if (m.method === 'Network.responseReceived' && (m.params?.response?.status ?? 0) >= 400) {
+      events.push(`NETFAIL ${m.params.response.status} ${m.params.response.url}`);
+    }
+    if (m.method === 'Network.loadingFailed' && !m.params?.canceled) {
+      events.push(`NETFAIL ${m.params?.errorText || 'failed'} ${reqUrl.get(m.params?.requestId) || '(unknown url)'}`);
     }
     if (onEvent) onEvent(m.method, m.params);
   };
@@ -396,6 +411,10 @@ export async function openExtPage(ctx, path) {
   const page = await attach(created.webSocketDebuggerUrl);
   await page.send('Runtime.enable');
   await page.send('Page.enable');
+  // why: the packaged-page boot check (check-packaged-pages.mjs) needs to see
+  // failed subresource loads (a pruned CSS/font/wasm/dynamic-import 404), which
+  // surface only as Network events — never as console errors.
+  await page.send('Network.enable');
   return page;
 }
 
