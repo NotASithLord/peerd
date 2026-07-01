@@ -61,6 +61,10 @@ const main = () => {
   run('bun tests', 'bun', ['test', './tests']);
   if (args.matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);
+    // Chrome-cost gate: boots every page of the real pruned build (both channels)
+    // and fails on a blank page / missing same-origin resource. Needs Chrome for
+    // Testing (bun run e2e:chrome); mirrors the CI `packaged page boot` job.
+    run('packaged page boot (every page loads clean in the pruned build)', 'bun', ['run', 'check:pages']);
   }
 
   console.log('\npreflight OK');
