@@ -43,11 +43,10 @@ const CONNECT_TIMEOUT_MS = 45_000;
 // open picks: moonshotai/kimi-k2.6, minimax/minimax-m2 (see MODEL_CATALOG).
 export const DEFAULT_MODEL = 'z-ai/glm-5.1';
 
-// why: the page-reader (do/get/check) runner default — Haiku reached via
-// OpenRouter's gateway. Same intent as Anthropic's DEFAULT_RUNNER_MODEL: a
-// fast cheap model for the high-frequency runner. If the user's OpenRouter
-// account can't reach Anthropic, runRunner falls back to the inherited chat
-// model on failure — so this degrades gracefully rather than hard-failing.
+// why: the web actor default — Haiku reached via OpenRouter's gateway. Same
+// intent as Anthropic's DEFAULT_RUNNER_MODEL: a fast cheap model for the
+// high-frequency page-driving actor. If the user's OpenRouter account can't
+// reach Anthropic, the actor falls back to the inherited chat model.
 export const DEFAULT_RUNNER_MODEL = 'anthropic/claude-haiku-4.5';
 
 const MAX_RATE_LIMIT_RETRIES = 3;

@@ -99,9 +99,9 @@ export { makeAsyncSubagents } from './subagent/async-subagents.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-subagents shape, specialized).
 export { makeActorMessaging } from './subagent/actor-messaging.js';
-// DESIGN-17: the WEB actor — the disposable browser-runner folded into the
-// actor model as a fourth `actorType:'web'` actor that owns one tab. Pure core:
-// the tab→session bindings, the action-log rolling-summary prompt, the self-fence.
+// DESIGN-17: the WEB actor — the disposable page-driving agent (an
+// `actorType:'web'` actor that owns one tab). Pure core: the tab→session
+// bindings, the action-log rolling-summary prompt, the self-fence.
 // DESIGN-18: the API actor is the same origin actor with NO tab (fetch-only) — its
 // origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {

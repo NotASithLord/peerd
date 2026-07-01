@@ -7,21 +7,21 @@
 // of this output is the §02 "every action is recorded" claim,
 // demonstrated as real timestamps and event types.
 
-// why: a browser-runner (subagent, depth>0) runs DOM tools whose FAILURE
-// messages can echo PAGE CONTENT — e.g. type's `no_option_matching: "<page
-// label>" — available: <page labels>`. The dispatcher audits tool_failed with
+// why: a subagent (depth>0) can run tools whose FAILURE messages echo
+// UNTRUSTED text — e.g. a DOM tool's `no_option_matching: "<page label>" —
+// available: <page labels>`. The dispatcher audits tool_failed with
 // details.error = that message. inspect_audit_log is on the MAIN agent's
 // surface, so returning those verbatim would let the main agent re-ingest
-// untrusted page text through its own audit trail — laundering around the
-// do/get/check boundary. We redact the error body on subagent records (the
-// runner's internal errors are inspectable in its side-panel card); the
+// untrusted text through its own audit trail — laundering around the
+// child-context boundary. We redact the error body on subagent records (the
+// child's internal errors are inspectable in its side-panel card); the
 // metadata (tool, depth, parentage) stays.
 /** @typedef {import('/peerd-egress/audit/types.js').AuditEntry} AuditEntry */
 
 /** @param {AuditEntry} e @returns {AuditEntry} */
 const redactSubagentError = (e) => {
   if (e?.details?.subagentSessionId && typeof e.details.error === 'string') {
-    return { ...e, details: { ...e.details, error: '<runner tool error redacted — see the runner card in the side panel>' } };
+    return { ...e, details: { ...e.details, error: '<subagent tool error redacted — see the child card in the side panel>' } };
   }
   return e;
 };

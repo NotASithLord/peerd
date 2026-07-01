@@ -53,9 +53,6 @@ import { spawnSubagentTool }          from './spawn-subagent.js';
 import { subagentTasksTool }          from './subagent-tasks.js';
 import { subagentCancelTool }         from './subagent-cancel.js';
 import { messageActorTool }        from './message-actor.js';
-import { doTool }                      from './do.js';
-import { getTool }                     from './get.js';
-import { checkTool }                   from './check.js';
 import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
@@ -121,10 +118,6 @@ export {
   subagentTasksTool,
   subagentCancelTool,
   messageActorTool,
-  // high-level browser tools (do/get/check — runner layer over the DOM engine)
-  doTool,
-  getTool,
-  checkTool,
   // memory (V1.5 — file-based AGENTS.md)
   rememberTool,
   readMemoryTool,
@@ -207,11 +200,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   // Registered always; the exposure gate refuses it on an actor session, so a
   // actor can't recursively message another actor.
   messageActorTool,
-  // high-level browser tools — the runner layer over the DOM engine. After the
-  // exposure cutover these are the ONLY browser tools the MAIN agent sees.
-  doTool,
-  getTool,
-  checkTool,
   // memory (V1.5 — file-based AGENTS.md)
   readMemoryTool,
   rememberTool,

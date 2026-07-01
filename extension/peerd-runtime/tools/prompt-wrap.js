@@ -33,7 +33,7 @@ import { escapeAttr } from '/shared/util.js';
 // peerd_file is the @-mention file fence (composer/resolvers.js): an inlined
 // App/Notebook file is reference DATA, and its body may itself be scraped web
 // text, so it gets the same structural break-out defense.
-const FENCE_TAGS = ['untrusted_web_content', 'untrusted_runner_summary', 'peerd_file'];
+const FENCE_TAGS = ['untrusted_web_content', 'peerd_file'];
 const FENCE_RE = new RegExp(`<(\\s*/?\\s*)(${FENCE_TAGS.join('|')})\\b`, 'gi');
 
 /**
@@ -66,32 +66,5 @@ export const wrapUntrusted = ({ origin, tool, body, retrievedAt }) => {
     `<untrusted_web_content origin="${escapeAttr(origin)}" ` +
     `tool="${escapeAttr(tool)}" retrieved_at="${ts}">\n${neutralizeFence(body)}\n` +
     `</untrusted_web_content>`
-  );
-};
-
-/**
- * Wrap a browser-runner's output (a do/get/check summary / value / rationale)
- * before it crosses BACK into the MAIN agent's privileged context.
- *
- * why: the runner operates on untrusted pages. A prompt-injected page can steer
- * what the runner reports, so its summary is itself untrusted — it must not be
- * read by the main agent as instructions. Same discipline as
- * <untrusted_web_content>, with the tab + goal as context. The main agent USES
- * the information to decide its next step but treats any embedded instruction as
- * page-originated data, never a command.
- *
- * @param {Object} args
- * @param {string} [args.tabUrl]   the tab the runner drove
- * @param {string} [args.goal]     the instruction/query/assertion given to the runner
- * @param {string} args.body       the runner's output text
- * @param {string} [args.retrievedAt]
- * @returns {string}
- */
-export const wrapUntrustedRunner = ({ tabUrl, goal, body, retrievedAt }) => {
-  const ts = retrievedAt ?? new Date().toISOString();
-  return (
-    `<untrusted_runner_summary tab="${escapeAttr(tabUrl ?? '')}" ` +
-    `goal="${escapeAttr((goal ?? '').slice(0, 160))}" retrieved_at="${ts}">\n${neutralizeFence(body)}\n` +
-    `</untrusted_runner_summary>`
   );
 };

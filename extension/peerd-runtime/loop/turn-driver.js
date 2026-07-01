@@ -230,8 +230,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // EXPOSURE CUTOVER: the MAIN agent's browser surface is message_actor (+
   // actor_list/open_tab). The low-level DOM/page tools are hidden here so a11y
   // trees, refs, and raw page content never enter the main context — they're
-  // the runner's, reached only through do/get/check. The tools stay REGISTERED
-  // (listTools is full); the runner still narrows from the full set via
+  // the web actor's, reached only by messaging a tab's actor. The tools stay
+  // REGISTERED (listTools is full); the actor narrows from the full set via
   // getToolDescriptors. This filter is main-turn-only. See tools/exposure.js.
   //
   // SECOND cut: the session's tool MANIFEST (/tools — tools/manifests.js).
@@ -284,9 +284,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // SIXTH cut: goal mode. complete_goal is registered always but revealed to
     // the model ONLY while a goal run is live for this session (goalActiveFor),
     // so a normal chat never sees it. Outermost so it composes over the rest.
-    // SEVENTH cut (DESIGN-17): the actor surface. The instance-mutating tier and
-    // the do/get/check page runner LEAVE the main agent (it delegates via
-    // message_actor, which it keeps). Outermost so it composes over everything else.
+    // SEVENTH cut (DESIGN-17): the actor surface. The instance-mutating tier
+    // LEAVES the main agent (it delegates via message_actor, which it keeps).
+    // Outermost so it composes over everything else.
     const descriptors = filterActorSurface(
       filterByGoalActive(
         filterByDwebActive(

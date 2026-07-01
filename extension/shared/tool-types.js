@@ -156,11 +156,10 @@
  * @property {Primitive} primitive    the RESOURCE/domain this tool exercises
  *   (tab / web / webvm / notebook / app / memory / inspect / subagent). Answers
  *   "what does it touch?".
- * @property {'inline'|'runner'|'subagent'} [dispatch]   the EXECUTION mechanism —
+ * @property {'inline'|'subagent'} [dispatch]   the EXECUTION mechanism —
  *   orthogonal to `primitive`. Absent/'inline' = runs in the dispatcher.
- *   'runner' = carried out by a spawned browser-runner (do/get/check: a tab
- *   resource driven by a runner). Lets the UI show "tab · via runner" without
- *   conflating the mechanism into the primitive. Answers "how is it run?".
+ *   'subagent' = carried out by a spawned child session. Lets the UI show the
+ *   mechanism without conflating it into the primitive. Answers "how is it run?".
  * @property {Record<string, any>} schema           JSON Schema for args
  * @property {SideEffect} sideEffect
  * @property {boolean} [dweb]   true = a dweb network tool (publish/discover/

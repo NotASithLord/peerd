@@ -109,14 +109,14 @@ export const defaults = {
   // no chrome.debugger API, so the setting is moot there on either channel.
   advancedAutomationEnabled: { store: false, preview: true },
 
-  // Page-reader (get/check) runner model override. '' is NO override — the
-  // runner resolves to the active provider's fast default (Haiku on Anthropic
-  // via adapter.defaultRunnerModel; resolveRunnerModel), NOT the chat model.
-  // So out of the box page reads ride Haiku while `do` and chat keep the
-  // stronger model. A non-empty value pins a specific SAME-PROVIDER model id;
-  // runRunner falls back to the inherited chat model when the runner blows its
-  // step budget or refuses. Once the local WebGPU runner is downloaded it
-  // becomes the resolved default here automatically. Same on both channels.
+  // Web actor model override. '' is NO override — the web actor resolves to
+  // the active provider's fast default (Haiku on Anthropic via
+  // adapter.defaultRunnerModel; resolveRunnerModel), NOT the chat model. So out
+  // of the box page reads ride Haiku while chat keeps the stronger model. A
+  // non-empty value pins a specific SAME-PROVIDER model id. Once the local
+  // WebGPU runner is downloaded it becomes the resolved default here
+  // automatically. The KEY stays `runnerModel` for saved-settings continuity.
+  // Same on both channels.
   runnerModel: { store: '', preview: '' },
 
   // Cost telemetry: the meter is always on; the hard limit is opt-in.

@@ -65,40 +65,41 @@ describe('tool manifests — presets vs the real registry', () => {
 
 describe('tool manifests — main-turn descriptor pipeline (real tool list)', () => {
   // The REAL main-turn pipeline (turn-driver.js): the manifest filter THEN
-  // filterActorSurface as the outermost cut. DESIGN-17 folded do/get/check +
+  // filterActorSurface as the outermost cut. DESIGN-17 folded the DOM toolset +
   // the mutating tier into the tab's actor, so they leave the MAIN agent even
-  // when a preset names them (the preset still lists them for the SUBAGENT path).
+  // when a preset names them (the preset still lists the DOM tools so the web
+  // actor inherits them via the manifest).
   /** @param {string} preset */
   const mainListFor = (preset) => filterActorSurface(
     filterDescriptorsByManifest(mainAgentDescriptors(registered), resolveManifestAllow({ preset })),
   ).map((t) => t.name);
 
-  it('research: keeps the page-via-actor channel + memory, folds do/get/check away', () => {
+  it('research: keeps the page-via-actor channel + memory, hides the DOM tools', () => {
     const names = mainListFor('research');
     // fetch_url is actor-only (correctly NOT in the main list); the main
     // agent's web channel is the actor (message_actor) + tab management.
     for (const keep of ['message_actor', 'actor_list', 'open_tab', 'remember', 'read_memory', 'inspect_audit_log']) {
       expect(names).toContain(keep);
     }
-    // do/get/check folded into the actor; execution/edit/spawn dropped by the preset.
-    for (const drop of ['do', 'get', 'check', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'spawn_subagent', 'request_review', 'load_skill']) {
+    // the DOM tools go to the actor; execution/edit/spawn dropped by the preset.
+    for (const drop of ['snapshot', 'click', 'type', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'spawn_subagent', 'request_review', 'load_skill']) {
       expect(names.indexOf(drop)).toBe(-1);
     }
   });
 
-  it('browse-only: keeps tabs + the actor channel, folds get/check away', () => {
+  it('browse-only: keeps tabs + the actor channel, hides the DOM tools', () => {
     const names = mainListFor('browse-only');
     // fetch_url is actor-only (correctly NOT in the main list); the main
     // agent reaches web reads via the actor (message_actor).
     for (const keep of ['message_actor', 'actor_list', 'open_tab']) {
       expect(names).toContain(keep);
     }
-    for (const drop of ['do', 'get', 'check', 'remember', 'read_memory', 'edit_file', 'vm_boot', 'capture']) {
+    for (const drop of ['snapshot', 'read_page', 'click', 'remember', 'read_memory', 'edit_file', 'vm_boot', 'capture']) {
       expect(names.indexOf(drop)).toBe(-1);
     }
   });
 
-  it('runner internals named by a preset NEVER surface in the main list (exposure filter wins)', () => {
+  it('DOM tools named by a preset NEVER surface in the main list (exposure filter wins)', () => {
     for (const preset of Object.keys(TOOL_MANIFEST_PRESETS)) {
       const names = mainListFor(preset);
       for (const hidden of MAIN_AGENT_HIDDEN_TOOLS) {
@@ -155,9 +156,9 @@ describe('tool manifests — the /tools command flow (real session store)', () =
       filterDescriptorsByManifest(mainAgentDescriptors(registered), allow),
     );
     expect(descriptors.length < mainAgentDescriptors(registered).length).toBe(true);
-    // the page-via-actor channel stays; do/get/check + vm_boot are off the main agent.
+    // the page-via-actor channel stays; the DOM tools + vm_boot are off the main agent.
     expect(descriptors.map((t) => t.name)).toContain('message_actor');
-    expect(descriptors.map((t) => t.name).indexOf('do')).toBe(-1);
+    expect(descriptors.map((t) => t.name).indexOf('snapshot')).toBe(-1);
     expect(descriptors.map((t) => t.name).indexOf('vm_boot')).toBe(-1);
   });
 

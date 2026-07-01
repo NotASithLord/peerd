@@ -130,8 +130,6 @@ export const spawnSubagentTool = {
     // Default ASYNC (non-blocking, DESIGN-11): fire it, return a handle,
     // and the child's result re-enters this session as a later synthetic
     // turn. sync:true keeps the blocking path for "I need it THIS turn".
-    // (The do/get/check runner uses the subagent/spawn route, which stays
-    // synchronous regardless — this default is the main-agent tool only.)
     if (args.sync !== true) {
       if (typeof sctx.spawnSubagentAsync !== 'function') {
         return { ok: false, error: 'async_subagent_unavailable' };

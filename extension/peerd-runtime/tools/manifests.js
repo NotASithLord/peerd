@@ -29,14 +29,12 @@
 // in-browser suite checks every entry against the real registry, and the
 // bun suite checks the runner-internals invariant below, so drift fails CI.
 //
-// INVARIANT (do/get/check): those tools dispatch to a browser-runner
-// child whose toolset INTERSECTS this manifest (spawn.js). A preset that
-// grants `do` must therefore also carry the runner's DO_TOOLSET, and one
-// that grants get/check the READ_TOOLSET (runner/index.js) — otherwise
-// the runner spawns tool-less and every do/get/check call dies. The
-// runner internals stay hidden from the MAIN agent regardless
-// (exposure.js filters first); listing them here only lets the RUNNER
-// keep them.
+// INVARIANT (web actor): a preset that grants message_actor must also
+// carry the web actor's DOM toolset (snapshot/read_page/click/type/...),
+// because the web actor INHERITS the owner chat's toolManifest (spawn.js).
+// Omit those and the actor is minted tool-less and can't drive its tab.
+// The DOM tools stay hidden from the MAIN agent regardless (exposure.js
+// filters first); listing them here only lets the ACTOR keep them.
 export const TOOL_MANIFEST_PRESETS = Object.freeze({
   research: Object.freeze({
     description: 'web reads + search, page browsing (message a tab\'s actor), memory, introspection — no VM/JS/App, no file edits, no spawning',
@@ -47,14 +45,10 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // fetch_url or its drive-a-tab DOM tools.
       'fetch_url', 'capture',
       // the main agent's browser surface: enumerate actors (instances/tabs/
-      // integrations) + open a tab + message a tab's web actor to read or act
-      // (do/get/check are folded into the actor).
+      // integrations) + open a tab + message a tab's web actor to read or act.
       'actor_list', 'open_tab', 'message_actor',
-      // do/get/check stay for SUBAGENTS (they can't message actors); the main
-      // agent has them folded into the tab's actor by the cutover.
-      'do', 'get', 'check',
-      // page DOM toolset (inherited by the web actor, which DOES the page work):
-      // DO_TOOLSET ∪ READ_TOOLSET (see invariant above)
+      // page DOM toolset (inherited by the web actor, which DOES the page work —
+      // see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
       'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
       // memory
@@ -73,8 +67,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // READ-ONLY by this manifest (only the READ DOM tools below are allowed, so
       // it can observe but not click/type — the manifest constrains the actor too).
       'actor_list', 'open_tab', 'navigate', 'message_actor',
-      'get', 'check',   // subagent read path (the main agent reads via the actor)
-      // READ_TOOLSET only (observe, never mutate) — inherited by the web actor.
+      // read-only DOM subset (observe, never mutate) — inherited by the web actor.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'view',
       // web reads: fetch_url (the web actor's sessionless fetch)
       'fetch_url',

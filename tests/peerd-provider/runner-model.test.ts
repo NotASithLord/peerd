@@ -1,4 +1,4 @@
-// resolveRunnerModel — the page-reader (do/get/check) runner model resolution.
+// resolveRunnerModel — the web actor model resolution.
 // Pure; first match wins: pin → local WebGPU → provider default → inherit.
 
 import { describe, expect, test } from 'bun:test';

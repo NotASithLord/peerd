@@ -73,11 +73,11 @@ let turn = fresh();
 // cacheReadTokens, cacheWriteTokens, cost (USD) }. We keep the whole thing so
 // the scorecard can split cheap cache-reads from full-price fresh tokens and
 // report actual $/task, instead of collapsing it all into one number.
-// runner: tokens spent by browser-runners (do/get/check) THIS turn — separate
-// from `cost` (the main session's spend). After the do/get/check cutover the
-// page mechanics move off the main context into runners; this is where that
-// offloaded spend shows up so the scorecard stays honest (main drops, runner
-// appears — not "free").
+// runner: tokens spent by the web actor (+ any subagents) THIS turn — separate
+// from `cost` (the main session's spend). Page mechanics live off the main
+// context in the actor; this is where that offloaded spend shows up so the
+// scorecard stays honest (main is low, the actor's spend appears — not "free").
+// The bucket keeps the `runner` name for continuity with the runnerModel A/B.
 /** @returns {Turn} */
 function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null }; }
 
@@ -398,7 +398,7 @@ async function populateModelSelects() {
     return el;
   };
   const a = fill('cfgA'); const b = fill('cfgB');
-  // Default A to a Haiku-class fast model (the page-reader runner default); B to
+  // Default A to a Haiku-class fast model (the web actor default); B to
   // a different cloud model. If the local model is already downloaded,
   // refreshLocalStatus will add it + switch B to it (the natural local-vs-Haiku A/B).
   const haiku = cloud.find((/** @type {any} */ o) => /haiku/i.test(o.model));
