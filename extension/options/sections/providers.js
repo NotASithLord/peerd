@@ -5,7 +5,7 @@
 // section (the disclosure Section wrapper is dropped; the options shell
 // renders the page heading). Each provider gets its own logo card with
 // a slick inline key editor (collapsed to a masked badge until you hit
-// Replace), plus the default provider+model selectors, the page-reader
+// Replace), plus the default provider+model selectors, the web-actor
 // model, and the Ollama GPU-fit recommendation.
 //
 // The key is sent to the SW as plaintext via runtime.sendMessage; the
@@ -429,13 +429,13 @@ export const ProvidersSection = {
           ? [m('.settings-divider'), m(OllamaRecommendation, { send })]
           : null,
         m('.input-row', [
-          m('label', { for: 'runner-model' }, 'Page-reader model'),
+          m('label', { for: 'runner-model' }, 'Web actor model'),
           m('input', {
             id: 'runner-model',
             type: 'text',
             spellcheck: false,
             // why: blank no longer means "inherit chat model" — it means this
-            // provider's fast runner default (Haiku on Anthropic / OpenRouter).
+            // provider's fast web-actor default (Haiku on Anthropic / OpenRouter).
             // Show that id as the placeholder so the field is honest about what runs.
             placeholder: runnerPlaceholder,
             value: state.settings?.runnerModel ?? '',
@@ -446,13 +446,11 @@ export const ProvidersSection = {
           }),
         ]),
         m('p.hint', [
-          'The page-reading sub-agents (',
-          m('code', 'get'), '/', m('code', 'check'),
-          ') run on a fast, cheap model by default — ',
+          'The web actor — peerd’s page reader and operator — runs on a fast, cheap ',
+          'model by default: ',
           m('code', runnerPlaceholder),
           ' on ', m('strong', defaultProvRow?.label ?? 'this provider'),
-          '. Leave blank for that default, or pin any same-provider model id. ',
-          'It falls back to the chat model automatically when it struggles.',
+          '. Leave blank for that default, or pin any same-provider model id.',
         ]),
         resetRow(send, ['providerName', 'providerModel', 'runnerModel']),
 
@@ -466,7 +464,7 @@ export const ProvidersSection = {
         m('h3', 'Default model for new chats'),
         m('p.muted', 'Add an API key for a provider above — or start a local '
           + 'Ollama daemon — and this is where you’ll pick the default model and '
-          + 'page-reader model for new chats. Nothing is assumed until you '
+          + 'web actor model for new chats. Nothing is assumed until you '
           + 'connect a provider.'),
       ],
     ]);

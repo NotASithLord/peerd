@@ -3,11 +3,11 @@
 // the same real web tasks (the actual agent loop, tools, and gates — not a mock).
 //
 // A config is a PAIR of models, because that's what actually runs a task:
-//   • the MAIN model — the chat agent that plans + orchestrates do/get/check
-//   • the RUNNER model — the disposable sub-agent that reads/acts on pages
+//   • the MAIN model — the chat agent that plans + orchestrates
+//   • the WEB ACTOR model — the sub-agent that reads/acts on pages
 // Both are configurable per side, so you can compare e.g. "cloud main + cloud
-// runner" vs "fully on-device (local main + local runner)" — and the cost is
-// honest: a fully-local config reads $0 total.
+// web actor" vs "fully on-device (local main + local web actor)" — and the cost
+// is honest: a fully-local config reads $0 total.
 //
 // Brand rule: monochrome; pass/fail by glyph (✓/✗) + the lone semantic red.
 // The engine (eval/eval-engine.js) owns the SW port + run loop; this is the view.
@@ -76,15 +76,30 @@ async function loadModels() {
   ui.localLabel = (ls?.available || ls?.downloaded) ? (ls.label || 'Local model') : null;
   const hasKey = Array.isArray(ps?.providers) ? ps.providers.some((/** @type {any} */ p) => p.hasKey) : !!ps?.providers?.hasKey;
   ui.warn = (!ps?.ok || !hasKey) ? 'No provider key detected (or the vault is locked). Add a key + unlock in Settings, then reopen the Lab.' : '';
-  // Defaults: A = a cloud pair (cloud main + Haiku runner); B = on-device where
-  // possible (local main + local runner) so the headline comparison is cloud-vs-local.
-  const haiku = ui.cloudOptions.find((o) => /haiku/i.test(o.model));
+  // Defaults: A = a cloud pair (cloud main + the real WEB ACTOR default, Haiku); B =
+  // on-device where possible (local main + local web actor) so the headline comparison
+  // is cloud-vs-local.
   const firstCloud = ui.cloudOptions[0];
   const localMain = ui.allOptions.find((o) => o.provider === 'local-webgpu');
+  // The web actor's TRUE default model is the active provider's defaultRunnerModel
+  // (Haiku on OpenRouter/Anthropic) — resolved from provider/status, NOT a /haiku/
+  // guess over the user's curated list. That id often isn't in the curated set (an
+  // OR user commonly curates only their main model), so surface it as a selectable
+  // option; otherwise the <select> falls back to GLM and misrepresents what runs.
+  const providers = Array.isArray(ps?.providers) ? ps.providers : [];
+  const activeProv = providers.find((/** @type {any} */ p) => p.name === firstCloud?.provider)
+    ?? providers.find((/** @type {any} */ p) => p.hasKey && p.name !== 'local-webgpu');
+  const webActorDefault = activeProv?.defaultRunnerModel || '';
+  if (webActorDefault && !ui.cloudOptions.some((o) => o.model === webActorDefault)) {
+    ui.cloudOptions = [
+      { value: `${activeProv.name}::${webActorDefault}`, model: webActorDefault, provider: activeProv.name, providerLabel: activeProv.label ?? activeProv.name, label: `${webActorDefault} (web actor default)` },
+      ...ui.cloudOptions,
+    ];
+  }
   if (!ui.mainA) ui.mainA = firstCloud?.value ?? ui.allOptions[0]?.value ?? '';
-  if (!ui.runnerA) ui.runnerA = haiku ? haiku.model : (ui.cloudOptions[0]?.model ?? '');
+  if (!ui.runnerA) ui.runnerA = webActorDefault || (ui.cloudOptions[0]?.model ?? '');
   if (!ui.mainB) ui.mainB = localMain?.value ?? ui.mainA;
-  if (!ui.runnerB) ui.runnerB = ui.localLabel ? 'local' : (ui.cloudOptions.find((o) => o.model !== ui.runnerA)?.model ?? ui.runnerA);
+  if (!ui.runnerB) ui.runnerB = ui.localLabel ? 'local' : (webActorDefault || ui.runnerA);
   ui.loaded = true;
   m.redraw();
 }
@@ -162,7 +177,7 @@ function singleBoard({ config, card }) {
 const pairCol = (side) => m('.eval-pair', [
   m('.eval-pair-head', side),
   m('label.eval-field', ['main model', m('select', { value: side === 'A' ? ui.mainA : ui.mainB, disabled: ui.running, onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui[side === 'A' ? 'mainA' : 'mainB'] = e.target.value; } }, mainOptionEls())]),
-  m('label.eval-field', ['page runner', m('select', { value: side === 'A' ? ui.runnerA : ui.runnerB, disabled: ui.running, onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui[side === 'A' ? 'runnerA' : 'runnerB'] = e.target.value; } }, runnerOptionEls())]),
+  m('label.eval-field', ['web actor', m('select', { value: side === 'A' ? ui.runnerA : ui.runnerB, disabled: ui.running, onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui[side === 'A' ? 'runnerA' : 'runnerB'] = e.target.value; } }, runnerOptionEls())]),
 ]);
 
 // The selected suite (the id is a free string in state; SUITES is keyed).
@@ -174,7 +189,7 @@ export const EvalSection = {
     return m('div.eval-lab', [
       m('h2', 'Lab'),
       m('p.muted', ['Pit two model configs head-to-head on real web tasks — the same agent loop, tools, and gates a live chat uses. Each config is a pair: a ',
-        m('strong', 'main'), ' model (plans + orchestrates) and a ', m('strong', 'page runner'), ' (reads/acts on pages). ',
+        m('strong', 'main'), ' model (plans + orchestrates) and a ', m('strong', 'web actor'), ' (reads/acts on pages). ',
         m('a.eval-link', { href: '#', onclick: (/** @type {Event} */ e) => { e.preventDefault(); openOptions('providers'); } }, 'Configure models →')]),
       ui.warn ? m('p.error', ui.warn) : null,
       m('p.eval-note', 'A run takes over the agent session (your current chat resets) and drives a hidden browser window — don\'t start a chat while it runs.'),

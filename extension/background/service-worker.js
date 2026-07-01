@@ -2631,6 +2631,16 @@ const actorMailbox = {
 const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
+  // latency-sensitive job that ingests untrusted page content — so it runs on the
+  // fast, cheap RUNNER model (Haiku by default), NOT the chat's stronger, pricier
+  // model. Same resolution the old do/get/check runner used: explicit pin →
+  // local WebGPU → this provider's fast default (Haiku) → inherit the chat model
+  // (''). Engine actors (webvm/notebook/app, via mintActor) are UNCHANGED — they
+  // reason about code/shell and keep the chat model.
+  const actorProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
+  const runnerProvider = listProviders().find((p) => p.name === actorProviderName);
+  const webActorModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
   const created = await sessions.create({
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
@@ -2639,7 +2649,9 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
     // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
     ...(backing ? { backing } : {}),
     ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
-    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    // '' from resolveRunnerModel means "inherit the chat model" — fall back to the
+    // owner chat's model so the empty-pin semantics + the session-create default hold.
+    ...((webActorModel || ownerChat?.model) ? { model: webActorModel || ownerChat?.model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
