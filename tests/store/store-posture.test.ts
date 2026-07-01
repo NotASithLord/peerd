@@ -75,17 +75,25 @@ describe('store manifest posture', () => {
     expect(csp).not.toMatch(/\bwss:(?!\/\/)/);
   });
 
-  test('connect-src admits the local Ollama daemon on every channel', () => {
-    // The native Ollama adapter ships in the box, so the store package now
-    // GENUINELY uses http://localhost:11434 — declaring it no longer
-    // violates the "never request what the shipped version doesn't use"
-    // store posture. Pinned exact-origin (scheme+host+port), not a
-    // scheme wildcard.
+  test('connect-src admits Ollama on the standard port, host-wildcard but PORT-SCOPED (issue #104)', () => {
+    // The native Ollama adapter ships in the box and now supports a REMOTE
+    // daemon (issue #104, e.g. a LAN box at http://192.168.1.4:11434). MV3 CSP
+    // can't be set dynamically, so the host can't be pinned at build time — the
+    // connect-src is a HOST wildcard on the standard Ollama port: http://*:11434.
+    // The real gate stays the exact-origin EGRESS allowlist (the SW adds only the
+    // user's configured host); this CSP entry is the browser-level permission.
+    // The invariant pinned here: the wildcard is PORT-SCOPED (only :11434) — no
+    // blanket http: and no plain-http on any other port (an HTTPS-fronted remote
+    // host rides the existing `https:`).
     for (const mf of [manifest, preview]) {
       const csp = mf.content_security_policy?.extension_pages ?? '';
-      expect(csp).toContain('http://localhost:11434');
-      // No blanket http: — only the pinned loopback origin.
-      expect(csp).not.toMatch(/\bhttp:(?!\/\/localhost:11434)/);
+      expect(csp).toContain('http://*:11434');
+      // Every plain-http source must be on :11434 — nothing wider slipped in.
+      const httpSources = csp.match(/http:\/\/\S+/g) ?? [];
+      expect(httpSources.length).toBeGreaterThan(0);
+      for (const src of httpSources) expect(src).toMatch(/:11434$/);
+      // No scheme-only `http:` (which would admit any http host on any port).
+      expect(csp).not.toMatch(/\bhttp:(?!\/\/)/);
     }
   });
 

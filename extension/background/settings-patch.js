@@ -184,5 +184,17 @@ export const normalizeSettingsPatch = (patch, {
   if (dwebEnabled && typeof patch.dwebEnabled === 'boolean') {
     next.dwebEnabled = patch.dwebEnabled;
   }
+  // Ollama host (issue #104). Accept ONLY a well-formed http(s) ORIGIN, stored
+  // normalized (origin-only — scheme + host + port, no path/query). why strict:
+  // this value is added to the egress allowlist and fetched with no key, so a
+  // malformed or non-http(s) value must never persist. `new URL(...).origin`
+  // both validates and canonicalizes (drops any path, lowercases the host). A
+  // garbage/non-string/non-http value drops the key, leaving the prior host.
+  if (typeof patch.ollamaHost === 'string') {
+    try {
+      const u = new URL(patch.ollamaHost.trim());
+      if (u.protocol === 'http:' || u.protocol === 'https:') next.ollamaHost = u.origin;
+    } catch { /* not a valid URL — drop the key */ }
+  }
   return next;
 };

@@ -31,7 +31,8 @@ export const makeProviderRoutes = (deps) => {
       // and doesn't load a multi-GB model into memory just for a ping.
       if (adapter?.keyless && adapter.liveModels) {
         try {
-          const models = await listProviderModels(provider, { safeFetch });
+          // ollamaHost (issue #104): test the daemon the user actually configured.
+          const models = await listProviderModels(provider, { safeFetch, ollamaHost: settingsStore.get().ollamaHost });
           auditLog.append({ type: 'provider_validated', details: { provider } }).catch(() => {});
           return { ok: true, models: models?.length ?? 0 };
         } catch (e) {
