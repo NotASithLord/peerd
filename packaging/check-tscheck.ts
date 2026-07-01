@@ -44,7 +44,8 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // directly now). A legitimate decrease (files deleted, not directives dropped).
 // → 474: the web-actor page-API translation core (subagent/page-api.js) + the
 // page-call handler (subagent/page-call-handler.js), +2 on the post-cull set.
-const COVERED_FLOOR = 474;
+// 474 → 475: the code-REPL action tool (tools/defs/page-code.js, PR #119).
+const COVERED_FLOOR = 475;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

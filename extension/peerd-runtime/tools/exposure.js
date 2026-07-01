@@ -46,6 +46,9 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // never holds it. With call_api/read_article/web_search/submit_form removed, the
   // web actor (fetch_url + drive-a-tab) is the single entry point for ALL web work.
   'fetch_url',
+  // page_code is the code-surface web actor's action tool (PR #119 A/B arm) —
+  // same boundary as the DOM tools it wraps: page-driving stays off the main agent.
+  'page_code',
 ]));
 
 /** Is this tool hidden from the main agent (actor-only)? Pure. @param {string} name */
@@ -161,6 +164,10 @@ export const ACTOR_MUTATING_TOOLS = Object.freeze(new Set([
   'js_notebook', 'js_write_file', 'js_delete',
   'app_update', 'app_write_file', 'app_delete_file', 'app_delete',
   'edit_file',
+  // PR #119: the code-surface web actor's page-driving REPL. Unlike js_run
+  // (a parent tool, deliberately absent), page_code ACTS on the actor's owned
+  // tab — so like every page-driving tool it is refused for any non-actor ctx.
+  'page_code',
 ]));
 
 /** Is this a tiered mutating tool (actor-only, off the main agent)? Pure. @param {string} name */
@@ -174,6 +181,18 @@ export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes',
   'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
 ]);
+
+// PR #119 — the CODE-surface web actor's toolset (the Aside-style A/B arm: the
+// actor WRITES page-driving JS instead of emitting discrete tool calls).
+// Perception stays snapshot-based (snapshot/read_page — the ONE unchanged axis);
+// ACTION collapses into page_code, whose page.* calls dispatch the SAME gated
+// DOM tools via the SW 'page/call' route — so the discrete click/type/navigate
+// leave the MODEL's hand without leaving the gate's. why so tight: the A/B must
+// change one variable, and the code worker's capability profile (page + pure
+// compute only) must mirror what the surface advertises.
+export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set([
+  'snapshot', 'read_page', 'page_code',
+]));
 
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
@@ -218,14 +237,20 @@ const WEB_API_TOOLS = Object.freeze(new Set(['fetch_url']));
 
 /**
  * The Set an actor may call given its kind AND (for a web actor) its backing — the
- * full web toolset for a tab backing, fetch_url-only for an API backing. Pure.
- * @param {string} [kind] @param {'tab' | 'api'} [backing]
+ * full web toolset for a tab backing, fetch_url-only for an API backing. PR #119:
+ * a tab-backed web actor on the CODE surface gets WEB_ACTOR_CODE_TOOLS instead
+ * (action collapses into page_code; perception stays snapshot/read_page). An
+ * absent surface means 'tools' — every existing caller keeps today's set. Pure.
+ * @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface]
  */
-export const actorAllowedToolsFor = (kind, backing) =>
-  (kind === 'web' && backing === 'api') ? WEB_API_TOOLS : actorAllowedTools(kind);
+export const actorAllowedToolsFor = (kind, backing, surface) => {
+  if (kind === 'web' && backing === 'api') return WEB_API_TOOLS;
+  if (kind === 'web' && surface === 'code') return WEB_ACTOR_CODE_TOOLS;
+  return actorAllowedTools(kind);
+};
 
-/** May an actor of `kind`/`backing` call this tool? Pure. @param {string} name @param {string} [kind] @param {'tab' | 'api'} [backing] */
-export const isAllowedForActor = (name, kind, backing) => actorAllowedToolsFor(kind, backing).has(name);
+/** May an actor of `kind`/`backing`/`surface` call this tool? Pure. @param {string} name @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface] */
+export const isAllowedForActor = (name, kind, backing, surface) => actorAllowedToolsFor(kind, backing, surface).has(name);
 
 // Per-tool target-id ARG field — what an actor-gated tool calls its instance
 // target. The actor dispatch wrapper force-injects the bound id here (the
@@ -286,12 +311,13 @@ export const actorWebTabTarget = (args) =>
  * The descriptor list an actor of `kind`/`backing` should SEE — its own toolset.
  * Pure. (The gate is the wall; this keeps the model's advertised list tight so it
  * isn't shown tools it would only get refused for.) DESIGN-18: backing-aware, so an
- * API actor is advertised ONLY fetch_url, matching its lore + the gate.
+ * API actor is advertised ONLY fetch_url, matching its lore + the gate. PR #119:
+ * surface-aware, so a code-surface web actor is advertised only its code toolset.
  * @template {{ name: string }} T
- * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @param {'tab' | 'api'} [backing] @returns {T[]}
+ * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface] @returns {T[]}
  */
-export const actorDescriptors = (descriptors, kind, backing) => {
-  const allow = actorAllowedToolsFor(kind, backing);
+export const actorDescriptors = (descriptors, kind, backing, surface) => {
+  const allow = actorAllowedToolsFor(kind, backing, surface);
   return descriptors.filter((t) => allow.has(t.name));
 };
 

@@ -14,12 +14,15 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number }} [opts]
+   * @param {{ timeoutMs?: number, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string }} [opts]
+   *   caps: capability profile for the sealed worker (default = the historical
+   *   js_run surface). ownerSessionId: the actor session this job runs FOR —
+   *   required by the page bridge; set only from a trusted ctx (PR #119).
    * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null }>}
    */
-  execHeadless: async (code, { timeoutMs } = {}) => {
+  execHeadless: async (code, { timeoutMs, caps, ownerSessionId } = {}) => {
     await ensureOffscreen();
-    const reply = await sendMessage({ type: 'job/run', code, timeoutMs });
+    const reply = await sendMessage({ type: 'job/run', code, timeoutMs, caps, ownerSessionId });
     if (!reply?.ok) throw new Error(reply?.error ?? 'headless job failed');
     return reply.result;
   },

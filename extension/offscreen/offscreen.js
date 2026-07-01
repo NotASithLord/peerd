@@ -329,7 +329,10 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // is unset today, so this is defense-in-depth, not an active hole.
   if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
   runJob(
-    { code: msg.code, timeoutMs: msg.timeoutMs },
+    // caps + ownerSessionId ride from the SW's job/run message (trusted: the
+    // sender gate above). The WORKER never supplies either — job-runner attaches
+    // them from these params and ignores anything in the worker's own messages.
+    { code: msg.code, timeoutMs: msg.timeoutMs, caps: msg.caps, ownerSessionId: msg.ownerSessionId },
     { sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }) },
   )
     .then((result) => sendResponse({ ok: true, result }))

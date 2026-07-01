@@ -29,6 +29,19 @@ const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
 // static entry import does. Don't let it drift from buildEntry's builtins below.
 export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
 
+// The default capability profile — the surface every worker had before profiles
+// existed. A caller that passes nothing gets EXACTLY the historical worker.
+// why a profile at all: the web actor's code-REPL arm (PR #119) runs
+// MODEL-AUTHORED page-driving code in this same sealed worker, and its actor
+// deliberately holds NO egress / subagent / opfs (an actor that ingests
+// untrusted page text must not also wield those — the exclusion IS the
+// boundary, exposure.js). The profile is enforced TWICE: here (the surface is
+// absent / throws inside the realm) and in the HOST relay (job-runner.js
+// refuses the bridge message), so a seal escape alone doesn't re-open a lane.
+export const DEFAULT_WORKER_CAPS = Object.freeze({
+  page: false, egress: true, subagent: true, opfs: true,
+});
+
 /**
  * Build the worker-entry source string for one run.
  *
@@ -37,9 +50,12 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
  * @param {string} [opts.entryPath]   resolver entry name (default 'notebook.js')
  * @param {string} opts.notebookId    realm id surfaced as peerd.self.id
  * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
+ * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }} [opts.caps]
+ *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface)
  * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }> }>}
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, caps }) => {
+  const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
@@ -213,7 +229,57 @@ const distributedInfo = () => new Promise((resolve, reject) => {
   pendingDistributed.set(rid, { resolve, reject });
   postMessage({ type: 'distributed-request', rid });
 });
-
+${profile.page ? `
+// --- peerd.page.* (web-actor page control) proxy ---
+// PR #119 code-REPL arm: each page.* call is ONE host round-trip; the host
+// relays it to the SW's 'page/call' route, which dispatches the SAME gated tool
+// the tool-call web actor uses (denylist / confirm / audit unchanged) against
+// the ONE tab this actor owns. The host attaches the owner identity itself —
+// nothing this realm sends can choose the session or the tab.
+const pendingPage = new Map();
+let nextPageRid = 1;
+const pageCall = (method, args) => new Promise((resolve, reject) => {
+  const rid = nextPageRid++;
+  pendingPage.set(rid, { resolve, reject });
+  postMessage({ type: 'page-request', rid, method, args });
+  setTimeout(() => {
+    if (pendingPage.has(rid)) {
+      pendingPage.delete(rid);
+      reject(new Error('page.' + method + ' timed out'));
+    }
+  }, 30000);
+});
+globalThis.peerd.page = {
+  goto:     (url) => pageCall('goto', { url }),
+  click:    (selector, opts) => pageCall('click', (opts && typeof opts.nth === 'number') ? { selector, nth: opts.nth } : { selector }),
+  fill:     (selector, text) => pageCall('fill', { selector, text }),
+  snapshot: () => pageCall('snapshot', {}),
+  content:  () => pageCall('content', {}),
+};
+` : ''}${profile.egress ? '' : `
+// Capability profile: NO egress. peerd.egress.fetch throws in-realm; the host
+// relay refuses any 'fetch-request' this realm still emits (global fetch is the
+// seal's bridge and cannot be removed here) — two walls, same refusal.
+globalThis.peerd.egress.fetch = () => {
+  throw new Error('peerd.egress.fetch is not available in this worker (no-egress capability profile).');
+};
+`}${profile.subagent ? '' : `
+// Capability profile: NO subagents.
+globalThis.peerd.runtime.runAgent = () => {
+  throw new Error('peerd.runtime.runAgent is not available in this worker (no-subagent capability profile).');
+};
+`}${profile.opfs ? '' : `
+// Capability profile: NO OPFS. Files and dynamic imports are off; the host
+// relay refuses any 'opfs-request' as the second wall.
+const noOpfs = (name) => () => {
+  throw new Error('peerd.self.' + name + ' is not available in this worker (no-opfs capability profile).');
+};
+globalThis.peerd.self.readFile = noOpfs('readFile');
+globalThis.peerd.self.writeFile = noOpfs('writeFile');
+globalThis.peerd.self.listFiles = noOpfs('listFiles');
+globalThis.peerd.self.import = noOpfs('import');
+globalThis.__peerd_dynamic_import = noOpfs('import');
+`}
 self.addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || typeof m !== 'object') return;
@@ -242,7 +308,15 @@ self.addEventListener('message', (ev) => {
     else p.resolve(m.result);
     return;
   }
-});
+${profile.page ? `  if (m.type === 'page-response') {
+    const p = pendingPage.get(m.rid);
+    if (!p) return;
+    pendingPage.delete(m.rid);
+    if (m.error) p.reject(new Error(m.error));
+    else p.resolve(m.result);
+    return;
+  }
+` : ''}});
 
 const __start = performance.now();
 (async () => {

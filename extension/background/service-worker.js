@@ -231,6 +231,8 @@ import {
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  // PR #119: the code-REPL arm's host-side page-call handler.
+  makePageCallHandler,
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
@@ -953,7 +955,7 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
@@ -1063,6 +1065,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // DESIGN-18: a web actor's backing (the gate reads it to refuse DOM tools for an
     // API actor, which has no tab). Absent = tab backing (the DESIGN-17 default).
     ...(actorBacking ? { backing: actorBacking } : {}),
+    // PR #119: a TAB web actor's ACTION surface — 'tools' (discrete DOM tools) or
+    // 'code' (page_code REPL). An explicit arg wins (the page/call route forces
+    // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
+    // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
+    ...((actorType === 'web' && actorBacking !== 'api')
+      ? { actorSurface: (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')) }
+      : {}),
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -2555,6 +2564,50 @@ Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
   .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
   .catch(() => {});
 
+// PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
+// web actor makes inside its sealed worker rides here (offscreen job-runner →
+// 'page/call'). SECURITY, the whole point of doing this SW-side:
+//   • The OWNER is the sessionId the offscreen relay attached from the trusted
+//     job params — never anything the worker put in its own message.
+//   • That session must be a tab-backed WEB actor; anything else (a bare js_run
+//     job, an engine actor, a stale id) is refused — the page capability is not
+//     a general worker power.
+//   • The tab is resolved AUTHORITATIVELY from webActorTabBindings.tabFor(owner):
+//     the owner can't name a tab, so it can only ever act on the ONE tab it owns
+//     (fail closed if it owns none).
+// Then makePageCallHandler translates → builds a normal tab web-actor ctx (NO
+// code surface, so the mapped navigate/click/type are allowed) → dispatches
+// through the FULL gate stack (denylist / confirm / audit), so this route adds
+// zero authority over the tool-call actor.
+const pageCallHandler = makePageCallHandler({
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  buildActorContext: ({ sessionId, tabId }) => buildToolContext({
+    sessionId, activeTabId: tabId,
+    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
+    // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
+    // surface is 'code' (that's how it got here), but navigate/click/type must be
+    // ALLOWED for the page.* translation — else the setting would refuse them.
+    actorSurface: 'tools',
+  }),
+});
+const pageCallRoute = {
+  /** @param {{ method?: string, args?: object, ownerSessionId?: string }} msg */
+  'page/call': async ({ method, ownerSessionId, args } = {}) => {
+    if (vault.isLocked()) return { ok: false, error: 'locked' };
+    if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'page_call_no_owner' };
+    // The owner MUST be a live tab-backed web actor — the page surface is not a
+    // general worker capability. (findActorSession/get by id; reject otherwise.)
+    const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
+      return { ok: false, error: 'page_call_not_web_actor' };
+    }
+    // Authoritative tab: the ONE this actor owns. Never a worker-supplied id.
+    const tabId = webActorTabBindings.tabFor(ownerSessionId);
+    if (typeof tabId !== 'number') return { ok: false, error: 'page_call_no_owned_tab' };
+    return pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+  },
+};
+
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
 // origin) — origin-keyed (vs the tab store's tabId key) because an API origin never
@@ -3306,6 +3359,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // Stored under origin:<origin>, decrypted only in withApiCredentials at request
   // time, never shown to the agent. `list` returns origins + header NAME only.
   ...(/** @type {any} */ (originCredentialRoutes)),
+
+  // --- PR #119 code-REPL arm: the web actor's page.<method> bridge route ---
+  // A sealed-worker page.* call → the SAME gated dispatch the tool-call actor
+  // uses, pinned to the actor's owned tab (owner + tab resolved trusted-side).
+  ...(/** @type {any} */ (pageCallRoute)),
 })));
 
 // ---------------------------------------------------------------------------

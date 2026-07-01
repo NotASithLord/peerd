@@ -407,3 +407,73 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'snapshot']);
   });
 });
+
+describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
+  const webCode = (over: object = {}) =>
+    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code', ...over });
+
+  test('the code surface is {snapshot, read_page, page_code} — action collapses into page_code', () => {
+    expect([...actorAllowedToolsFor('web', 'tab', 'code')].sort()).toEqual(['page_code', 'read_page', 'snapshot']);
+    // page_code is allowed ONLY on the code surface; the discrete DOM action tools
+    // are NOT (they move into page.* inside the script).
+    expect(isAllowedForActor('page_code', 'web', 'tab', 'code')).toBe(true);
+    for (const n of ['click', 'type', 'navigate', 'query_dom', 'page_keys', 'fetch_url']) {
+      expect(isAllowedForActor(n, 'web', 'tab', 'code')).toBe(false);
+    }
+    // Perception stays snapshot-based (the ONE unchanged axis).
+    expect(isAllowedForActor('snapshot', 'web', 'tab', 'code')).toBe(true);
+    expect(isAllowedForActor('read_page', 'web', 'tab', 'code')).toBe(true);
+  });
+
+  test('the TOOLS surface (and an absent surface) is unchanged — page_code is NOT in it', () => {
+    // Default: no surface arg means the historical tool-call surface; page_code
+    // must NOT leak into it, and the discrete DOM tools must stay.
+    expect(isAllowedForActor('page_code', 'web', 'tab', 'tools')).toBe(false);
+    expect(isAllowedForActor('page_code', 'web', 'tab', undefined)).toBe(false);
+    expect(isAllowedForActor('navigate', 'web', 'tab', 'tools')).toBe(true);
+    expect(isAllowedForActor('navigate', 'web', 'tab', undefined)).toBe(true);
+    // An API backing ignores the surface entirely — still fetch_url-only.
+    expect(isAllowedForActor('page_code', 'web', 'api', 'code')).toBe(false);
+    expect(actorAllowedToolsFor('web', 'api', 'code').size).toBe(1);
+  });
+
+  test('page_code is on the mutating tier — refused for every non-actor ctx', () => {
+    // THE PROOF: page_code ACTS on the owned tab, so a spawn_subagent or a
+    // prompt-injected main turn emitting it fails closed at the gate.
+    expect(isActorMutatingTool('page_code')).toBe(true);
+    for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'subagent' }]) {
+      const r = rt({ name: 'page_code' }, {}, ctx);
+      expect(r?.allowed).toBe(false);
+      expect(r?.reason).toContain('actor-only');
+    }
+  });
+
+  test('the gate: a code-surface web actor may call page_code, NOT discrete DOM tools', () => {
+    expect(rt({ name: 'page_code' }, { code: 'return 1' }, webCode())).toBeNull();      // allowed
+    // Discrete DOM action tools refuse — the model can only act via page.* in code.
+    for (const n of ['click', 'type', 'navigate', 'query_dom', 'fetch_url']) {
+      expect(rt({ name: n }, {}, webCode())?.allowed).toBe(false);
+    }
+    // Perception tools still pass.
+    expect(rt({ name: 'snapshot' }, {}, webCode())).toBeNull();
+    expect(rt({ name: 'read_page' }, {}, webCode())).toBeNull();
+  });
+
+  test('the gate: a TOOLS-surface web actor is refused page_code (surface is enforced, not advisory)', () => {
+    const toolsCtx = { exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'tools' };
+    expect(rt({ name: 'page_code' }, {}, toolsCtx)?.allowed).toBe(false);
+    // ...and the discrete DOM tools it DOES own still pass.
+    expect(rt({ name: 'navigate' }, {}, toolsCtx)).toBeNull();
+    // An absent surface behaves like 'tools' — page_code refused, navigate allowed.
+    const noSurface = { exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42' };
+    expect(rt({ name: 'page_code' }, {}, noSurface)?.allowed).toBe(false);
+    expect(rt({ name: 'navigate' }, {}, noSurface)).toBeNull();
+  });
+
+  test('actorDescriptors is surface-aware — a code actor is advertised only its code toolset', () => {
+    const all = [{ name: 'click' }, { name: 'navigate' }, { name: 'snapshot' }, { name: 'read_page' }, { name: 'page_code' }, { name: 'fetch_url' }];
+    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name).sort()).toEqual(['page_code', 'read_page', 'snapshot']);
+    // The tools surface keeps the discrete DOM tools + fetch_url, and never shows page_code.
+    expect(actorDescriptors(all, 'web', 'tab', 'tools').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'read_page', 'snapshot']);
+  });
+});

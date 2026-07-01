@@ -219,7 +219,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
       // API actor (fetch-only origin lore) — both are actorType:'web'. instanceId lets
       // an API actor's lore name the ONE origin it owns.
-      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId } : {}),
+      // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
+      // buildToolContext from the setting — the prompt teaches page.* for 'code'.
+      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface } : {}),
     });
   };
 
@@ -313,7 +315,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // browse-only chat's web actor is shown only the read DOM tools, matching the
   // gate (which refuses click/type for it). null manifest passes through unchanged.
   const refreshActorTools = async () =>
-    filterDescriptorsByManifest(actorDescriptors(listTools(), actorType, actorBacking), sessionToolAllow)
+    filterDescriptorsByManifest(actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface), sessionToolAllow)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();

@@ -73,6 +73,7 @@ import {
  *   actorInstanceId?: string,
  *   actorType?: string,
  *   backing?: 'tab' | 'api',
+ *   actorSurface?: 'tools' | 'code',
  * }} GateContext
  */
 
@@ -135,8 +136,11 @@ export const actorTierGate = (tool, args, ctx) => {
   }
   // DESIGN-18: an API actor (actorType:'web', backing:'api') is fetch-only — its
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
-  // refuses HERE, at the gate, not just at execute-time.
-  if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing)) {
+  // refuses HERE, at the gate, not just at execute-time. PR #119: surface-aware —
+  // a code-surface web actor's set is {snapshot, read_page, page_code}, so a
+  // discrete click/type/navigate FROM THE MODEL refuses here too (the page/call
+  // route's inner dispatch builds a tools-surface ctx, which stays allowed).
+  if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing, ctx.actorSurface)) {
     const scope = ctx.backing === 'api' ? 'API integration (no tab — fetch_url only)' : `${ctx.actorType ?? 'unknown'}`;
     return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
   }

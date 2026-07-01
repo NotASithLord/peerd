@@ -36,6 +36,7 @@ import { vmDeleteTool }               from './vm-delete.js';
 import { jsCreateTool }               from './js-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { jsRunTool }                  from './js-run.js';
+import { pageCodeTool }               from './page-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
@@ -98,6 +99,7 @@ export {
   jsCreateTool,
   jsNotebookTool,
   jsRunTool,
+  pageCodeTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
@@ -167,6 +169,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
+  // the web actor's CODE-REPL action surface (PR #119 A/B arm) — registered +
+  // hidden from main; allowed ONLY for a code-surface web actor
+  // (WEB_ACTOR_CODE_TOOLS in exposure.js).
+  pageCodeTool,
   // engine (WebVM)
   vmCreateTool,
   vmBootTool,
