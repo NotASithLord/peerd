@@ -13,7 +13,7 @@
 // tool narrowing (subagent/spawn.js); it can never re-expose a tool one
 // of those layers removed.
 //
-// Enforced at BOTH layers, same pattern as the runner-only split:
+// Enforced at BOTH layers, same pattern as the main-hidden tool split:
 //   1. descriptors — the SW intersects the main turn's descriptor list
 //      with the manifest, so the model never SEES an excluded tool;
 //   2. dispatch — the exposure gate (gates.js) refuses an excluded tool

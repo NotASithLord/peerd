@@ -247,7 +247,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // per tool call; we snapshot provider/vault state at turn start so
   // mid-turn changes (e.g. user adds a key while tools are firing)
   // don't surface inconsistent readings. exposure:'main' makes the
-  // exposure gate refuse runner-only tools the model shouldn't reach.
+  // exposure gate refuse actor-only tools the model shouldn't reach.
   // Built BEFORE the descriptor list so refreshMainTools (below) can restamp
   // its instanceState each step — progressive disclosure.
   //

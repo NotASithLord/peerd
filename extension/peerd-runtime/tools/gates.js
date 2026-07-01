@@ -16,8 +16,8 @@
 //                  passes here and defers auto-vs-ask to the dispatcher.
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
-//                  runner-only tool even if the model emits its name. Also
-//                  carries the DESIGN-17 actor capability tier (flag-gated):
+//                  actor-only (main-hidden) tool even if the model emits its
+//                  name. Also carries the DESIGN-17 actor capability tier:
 //                  the instance-mutating set is actor-only, and an actor
 //                  is positively scoped to its own kind + pinned to its own
 //                  instance.
