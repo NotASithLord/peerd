@@ -94,11 +94,11 @@ export const listProviders = () =>
     name: a.name,
     label: a.label,
     defaultModel: a.defaultModel,
-    // why: the per-provider fast default for the page-reader runner
-    // (do/get/check). resolveRunnerModel uses it when the user hasn't pinned
-    // an override; the Settings placeholder shows it so "blank" is honest
-    // about what actually runs. Falls back to defaultModel if an adapter
-    // somehow omits it (every shipped adapter sets one).
+    // why: the per-provider fast default for the web actor.
+    // resolveRunnerModel uses it when the user hasn't pinned an override; the
+    // Settings placeholder shows it so "blank" is honest about what actually
+    // runs. Falls back to defaultModel if an adapter somehow omits it (every
+    // shipped adapter sets one).
     defaultRunnerModel: a.defaultRunnerModel ?? a.defaultModel,
     vaultSecretName: a.vaultSecretName,
     // keyless: local providers have no API key — the chassis skips vault

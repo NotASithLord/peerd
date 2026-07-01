@@ -73,8 +73,8 @@ import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
 
 import {
   listProviders,
-  // page-reader (do/get/check) runner-model resolution: pin → local → provider
-  // default → inherit. Pure; the SW resolves it per tool-context build.
+  // web actor model resolution: pin → local → provider default → inherit.
+  // Pure; the SW resolves it when minting a web actor session.
   resolveRunnerModel,
   // local WebGPU runner: the offscreen-engine bridge + the resident model id.
   setLocalGenerate, LOCAL_MODEL_ID,
@@ -406,9 +406,9 @@ const resolveActiveProvider = () => {
     name: chosen.name,
     label: chosen.label,
     model: settingsStore.get().providerModel || chosen.defaultModel,
-    // why: the page-reader runner's fast default for this provider (Haiku on
+    // why: the web actor's fast default for this provider (Haiku on
     // Anthropic). Surfaced so the settings UI can show it as the "blank =
-    // this" placeholder and buildToolContext can resolve the runner model.
+    // this" placeholder and mintWebSession can resolve the web actor model.
     defaultRunnerModel: chosen.defaultRunnerModel,
     vaultSecretName: chosen.vaultSecretName,
     keyless: !!chosen.keyless,
@@ -1016,11 +1016,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
         }
       }
     } else {
-    // why: a browser-runner (do/get/check) is PINNED to one specific tab,
-    // passed as activeTabId. Resolve activeTab to THAT tab so its DOM tools
-    // target it — and, critically, so ctx.activeTab.origin is the runner's tab
-    // for the origin/denylist gate. With no activeTabId this is the original
-    // behaviour: the chat's current active tab.
+    // why: a web actor is PINNED to one specific tab, passed as activeTabId.
+    // Resolve activeTab to THAT tab so its DOM tools target it — and, critically,
+    // so ctx.activeTab.origin is the actor's tab for the origin/denylist gate.
+    // With no activeTabId this is the original behaviour: the chat's current
+    // active tab.
     let t;
     if (activeTabId != null) {
       t = await browser.tabs.get(activeTabId).catch(() => null);
@@ -1039,19 +1039,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   } catch (e) {
     console.warn('[sw] active tab query failed', e);
   }
-  // The page-reader runner (do/get/check) model, resolved once per ctx build:
-  // explicit pin → local WebGPU runner (when it ships) → this provider's fast
-  // default (Haiku) → inherit (''). get/check read ctx.runnerModel; runRunner
-  // still falls back to the inherited chat model at runtime if it struggles.
-  const runnerProvider = listProviders().find((p) => p.name === ctxProviderName);
-  const runnerModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
   const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
-    // at dispatch, so a prompt-injected model can't reach them by name. The
-    // runner / subagents leave it unset (they hold those tools by design).
-    // DESIGN-17: an actor turn sets 'actor' — the kind-scoped, instance-
-    // pinned tier (and the capability strip below makes its ctx keyless).
+    // at dispatch, so a prompt-injected model can't reach them by name.
+    // Subagents leave it unset. DESIGN-17: an actor turn sets 'actor' — the
+    // kind-scoped, instance-pinned tier (the web actor holds the DOM tools;
+    // the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
     synthetic: synthetic === true,
     // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
@@ -1090,7 +1084,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     toolAllow,
     toolManifestLabel: toolAllow ? manifestLabel(activeSession?.toolManifest) : null,
     // why: progressive-disclosure state for the exposure gate (which is sync).
-    // ONLY the main turn gates on it; subagents / the runner / direct dispatch
+    // ONLY the main turn gates on it; subagents / actors / direct dispatch
     // hold full tools, so leave it null there (the gate skips the check). The
     // main turn restamps this per step via refreshTools so an op revealed after
     // a mid-turn create also passes the gate.
@@ -1234,7 +1228,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // (the 0-tab fetch state) calls this from navigate to lazily OPEN + ADOPT its one
     // tab, bound to THIS actor's session. Injected ONLY for the web kind; the
     // capability strip drops it from any actor whose toolset lacks navigate, and
-    // it's absent on the main/runner/subagent ctx (actorType unset). adoptWebTab
+    // it's absent on the main/subagent ctx (actorType unset). adoptWebTab
     // is defined later in the file — referenced lazily here (called at turn time),
     // the same late-bound pattern as noteAgentTab.
     // DESIGN-18: an API actor (backing:'api') never renders — no tab, ever — so it
@@ -1254,9 +1248,6 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // why: web tools open background tabs unconditionally (never-steal-
     // focus policy, 2026-06-12); settings ride along for other consumers.
     settings: { ...settingsStore.get() },
-    // why: the resolved page-reader runner model (see above). get/check pass
-    // it as the runner's model; '' means inherit the chat model.
-    runnerModel,
     getSecret: (/** @type {string} */ name) => vault.getSecret(name),
     audit: (/** @type {any} */ entry) => auditLog.append(entry),
     // Real confirmation round-trip (SW ↔ side panel). The dispatcher
@@ -1297,18 +1288,18 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     },
     vault: { isLocked: vault.isLocked() },
   };
-  // DESIGN-17: an ACTOR gets a KEYLESS, kind-narrowed tool context — the
-  // do/get/check runner trust model generalized. restrictCtxCapabilities strips
-  // every capability closure (getSecret, safeFetch, webFetch, spawnSubagent,
-  // memory, messageActor, …) that none of the actor's OWN kind tools need,
-  // so a confused/injected tool has no path to secrets/egress/spawn. The loop
-  // still gets the provider key via the turn driver's injected getSecret (off
-  // this ctx), exactly like a subagent. Non-actor ctx is unchanged.
+  // DESIGN-17: an ACTOR gets a KEYLESS, kind-narrowed tool context — a keyless,
+  // narrow trust model. restrictCtxCapabilities strips every capability closure
+  // (getSecret, safeFetch, webFetch, spawnSubagent, memory, messageActor, …)
+  // that none of the actor's OWN kind tools need, so a confused/injected tool
+  // has no path to secrets/egress/spawn. The loop still gets the provider key
+  // via the turn driver's injected getSecret (off this ctx), exactly like a
+  // subagent. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
     // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
     // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
     // (getSecret/safeFetch/adoptWebTab/engine/spawn/…). NB scripting + debuggerPool are
-    // NOT in CAPABILITY_CONSUMERS (shared with the do/get/check runner), so they survive
+    // NOT in CAPABILITY_CONSUMERS (shared with the web actor's DOM tools), so they survive
     // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
     // tool (isAllowedForActor → fetch_url only), not on this strip.
     const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking)));
@@ -1410,10 +1401,10 @@ const forwardSubagentEvent = (/** @type {any} */ ev) => {
       post({ type: 'turn/subagent-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
       break;
     case 'usage':
-      // why: subagent/runner spend is SEPARATE from the main turn tally (the
+      // why: subagent/actor spend is SEPARATE from the main turn tally (the
       // main usage handler only folds its own session). Forward it so the eval
-      // harness — and any future runner-cost meter — can attribute the offloaded
-      // do/get/check work honestly instead of it looking free.
+      // harness — and any future offload-cost meter — can attribute the
+      // delegated work honestly instead of it looking free.
       post({ type: 'turn/subagent-cost', sessionId: ev.sessionId, usage: ev.usage });
       break;
     default:
@@ -1805,7 +1796,7 @@ const advancedAutomationOn = () =>
 // nag — but the latch is consumed only on SUCCESSFUL delivery, so a tool
 // failing while the panel is closed leaves the offer armed for a later turn.
 let debuggerNudgeShown = false;
-// Prefix match, not exact: the runner-facing tools (snapshot/click/type/
+// Prefix match, not exact: the DOM tools (snapshot/click/type/
 // read_state) return a self-describing `debugger_unavailable: <hint>` string.
 const isDebuggerUnavailableError = (/** @type {any} */ err) =>
   typeof err === 'string'
@@ -1912,7 +1903,7 @@ const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
 // drives the offscreen engine (offscreen/local-model.js) and streams its tokens
 // back. local-model/{status,init} flip localModelAvailable, which feeds
 // resolveRunnerModel step 2 (local-when-available) — so once the model is
-// resident it becomes the page-reader runner default with no pin.
+// resident it becomes the web actor default with no pin.
 // Local-model residency + progress live in a store (background/local-model-state.js)
 // so the local-model/* routes reach them via deps. available() feeds
 // resolveRunnerModel; progress() is polled by Settings.
@@ -2206,9 +2197,9 @@ const buildStateSnapshot = async () => {
       current: activeProv.name,
       hasKey,
       model: activeProv.model,
-      // why: the page-reader runner's fast default for this provider — the
-      // Settings "Page-reader model" field shows it as the blank placeholder
-      // so "blank" honestly reads as e.g. claude-haiku-4-5, not "inherit".
+      // why: the web actor's fast default for this provider — the Settings
+      // "Web actor model" field shows it as the blank placeholder so "blank"
+      // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
     profile: {
@@ -2654,6 +2645,16 @@ const actorMailbox = {
 const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
+  // latency-sensitive job that ingests untrusted page content — so it runs on a
+  // fast, cheap model (Haiku by default), NOT the chat's stronger, pricier model.
+  // resolveRunnerModel: explicit pin → local WebGPU → this provider's fast
+  // default (Haiku) → inherit the chat model (''). Engine actors (webvm/notebook/
+  // app, via mintActor) are UNCHANGED — they reason about code/shell and keep the
+  // chat model.
+  const actorProviderName = ownerChat?.provider ?? resolveActiveProvider().name;
+  const runnerProvider = listProviders().find((p) => p.name === actorProviderName);
+  const webActorModel = resolveRunnerModel({ settings: settingsStore.get(), provider: runnerProvider, localRunner: localRunnerState() });
   const created = await sessions.create({
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
@@ -2662,7 +2663,9 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
     // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
     ...(backing ? { backing } : {}),
     ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
-    ...(ownerChat?.model ? { model: ownerChat.model } : {}),
+    // '' from resolveRunnerModel means "inherit the chat model" — fall back to the
+    // owner chat's model so the empty-pin semantics + the session-create default hold.
+    ...((webActorModel || ownerChat?.model) ? { model: webActorModel || ownerChat?.model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
@@ -2982,10 +2985,10 @@ const noteAgentTab = async (/** @type {number} */ tabId, /** @type {any} */ info
   // stays eye-catching — the sanctioned "peers/actions are the content" accent.
   const color = AGENT_TAB_COLORS[Math.floor(Math.random() * AGENT_TAB_COLORS.length)];
   // `opened`: true when peerd OPENED this tab (open_tab / an engine create) — the
-  // only case that mints an inline notice; false when the agent merely ACTED on a
-  // tab via do/get/check (the runner), which resurfaces an existing notice but
-  // never invents one for a tab the USER opened. `noted: true` marks this as a
-  // real agent touch (vs. a passive current-flag refresh on tab activation).
+  // only case that mints an inline notice; false when the web actor merely ACTED
+  // on a tab, which resurfaces an existing notice but never invents one for a tab
+  // the USER opened. `noted: true` marks this as a real agent touch (vs. a
+  // passive current-flag refresh on tab activation).
   agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened, parentToolUseId };
   broadcastAgentTab(true);
 };

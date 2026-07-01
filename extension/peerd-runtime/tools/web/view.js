@@ -26,7 +26,7 @@
 //
 // Security: a screenshot is UNTRUSTED page content — text painted into the image
 // (a fake "system" banner, an "ignore your instructions" overlay) is an
-// injection vector the model must not obey. `view` is runner-only (hidden from
+// injection vector the model must not obey. `view` is actor-only (hidden from
 // the main agent), so the same untrusted-content boundary that fences read_page
 // output covers what it surfaces; the note in the result reinforces it.
 

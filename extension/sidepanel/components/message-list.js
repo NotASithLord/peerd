@@ -517,13 +517,6 @@ const ToolCall = {
             moduleFor(meta?.primitive)
               ? m('span.primitive-module', `peerd-${moduleFor(meta?.primitive)}`)
               : null,
-            // dispatch: how the action was carried out (orthogonal to the
-            // resource primitive). 'runner' = a spawned browser-runner drove
-            // the tab — the trigger, surfaced so it's not hidden in the nested
-            // transcript below.
-            meta?.dispatch === 'runner'
-              ? m('span.dispatch-badge', 'via runner')
-              : null,
           ]),
           meta && meta.gates.length > 0
             ? m('.lineage-row', [
@@ -727,9 +720,9 @@ const formatResultContent = (toolResult) => {
     }
   } catch { /* leave as-is */ }
   // Display-only: hide the <untrusted_*> fence WRAPPER tags from the rendered
-  // card (do/get/check runner summaries + fetch_url, at every nested
-  // transcript depth) — the body stays, the model still receives the fence in
-  // the persisted tool_result. The single chokepoint for every tool-result card.
+  // card (web actor page reads + fetch_url, at every nested transcript depth) —
+  // the body stays, the model still receives the fence in the persisted
+  // tool_result. The single chokepoint for every tool-result card.
   return stripUntrustedFences(content);
 };
 

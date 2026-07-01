@@ -1,26 +1,24 @@
 // @ts-check
-// runner-model — resolve which model the page-reader runner (do/get/check)
-// runs on.
+// runner-model — resolve which model the WEB ACTOR runs on.
 //
-// The browser-runner is the disposable subagent behind `do`/`get`/`check`:
-// a narrow, high-frequency, latency-sensitive, security-contained job. It
-// gets its OWN model, distinct from the main chat model, so page reads ride
-// a fast cheap model while the chat keeps the stronger one.
+// The web actor is the disposable page-driving agent the orchestrator reaches
+// via message_actor: a narrow, high-frequency, latency-sensitive, security-
+// contained job. It gets its OWN model, distinct from the main chat model, so
+// page reads ride a fast cheap model (Haiku by default) while the chat keeps
+// the stronger one.
 //
-// Pure (no IO) → Bun-testable. The SW calls this once per tool-context build
-// and hands the result to the runner via ctx.runnerModel; get.js / check.js
-// pass it as the runner's model. An empty string means "inherit the main
-// session model" (the last-resort fallback) — runRunner ALSO falls back to
-// the inherited model at runtime if the resolved one blows its step budget.
+// Pure (no IO) → Bun-testable. The SW calls this in mintWebSession and pins the
+// result as the web actor session's model. An empty string means "inherit the
+// owner chat model" (the last-resort fallback).
 //
-// Resolution order (first match wins) — mirrors FEATURE-LOCAL-WEBGPU.md §2.3:
-//   1. Explicit user pin (Settings → Page-reader model), if set.
+// Resolution order (first match wins):
+//   1. Explicit user pin (Settings → Web actor model), if set.
 //   2. Local WebGPU runner, when downloaded + available — on-device, keyless,
 //      provider-independent. This is the rung the local Gemma runner plugs
-//      into: once the model is resident it becomes the runner default for
-//      every provider. (Absent until the local-webgpu adapter ships.)
+//      into: once the model is resident it becomes the default for every
+//      provider. (Absent until the local-webgpu adapter ships.)
 //   3. The active provider's defaultRunnerModel (e.g. Haiku on Anthropic).
-//   4. Inherit the main session model ('').
+//   4. Inherit the owner chat model ('').
 
 /**
  * @typedef {Object} RunnerModelInputs
@@ -33,10 +31,10 @@
  */
 
 /**
- * Resolve the runner (page-reader) model id.
+ * Resolve the web actor model id.
  *
  * @param {RunnerModelInputs} inputs
- * @returns {string} a model id, or '' to inherit the main session model.
+ * @returns {string} a model id, or '' to inherit the owner chat model.
  */
 export const resolveRunnerModel = ({ settings, provider, localRunner } = {}) => {
   // 1. Explicit user pin always wins — power users override deliberately.

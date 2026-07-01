@@ -139,10 +139,10 @@ export const normalizeSettingsPatch = (patch, {
       .slice(0, 8);
   }
   if (typeof patch.runnerModel === 'string') {
-    // Browser-runner (get/check) model override. '' = inherit the chat
-    // model. Must be a model id of the SAME provider as the chat (the
-    // runner inherits the parent session's provider); runRunner retries
-    // on the inherited model if this one underperforms.
+    // Web actor model override. '' = inherit the chat model. Must be a model
+    // id of the SAME provider as the chat (the web actor inherits the owner
+    // chat's provider). The settings KEY stays `runnerModel` for continuity
+    // with saved settings; resolveRunnerModel reads this pin.
     next.runnerModel = patch.runnerModel.trim().slice(0, 200);
   }
   // Idle vault auto-lock interval (ms). 0 = never; otherwise clamp to a

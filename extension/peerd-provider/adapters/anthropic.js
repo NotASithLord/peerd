@@ -59,13 +59,12 @@ const MAX_BACKOFF_MS = 60_000;
 // pay Opus rates by surprise.
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
-// why: the browser-runner (the disposable subagent behind do/get/check —
-// the "page-reader") is a narrow, high-frequency, latency-sensitive job. It
-// gets its OWN default: the latest Haiku, fast and cheap, reached with the
-// same Anthropic key. So out of the box page reads ride Haiku while chat
-// keeps Sonnet — instead of the runner inheriting (and re-paying) the chat
-// model. Overridable via the Page-reader model setting; runRunner falls back
-// to the inherited chat model when the runner blows its step budget.
+// why: the web actor (the disposable page-driving agent the orchestrator
+// reaches via message_actor) is a narrow, high-frequency, latency-sensitive
+// job. It gets its OWN default: the latest Haiku, fast and cheap, reached with
+// the same Anthropic key. So out of the box page reads ride Haiku while chat
+// keeps Sonnet — instead of the actor inheriting (and re-paying) the chat
+// model. Overridable via the Web actor model setting.
 export const DEFAULT_RUNNER_MODEL = 'claude-haiku-4-5';
 
 /**

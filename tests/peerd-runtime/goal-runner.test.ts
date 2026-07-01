@@ -147,11 +147,11 @@ describe('makeGoalRunner — the goal loop', () => {
 });
 
 describe('filterByGoalActive — complete_goal exposure', () => {
-  const tools = [{ name: 'do' }, { name: 'complete_goal' }, { name: 'get' }];
+  const tools = [{ name: 'remember' }, { name: 'complete_goal' }, { name: 'now' }];
 
   it('hides complete_goal when no goal run is active', () => {
     const names = filterByGoalActive(tools, false).map((t) => t.name);
-    expect(names).toEqual(['do', 'get']);
+    expect(names).toEqual(['remember', 'now']);
   });
 
   it('reveals complete_goal while a goal run is active', () => {

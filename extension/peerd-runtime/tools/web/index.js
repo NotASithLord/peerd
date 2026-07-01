@@ -4,9 +4,9 @@
 // WEB_TOOLS is registered by the SW alongside BUILTIN_TOOLS and
 // CLOCK_TOOLS. Two tools live here: `capture` — a user-facing screenshot of the
 // active tab (its pixels are redacted before the model sees them) — and `view`,
-// a runner-only screenshot whose pixels DO reach the model as a vision input (so
+// an actor-only screenshot whose pixels DO reach the model as a vision input (so
 // it can reason about canvas/Figma/game pages the DOM tools go blind on); view's
-// untrusted-image boundary is the same as read_page, hence runner-only.
+// untrusted-image boundary is the same as read_page, hence actor-only.
 //
 // call_api, read_article, web_search, and submit_form were all REMOVED: the
 // web actor (kind:'web') is the single entry point for web work now. It READS

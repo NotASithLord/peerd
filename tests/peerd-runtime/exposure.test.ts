@@ -11,7 +11,6 @@ import {
   WEB_ACTOR_DOM_TOOLS, actorWebTabTarget,
 } from '../../extension/peerd-runtime/tools/exposure.js';
 import { exposureGate as exposureGateRaw, actorTierGate } from '../../extension/peerd-runtime/tools/gates.js';
-import { DO_TOOLSET } from '../../extension/peerd-runtime/runner/index.js';
 
 type ToolT = import('../../extension/shared/tool-types.js').Tool;
 type GateCtxT = import('../../extension/peerd-runtime/tools/gates.js').GateContext;
@@ -24,16 +23,16 @@ const eg = (tool: { name: string }, args: unknown, ctx: object) =>
   exposureGateRaw(tool as unknown as ToolT, args, ctx as GateCtxT);
 
 describe('dweb tool exposure (off the store build)', () => {
-  const tools = [{ name: 'app_create' }, { name: 'dweb_share', dweb: true }, { name: 'do' }, { name: 'dweb_discover', dweb: true }];
+  const tools = [{ name: 'app_create' }, { name: 'dweb_share', dweb: true }, { name: 'remember' }, { name: 'dweb_discover', dweb: true }];
   test('isDwebTool reads the dweb flag', () => {
     expect(isDwebTool({ name: 'dweb_share', dweb: true })).toBe(true);
     expect(isDwebTool({ name: 'app_create' })).toBe(false);
   });
   test('hides dweb tools when the dweb is off; keeps the rest', () => {
-    expect(filterByDwebEnabled(tools, false).map((t) => t.name)).toEqual(['app_create', 'do']);
+    expect(filterByDwebEnabled(tools, false).map((t) => t.name)).toEqual(['app_create', 'remember']);
   });
   test('keeps dweb tools when the dweb is on', () => {
-    expect(filterByDwebEnabled(tools, true).map((t) => t.name)).toEqual(['app_create', 'dweb_share', 'do', 'dweb_discover']);
+    expect(filterByDwebEnabled(tools, true).map((t) => t.name)).toEqual(['app_create', 'dweb_share', 'remember', 'dweb_discover']);
   });
 });
 
@@ -65,15 +64,15 @@ describe('tool exposure (main-agent cutover)', () => {
     }
   });
 
-  test('keeps do/get/check + tab management + non-browser tools', () => {
-    for (const name of ['do', 'get', 'check', 'actor_list', 'open_tab', 'spawn_subagent', 'vm_boot', 'remember']) {
+  test('keeps tab management + non-browser tools visible to the main agent', () => {
+    for (const name of ['actor_list', 'open_tab', 'message_actor', 'spawn_subagent', 'vm_boot', 'remember']) {
       expect(isHiddenFromMain(name)).toBe(false);
     }
   });
 
   test('mainAgentDescriptors removes exactly the hidden set, order preserved', () => {
-    const all = [{ name: 'do' }, { name: 'snapshot' }, { name: 'click' }, { name: 'get' }, { name: 'actor_list' }, { name: 'page_exec' }, { name: 'check' }];
-    expect(mainAgentDescriptors(all).map((t) => t.name)).toEqual(['do', 'get', 'actor_list', 'check']);
+    const all = [{ name: 'message_actor' }, { name: 'snapshot' }, { name: 'click' }, { name: 'open_tab' }, { name: 'actor_list' }, { name: 'page_exec' }, { name: 'remember' }];
+    expect(mainAgentDescriptors(all).map((t) => t.name)).toEqual(['message_actor', 'open_tab', 'actor_list', 'remember']);
   });
 });
 
@@ -81,10 +80,10 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
   test('refuses a hidden tool when the context is the MAIN agent', () => {
     const r = eg({ name: 'page_exec' }, {}, { exposure: 'main' });
     expect(r.allowed).toBe(false);
-    expect(r.reason).toContain('runner-only');
+    expect(r.reason).toContain('actor-only');
   });
 
-  test('allows a hidden tool for the runner / subagent (exposure unset)', () => {
+  test('allows a hidden tool for the actor / subagent (exposure unset)', () => {
     expect(eg({ name: 'page_exec' }, {}, {}).allowed).toBe(true);
     expect(eg({ name: 'snapshot' }, {}, { exposure: null }).allowed).toBe(true);
   });
@@ -94,19 +93,15 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
     expect(eg({ name: 'actor_list' }, {}, { exposure: 'main' }).allowed).toBe(true);
   });
 
-  // DESIGN-17 web-actor cutover: the do/get/check page runner leaves the MAIN
-  // agent (it messages a tab's actor instead). Subagents (exposure unset) keep
-  // them — they can't message actors.
-  test('refuses do/get/check on the MAIN turn (folded into the web actor)', () => {
-    for (const name of ['do', 'get', 'check']) {
+  // DESIGN-17 web-actor cutover: the low-level DOM/page tools leave the MAIN
+  // agent (it messages a tab's actor instead). The web actor holds them; the
+  // main turn is refused any of them at dispatch.
+  test('refuses the DOM/page tools on the MAIN turn (they belong to the web actor)', () => {
+    for (const name of ['snapshot', 'click', 'type', 'navigate', 'read_page']) {
       const r = eg({ name }, {}, { exposure: 'main' });
       expect(r.allowed).toBe(false);
-      expect(r.reason).toContain('web actor');
+      expect(r.reason).toContain('actor');
     }
-  });
-  test('a subagent (exposure unset) still keeps do/get/check', () => {
-    expect(eg({ name: 'do' }, {}, { exposure: null }).allowed).toBe(true);
-    expect(eg({ name: 'get' }, {}, {}).allowed).toBe(true);
   });
 });
 
@@ -119,7 +114,7 @@ describe('progressive disclosure — instance-gated engine ops', () => {
     expect(instanceGateKind('js_read_file')).toBe('notebook');
     expect(instanceGateKind('app_update')).toBe('app');
     // entry + auto-creating + unrelated tools are NOT gated
-    for (const n of ['vm_create', 'vm_boot', 'js_create', 'js_notebook', 'app_create', 'app_open', 'do', 'remember']) {
+    for (const n of ['vm_create', 'vm_boot', 'js_create', 'js_notebook', 'app_create', 'app_open', 'remember']) {
       expect(instanceGateKind(n)).toBeNull();
     }
   });
@@ -140,7 +135,7 @@ describe('progressive disclosure — instance-gated engine ops', () => {
   });
 
   test('non-gated tools (entry + auto-create + unrelated) are never gated', () => {
-    for (const n of ['vm_boot', 'js_notebook', 'app_create', 'vm_create', 'app_open', 'do', 'get']) {
+    for (const n of ['vm_boot', 'js_notebook', 'app_create', 'vm_create', 'app_open', 'remember', 'open_tab']) {
       expect(isInstanceGatedOut(n, NONE)).toBe(false);
       expect(isInstanceGatedOut(n, null)).toBe(false);
     }
@@ -149,12 +144,12 @@ describe('progressive disclosure — instance-gated engine ops', () => {
   test('filterByInstanceState reveals a kind only when its instance exists', () => {
     const all = [
       { name: 'vm_create' }, { name: 'vm_boot' }, { name: 'vm_write_file' },
-      { name: 'app_create' }, { name: 'app_update' }, { name: 'do' },
+      { name: 'app_create' }, { name: 'app_update' }, { name: 'remember' },
     ];
     expect(filterByInstanceState(all, NONE).map((t) => t.name))
-      .toEqual(['vm_create', 'vm_boot', 'app_create', 'do']);
+      .toEqual(['vm_create', 'vm_boot', 'app_create', 'remember']);
     expect(filterByInstanceState(all, { webvm: true }).map((t) => t.name))
-      .toEqual(['vm_create', 'vm_boot', 'vm_write_file', 'app_create', 'do']);
+      .toEqual(['vm_create', 'vm_boot', 'vm_write_file', 'app_create', 'remember']);
     expect(filterByInstanceState(all, ALL).map((t) => t.name)).toEqual(all.map((t) => t.name));
   });
 });
@@ -178,7 +173,7 @@ describe('exposureGate — instance gating at dispatch (fails closed)', () => {
     expect(eg({ name: 'js_read_file' }, {}, { exposure: 'main' }).allowed).toBe(false);
   });
 
-  test('never instance-gates a non-main context (runner / subagent hold full tools)', () => {
+  test('never instance-gates a non-main context (actor / subagent hold full tools)', () => {
     // Instance gating is main-only; a non-main ctx is never instance-gated. Uses
     // READ ops (non-tiered) so the DESIGN-17 actor tier doesn't mask the point.
     expect(eg({ name: 'app_read_file' }, {}, {}).allowed).toBe(true);
@@ -245,11 +240,11 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
   });
 
   test('actorDescriptors filters to the kind; filterActorSurface strips the main surface', () => {
-    const all = [{ name: 'app_update' }, { name: 'vm_boot' }, { name: 'do' }, { name: 'get' }, { name: 'message_actor' }, { name: 'open_tab' }];
+    const all = [{ name: 'app_update' }, { name: 'vm_boot' }, { name: 'remember' }, { name: 'message_actor' }, { name: 'open_tab' }];
     expect(actorDescriptors(all, 'app').map((t) => t.name)).toEqual(['app_update']);
-    // The mutating tier AND do/get/check both leave the main agent (folded into the
-    // tab's actor); message_actor + open_tab stay.
-    expect(filterActorSurface(all).map((t) => t.name)).toEqual(['message_actor', 'open_tab']);
+    // The mutating tier leaves the main agent (delegated via message_actor);
+    // message_actor + open_tab + non-instance tools stay.
+    expect(filterActorSurface(all).map((t) => t.name)).toEqual(['remember', 'message_actor', 'open_tab']);
   });
 });
 
@@ -316,8 +311,15 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
   const web = (over: object = {}) =>
     ({ exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: '42', ...over });
 
-  test('the web toolset mirrors the runner DO_TOOLSET (drift guard)', () => {
-    expect([...WEB_ACTOR_DOM_TOOLS].sort()).toEqual([...DO_TOOLSET].sort());
+  test('WEB_ACTOR_DOM_TOOLS is the DOM read/mutate set (no code-exec)', () => {
+    // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
+    // it ingests untrusted page text, so it must not also wield code-exec.
+    expect([...WEB_ACTOR_DOM_TOOLS].sort()).toEqual([
+      'click', 'navigate', 'query_dom', 'page_keys', 'read_page', 'read_pdf',
+      'read_state', 'snapshot', 'type', 'view', 'watch_changes',
+    ].sort());
+    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_eval');
+    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_exec');
   });
 
   test('a web actor may call its DOM tools (read + mutate) + the sessionless fetch_url', () => {
@@ -365,7 +367,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
 
   test('a web actor is positively scoped — foreign + powerful tools refused', () => {
     // notably page_eval/page_exec (code-exec) are NOT in the web toolset — the
-    // same exclusion that IS the runner's boundary, now enforced at the gate.
+    // exclusion that IS the web actor's boundary, enforced at the gate.
     for (const n of ['app_update', 'vm_boot', 'js_notebook', 'edit_file',
       'call_api', 'spawn_subagent', 'page_eval', 'page_exec', 'message_actor']) {
       expect(rt({ name: n }, {}, web())?.allowed).toBe(false);
@@ -373,12 +375,12 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
   });
 
   test('the exposure×tier reconciliation: DOM mutators stay OFF the mutating tier', () => {
-    // why: the runner (exposure UNSET) must keep using click/type/navigate. They're
-    // contained for MAIN by isHiddenFromMain (the exposure axis), NOT by the
-    // mutating tier — so the tier has no opinion and the runner is never refused.
+    // why: the web actor (exposure ACTOR) calls click/type/navigate via its
+    // positive kind-scope; they're contained for MAIN by isHiddenFromMain (the
+    // exposure axis), NOT by the mutating tier — so the tier has no opinion.
     for (const n of ['click', 'type', 'navigate']) {
       expect(isActorMutatingTool(n)).toBe(false);
-      expect(rt({ name: n }, {}, {})).toBeNull();                   // runner (exposure unset)
+      expect(rt({ name: n }, {}, {})).toBeNull();                   // subagent (exposure unset)
       expect(rt({ name: n }, {}, { exposure: 'main' })).toBeNull(); // tier no-opinion (exposure hides it)
     }
   });
@@ -392,7 +394,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
   });
 
   test('actorDescriptors filters a web actor to its DOM toolset', () => {
-    const all = [{ name: 'click' }, { name: 'app_update' }, { name: 'do' }, { name: 'snapshot' }];
+    const all = [{ name: 'click' }, { name: 'app_update' }, { name: 'remember' }, { name: 'snapshot' }];
     expect(actorDescriptors(all, 'web').map((t) => t.name).sort()).toEqual(['click', 'snapshot']);
   });
 

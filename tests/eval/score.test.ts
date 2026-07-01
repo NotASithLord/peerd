@@ -35,9 +35,9 @@ describe('aggregate', () => {
     expect(card.avgCostUsd).toBe(0.005);       // sub-cent precision (5dp), not rounded to $0.00
   });
 
-  test('tracks browser-runner (do/get/check) spend separately from main', () => {
+  test('tracks web actor spend separately from main', () => {
     const card = aggregate([
-      R('a', true, { inputTokens: 50, outputTokens: 10, runnerTokens: 40_000 }),  // most work offloaded to the runner
+      R('a', true, { inputTokens: 50, outputTokens: 10, runnerTokens: 40_000 }),  // most work offloaded to the web actor
       R('b', true, { inputTokens: 60, outputTokens: 20, runnerTokens: 20_000 }),
     ]);
     expect(card.avgRunnerTokens).toBe(30_000);   // the relocated page-mechanics spend
