@@ -1,10 +1,10 @@
 // @ts-check
 // read_pdf — extract the text of a PDF loaded in a tab.
 //
-// A RUNNER-ONLY tool (hidden from the main agent in exposure.js, in the
-// runner's READ_TOOLSET/DO_TOOLSET): like every page-content reader, its
-// output is UNTRUSTED and must land in the disposable browser-runner's
-// context, never the main loop. The main agent reaches it through get/do.
+// An ACTOR-ONLY tool (hidden from the main agent in exposure.js, in the web
+// actor's DOM toolset): like every page-content reader, its output is
+// UNTRUSTED and must land in the web actor's context, never the main loop.
+// The main agent reaches the page by messaging the tab's actor.
 //
 // Chrome renders PDFs in a built-in viewer that the DOM tools can't read
 // (it's an embedded plugin, not scriptable HTML), so snapshot/read_page come

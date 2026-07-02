@@ -85,7 +85,7 @@ const summarizeCall = (name, args) => {
  * UI hint, off the wire), so we widen locally; the widened meta is still
  * structurally a ToolMeta where the result type needs one.
  *
- * @typedef {ToolMeta & { dispatch?: 'inline' | 'runner' | 'subagent' }} DispatchMeta
+ * @typedef {ToolMeta & { dispatch?: 'inline' | 'subagent' }} DispatchMeta
  */
 
 /**

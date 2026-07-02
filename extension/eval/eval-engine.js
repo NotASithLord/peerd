@@ -278,8 +278,8 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     return v;
   };
   // The MAIN (chat agent) model — the other half of a config. A config is a PAIR:
-  // the main model that orchestrates do/get/check + the runner model that reads
-  // pages. setMainModel writes providerName+providerModel.
+  // the main model that orchestrates + the web actor model that reads pages.
+  // setMainModel writes providerName+providerModel.
   /** @param {string} provider @param {string} model */
   const setMainModel = (provider, model) => browser.runtime.sendMessage({ type: 'settings/update', patch: { providerName: provider, providerModel: model } });
   const readMainModel = async () => { try { const r = await browser.runtime.sendMessage({ type: 'state/get' }); const s = r?.state?.settings; return { provider: s?.providerName ?? '', model: s?.providerModel ?? '' }; } catch { return { provider: '', model: '' }; } };

@@ -16,8 +16,9 @@
 //     IP) — fetch never exposes the resolved IP, so that isn't blockable
 //     client-side.
 //   - It is NOT the defense against exfil to arbitrary PUBLIC domains. That's
-//     inherent to open-web access; the architectural defense is that the
-//     do/get/check runner has NO web tools, so an injected runner can't exfil.
+//     inherent to open-web access; the architectural defense is that the web
+//     actor's context is KEYLESS (the capability strip removes getSecret /
+//     safeFetch), so an injected page can't exfil the user's credentials.
 //
 // Pure — table-tested. No imports.
 

@@ -452,25 +452,10 @@ describe('makeSpawnSubagent', () => {
   });
 });
 
-// ---- browser-runner extensions (do/get/check plumbing — Phase 0) -----------
+// ---- subagent context building ---------------------------------------------
 
-describe('browser-runner extensions', () => {
-  test('systemPromptOverride is used verbatim, bypassing base + <subagent_task>', async () => {
-    const store = makeStore();
-    const parent = await store.create({});
-    let seenSystem = '';
-    async function* loop(ctx: any) {
-      seenSystem = await ctx.getSystemPrompt(); // loop calls getSystemPrompt()
-      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'ok' });
-      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
-    }
-    const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
-    await spawn({ task: 'drive the tab', parentSessionId: parent.sessionId, systemPromptOverride: 'RUNNER PROMPT' });
-    expect(seenSystem).toBe('RUNNER PROMPT'); // verbatim — NOT the rendered base+task
-  });
-
-  test('without override, getSystemPrompt still renders the normal subagent prompt', async () => {
+describe('subagent context building', () => {
+  test('getSystemPrompt renders the normal subagent prompt (base + taskOverride)', async () => {
     const store = makeStore();
     const parent = await store.create({});
     let seenSystem = '';
@@ -482,10 +467,10 @@ describe('browser-runner extensions', () => {
     const { deps } = baseDeps(store, loop);
     const spawn = makeSpawnSubagent(deps);
     await spawn({ task: 'a thing', parentSessionId: parent.sessionId });
-    expect(seenSystem).toBe('sys task=a thing'); // base+taskOverride path intact
+    expect(seenSystem).toBe('sys task=a thing'); // base+taskOverride path
   });
 
-  test('tabId is threaded to buildToolContext as activeTabId (pins the runner tab)', async () => {
+  test('buildToolContext is called without a tab pin (no activeTabId)', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const ctxArgs: any[] = [];
@@ -494,9 +479,9 @@ describe('browser-runner extensions', () => {
       buildToolContext: async (args: any) => { ctxArgs.push(args); return { session: { sessionId: args.sessionId }, audit: async () => {} }; },
     });
     const spawn = makeSpawnSubagent(deps);
-    await spawn({ task: 'drive', parentSessionId: parent.sessionId, tabId: 4242 });
+    await spawn({ task: 'a thing', parentSessionId: parent.sessionId });
     expect(ctxArgs.length).toBe(1);
-    expect(ctxArgs[0].activeTabId).toBe(4242);
+    expect(ctxArgs[0].activeTabId).toBeUndefined();
   });
 
   test('accumulates child model usage and returns it (separate from the parent tally)', async () => {
@@ -515,8 +500,8 @@ describe('browser-runner extensions', () => {
   });
 });
 
-describe('makeSpawnSubagent — taskContext + persistDeltas (runner speed path)', () => {
-  test('taskContext rides the user message only; task/audit/card stay short', async () => {
+describe('makeSpawnSubagent — persistDeltas (ephemeral speed path)', () => {
+  test('persistDeltas:false threads to the loop; userText is exactly the task', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const seen: any[] = [];
@@ -531,19 +516,14 @@ describe('makeSpawnSubagent — taskContext + persistDeltas (runner speed path)'
     const events: any[] = [];
     await spawn({
       task: 'find the price',
-      taskContext: '<untrusted_web_content origin="https://x">BIG SNAPSHOT</untrusted_web_content>',
       persistDeltas: false,
       parentSessionId: parent.sessionId,
       parentDepth: 0,
       onEvent: (ev: any) => events.push(ev),
     });
 
-    // Model sees task + context…
-    expect(seen[0].userText).toContain('find the price');
-    expect(seen[0].userText).toContain('BIG SNAPSHOT');
+    expect(seen[0].userText).toBe('find the price');
     expect(seen[0].persistDeltas).toBe(false);
-    // …but the stored task, the audit slice, and the card label do NOT
-    // carry page-derived bytes.
     const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
     expect(child.task).toBe('find the price');
     const spawned = audits.find((a: any) => a.type === 'subagent_spawned');
@@ -552,7 +532,7 @@ describe('makeSpawnSubagent — taskContext + persistDeltas (runner speed path)'
     expect(startEv.task).toBe('find the price');
   });
 
-  test('no taskContext → userText is exactly the task; persistDeltas defaults true', async () => {
+  test('persistDeltas defaults true', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const seen: any[] = [];

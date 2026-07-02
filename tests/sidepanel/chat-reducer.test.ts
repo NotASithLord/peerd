@@ -165,6 +165,35 @@ describe('reduceChat', () => {
     expect(reduceChat(costed, { type: 'turn/actor-state', parentToolUseId: 'nope', session: { messages: [] } })).toBe(costed);
   });
 
+  test('turn/actor-cost only UPDATES an existing card — never self-seeds a premature "ok" card (#9)', () => {
+    // A cost event before turn/actor-start (panel connected mid-turn) must NOT
+    // create a card: a streaming-less {cost} card renders a premature green 'ok'
+    // and then blocks turn/actor-state's `existing ? {} : seed` from applying
+    // streaming/kind/name. onCost fires on every usage event, so this is real.
+    const costOnly = reduceChat(INITIAL_STATE, { type: 'turn/actor-cost', parentToolUseId: 'tu-x', cost: { cost: 0.05 } });
+    expect(costOnly).toBe(INITIAL_STATE);                       // no card, same state object
+    expect(costOnly.actors['tu-x']).toBeUndefined();
+    // After a real start, cost folds in and the card stays streaming:true.
+    const started = reduceChat(INITIAL_STATE, { type: 'turn/actor-start', parentToolUseId: 'tu-x', sessionId: 'r', fromIndex: 0 });
+    const costed = reduceChat(started, { type: 'turn/actor-cost', parentToolUseId: 'tu-x', cost: { cost: 0.05 } });
+    expect(costed.actors['tu-x']).toMatchObject({ streaming: true, cost: { cost: 0.05 } });
+  });
+
+  test('a session SWITCH prunes the orchestrator projections; a same-session state push keeps them (#10)', () => {
+    const a0 = reduceChat({ ...INITIAL_STATE, session: { sessionId: 'A', messages: [], cost: null } },
+      { type: 'turn/actor-start', parentToolUseId: 'tu-1', sessionId: 'r', fromIndex: 0 });
+    expect(a0.actors['tu-1']).toBeDefined();
+    // Same-session 'state' push (Plan/Act toggle, /system, settings) must NOT wipe a live card.
+    const sameSession = reduceChat(a0, { type: 'state', state: { session: { sessionId: 'A', messages: [] } } });
+    expect(sameSession.actors['tu-1']).toBeDefined();
+    // An ACTUAL switch to B prunes actors/subagents/asyncTasks (they belong to A's transcript).
+    const switched = reduceChat(a0, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } });
+    expect(switched.session.sessionId).toBe('B');
+    expect(switched.actors).toEqual({});
+    expect(switched.subagents).toEqual(INITIAL_STATE.subagents);
+    expect(switched.asyncTasks).toEqual(INITIAL_STATE.asyncTasks);
+  });
+
   test('goal/state tracks a run per session, and a terminal phase clears it', () => {
     const running: any = reduceChat(INITIAL_STATE, {
       type: 'goal/state', sessionId: 's1', phase: 'running', iteration: 3, maxIterations: 40, goal: 'ship it', summary: null,

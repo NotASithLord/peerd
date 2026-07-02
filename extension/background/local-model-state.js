@@ -16,7 +16,7 @@ export const makeLocalModelState = () => {
   /** @type {unknown} */
   let progress = null;
   return {
-    /** Is the local model resident/cached (usable as the page-reader runner)? */
+    /** Is the local model resident/cached (usable as the web actor model)? */
     available: () => available,
     /** @param {unknown} b */
     setAvailable: (b) => { available = !!b; },

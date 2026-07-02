@@ -123,3 +123,24 @@ describe('normalizeSettingsPatch — dweb gate', () => {
     expect(norm({ dwebEnabled: 'yes' })).toEqual({});
   });
 });
+
+describe('normalizeSettingsPatch — ollamaHost (issue #104)', () => {
+  test('keeps a valid http(s) origin', () => {
+    expect(norm({ ollamaHost: 'http://localhost:11434' })).toEqual({ ollamaHost: 'http://localhost:11434' });
+    expect(norm({ ollamaHost: 'http://192.168.1.4:11434' })).toEqual({ ollamaHost: 'http://192.168.1.4:11434' });
+    expect(norm({ ollamaHost: 'https://ollama.example.com' })).toEqual({ ollamaHost: 'https://ollama.example.com' });
+  });
+  test('canonicalizes to the ORIGIN — strips path/query/trailing slash, trims whitespace', () => {
+    expect(norm({ ollamaHost: 'http://192.168.1.4:11434/' })).toEqual({ ollamaHost: 'http://192.168.1.4:11434' });
+    expect(norm({ ollamaHost: 'http://192.168.1.4:11434/api/tags' })).toEqual({ ollamaHost: 'http://192.168.1.4:11434' });
+    expect(norm({ ollamaHost: '  http://192.168.1.4:11434  ' })).toEqual({ ollamaHost: 'http://192.168.1.4:11434' });
+  });
+  test('drops a non-http(s) scheme, a malformed URL, a bare host, and a non-string', () => {
+    expect(norm({ ollamaHost: 'ftp://192.168.1.4:11434' })).toEqual({});  // only http(s)
+    expect(norm({ ollamaHost: 'file:///etc/passwd' })).toEqual({});
+    expect(norm({ ollamaHost: '192.168.1.4:11434' })).toEqual({});         // missing scheme
+    expect(norm({ ollamaHost: 'not a url' })).toEqual({});
+    expect(norm({ ollamaHost: '' })).toEqual({});
+    expect(norm({ ollamaHost: 123 })).toEqual({});
+  });
+});

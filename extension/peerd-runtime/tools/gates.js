@@ -16,8 +16,8 @@
 //                  passes here and defers auto-vs-ask to the dispatcher.
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
-//                  runner-only tool even if the model emits its name. Also
-//                  carries the DESIGN-17 actor capability tier (flag-gated):
+//                  actor-only (main-hidden) tool even if the model emits its
+//                  name. Also carries the DESIGN-17 actor capability tier:
 //                  the instance-mutating set is actor-only, and an actor
 //                  is positively scoped to its own kind + pinned to its own
 //                  instance.
@@ -44,7 +44,7 @@ import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
   EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActor, actorTargetId,
-  actorWebTabTarget, isRunnerPageTool,
+  actorWebTabTarget,
 } from './exposure.js';
 import {
   decideAction,
@@ -116,13 +116,10 @@ const personaGate = (tool, _args, ctx) => {
  * tier has no opinion (the gate continues). The rules:
  *   (1) non-actor ctx → the instance-MUTATING set is refused (it's actor-
  *       only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
- *   (2) main ctx → the do/get/check page runner is refused too (folded into the
- *       web actor); SUBAGENTS keep it (their page path; they can't message a
- *       actor), and the runner itself never calls it.
- *   (3) actor ctx → POSITIVELY constrained to its own kind's toolset (a
+ *   (2) actor ctx → POSITIVELY constrained to its own kind's toolset (a
  *       hallucinated/injected non-env tool fails closed here, not just in the
- *       descriptor list — the keyless/narrow runner trust model).
- *   (4) actor ctx → per-instance pin: an EXPLICIT target that isn't this
+ *       descriptor list — the keyless, narrow trust model).
+ *   (3) actor ctx → per-instance pin: an EXPLICIT target that isn't this
  *       actor's instance is refused (defense in depth — the actor dispatch
  *       wrapper already force-injects the bound id).
  *
@@ -133,9 +130,6 @@ export const actorTierGate = (tool, args, ctx) => {
   if (ctx?.exposure !== EXPOSURE_ACTOR) {
     if (isActorMutatingTool(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
-    }
-    if (ctx?.exposure === 'main' && isRunnerPageTool(tool.name)) {
-      return { allowed: false, reason: `'${tool.name}' is folded into the web actor — open_tab, then message that tab's actor to read or act on the page` };
     }
     return null;
   }
@@ -177,20 +171,19 @@ export const actorTierGate = (tool, args, ctx) => {
  * Exposure — enforces the main-agent tool boundary at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
  * (snapshot, click, type, page_exec, …) are hidden from the main agent and
- * belong to the disposable browser-runner. mainAgentDescriptors() keeps
- * them out of the model's tool list, but that's advisory — a
- * prompt-injected model can still EMIT a hidden tool name. This gate makes
- * the boundary real: a context marked `exposure: 'main'` (set only on the
- * main turn) is refused any hidden tool. The runner and subagents leave
- * `exposure` unset — they legitimately hold these tools, narrowed by the
- * orchestrator's own allow-list (spawn.js).
+ * belong to the web actor. mainAgentDescriptors() keeps them out of the
+ * model's tool list, but that's advisory — a prompt-injected model can
+ * still EMIT a hidden tool name. This gate makes the boundary real: a
+ * context marked `exposure: 'main'` (set only on the main turn) is refused
+ * any hidden tool. Actors and subagents leave `exposure` unset — the actor
+ * legitimately holds these tools, narrowed by its kind's allow-list (spawn.js).
  *
  * SECOND check: the per-session tool manifest (tools/manifests.js).
  * ctx.toolAllow is the session's RESOLVED allow-set (null = no manifest =
  * everything). Descriptor filtering keeps excluded tools out of the
  * model's advertised list, but that's advisory too — this refusal makes
- * the manifest real at dispatch. Unlike the runner-only check it applies
- * to EVERY context that carries it, main turn AND children: spawn.js
+ * the manifest real at dispatch. Unlike the main-only hidden-tool check it
+ * applies to EVERY context that carries it, main turn AND children: spawn.js
  * inherits the manifest into child session records, so a child's
  * effective set can intersect with, but never escalate past, its
  * parent's manifest.
@@ -201,7 +194,7 @@ export const actorTierGate = (tool, args, ctx) => {
 export const exposureGate = (tool, args, ctx) => {
   if (ctx?.exposure === 'main') {
     if (isHiddenFromMain(tool.name)) {
-      return { allowed: false, reason: `'${tool.name}' is runner-only, not available to the main agent` };
+      return { allowed: false, reason: `'${tool.name}' is actor-only — message a tab's actor to reach the page` };
     }
     // Progressive disclosure: an instance-gated op (webvm/notebook/app secondary
     // op) is refused until the chat has a current instance of that kind. The

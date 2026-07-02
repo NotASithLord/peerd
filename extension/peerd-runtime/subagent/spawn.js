@@ -88,7 +88,7 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
 // soft spot of the single-thread/shared-heap model (docs §security, "not
 // isolated like Cloudflare"). We close it BY CONSTRUCTION: strip every
 // capability closure that NONE of the child's granted tools consume, so a
-// browser-runner's context literally has no path to secrets/egress/spawn.
+// narrowed child's context literally has no path to secrets/egress/spawn.
 //
 // The lists below are the COMPLETE set of ctx.<cap> readers among tools
 // (grep `ctx.<cap>` over tools/**). getSecret/safeFetch have NO tool reader —
@@ -228,18 +228,8 @@ export const makeSpawnSubagent = (deps) => {
    * @param {number} [req.parentDepth]             spawner's depth (child = +1)
    * @param {(ev: object) => void} [req.onEvent]   live forwarder for the side panel
    * @param {string} [req.parentToolUseId]         links the parent's card → child session
-   * @param {string} [req.systemPromptOverride]    a full system prompt used VERBATIM
-   *   (browser-runner). Bypasses the base template + <subagent_task> block; the
-   *   goal still arrives as the first user message.
-   * @param {number} [req.tabId]                   pin the child's DOM tools (and the
-   *   origin/denylist gate) to ONE specific tab. Used by do/get/check.
-   * @param {string} [req.taskContext]              bulky context appended to the
-   *   child's first USER MESSAGE only (e.g. a pre-captured page snapshot).
-   *   Deliberately kept OUT of session.task, the side-panel card label, the
-   *   session-title derivation, and the audit slice — those stay the short
-   *   human-legible task. Page-derived text must never leak into the audit log.
    * @param {boolean} [req.persistDeltas=true]      set false for ephemeral
-   *   children (browser-runners): skips the per-streamed-delta full-record
+   *   children (e.g. cheap-call): skips the per-streamed-delta full-record
    *   IDB rewrite. Finalization writes still happen — the result extraction
    *   below reads the COMPLETED session, which is the only persistence an
    *   ephemeral child needs (a mid-run SW death orphans the await anyway).
@@ -258,12 +248,6 @@ export const makeSpawnSubagent = (deps) => {
       parentDepth = 0,
       onEvent,
       parentToolUseId,
-      // Browser-runner extensions (do/get/check). systemPromptOverride replaces
-      // the base+<subagent_task> prompt with the runner's own; tabId pins the
-      // child's DOM tools (and the origin/denylist gate) to ONE specific tab.
-      systemPromptOverride,
-      tabId,
-      taskContext,
       persistDeltas = true,
     } = req;
 
@@ -363,11 +347,10 @@ export const makeSpawnSubagent = (deps) => {
     /** @type {((call: import('/shared/tool-types.js').ToolCall) => Promise<import('/shared/tool-types.js').ToolResult>) | undefined} */
     let toolDispatch;
     if (subsetDescriptors.length > 0) {
-      const baseCtx = await buildToolContext({ sessionId: child.sessionId, activeTabId: tabId });
+      const baseCtx = await buildToolContext({ sessionId: child.sessionId });
       // why restrictCtxCapabilities: capability-by-need. buildToolContext returns
       // the full capability surface (secrets/egress/spawn closures); we remove the
-      // ones no granted tool needs so a narrowed child — above all the do/get/check
-      // browser-runner, which reads untrusted pages — has no closure path to them
+      // ones no granted tool needs so a narrowed child has no closure path to them
       // even if a granted tool were confused into reaching for one.
       const childCtx = restrictCtxCapabilities({ ...baseCtx, audit: taggedAudit }, allowedNames);
       toolDispatch = (call) => {
@@ -389,12 +372,6 @@ export const makeSpawnSubagent = (deps) => {
       };
     }
 
-    // why: a browser-runner (do/get/check) supplies its OWN system prompt — the
-    // base template + <subagent_task> block doesn't apply. When
-    // systemPromptOverride is set, use it verbatim (the runner's goal still
-    // arrives as the first user message, userText below). Otherwise: the normal
-    // subagent prompt.
-    //
     // why no customSystemPrompt here: the parent session's /system
     // instructions are deliberately NOT inherited — a subagent gets its
     // own task framing (taskOverride) and nothing else. The instructions
@@ -402,9 +379,7 @@ export const makeSpawnSubagent = (deps) => {
     // would distort the child's one-shot task and silently widen the
     // blast radius of a session-scoped instruction. Inheritance is
     // "absent", by design.
-    const getSystemPrompt = (typeof systemPromptOverride === 'string' && systemPromptOverride.trim().length > 0)
-      ? () => Promise.resolve(systemPromptOverride)
-      : () => renderSystemPrompt({ taskOverride: task });
+    const getSystemPrompt = () => renderSystemPrompt({ taskOverride: task });
 
     // Guardrail 5 (output cap): inject maxTokens into every model call.
     /** @param {object} modelArgs */
@@ -418,21 +393,16 @@ export const makeSpawnSubagent = (deps) => {
     let lastStopReason;
     // why: the child's model usage is yielded as 'usage' events but is NOT
     // folded into the parent/main turn tally (the main SW only accumulates its
-    // OWN session's usage). That means runner spend is naturally SEPARATE from
-    // main-agent spend — exactly what do/get/check needs (the main context stays
-    // clean). We sum it here so the runner's token cost is at least VISIBLE to
-    // the caller (eval telemetry / success criterion 5), without polluting main.
+    // OWN session's usage). That means subagent spend is naturally SEPARATE from
+    // main-agent spend (the main context stays clean). We sum it here so the
+    // child's token cost is at least VISIBLE to the caller (eval telemetry /
+    // success criterion 5), without polluting main.
     const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     const start = now();
     try {
       for await (const ev of runUserTurn({
         sessionId: child.sessionId,
-        // why: taskContext (e.g. a pre-captured snapshot) rides ONLY here —
-        // the model sees it, but session.task / cards / audit keep the
-        // short task string.
-        userText: (typeof taskContext === 'string' && taskContext.length > 0)
-          ? `${task}\n\n${taskContext}`
-          : task,
+        userText: task,
         callModel: cappedCallModel,
         getSecret,
         safeFetch,

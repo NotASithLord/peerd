@@ -94,7 +94,7 @@ describe('sidepanel.tools-chip', () => {
   });
 
   it('a custom allow-list manifest labels the chip with the tool count', async () => {
-    const { root, unmount } = await mountChat(baseState({ toolManifest: { allow: ['get', 'check'] } }));
+    const { root, unmount } = await mountChat(baseState({ toolManifest: { allow: ['snapshot', 'read_page'] } }));
     try {
       const chip = toolsChip(root);
       expect(chip.textContent).toBe('/tools custom (2 tools)');

@@ -1192,19 +1192,6 @@ button.icon:hover { background: var(--bg); }
   font-family: var(--font-mono);
 }
 
-/* dispatch badge — the EXECUTION mechanism (e.g. "via runner"), distinct from
-   the resource primitive. Muted/outlined so it reads as a qualifier, not a
-   second primitive. */
-.dispatch-badge {
-  font-size: 10px;
-  font-family: var(--font-mono);
-  color: var(--fg-muted);
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
-  border-radius: 4px;
-  padding: 0 5px;
-  line-height: 16px;
-}
-
 .gate-row {
   display: flex;
   flex-wrap: wrap;

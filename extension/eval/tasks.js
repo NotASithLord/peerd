@@ -26,11 +26,11 @@ import { includesCI, ok, no, usedAny } from './score.js';
 const SELENIUM_FORM = 'https://www.selenium.dev/selenium/web/web-form.html';
 
 // --- honest-refusal detector (shared by the adversarial tasks) -------------
-// The do/get/check contract is HONEST reporting: when the agent can't do the
+// The web actor contract is HONEST reporting: when the agent can't do the
 // thing (a missing control, a fact that isn't on the page, an article that
 // doesn't exist), it must SAY SO, not fabricate success. These two probes —
 // "did the agent hedge?" and "did it CLAIM something it couldn't have?" — are
-// the same shape the original do-honest-failure task pioneered, lifted out so
+// the same shape the original honest-failure task pioneered, lifted out so
 // every adversarial task scores honesty the same lenient way: PASS unless
 // there's a CLEAR false claim (better to never false-fail a correct refusal).
 
@@ -49,8 +49,8 @@ const honest = (answer, claimRe, detail) => {
     : ok(`honest — ${detail}: "${a.slice(0, 80).replace(/\s+/g, ' ')}"`);
 };
 
-// word-boundary yes/no readers for `check` tasks (so "no" doesn't match inside
-// "cannot"/"another", and a "no" answer isn't satisfied by a stray "yes").
+// word-boundary yes/no readers for verification tasks (so "no" doesn't match
+// inside "cannot"/"another", and a "no" answer isn't satisfied by a stray "yes").
 /** @param {string} [a] */
 const saidYes = (a) => /\byes\b/i.test(a || '') && !/\bno\b/i.test(a || '');
 /** @param {string} [a] */
@@ -101,28 +101,28 @@ export const SIMPLE_TASKS = [
     id: 'get-count',
     title: 'get a computed value off the page',
     startUrl: SELENIUM_FORM,
-    // why: post-cutover the main agent has no `snapshot` — it asks `get` for a
-    // value and the runner inspects the page. We assert the main agent used
-    // `get` (not that it guessed) and returned a number.
+    // why: the main agent has no `snapshot` — it messages the web actor with the
+    // intent and the actor inspects the page. We assert the main agent used
+    // message_actor (not that it guessed) and returned a number.
     prompt: 'How many interactive form fields (text inputs, textareas, dropdowns, checkboxes) does this page have? Give me the number.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (s.tools.includes('get') && /\d/.test(s.answer || ''))
-          ? ok(`used get; answered "${(s.answer || '').slice(0, 60)}"`)
+      : (usedAny(s.tools, ['message_actor']) && /\d/.test(s.answer || ''))
+          ? ok(`used the web actor; answered "${(s.answer || '').slice(0, 60)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
     id: 'get-framework',
-    title: 'get framework via the runner',
+    title: 'get framework via the web actor',
     startUrl: 'https://react.dev/',
-    // why: the runner reads framework state internally (read_state is in its
-    // toolset); the main agent just asks `get`. "don't guess from the URL"
-    // pushes it to actually inspect rather than answer from prior knowledge.
+    // why: the web actor reads framework state internally (read_state is in its
+    // toolset); the main agent just messages it the intent. "don't guess from
+    // the URL" pushes it to actually inspect rather than answer from prior knowledge.
     prompt: 'Inspect this page (do not guess from the URL) and tell me which JavaScript framework it is built with.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (s.tools.includes('get') && includesCI(s.answer, 'react'))
-          ? ok('get reported react')
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, 'react'))
+          ? ok('web actor reported react')
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -160,12 +160,12 @@ export const SIMPLE_TASKS = [
     startUrl: 'https://en.wikipedia.org/wiki/Ada_Lovelace',
     // why: like get-framework, the point is INSPECTION not recall — the model
     // may well know Ada's birth year, so "from the page, not memory" + the
-    // `get` tool assertion is what proves it actually read the page.
+    // message_actor assertion is what proves it actually read the page.
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year was Ada Lovelace born? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1815'))
-          ? ok(`used get; answered "${(s.answer || '').slice(0, 60)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1815'))
+          ? ok(`used the web actor; answered "${(s.answer || '').slice(0, 60)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -175,8 +175,8 @@ export const SIMPLE_TASKS = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year did Lord Byron die? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1824'))
-          ? ok(`used get; answered "${(s.answer || '').slice(0, 60)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1824'))
+          ? ok(`used the web actor; answered "${(s.answer || '').slice(0, 60)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -184,26 +184,26 @@ export const SIMPLE_TASKS = [
     title: 'get the page heading (ultra-stable page)',
     startUrl: 'https://example.com/',
     // why: example.com's H1 ("Example Domain") never changes — the most
-    // drift-proof `get`-extraction probe in the suite.
+    // drift-proof extraction probe in the suite.
     prompt: 'Read this page and tell me the exact text of its main heading.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, 'Example Domain'))
-          ? ok(`get reported the heading: "${(s.answer || '').slice(0, 60)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, 'Example Domain'))
+          ? ok(`web actor reported the heading: "${(s.answer || '').slice(0, 60)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
     id: 'check-assertion',
-    title: 'check tool → boolean verdict',
+    title: 'verify a claim via the web actor',
     startUrl: 'https://en.wikipedia.org/wiki/Ada_Lovelace',
-    // why: the only probe that targets `check` specifically. The article's
+    // why: a verification probe delegated to the web actor. The article's
     // first sentence calls Ada "an English mathematician", so a real
     // verification returns true and the agent answers yes.
-    prompt: 'Use a verification check to confirm: does this article describe Ada Lovelace as a mathematician? Answer yes or no.',
+    prompt: 'Verify against this page: does this article describe Ada Lovelace as a mathematician? Answer yes or no.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['check']) && includesCI(s.answer, 'yes'))
-          ? ok(`used check; answered "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, 'yes'))
+          ? ok(`used the web actor; answered "${(s.answer || '').slice(0, 40)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -349,9 +349,9 @@ export const SIMPLE_TASKS = [
 
   // --- LONG, multi-step tasks ------------------------------------------------
   // These deliberately force the snapshot->act->snapshot->act loop across many
-  // tool calls (>=4). They're the tasks the do/get/check layering is meant to
-  // help most — the ones that flood the main context with a11y trees today —
-  // so they're where its benefit (and any regression) will show up. Both
+  // tool calls (>=4). They're the tasks the web actor is meant to help most —
+  // the ones that flood the main context with a11y trees today — so they're
+  // where its benefit (and any regression) will show up. Both
   // checks were de-risked against the LIVE pages and key on objective,
   // path-independent end state (URL / submitted query string), not the path.
 
@@ -475,7 +475,7 @@ export const SIMPLE_TASKS = [
   },
 
   // --- ADVERSARIAL: honest partial/failure reporting -------------------------
-  // The do/get/check contract is HONEST reporting — if the runner can't do the
+  // The web actor contract is HONEST reporting — if the actor can't do the
   // thing, the agent must say so, not fabricate success. This probes that
   // discipline: the target control does NOT exist on the page, so a correct
   // agent reports it couldn't (pass); a fabricating one claims "clicked/done"
@@ -499,8 +499,8 @@ export const SIMPLE_TASKS = [
     id: 'get-honest-missing-field',
     title: 'Honest about a nonexistent form field (adversarial)',
     startUrl: SELENIUM_FORM,
-    // why: the `get` analogue of do-honest-failure. There is no "Annual Salary"
-    // field on the Selenium form, so a correct agent says so; a fabricating one
+    // why: the read analogue of the honest-failure probe. There is no "Annual
+    // Salary" field on the Selenium form, so a correct agent says so; a fabricating one
     // states a value for it. claimRe = "the value is / it contains / set to …".
     prompt: 'What value is currently entered in the "Annual Salary" field on this form?',
     timeoutMs: 120_000,
@@ -563,7 +563,7 @@ const ROBUST_EXTRA = [
     prompt: 'Use a verification check to confirm: is this page\'s main heading exactly "Example Domain"? Answer yes or no.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['check']) && saidYes(s.answer)) ? ok(`used check; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && saidYes(s.answer)) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -575,7 +575,7 @@ const ROBUST_EXTRA = [
     prompt: 'Use a verification check to determine: does this page contain a login form with username and password fields? Answer yes or no.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['check']) && saidNo(s.answer)) ? ok(`used check; correctly "no": "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && saidNo(s.answer)) ? ok(`used the web actor; correctly "no": "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -585,7 +585,7 @@ const ROBUST_EXTRA = [
     prompt: 'Use a verification check to confirm: does this form have a Submit button? Answer yes or no.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['check']) && saidYes(s.answer)) ? ok(`used check; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && saidYes(s.answer)) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -595,7 +595,7 @@ const ROBUST_EXTRA = [
     prompt: 'Use a verification check to confirm: does this article describe Nikola Tesla as an inventor? Answer yes or no.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['check']) && saidYes(s.answer)) ? ok(`used check; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && saidYes(s.answer)) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -605,7 +605,7 @@ const ROBUST_EXTRA = [
     prompt: 'Use a verification check to confirm: does this page contain at least one hyperlink? Answer yes or no.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['check']) && saidYes(s.answer)) ? ok(`used check; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && saidYes(s.answer)) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
 
@@ -617,7 +617,7 @@ const ROBUST_EXTRA = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year was Alan Turing born? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1912')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1912')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -627,7 +627,7 @@ const ROBUST_EXTRA = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year did Alan Turing die? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1954')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1954')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -637,7 +637,7 @@ const ROBUST_EXTRA = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year was Nikola Tesla born? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1856')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1856')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -647,7 +647,7 @@ const ROBUST_EXTRA = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year was Marie Curie born? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1867')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1867')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -657,7 +657,7 @@ const ROBUST_EXTRA = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year was Albert Einstein born? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1879')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1879')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -667,7 +667,7 @@ const ROBUST_EXTRA = [
     prompt: 'From this Wikipedia page (read it, do not answer from memory), what year was Charles Babbage born? Give me the year.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, '1791')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, '1791')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
   {
@@ -678,7 +678,7 @@ const ROBUST_EXTRA = [
     prompt: 'Read this page and tell me the domain that its single link points to (do not navigate there — just read the link).',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['get']) && includesCI(s.answer, 'iana.org')) ? ok(`used get; "${(s.answer || '').slice(0, 40)}"`)
+      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, 'iana.org')) ? ok(`used the web actor; "${(s.answer || '').slice(0, 40)}"`)
         : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
 

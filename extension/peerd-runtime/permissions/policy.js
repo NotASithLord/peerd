@@ -158,6 +158,19 @@ export const classifyAction = (tool) => {
 // the same pure load). The denylist origin gate still applies to both.
 export const PLAN_NAVIGATION_TOOLS = Object.freeze(new Set(['navigate', 'open_tab']));
 
+// Plan-mode delegation carve-out. why: `message_actor` is the main agent's ONLY
+// page-content path (do/get/check + DOM reads were folded off the orchestrator
+// into the actor). Classified `write` it would be EXTERNAL and Plan-blocked,
+// leaving Plan with no way to read a page at all — silently breaking Decision
+// #16's "go look at X and tell me what it says". But the delegation itself
+// mutates nothing: the actor it mints INHERITS the orchestrator's permission
+// mode (service-worker.js mintActor: `permissionMode: perm.mode`), so a
+// Plan-mode delegation spins up a Plan-mode actor whose OWN inner turn is the
+// real write barrier — its read_page/snapshot run, its click/type still block.
+// The outer gate allows the delegation; the inner inherited-Plan turn enforces
+// read-only. (Act-mode confirmation is untouched — see #7.)
+export const PLAN_DELEGATION_TOOLS = Object.freeze(new Set(['message_actor']));
+
 // --- The decision ----------------------------------------------------------
 
 /**
@@ -210,6 +223,14 @@ export const decideAction = ({ mode, confirmActions, tool }) => {
         confirm: false,
         actionClass,
         reason: 'plan: navigation carve-out — a pure URL load mutates no page state',
+      };
+    }
+    if (tool?.name && PLAN_DELEGATION_TOOLS.has(tool.name)) {
+      return {
+        allowed: true,
+        confirm: false,
+        actionClass,
+        reason: 'plan: delegation carve-out — the actor inherits Plan; its inner turn is the read-only barrier',
       };
     }
     return {

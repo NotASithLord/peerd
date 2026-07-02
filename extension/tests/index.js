@@ -94,3 +94,4 @@ import './unit/sidepanel/message-list.test.js';
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
 import './unit/home/contacts-section.test.js';
+import './unit/home/network-section.test.js';

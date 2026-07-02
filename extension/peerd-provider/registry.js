@@ -94,11 +94,11 @@ export const listProviders = () =>
     name: a.name,
     label: a.label,
     defaultModel: a.defaultModel,
-    // why: the per-provider fast default for the page-reader runner
-    // (do/get/check). resolveRunnerModel uses it when the user hasn't pinned
-    // an override; the Settings placeholder shows it so "blank" is honest
-    // about what actually runs. Falls back to defaultModel if an adapter
-    // somehow omits it (every shipped adapter sets one).
+    // why: the per-provider fast default for the web actor.
+    // resolveRunnerModel uses it when the user hasn't pinned an override; the
+    // Settings placeholder shows it so "blank" is honest about what actually
+    // runs. Falls back to defaultModel if an adapter somehow omits it (every
+    // shipped adapter sets one).
     defaultRunnerModel: a.defaultRunnerModel ?? a.defaultModel,
     vaultSecretName: a.vaultSecretName,
     // keyless: local providers have no API key — the chassis skips vault
@@ -116,7 +116,9 @@ export const listProviders = () =>
  * callers can surface the legible message.
  *
  * @param {string} name
- * @param {{ safeFetch: Function, signal?: AbortSignal }} deps
+ * @param {{ safeFetch: Function, signal?: AbortSignal, ollamaHost?: string }} deps
+ *   ollamaHost (issue #104) routes the live inventory to a remote daemon; other
+ *   adapters ignore it.
  * @returns {Promise<Array<{ model: string, label: string }> | null>}
  */
 export const listProviderModels = async (name, deps) => {
@@ -135,7 +137,8 @@ export const listProviderModels = async (name, deps) => {
  *
  * @param {string} name
  * @param {string} model
- * @param {{ getSecret: Function, safeFetch: Function, signal?: AbortSignal }} deps
+ * @param {{ getSecret: Function, safeFetch: Function, signal?: AbortSignal, ollamaHost?: string }} deps
+ *   ollamaHost (issue #104) routes the live /api/show window to a remote daemon.
  * @returns {Promise<number | null>}
  */
 export const providerModelContextWindow = async (name, model, deps) => {

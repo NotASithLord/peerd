@@ -39,9 +39,12 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // (actor-list.js), a net −4 CHECKED FILES. This is a legitimate decrease (files
 // deleted, not directives dropped) — coverage stays 100% of the non-ES5 set.
 // 474 → 475: the view tool (tools/web/view.js) added one // @ts-check'd file.
-// 475 → 476: the web-actor page-API translation core (subagent/page-api.js).
-// 476 → 477: the page-call handler (subagent/page-call-handler.js).
-const COVERED_FLOOR = 477;
+// 475 → 471: the do/get/check cull removed four // @ts-check'd files (the do/
+// get/check tool defs + runner/index.js — the web actor holds the DOM tools
+// directly now). A legitimate decrease (files deleted, not directives dropped).
+// → 474: the web-actor page-API translation core (subagent/page-api.js) + the
+// page-call handler (subagent/page-call-handler.js), +2 on the post-cull set.
+const COVERED_FLOOR = 474;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

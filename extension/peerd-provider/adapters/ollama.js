@@ -31,10 +31,26 @@ import {
   OllamaNotRunningError,
 } from '../errors.js';
 
-const ORIGIN = 'http://localhost:11434';
-const ENDPOINT = `${ORIGIN}/v1/chat/completions`;
-const TAGS_ENDPOINT = `${ORIGIN}/api/tags`;
-const SHOW_ENDPOINT = `${ORIGIN}/api/show`;
+// The default daemon origin (local loopback). A user with a remote/LAN Ollama
+// box overrides it via the `ollamaHost` setting (issue #104), threaded into each
+// call below. localhost:11434 + 127.0.0.1:11434 are on the hardcoded egress
+// allowlist; a custom host is added to the allowlist from its setting.
+const DEFAULT_ORIGIN = 'http://localhost:11434';
+
+/**
+ * Build the three Ollama endpoints from a host. `host` is a normalized origin
+ * (settings-patch validates it to `new URL(...).origin`); we still strip a
+ * trailing slash and fall back to the loopback default defensively.
+ * @param {string} [host]
+ */
+const endpointsFor = (host) => {
+  const origin = String(host || DEFAULT_ORIGIN).replace(/\/+$/, '');
+  return {
+    completions: `${origin}/v1/chat/completions`,
+    tags: `${origin}/api/tags`,
+    show: `${origin}/api/show`,
+  };
+};
 
 // why 120s (vs the 45s the cloud adapters use): Ollama sends response
 // headers only after the model is LOADED into memory — a cold start on a
@@ -66,6 +82,10 @@ export const DEFAULT_MODEL = 'qwen3:8b';
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
  * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
  * @param {AbortSignal} [args.signal]
+ * @param {string} [args.ollamaHost]
+ *   Daemon base URL (issue #104). Defaults to the local loopback; a remote/LAN
+ *   host is threaded in from the `ollamaHost` setting. Must already be on the
+ *   egress allowlist (the SW adds the configured host).
  * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [args._sleep]
  *   Test seam for the connection-drop retry backoff — same contract as the
  *   other adapters' _sleep. Production callers leave it undefined.
@@ -79,9 +99,11 @@ export async function* callOllama(args) {
     tools,
     safeFetch,
     signal,
+    ollamaHost,
     _sleep = abortableSleep,
   } = args;
 
+  const { completions: ENDPOINT } = endpointsFor(ollamaHost);
   const body = toOpenAiBody({ model, system, messages, tools, maxTokens });
   const requestInit = {
     method: 'POST',
@@ -138,9 +160,11 @@ export async function* callOllama(args) {
  * @param {Object} deps
  * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.safeFetch
  * @param {AbortSignal} [deps.signal]
+ * @param {string} [deps.ollamaHost] daemon base URL (issue #104); defaults to loopback.
  * @returns {Promise<Array<{ model: string, label: string, sizeBytes: number }>>}
  */
-export const listOllamaModels = async ({ safeFetch, signal }) => {
+export const listOllamaModels = async ({ safeFetch, signal, ollamaHost }) => {
+  const { tags: TAGS_ENDPOINT } = endpointsFor(ollamaHost);
   let res;
   try {
     res = await safeFetch(TAGS_ENDPOINT, { method: 'GET', signal });
@@ -189,10 +213,12 @@ export const listOllamaModels = async ({ safeFetch, signal }) => {
  * @param {string} args.model
  * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
  * @param {AbortSignal} [args.signal]
+ * @param {string} [args.ollamaHost] daemon base URL (issue #104); defaults to loopback.
  * @returns {Promise<number | null>}
  */
-export const fetchOllamaContextWindow = async ({ model, safeFetch, signal }) => {
+export const fetchOllamaContextWindow = async ({ model, safeFetch, signal, ollamaHost }) => {
   if (typeof model !== 'string' || !model) return null;
+  const { show: SHOW_ENDPOINT } = endpointsFor(ollamaHost);
   return fetchModelWindow({
     safeFetch,
     url: SHOW_ENDPOINT,
@@ -233,7 +259,9 @@ export const fetchOllamaContextWindow = async ({ model, safeFetch, signal }) => 
 export const ollamaAdapter = Object.freeze({
   name: 'ollama',
   label: 'Ollama (local)',
-  endpoint: ENDPOINT,
+  // Informational default; the live endpoint is built per-call from the
+  // `ollamaHost` setting (endpointsFor) so a remote daemon works (issue #104).
+  endpoint: `${DEFAULT_ORIGIN}/v1/chat/completions`,
   defaultModel: DEFAULT_MODEL,
   // why: Ollama has no separate fast/cheap tier the way the cloud gateways
   // do — the runner rides the same local model as chat. Set it explicitly

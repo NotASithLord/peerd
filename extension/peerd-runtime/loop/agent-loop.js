@@ -177,7 +177,7 @@ export async function* asCompleted(promises) {
  * @param {() => number} [ctx.now]
  * @param {boolean} [ctx.persistDeltas]
  *   When false, skip the per-delta IDB rewrite of the partial transcript
- *   (browser-runners opt out — an ephemeral child's partial reply dies with
+ *   (ephemeral children opt out — an ephemeral child's partial reply dies with
  *   the SW anyway). Defaults to true; finalization writes are unaffected.
  * @param {boolean} [ctx.oneShot]
  *   One-shot turn (actor delegations): after the FIRST clean tool round,
@@ -206,7 +206,7 @@ export async function* runUserTurn(ctx) {
   // why: per-delta persistence buys SW-crash recovery of a PARTIAL
   // transcript — worth a full-record IDB rewrite per chunk for the main
   // chat, pure waste for an ephemeral child whose awaiting parent dies
-  // with the SW anyway. Callers opt OUT explicitly (browser-runners);
+  // with the SW anyway. Callers opt OUT explicitly (ephemeral children);
   // finalization writes are unaffected either way.
   const persistDeltas = ctx.persistDeltas !== false;
   const toolsArePresent = Array.isArray(tools) && tools.length > 0;

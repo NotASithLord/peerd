@@ -78,15 +78,15 @@ export const escapeAttr = (s) => String(s)
 
 /**
  * Display-only removal of the untrusted-content fence WRAPPER tags, keeping the
- * inner body. The mirror of wrapUntrusted / wrapUntrustedRunner
- * (peerd-runtime/tools/prompt-wrap.js): the MODEL receives the fenced text (its
- * "treat as data" boundary), but the human should never see the literal
- * <untrusted_*> delimiters in a rendered tool-result card. PURE + render-only —
- * returns a new string, never mutates stored content, and is NEVER fed back to
- * the model (the persisted tool_result keeps its fence so the model stays
- * injection-aware every turn). Non-string in → '' out.
+ * inner body. The mirror of wrapUntrusted (peerd-runtime/tools/prompt-wrap.js):
+ * the MODEL receives the fenced text (its "treat as data" boundary), but the
+ * human should never see the literal <untrusted_*> delimiters in a rendered
+ * tool-result card. PURE + render-only — returns a new string, never mutates
+ * stored content, and is NEVER fed back to the model (the persisted tool_result
+ * keeps its fence so the model stays injection-aware every turn). Non-string in
+ * → '' out.
  *
- * Removes ONLY this module's two wrapper tags (open + close), tolerant of
+ * Removes the untrusted_web_content wrapper tag (open + close), tolerant of
  * internal whitespace + case, plus the single padding newline the wrapper
  * inserts on each side. Leaves the BODY untouched — including any defanged
  * `&lt;…` variants (neutralizeFence output, which must stay visible as evidence
@@ -99,7 +99,7 @@ export const escapeAttr = (s) => String(s)
  */
 export const stripUntrustedFences = (text) => {
   if (typeof text !== 'string') return '';
-  const TAGS = 'untrusted_web_content|untrusted_runner_summary';
+  const TAGS = 'untrusted_web_content';
   // why [^>]* not .*: attribute VALUES are escapeAttr'd by the producer (`>` →
   // `&gt;`), so a real wrapper open tag has exactly one unescaped `>` — its own.
   // This is correct AND avoids catastrophic backtracking. The `\n?` absorbs the

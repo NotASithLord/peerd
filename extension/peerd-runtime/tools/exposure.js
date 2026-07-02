@@ -3,24 +3,23 @@
 //
 // After the DESIGN-17 actor cutover, the main agent's browser surface is
 // actor_list / open_tab / message_actor (+ capture). The page itself is
-// reached by messaging the tab's web ACTOR — do/get/check and the low-level
-// DOM/page tools (a11y snapshots, element refs, click/type/navigate, raw page
-// content, code-exec) all LEFT the main agent: the actor holds the DOM
-// toolset, subagents still drive a page through do/get/check. This keeps
-// untrusted page content and ref noise out of the main context: the security +
-// long-task-reliability thesis. The strip is RUNNER_PAGE_TOOLS + the actor
-// mutating tier, applied by filterActorSurface (below) + the gate.
+// reached by messaging the tab's web ACTOR — the low-level DOM/page tools
+// (a11y snapshots, element refs, click/type/navigate, raw page content,
+// code-exec) all LEFT the main agent and now live on the web actor directly.
+// This keeps untrusted page content and ref noise out of the main context: the
+// security + long-task-reliability thesis. The strip is the actor mutating
+// tier, applied by filterActorSurface (below) + the gate.
 //
-// The tools remain REGISTERED; the actor + subagents still receive them via
-// tool narrowing (spawn.js). This module ONLY filters what the MAIN model SEES.
+// The DOM tools remain REGISTERED; the web actor receives them via tool
+// narrowing (spawn.js). This module ONLY filters what the MAIN model SEES.
 // It is the realization of the V1.3 exposure manifest (gates.js exposureGate).
 //
 // Pure — unit-tested. The SW applies mainAgentDescriptors() to the main turn's
-// descriptor list, and leaves getToolDescriptors() (the runner's source) full.
+// descriptor list, and leaves getToolDescriptors() (the actor's source) full.
 
-// The DOM/page tools hidden from the MAIN agent. The runner uses these. Keep in
-// sync with peerd-runtime/runner/index.js DO_TOOLSET / READ_TOOLSET (those are
-// the runner-side allow-list; this is the main-side deny-list).
+// The DOM/page tools hidden from the MAIN agent. The web actor uses these
+// (ACTOR_TYPE_TOOLS.web below is the actor-side allow-list; this is the
+// main-side deny-list).
 //
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 // web_search and submit_form are GONE (deleted, not hidden) — the web actor
@@ -34,12 +33,12 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
   'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
-  // runner reaches it through get/do.
+  // web actor reaches it directly.
   'read_pdf',
   // view returns an UNTRUSTED page screenshot as a model-visible image — same
-  // boundary as read_page (raw page content), so it stays runner-only; the runner
-  // sees the pixels and reports back. (capture is NOT here: its image is redacted
-  // to a sentinel before the model sees it.)
+  // boundary as read_page (raw page content), so it stays actor-only; the web
+  // actor sees the pixels and reports back. (capture is NOT here: its image is
+  // redacted to a sentinel before the model sees it.)
   'view',
   // fetch_url is the web ACTOR's secure fetch — its NON-render web mechanism (the
   // other is drive-a-tab). It's actor-only: the orchestrator delegates web INTENT
@@ -49,7 +48,7 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'fetch_url',
 ]));
 
-/** Is this tool hidden from the main agent (runner-only)? Pure. @param {string} name */
+/** Is this tool hidden from the main agent (actor-only)? Pure. @param {string} name */
 export const isHiddenFromMain = (name) => MAIN_AGENT_HIDDEN_TOOLS.has(name);
 
 /**
@@ -137,17 +136,17 @@ export const filterByInstanceState = (descriptors, instanceState) =>
 // descriptor filters which are advisory):
 //
 //   - ACTOR_MUTATING_TOOLS leave the MAIN agent. A non-actor ctx
-//     (main / subagent / runner / review / direct) is REFUSED any of them —
+//     (main / subagent / review / direct) is REFUSED any of them —
 //     so a one-line `spawn_subagent({tools:['app_delete']})` can't escalate.
 //     Only MUTATION is tiered; READS (app_read_file/app_list_files/
 //     js_read_file) stay GLOBAL + id-addressable, per the spec.
 //   - An actor is POSITIVELY constrained to its own kind's toolset
-//     (actorAllowedTools) — the keyless/narrow runner trust model
-//     generalized: a hallucinated/injected non-env tool from an actor
-//     fails closed at the gate, not just in the descriptor list.
+//     (actorAllowedTools) — a keyless, narrow trust model: a
+//     hallucinated/injected non-env tool from an actor fails closed at the
+//     gate, not just in the descriptor list.
 //
 // The exposure marker is a free string on ctx: 'main' (main turn) / 'actor'
-// (actor turn) / unset (subagent/runner). EXPOSURE_ACTOR is a const so a
+// (actor turn) / unset (subagent). EXPOSURE_ACTOR is a const so a
 // typo can't silently widen authority at its (many) read sites; 'main' stays a
 // bare literal — it's only ever the gate's negative space, never matched by name.
 export const EXPOSURE_ACTOR = 'actor';
@@ -167,24 +166,10 @@ export const ACTOR_MUTATING_TOOLS = Object.freeze(new Set([
 /** Is this a tiered mutating tool (actor-only, off the main agent)? Pure. @param {string} name */
 export const isActorMutatingTool = (name) => ACTOR_MUTATING_TOOLS.has(name);
 
-// DESIGN-17 web-actor cutover — the do/get/check page RUNNER, folded into the
-// actor model. The orchestrator reaches a page ONLY by messaging that tab's
-// actor (open_tab + message_actor), so these leave the MAIN agent.
-// Subagents (exposure unset) keep them — they can't message actors.
-// The tools + the runner stay REGISTERED (a subagent still drives a page through
-// them) — only the main-agent surface narrows.
-export const RUNNER_PAGE_TOOLS = Object.freeze(new Set(['do', 'get', 'check']));
-
-/** Is this one of the do/get/check page-runner tools? Pure. @param {string} name */
-export const isRunnerPageTool = (name) => RUNNER_PAGE_TOOLS.has(name);
-
-// DESIGN-17 web actor — the DOM toolset it owns. MUST mirror the runner's
-// DO_TOOLSET (`runner/index.js`): the web actor IS the runner's lineage with a
-// tier marker + a tab pin, so it holds exactly the runner's tools. Kept as a
-// literal here (not imported) so exposure.js stays a leaf — a drift-guard test
-// (exposure.test.ts) asserts equality with DO_TOOLSET. why these and not
-// page_eval/page_exec: same as the runner — it ingests untrusted page text, so it
-// must not also wield code-exec (the exclusion IS the boundary).
+// DESIGN-17 web actor — the DOM toolset it owns. This list is the sole source
+// of truth for that set. why these and not page_eval/page_exec: the web actor
+// ingests untrusted page text, so it must not also wield code-exec — the
+// exclusion IS the boundary.
 export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes',
   'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
@@ -207,14 +192,13 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   ])),
   // The web actor owns a tab via the DOM toolset. The DOM mutators
   // (click/type/navigate) are NOT in ACTOR_MUTATING_TOOLS — they're contained
-  // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis), and the
-  // runner (exposure unset) keeps using them. Putting them in this POSITIVE set
-  // is what lets a web-actor ctx call them (gate rule 2) — the reconciliation.
-  // PLUS fetch_url: the web actor's SESSIONLESS non-render mechanism, added
-  // OUTSIDE WEB_ACTOR_DOM_TOOLS so that set stays == the runner's DO_TOOLSET
-  // (the drift guard). The web actor is the only ctx allowed fetch_url, and the
-  // capability strip (spawn.js) keeps it keyless: webFetch survives, getSecret /
-  // safeFetch do not.
+  // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis). Putting
+  // them in this POSITIVE set is what lets a web-actor ctx call them (gate rule
+  // 2) — the reconciliation. PLUS fetch_url: the web actor's SESSIONLESS
+  // non-render mechanism, added OUTSIDE WEB_ACTOR_DOM_TOOLS to keep that set a
+  // clean DOM-only list. The web actor is the only ctx allowed fetch_url, and
+  // the capability strip (spawn.js) keeps it keyless: webFetch survives,
+  // getSecret / safeFetch do not.
   web: Object.freeze(new Set([...WEB_ACTOR_DOM_TOOLS, 'fetch_url'])),
 });
 
@@ -313,14 +297,14 @@ export const actorDescriptors = (descriptors, kind, backing) => {
 
 /**
  * Re-shape the MAIN agent's descriptor list for the actor world: the instance-
- * mutating tier and the do/get/check page runner both LEAVE the main agent (it
- * bootstraps + delegates via message_actor, which it keeps). Pure; composes
- * after mainAgentDescriptors()/the instance/dweb/goal filters.
+ * mutating tier LEAVES the main agent (it bootstraps + delegates via
+ * message_actor, which it keeps). Pure; composes after mainAgentDescriptors()/
+ * the instance/dweb/goal filters.
  * @template {{ name: string }} T
  * @param {ReadonlyArray<T>} descriptors @returns {T[]}
  */
 export const filterActorSurface = (descriptors) =>
-  descriptors.filter((t) => !ACTOR_MUTATING_TOOLS.has(t.name) && !RUNNER_PAGE_TOOLS.has(t.name));
+  descriptors.filter((t) => !ACTOR_MUTATING_TOOLS.has(t.name));
 
 // ── dweb tools: gated on the dweb being enabled ─────────────────────────────
 // The dweb network tools (publish/discover/install) are exposed to the agent

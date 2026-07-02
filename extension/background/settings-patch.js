@@ -139,10 +139,10 @@ export const normalizeSettingsPatch = (patch, {
       .slice(0, 8);
   }
   if (typeof patch.runnerModel === 'string') {
-    // Browser-runner (get/check) model override. '' = inherit the chat
-    // model. Must be a model id of the SAME provider as the chat (the
-    // runner inherits the parent session's provider); runRunner retries
-    // on the inherited model if this one underperforms.
+    // Web actor model override. '' = inherit the chat model. Must be a model
+    // id of the SAME provider as the chat (the web actor inherits the owner
+    // chat's provider). The settings KEY stays `runnerModel` for continuity
+    // with saved settings; resolveRunnerModel reads this pin.
     next.runnerModel = patch.runnerModel.trim().slice(0, 200);
   }
   // Idle vault auto-lock interval (ms). 0 = never; otherwise clamp to a
@@ -183,6 +183,18 @@ export const normalizeSettingsPatch = (patch, {
   // build's CHANNEL_DEFAULTS — two layers, don't rely on one.
   if (dwebEnabled && typeof patch.dwebEnabled === 'boolean') {
     next.dwebEnabled = patch.dwebEnabled;
+  }
+  // Ollama host (issue #104). Accept ONLY a well-formed http(s) ORIGIN, stored
+  // normalized (origin-only — scheme + host + port, no path/query). why strict:
+  // this value is added to the egress allowlist and fetched with no key, so a
+  // malformed or non-http(s) value must never persist. `new URL(...).origin`
+  // both validates and canonicalizes (drops any path, lowercases the host). A
+  // garbage/non-string/non-http value drops the key, leaving the prior host.
+  if (typeof patch.ollamaHost === 'string') {
+    try {
+      const u = new URL(patch.ollamaHost.trim());
+      if (u.protocol === 'http:' || u.protocol === 'https:') next.ollamaHost = u.origin;
+    } catch { /* not a valid URL — drop the key */ }
   }
   return next;
 };

@@ -401,10 +401,22 @@ export const NetworkSection = () => {
 
   /** @param {Send} send */
   const start = async (send) => {
-    starting = true; if (!dead) m.redraw();
-    try { await send({ type: 'dweb/base/start' }); } catch (e) { error = /** @type {{ message?: string }} */ (e)?.message || String(e); }
+    starting = true; error = null; if (!dead) m.redraw();
+    // Surface a FAILED start. The offscreen host answers a thrown handler with
+    // a RESOLVED { ok:false, error } reply (not a rejection), so `await send()`
+    // alone swallows it and the button silently snaps back to "Start the
+    // network" — the "does nothing" bug. Capture both the ok:false reply and a
+    // real throw, and re-apply it AFTER refresh (which pulls fresh info and
+    // would otherwise clear error to null).
+    /** @type {string | null} */
+    let startErr = null;
+    try {
+      const r = await send({ type: 'dweb/base/start' });
+      if (r && r.ok === false) startErr = r.error || 'start failed';
+    } catch (e) { startErr = /** @type {{ message?: string }} */ (e)?.message || String(e); }
     starting = false;
     await refresh(send);
+    if (startErr) { error = startErr; if (!dead) m.redraw(); }
   };
 
   /** The kill switch: shut down ALL dweb networking + persist it off. @param {Send} send */
@@ -412,10 +424,16 @@ export const NetworkSection = () => {
     // Destructive — drops every live connection — so confirm before the kill.
     if (typeof confirm === 'function'
       && !confirm('Shut down all peer-to-peer networking? This drops every live connection and keeps it off (it won’t come back on unlock) until you start it again.')) return;
-    stopping = true; if (!dead) m.redraw();
-    try { await send({ type: 'dweb/base/stop' }); } catch (e) { error = /** @type {{ message?: string }} */ (e)?.message || String(e); }
+    stopping = true; error = null; if (!dead) m.redraw();
+    /** @type {string | null} */
+    let stopErr = null;
+    try {
+      const r = await send({ type: 'dweb/base/stop' });
+      if (r && r.ok === false) stopErr = r.error || 'stop failed';
+    } catch (e) { stopErr = /** @type {{ message?: string }} */ (e)?.message || String(e); }
     stopping = false;
     await refresh(send);
+    if (stopErr) { error = stopErr; if (!dead) m.redraw(); }
   };
 
   return {

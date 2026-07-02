@@ -179,13 +179,33 @@ jobs:
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
-      - name: Packaged page boot (each #app page mounts in the PRUNED build)
+
+  # The behavioral packaged-build gate. Its OWN job (stable name) on purpose:
+  # check:pages is the only tier that loads the REAL pruned artifact and so the
+  # only one that catches the v0.2.0 black-screen class — it must be able to gate
+  # merges WITHOUT being coupled to the flakier faked-wire e2e suite above. Add
+  # this job to the branch-protection required-checks list once it has a green
+  # history (mirrors the note on `inbrowser`).
+  packaged-pages:
+    name: packaged page boot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - uses: browser-actions/setup-chrome@v2
+      - run: bun install
+      - name: Provision Chrome for Testing
+        id: cft
+        run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Boot every packaged page (no blank page / missing same-origin resource)
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-        # The runtime backstop to check:imports — loads the actual PACKAGED tree
-        # (both channels) and asserts every #app page mounts. e2e above loads the
-        # UNPACKED source, so this is the only tier that observes prune-induced
-        # blank pages (the v0.2.0 home black-screen class).
+        # Packages both channels, loads the PRUNED tree, boots every shipped page,
+        # and fails on a blank page OR any failed same-origin resource load (CSS/
+        # font/wasm/dynamic-import 404) — the silent half of the black-screen class
+        # the e2e suite (unpacked source) structurally cannot see.
         run: bun run check:pages
 
   package:

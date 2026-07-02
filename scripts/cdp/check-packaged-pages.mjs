@@ -1,13 +1,27 @@
 #!/usr/bin/env bun
 // Behavioral packaged-page BOOT check — the runtime backstop to the static
-// check:imports. It loads the PRUNED/packaged tree headless (launchPeerd with a
-// staging dir, not extension/) and asserts every Mithril #app page actually
-// mounts. This catches packaged-build-only RUNTIME breaks the static check can't
-// see — a 404'd dynamic import of a pruned module, a regressed graceful-degrade
-// path, a pruned CSS/asset — and the whole class e2e misses (it loads the
-// UNPACKED source and only ever opens the side panel). This is the test that
-// would have caught the v0.2.0 home black-screen directly: home/home.html's #app
-// would never have gained children in the packaged build.
+// check:imports, and the broad net that catches the WHOLE "works in dev, blank
+// in a packaged install" class. It packages each channel, loads the PRUNED tree
+// headless via launchPeerd(extensionDir) (not extension/), and boots EVERY
+// shipped page, asserting it referenced nothing it didn't ship.
+//
+// The class-killer signal is a failed SAME-ORIGIN (chrome-extension://) resource
+// load: Chrome emits NO console error for a missing subresource (CSS/font/wasm/
+// img/dynamic-import), so a pruned asset would otherwise ship silently with every
+// other guard green. We capture Network.loadingFailed/4xx in the harness and fail
+// on any same-origin miss — one assertion covers JS, CSS, fonts, wasm, and
+// at-load dynamic imports, on every page, with no per-asset parser to maintain.
+//
+//   - #app pages (home/options/sidepanel): ALSO assert Mithril mounts + zero
+//     uncaught exceptions (clean UI pages — strict).
+//   - other pages (engine tabs, offscreen, mic, dwapps): assert load + zero
+//     missing same-origin resource; exceptions are NOTED, not failed (booting a
+//     page out of its normal context — e.g. the offscreen doc — can throw on a
+//     healthy build, so the reliable signal there is the resource miss).
+//
+// Per-channel page sets fall out for free: walk() lists only files present in the
+// staged tree, so a page pruned for a channel (commons in store) is simply not
+// booted there.
 //
 // Run: bun run check:pages   (needs Chrome for Testing: bun run e2e:chrome)
 
@@ -19,6 +33,8 @@ import { launchPeerd, openExtPage, evalIn, waitFor, log } from './e2e-harness.mj
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const version = String(JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version);
+const SETTLE_MS = 2000;   // let late dynamic-import / asset loadingFailed events land
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const walk = (dir, out = []) => {
   for (const name of readdirSync(dir)) {
@@ -29,40 +45,64 @@ const walk = (dir, out = []) => {
   return out;
 };
 
-// Pages that mount Mithril at #app — these must never render blank. Auto-
-// discovered from the staged tree, so a future #app page is covered for free.
-const appPages = (root) =>
-  walk(root)
-    .filter((f) => f.endsWith('.html') && readFileSync(f, 'utf8').includes('id="app"'))
-    .map((f) => relative(root, f))
-    .sort();
+// Every shipped page in the staged tree.
+const htmlPages = (root) =>
+  walk(root).filter((f) => f.endsWith('.html')).map((f) => relative(root, f)).sort();
+// Mithril mount pages get the strict treatment.
+const isAppPage = (root, page) => readFileSync(join(root, page), 'utf8').includes('id="app"');
+
+// A same-origin (chrome-extension://) load failure = a file the packaged build
+// references but didn't ship. Ignore favicon (Chrome auto-requests it; extensions
+// ship none) and cross-origin misses (test-env noise, not our artifact).
+const sameOriginNetFails = (events) => (events || [])
+  .filter((e) => e.startsWith('NETFAIL') && e.includes('chrome-extension://')
+    && !e.includes('/favicon.ico')
+    // .map sourcemaps aren't shipped + are only fetched under the Debugger domain
+    // (we don't enable it) — exclude them so adding Debugger later can't red the gate.
+    && !/\.map(\?|#|$)/.test(e));
+const exceptions = (events) => (events || []).filter((e) => /^EXC |^ERR /.test(e));
 
 let failed = false;
 for (const channel of ['preview', 'store']) {
   await packageArtifact({ channel, browser: 'chrome', version, sign: false, verify: false });
   const root = join(REPO_ROOT, 'artifacts', 'staging', `${channel}-chrome`);
-  const pages = appPages(root);
+  const pages = htmlPages(root);
   let ctx = null;
   try {
-    // Loads the PACKAGED tree (not extension/). launchPeerd already opens +
-    // mounts the side panel as part of setup, so a packaged side-panel break
-    // throws here and is caught below.
+    // Loads the PACKAGED tree (not extension/). launchPeerd opens + mounts the
+    // side panel as part of setup, so a packaged side-panel break throws here.
     ctx = await launchPeerd({ extensionDir: root });
     for (const page of pages) {
-      const p = await openExtPage(ctx, page);
-      const mounted = await waitFor(
-        () => evalIn(p, `(document.getElementById('app')?.childElementCount || 0) > 0`),
-        { budgetMs: 12_000, pollMs: 200 });
-      const errs = (p.events || []).filter((e) => /^EXC|^ERR/.test(e)).slice(0, 6);
-      if (mounted && errs.length === 0) {
-        log(`  ✓ [${channel}] ${page} mounted`);
-      } else {
+      const app = isAppPage(root, page);
+      let p = null; let mounted = true; let openErr = null;
+      try {
+        p = await openExtPage(ctx, page);
+        const ready = app
+          ? `(document.getElementById('app')?.childElementCount || 0) > 0`
+          : `document.readyState === 'complete'`;
+        mounted = await waitFor(() => evalIn(p, ready), { budgetMs: 12_000, pollMs: 200 });
+        await sleep(SETTLE_MS);
+      } catch (e) { openErr = e?.message ?? String(e); }
+      const netFails = p ? sameOriginNetFails(p.events) : [];
+      const excs = p ? exceptions(p.events) : [];
+      try { p?.close(); } catch { /* */ }
+      // Hard fail: an open failure, a missing same-origin resource (ANY page), a
+      // non-mounting #app page, or an uncaught exception on an #app page.
+      const hardFail = !!openErr || netFails.length > 0 || (app && (!mounted || excs.length > 0));
+      if (hardFail) {
         failed = true;
-        log(`  ✗ [${channel}] ${page} — ${mounted ? 'mounted but console errors' : 'NEVER MOUNTED (blank page)'}`);
-        for (const e of errs) log(`      ${e}`);
+        const why = openErr ? `open failed: ${openErr}`
+          : netFails.length ? 'missing same-origin resource(s)'
+          : !mounted ? 'NEVER MOUNTED (blank page)'
+          : 'uncaught exception';
+        log(`  ✗ [${channel}] ${page} — ${why}`);
+        for (const e of [...netFails, ...(app ? excs : [])].slice(0, 6)) log(`      ${e}`);
+      } else {
+        const note = !app && excs.length ? ` (${excs.length} non-fatal exception(s) — out-of-context boot)` : '';
+        log(`  ✓ [${channel}] ${page}${app ? ' mounted' : ' loaded'}${note}`);
       }
     }
-    log(`[${channel}/chrome] booted ${pages.length} #app page(s)`);
+    log(`[${channel}/chrome] booted ${pages.length} page(s)`);
   } catch (e) {
     failed = true;
     log(`✗ [${channel}] launch/boot failed: ${e?.message ?? e}`);
@@ -72,8 +112,8 @@ for (const channel of ['preview', 'store']) {
 }
 
 if (failed) {
-  console.error('\nPACKAGED PAGE BOOT CHECK FAILED — a page rendered blank or errored in the packaged build (the v0.2.0 home black-screen class).');
+  console.error('\nPACKAGED PAGE BOOT CHECK FAILED — a page rendered blank, threw, or referenced a missing file in the packaged build (the v0.2.0 black-screen class).');
   process.exit(1);
 }
-log('packaged page boot check OK — every #app page mounts in both channels.');
+log('packaged page boot check OK — every shipped page boots with no missing same-origin resource, both channels.');
 process.exit(0);

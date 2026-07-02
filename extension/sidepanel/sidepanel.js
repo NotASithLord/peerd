@@ -87,6 +87,14 @@ const handlePortDisconnect = () => {
     streaming: false,
     notices: INITIAL_STATE.notices,
     goalRuns: INITIAL_STATE.goalRuns,
+    // why: actors/subagents/asyncTasks are SW-OWNED live projections too. A card
+    // created with {streaming:true} would otherwise linger as a stuck 'working…'
+    // chip — the SW that drove it died, and its boot redrain re-runs the turn
+    // with no parentToolUseId, so the card never receives turn/actor-done. Reset
+    // them; a revived SW re-seeds anything still live via turn/actor-state.
+    actors: INITIAL_STATE.actors,
+    subagents: INITIAL_STATE.subagents,
+    asyncTasks: INITIAL_STATE.asyncTasks,
   };
   m.redraw();
   port = null;

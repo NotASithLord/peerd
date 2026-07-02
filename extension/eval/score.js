@@ -60,10 +60,11 @@ export const aggregate = (results) => {
     // ever carries one bucket but not the other — score.js owns its own math
     // rather than depending on the caller filling both.
     avgFreshTokens: avg(results.map((r) => ({ fresh: (r.inputTokens || 0) + (r.outputTokens || 0) })), 'fresh'),
-    // Browser-runner spend (do/get/check). After the cutover, page mechanics
-    // move OFF the main context into runners — so main fresh/cache should drop
-    // and this should be where the a11y work now lives. Tracking it keeps the
-    // scorecard honest (the offload isn't free, it's relocated).
+    // Web actor spend (the offloaded page work). Page mechanics live OFF the
+    // main context in the actor — so main fresh/cache should be low and this is
+    // where the a11y work lives. Tracking it keeps the scorecard honest (the
+    // offload isn't free, it's relocated). Field name stays `runnerTokens` for
+    // continuity with the emitted subagent-cost events + the runnerModel A/B.
     avgRunnerTokens: avg(results, 'runnerTokens'),
     avgCostUsd: avg(results, 'costUsd', 5),                         // MAIN-loop $ (the chat model orchestrating) from the local pricing table
     // The RUNNER's own $ — the model under A/B test. $0 for a local/on-device

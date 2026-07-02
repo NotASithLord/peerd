@@ -265,9 +265,9 @@ describe('gate composition order', () => {
 
   it('exposure gate refuses main-hidden tools when ctx.exposure is "main"', async () => {
     clearTools();
-    // read_page is in the main-hidden set (runner-only since the do/get/
-    // check cutover) — dispatching it with exposure:'main' must refuse at
-    // the gate, so a prompt-injected model can't reach it by name.
+    // read_page is in the main-hidden set (actor-only — the web actor holds the
+    // DOM tools) — dispatching it with exposure:'main' must refuse at the gate,
+    // so a prompt-injected model can't reach it by name.
     registerTool(makeTool({ name: 'read_page', sideEffect: 'read' }));
     const { ctx } = recorderCtx({ exposure: 'main' });
     const r = await dispatchToolCall({ id: 'x', name: 'read_page', args: {} }, ctx);
@@ -275,7 +275,7 @@ describe('gate composition order', () => {
     expect(errOf(r).startsWith('gate_blocked:exposure:')).toBe(true);
     const exposure = metaOf(r).gates.find((g) => g.name === 'exposure');
     expect(exposure?.allowed).toBe(false);
-    expect(exposure?.reason.includes('runner-only')).toBe(true);
+    expect(exposure?.reason.includes('actor-only')).toBe(true);
   });
 
   // DESIGN-17: the actor capability tier, end-to-end through the dispatcher.
