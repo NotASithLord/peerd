@@ -145,6 +145,19 @@ export const fetchUrlTool = {
             + 'Retry with the final URL (try https:// and/or the www. host), or drive a tab instead.',
         };
       }
+      // A private/loopback/LAN host (localhost, 127.0.0.1, 192.168.*, a local dev
+      // server) is refused by the SSRF guard — fetch_url can't reach it. This is
+      // NOT "the site is unreachable": RENDER it instead — navigate opens it in
+      // your tab and the DOM tools (snapshot / read_page) read the live page. And
+      // never re-fetch content you can already SEE on a page you've rendered.
+      if (err?.reason === 'private_network') {
+        return {
+          ok: false,
+          error: `blocked: ${args.url} is a private/loopback host, which fetch_url cannot reach (SSRF defense) — `
+            + 'this does NOT mean the site is unreachable. Open it with navigate and read the rendered page '
+            + 'with snapshot/read_page instead. If you already rendered the page, read that DOM — do not re-fetch it.',
+        };
+      }
       return { ok: false, error: err?.message ?? 'fetch_failed' };
     }
   },

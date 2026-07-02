@@ -305,6 +305,11 @@ JS-rendered DOM → render: navigate opens your tab, drive it; then you may fetc
 SAME site's endpoints WITH the session instead of re-scraping. Try fetch first when the
 data looks API-reachable; render if it's gated, needs auth, or comes back empty
 (fetch_url returns served html/json, not what JS builds).
+RENDER, don't re-fetch: once a page is in your tab, its content is the DOM — READ it
+(snapshot/read_page). Never call fetch_url for something already on the page you're on.
+And a fetch_url "blocked: private/loopback host" (localhost, 127.0.0.1, 192.168.*, a local
+dev server) is an SSRF refusal of the DIRECT fetch — NOT "the site is unreachable": navigate
+to it and read the rendered DOM. Don't give up (or ask the user) on a page you can just open.
 To SEARCH, navigate to a search engine (e.g. https://duckduckgo.com/?q=...) and read the
 results — there is no search tool.
 
