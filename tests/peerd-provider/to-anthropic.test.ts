@@ -96,12 +96,28 @@ describe('toAnthropicBody — output ceiling + effort', () => {
     expect(body.max_tokens).toBe(2000);
   });
 
-  test('reasoning.effort passes through as output_config.effort', () => {
+  test('reasoning.effort passes through as output_config.effort (adaptive models)', () => {
     const body = toAnthropicBody({
       model: 'claude-opus-4-8', system: 's', messages: [userMsg('hi')],
       reasoning: { enabled: true, effort: 'medium' },
     });
     expect(body.output_config).toEqual({ effort: 'medium' });
+  });
+
+  test('effort is OMITTED on pre-4.6 models — they 400 on output_config.effort', () => {
+    // Regression: peerd sent output_config.effort to EVERY model, and Haiku 4.5
+    // (pre-4.6) rejects it ("This model does not support the effort parameter"),
+    // which failed every request with the default reasoningEffort='medium'. The
+    // effort knob rides ONLY the adaptive shape (usesAdaptiveThinking).
+    for (const model of ['claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-5', 'claude-3-5-sonnet']) {
+      const body = toAnthropicBody({
+        model, system: 's', messages: [userMsg('hi')],
+        reasoning: { enabled: true, effort: 'medium' },
+      });
+      expect('output_config' in body).toBe(false);
+      // ...and it still gets the legacy enabled+budget thinking shape.
+      expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    }
   });
 
   test('no output_config when effort is absent (platform default = high)', () => {

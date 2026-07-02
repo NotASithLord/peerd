@@ -445,9 +445,12 @@ export const toAnthropicBody = ({ model, system, messages, tools, maxTokens = 64
     stream: true,
   };
   // Effort (GA on 4.6+/Fable): the only bound on ADAPTIVE thinking depth
-  // (budget_tokens is removed there). Pass-through when the caller sets
-  // it; absent = the platform default (high).
-  if (typeof reasoning?.effort === 'string' && reasoning.effort) {
+  // (budget_tokens is removed there). ONLY the adaptive-shape models accept
+  // output_config.effort — sending it to a PRE-4.6 model (Haiku 4.5, Sonnet
+  // 4.5, the 3.x line) 400s with "does not support the effort parameter", so
+  // gate it on the SAME predicate as the thinking shape. Absent = platform
+  // default (high). Pass-through when the caller sets it on an adaptive model.
+  if (usesAdaptiveThinking(model) && typeof reasoning?.effort === 'string' && reasoning.effort) {
     body.output_config = { effort: reasoning.effort };
   }
   // why: an empty/whitespace system prompt must OMIT the field — the
