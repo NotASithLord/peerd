@@ -29,7 +29,8 @@
 // Flags:
 //   --provider=anthropic|openrouter|ollama   (default anthropic; smoke → ollama)
 //   --model=<id>                             (default: the provider's default)
-//   --suite=simple|robust                    (default simple)
+//   --suite=simple|robust|web-actor          (default simple; web-actor starts
+//                                            a local fixture server + drives it)
 //   --limit=N                                run only the first N tasks (cost control)
 //   --baseline=<path.json>                   diff against a prior scorecard; exit 1 on a regression
 //   --budget-min=N                           max minutes to wait for the run (default 45; smoke 5)
@@ -43,6 +44,7 @@ import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { launchPeerd, openExtPage, rpc, evalIn, waitFor, log, PASSPHRASE, sseText } from './e2e-harness.mjs';
 import { compare } from '../../extension/eval/score.js';
+import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = resolve(__dirname, 'bench-results');
@@ -89,7 +91,15 @@ async function main() {
   // In smoke mode launchPeerd intercepts the keyless model wire; a fixed no-op
   // answer is fine — we only check the driver yields a scorecard.
   const ctx = await launchPeerd(SMOKE ? { modelResponder: () => ({ sse: sseText('benchmark smoke: no-op answer.') }) } : {});
+  // The web-actor suite drives a local fixture site (drift-free); start it on an
+  // ephemeral port and thread the base URL into the run (the tasks carry the
+  // __FIXTURE__ sentinel). Other suites don't need it.
+  let fixture = null;
   try {
+    if (SUITE === 'web-actor') {
+      fixture = await startWebFixtureServer();
+      log(`web-actor fixture server → ${fixture.url}`);
+    }
     // 1) vault + provider
     const vault = await rpc(ctx.page, { type: 'vault/initialize', passphrase: PASSPHRASE });
     if (!vault?.ok) throw new Error(`vault/initialize failed: ${JSON.stringify(vault)}`);
@@ -124,7 +134,12 @@ async function main() {
     //    outlasts a single awaited CDP call. Smoke targets ONE network-free
     //    compute task so the plumbing check is fast + deterministic.
     const runOpts = { suite: SUITE };
-    if (SMOKE) runOpts.taskIds = ['clock-now'];
+    if (fixture) runOpts.fixtureBaseUrl = fixture.url;
+    // Smoke targets ONE task to keep the plumbing check fast + deterministic:
+    // the network-free clock-now for the compute suites, but the FIRST web task
+    // for web-actor (so the fixture nav + __FIXTURE__ substitution are exercised
+    // — it still "fails" under the wire fake, which is the expected ~0 passRate).
+    if (SMOKE) { if (SUITE === 'web-actor') runOpts.limit = 1; else runOpts.taskIds = ['clock-now']; }
     else if (LIMIT) runOpts.limit = LIMIT;
     await evalIn(evalPage, `(() => { window.__peerdEval.run(${JSON.stringify(runOpts)}); return true; })()`);
     log(`run started (suite=${SUITE}${LIMIT ? `, first ${LIMIT}` : ''}); polling for the scorecard (budget ${Math.round(RUN_BUDGET_MS / 60000)} min)…`);
@@ -161,10 +176,12 @@ async function main() {
       regressed = compare(base.card ?? base, card).regressions.length > 0;
     }
 
+    if (fixture) await fixture.close().catch(() => {});
     ctx.close();
     process.exit(SMOKE ? 0 : (regressed ? 1 : 0));
   } catch (e) {
     console.error('[bench]', e?.message || e);
+    if (fixture) await fixture.close().catch(() => {});
     try { ctx.close(); } catch { /* */ }
     process.exit(1);
   }
