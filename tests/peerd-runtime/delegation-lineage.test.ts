@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { mayMessageActor, ASYNC_SUBAGENT_ACTORS } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
+import { mayMessageActor, messageProvenance, ASYNC_SUBAGENT_ACTORS } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
 
 // The PURE trust decision for the "subagents as async actors" refactor: may a
 // sender session message an actor? It replaces the sender gate's `=== active`
@@ -76,6 +76,43 @@ describe('mayMessageActor — non-descendants and malformed chains fail closed',
   test('a cyclic chain terminates and refuses (never hangs)', () => {
     const ancestry = [hop('a', 'b', true), hop('b', 'a', true)]; // a→b→a, never reaches active
     expect(mayMessageActor({ inbound: false, senderSessionId: 'a', activeSessionId: ACTIVE, ancestry })).toBe(false);
+  });
+});
+
+describe('messageProvenance — the parent reference the choke-point actor arbitrates on', () => {
+  test('a top-level chat is its own root, path is just itself', () => {
+    expect(messageProvenance({ senderSessionId: ACTIVE, ancestry: [] }))
+      .toEqual({ senderSessionId: ACTIVE, rootSessionId: ACTIVE, lineagePath: [ACTIVE] });
+  });
+
+  test('a subagent resolves to its root chat with a root->sender path', () => {
+    const ancestry = [hop('sub-1', ACTIVE, true)];
+    expect(messageProvenance({ senderSessionId: 'sub-1', ancestry }))
+      .toEqual({ senderSessionId: 'sub-1', rootSessionId: ACTIVE, lineagePath: [ACTIVE, 'sub-1'] });
+  });
+
+  test('a grandchild carries the full root->...->sender path', () => {
+    const ancestry = [hop('sub-2', 'sub-1', true), hop('sub-1', ACTIVE, true)];
+    expect(messageProvenance({ senderSessionId: 'sub-2', ancestry }))
+      .toEqual({ senderSessionId: 'sub-2', rootSessionId: ACTIVE, lineagePath: [ACTIVE, 'sub-1', 'sub-2'] });
+  });
+
+  test('two subagents under one chat share a rootSessionId (so the actor can group + be fair)', () => {
+    const a = messageProvenance({ senderSessionId: 'sub-a', ancestry: [hop('sub-a', ACTIVE, true)] });
+    const b = messageProvenance({ senderSessionId: 'sub-b', ancestry: [hop('sub-b', ACTIVE, true)] });
+    expect(a.rootSessionId).toBe(b.rootSessionId);
+    expect(a.senderSessionId).not.toBe(b.senderSessionId);
+  });
+
+  test('a missing chain fails safe: the sender is treated as its own root', () => {
+    expect(messageProvenance({ senderSessionId: 'sub-orphan' }))
+      .toEqual({ senderSessionId: 'sub-orphan', rootSessionId: 'sub-orphan', lineagePath: ['sub-orphan'] });
+  });
+
+  test('a cyclic chain terminates (never hangs)', () => {
+    const ancestry = [hop('a', 'b', true), hop('b', 'a', true)];
+    const p = messageProvenance({ senderSessionId: 'a', ancestry });
+    expect(p.lineagePath[p.lineagePath.length - 1]).toBe('a'); // sender is last, walk stopped
   });
 });
 

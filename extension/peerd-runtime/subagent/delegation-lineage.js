@@ -108,3 +108,54 @@ export const mayMessageActor = ({ inbound, senderSessionId, activeSessionId, anc
   // Ran out of chain without reaching the active chat: not a descendant. Refuse.
   return false;
 };
+
+// ── mailbox provenance — the choke-point judgement ──────────────────────────
+//
+// An actor is a serialized CHOKE POINT: one tab (or one origin), one mailbox,
+// one turn at a time. While only the foreground chat messages it, "who sent
+// this" is trivial. Once actors are SHARED — a web actor on a tab that several
+// orchestrators or subagents all message — the actor (and the mailbox in front
+// of it) must arbitrate: coalesce an accidental duplicate, order competing
+// requests, cancel one a newer message supersedes, or keep unrelated senders
+// fair. To make that call it needs each message's PROVENANCE: who sent it, and
+// on whose behalf.
+//
+// The trusted-lineage chain already carries exactly that, so provenance is free
+// once the gate has it. The shell stamps it onto the message ENVELOPE
+// (denormalized) so the actor never has to walk the store mid-turn.
+//
+// why the envelope, not a structured session id: session ids are uuidv7
+// (time-sortable, globally-unique store keys); overloading them with a parent
+// path is brittle to parse and length-bound. The envelope carries the full
+// reference instead — same capability (the actor can name the parent), no id
+// overloading. Encoding it into the id is an owner call; the shape is the same.
+
+/**
+ * The provenance an actor's mailbox stamps on each incoming message, derived
+ * from the sender's trusted-lineage chain.
+ *
+ * @param {Object} req
+ * @param {string} req.senderSessionId
+ * @param {ReadonlyArray<LineageHop>} [req.ancestry]  sender-first chain toward the root
+ * @returns {{ senderSessionId: string, rootSessionId: string, lineagePath: string[] }}
+ *   rootSessionId — the chat at the base of the lineage (who ULTIMATELY asked);
+ *   equals senderSessionId for a top-level chat or a missing chain.
+ *   lineagePath — root → … → sender ids: the "reference to the parent" an actor
+ *   uses to group by root (fairness), match a supersede (same sender), or flag a
+ *   likely duplicate (same lineagePath + same intent, close in time).
+ */
+export const messageProvenance = ({ senderSessionId, ancestry = [] }) => {
+  const byId = new Map(ancestry.map((h) => [h.sessionId, h]));
+  const path = [senderSessionId];
+  const seen = new Set([senderSessionId]);
+  let cursor = /** @type {LineageHop | undefined} */ (byId.get(senderSessionId));
+  // Walk parentSessionId up to the root; the cycle guard keeps a corrupt chain
+  // from hanging us (a self-referential parent just stops the walk).
+  while (cursor?.parentSessionId && !seen.has(cursor.parentSessionId)) {
+    path.push(cursor.parentSessionId);
+    seen.add(cursor.parentSessionId);
+    cursor = byId.get(cursor.parentSessionId);
+  }
+  path.reverse();                 // root → … → sender
+  return { senderSessionId, rootSessionId: path[0], lineagePath: path };
+};
