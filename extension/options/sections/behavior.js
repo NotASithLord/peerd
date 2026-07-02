@@ -195,6 +195,33 @@ export const BehaviorSection = {
         }, ui.devModeBusy ? '…' : devMode ? 'Disable developer mode' : 'Enable developer mode'),
       ]),
 
+      // ── Web actor action surface (PR #119 A/B experiment) ────────────
+      m('.settings-divider'),
+      m('h3', 'Web actor: action surface'),
+      (() => {
+        const surface = state.settings?.webActorActionSurface === 'code' ? 'code' : 'tools';
+        return [
+          m('p', surface === 'code'
+            ? 'EXPERIMENT ON — the web actor drives pages by WRITING JavaScript (a Playwright-style page API in a sealed worker) instead of one tool call per action. Same page tools underneath, same denylist/confirmation/audit gates — this changes how the model expresses actions, not what it may do. Being A/B-measured against the default; flip back if web tasks misbehave.'
+            : 'Default — the web actor drives pages with one tool call per action (click, type, navigate). The experimental alternative has it write short Playwright-style scripts instead; same gates underneath. Used for A/B benchmarking; leave on default unless you\'re experimenting.'),
+          m('.input-row', [
+            m('label', { for: 'web-actor-surface' }, 'Action surface'),
+            m('select', {
+              id: 'web-actor-surface',
+              value: surface,
+              onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
+                await send({ type: 'settings/update', patch: { webActorActionSurface: e.target.value } });
+                m.redraw();
+              },
+            }, [
+              ['tools', 'tool calls — default'],
+              ['code', 'code (Playwright-style) — experiment'],
+            ].map(([value, label]) => m('option', { value }, label))),
+          ]),
+          m('p.hint', 'Applies to the next web-actor turn; an in-flight actor finishes on the surface it started with.'),
+        ];
+      })(),
+
       // ── Resilience ─────────────────────────────────────────────────
       m('.settings-divider'),
       m('h3', 'Auto-resume interrupted turns'),

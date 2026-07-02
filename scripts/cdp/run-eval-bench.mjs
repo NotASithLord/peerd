@@ -31,6 +31,10 @@
 //   --model=<id>                             (default: the provider's default)
 //   --suite=simple|robust|web-actor          (default simple; web-actor starts
 //                                            a local fixture server + drives it)
+//   --actor-surface=tools|code               web actor action surface (default: the
+//                                            channel default, i.e. tools). The PR #119
+//                                            A/B: run once per surface, diff with
+//                                            --baseline. Tagged into the scorecard.
 //   --limit=N                                run only the first N tasks (cost control)
 //   --baseline=<path.json>                   diff against a prior scorecard; exit 1 on a regression
 //   --budget-min=N                           max minutes to wait for the run (default 45; smoke 5)
@@ -62,6 +66,13 @@ const SMOKE = !!flag('smoke', false);
 const PROVIDER = String(flag('provider', SMOKE ? 'ollama' : 'anthropic'));
 const MODEL = flag('model', false) ? String(flag('model', '')) : '';
 const SUITE = String(flag('suite', 'simple'));
+// PR #119 A/B: the web actor's action surface for THIS run. Empty = leave the
+// channel default alone ('tools'); 'code' flips the setting before the run.
+const ACTOR_SURFACE = flag('actor-surface', false) ? String(flag('actor-surface', '')) : '';
+if (ACTOR_SURFACE && ACTOR_SURFACE !== 'tools' && ACTOR_SURFACE !== 'code') {
+  console.error(`[bench] --actor-surface must be 'tools' or 'code' (got '${ACTOR_SURFACE}')`);
+  process.exit(2);
+}
 const LIMIT = SMOKE ? 1 : (flag('limit', false) ? Number(flag('limit', 0)) : 0);
 const BASELINE = flag('baseline', false) ? String(flag('baseline', '')) : '';
 const SHOW_TABS = !!flag('show-tabs', false);
@@ -124,6 +135,16 @@ async function main() {
     if (!usable) throw new Error(`provider ${PROVIDER} is not usable after setup (no key?)`);
     log(`provider ready: ${PROVIDER}${MODEL ? ` (${MODEL})` : ''}`);
 
+    // PR #119 A/B: pin the web actor's action surface for this run. The setting
+    // is read live at each actor ctx build, so setting it once up front covers
+    // every task. Fail loud if the patch didn't take (a silent fallback would
+    // score the WRONG arm and poison the A/B).
+    if (ACTOR_SURFACE) {
+      const surf = await rpc(ctx.page, { type: 'settings/update', patch: { webActorActionSurface: ACTOR_SURFACE } });
+      if (!surf?.ok) throw new Error(`settings/update webActorActionSurface failed: ${JSON.stringify(surf)}`);
+      log(`web actor action surface: ${ACTOR_SURFACE}`);
+    }
+
     // 2) open the eval harness page + wait for its driver hook
     const evalPage = await openExtPage(ctx, 'eval/runner.html');
     if (SHOW_TABS) await evalIn(evalPage, `(() => { const c = document.getElementById('showtabs'); if (c) c.checked = true; })()`);
@@ -158,9 +179,13 @@ async function main() {
     const sha = shortSha();
     const modelTag = (MODEL || PROVIDER).replace(/[^a-z0-9.-]+/gi, '_');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const outPath = join(OUT_DIR, `${sha}-${modelTag}-${stamp}.json`);
+    // The surface rides the filename AND the record so two A/B legs of the same
+    // build+model can't be confused when diffing with --baseline.
+    const surfaceTag = ACTOR_SURFACE ? `-${ACTOR_SURFACE}` : '';
+    const outPath = join(OUT_DIR, `${sha}-${modelTag}${surfaceTag}-${stamp}.json`);
     const record = {
       build: sha, provider: PROVIDER, model: MODEL || null, suite: SUITE,
+      actorSurface: ACTOR_SURFACE || null,
       limit: LIMIT || null, smoke: SMOKE, at: new Date().toISOString(), card, results,
     };
     writeFileSync(outPath, JSON.stringify(record, null, 2));
