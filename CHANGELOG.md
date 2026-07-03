@@ -10,7 +10,28 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The heap split — every non-orchestrator agent loop now runs in its own
+  dedicated offscreen Worker heap.** Bound actors (web / WebVM / Notebook /
+  App) and subagents (tool-less reasoning AND tool-bearing) run keyless, in
+  isolated memory, reaching the model and their tools only through
+  service-worker routes that re-check every call. Untrusted page, instance,
+  and response content stays in the actor's heap; it cannot reach the vault
+  key or the orchestrator's memory. The "actor fence" went from a prompt
+  boundary in one shared heap to a real memory boundary — the correct answer
+  to prompt injection (the loop that reads hostile content never holds the
+  authority to act on it). One substrate, one code path: a subagent is an
+  ephemeral actor, so the former reasoning and actor stacks collapsed into
+  one. Chrome-only (needs the offscreen API); Firefox falls back to the
+  keyless in-SW loop until it has one.
+
+### Fixed
+- A subagent could be granted the actor-only DOM/page tools (`read_page`,
+  `page_exec`, `click`, `navigate`, `fetch_url`, …) and read or drive the
+  user's foreground tab — authority the main agent itself lacks. A subagent's
+  grantable toolset is now narrowed from the main-agent surface, so it holds
+  a subset of what its parent holds and delegates web/DOM work to the web
+  actor like the main agent does.
 
 ---
 

@@ -42,11 +42,18 @@ Understanding the boundaries helps you scope a report:
   `peerd-egress/fetch/`: `safeFetch` (a hardcoded provider allowlist for
   model calls) and `webFetch` (SSRF guard + a denylist of sensitive
   origins, no redirects). There is no other egress path.
-- **Untrusted-content boundary.** The main agent never sees raw page
-  content: `do`/`get`/`check` dispatch to a disposable **browser-runner**
-  subagent that holds no key, no memory, and no egress tools, and wraps
-  page text as untrusted data. This is the core prompt-injection /
-  "lethal trifecta" defense.
+- **Untrusted-content boundary (the heap split).** The main agent never
+  sees raw page content: page/DOM work is delegated to a per-tab **web
+  actor** — a separate agent loop that, on Chrome, runs in its OWN Worker
+  heap, holds no key, no `chrome.*`, and no egress, and reaches the model,
+  the network, or the page only by asking the service worker, which holds
+  the key and re-checks every request. Untrusted content (page text,
+  command output, file contents) stays inside that heap and returns to the
+  orchestrator only as a `wrapUntrusted`-fenced summary. Subagents run the
+  same way — keyless, in their own heap, with a narrowed toolset. This is
+  the core prompt-injection / "lethal trifecta" defense: a memory boundary,
+  not a prompt one. (Firefox lacks the offscreen API, so there the actor
+  runs keyless in the shared loop until it lands.)
 - **Policy-gated tool dispatch** with a local, append-only audit log. The
   current policy checks and hooks live in `peerd-runtime/tools/`.
 - **Sandboxed execution.** WebVM (CheerpX, network only via the egress

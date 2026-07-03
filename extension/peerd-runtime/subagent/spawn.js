@@ -104,11 +104,14 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
 // user). Tool NARROWING only limits which tools the model may NAME; it does NOT
 // remove those closures from the heap object the child shares with the service
 // worker. So a confused-deputy bug in a granted tool (e.g. a DOM tool fed
-// crafted args) would have the vault one property access away — the precise
-// soft spot of the single-thread/shared-heap model (docs §security, "not
-// isolated like Cloudflare"). We close it BY CONSTRUCTION: strip every
-// capability closure that NONE of the child's granted tools consume, so a
-// narrowed child's context literally has no path to secrets/egress/spawn.
+// crafted args) would have the vault one property access away in a SHARED heap.
+// We close it BY CONSTRUCTION: strip every capability closure that NONE of the
+// child's granted tools consume, so a narrowed child's context literally has no
+// path to secrets/egress/spawn. The heap split now runs the child's loop in its
+// OWN Worker heap (offscreen path) where it never receives these closures at all
+// — this restrict is the SW-side ctx build the tool-dispatch route reuses per
+// relayed call, AND the standalone defense for the in-SW fallback (Firefox /
+// offscreen unavailable), where the shared-heap soft spot still applies.
 //
 // The lists below are the COMPLETE set of ctx.<cap> readers among tools
 // (grep `ctx.<cap>` over tools/**). getSecret/safeFetch have NO tool reader —
