@@ -129,6 +129,28 @@ describe('click/type — walk-ref dispatch', () => {
     expect(r.content).toContain('"matchedCount": 3');
   });
 
+  test('CDP ref {expectedCount:2} is a mismatch (a resolved backend node is exactly one)', async () => {
+    const { ctx } = makeCtx(() => [{ result: WALK_RESULT }]);
+    ctx.debuggerPool = { clickBackendNode: async () => ({ ok: true, tag: 'button', text: 'Send' }) };
+    ctx.domRefs.setSnapshot(7, [{ ref: '@e1', backendDOMNodeId: 99, role: 'button', name: 'Send' }]);
+    const r = await clickTool.execute({ ref: '@e1', expectedCount: 2 }, ctx);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error result');
+    expect(r.error).toBe('matched_count_mismatch');
+    expect((r as any).matchedCount).toBe(1);
+    expect((r as any).expectedCount).toBe(2);
+  });
+
+  test('CDP ref {expectedCount:1} passes and reports matchedCount:1', async () => {
+    const { ctx } = makeCtx(() => [{ result: WALK_RESULT }]);
+    ctx.debuggerPool = { clickBackendNode: async () => ({ ok: true, tag: 'button', text: 'Send' }) };
+    ctx.domRefs.setSnapshot(7, [{ ref: '@e1', backendDOMNodeId: 99, role: 'button', name: 'Send' }]);
+    const r = await clickTool.execute({ ref: '@e1', expectedCount: 1 }, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok result');
+    expect(r.content).toContain('"matchedCount": 1');
+  });
+
   test('type {selector, expectedCount} forwards a pre-action cardinality guard', async () => {
     const { ctx, injections } = makeCtx((req: any) => [{ result: { ok: true, typed: 'Ada', submitted: false, tag: 'input', matchedCount: 1 } }]);
     const r = await typeTool.execute({ selector: 'input[name="assignee"]', text: 'Ada', expectedCount: 1 }, ctx);

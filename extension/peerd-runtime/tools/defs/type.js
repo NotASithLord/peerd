@@ -107,6 +107,12 @@ export const typeTool = {
       if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first` };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.setValueBackendNode === 'function') {
+        // Cardinality guard on the CDP channel too (#36 consistency): a resolved
+        // backendDOMNodeId ref IS exactly one node, so any expectedCount other
+        // than 1 is a mismatch — same shape the walk-ref/selector paths return.
+        if (expectedCount != null && expectedCount !== 1) {
+          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount };
+        }
         try {
           const r = await debuggerPool.setValueBackendNode(tab.id, entry.backendDOMNodeId, args.text, !!args.submit);
           if (!r.ok) return { ok: false, error: r.error ?? 'ref_type_failed' };
@@ -114,7 +120,7 @@ export const typeTool = {
             ok: true,
             content: JSON.stringify({
               typed: args.text.slice(0, 200), submitted: !!args.submit,
-              ref, role: entry.role, name: entry.name, tag: r.tag,
+              ref, role: entry.role, name: entry.name, tag: r.tag, matchedCount: 1,
               ...(r.navigated ? { navigated: true } : {}),
               // Action-result attribution: what typing changed on the page.
               result: r.navigated ? 'page navigated' : summarizeMutations(r.mutations),

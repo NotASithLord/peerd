@@ -420,6 +420,46 @@ export const makeSpawnSubagent = (deps) => {
 
     taggedAudit({ type: 'subagent_spawned', details: { task: task.slice(0, 200), maxSteps, maxDepth } }).catch(() => {});
 
+    // PR #134 phases 1+2 — claim the child's turn slot and arm the wall-clock
+    // timer NOW, immediately after the session exists, BEFORE the tool-context
+    // build below. why here and not later: a Stop cascade enumerates the
+    // live-children registry, so a child not yet registered when Stop fires
+    // would escape it and run its full budget post-Stop (the tighter the window
+    // between create and register, the smaller that hole). Claiming the CHILD's
+    // own slot (a fresh id — nothing contends it) gives Stop/cancel/timeout one
+    // uniform lever: abort the controller, and the loop unwinds through its
+    // normal abort branch exactly like a steered main turn.
+    const { controller, release } = turnSlots.claim(child.sessionId);
+    registerChild(parentSessionId, child.sessionId);
+    let timerFired = false;
+    // Clamp to the backstop either way: a caller may lower the budget freely,
+    // but can't park a child past MAX (same posture as maxSteps).
+    const budgetMs = Math.min(
+      Number.isFinite(timeoutMs) && /** @type {number} */ (timeoutMs) > 0 ? /** @type {number} */ (timeoutMs) : DEFAULT_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+    );
+    const timer = setTimer(() => {
+      timerFired = true;
+      appendAudit({
+        type: 'subagent_timeout',
+        details: { parentSessionId, subagentSessionId: child.sessionId, depth, budgetMs },
+      }).catch(() => {});
+      // why turnSlots.stop AND controller.abort: stop() fires the slot's onAbort
+      // hook (confirmCoordinator.declineSession) so a child parked on a confirm
+      // is declined at once instead of overshooting the budget by the confirm
+      // protocol's own 120s timeout — the same path user Stop / cancel take.
+      // The direct abort() is the guaranteed backstop (the injected stub stop()
+      // is a no-op in tests); abort() is idempotent, so calling both is safe.
+      turnSlots.stop(child.sessionId);
+      controller.abort();
+    }, budgetMs);
+    // Reclaim the child on ITS OWN abort too (#1/#3): a subagent blocked in an
+    // awaitReply message_actor call is suspended in tool dispatch — the loop
+    // only checks the signal at wave boundaries, so aborting the controller
+    // doesn't unwind that await by itself. message_actor reads this signal off
+    // ctx and races the actor reply against it, so the timeout / cancel that
+    // fires this controller also unblocks the awaiting child.
+
     // ---- Guardrail 2: tool narrowing -------------------------------------
     // The parent session's tool manifest caps the child's set whatever the
     // caller asked for — intersection, never escalation (fail-closed: a
@@ -442,7 +482,11 @@ export const makeSpawnSubagent = (deps) => {
       // the full capability surface (secrets/egress/spawn closures); we remove the
       // ones no granted tool needs so a narrowed child has no closure path to them
       // even if a granted tool were confused into reaching for one.
-      const childCtx = restrictCtxCapabilities({ ...baseCtx, audit: taggedAudit }, allowedNames);
+      // abortSignal (#1/#3): the child's own abort signal, so a blocking tool
+      // (message_actor awaitReply) can race its wait against it and unwind when
+      // the wall-clock timeout / cancel fires — restrictCtxCapabilities passes
+      // through any key not in CAPABILITY_CONSUMERS, so this survives the strip.
+      const childCtx = restrictCtxCapabilities({ ...baseCtx, audit: taggedAudit, abortSignal: controller.signal }, allowedNames);
       toolDispatch = (call) => {
         // Defense in depth: even if the model hallucinates a tool name
         // outside its granted subset, the dispatch refuses it. The
@@ -478,31 +522,6 @@ export const makeSpawnSubagent = (deps) => {
     // Announce the child up-front so the side panel can map the parent's
     // tool card → this session id and render live, before any loop event.
     onEvent?.({ type: 'subagent-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
-
-    // PR #134 phases 1+2 — the child runs UNDER a turn slot with an abort
-    // signal and a wall-clock budget. Before this it was un-abortable (no
-    // signal threaded) and un-bounded in time (only step/depth caps): a hung
-    // tool call parked it forever, invisible to Stop. Claiming the CHILD's own
-    // slot (a fresh id — nothing contends it) gives Stop/cancel/timeout one
-    // uniform lever: abort the controller, and the loop unwinds through its
-    // normal abort branch exactly like a steered main turn.
-    const { controller, release } = turnSlots.claim(child.sessionId);
-    registerChild(parentSessionId, child.sessionId);
-    let timedOut = false;
-    // Clamp to the backstop either way: a caller may lower the budget freely,
-    // but can't park a child past MAX (same posture as maxSteps).
-    const budgetMs = Math.min(
-      Number.isFinite(timeoutMs) && /** @type {number} */ (timeoutMs) > 0 ? /** @type {number} */ (timeoutMs) : DEFAULT_TIMEOUT_MS,
-      MAX_TIMEOUT_MS,
-    );
-    const timer = setTimer(() => {
-      timedOut = true;
-      appendAudit({
-        type: 'subagent_timeout',
-        details: { parentSessionId, subagentSessionId: child.sessionId, depth, budgetMs },
-      }).catch(() => {});
-      controller.abort();
-    }, budgetMs);
 
     let toolCalls = 0;
     let lastStopReason;
@@ -559,10 +578,16 @@ export const makeSpawnSubagent = (deps) => {
     // of room before finishing. Surface it so the caller (and the model)
     // knows the result may be partial.
     const exceeded = lastStopReason === 'max_steps';
-    // Phase 2: distinguish WHY an abort unwound the loop. timedOut is stamped
-    // by the timer before it fires the controller; any other abort (Stop
-    // cascade, subagentCancel) reports `stopped`. Both mean a partial result.
-    const stopped = !timedOut && lastStopReason === 'aborted';
+    // Phase 2: distinguish WHY an abort unwound the loop — but ONLY when the
+    // loop actually aborted. timerFired alone doesn't imply a timeout: the timer
+    // can fire in the race window between a clean 'end_turn' finish and this
+    // finally's clearTimer, which must NOT relabel a complete result as partial.
+    // Gate both flags on lastStopReason==='aborted' (a real abort unwind), then
+    // split by cause: timer → timedOut, anything else (Stop cascade, cancel) →
+    // stopped. A non-aborted finish is neither.
+    const aborted = lastStopReason === 'aborted';
+    const timedOut = aborted && timerFired;
+    const stopped = aborted && !timerFired;
 
     taggedAudit({
       type: 'subagent_completed',

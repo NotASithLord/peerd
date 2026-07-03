@@ -43,6 +43,34 @@ describe('makeAsyncSubagents', () => {
     expect(reenters[0].userText).toContain('[UNTRUSTED]'); // child result is wrapped
   });
 
+  // PR #134 #2 (regression guard): a child that came back STOPPED (a user Stop
+  // cascaded to it) must NOT re-enter the parent — the parent's own turn was
+  // just stopped, so a reintegration wake would restart it seconds after Stop.
+  test('a Stop-aborted child does not wake the parent (dropped like a cancel)', async () => {
+    const reenters: any[] = [];
+    const as = makeAsyncSubagents(baseDeps({
+      spawnSubagent: async () => ({ result: 'partial', sessionId: 'c1', stopped: true }),
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnSubagentAsync({ task: 'long', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(0); // no synthetic wake after a user Stop
+  });
+
+  // A TIMEOUT is different from a user Stop — the parent is still working and
+  // wants the partial, so a timed-out child DOES reintegrate.
+  test('a timed-out child still wakes the parent with its partial', async () => {
+    const reenters: any[] = [];
+    const as = makeAsyncSubagents(baseDeps({
+      spawnSubagent: async () => ({ result: 'partial', sessionId: 'c1', timedOut: true }),
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnSubagentAsync({ task: 'slow', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('wall-clock timeout');
+  });
+
   // The status-bar feed (DESIGN-11 UI): every transition must push so the bar
   // never goes stale. Spawn makes the task appear; settle flips it done.
   test('onTasksChanged fires on spawn and on settle (feeds the live status bar)', async () => {

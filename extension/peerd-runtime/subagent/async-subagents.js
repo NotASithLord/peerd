@@ -220,7 +220,18 @@ export const makeAsyncSubagents = (deps) => {
 
     /** @param {{ type: string, sessionId?: string, text?: string, [k: string]: unknown }} ev */
     const onEvent = (ev) => {
-      if (ev.type === 'subagent-start') entry.childSessionId = ev.sessionId ?? null;
+      if (ev.type === 'subagent-start') {
+        entry.childSessionId = ev.sessionId ?? null;
+        // #9 race: a cancel that landed BEFORE this start event couldn't stop a
+        // child whose id it didn't yet know (childSessionId was null), so it
+        // only flipped status. Now that the id has arrived, honor that pending
+        // cancel — abort the child (and its subtree) so the copy "its work is
+        // being stopped" is true instead of leaving it running its full budget.
+        if (entry.status === 'cancelled' && entry.childSessionId) {
+          stopSubtree?.(entry.childSessionId);
+          turnSlots.stop?.(entry.childSessionId);
+        }
+      }
       if (ev.type === 'delta' && typeof ev.text === 'string' && ev.text) {
         entry.ring.push(ev.text);
         while (entry.ring.length > RING_LINES) entry.ring.shift();
@@ -233,6 +244,22 @@ export const makeAsyncSubagents = (deps) => {
     /** @param {Partial<ChildEntry>} patch */
     const settle = (patch) => {
       if (entry.status === 'cancelled') return; // cancelled mid-run → drop, no wake
+      // A user Stop cascades to the child (routes/sessions.js stopSubtree aborts
+      // its slot); the child unwinds and comes back `stopped:true`. Do NOT drain
+      // a Stop-aborted child: the parent's OWN turn was just stopped too, so a
+      // reintegration wake would re-enter it with a synthetic turn and the model
+      // would immediately start a fresh full-tool turn — seconds after the user
+      // pressed Stop (the actor-messaging path already guards this via its
+      // stop-generation skip; the spawn path needs the same guard). Drop it like
+      // a cancel: mark terminal, surface on the bar, no wake. A TIMEOUT is
+      // different — the parent is still working and wants the partial — so
+      // timedOut still drains. (A goal/auto continuation isn't a user Stop; those
+      // don't cascade stopSubtree, so they never reach here as `stopped`.)
+      if (patch.stopped === true) {
+        Object.assign(entry, patch, { status: 'cancelled' });
+        onTasksChanged(parentSessionId);
+        return;
+      }
       Object.assign(entry, patch, { status: 'done' });
       onTasksChanged(parentSessionId); // running → done (still on the bar until delivered)
       turnSlots.runWhenIdle(parentSessionId, () => {

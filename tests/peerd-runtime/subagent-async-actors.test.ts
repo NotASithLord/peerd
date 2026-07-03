@@ -195,6 +195,24 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
     expect(out.stopped).toBeUndefined();
     expect(cleared).toEqual([42]);
   });
+
+  test('a timer that fires AFTER a clean finish does not mislabel the result timedOut (#5)', async () => {
+    // The child finishes cleanly (end_turn); we fire the captured timer callback
+    // AFTER the run resolved. timedOut is gated on lastStopReason==='aborted', so
+    // a post-finish timer tick must not flip a complete result to partial.
+    const store = makeStore();
+    const parent = await store.create({});
+    let timerCb: (() => void) | null = null;
+    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop('complete'), {
+      setTimer: (fn: () => void) => { timerCb = fn; return 1; },
+      clearTimer: () => {},
+    }) as any);
+    const out = await spawn({ task: 't', tools: [], parentSessionId: parent.sessionId });
+    (timerCb as null | (() => void))?.(); // the stray macrotask fires late
+    expect(out.result).toBe('complete');
+    expect(out.timedOut).toBeUndefined();
+    expect(out.stopped).toBeUndefined();
+  });
 });
 
 // ---- actor-messaging: the lineage gate + arbitration ------------------------
@@ -332,6 +350,51 @@ describe('message_actor — the subagent awaitReply mode', () => {
     await tick();
     expect(reentries.length).toBe(0); // the child is never woken
   });
+  test('an aborted subagent unblocks even if the actor turn never settles (#1/#3)', async () => {
+    // The actor turn is held in the queue (never run), so onReply never fires.
+    // The child's abort signal must still unwind the await — and stop the
+    // actor slot it was waiting on.
+    const stopped: string[] = [];
+    const controller = new AbortController();
+    const { messageActor } = gateHarness({
+      getAncestry: ancestryOf(trustedChild),
+      turnSlots: {
+        runWhenIdle: (_sid: string, _fn: () => void) => { /* hold: never run the actor turn */ },
+        stop: (id: string) => { stopped.push(id); return true; },
+      } as any,
+    });
+    const pending = messageActor({
+      to: 'app-1', message: 'hang', senderSessionId: 'sub-1', inbound: false,
+      awaitReply: true, awaitSignal: controller.signal,
+    });
+    await tick();
+    controller.abort(); // the child's wall-clock timeout / cancel fires
+    const r = await pending;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toContain('aborted');
+    // the delegated actor turn was stopped, not left running orphaned
+    expect(stopped).toContain('res-1');
+  });
+
+  test('an already-aborted signal resolves immediately and stops the actor', async () => {
+    const stopped: string[] = [];
+    const controller = new AbortController();
+    controller.abort();
+    const { messageActor } = gateHarness({
+      getAncestry: ancestryOf(trustedChild),
+      turnSlots: {
+        runWhenIdle: (_sid: string, _fn: () => void) => { /* hold */ },
+        stop: (id: string) => { stopped.push(id); return true; },
+      } as any,
+    });
+    const r = await messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'sub-1', inbound: false,
+      awaitReply: true, awaitSignal: controller.signal,
+    });
+    expect(r.ok).toBe(false);
+    expect(stopped).toContain('res-1');
+  });
+
   test('a failed actor turn resolves ok:false with the fenced error', async () => {
     const { messageActor, reentries } = gateHarness({
       getAncestry: ancestryOf(trustedChild),
@@ -384,6 +447,26 @@ describe('message_actor — envelope provenance + redrain reroute (phase 7)', ()
     expect(reentries.length).toBe(1);
     expect(reentries[0].sessionId).toBe('chat-1');
     expect(audits.some((a) => a.type === 'actor_reply_rerouted')).toBe(true);
+  });
+
+  test('a redrained in-flight twin still counts against dedupe (#4 symmetry)', async () => {
+    // Hold every queued turn so the redrained turn stays in flight; its intent
+    // must be tracked so an identical fresh send is refused and — critically —
+    // the redrained turn's settle doesn't decrement a DIFFERENT send's refcount.
+    const queued: Array<() => void> = [];
+    const { messageActor, redrain } = gateHarness({
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); } },
+      mailbox: {
+        append: async () => {},
+        remove: async () => {},
+        load: async () => [{ id: 'c-1', senderSessionId: 'chat-1', to: 'app-1', message: 'reprice', createdAt: 1 }],
+      },
+    });
+    await redrain(); // re-queues (chat-1 → app-1, 'reprice'); intent now tracked
+    // An identical fresh send from the same chat is refused as a duplicate.
+    const dup = await messageActor({ to: 'app-1', message: 'reprice', senderSessionId: 'chat-1' });
+    expect(dup.ok).toBe(false);
+    expect(dup.error).toContain('already in flight');
   });
 
   test('a pre-#134 envelope (no provenance) keeps the sender-addressed wake', async () => {

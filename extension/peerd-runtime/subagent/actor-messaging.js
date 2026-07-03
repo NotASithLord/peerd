@@ -184,6 +184,19 @@ export const makeActorMessaging = (deps) => {
     return actorsFor(root);
   };
 
+  // Stop the ONE actor turn a subagent's awaitReply was waiting on, when that
+  // subagent aborts (#1/#3). Bump the lineage's Stop generation so a still-
+  // QUEUED actor turn skips when its slot frees, and abort a RUNNING one via
+  // turnSlots.stop (optional — the pure-heap test harness injects no stop; the
+  // await resolves either way). Scoped to the single actorSessionId the child
+  // delegated to, not the whole lineage, so a sibling's in-flight actor is
+  // untouched.
+  /** @param {string} root @param {string} actorSessionId */
+  const stopActorForAwait = (root, actorSessionId) => {
+    stopGen.set(root, (stopGen.get(root) ?? 0) + 1);
+    /** @type {{ stop?: (id: string) => boolean }} */ (turnSlots).stop?.(actorSessionId);
+  };
+
   /** @param {string} root */
   const decInFlight = (root) => {
     const c = (inFlight.get(root) ?? 1) - 1;
@@ -311,14 +324,17 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void } }} req
    *   awaitReply — the SUBAGENT reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'subagent'` sender.
+   *   awaitSignal — the awaiting subagent's AbortSignal (its wall-clock timeout
+   *   / cancel). Only meaningful with awaitReply: the await races the reply
+   *   against it so an aborted child unblocks instead of parking on a hung actor.
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageActor = async (req) => {
-    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply } = req;
+    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
     }
@@ -400,7 +416,14 @@ export const makeActorMessaging = (deps) => {
     const intentK = intentKey(instanceId, message);
     if ((inFlightIntents.get(rootSessionId)?.get(intentK) ?? 0) > 0) {
       log('REFUSED', { reason: 'duplicate_intent', senderSessionId, rootSessionId, to: instanceId });
-      return { ok: false, error: `message_actor: an identical request to '${to}' is already in flight for this chat — await its reply instead of re-sending.` };
+      // why this wording: the in-flight twin may have been sent by a DIFFERENT
+      // session in this delegation tree (a sibling subagent, or the parent),
+      // and its reply routes to THAT sender — never to this one. Telling this
+      // caller to "await its reply" would be unactionable (a subagent has no
+      // channel to observe another's reply). So the honest guidance is: this
+      // work is already happening elsewhere in the tree — don't re-send; report
+      // that and proceed / synthesize from what you have.
+      return { ok: false, error: `message_actor: an identical request to '${to}' is already in flight elsewhere in this chat's delegation tree — do NOT re-send. That work is already happening; proceed with what you have or report that it's underway.` };
     }
 
     recent.push(nowMs);
@@ -438,11 +461,36 @@ export const makeActorMessaging = (deps) => {
     // like the async path; only the completion routing differs.
     if (awaitReply === true) {
       const settled = await new Promise((resolve) => {
+        // Race the actor reply against the CALLING SUBAGENT's abort signal.
+        // why: the subagent is suspended here in tool dispatch, and its loop
+        // only observes the signal at wave boundaries — so its wall-clock
+        // timeout / subagent_cancel (which fire this signal) cannot unwind this
+        // await on their own. Without the race, a hung/queued actor turn parks
+        // the child, its slot, and its parent's await indefinitely — the exact
+        // "parked forever" failure the timeout exists to prevent. On abort we
+        // ALSO stop the actor turn this child was waiting on (stopActorForAwait):
+        // it is the child's delegate, so it should die with the child, not run
+        // on orphaned. onReply and onAbort guard each other (first wins; the loser
+        // is a no-op). runEngineDelivery is ALWAYS called so its trackActor/clear
+        // bookkeeping stays symmetric and the mailbox entry is cleaned up even on
+        // abort (its onReply is just a no-op by then).
+        let done = false;
+        const finish = (/** @type {{ text: string, failed: boolean }} */ v) => { if (!done) { done = true; resolve(v); } };
+        // Queue the actor turn FIRST — so it captures the current Stop generation
+        // BEFORE onAbort bumps it, letting the gen-skip actually cancel a queued turn.
         runEngineDelivery({
           correlationId, senderSessionId: sender, rootSessionId, actor, message,
           parentToolUseId: toolUseId, oneShot: oneShot === true,
-          onReply: (text, failed) => resolve({ text, failed }),
+          onReply: (text, failed) => finish({ text, failed }),
         });
+        const onAbort = () => {
+          stopActorForAwait(rootSessionId, actor.actorSessionId);
+          finish({ text: replyText(instanceId, kind, name, 'the request was aborted (timeout or cancel) before the actor replied.', true), failed: true });
+        };
+        if (awaitSignal) {
+          if (awaitSignal.aborted) onAbort();               // already aborted → resolve now
+          else awaitSignal.addEventListener('abort', onAbort, { once: true });
+        }
       });
       return settled.failed
         ? { ok: false, error: settled.text }
@@ -512,6 +560,12 @@ export const makeActorMessaging = (deps) => {
         continue;
       }
       inFlight.set(wakeTarget, (inFlight.get(wakeTarget) ?? 0) + 1);
+      // Track the intent too (#4): runEngineDelivery's clear() unconditionally
+      // untrackIntent()s on settle, so a redrained turn that never tracked would
+      // decrement — and delete — a DIFFERENT live send's refcount, silently
+      // defeating the dedupe guard. Mirror the live path's trackIntent here so
+      // the ref is symmetric. Keyed on the resolved instanceId, as the live path.
+      trackIntent(wakeTarget, intentKey(actor.instanceId, e.message));
       // senderSessionId here is the DELIVERY address (deliver() wakes it) and the
       // bookkeeping root on a redrain — for a rerouted entry both are the root.
       runEngineDelivery({ correlationId: e.id, senderSessionId: wakeTarget, rootSessionId: wakeTarget, actor, message: e.message, oneShot: e.oneShot === true });

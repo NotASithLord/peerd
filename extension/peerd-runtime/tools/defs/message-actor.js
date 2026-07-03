@@ -14,10 +14,11 @@
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
+ * @property {{ aborted: boolean, addEventListener: Function }} [abortSignal]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -92,6 +93,10 @@ export const messageActorTool = {
       // on the main exposure surface), so its reply resolves INTO this tool
       // result — still wrapUntrusted-fenced. Long-lived senders keep the wake.
       awaitReply: c.session?.kind === 'subagent',
+      // The child's own abort signal (spawn.js threads it onto ctx). Lets the
+      // awaited reply race the child's wall-clock timeout / cancel, so a hung
+      // actor turn doesn't park the subagent past its budget (#1/#3).
+      awaitSignal: c.abortSignal,
     });
     // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
     return res.ok

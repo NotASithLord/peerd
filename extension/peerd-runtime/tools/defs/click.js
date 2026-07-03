@@ -108,13 +108,20 @@ export const clickTool = {
       if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first` };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.clickBackendNode === 'function') {
+        // Cardinality guard on the CDP channel too (#36 consistency): a resolved
+        // backendDOMNodeId ref IS exactly one node, so any expectedCount other
+        // than 1 is a mismatch — same shape the walk-ref/selector paths return,
+        // so the guard the schema promises holds identically across channels.
+        if (expectedCount != null && expectedCount !== 1) {
+          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount };
+        }
         try {
           const r = await debuggerPool.clickBackendNode(tab.id, entry.backendDOMNodeId);
           if (!r.ok) return { ok: false, error: r.error ?? 'ref_click_failed' };
           return {
             ok: true,
             content: JSON.stringify({
-              clicked: true, ref, role: entry.role, name: entry.name, tag: r.tag, text: r.text,
+              clicked: true, ref, role: entry.role, name: entry.name, tag: r.tag, text: r.text, matchedCount: 1,
               ...(r.navigated ? { navigated: true } : {}),
               // Action-result attribution: what the click changed on the page.
               result: r.navigated ? 'page navigated' : summarizeMutations(r.mutations),
