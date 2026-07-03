@@ -74,6 +74,8 @@ let actorState = { delegates: 0, seen: [] };
 let reasoningState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: the offscreen TOOL-BEARING subagent state.
 let subagentToolsState = { spawned: 0, childCalls: 0 };
+// heap-split phase 4: an offscreen subagent DELEGATING to its own web actor.
+let subagentDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
 
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
 // An order page served over localhost. The order lines are ANCHOR text so the
@@ -628,6 +630,69 @@ export const STATES = [
       rec.check('js_run actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
       rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
+      rec.check('the turn settles idle', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: an offscreen subagent DELEGATES to its own web actor ------
+  // Heap-split phase 4, the deepest chain — two isolated heaps stacked. The
+  // orchestrator spawns a sync subagent granted message_actor; that subagent's loop
+  // runs in its OWN offscreen heap and calls message_actor({to:'web'}) — which relays
+  // to the SW, dispatches actorMessaging from the child's restricted ctx, and (because
+  // the sender is a subagent) AWAITS the web actor's fenced reply into the child's tool
+  // result. The web actor is ITSELF an offscreen heap (phase 3). Proof: the child looped
+  // offscreen, a web-actor sub-loop ran, message_actor executed via the relay, and the
+  // web reply round-tripped up through the child into the orchestrator's answer. This is
+  // the delegation-from-a-heap path the unit tests can only stub.
+  {
+    name: 'subagent-delegates-offscreen', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      // The WEB ACTOR's model call (its own offscreen heap).
+      if (body.includes("You are peerd's web actor")) {
+        subagentDelegatesState.webCalls += 1;
+        return { sse: sseText('WEB-PRICE-99') };
+      }
+      // The SUBAGENT's model calls (ephemeral-actor prompt). First emits message_actor;
+      // second (after the awaited web reply re-enters its heap) answers.
+      if (body.includes('You are an EPHEMERAL ACTOR')) {
+        subagentDelegatesState.childCalls += 1;
+        if (subagentDelegatesState.childCalls === 1) return { sse: sseToolCall('message_actor', { to: 'web', message: 'get the price of widget X' }) };
+        return { sse: sseText('CHILD-GOT-WEB') };
+      }
+      // ORCHESTRATOR — spawn ONE sync subagent granted message_actor, then answer.
+      if (subagentDelegatesState.spawned === 0) {
+        subagentDelegatesState.spawned += 1;
+        return { sse: sseToolCall('spawn_subagent', { task: 'ask the web actor for the price and report it', tools: ['message_actor'], sync: true }) };
+      }
+      return { sse: sseText('FINAL-VIA-SUBAGENT') };
+    },
+    async run(ctx, rec) {
+      subagentDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use a subagent to ask the web actor for the price' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-VIA-SUBAGENT') && !out.busy;
+      }, { budgetMs: 40_000 });
+
+      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
+      const entries = (audit && audit.entries) || [];
+      const ranOffscreen = entries.some((e) => e.type === 'subagent_ran_offscreen');
+      const fellBack = entries.some((e) => e.type === 'subagent_offscreen_fallback');
+      const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
+      rec.check('the subagent looped offscreen (message_actor emitted, then answered) — 2 child calls', subagentDelegatesState.childCalls >= 2, `childCalls=${subagentDelegatesState.childCalls}`);
+      rec.check('the subagent ran in its OWN offscreen heap (subagent_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the subagent delegated via message_actor from its heap (tool_executed audit)', msgActorRan === true, `msgActorRan=${msgActorRan}`);
+      rec.check('a WEB-ACTOR sub-loop ran (its own heap) for the child delegation', subagentDelegatesState.webCalls >= 1, `webCalls=${subagentDelegatesState.webCalls}`);
+      rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
+      rec.check('the web reply round-tripped up through the subagent into the final answer', (out.bubbles || []).includes('FINAL-VIA-SUBAGENT'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },
