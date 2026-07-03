@@ -65,10 +65,11 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         if (m.type === 'done') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }
           const r = m.result ?? {};
-          // Propagate the worker's authoritative aborted flag (a clean Stop unwind has
-          // no error yet must still surface as cancelled, not a blank success).
-          if (r.error) finish({ ok: false, started: true, error: r.error, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, aborted: r.aborted === true });
-          else finish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: r.toolCalls ?? 0, aborted: r.aborted === true });
+          // No `aborted` here: a Stop-cascade is stamped at the SW client (which alone
+          // sees signal.aborted AND whether a reply came back). The runner only marks
+          // `aborted` for its OWN wall-clock timeout below.
+          if (r.error) finish({ ok: false, started: true, error: r.error, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason });
+          else finish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: r.toolCalls ?? 0 });
         }
         if (m.type === 'error') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }

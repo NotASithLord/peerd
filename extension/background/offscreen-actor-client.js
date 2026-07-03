@@ -62,7 +62,8 @@ export const makeOffscreenActorClient = ({
       for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
       sendMessage({ type: 'actor/abort', runId }).catch(() => {});
     };
-    if (signal) { if (signal.aborted) abortRun(); else signal.addEventListener('abort', abortRun, { once: true }); }
+    if (signal && !signal.aborted) signal.addEventListener('abort', abortRun, { once: true });
+    else if (signal?.aborted) abortRun();
     try {
       const result = await sendMessage({ type: 'actor/run', job: { ...job, runId } });
       // Stop / cancel cascade: `signal.aborted` HERE is the authoritative proof a Stop
@@ -76,6 +77,9 @@ export const makeOffscreenActorClient = ({
       if (signal?.aborted && result && !result.finalText) result.aborted = true;
       return result;
     } finally {
+      // Drop the abort listener a completed-without-Stop run left attached (a no-op if
+      // it already fired under {once:true}); keeps nothing dangling on the turn signal.
+      signal?.removeEventListener('abort', abortRun);
       runOnEvent.delete(runId);
       inflight.delete(runId);
       abortedRuns.delete(runId);
