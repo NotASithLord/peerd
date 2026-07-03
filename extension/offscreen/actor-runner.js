@@ -19,9 +19,9 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps: number, maxOutputTokens?: number, tools?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number }} job
+ * @param {{ runId?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any> }} deps
- * @returns {Promise<{ ok: boolean, started?: boolean, finalText?: string, usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>}
+ * @returns {Promise<{ ok: boolean, started?: boolean, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>}
  */
 export const runActor = async (job, { workerUrl, sendToSW }) => {
   if (active >= MAX_CONCURRENT) return { ok: false, started: false, error: `actor worker rejected: ${MAX_CONCURRENT} already running` };
@@ -64,8 +64,8 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         if (m.type === 'done') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }
           const r = m.result ?? {};
-          if (r.error) finish({ ok: false, started: true, error: r.error, finalText: r.finalText ?? '', usage: r.usage, stopReason: r.stopReason });
-          else finish({ ok: true, started: true, finalText: r.finalText ?? '', usage: r.usage, stopReason: r.stopReason, toolCalls: r.toolCalls ?? 0 });
+          if (r.error) finish({ ok: false, started: true, error: r.error, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason });
+          else finish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: r.toolCalls ?? 0 });
         }
         if (m.type === 'error') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }
@@ -79,6 +79,9 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
       w.postMessage({
         type: 'run', runId, sessionId: job.actorSessionId, message: job.message, systemPrompt: job.systemPrompt,
         provider: job.provider, model: job.model, depth: job.depth, tools: job.tools ?? [],
+        // priorMessages seeds the actor's history — a bound actor is STATEFUL
+        // across turns (dropping it made every offscreen turn amnesiac).
+        priorMessages: job.priorMessages ?? [],
         maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, reasoning: job.reasoning, contextWindow: job.contextWindow,
       });
     });

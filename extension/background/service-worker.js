@@ -2906,9 +2906,27 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
   if (!rec) return null;
   const { controller, release } = turnSlots.claim(actorSessionId);
   try {
-    const systemPrompt = await renderSystemPrompt({ actorType: kind, backing: rec.backing, instanceId });
+    // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system
+    // override (rec.customSystemPrompt). Actors get no memory/skills block (same
+    // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
+    const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
+    const systemPrompt = await renderSystemPrompt({
+      actorType: kind, backing: rec.backing, instanceId,
+      temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+    });
     const tools = actorDescriptors(listTools(), kind, rec.backing)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
+    const reasoning = {
+      enabled: settingsStore.get().reasoningEnabled,
+      budgetTokens: REASONING_BUDGET_TOKENS,
+      effort: REASONING_EFFORT_LEVELS.includes(settingsStore.get().reasoningEffort)
+        ? settingsStore.get().reasoningEffort : DEFAULT_SETTINGS.reasoningEffort,
+    };
+    const contextWindow = /** @type {any} */ (contextWindowFor(rec.model, {
+      overrides: settingsStore.get().contextWindowOverrides,
+      live: liveContextWindow(rec.provider, rec.model),
+    }));
     // Minimal card display: mount on start, mirror the worker's state snapshots,
     // settle on done. fromIndex = the actor's length BEFORE this turn.
     const fromIndex = (rec.messages ?? []).length;
@@ -2919,22 +2937,36 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       ? (/** @type {any} */ ev) => {
         try {
           if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
-          else if (ev.type === 'usage') uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, usage: ev.usage });
         } catch { /* display best-effort */ }
       }
       : undefined;
     const r = await actorClient.run({
       actorSessionId, message, systemPrompt,
       provider: rec.provider, model: rec.model, depth: rec.depth,
-      tools, maxSteps: 20, priorMessages: rec.messages ?? [],
+      // maxSteps omitted → the worker's runUserTurn uses its OWN default (parity
+      // with the in-SW path, not a hardcoded fifth of it). Seed the actor's prior
+      // history for statefulness.
+      tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
     }, { signal: controller.signal, onEvent });
     if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
-    // Persist the turn to the real actor session (statefulness + the
-    // finalAssistantText read in runActorTurn below).
-    const stamp = new Date().toISOString();
-    await sessions.appendMessage(actorSessionId, /** @type {any} */ ({ id: `off-u-${Date.now()}`, when: stamp, role: 'user', content: message })).catch(() => {});
-    await sessions.appendMessage(actorSessionId, /** @type {any} */ ({ id: `off-a-${Date.now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
-    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true } }).catch(() => {});
+    // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
+    // tool_result), not a lossy user+finalText pair — so a long-lived actor keeps
+    // its tool-round memory across turns, matching the in-SW path.
+    const newMessages = Array.isArray(r.newMessages) ? r.newMessages : [];
+    let persistOk = true;
+    for (const m of newMessages) {
+      await sessions.appendMessage(actorSessionId, /** @type {any} */ (m)).catch(() => { persistOk = false; });
+    }
+    // Cost PARITY: price the turn's usage and surface it on the card (the reducer
+    // reads `cost`, not raw usage — the earlier `usage` field never populated).
+    if (display && uiConnected() && r.usage) {
+      try {
+        const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
+        const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
+        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost });
+      } catch { /* cost telemetry is best-effort */ }
+    }
+    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, persistOk } }).catch(() => {});
     if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
     return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   } finally {

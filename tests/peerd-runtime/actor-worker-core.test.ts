@@ -36,20 +36,22 @@ describe('makeRelayedToolDispatch', () => {
 });
 
 describe('runActorLoop', () => {
-  // A fake actor loop: dispatch ONE tool via the relay, then answer.
+  // A fake actor loop: append the user message + a tool round + a NEW final
+  // assistant message (as the real runUserTurn does), so per-turn scoping works.
   const fakeActorLoop = (finalText: string) => async function* (ctx: any) {
+    await ctx.sessions.appendMessage(ctx.sessionId, { id: 'u', role: 'user', content: ctx.userText });
     const r = await ctx.toolDispatch({ name: 'vm_boot', args: { cmd: 'echo hi' }, id: 't1' });
     ctx._toolResult = r;
     await ctx.appendAudit({ type: 'x' }).catch(() => {});   // phase-1 crash shape
+    await ctx.sessions.appendMessage(ctx.sessionId, { id: 'tr', role: 'tool', content: 'hi' });
     yield { type: 'tool-use', name: 'vm_boot' };
-    await ctx.sessions.updateAssistantMessage(ctx.sessionId, 'a1', { content: finalText });
+    await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a1', role: 'assistant', content: finalText });
     yield { type: 'usage', usage: { inputTokens: 4, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } };
     yield { type: 'stop', stopReason: 'end_turn' };
   };
 
-  test('runs the actor loop, relays tool dispatch, returns finalText + usage + toolCalls', async () => {
+  test('runs the actor loop, relays tool dispatch, returns finalText + FULL new transcript + usage', async () => {
     const sessions = makeInMemorySessions({ sessionId: 'act-1', provider: 'anthropic', model: 'm' });
-    await sessions.appendMessage('act-1', { role: 'assistant', content: '', id: 'a1' });
     const forwarded: any[] = [];
     const toolDispatch = makeRelayedToolDispatch(async () => ({ ok: true, result: { ok: true, content: 'hi' } }));
     const out = await runActorLoop(
@@ -59,7 +61,24 @@ describe('runActorLoop', () => {
     expect(out.finalText).toBe('the VM did the thing');
     expect(out.toolCalls).toBe(1);
     expect(out.usage.outputTokens).toBe(3);
+    // the WHOLE turn is returned (user + tool_result + assistant) so the SW can
+    // persist it — not a lossy user+finalText pair.
+    expect(out.newMessages.map((m: any) => m.role)).toEqual(['user', 'tool', 'assistant']);
     expect(forwarded.map((e) => e.type)).toEqual(['tool-use', 'usage', 'stop']);
+  });
+
+  test('per-turn scoping: a SEEDED prior reply is NOT returned as this turn\'s answer (stale-reply guard)', async () => {
+    // Seed the actor's prior history (statefulness) — turn 1 answered "PRIOR".
+    const sessions = makeInMemorySessions({ sessionId: 'act-1', messages: [{ id: 'p', role: 'assistant', content: 'PRIOR REPLY' }] });
+    // Turn 2 emits NO new assistant text (Stop/error).
+    const noTextLoop = async function* () { yield { type: 'error', error: 'stopped' }; yield { type: 'stop', stopReason: 'aborted' }; };
+    const out = await runActorLoop(
+      { runUserTurn: noTextLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => ({}), getSystemPrompt: () => 'S', tools: [] },
+      { sessionId: 'act-1', userText: 't2', maxSteps: 5 },
+    );
+    expect(out.finalText).toBe('');            // NOT 'PRIOR REPLY'
+    expect(out.error).toBe('stopped');         // the real failure surfaces
+    expect(out.newMessages).toEqual([]);       // nothing new this turn
   });
 
   test('surfaces a text-less error (not a silent blank)', async () => {

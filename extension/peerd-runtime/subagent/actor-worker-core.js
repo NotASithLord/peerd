@@ -67,8 +67,8 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {(entry: object) => (Promise<unknown> | void)} [deps.appendAudit]
  * @param {(ev: object) => void} [deps.onEvent]
  * @param {Array<{ name: string, description: string, schema: object }>} deps.tools
- * @param {{ sessionId: string, userText: string, maxSteps: number, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
- * @returns {Promise<{ finalText: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
+ * @param {{ sessionId: string, userText: string, maxSteps?: number, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
+ * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
   const { runUserTurn, sessions, callModel, toolDispatch, getSystemPrompt, onEvent, tools } = deps;
@@ -80,6 +80,12 @@ export const runActorLoop = async (deps, req) => {
   let toolCalls = 0;
   let stopReason;
   let errorEvent;
+  // Per-turn scoping (the in-SW path's `before`/slice guard): the worker session
+  // is SEEDED with the actor's prior history (statefulness), so finalAssistantText
+  // over the WHOLE transcript would return a PRIOR turn's reply when THIS turn
+  // emits none (Stop/error) — the stale-reply bug. Capture the length BEFORE the
+  // turn and read only the messages it adds.
+  const before = (await sessions.get(sessionId))?.messages?.length ?? 0;
   for await (const ev of runUserTurn({
     sessionId,
     userText,
@@ -97,6 +103,9 @@ export const runActorLoop = async (deps, req) => {
     maxSteps,
     persistDeltas: false,
     ...(signal ? { signal } : {}),
+    // maxSteps: omit when undefined so runUserTurn uses its OWN default (parity
+    // with the in-SW actor path, which passes none). Only cap when the caller asks.
+    ...(maxSteps != null ? { maxSteps } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(contextWindow != null ? { contextWindow } : {}),
   })) {
@@ -111,7 +120,12 @@ export const runActorLoop = async (deps, req) => {
     }
     onEvent?.(ev);
   }
-  const finalText = finalAssistantText(await sessions.get(sessionId));
+  // Only THIS turn's messages — the full transcript slice (user + assistant
+  // rounds + tool_use/tool_result), so the SW can persist the WHOLE exchange to
+  // the real session (not a lossy user+finalText pair) and statefulness holds.
+  const all = (await sessions.get(sessionId))?.messages ?? [];
+  const newMessages = all.slice(before);
+  const finalText = finalAssistantText({ messages: newMessages });
   const error = (!finalText && errorEvent) ? String(errorEvent) : undefined;
-  return { finalText, usage, stopReason, toolCalls, ...(error ? { error } : {}) };
+  return { finalText, newMessages, usage, stopReason, toolCalls, ...(error ? { error } : {}) };
 };
