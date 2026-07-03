@@ -231,8 +231,9 @@ import {
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
-  // PR #119: the code-REPL arm's host-side page-call handler.
-  makePageCallHandler,
+  // PR #119: the code-REPL arm's host-side page-call handler + the pure
+  // adopt-first-tab-on-goto decision.
+  makePageCallHandler, resolvePageTab,
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
@@ -2601,9 +2602,22 @@ const pageCallRoute = {
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
       return { ok: false, error: 'page_call_not_web_actor' };
     }
-    // Authoritative tab: the ONE this actor owns. Never a worker-supplied id.
-    const tabId = webActorTabBindings.tabFor(ownerSessionId);
-    if (typeof tabId !== 'number') return { ok: false, error: 'page_call_no_owned_tab' };
+    // Authoritative tab: the ONE this actor owns (never a worker-supplied id).
+    // A fresh code actor owns none — and unlike the tool-call actor it has no
+    // direct `navigate` to lazily open one, so page.goto() IS its adopt path:
+    // open + bind its first tab here (the SAME adoptWebTab navigate uses), then
+    // dispatch pinned to it. Every other page.* with no tab is refused with an
+    // actionable "open a page first" message. See resolvePageTab.
+    const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
+    if (decision.action === 'refuse') return { ok: false, error: decision.error };
+    let tabId;
+    if (decision.action === 'adopt') {
+      const adopted = await adoptWebTab(ownerSessionId).catch(() => null);
+      if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
+      tabId = adopted.tabId;
+    } else {
+      tabId = decision.tabId;
+    }
     return pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
   },
 };

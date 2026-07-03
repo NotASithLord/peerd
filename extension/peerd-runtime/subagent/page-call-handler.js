@@ -23,6 +23,33 @@ import { pageCallToToolCall, shapePageResult } from './page-api.js';
  */
 
 /**
+ * Decide how the page/call route should resolve the actor's tab. PURE — the SW
+ * route feeds it the currently-owned tab (from webActorTabBindings.tabFor) and
+ * the method, and acts on the verdict.
+ *
+ * why this exists: the CODE-surface web actor's ONLY navigation is page.goto,
+ * and it has NO direct `navigate` tool — so it can't trigger the tool-call
+ * actor's lazy `adoptWebTab` that opens the FIRST tab. Without this, page.goto
+ * on a fresh actor failed closed ('no owned tab'), the model retried page_code
+ * until (if lucky) the orchestrator opened a tab for it, and otherwise gave up —
+ * reading as "the page worker is down". page.goto is the code actor's adopt
+ * path: mirror navigate's lazy open. Any OTHER page.* with no tab genuinely has
+ * no page to act on → refuse with an actionable message.
+ *
+ * @param {number | null | undefined} ownedTabId  the actor's currently-bound tab, if any
+ * @param {string} method  the page.* method
+ * @returns {{ action: 'dispatch', tabId: number } | { action: 'adopt' } | { action: 'refuse', error: string }}
+ */
+export const resolvePageTab = (ownedTabId, method) => {
+  if (typeof ownedTabId === 'number') return { action: 'dispatch', tabId: ownedTabId };
+  if (method === 'goto') return { action: 'adopt' };
+  return {
+    action: 'refuse',
+    error: `page.${method}: no page open yet — call page.goto(url) first to open your tab.`,
+  };
+};
+
+/**
  * @param {{
  *   dispatchToolCall: (call: { name: string, args: object, id?: string }, ctx: any) => Promise<ToolResult>,
  *   buildActorContext: (binding: { sessionId: string, tabId: number }) => any,

@@ -6,7 +6,30 @@
 // the worker's awaited page.* call would see it.
 
 import { describe, test, expect, mock } from 'bun:test';
-import { makePageCallHandler } from '../../extension/peerd-runtime/subagent/page-call-handler.js';
+import { makePageCallHandler, resolvePageTab } from '../../extension/peerd-runtime/subagent/page-call-handler.js';
+
+describe('resolvePageTab — first-tab adoption for the code actor', () => {
+  test('an owned tab dispatches straight to it', () => {
+    expect(resolvePageTab(42, 'click')).toEqual({ action: 'dispatch', tabId: 42 });
+    expect(resolvePageTab(42, 'goto')).toEqual({ action: 'dispatch', tabId: 42 });
+  });
+
+  test('page.goto with NO tab ADOPTS (the fix: the code actor opens its first tab this way)', () => {
+    // The bug this fixes: the code actor has no direct `navigate` to trigger the
+    // tool-call actor's lazy adoptWebTab, so page.goto must be its adopt path —
+    // else a fresh actor can never open a tab and every task thrashes.
+    expect(resolvePageTab(null, 'goto')).toEqual({ action: 'adopt' });
+    expect(resolvePageTab(undefined, 'goto')).toEqual({ action: 'adopt' });
+  });
+
+  test('any OTHER page.* with no tab is refused with an actionable message', () => {
+    for (const m of ['click', 'fill', 'snapshot', 'content']) {
+      const r = resolvePageTab(null, m);
+      expect(r.action).toBe('refuse');
+      if (r.action === 'refuse') expect(r.error).toMatch(/page\.goto/);
+    }
+  });
+});
 
 const ACTOR_CTX = { sessionId: 's1', exposure: 'runner' as const };
 
