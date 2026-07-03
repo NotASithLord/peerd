@@ -202,6 +202,37 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
   });
 });
 
+// PR #134: a subagent is an EPHEMERAL ACTOR. Its block joins the <actor_agent>
+// family (one vocabulary) but differs from a bound actor: it owns no instance
+// and — the inverted rule — it MAY message_actor.
+describe('the ephemeral-actor (subagent) prompt', () => {
+  test('shares the <actor_agent> framing as the ephemeral kind, carrying the task', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const out = await renderSystemPrompt({ taskOverride: 'summarize the release notes' });
+    expect(out.includes('<actor_agent>')).toBe(true);
+    expect(out.includes('EPHEMERAL ACTOR')).toBe(true);
+    expect(out.includes('summarize the release notes')).toBe(true);           // the task rides in
+    // The return-value contract survives.
+    expect(out.includes('value returned to the parent')).toBe(true);
+    // Old model-facing identity is gone (unified into the actor family).
+    expect(out.includes('<subagent_task>')).toBe(false);
+    expect(out.includes('You are a SUBAGENT')).toBe(false);
+  });
+
+  test('the inverted rule: an ephemeral actor MAY delegate (unlike a bound actor)', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const ephemeral = await renderSystemPrompt({ taskOverride: 'do X' });
+    // it is told it may message_actor and gets the reply in its tool result
+    expect(ephemeral.includes('message_actor')).toBe(true);
+    expect(ephemeral.includes('tool result')).toBe(true);
+    // it still cannot mutate an instance directly (the phrase wraps a line)
+    expect(ephemeral.includes('cannot mutate')).toBe(true);
+    // a BOUND actor, by contrast, is told message_actor is NOT its tool
+    const bound = actorBlock('webvm');
+    expect(bound.includes("message_actor tools named above are the ORCHESTRATOR's")).toBe(true);
+  });
+});
+
 // Guard the always-on prompt stays lean: the deep per-kind lore lives in
 // actorBlock, NOT the main template. A regression that pastes a kind's
 // mechanics back into system-prompt.txt would balloon every turn's context with
