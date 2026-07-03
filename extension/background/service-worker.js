@@ -246,6 +246,7 @@ import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
+import { makeOffscreenReasoningClient } from './offscreen-reasoning-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { decidePullIn } from './panel-affordance.js';
@@ -1417,6 +1418,14 @@ const forwardSubagentEvent = (/** @type {any} */ ev) => {
   }
 };
 
+// Forward-declared (assigned later, after ensureOffscreen at ~L1930) so both the
+// makeSpawnSubagent deps below AND the dispatcher's lazy 'reasoning/model-call'
+// arrow can close over it without a TDZ. Both only DEREFERENCE it at call time —
+// long after module init assigns it; never read during boot.
+// why: heap-split phase 1 — the offscreen reasoning client (own-heap tools:[] children).
+/** @type {ReturnType<typeof makeOffscreenReasoningClient> | null} */
+let reasoningClient = null;
+
 const spawnSubagentCore = makeSpawnSubagent({
   sessions,
   runUserTurn,
@@ -1437,6 +1446,17 @@ const spawnSubagentCore = makeSpawnSubagent({
     claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
+  // Heap-split phase 1: run a PURE-REASONING (tools:[]) child in a dedicated
+  // offscreen Worker instead of the in-SW loop. A LAZY arrow — reasoningClient is
+  // assigned LATER in module init (after ensureOffscreen), so reading it here at
+  // wiring time would always see null. At call time it's the client, or null on
+  // Firefox / when offscreen is unavailable → return the unavailable sentinel so
+  // spawn.js falls back to the in-SW loop. The key never enters the worker; the
+  // model call relays back to the SW route above.
+  runReasoningOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => reasoningClient
+    ? reasoningClient.run(job, opts)
+    : Promise.resolve({ ok: false, error: 'reasoning offscreen unavailable' }),
+  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
@@ -1912,6 +1932,19 @@ const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.crea
 const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// Heap-split phase 1: the offscreen reasoning client runs a PURE-REASONING
+// (tools:[]) subagent loop in a dedicated Worker — its own heap. The model call
+// relays back to THIS route (getSecret added here), so the key never enters the
+// worker. Null when offscreen is unavailable (Firefox MV3 path) → spawn.js falls
+// back to the in-SW loop. The 'reasoning/model-call' route is spread into the
+// dispatcher below.
+reasoningClient = offscreenAvailable ? makeOffscreenReasoningClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+  callModel: /** @type {any} */ (callModel),
+  getSecret,
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -3277,6 +3310,14 @@ const ensureSession = ensureCurrentSession;
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
+  // Heap-split phase 1: the offscreen→SW model-call relay for reasoning workers
+  // (getSecret is added in the handler — the key never left the SW). A LAZY
+  // arrow — reasoningClient is defined later in module init (after
+  // ensureOffscreen), so it must not be read at this eager spread; the arrow only
+  // dereferences it when a message actually arrives, long after boot.
+  'reasoning/model-call': (/** @type {any} */ msg) => reasoningClient
+    ? reasoningClient.routes['reasoning/model-call'](msg)
+    : Promise.resolve({ ok: false, error: 'reasoning offscreen unavailable' }),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,

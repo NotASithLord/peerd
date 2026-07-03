@@ -228,6 +228,12 @@ export const finalAssistantText = (session) => {
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
  *   Bun-testable without real waiting.
+ * @param {((job: object, opts?: { signal?: AbortSignal }) => Promise<{ ok: boolean, finalText?: string, usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>) | null} [deps.runReasoningOffscreen]
+ *   Heap-split phase 1: run a pure-reasoning child in a dedicated offscreen
+ *   Worker (its own heap; key never enters it). null = use the in-SW loop.
+ * @param {((task: string) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
+ *   Render the child's system prompt SW-side for the offscreen path (the worker
+ *   never assembles it). Required alongside runReasoningOffscreen.
  */
 export const makeSpawnSubagent = (deps) => {
   const {
@@ -241,6 +247,13 @@ export const makeSpawnSubagent = (deps) => {
     },
     setTimer = (/** @type {() => void} */ fn, /** @type {number} */ ms) => setTimeout(fn, ms),
     clearTimer = (/** @type {unknown} */ handle) => clearTimeout(/** @type {any} */ (handle)),
+    // Heap-split phase 1: run a PURE-REASONING (empty granted toolset) child in a
+    // dedicated offscreen Worker — its own heap, no key, no chrome.*, egress-less.
+    // null → the in-SW loop (Firefox / offscreen unavailable / a tool-holding
+    // child, which can't run in the keyless worker). renderSystemPromptForChild
+    // renders the child's prompt SW-side so the worker never assembles it.
+    runReasoningOffscreen = null,
+    renderSystemPromptForChild = null,
   } = deps;
 
   // Live-children registry (phase 5, multi-hop Stop): parent → the child
@@ -533,34 +546,78 @@ export const makeSpawnSubagent = (deps) => {
     // success criterion 5), without polluting main.
     const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     const start = now();
+    // Heap-split phase 1: a PURE-REASONING child (no granted tools) runs in a
+    // dedicated offscreen Worker — a separate heap with no key, no chrome.*, no
+    // egress; its only outward edge is the SW-gated model call. Falls back to the
+    // in-SW loop when offscreen isn't wired (Firefox), when the prompt renderer
+    // is absent, or when the offscreen run HARD-fails to start (a normal
+    // completion, even an error/abort, does NOT fall back — that would double-run).
+    const pureReasoning = allowedNames.size === 0
+      && typeof runReasoningOffscreen === 'function'
+      && typeof renderSystemPromptForChild === 'function';
+    let ranOffscreen = false;
     try {
-      for await (const ev of runUserTurn({
-        sessionId: child.sessionId,
-        userText: task,
-        callModel: cappedCallModel,
-        getSecret,
-        safeFetch,
-        sessions,
-        getSystemPrompt,
-        appendAudit: taggedAudit,
-        tools: subsetDescriptors,
-        toolDispatch,
-        maxSteps,
-        persistDeltas,
-        now,
-        // Phase 1: the child is abortable — Stop cascades, subagentCancel, and
-        // the wall-clock timer all fire this controller.
-        signal: controller.signal,
-      })) {
-        if (ev.type === 'tool-use') toolCalls++;
-        if (ev.type === 'stop') lastStopReason = ev.stopReason;
-        if (ev.type === 'usage' && ev.usage) {
-          usage.inputTokens += ev.usage.inputTokens || 0;
-          usage.outputTokens += ev.usage.outputTokens || 0;
-          usage.cacheReadTokens += ev.usage.cacheReadTokens || 0;
-          usage.cacheWriteTokens += ev.usage.cacheWriteTokens || 0;
+      if (pureReasoning) {
+        const systemPrompt = await renderSystemPromptForChild(task);
+        const r = await runReasoningOffscreen({
+          sessionId: child.sessionId, task, systemPrompt,
+          provider, model: model ?? parent?.model, depth,
+          maxSteps, maxOutputTokens, budgetMs,
+        }, { signal: controller.signal });
+        if (r && r.ok) {
+          ranOffscreen = true;
+          // Reconstruct the child transcript SW-side (the worker's heap held it;
+          // only the final text crossed back) so finalAssistantText + the card
+          // read a coherent session. Pure reasoning = user turn + one answer.
+          // Cast: these are minimal role/content records for finalAssistantText
+          // (which reads only role+content); the worker owns the full transcript.
+          const stamp = new Date(now()).toISOString();
+          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
+          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-a-${now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
+          toolCalls = r.toolCalls ?? 0;
+          lastStopReason = r.aborted ? 'aborted' : (r.stopReason ?? 'end_turn');
+          if (r.usage) {
+            usage.inputTokens += r.usage.inputTokens || 0;
+            usage.outputTokens += r.usage.outputTokens || 0;
+            usage.cacheReadTokens += r.usage.cacheReadTokens || 0;
+            usage.cacheWriteTokens += r.usage.cacheWriteTokens || 0;
+          }
+          taggedAudit({ type: 'subagent_ran_offscreen', details: { heapSplit: true } }).catch(() => {});
+        } else {
+          // Hard start failure (offscreen doc / worker spawn) → defensive fallback
+          // to the in-SW loop, so a reasoning child never just dies on infra.
+          taggedAudit({ type: 'subagent_offscreen_fallback', details: { error: r?.error ?? 'unknown' } }).catch(() => {});
         }
-        onEvent?.(ev);
+      }
+      if (!ranOffscreen) {
+        for await (const ev of runUserTurn({
+          sessionId: child.sessionId,
+          userText: task,
+          callModel: cappedCallModel,
+          getSecret,
+          safeFetch,
+          sessions,
+          getSystemPrompt,
+          appendAudit: taggedAudit,
+          tools: subsetDescriptors,
+          toolDispatch,
+          maxSteps,
+          persistDeltas,
+          now,
+          // Phase 1: the child is abortable — Stop cascades, subagentCancel, and
+          // the wall-clock timer all fire this controller.
+          signal: controller.signal,
+        })) {
+          if (ev.type === 'tool-use') toolCalls++;
+          if (ev.type === 'stop') lastStopReason = ev.stopReason;
+          if (ev.type === 'usage' && ev.usage) {
+            usage.inputTokens += ev.usage.inputTokens || 0;
+            usage.outputTokens += ev.usage.outputTokens || 0;
+            usage.cacheReadTokens += ev.usage.cacheReadTokens || 0;
+            usage.cacheWriteTokens += ev.usage.cacheWriteTokens || 0;
+          }
+          onEvent?.(ev);
+        }
       }
     } finally {
       clearTimer(timer);

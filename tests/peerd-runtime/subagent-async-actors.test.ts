@@ -215,6 +215,54 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
   });
 });
 
+describe('heap-split phase 1 — routing a pure-reasoning child offscreen', () => {
+  const withOffscreen = (store: any, offscreen: any, extra: any = {}) => {
+    // A distinctively-texted in-SW loop so we can tell which path ran.
+    const inSwLoop = makeFastLoop('IN-SW answer');
+    return makeSpawnSubagent(spawnDeps(store, inSwLoop, {
+      runReasoningOffscreen: offscreen,
+      renderSystemPromptForChild: (t: string) => `SYS:${t}`,
+      ...extra,
+    }) as any);
+  };
+
+  test('a tools:[] child runs OFFSCREEN (not the in-SW loop) and returns its finalText', async () => {
+    const store = makeStore();
+    const parent = await store.create({ model: 'parent-model' });
+    let offscreenJob: any = null;
+    const offscreen = async (job: any) => { offscreenJob = job; return { ok: true, finalText: 'OFFSCREEN answer', usage: { inputTokens: 3, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 }, stopReason: 'end_turn', toolCalls: 0 }; };
+    const spawn = withOffscreen(store, offscreen);
+    const out = await spawn({ task: 'reason about X', tools: [], parentSessionId: parent.sessionId });
+    expect(out.result).toBe('OFFSCREEN answer');       // came from the worker, not the in-SW loop
+    expect(out.usage.outputTokens).toBe(2);
+    // the child's prompt was rendered SW-side and the session/provider threaded in
+    expect(offscreenJob.systemPrompt).toBe('SYS:reason about X');
+    expect(offscreenJob.provider).toBe('anthropic');
+    expect(offscreenJob.model).toBe('parent-model');
+    // the child transcript was reconstructed SW-side (finalAssistantText reads it)
+    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    expect(child.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'OFFSCREEN answer' });
+  });
+
+  test('a child WITH tools stays in the in-SW loop (keyless worker cannot hold tools)', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let offscreenCalled = false;
+    const spawn = withOffscreen(store, async () => { offscreenCalled = true; return { ok: true, finalText: 'x' }; });
+    const out = await spawn({ task: 't', tools: ['a'], parentSessionId: parent.sessionId });
+    expect(offscreenCalled).toBe(false);
+    expect(out.result).toBe('IN-SW answer');
+  });
+
+  test('a HARD offscreen failure falls back to the in-SW loop (never just dies on infra)', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    const spawn = withOffscreen(store, async () => ({ ok: false, error: 'offscreen doc unavailable' }));
+    const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
+    expect(out.result).toBe('IN-SW answer');           // fell back, didn't die
+  });
+});
+
 // ---- actor-messaging: the lineage gate + arbitration ------------------------
 
 type Reenter = { userText: string; sessionId: string; synthetic: boolean };

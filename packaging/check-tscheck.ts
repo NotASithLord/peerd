@@ -44,7 +44,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // directly now). A legitimate decrease (files deleted, not directives dropped).
 // 471 → 473: main added one // @ts-check'd file post-cull, and the async-actor
 // proposal adds delegation-lineage.js (the pure trusted-lineage predicate).
-const COVERED_FLOOR = 473;
+// 473 → 477: heap-split phase 1 adds reasoning-worker-core.js, reasoning-worker.js,
+// reasoning-runner.js, offscreen-reasoning-client.js (all // @ts-check).
+const COVERED_FLOOR = 477;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

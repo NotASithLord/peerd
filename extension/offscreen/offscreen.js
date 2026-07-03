@@ -24,6 +24,8 @@ import { createBestTranscriber, createModelStore } from '/peerd-runtime/index.js
 // Headless JS jobs (the js_run tool / engine.runJob): a sealed Worker hosted
 // here, no UI. See job-runner.js for its (deliberately seal-only) security note.
 import { runJob } from './job-runner.js';
+// Pure-reasoning subagents in a dedicated Worker (heap-split phase 1).
+import { runReasoning, abortReasoning } from './reasoning-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
@@ -337,6 +339,32 @@ const onJobMessage = (msg, sender, sendResponse) => {
   return true;     // async sendResponse contract
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
+
+// --- pure-reasoning subagents (heap-split phase 1) ---
+// Runs a tools:[] subagent loop in a dedicated Worker (its own heap), relaying
+// each model call to the SW's 'reasoning/model-call' route (the SW holds the
+// key). Same trust posture as onJobMessage: first-party senders only.
+/**
+ * @param {any} msg
+ * @param {import('webextension-polyfill').Runtime.MessageSender} sender
+ * @param {(response: any) => void} sendResponse
+ */
+const onReasoningMessage = (msg, sender, sendResponse) => {
+  if (msg?.type !== 'reasoning/run' && msg?.type !== 'reasoning/abort') return undefined;
+  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (msg.type === 'reasoning/abort') { abortReasoning(msg.runId); sendResponse({ ok: true }); return true; }
+  runReasoning(
+    msg.job ?? {},
+    {
+      workerUrl: browser.runtime.getURL('offscreen/reasoning-worker.js'),
+      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+    },
+  )
+    .then((result) => sendResponse(result))
+    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
+  return true;     // async sendResponse contract
+};
+browser.runtime.onMessage.addListener(/** @type {any} */ (onReasoningMessage));
 
 // Local WebGPU inference (FEATURE-LOCAL-WEBGPU B). The SW's local-webgpu adapter
 // drives this: status/probe/init/teardown are request→response; generate STREAMS
