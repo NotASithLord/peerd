@@ -25,6 +25,9 @@
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
  * @param {(call: object, ctx: object) => Promise<any>} deps.dispatchToolCall
  * @param {(call: any, actorType: string|undefined, instanceId: string|undefined) => void} deps.pinActorCall
+ * @param {(ctx: any, allowedNames: Set<string>) => any} [deps.restrictCtxCapabilities]  phase 4:
+ *   strip a subagent ctx down to the capabilities its GRANTED tools need (capability-by-need),
+ *   the analog of the actor's kind-scoped strip. Required to run tool-bearing subagents offscreen.
  * @param {(actorSessionId: string) => (number | undefined)} [deps.ownedTabFor]  a
  *   tab-backed WEB actor's currently-owned tab id (phase 3) — read per dispatch so a
  *   mid-turn navigate that adopts a tab (0→1) is seen by the NEXT tool call. undefined
@@ -34,7 +37,7 @@
  */
 export const makeOffscreenActorClient = ({
   ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
-  sessions, buildToolContext, dispatchToolCall, pinActorCall, ownedTabFor, EXPOSURE_ACTOR, now = Date.now,
+  sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, now = Date.now,
 }) => {
   let seq = 0;
   /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
@@ -48,6 +51,12 @@ export const makeOffscreenActorClient = ({
   const abortedRuns = new Set();
   /** @type {Map<string, (ev: object) => void>} runId → onEvent */
   const runOnEvent = new Map();
+  /** @type {Map<string, AbortSignal>} sessionId → the in-flight run's abort signal.
+   * Phase 4: a subagent's BLOCKING tool (message_actor awaitReply) runs SW-side via the
+   * relay and races the reply against the child's cancel; the child's signal is only
+   * visible at run() time, so stash it here for the tool-dispatch route to read. One run
+   * per session at a time (turn slots serialize), so a plain Map is enough. */
+  const signalBySession = new Map();
 
   /**
    * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string }} job
@@ -64,6 +73,7 @@ export const makeOffscreenActorClient = ({
     };
     if (signal && !signal.aborted) signal.addEventListener('abort', abortRun, { once: true });
     else if (signal?.aborted) abortRun();
+    if (signal) signalBySession.set(job.actorSessionId, signal);   // phase 4: blocking-tool cancel race
     try {
       const result = await sendMessage({ type: 'actor/run', job: { ...job, runId } });
       // Stop / cancel cascade: `signal.aborted` HERE is the authoritative proof a Stop
@@ -83,6 +93,7 @@ export const makeOffscreenActorClient = ({
       runOnEvent.delete(runId);
       inflight.delete(runId);
       abortedRuns.delete(runId);
+      if (signal && signalBySession.get(job.actorSessionId) === signal) signalBySession.delete(job.actorSessionId);
     }
   };
 
@@ -111,11 +122,33 @@ export const makeOffscreenActorClient = ({
         set.delete(ac); if (set.size === 0) inflight.delete(key);
       }
     },
-    /** @param {{ actorSessionId?: string, call?: any }} [msg] - SW-side pin + gate + dispatch. */
+    /** @param {{ actorSessionId?: string, call?: any }} [msg] - SW-side ctx build + gate + dispatch. */
     'actor/tool-dispatch': async ({ actorSessionId, call } = {}) => {
       try {
         const rec = actorSessionId ? await sessions.get(actorSessionId) : null;
-        if (!rec || rec.kind !== 'actor') return { ok: false, error: 'actor/tool-dispatch: not an actor session' };
+        if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
+
+        // Phase 4 — a SUBAGENT is a tool-bearing EPHEMERAL actor. Its toolset is the
+        // NARROWED-GENERAL set persisted at spawn (rec.grantedTools), not an instance
+        // pin. Rebuild its restricted ctx SW-side EXACTLY as the in-SW spawn path does
+        // (buildToolContext → audit-tag → abortSignal → restrictCtxCapabilities over the
+        // granted set) and re-check the relayed call against grantedTools first — the
+        // worker's call args (shaped by tool output it read) are never trusted, the same
+        // defense-in-depth as the actor pin.
+        if (rec.kind === 'subagent') {
+          if (!restrictCtxCapabilities) return { ok: false, error: 'actor/tool-dispatch: subagent offscreen not wired' };
+          const granted = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
+          if (typeof call?.name !== 'string' || !granted.has(call.name)) return { ok: false, error: `tool_not_available_to_subagent: ${call?.name}` };
+          const base = await buildToolContext({ sessionId: actorSessionId });
+          const sig = signalBySession.get(/** @type {string} */ (actorSessionId));
+          // Stamp the child lineage on every audit its tools emit (parity with spawn.js's taggedAudit).
+          const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, subagentSessionId: actorSessionId, depth: rec.depth } });
+          const ctx = restrictCtxCapabilities({ ...base, audit, ...(sig ? { abortSignal: sig } : {}) }, granted);
+          const result = await dispatchToolCall(call, ctx);
+          return { ok: true, result };
+        }
+
+        if (rec.kind !== 'actor') return { ok: false, error: 'actor/tool-dispatch: not an actor or subagent session' };
         // Phase 3: a WEB actor (kind 'web', backing tab) OWNS one tab; its DOM tools
         // must target THAT tab and the origin/denylist gate must see its origin.
         // Resolve the owned tab id HERE, per dispatch (never trust the worker), so a

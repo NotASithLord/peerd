@@ -228,12 +228,14 @@ export const finalAssistantText = (session) => {
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
  *   Bun-testable without real waiting.
- * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, finalText?: string, usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>) | null} [deps.runReasoningOffscreen]
- *   Heap-split phase 1: run a pure-reasoning child in a dedicated offscreen
- *   Worker (its own heap; key never enters it). null = use the in-SW loop.
+ * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, finalText?: string, newMessages?: any[], usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>) | null} [deps.runChildOffscreen]
+ *   Heap split: run a child's loop in a dedicated offscreen Worker (its own heap;
+ *   key never enters it). Tool-less children only relay the model call; tool-bearing
+ *   children (job.tools set) also relay each tool call to the SW-gated dispatch.
+ *   null = use the in-SW loop.
  * @param {((task: string) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
  *   Render the child's system prompt SW-side for the offscreen path (the worker
- *   never assembles it). Required alongside runReasoningOffscreen.
+ *   never assembles it). Required alongside runChildOffscreen.
  */
 export const makeSpawnSubagent = (deps) => {
   const {
@@ -249,10 +251,11 @@ export const makeSpawnSubagent = (deps) => {
     clearTimer = (/** @type {unknown} */ handle) => clearTimeout(/** @type {any} */ (handle)),
     // Heap-split phase 1: run a PURE-REASONING (empty granted toolset) child in a
     // dedicated offscreen Worker — its own heap, no key, no chrome.*, egress-less.
-    // null → the in-SW loop (Firefox / offscreen unavailable / a tool-holding
-    // child, which can't run in the keyless worker). renderSystemPromptForChild
-    // renders the child's prompt SW-side so the worker never assembles it.
-    runReasoningOffscreen = null,
+    // Tool-bearing children run here too (heap-split phase 4): their tool calls
+    // relay to the SW-gated dispatch. null → the in-SW loop (Firefox / offscreen
+    // unavailable). renderSystemPromptForChild renders the child's prompt SW-side so
+    // the worker never assembles it.
+    runChildOffscreen = null,
     renderSystemPromptForChild = null,
   } = deps;
 
@@ -386,6 +389,21 @@ export const makeSpawnSubagent = (deps) => {
     // parent has no explicit choice.
     const parentConfirmActions = confirmActionsFromRecord(parent);
 
+    // ---- Guardrail 2: tool narrowing (computed BEFORE create) ------------
+    // The parent session's tool manifest caps the child's set whatever the
+    // caller asked for — intersection, never escalation (fail-closed: a
+    // manifest naming none of the requested tools yields a tool-less child).
+    // Hoisted above create (heap-split phase 4) so the granted set can be
+    // PERSISTED on the child record: when a tool-bearing child runs in its own
+    // offscreen heap, the SW rebuilds the child's restricted tool context from
+    // this persisted set at dispatch time and NEVER trusts the worker's call.
+    const parentAllow = resolveManifestAllow(parent?.toolManifest);
+    const subset = narrowTools(getToolDescriptors(), { tools, allowRecursion, allow: parentAllow });
+    const allowedNames = new Set(subset.map((t) => t.name));
+    const subsetDescriptors = subset.map((t) => ({
+      name: t.name, description: t.description, schema: t.schema,
+    }));
+
     const child = await sessions.create({
       kind: 'subagent',
       parentSessionId,
@@ -411,6 +429,11 @@ export const makeSpawnSubagent = (deps) => {
       // intersects against it again — no depth at which the narrowing
       // evaporates.
       ...(parent?.toolManifest !== undefined ? { toolManifest: parent.toolManifest } : {}),
+      // Heap-split phase 4: the child's GRANTED toolset (post-narrowing), persisted
+      // so the SW-side offscreen tool-dispatch route rebuilds the child's restricted
+      // ctx from THIS list and re-checks every relayed call against it — the subagent
+      // analog of the actor instance-pin. The worker's call args are never trusted.
+      grantedTools: [...allowedNames],
       // PR #134 phase 3 — the trusted-lineage hop verdict, stamped SERVER-SIDE
       // at create so the chain is never model-supplied. Trusted ONLY when the
       // spawning turn explicitly proved itself non-inbound; an inbound spawn
@@ -472,17 +495,6 @@ export const makeSpawnSubagent = (deps) => {
     // doesn't unwind that await by itself. message_actor reads this signal off
     // ctx and races the actor reply against it, so the timeout / cancel that
     // fires this controller also unblocks the awaiting child.
-
-    // ---- Guardrail 2: tool narrowing -------------------------------------
-    // The parent session's tool manifest caps the child's set whatever the
-    // caller asked for — intersection, never escalation (fail-closed: a
-    // manifest naming none of the requested tools yields a tool-less child).
-    const parentAllow = resolveManifestAllow(parent?.toolManifest);
-    const subset = narrowTools(getToolDescriptors(), { tools, allowRecursion, allow: parentAllow });
-    const allowedNames = new Set(subset.map((t) => t.name));
-    const subsetDescriptors = subset.map((t) => ({
-      name: t.name, description: t.description, schema: t.schema,
-    }));
 
     // Only stand up a dispatcher when the subagent actually has tools.
     // A tools:[] subagent (the common parallel-fan-out case) is pure
@@ -546,23 +558,28 @@ export const makeSpawnSubagent = (deps) => {
     // success criterion 5), without polluting main.
     const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     const start = now();
-    // Heap-split phase 1: a PURE-REASONING child (no granted tools) runs in a
-    // dedicated offscreen Worker — a separate heap with no key, no chrome.*, no
-    // egress; its only outward edge is the SW-gated model call. Falls back to the
-    // in-SW loop when offscreen isn't wired (Firefox), when the prompt renderer
-    // is absent, or when the offscreen run HARD-fails to start (a normal
-    // completion, even an error/abort, does NOT fall back — that would double-run).
-    const pureReasoning = allowedNames.size === 0
-      && typeof runReasoningOffscreen === 'function'
+    // Heap split: EVERY child runs its loop in a dedicated offscreen Worker — its
+    // own heap, no key, no chrome.*, no egress. A tool-LESS child (phase 1) only
+    // relays its model call; a tool-BEARING child (phase 4) also relays each tool
+    // call to the SW, which rebuilds the child's restricted ctx from the persisted
+    // grantedTools and dispatches there (so js_run and friends run from the child's
+    // own heap, keyless). Falls back to the in-SW loop when offscreen isn't wired
+    // (Firefox), when the prompt renderer is absent, or when the offscreen run
+    // HARD-fails to start (a normal completion, even error/abort, does NOT fall back
+    // — that would double-run).
+    const canRunOffscreen = typeof runChildOffscreen === 'function'
       && typeof renderSystemPromptForChild === 'function';
     let ranOffscreen = false;
     try {
-      if (pureReasoning) {
+      if (canRunOffscreen) {
         const systemPrompt = await renderSystemPromptForChild(task);
-        const r = await runReasoningOffscreen({
+        const r = await runChildOffscreen({
           sessionId: child.sessionId, task, systemPrompt,
           provider, model: model ?? parent?.model, depth,
           maxSteps, maxOutputTokens, budgetMs,
+          // The granted descriptors the worker advertises to the model; each call
+          // it makes relays back to the SW-gated, grantedTools-checked dispatch.
+          tools: subsetDescriptors,
         }, { signal: controller.signal, onEvent });
         // Fall back to the in-SW loop ONLY when the worker never STARTED (offscreen
         // unavailable / concurrency cap / spawn throw). A run that STARTED — even if
@@ -570,14 +587,19 @@ export const makeSpawnSubagent = (deps) => {
         // re-running it in-SW would double-run; surface it as-is instead.
         if (r && (r.ok || r.started)) {
           ranOffscreen = true;
-          // Reconstruct the child transcript SW-side (the worker's heap held it;
-          // only the final text crossed back) so finalAssistantText + the card
-          // read a coherent session. Pure reasoning = user turn + one answer.
-          // Cast: these are minimal role/content records for finalAssistantText
-          // (which reads only role+content); the worker owns the full transcript.
-          const stamp = new Date(now()).toISOString();
-          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
-          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-a-${now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
+          // Reconstruct the child transcript SW-side (the worker's heap held it) so
+          // finalAssistantText + the card read a coherent session. Prefer the worker's
+          // FULL transcript when it crossed back (a tool-bearing child has tool rounds
+          // worth showing on the card); fall back to a user+answer pair for a tool-less
+          // child or when no transcript came back. Cast: minimal role/content records.
+          const newMessages = Array.isArray(r.newMessages) ? r.newMessages : [];
+          if (newMessages.length > 0) {
+            for (const m of newMessages) await sessions.appendMessage(child.sessionId, /** @type {any} */ (m)).catch(() => {});
+          } else {
+            const stamp = new Date(now()).toISOString();
+            await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
+            await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-a-${now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
+          }
           toolCalls = r.toolCalls ?? 0;
           lastStopReason = r.aborted ? 'aborted' : (r.stopReason ?? (r.ok ? 'end_turn' : undefined));
           if (r.usage) {

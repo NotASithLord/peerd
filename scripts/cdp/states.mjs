@@ -72,6 +72,8 @@ let pdaToolResultBody = '';
 let actorState = { delegates: 0, seen: [] };
 // heap-split phase 1: the offscreen pure-reasoning subagent state.
 let reasoningState = { spawned: 0, childCalls: 0 };
+// heap-split phase 4: the offscreen TOOL-BEARING subagent state.
+let subagentToolsState = { spawned: 0, childCalls: 0 };
 
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
 // An order page served over localhost. The order lines are ANCHOR text so the
@@ -571,6 +573,61 @@ export const STATES = [
       rec.check('the pure-reasoning child ran in its OWN offscreen heap (subagent_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack} bubbles=${JSON.stringify(out.bubbles)} subagentAudits=${JSON.stringify(subagentTypes)}`);
       rec.check('it did NOT silently fall back to the in-SW loop', fellBack === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-ANSWER-42'));
+      rec.check('the turn settles idle', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: a TOOL-BEARING subagent runs in its OWN offscreen heap ---
+  // Heap-split phase 4. The orchestrator spawns a sync subagent GRANTED js_run;
+  // that child's loop runs in a dedicated offscreen Worker (its own heap, no key)
+  // and RELAYS its js_run call back to the SW, which rebuilds the child's restricted
+  // ctx from the persisted grantedTools and dispatches js_run in the offscreen
+  // job-runner. Proof: the child looped (two model calls: emit js_run, then answer),
+  // the subagent_ran_offscreen audit fired (offscreen path, not the in-SW fallback),
+  // AND a tool_executed audit for js_run is present (the relayed tool actually ran).
+  {
+    name: 'subagent-tools-offscreen', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      // The CHILD's model calls (ephemeral-actor prompt). First call emits js_run;
+      // second call (after the tool result re-enters its heap) answers.
+      if (body.includes('You are an EPHEMERAL ACTOR')) {
+        subagentToolsState.childCalls += 1;
+        if (subagentToolsState.childCalls === 1) return { sse: sseToolCall('js_run', { code: 'return 6 * 7;' }) };
+        return { sse: sseText('CHILD-RAN-JS') };
+      }
+      // ORCHESTRATOR — spawn ONE sync subagent granted js_run, then answer.
+      if (subagentToolsState.spawned === 0) {
+        subagentToolsState.spawned += 1;
+        return { sse: sseToolCall('spawn_subagent', { task: 'compute six times seven with js_run', tools: ['js_run'], sync: true }) };
+      }
+      return { sse: sseText('FINAL-WITH-CHILD') };
+    },
+    async run(ctx, rec) {
+      subagentToolsState = { spawned: 0, childCalls: 0 };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use a subagent to compute six times seven' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-WITH-CHILD') && !out.busy;
+      }, { budgetMs: 30_000 });
+
+      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
+      const entries = (audit && audit.entries) || [];
+      const ranOffscreen = entries.some((e) => e.type === 'subagent_ran_offscreen');
+      const fellBack = entries.some((e) => e.type === 'subagent_offscreen_fallback');
+      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'js_run');
+      rec.check('the tool-bearing child looped in its heap (js_run emitted, then answered) — 2 child calls', subagentToolsState.childCalls >= 2, `childCalls=${subagentToolsState.childCalls}`);
+      rec.check('the child ran in its OWN offscreen heap (subagent_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('js_run actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
+      rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
+      rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },

@@ -33,6 +33,7 @@ const makeStore = () => {
         ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
         ...(opts.spawnedTrusted !== undefined ? { spawnedTrusted: opts.spawnedTrusted } : {}),
         ...(opts.task ? { task: opts.task } : {}),
+        ...(opts.grantedTools ? { grantedTools: opts.grantedTools } : {}),
       };
       map.set(s.sessionId, s);
       return s;
@@ -215,12 +216,12 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
   });
 });
 
-describe('heap-split phase 1 — routing a pure-reasoning child offscreen', () => {
+describe('heap split — routing a child offscreen (reasoning AND tool-bearing)', () => {
   const withOffscreen = (store: any, offscreen: any, extra: any = {}) => {
     // A distinctively-texted in-SW loop so we can tell which path ran.
     const inSwLoop = makeFastLoop('IN-SW answer');
     return makeSpawnSubagent(spawnDeps(store, inSwLoop, {
-      runReasoningOffscreen: offscreen,
+      runChildOffscreen: offscreen,
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
       ...extra,
     }) as any);
@@ -244,14 +245,21 @@ describe('heap-split phase 1 — routing a pure-reasoning child offscreen', () =
     expect(child.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'OFFSCREEN answer' });
   });
 
-  test('a child WITH tools stays in the in-SW loop (keyless worker cannot hold tools)', async () => {
+  test('a child WITH tools ALSO runs offscreen (phase 4), carrying its granted descriptors', async () => {
+    // Phase 4: a tool-bearing child is a tool-bearing ephemeral actor. It runs in its
+    // own heap and relays each tool call; the keyless worker "holds" tools because the
+    // SW executes them. The granted set is persisted on the child so the SW can rebuild
+    // the restricted ctx and re-check every relayed call.
     const store = makeStore();
     const parent = await store.create({});
-    let offscreenCalled = false;
-    const spawn = withOffscreen(store, async () => { offscreenCalled = true; return { ok: true, finalText: 'x' }; });
+    let offscreenJob: any = null;
+    const spawn = withOffscreen(store, async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'did it', usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, stopReason: 'end_turn', toolCalls: 1 }; });
     const out = await spawn({ task: 't', tools: ['a'], parentSessionId: parent.sessionId });
-    expect(offscreenCalled).toBe(false);
-    expect(out.result).toBe('IN-SW answer');
+    expect(out.result).toBe('did it');                       // ran offscreen, not the in-SW loop
+    expect(offscreenJob.tools.map((t: any) => t.name)).toContain('a');   // descriptors relayed to the worker
+    // the granted set is persisted on the child record for the SW-side dispatch to re-check
+    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    expect(child.grantedTools).toContain('a');
   });
 
   test('a NEVER-STARTED offscreen failure falls back to the in-SW loop (never dies on infra)', async () => {
@@ -268,7 +276,7 @@ describe('heap-split phase 1 — routing a pure-reasoning child offscreen', () =
     let inSwRan = false;
     const inSwLoop = async function* (ctx: any) { inSwRan = true; await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'IN-SW answer' }); yield { type: 'stop', stopReason: 'end_turn' }; };
     const spawn = makeSpawnSubagent(spawnDeps(store, inSwLoop, {
-      runReasoningOffscreen: async () => ({ ok: false, started: true, error: 'provider-http-500', finalText: '' }),
+      runChildOffscreen: async () => ({ ok: false, started: true, error: 'provider-http-500', finalText: '' }),
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
     }) as any);
     const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });

@@ -1438,23 +1438,26 @@ const spawnSubagentCore = makeSpawnSubagent({
     claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
-  // Heap split: run a PURE-REASONING (tools:[]) child in a dedicated offscreen
-  // Worker instead of the in-SW loop — the SAME substrate a bound actor uses (a
-  // reasoning child is just a tool-less ephemeral actor), so it flows through the
-  // ONE actorClient. A LAZY arrow — actorClient is a const assigned LATER in module
-  // init (after ensureOffscreen); reading it at wiring time would see the TDZ, so we
-  // only DEREFERENCE at call time. null on Firefox / when offscreen is unavailable →
-  // the unavailable sentinel so spawn.js falls back to the in-SW loop. The key never
-  // enters the worker; the model call relays back to the SW route. Adapt the reasoning
-  // job shape (sessionId/task) to the actor run shape (actorSessionId/message + tools:[]).
-  runReasoningOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
+  // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
+  // in-SW loop — the SAME substrate a bound actor uses (a subagent is an ephemeral
+  // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
+  // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
+  // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
+  // would see the TDZ, so we only DEREFERENCE at call time. null on Firefox / when
+  // offscreen is unavailable → the unavailable sentinel so spawn.js falls back to the
+  // in-SW loop. The key never enters the worker; the model call and every tool call
+  // relay back to SW-gated routes. Adapt the child job shape (sessionId/task/tools) to
+  // the actor run shape (actorSessionId/message/tools); the 'actor/tool-dispatch' route
+  // rebuilds the child's restricted ctx from the persisted grantedTools (never the
+  // worker's args). Tools default to [] (a pure-reasoning child that never dispatches).
+  runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
     ? actorClient.run({
       actorSessionId: job.sessionId, message: job.task, systemPrompt: job.systemPrompt,
       provider: job.provider, model: job.model, depth: job.depth,
       maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
-      tools: [],
+      tools: job.tools ?? [],
     }, opts)
-    : Promise.resolve({ ok: false, error: 'reasoning offscreen unavailable' }),
+    : Promise.resolve({ ok: false, error: 'child offscreen unavailable' }),
   renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
 });
 
@@ -1949,6 +1952,9 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   buildToolContext,
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   pinActorCall,
+  // Phase 4: rebuild a subagent's narrowed-general tool ctx SW-side from its persisted
+  // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.
+  restrictCtxCapabilities,
   // Phase 3: a tab-backed web actor's currently-owned tab, read per dispatch (lazy —
   // webActorTabBindings is defined later, called at turn time). tabFor returns the
   // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
