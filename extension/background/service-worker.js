@@ -1095,6 +1095,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // the child's depth (parent + 1) and enforce maxDepth. Defaults to
       // 0 for legacy sessions written before the field existed.
       depth: activeSession?.depth ?? 0,
+      // why: message_actor reads ctx.session.kind to pick its reply mode
+      // (PR #134): a 'subagent' sender is an EPHEMERAL call-site with no
+      // later turn to wake, so its actor reply is awaited into the tool
+      // result instead of delivered as a re-entry wake.
+      kind: activeSession?.kind ?? 'chat',
     },
     // Plan/Act permission policy input. The persona gate reads
     // permission.mode to enforce Plan's read-only block; the dispatcher
@@ -1425,11 +1430,24 @@ const spawnSubagentCore = makeSpawnSubagent({
   // boot — settings load async and can change over the SW's life. This
   renderSystemPrompt: (opts) => renderSystemPrompt(opts),
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+  // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
+  // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
+  // later in this module (after the agent loop); only called at spawn time.
+  turnSlots: {
+    claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
+    stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
+  },
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
 // wire streaming; an explicit onEvent in `req` still wins.
 const spawnSubagent = (/** @type {any} */ req) => spawnSubagentCore({ onEvent: forwardSubagentEvent, ...req });
+// PR #134 phase 5: the live-children registry riding on the spawn orchestrator —
+// agent/stop and subagent_cancel walk it to end whole delegation subtrees.
+const subagentLifecycle = {
+  stopSubtree: (/** @type {string} */ sessionId) => spawnSubagentCore.stopSubtree(sessionId),
+  liveChildrenOf: (/** @type {string} */ sessionId) => spawnSubagentCore.liveChildrenOf(sessionId),
+};
 
 // ---------------------------------------------------------------------------
 // Async subagents (DESIGN-11) — orchestration in peerd-runtime/subagent.
@@ -1480,7 +1498,12 @@ const asyncSubagentsOrchestrator = makeAsyncSubagents({
   turnSlots: {
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
+    // PR #134: subagent_cancel aborts the child's live slot (children run
+    // under slots now), instead of only dropping the result.
+    stop: (sessionId) => turnSlots.stop(sessionId),
   },
+  // PR #134: a cancel ends the child's own descendants too.
+  stopSubtree: (sessionId) => spawnSubagentCore.stopSubtree(sessionId),
   // async-subagent wakes are NOT trusted to delegate (a parent reacting to a
   // subagent result stays attended-gated for message_actor, like today) —
   // so this reenter deliberately does not forward trusted.
@@ -2895,6 +2918,32 @@ const actorMessaging = makeActorMessaging({
   reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
+  // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. Builds
+  // the sender-first LineageHop chain by following parentSessionId up the
+  // session store. spawnedTrusted per hop: a ROOT (no parent) is trusted by
+  // construction (nothing spawned it); a PARENTED record must carry an
+  // explicit true — records written before the field existed read as
+  // untrusted (fail-closed; those children never had delegation anyway).
+  // Hop cap far above MAX_DEPTH: purely an anti-hang bound on corrupt data.
+  getAncestry: async (/** @type {string} */ sessionId) => {
+    /** @type {Array<{ sessionId: string, parentSessionId: string | null, spawnedTrusted: boolean }>} */
+    const hops = [];
+    let cursor = /** @type {string | null} */ (sessionId);
+    const seen = new Set();
+    for (let i = 0; i < 32 && cursor && !seen.has(cursor); i++) {
+      seen.add(cursor);
+      const record = await sessions.get(cursor);
+      if (!record) break; // unknown session → chain ends; the gate fails closed
+      const parentSessionId = record.parentSessionId ?? null;
+      hops.push({
+        sessionId: cursor,
+        parentSessionId,
+        spawnedTrusted: parentSessionId ? record.spawnedTrusted === true : true,
+      });
+      cursor = parentSessionId;
+    }
+    return hops;
+  },
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),
@@ -3263,6 +3312,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     startGoalRun, haltGoalRun, ensureSession,
     // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
     actorMessaging,
+    // PR #134 phase 5: agent/stop also cascades through the live subagent
+    // subtree (children run under their own turn slots now).
+    subagentLifecycle,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,

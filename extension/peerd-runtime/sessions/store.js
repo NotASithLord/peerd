@@ -147,6 +147,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   model?: string,
    *   kind?: import('./types.js').SessionKind,
    *   parentSessionId?: string,
+   *   spawnedTrusted?: boolean,
    *   task?: string,
    *   depth?: number,
    *   permissionMode?: string,
@@ -164,6 +165,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     model = 'claude-sonnet-4-6',
     kind = 'chat',
     parentSessionId,
+    spawnedTrusted,
     task,
     depth = 0,
     permissionMode,
@@ -192,6 +194,11 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
         : {}),
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
+      // Trusted-lineage hop verdict (subagent/delegation-lineage.js): stamped by
+      // spawn.js from the SPAWNING turn's inbound flag, server-side — the model
+      // never supplies it. Persisted only when explicitly passed, so roots stay
+      // absent (getAncestry treats an unparented record as trusted).
+      ...(spawnedTrusted !== undefined ? { spawnedTrusted } : {}),
       ...(task ? { task } : {}),
       // DESIGN-17: an actor self-describes the instance it owns + its kind.
       ...(instanceId ? { instanceId } : {}),

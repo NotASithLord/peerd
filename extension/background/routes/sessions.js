@@ -21,6 +21,7 @@ export const makeSessionRoutes = (deps) => {
     postChatNote, spawnSubagent, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     startGoalRun, haltGoalRun, ensureSession, actorMessaging,
+    subagentLifecycle,
   } = deps;
 
   return {
@@ -55,6 +56,19 @@ export const makeSessionRoutes = (deps) => {
           if (turnSlots.stop(actorSessionId)) {
             auditLog.append({ type: 'actor_stopped', details: { actorSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
           }
+        }
+      }
+      // PR #134 phase 5 — cascade the Stop through the SUBAGENT subtree too.
+      // Children run under their own turn slots now (spawn.js claims one per
+      // child), so the line above never reached them; without this, spawned
+      // work — including grandchildren, since one Stop must end the whole
+      // delegation graph — kept running after the user hit Stop. stopSubtree
+      // walks the live-children registry transitively and aborts each slot.
+      // (Actor turns those children had in flight are already covered: the
+      // actor bookkeeping is keyed by the lineage ROOT, i.e. this chat.)
+      if (sessionId && subagentLifecycle?.stopSubtree) {
+        for (const childSessionId of subagentLifecycle.stopSubtree(/** @type {any} */ (sessionId))) {
+          auditLog.append({ type: 'subagent_stopped', details: { childSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
         }
       }
       return { ok: true };

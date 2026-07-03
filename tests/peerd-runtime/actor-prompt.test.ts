@@ -58,11 +58,14 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('do                       — perform an action')).toBe(false); // runner listing gone
   });
 
-  test('the subagents section no longer routes instance work to a child', () => {
-    // A subagent can't mutate (actor-only) nor message_actor (sender-gated),
-    // so the old "pass a child the ids it should act on" guidance is a dead end.
-    expect(base.includes('the ids it should act on')).toBe(false);
-    expect(base.includes('never hand a vm/notebook/')).toBe(true);
+  test('the subagents section reflects the PR #134 trusted-lineage capability', () => {
+    // A subagent still can't MUTATE an instance directly (actor-only), but a
+    // trusted-lineage child MAY now message_actor and gets the reply in its own
+    // tool result — so the prompt no longer tells the model to never delegate to
+    // a child, and no longer claims message_actor is refused from one.
+    expect(base.includes('never hand a vm/notebook/')).toBe(false);
+    expect(base.includes('message_actor is refused')).toBe(false);
+    expect(base.includes('RIGHT IN its')).toBe(true);            // reply-in-tool-result guidance
     expect(base.includes('PARALLELISM is many message_actor')).toBe(true);
   });
 

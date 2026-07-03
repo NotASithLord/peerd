@@ -38,6 +38,12 @@
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
  * @property {string} [task]                  the spawning prompt (subagents only)
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
+ * @property {boolean} [spawnedTrusted]       was the SPAWNING turn trusted (non-inbound)?
+ *   The per-hop verdict the trusted-lineage gate (subagent/delegation-lineage.js)
+ *   walks: stamped server-side at create() by spawn.js, never model-supplied.
+ *   Absent on roots (nothing spawned them — treated as trusted) and on records
+ *   written before the async-actor refactor (a PARENTED record missing it reads
+ *   as untrusted — fail-closed; see the SW's getAncestry).
  *
  * Actor binding (DESIGN-17). A `kind:'actor'` session self-describes
  * which instance it owns: `instanceId` (the WebVM/Notebook/App id it drives, or

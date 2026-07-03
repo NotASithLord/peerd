@@ -42,7 +42,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 475 → 471: the do/get/check cull removed four // @ts-check'd files (the do/
 // get/check tool defs + runner/index.js — the web actor holds the DOM tools
 // directly now). A legitimate decrease (files deleted, not directives dropped).
-const COVERED_FLOOR = 471;
+// 471 → 473: main added one // @ts-check'd file post-cull, and the async-actor
+// proposal adds delegation-lineage.js (the pure trusted-lineage predicate).
+const COVERED_FLOOR = 473;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
