@@ -24,13 +24,14 @@ const MAX_RESULT_CHARS = 200 * 1024;
  * @typedef {{
  *   result: string, sessionId: string | null, toolCalls: number,
  *   durationMs: number, depth: number, exceeded?: true, refused?: true,
+ *   timedOut?: true, stopped?: true,
  * }} SpawnSubagentResult
  */
 /**
  * @typedef {{
  *   task: string, tools?: string[], maxSteps?: number, maxDepth?: number,
  *   allowRecursion: boolean, parentSessionId: string, parentDepth: number,
- *   parentToolUseId?: string,
+ *   parentInbound: boolean, parentToolUseId?: string,
  * }} SpawnRequest
  */
 /**
@@ -39,6 +40,7 @@ const MAX_RESULT_CHARS = 200 * 1024;
  *   spawnSubagentAsync?: (req: SpawnRequest) => Promise<{ ok: true, content: string } | { ok: false, error: string }>,
  *   toolUseId?: string,
  *   session?: { sessionId?: string, depth?: number },
+ *   inbound?: boolean,
  * }} SubagentCtx
  */
 
@@ -122,6 +124,12 @@ export const spawnSubagentTool = {
       // why: ctx.session.depth is the spawner's depth; the child is +1.
       // buildToolContext defaults it to 0 for legacy sessions.
       parentDepth: sctx.session?.depth ?? 0,
+      // Trusted-lineage stamping (delegation-lineage.js): the SPAWNING turn's
+      // untrusted-origin flag, folded by buildToolContext (synthetic && !trusted,
+      // always set on a real ctx). FAIL-CLOSED coercion: spawn.js trusts the
+      // child ONLY on an explicit `parentInbound === false`, so an ABSENT flag
+      // (a ctx that never folded it) must read as inbound — taint, never pass.
+      parentInbound: sctx.inbound === false ? false : true,
       // why: the dispatcher threads the tool_use_id into ctx so the live
       // event stream can be mapped to THIS card in the side panel.
       parentToolUseId: sctx.toolUseId,
@@ -158,9 +166,12 @@ const formatSubagentResult = (out) => {
     const head = result.slice(0, MAX_RESULT_CHARS);
     result = `${head}\n\n…[result truncated at ${MAX_RESULT_CHARS} chars — expand the card in the side panel for the full transcript]`;
   }
+  const flag = out.timedOut ? ' — HIT WALL-CLOCK TIMEOUT, result is partial'
+    : out.stopped ? ' — STOPPED before finishing, result is partial'
+    : out.exceeded ? ' — HIT STEP CAP, result may be incomplete' : '';
   const lines = [
     `subagent (session ${out.sessionId}, depth ${out.depth}) — `
-      + `${out.toolCalls} tool call${out.toolCalls === 1 ? '' : 's'}, ${out.durationMs}ms${out.exceeded ? ' — HIT STEP CAP, result may be incomplete' : ''}`,
+      + `${out.toolCalls} tool call${out.toolCalls === 1 ? '' : 's'}, ${out.durationMs}ms${flag}`,
     '',
     result || '(subagent returned no text)',
   ];

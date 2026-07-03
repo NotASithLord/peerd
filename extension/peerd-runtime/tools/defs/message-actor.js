@@ -14,8 +14,8 @@
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
- * @property {{ sessionId?: string }} [session]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
  */
@@ -40,6 +40,8 @@ export const messageActorTool = {
     'message at a time (its mailbox): reuse the same `to` for follow-up (no',
     're-orientation); message a DIFFERENT tab/instance for independent work — separate',
     'actors run in parallel. Your ONLY path to act on a page or mutate an instance.',
+    '(When you are a SUBAGENT, the reply comes back directly in THIS tool result',
+    'instead of a later turn — use it and continue.)',
   ].join(' '),
   schema: {
     type: 'object',
@@ -85,6 +87,11 @@ export const messageActorTool = {
       // same thread spawn_subagent uses) keys the actor's live display stream
       // to this card, so its work renders inline like a subagent transcript.
       toolUseId: c.toolUseId,
+      // PR #134 — the subagent reply mode. An ephemeral child has no later turn
+      // for the reply-wake to re-enter (and waking its session would rebuild it
+      // on the main exposure surface), so its reply resolves INTO this tool
+      // result — still wrapUntrusted-fenced. Long-lived senders keep the wake.
+      awaitReply: c.session?.kind === 'subagent',
     });
     // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
     return res.ok

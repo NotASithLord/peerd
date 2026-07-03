@@ -1,6 +1,7 @@
 // @ts-check
 // delegation-lineage — the PURE trust decision for the "subagents as async
-// actors" refactor (PROPOSAL, inert until wired). See PR body for the full spec.
+// actors" refactor (PR #134, WIRED — the sender gate in actor-messaging.js
+// routes through mayMessageActor and stamps messageProvenance on envelopes).
 //
 // PROBLEM. Today a subagent and a message_actor actor are two different async
 // lifecycles. The one that matters here: a subagent CANNOT message an actor, so
@@ -42,12 +43,13 @@
 // wired) builds `ancestry` by walking parentSessionId up from the sender via the
 // session store, then asks this function yes/no. This function reads values only.
 
-// Feature flag for the refactor. OFF here: nothing imports this yet, so the live
-// sender gate keeps its `=== active` behavior and runtime is unchanged. The
-// follow-up implementation flips this and routes the gate through
-// mayMessageActor() (plus the abortable/timeout-bounded ephemeral-actor
-// lifecycle described in the PR body).
-export const ASYNC_SUBAGENT_ACTORS = false;
+// Feature flag for the refactor — ON: the sender gate (actor-messaging.js)
+// routes through mayMessageActor(), subagents run under abortable,
+// timeout-bounded turn slots (spawn.js), and envelopes carry provenance.
+// Kept (not deleted) so the gate can revert to the strict `=== active`
+// identity check with a one-line flip if a field problem surfaces; OFF
+// restores the pre-#134 sender gate, everything else stands.
+export const ASYNC_SUBAGENT_ACTORS = true;
 
 /**
  * One hop of a sender's ancestry: a session record reduced to the fields the

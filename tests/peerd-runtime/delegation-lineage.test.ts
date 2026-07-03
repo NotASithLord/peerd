@@ -116,8 +116,8 @@ describe('messageProvenance — the parent reference the choke-point actor arbit
   });
 });
 
-describe('the refactor ships behind a flag, default OFF', () => {
-  test('ASYNC_SUBAGENT_ACTORS is off so nothing is wired yet', () => {
-    expect(ASYNC_SUBAGENT_ACTORS).toBe(false);
+describe('the refactor ships behind a flag, now ON', () => {
+  test('ASYNC_SUBAGENT_ACTORS is on — the sender gate routes through mayMessageActor', () => {
+    expect(ASYNC_SUBAGENT_ACTORS).toBe(true);
   });
 });

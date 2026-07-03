@@ -22,9 +22,16 @@
 
 /**
  * @param {Object} deps
- * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean }>} deps.spawnSubagent
+ * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean, timedOut?: boolean, stopped?: boolean }>} deps.spawnSubagent
  *   The bound child runner (resolves when the child's whole loop finishes).
- * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, isBusy: (sessionId: string) => boolean }} deps.turnSlots
+ * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, isBusy: (sessionId: string) => boolean, stop?: (sessionId: string) => boolean }} deps.turnSlots
+ *   stop (optional — PR #134): abort a child session's live turn slot, so
+ *   subagent_cancel actually ENDS the child's work instead of only dropping
+ *   its result. Absent (older harnesses/tests) → cancel keeps the drop-only
+ *   behavior.
+ * @param {(sessionId: string) => string[]} [deps.stopSubtree]
+ *   Transitively stop a cancelled child's OWN descendants (spawn.js
+ *   stopSubtree) — a cancel must end the whole subtree, like Stop does.
  * @param {(opts: { userText: string, sessionId: string, synthetic: boolean }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn.
  * @param {() => Promise<string|null>} deps.getActiveSessionId
@@ -42,7 +49,7 @@
 export const makeAsyncSubagents = (deps) => {
   const {
     spawnSubagent, turnSlots, reenter, getActiveSessionId, isVaultLocked,
-    wrapUntrusted, forwardEvent, notify, now = Date.now, caps = {},
+    wrapUntrusted, forwardEvent, notify, stopSubtree, now = Date.now, caps = {},
     // Mirror the live task list to a UI on each status transition. No-op in
     // tests / headless contexts that don't render it.
     onTasksChanged = () => {},
@@ -68,6 +75,8 @@ export const makeAsyncSubagents = (deps) => {
    * @property {string} result
    * @property {boolean} exceeded
    * @property {boolean} interrupted
+   * @property {boolean} timedOut     the child hit its wall-clock budget (PR #134)
+   * @property {boolean} stopped      the child's slot was aborted (Stop cascade)
    * @property {string | null} childSessionId
    * @property {boolean} reintegrated
    * @property {string[]} ring
@@ -99,18 +108,26 @@ export const makeAsyncSubagents = (deps) => {
     }));
   };
 
-  // Cancel: stop the result from coming back and free the cap slot. The child
-  // loop settles on its own; a cancelled entry is dropped on settle (no wake).
-  // taskId may arrive undefined (callers read it off a possibly-error spawn
-  // handle); Map.get tolerates it and the !entry guard below catches it.
+  // Cancel: ABORT the child's live turn (PR #134 — its loop runs under a turn
+  // slot now, so cancel actually ends the work, not just the result), stop the
+  // result from coming back, and free the cap slot. The aborted loop settles
+  // through spawnSubagent's normal path; a cancelled entry is dropped on settle
+  // (no wake). The child's own descendants are stopped too — a cancel ends the
+  // whole subtree, exactly like Stop. taskId may arrive undefined (callers read
+  // it off a possibly-error spawn handle); Map.get tolerates it and the !entry
+  // guard below catches it.
   /** @param {string} parentSessionId @param {string | undefined} taskId */
   const subagentCancel = (parentSessionId, taskId) => {
     const entry = children.get(parentSessionId)?.get(taskId ?? '');
     if (!entry) return { ok: false, error: 'no_such_task' };
     if (entry.status !== 'running') return { ok: false, error: `task already ${entry.reintegrated ? 'delivered' : entry.status}` };
     entry.status = 'cancelled';
+    if (entry.childSessionId) {
+      stopSubtree?.(entry.childSessionId);
+      turnSlots.stop?.(entry.childSessionId);
+    }
     onTasksChanged(parentSessionId);
-    return { ok: true, content: `subagent ${taskId} cancelled — its result will not come back` };
+    return { ok: true, content: `subagent ${taskId} cancelled — its work is being stopped and its result will not come back` };
   };
 
   // Coalesce all of a parent's finished-but-unreintegrated children into ONE
@@ -144,6 +161,8 @@ export const makeAsyncSubagents = (deps) => {
       // determinism, formatted correctly.
       const wrapped = wrapUntrusted({ origin: 'subagent', tool: 'spawn_subagent', body, retrievedAt: new Date(now()).toISOString() });
       const flag = c.interrupted ? ' (interrupted before finishing — partial)'
+        : c.timedOut ? ' (hit its wall-clock timeout — partial)'
+        : c.stopped ? ' (stopped before finishing — partial)'
         : c.exceeded ? ' (hit its step cap — may be incomplete)' : '';
       return `Subagent "${c.task.slice(0, 80)}"${flag}:\n${wrapped}`;
     });
@@ -193,7 +212,8 @@ export const makeAsyncSubagents = (deps) => {
     /** @type {ChildEntry} */
     const entry = {
       taskId, task: String(req.task ?? ''), status: 'running', result: '',
-      exceeded: false, interrupted: false, childSessionId: null, reintegrated: false, ring: [],
+      exceeded: false, interrupted: false, timedOut: false, stopped: false,
+      childSessionId: null, reintegrated: false, ring: [],
     };
     kids.set(taskId, entry);
     onTasksChanged(parentSessionId); // new task → appears on the live bar
@@ -223,6 +243,8 @@ export const makeAsyncSubagents = (deps) => {
       .then((out) => settle({
         result: out.refused ? out.result : (out.result ?? ''),
         exceeded: out.exceeded === true || out.refused === true,
+        timedOut: out.timedOut === true,
+        stopped: out.stopped === true,
         childSessionId: out.sessionId ?? entry.childSessionId,
       }))
       .catch((e) => settle({ result: `subagent errored: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, interrupted: true }));

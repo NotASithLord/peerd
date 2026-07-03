@@ -37,6 +37,18 @@ export const DEFAULT_MAX_DEPTH = 5;
 export const DEFAULT_MAX_STEPS = 20;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
+// Wall-clock ceiling for a child's WHOLE run (subagents-as-async-actors,
+// PR #134 phase 2). Before this, a subagent had only step/depth caps — a
+// single hung tool call or provider stall could park it forever, with no
+// abort path (no signal was threaded) and nothing to wake the parent. The
+// timer aborts the child's turn-slot controller, so the loop unwinds
+// through its normal abort branch (persists the partial, stopReason
+// 'aborted') and the parent is woken with a timeout-flagged result.
+// Callers may pass timeoutMs lower or higher, clamped to MAX — the same
+// "can't be raised past the backstop" posture as maxSteps.
+export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+export const MAX_TIMEOUT_MS = 30 * 60_000;
+
 /**
  * Compute the tool subset a subagent may use.
  *
@@ -206,6 +218,16 @@ export const finalAssistantText = (session) => {
  * @param {() => Array<{ name: string, description: string, schema: object }>} deps.getToolDescriptors
  *   Returns the full registered tool descriptor set (parent's tools).
  * @param {() => number} [deps.now]
+ * @param {{ claim: (sessionId: string) => { controller: AbortController, release: () => void }, stop: (sessionId: string) => boolean }} [deps.turnSlots]
+ *   The per-session turn-slot system (loop/turn-slots.js). PR #134 phase 1: a
+ *   child runs UNDER a slot so it is abortable — Stop, the wall-clock timeout,
+ *   and subagentCancel all reach it via the slot's controller. The default is a
+ *   standalone stub (a fresh controller per spawn, stop() a no-op) so orchestrators
+ *   that never stop children (tests, cheap-call harnesses) need no wiring.
+ * @param {(fn: () => void, ms: number) => unknown} [deps.setTimer]
+ * @param {(handle: unknown) => void} [deps.clearTimer]
+ *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
+ *   Bun-testable without real waiting.
  */
 export const makeSpawnSubagent = (deps) => {
   const {
@@ -213,7 +235,56 @@ export const makeSpawnSubagent = (deps) => {
     appendAudit, buildToolContext, dispatchToolCall,
     renderSystemPrompt, getToolDescriptors,
     now = Date.now,
+    turnSlots = {
+      claim: () => ({ controller: new AbortController(), release: () => {} }),
+      stop: () => false,
+    },
+    setTimer = (/** @type {() => void} */ fn, /** @type {number} */ ms) => setTimeout(fn, ms),
+    clearTimer = (/** @type {unknown} */ handle) => clearTimeout(/** @type {any} */ (handle)),
   } = deps;
+
+  // Live-children registry (phase 5, multi-hop Stop): parent → the child
+  // sessions whose loops are CURRENTLY running under this orchestrator.
+  // In-memory, in-session only — same durability posture as async-subagents'
+  // task map (a child lost to SW death is reported interrupted, never resumed).
+  /** @type {Map<string, Set<string>>} */
+  const liveChildren = new Map();
+  /** @param {string} parentSessionId @param {string} childSessionId */
+  const registerChild = (parentSessionId, childSessionId) => {
+    const set = liveChildren.get(parentSessionId) ?? new Set();
+    set.add(childSessionId);
+    liveChildren.set(parentSessionId, set);
+  };
+  /** @param {string} parentSessionId @param {string} childSessionId */
+  const unregisterChild = (parentSessionId, childSessionId) => {
+    const set = liveChildren.get(parentSessionId);
+    if (!set) return;
+    set.delete(childSessionId);
+    if (set.size === 0) liveChildren.delete(parentSessionId);
+  };
+
+  /** The DIRECT live children of a session. @param {string} parentSessionId @returns {string[]} */
+  const liveChildrenOf = (parentSessionId) => [...(liveChildren.get(parentSessionId) ?? [])];
+
+  // Phase 5 — transitive Stop. Abort every live descendant's turn slot,
+  // depth-first from the given root (the root itself is the caller's to stop —
+  // agent/stop already does). Returns the descendants whose slot actually
+  // aborted, for the caller's audit trail. The cycle guard is defensive: the
+  // registry is built from fresh child ids, but a corrupt map must not hang us.
+  /** @param {string} rootSessionId @returns {string[]} */
+  const stopSubtree = (rootSessionId) => {
+    const stopped = [];
+    const seen = new Set([rootSessionId]);
+    const queue = liveChildrenOf(rootSessionId);
+    while (queue.length > 0) {
+      const id = queue.shift();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      if (turnSlots.stop(id)) stopped.push(id);
+      queue.push(...liveChildrenOf(id));
+    }
+    return stopped;
+  };
 
   /**
    * @param {Object} req
@@ -226,6 +297,15 @@ export const makeSpawnSubagent = (deps) => {
    * @param {boolean} [req.allowRecursion]         keep spawn_subagent in the subset
    * @param {string} req.parentSessionId           who is spawning this
    * @param {number} [req.parentDepth]             spawner's depth (child = +1)
+   * @param {boolean} [req.parentInbound]          was the SPAWNING turn inbound
+   *   (untrusted-origin)? Stamped onto the child as `spawnedTrusted` — the
+   *   per-hop verdict the trusted-lineage gate walks (delegation-lineage.js).
+   *   FAIL-CLOSED: only an explicit `false` (the spawn_subagent tool passes
+   *   ctx.inbound) yields a trusted hop; undefined (the Notebook route, review,
+   *   cheap-call, any legacy caller) taints the child — those children never
+   *   had delegation, so nothing regresses.
+   * @param {number} [req.timeoutMs]               wall-clock budget for the whole
+   *   run (default DEFAULT_TIMEOUT_MS, clamped to MAX_TIMEOUT_MS)
    * @param {(ev: object) => void} [req.onEvent]   live forwarder for the side panel
    * @param {string} [req.parentToolUseId]         links the parent's card → child session
    * @param {boolean} [req.persistDeltas=true]      set false for ephemeral
@@ -233,7 +313,7 @@ export const makeSpawnSubagent = (deps) => {
    *   IDB rewrite. Finalization writes still happen — the result extraction
    *   below reads the COMPLETED session, which is the only persistence an
    *   ephemeral child needs (a mid-run SW death orphans the await anyway).
-   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, exceeded?: true, refused?: true }>}
+   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, exceeded?: true, refused?: true, timedOut?: true, stopped?: true }>}
    */
   const spawnSubagent = async (req) => {
     const {
@@ -246,6 +326,8 @@ export const makeSpawnSubagent = (deps) => {
       allowRecursion = false,
       parentSessionId,
       parentDepth = 0,
+      parentInbound,
+      timeoutMs,
       onEvent,
       parentToolUseId,
       persistDeltas = true,
@@ -316,6 +398,14 @@ export const makeSpawnSubagent = (deps) => {
       // intersects against it again — no depth at which the narrowing
       // evaporates.
       ...(parent?.toolManifest !== undefined ? { toolManifest: parent.toolManifest } : {}),
+      // PR #134 phase 3 — the trusted-lineage hop verdict, stamped SERVER-SIDE
+      // at create so the chain is never model-supplied. Trusted ONLY when the
+      // spawning turn explicitly proved itself non-inbound; an inbound spawn
+      // (or a caller that doesn't know) taints this child and — because the
+      // gate requires every hop trusted — its whole subtree. This is what
+      // closes the laundering hole: an injected turn refused message_actor
+      // can't spawn a child to delegate on its behalf.
+      spawnedTrusted: parentInbound === false,
     });
 
     // why: tag EVERY audit entry this subagent produces with its
@@ -389,6 +479,31 @@ export const makeSpawnSubagent = (deps) => {
     // tool card → this session id and render live, before any loop event.
     onEvent?.({ type: 'subagent-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
 
+    // PR #134 phases 1+2 — the child runs UNDER a turn slot with an abort
+    // signal and a wall-clock budget. Before this it was un-abortable (no
+    // signal threaded) and un-bounded in time (only step/depth caps): a hung
+    // tool call parked it forever, invisible to Stop. Claiming the CHILD's own
+    // slot (a fresh id — nothing contends it) gives Stop/cancel/timeout one
+    // uniform lever: abort the controller, and the loop unwinds through its
+    // normal abort branch exactly like a steered main turn.
+    const { controller, release } = turnSlots.claim(child.sessionId);
+    registerChild(parentSessionId, child.sessionId);
+    let timedOut = false;
+    // Clamp to the backstop either way: a caller may lower the budget freely,
+    // but can't park a child past MAX (same posture as maxSteps).
+    const budgetMs = Math.min(
+      Number.isFinite(timeoutMs) && /** @type {number} */ (timeoutMs) > 0 ? /** @type {number} */ (timeoutMs) : DEFAULT_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+    );
+    const timer = setTimer(() => {
+      timedOut = true;
+      appendAudit({
+        type: 'subagent_timeout',
+        details: { parentSessionId, subagentSessionId: child.sessionId, depth, budgetMs },
+      }).catch(() => {});
+      controller.abort();
+    }, budgetMs);
+
     let toolCalls = 0;
     let lastStopReason;
     // why: the child's model usage is yielded as 'usage' events but is NOT
@@ -414,6 +529,9 @@ export const makeSpawnSubagent = (deps) => {
         maxSteps,
         persistDeltas,
         now,
+        // Phase 1: the child is abortable — Stop cascades, subagentCancel, and
+        // the wall-clock timer all fire this controller.
+        signal: controller.signal,
       })) {
         if (ev.type === 'tool-use') toolCalls++;
         if (ev.type === 'stop') lastStopReason = ev.stopReason;
@@ -426,6 +544,11 @@ export const makeSpawnSubagent = (deps) => {
         onEvent?.(ev);
       }
     } finally {
+      clearTimer(timer);
+      unregisterChild(parentSessionId, child.sessionId);
+      // Release AFTER unregistering, so a Stop racing this settle can't abort a
+      // slot the registry no longer owns up to.
+      release();
       onEvent?.({ type: 'subagent-stop', parentToolUseId, sessionId: child.sessionId, depth });
     }
 
@@ -436,10 +559,14 @@ export const makeSpawnSubagent = (deps) => {
     // of room before finishing. Surface it so the caller (and the model)
     // knows the result may be partial.
     const exceeded = lastStopReason === 'max_steps';
+    // Phase 2: distinguish WHY an abort unwound the loop. timedOut is stamped
+    // by the timer before it fires the controller; any other abort (Stop
+    // cascade, subagentCancel) reports `stopped`. Both mean a partial result.
+    const stopped = !timedOut && lastStopReason === 'aborted';
 
     taggedAudit({
       type: 'subagent_completed',
-      details: { toolCalls, durationMs, exceeded, resultChars: result.length },
+      details: { toolCalls, durationMs, exceeded, timedOut, stopped, resultChars: result.length },
     }).catch(() => {});
 
     return {
@@ -450,8 +577,13 @@ export const makeSpawnSubagent = (deps) => {
       depth,
       usage,
       ...(exceeded ? { exceeded: true } : {}),
+      ...(timedOut ? { timedOut: true } : {}),
+      ...(stopped ? { stopped: true } : {}),
     };
   };
 
-  return spawnSubagent;
+  // The registry accessors ride ON the spawn function (not a wrapper object) so
+  // the ~25 existing construction sites — `const spawn = makeSpawnSubagent(d)` —
+  // keep working unchanged; the SW picks the extras off the same value.
+  return Object.assign(spawnSubagent, { liveChildrenOf, stopSubtree });
 };

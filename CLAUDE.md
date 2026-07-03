@@ -286,7 +286,15 @@ gotchas to know going in:
   `background/debugger-pool.js`.
 - Subagents — depth-bounded recursion (default `MAX_DEPTH=5`), tool
   narrowing, output cap. Real implementation at
-  `peerd-runtime/subagent/spawn.js` — not a stub.
+  `peerd-runtime/subagent/spawn.js` — not a stub. Since the async-actor
+  unification (PR #134): a child runs under its own turn slot with an
+  abort signal and a wall-clock timeout (Stop and `subagent_cancel`
+  actually end its work, transitively down the subtree), and a
+  trusted-lineage subagent may `message_actor` — the sender gate walks
+  server-stamped `spawnedTrusted` hops (`subagent/delegation-lineage.js`;
+  an inbound spawn taints its whole subtree), delegation budgets are
+  keyed by the lineage root, and a subagent's actor reply resolves into
+  its tool result (an ephemeral child has no later turn to wake).
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
   download, OPFS-cached) with a Web Speech API fallback. Hosted in the
   offscreen doc (`peerd-runtime/voice/`).
