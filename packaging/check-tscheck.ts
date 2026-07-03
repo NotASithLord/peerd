@@ -45,7 +45,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // → 474: the web-actor page-API translation core (subagent/page-api.js) + the
 // page-call handler (subagent/page-call-handler.js), +2 on the post-cull set.
 // 474 → 475: the code-REPL action tool (tools/defs/page-code.js, PR #119).
-const COVERED_FLOOR = 475;
+// 475 → 477: the OM2W adapter's two eval modules (eval/om2w-actions.js +
+// eval/om2w-recorder.js — the Grammar A action mapper + the trajectory recorder).
+const COVERED_FLOOR = 477;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

@@ -73,3 +73,7 @@ scripts/cdp/bench-results/
 # the vendored CheerpX/xterm assets kept directly in dist/) into /dist/
 # for Cloudflare Pages.
 /dist/
+
+# Online-Mind2Web (gated dataset + exported trajectories/screenshots)
+scripts/cdp/om2w/data/
+scripts/cdp/om2w/out/

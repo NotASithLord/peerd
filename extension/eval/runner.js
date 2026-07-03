@@ -14,6 +14,7 @@
 import browser from '/vendor/browser-polyfill.js';
 import { TASKS, SUITES } from './tasks.js';
 import { aggregate, compare } from './score.js';
+import { makeOm2wRecorder } from './om2w-recorder.js';
 import { costOf } from '/peerd-provider/index.js';
 import { sleep } from '/shared/util.js';
 
@@ -122,7 +123,11 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
   switch (msg?.type) {
     case 'turn/state': turn.session = msg.session; turn.started = true; bumpSettle(); break;
     case 'turn/delta': turn.started = true; bumpSettle(); break;
-    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); bumpSettle(); break;
+    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); om2w?.onToolUse(msg); bumpSettle(); break;
+    // OM2W trajectory capture: a page action becomes a step when its RESULT
+    // lands (post-execution state → the after-action screenshot). Also a real
+    // activity signal for the settle window.
+    case 'turn/tool-result': om2w?.onToolResult(msg); bumpSettle(); break;
     case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;
     case 'turn/subagent-cost':
       if (msg.usage) {
@@ -268,6 +273,41 @@ async function navigateTab(tabId, url) {
   }));
 }
 
+// ── OM2W trajectory capture (Online-Mind2Web adapter) ───────────────────────
+// Active only when the driver runs with om2w:true. Screenshots ride
+// chrome.tabs.captureVisibleTab, which only grabs a window's FOREGROUND tab —
+// so capture ACTIVATES the agent's current tab first (the agent addresses tabs
+// by id, never by focus, so activation doesn't change its behavior; it's also
+// the harvest-state precedent of bringing a tab forward to unthrottle it).
+// JPEG q70 keeps a 25-step trajectory a few MB, within a comfortable CDP pull.
+/** @type {ReturnType<typeof makeOm2wRecorder> | null} */
+let om2w = null;
+
+async function captureAgentTab() {
+  const tab = await resolveEndTab();
+  if (!tab?.id) throw new Error('om2w capture: no agent tab');
+  try { await browser.tabs.update(tab.id, { active: true }); } catch { /* tab vanished mid-capture */ }
+  // An action that navigates leaves the tab LOADING; the OM2W screenshot is the
+  // AFTER-action state, so wait for it to settle (bounded) before the grab —
+  // otherwise captureVisibleTab throws ("tab is loading"). Poll status; cap ~4s.
+  for (let i = 0; i < 20; i++) {
+    let t; try { t = await browser.tabs.get(tab.id); } catch { break; }
+    if (t?.status === 'complete') break;
+    await sleep(200);
+  }
+  await sleep(150);   // let the activation/paint land before the grab
+  // One retry — captureVisibleTab can transiently fail right at a load boundary.
+  try { return await browser.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 }); }
+  catch { await sleep(300); return browser.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 }); }
+}
+
+const makeTaskRecorder = () => makeOm2wRecorder({
+  capture: captureAgentTab,
+  tabInfo: async () => { const t = await resolveEndTab(); return t?.url ?? null; },
+  // The 25-step run-rule: halt the agent the way the Stop button does.
+  stop: () => { browser.runtime.sendMessage({ type: 'agent/stop' }).catch(() => {}); },
+});
+
 /** @param {number} tabId */
 async function readTab(tabId) {
   let url = '', title = '', text = '';
@@ -310,6 +350,8 @@ async function runTask(task, runnerCfg) {
   const startUrl = applyFixture(task.startUrl);
   const prompt = applyFixture(task.prompt) ?? task.prompt;
   if (startUrl) { log(`  nav → ${startUrl}`); await navigateTab(subjId, startUrl); }
+  // OM2W mode: step 0 is this initial navigation — recorded with its screenshot.
+  if (om2w && task.om2w) await om2w.begin(startUrl ?? null).catch((/** @type {any} */ e) => log(`  om2w begin failed: ${e?.message ?? e}`));
 
   /** @type {Promise<void>} */
   const donePromise = new Promise((res) => { turn.resolveDone = res; });
@@ -361,7 +403,15 @@ async function runTask(task, runnerCfg) {
   // final answer (it usually explains what the agent THOUGHT it did).
   log(`       tools: [${state.tools.join(' → ') || '—'}]`);
   if (!res.pass && state.answer) log(`       agent said: "${state.answer.slice(0, 240).replace(/\s+/g, ' ')}"`);
-  return { id: task.id, pass: res.pass, detail: res.detail, error: state.error, steps: state.steps, tokens: state.tokens, ...cost, runnerTokens, runnerCostUsd, durationMs, tools: state.tools };
+  /** @type {Record<string, any>} */
+  const row = { id: task.id, pass: res.pass, detail: res.detail, error: state.error, steps: state.steps, tokens: state.tokens, ...cost, runnerTokens, runnerCostUsd, durationMs, tools: state.tools };
+  // OM2W mode: attach the recorded trajectory (actions + after-action shots +
+  // the final answer the exporter turns into the TASK_COMPLETE step).
+  if (om2w && task.om2w) {
+    const rec = await om2w.finish().catch(() => null);
+    if (rec) { row.om2w = { ...rec, finalAnswer: state.answer }; log(`       om2w: ${rec.actions.length} page action(s), ${rec.shots.length} shot(s)${rec.capped ? ' — CAPPED at 25' : ''}`); }
+  }
+  return row;
 }
 
 // why: lead with the honest cost split — fresh (full-price input+output, the
@@ -724,13 +774,26 @@ const evalDriver = {
   lastResults: null,
   /** @type {string | null} */
   lastError: null,
-  /** @param {{ suite?: string, limit?: number, taskIds?: string[], runnerCfg?: string, fixtureBaseUrl?: string }} [opts] */
+  /** @param {{ suite?: string, limit?: number, taskIds?: string[], runnerCfg?: string, fixtureBaseUrl?: string, tasks?: Array<{ id: string, title?: string, startUrl?: string | null, prompt: string, timeoutMs?: number, reference_length?: number }>, om2w?: boolean }} [opts] */
   run(opts = {}) {
     if (evalDriver.running) return;
     const { suite, limit, taskIds, runnerCfg } = opts;
     // The web-actor suite's __FIXTURE__ tasks resolve against this (the CDP
     // driver's fixture server); other suites ignore it.
     fixtureBaseUrl = typeof opts.fixtureBaseUrl === 'string' ? opts.fixtureBaseUrl.replace(/\/$/, '') : '';
+    // OM2W mode: inline tasks (functions can't cross the CDP eval boundary, so
+    // the driver sends plain records and the check is attached HERE — a no-op
+    // pass, because OM2W tasks are scored OFFLINE by WebJudge, not by check()).
+    // The om2w flag arms the trajectory recorder for those tasks.
+    /** @type {any[] | undefined} */
+    const inlineTasks = (Array.isArray(opts.tasks) && opts.tasks.length)
+      ? opts.tasks.map((t) => ({
+        id: t.id, title: t.title ?? t.id, startUrl: t.startUrl ?? null, prompt: t.prompt,
+        timeoutMs: t.timeoutMs ?? 300_000, om2w: opts.om2w === true,
+        check: () => ({ pass: true, detail: 'scored externally (OM2W WebJudge)' }),
+      }))
+      : undefined;
+    om2w = (opts.om2w === true && inlineTasks) ? makeTaskRecorder() : null;
     evalDriver.running = true;
     evalDriver.lastCard = null; evalDriver.lastResults = null; evalDriver.lastError = null;
     if (suite) {
@@ -747,11 +810,11 @@ const evalDriver = {
     void (async () => {
       try {
         /** @type {any[] | undefined} */
-        let tasks;
-        if (Array.isArray(taskIds) && taskIds.length) {
+        let tasks = inlineTasks;
+        if (!tasks && Array.isArray(taskIds) && taskIds.length) {
           const all = selectedTasks();
           tasks = taskIds.map((id) => all.find((t) => t.id === id)).filter(Boolean);
-        } else if (typeof limit === 'number' && limit > 0) {
+        } else if (!tasks && typeof limit === 'number' && limit > 0) {
           tasks = selectedTasks().slice(0, limit);
         }
         const { card, results } = await runSuite(runnerCfg, tasks);
