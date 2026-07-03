@@ -26,6 +26,14 @@
 // manifest into the allow-set the narrowing intersects.
 import { confirmActionsFromRecord } from '../permissions/policy.js';
 import { resolveManifestAllow } from '../tools/manifests.js';
+// The MAIN-AGENT tool surface: a subagent is a CHILD of the main agent and must hold
+// no more than it could. mainAgentDescriptors drops MAIN_AGENT_HIDDEN_TOOLS (the
+// actor-only DOM/page/fetch tools — read_page, page_exec, click, navigate, fetch_url,
+// …) so a subagent cannot reach the user's foreground tab (DESIGN-17: web/DOM work
+// goes through the web actor via message_actor, never a raw grant); filterActorSurface
+// drops the instance-mutating tier (vm_*/js_write/app_*/edit_file — actor-only, already
+// gate-refused for a non-actor). Both are pure.
+import { mainAgentDescriptors, filterActorSurface } from '../tools/exposure.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 /** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
@@ -398,7 +406,15 @@ export const makeSpawnSubagent = (deps) => {
     // offscreen heap, the SW rebuilds the child's restricted tool context from
     // this persisted set at dispatch time and NEVER trusts the worker's call.
     const parentAllow = resolveManifestAllow(parent?.toolManifest);
-    const subset = narrowTools(getToolDescriptors(), { tools, allowRecursion, allow: parentAllow });
+    // SECURITY (DESIGN-17): narrow from the MAIN-AGENT surface, not the full registry.
+    // Without this, a subagent could be granted the actor-only DOM/page tools (read_page,
+    // page_exec, click, navigate, fetch_url, …) — which NO gate refuses for a subagent
+    // (exposure!=='main', not actor-mutating) — and drive/read the user's FOREGROUND tab,
+    // authority the spawning agent itself lacks. Filtering the grantable universe here is
+    // the fix: a subagent holds ⊆ what the main agent holds, delegating web/DOM work to
+    // the web actor via message_actor like the main agent does.
+    const grantable = filterActorSurface(mainAgentDescriptors(getToolDescriptors()));
+    const subset = narrowTools(grantable, { tools, allowRecursion, allow: parentAllow });
     const allowedNames = new Set(subset.map((t) => t.name));
     const subsetDescriptors = subset.map((t) => ({
       name: t.name, description: t.description, schema: t.schema,
@@ -496,12 +512,16 @@ export const makeSpawnSubagent = (deps) => {
     // ctx and races the actor reply against it, so the timeout / cancel that
     // fires this controller also unblocks the awaiting child.
 
-    // Only stand up a dispatcher when the subagent actually has tools.
-    // A tools:[] subagent (the common parallel-fan-out case) is pure
-    // reasoning and never touches the dispatcher/context plumbing.
-    /** @type {((call: import('/shared/tool-types.js').ToolCall) => Promise<import('/shared/tool-types.js').ToolResult>) | undefined} */
-    let toolDispatch;
-    if (subsetDescriptors.length > 0) {
+    // The in-SW tool dispatcher — built LAZILY, only on the fallback path. The
+    // offscreen happy path dispatches SW-side in the actor/tool-dispatch route
+    // (rebuilding the child ctx from the persisted grantedTools), so building this
+    // here — including the awaited buildToolContext — would be wasted work AND would
+    // couple the offscreen run to a ctx build it never uses (a transient vault/settings
+    // read that throws here would fail an offscreen child before it even starts). A
+    // tools:[] subagent is pure reasoning and never stands one up at all.
+    /** @returns {Promise<((call: import('/shared/tool-types.js').ToolCall) => Promise<import('/shared/tool-types.js').ToolResult>) | undefined>} */
+    const buildInSwToolDispatch = async () => {
+      if (subsetDescriptors.length === 0) return undefined;
       const baseCtx = await buildToolContext({ sessionId: child.sessionId });
       // why restrictCtxCapabilities: capability-by-need. buildToolContext returns
       // the full capability surface (secrets/egress/spawn closures); we remove the
@@ -512,7 +532,7 @@ export const makeSpawnSubagent = (deps) => {
       // the wall-clock timeout / cancel fires — restrictCtxCapabilities passes
       // through any key not in CAPABILITY_CONSUMERS, so this survives the strip.
       const childCtx = restrictCtxCapabilities({ ...baseCtx, audit: taggedAudit, abortSignal: controller.signal }, allowedNames);
-      toolDispatch = (call) => {
+      return (call) => {
         // Defense in depth: even if the model hallucinates a tool name
         // outside its granted subset, the dispatch refuses it. The
         // descriptor narrowing is what the model SEES; this is what it
@@ -529,7 +549,7 @@ export const makeSpawnSubagent = (deps) => {
         return /** @type {Promise<import('/shared/tool-types.js').ToolResult>} */ (
           dispatchToolCall(call, childCtx));
       };
-    }
+    };
 
     // why no customSystemPrompt here: the parent session's /system
     // instructions are deliberately NOT inherited — a subagent gets its
@@ -618,6 +638,9 @@ export const makeSpawnSubagent = (deps) => {
         }
       }
       if (!ranOffscreen) {
+        // Lazily stand up the in-SW dispatcher — ONLY now, on the fallback (see
+        // buildInSwToolDispatch). The offscreen path above never reaches here.
+        const toolDispatch = await buildInSwToolDispatch();
         for await (const ev of runUserTurn({
           sessionId: child.sessionId,
           userText: task,

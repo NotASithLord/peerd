@@ -53,10 +53,12 @@ export const isHiddenFromMain = (name) => MAIN_AGENT_HIDDEN_TOOLS.has(name);
 
 /**
  * Filter a tool descriptor list down to what the MAIN agent should see.
- * Pure — values in, values out.
+ * Pure — values in, values out. Generic so it preserves the descriptor shape
+ * (name/description/schema) for callers that map the survivors.
  *
- * @param {ReadonlyArray<{name: string}>} descriptors
- * @returns {Array<{name: string}>}
+ * @template {{ name: string }} T
+ * @param {ReadonlyArray<T>} descriptors
+ * @returns {T[]}
  */
 export const mainAgentDescriptors = (descriptors) =>
   descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name));
