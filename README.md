@@ -39,14 +39,20 @@ on decades of hardened browser platform work (V8 isolates for sandboxing,
 WebCrypto for the vault, WebAuthn passkeys to unlock it, opaque-origin
 iframes, Subresource Integrity) and writes none of its own cryptographic
 or process-isolation code. The agent that holds your keys never operates
-an environment itself: each browser tab, VM, notebook, and app is driven
-by its own keyless actor sub-agent that exclusively holds that
-environment's tools. The main agent acts as an orchestrator. It delegates
-a goal to an actor and gets back a summary fenced as untrusted, so raw
-page text and command output never reach the context that holds your
-keys, and a confused or prompt-injected main agent has no tool to touch
-an environment with in the first place. Every action an actor drives is
-verified against the live page before it counts as done. (More at
+an environment itself. Each browser tab, VM, notebook, and app is driven
+by its own actor: a separate agent loop that holds no key and holds only
+that one environment's tools. On Chrome, each actor runs in its own
+worker heap, a separate block of memory, so the untrusted content it
+reads (page text, command output, file contents) stays inside that actor.
+The actor reaches the model, the network, or the page only by asking the
+service worker, which holds the key and re-checks and gates every request
+before running it. The main agent acts as an orchestrator. It delegates a
+goal to an actor and gets back a summary fenced as untrusted, so raw page
+text and command output never reach the context that holds your keys, and
+a confused or prompt-injected main agent has no tool to touch an
+environment in the first place. Every action an actor drives is verified
+against the live page before it counts as done. This isolation is the
+core of peerd's security model, not an add-on. (More at
 [peerd.ai](https://peerd.ai).)
 
 **Status: 0.x, experimental beta.** The initial feature buildout is
