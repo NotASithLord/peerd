@@ -234,7 +234,7 @@ describe('heap-split phase 1 — routing a pure-reasoning child offscreen', () =
     const spawn = withOffscreen(store, offscreen);
     const out = await spawn({ task: 'reason about X', tools: [], parentSessionId: parent.sessionId });
     expect(out.result).toBe('OFFSCREEN answer');       // came from the worker, not the in-SW loop
-    expect(out.usage.outputTokens).toBe(2);
+    expect(out.usage?.outputTokens).toBe(2);
     // the child's prompt was rendered SW-side and the session/provider threaded in
     expect(offscreenJob.systemPrompt).toBe('SYS:reason about X');
     expect(offscreenJob.provider).toBe('anthropic');
@@ -254,12 +254,26 @@ describe('heap-split phase 1 — routing a pure-reasoning child offscreen', () =
     expect(out.result).toBe('IN-SW answer');
   });
 
-  test('a HARD offscreen failure falls back to the in-SW loop (never just dies on infra)', async () => {
+  test('a NEVER-STARTED offscreen failure falls back to the in-SW loop (never dies on infra)', async () => {
     const store = makeStore();
     const parent = await store.create({});
-    const spawn = withOffscreen(store, async () => ({ ok: false, error: 'offscreen doc unavailable' }));
+    const spawn = withOffscreen(store, async () => ({ ok: false, started: false, error: 'offscreen doc unavailable' }));
     const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
     expect(out.result).toBe('IN-SW answer');           // fell back, didn't die
+  });
+
+  test('a STARTED-but-errored offscreen run does NOT re-run in-SW (would double-bill)', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let inSwRan = false;
+    const inSwLoop = async function* (ctx: any) { inSwRan = true; await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'IN-SW answer' }); yield { type: 'stop', stopReason: 'end_turn' }; };
+    const spawn = makeSpawnSubagent(spawnDeps(store, inSwLoop, {
+      runReasoningOffscreen: async () => ({ ok: false, started: true, error: 'provider-http-500', finalText: '' }),
+      renderSystemPromptForChild: (t: string) => `SYS:${t}`,
+    }) as any);
+    const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
+    expect(inSwRan).toBe(false);                        // did NOT double-run
+    expect(out.result).toBe('');                        // surfaced the (empty) offscreen result
   });
 });
 

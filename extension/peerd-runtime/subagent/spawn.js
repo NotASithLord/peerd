@@ -228,7 +228,7 @@ export const finalAssistantText = (session) => {
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
  *   Bun-testable without real waiting.
- * @param {((job: object, opts?: { signal?: AbortSignal }) => Promise<{ ok: boolean, finalText?: string, usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>) | null} [deps.runReasoningOffscreen]
+ * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, finalText?: string, usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>) | null} [deps.runReasoningOffscreen]
  *   Heap-split phase 1: run a pure-reasoning child in a dedicated offscreen
  *   Worker (its own heap; key never enters it). null = use the in-SW loop.
  * @param {((task: string) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
@@ -563,8 +563,12 @@ export const makeSpawnSubagent = (deps) => {
           sessionId: child.sessionId, task, systemPrompt,
           provider, model: model ?? parent?.model, depth,
           maxSteps, maxOutputTokens, budgetMs,
-        }, { signal: controller.signal });
-        if (r && r.ok) {
+        }, { signal: controller.signal, onEvent });
+        // Fall back to the in-SW loop ONLY when the worker never STARTED (offscreen
+        // unavailable / concurrency cap / spawn throw). A run that STARTED — even if
+        // it errored, aborted, or timed out — may have billed model calls, so
+        // re-running it in-SW would double-run; surface it as-is instead.
+        if (r && (r.ok || r.started)) {
           ranOffscreen = true;
           // Reconstruct the child transcript SW-side (the worker's heap held it;
           // only the final text crossed back) so finalAssistantText + the card
@@ -575,17 +579,19 @@ export const makeSpawnSubagent = (deps) => {
           await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
           await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `off-a-${now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
           toolCalls = r.toolCalls ?? 0;
-          lastStopReason = r.aborted ? 'aborted' : (r.stopReason ?? 'end_turn');
+          lastStopReason = r.aborted ? 'aborted' : (r.stopReason ?? (r.ok ? 'end_turn' : undefined));
           if (r.usage) {
             usage.inputTokens += r.usage.inputTokens || 0;
             usage.outputTokens += r.usage.outputTokens || 0;
             usage.cacheReadTokens += r.usage.cacheReadTokens || 0;
             usage.cacheWriteTokens += r.usage.cacheWriteTokens || 0;
           }
-          taggedAudit({ type: 'subagent_ran_offscreen', details: { heapSplit: true } }).catch(() => {});
+          taggedAudit(r.ok
+            ? { type: 'subagent_ran_offscreen', details: { heapSplit: true } }
+            : { type: 'subagent_offscreen_error', details: { heapSplit: true, error: r.error ?? 'unknown', aborted: r.aborted === true } }).catch(() => {});
         } else {
-          // Hard start failure (offscreen doc / worker spawn) → defensive fallback
-          // to the in-SW loop, so a reasoning child never just dies on infra.
+          // Never started → defensive fallback to the in-SW loop, so a reasoning
+          // child never just dies on infra it couldn't even reach.
           taggedAudit({ type: 'subagent_offscreen_fallback', details: { error: r?.error ?? 'unknown' } }).catch(() => {});
         }
       }

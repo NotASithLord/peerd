@@ -95,6 +95,12 @@ const entryPoints = (root: string): string[] => {
       for (const s of bg.scripts) if (typeof s === 'string') entries.add(join(root, s));
     }
   } catch { /* no manifest — staging always writes one */ }
+  // Static Worker entry points loaded via `new Worker(getURL('…'))` — a STRING,
+  // so the <script src> / manifest scan above never sees them and their import
+  // graph would be a blind spot. Seed them explicitly so agent-loop.js + the
+  // reasoning core (which must ship + resolve in the package) get walked.
+  const WORKER_ENTRIES = ['offscreen/reasoning-worker.js'];
+  for (const w of WORKER_ENTRIES) { const p = join(root, w); if (existsSync(p)) entries.add(p); }
   return [...entries];
 };
 

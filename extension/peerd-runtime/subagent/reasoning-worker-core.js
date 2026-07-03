@@ -68,14 +68,15 @@ export const makeInMemorySessions = (seed) => {
       const s = map.get(id); if (!s) return undefined;
       s.messages.push(msg); return s;
     },
-    // The loop mutates an in-flight assistant message by id as it streams; find
-    // and replace (or append if new). Mirrors the real store's contract enough
-    // for the loop to accumulate a coherent transcript.
-    updateAssistantMessage: async (/** @type {string} */ id, /** @type {any} */ msg) => {
-      const s = map.get(id); if (!s) return undefined;
-      const idx = msg?.id != null ? s.messages.findIndex((/** @type {any} */ m) => m.id === msg.id) : -1;
-      if (idx >= 0) s.messages[idx] = { ...s.messages[idx], ...msg };
-      else s.messages.push(msg);
+    // The loop mutates an in-flight assistant message by id as it streams. The
+    // store contract is (sessionId, messageId, patch) — 3-arg (sessions/store.js).
+    // A 2-arg shim silently dropped the patch (which holds the final content), so
+    // finalAssistantText always returned '' — the child produced a blank answer.
+    updateAssistantMessage: async (/** @type {string} */ sessionId, /** @type {string} */ messageId, /** @type {any} */ patch) => {
+      const s = map.get(sessionId); if (!s) return undefined;
+      const idx = s.messages.findIndex((/** @type {any} */ m) => m.id === messageId);
+      if (idx >= 0) s.messages[idx] = { ...s.messages[idx], ...patch };
+      else s.messages.push({ id: messageId, ...patch });
       return s;
     },
     setTrimSummary: async () => {},
@@ -100,10 +101,18 @@ export const makeInMemorySessions = (seed) => {
  */
 export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
   async function* relayedCallModel(/** @type {any} */ args) {
-    // Drop everything non-serializable / secret before it crosses postMessage.
-    // getSecret is a function AND the key path — it must never leave the SW.
-    const { getSecret, signal, ...serializable } = args ?? {};
-    void getSecret; void signal;
+    // Drop the injected-IO the loop always adds to callModel args (agent-loop.js):
+    // getSecret + safeFetch are FUNCTIONS (structured-clone throws DataCloneError
+    // on a function — a missed strip made the relay throw on EVERY call, silently
+    // falling back to the in-SW loop) AND they are the key/egress path that must
+    // never leave the SW; signal is a non-cloneable AbortSignal. Belt-and-braces:
+    // also drop any OTHER function-valued field so a future loop addition can't
+    // re-break the clone. The SW route re-adds its own getSecret + safeFetch.
+    const { getSecret, safeFetch, signal, ...rest } = args ?? {};
+    void getSecret; void safeFetch; void signal;
+    /** @type {Record<string, unknown>} */
+    const serializable = {};
+    for (const [k, v] of Object.entries(rest)) if (typeof v !== 'function') serializable[k] = v;
     if (maxOutputTokens != null) serializable.maxTokens = maxOutputTokens;
     const reply = await requestModel(serializable);
     if (reply?.error) throw new Error(reply.error);
@@ -124,15 +133,22 @@ export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
  * @param {(args: object) => AsyncIterable<any>} deps.callModel  the relayed callModel
  * @param {() => (Promise<string> | string)} deps.getSystemPrompt
  * @param {(entry: object) => (Promise<unknown> | void)} deps.appendAudit
+ * @param {(ev: object) => void} [deps.onEvent]  forward each loop event across the
+ *   boundary (the SW re-emits it to the subagent card + cost meter). Fire-and-forget.
  * @param {{ sessionId: string, task: string, maxSteps: number, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
- * @returns {Promise<{ finalText: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number }>}
+ * @returns {Promise<{ finalText: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runReasoningLoop = async (deps, req) => {
-  const { runUserTurn, sessions, callModel, getSystemPrompt, appendAudit } = deps;
+  const { runUserTurn, sessions, callModel, getSystemPrompt, appendAudit, onEvent } = deps;
   const { sessionId, task, maxSteps, signal, reasoning, contextWindow } = req;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let toolCalls = 0;
   let stopReason;
+  // The loop yields 'error' events rather than throwing on a provider/loop
+  // failure, so a run can complete "normally" with NO assistant text. Capture the
+  // last error so the caller can surface it (an empty ok:true would hand the
+  // parent a blank answer with no signal that anything went wrong).
+  let errorEvent;
   for await (const ev of runUserTurn({
     sessionId,
     userText: task,
@@ -156,13 +172,18 @@ export const runReasoningLoop = async (deps, req) => {
   })) {
     if (ev.type === 'tool-use') toolCalls++;
     if (ev.type === 'stop') stopReason = ev.stopReason;
+    if (ev.type === 'error') errorEvent = ev.error;
     if (ev.type === 'usage' && ev.usage) {
       usage.inputTokens += ev.usage.inputTokens || 0;
       usage.outputTokens += ev.usage.outputTokens || 0;
       usage.cacheReadTokens += ev.usage.cacheReadTokens || 0;
       usage.cacheWriteTokens += ev.usage.cacheWriteTokens || 0;
     }
+    onEvent?.(ev);
   }
   const finalText = finalAssistantText(await sessions.get(sessionId));
-  return { finalText, usage, stopReason, toolCalls };
+  // Surface a loop error ONLY when it left no usable answer — a run that errored
+  // mid-stream but still produced text is a usable partial (same as the in-SW path).
+  const error = (!finalText && errorEvent) ? String(errorEvent) : undefined;
+  return { finalText, usage, stopReason, toolCalls, ...(error ? { error } : {}) };
 };

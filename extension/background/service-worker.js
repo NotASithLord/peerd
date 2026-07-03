@@ -1945,6 +1945,9 @@ reasoningClient = offscreenAvailable ? makeOffscreenReasoningClient({
   sendMessage: (m) => browser.runtime.sendMessage(m),
   callModel: /** @type {any} */ (callModel),
   getSecret,
+  // The provider adapter makes its HTTP request through safeFetch — inject the
+  // SW's real one (the key AND the egress path both stay in the SW).
+  safeFetch,
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -3318,6 +3321,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   'reasoning/model-call': (/** @type {any} */ msg) => reasoningClient
     ? reasoningClient.routes['reasoning/model-call'](msg)
     : Promise.resolve({ ok: false, error: 'reasoning offscreen unavailable' }),
+  // Fire-and-forget: a forwarded child loop event → the subagent card + cost meter.
+  'reasoning/loop-event': (/** @type {any} */ msg) => reasoningClient
+    ? reasoningClient.routes['reasoning/loop-event'](msg)
+    : Promise.resolve({ ok: true }),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
