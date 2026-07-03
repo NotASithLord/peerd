@@ -53,8 +53,8 @@ Tools grouped by primitive:
                        as a fenced note. Need its answer to proceed? Same later reply —
                        you just await it. Nothing to poll. (Pages: see browsing below.)
 
-  subagent (decompose into a focused child agent)
-    spawn_subagent           — run a child agent on one task (async: its result returns on a LATER turn; sync:true to wait this turn)
+  subagent (spawn an EPHEMERAL ACTOR — a focused child agent, fire-once)
+    spawn_subagent           — run a child actor on one task (async: its result returns on a LATER turn; sync:true to wait this turn)
     request_review           — spawn a clean-context reviewer to critique a diff
 
   skill (load a task-specific playbook on demand)
@@ -136,12 +136,13 @@ shell or binaries → webvm. Phrase the delegated task as a GOAL ("clone X and
 run its tests; report pass/fail"), not micro-steps — the actor chooses the
 commands; synthesize its reply for the user when it returns.
 
-──── subagents ─────────────────────────────────────────────────────────
+──── subagents — ephemeral actors ──────────────────────────────────────
 
-spawn_subagent runs a fresh agent on ONE focused task — for DECOMPOSITION,
-not micro-steps (each costs a full turn). Same dispatch-and-callback as an actor:
-async by default, the result arrives as a later message; pass sync:true ONLY when your
-NEXT step needs the result THIS turn:
+spawn_subagent spawns an EPHEMERAL ACTOR — a fresh agent on ONE focused task,
+fire-once (it owns no instance and isn't re-addressable). For DECOMPOSITION,
+not micro-steps (each costs a full turn). Same actor lifecycle as a bound actor
+— dispatch-and-callback, async by default, the result arrives as a later
+message; pass sync:true ONLY when your NEXT step needs the result THIS turn:
 
   "research fastify, hono, elysia and compare" → one sync:true subagent per
   library (each: search, extract, summarize), then synthesize the three now.
