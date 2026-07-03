@@ -412,17 +412,16 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
   const webCode = (over: object = {}) =>
     ({ exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code', ...over });
 
-  test('the code surface is {snapshot, read_page, page_code} — action collapses into page_code', () => {
-    expect([...actorAllowedToolsFor('web', 'tab', 'code')].sort()).toEqual(['page_code', 'read_page', 'snapshot']);
-    // page_code is allowed ONLY on the code surface; the discrete DOM action tools
-    // are NOT (they move into page.* inside the script).
+  test('the code surface is page_code ALONE — perceive + act both go through page.*', () => {
+    expect([...actorAllowedToolsFor('web', 'tab', 'code')]).toEqual(['page_code']);
     expect(isAllowedForActor('page_code', 'web', 'tab', 'code')).toBe(true);
-    for (const n of ['click', 'type', 'navigate', 'query_dom', 'page_keys', 'fetch_url']) {
+    // Everything else — action AND direct perception — is OFF the code surface:
+    // perception is page.snapshot()/page.content() INSIDE page_code, not a direct
+    // tool (a direct snapshot resolves the tab from the actor's turn ctx, which a
+    // fresh actor lacks — the mid-turn-adopted tab never repins it, so it fails).
+    for (const n of ['click', 'type', 'navigate', 'query_dom', 'page_keys', 'fetch_url', 'snapshot', 'read_page']) {
       expect(isAllowedForActor(n, 'web', 'tab', 'code')).toBe(false);
     }
-    // Perception stays snapshot-based (the ONE unchanged axis).
-    expect(isAllowedForActor('snapshot', 'web', 'tab', 'code')).toBe(true);
-    expect(isAllowedForActor('read_page', 'web', 'tab', 'code')).toBe(true);
   });
 
   test('the TOOLS surface (and an absent surface) is unchanged — page_code is NOT in it', () => {
@@ -448,15 +447,12 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     }
   });
 
-  test('the gate: a code-surface web actor may call page_code, NOT discrete DOM tools', () => {
+  test('the gate: a code-surface web actor may call page_code ONLY (even perception)', () => {
     expect(rt({ name: 'page_code' }, { code: 'return 1' }, webCode())).toBeNull();      // allowed
-    // Discrete DOM action tools refuse — the model can only act via page.* in code.
-    for (const n of ['click', 'type', 'navigate', 'query_dom', 'fetch_url']) {
+    // Everything else refuses — the model acts AND perceives via page.* in code.
+    for (const n of ['click', 'type', 'navigate', 'query_dom', 'fetch_url', 'snapshot', 'read_page']) {
       expect(rt({ name: n }, {}, webCode())?.allowed).toBe(false);
     }
-    // Perception tools still pass.
-    expect(rt({ name: 'snapshot' }, {}, webCode())).toBeNull();
-    expect(rt({ name: 'read_page' }, {}, webCode())).toBeNull();
   });
 
   test('the gate: a TOOLS-surface web actor is refused page_code (surface is enforced, not advisory)', () => {
@@ -470,9 +466,9 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(rt({ name: 'navigate' }, {}, noSurface)).toBeNull();
   });
 
-  test('actorDescriptors is surface-aware — a code actor is advertised only its code toolset', () => {
+  test('actorDescriptors is surface-aware — a code actor is advertised page_code only', () => {
     const all = [{ name: 'click' }, { name: 'navigate' }, { name: 'snapshot' }, { name: 'read_page' }, { name: 'page_code' }, { name: 'fetch_url' }];
-    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name).sort()).toEqual(['page_code', 'read_page', 'snapshot']);
+    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name)).toEqual(['page_code']);
     // The tools surface keeps the discrete DOM tools + fetch_url, and never shows page_code.
     expect(actorDescriptors(all, 'web', 'tab', 'tools').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'read_page', 'snapshot']);
   });

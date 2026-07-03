@@ -249,13 +249,19 @@ const pageCall = (method, args) => new Promise((resolve, reject) => {
     }
   }, 30000);
 });
-globalThis.peerd.page = {
+// The Playwright-shaped API is a BARE \`page\` global (the tool description +
+// actor lore both use \`await page.goto(...)\`), mirrored on peerd.page for
+// discoverability. Exposing only peerd.page left \`page\` undefined → every
+// script ReferenceError'd before its first action.
+const __page = {
   goto:     (url) => pageCall('goto', { url }),
   click:    (selector, opts) => pageCall('click', (opts && typeof opts.nth === 'number') ? { selector, nth: opts.nth } : { selector }),
   fill:     (selector, text) => pageCall('fill', { selector, text }),
   snapshot: () => pageCall('snapshot', {}),
   content:  () => pageCall('content', {}),
 };
+globalThis.page = __page;
+globalThis.peerd.page = __page;
 ` : ''}${profile.egress ? '' : `
 // Capability profile: NO egress. peerd.egress.fetch throws in-realm; the host
 // relay refuses any 'fetch-request' this realm still emits (global fetch is the

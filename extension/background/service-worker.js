@@ -1042,6 +1042,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   } catch (e) {
     console.warn('[sw] active tab query failed', e);
   }
+  // PR #119: resolve the tab web actor's ACTION surface ONCE. An explicit arg
+  // wins (the page/call route forces 'tools' for its inner mapped dispatch);
+  // otherwise it's the live setting. Used BOTH to stamp ctx.actorSurface (gate +
+  // descriptors) AND the capability strip below — the turn driver doesn't pass
+  // actorSurface, so the strip can't read the raw param; it must use THIS.
+  const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
+    ? (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'))
+    : undefined;
   const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
@@ -1070,9 +1078,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // 'code' (page_code REPL). An explicit arg wins (the page/call route forces
     // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
     // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
-    ...((actorType === 'web' && actorBacking !== 'api')
-      ? { actorSurface: (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')) }
-      : {}),
+    ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -1312,7 +1318,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // NOT in CAPABILITY_CONSUMERS (shared with the web actor's DOM tools), so they survive
     // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
     // tool (isAllowedForActor → fetch_url only), not on this strip.
-    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking)));
+    // PR #119: pass actorSurface — a CODE-surface web actor's allow-set is
+    // { page_code }, so WITHOUT the surface the strip computed the TOOLS
+    // allow-set (no page_code) and dropped jsOffscreenClient (page_code's
+    // execution client) — page_code then returned 'page_code_unavailable' on
+    // every call, silently breaking the whole code arm. The gate + descriptors
+    // were already surface-aware; this strip is the one place that wasn't.
+    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking, effectiveActorSurface)));
     // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
     // the user's session ONLY for a request same-origin to the ORIGIN it owns (where it's
     // already in that session — no escalation, and it never holds a credential: the

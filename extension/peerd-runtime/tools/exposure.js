@@ -183,15 +183,19 @@ export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
 ]);
 
 // PR #119 — the CODE-surface web actor's toolset (the Aside-style A/B arm: the
-// actor WRITES page-driving JS instead of emitting discrete tool calls).
-// Perception stays snapshot-based (snapshot/read_page — the ONE unchanged axis);
-// ACTION collapses into page_code, whose page.* calls dispatch the SAME gated
-// DOM tools via the SW 'page/call' route — so the discrete click/type/navigate
-// leave the MODEL's hand without leaving the gate's. why so tight: the A/B must
-// change one variable, and the code worker's capability profile (page + pure
-// compute only) must mirror what the surface advertises.
+// actor WRITES page-driving JS instead of emitting discrete tool calls). The
+// surface is page_code ALONE: the actor perceives AND acts through the page.*
+// API (page.snapshot()/page.content() for perception — still the a11y snapshot,
+// the unchanged axis — and page.goto/click/fill for action), every call routing
+// through the SW 'page/call' route to the SAME gated DOM tools on its owned tab.
+// why NOT also expose direct snapshot/read_page: those resolve the tab from the
+// ACTOR's turn context, which a fresh actor has none of — and a tab adopted
+// mid-turn inside page_code (SW-side) never repins that turn context, so a
+// direct snapshot after a page.goto failed and the actor thrashed. Routing ALL
+// page interaction through page_code keeps ONE consistent tab. (page.snapshot()
+// still dispatches the snapshot tool via the route's inner tools-surface ctx.)
 export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set([
-  'snapshot', 'read_page', 'page_code',
+  'page_code',
 ]));
 
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
