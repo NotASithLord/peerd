@@ -139,7 +139,11 @@ export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
  * @returns {Promise<{ finalText: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runReasoningLoop = async (deps, req) => {
-  const { runUserTurn, sessions, callModel, getSystemPrompt, appendAudit, onEvent } = deps;
+  const { runUserTurn, sessions, callModel, getSystemPrompt, onEvent } = deps;
+  // Defensive: the loop fire-and-forgets audits as `appendAudit(...).catch(...)`,
+  // so a caller passing a bare sync stub (returns undefined) would crash the run.
+  // Wrap to always return a promise.
+  const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
   const { sessionId, task, maxSteps, signal, reasoning, contextWindow } = req;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let toolCalls = 0;

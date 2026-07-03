@@ -53,7 +53,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       const result = await runReasoningLoop(
         {
           runUserTurn, sessions, callModel,
-          getSystemPrompt: () => m.systemPrompt, appendAudit: () => {},
+          getSystemPrompt: () => m.systemPrompt,
+          // MUST return a promise: the loop fire-and-forgets audits as
+          // appendAudit(...).catch(...) — a bare () => {} returns undefined and
+          // `.catch` throws, killing the run before its first model call.
+          appendAudit: async () => {},
           // Forward each loop event so the SW re-emits it to the subagent card +
           // cost meter (otherwise an offscreen child's card is blank and its cost
           // counts as zero).

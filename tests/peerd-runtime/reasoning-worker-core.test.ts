@@ -109,6 +109,24 @@ describe('runReasoningLoop', () => {
     expect(out.error).toBe('provider-http-500');   // surfaced, not swallowed into ok/empty
   });
 
+  test('tolerates a SYNC appendAudit stub (the loop fire-and-forgets audit.catch)', async () => {
+    // Regression: the real loop calls appendAudit(...).catch(...). A bare
+    // () => {} returns undefined → `.catch` threw → the offscreen run died before
+    // its first model call (caught live by the e2e). runReasoningLoop must wrap it.
+    const sessions = makeInMemorySessions({ sessionId: 'c1' });
+    const auditingLoop = async function* (ctx: any) {
+      // exercise the exact crash shape the real loop used
+      await ctx.appendAudit({ type: 'x' }).catch(() => {});
+      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'ok' });
+      yield { type: 'stop', stopReason: 'end_turn' };
+    };
+    const out = await runReasoningLoop(
+      { runUserTurn: auditingLoop as any, sessions, callModel: (async function* () {})() as any, getSystemPrompt: () => 'S', appendAudit: () => {} /* sync stub */, },
+      { sessionId: 'c1', task: 't', maxSteps: 5 },
+    );
+    expect(out.finalText).toBe('ok');   // did not crash on undefined.catch
+  });
+
   test('the loop never receives a real getSecret (worker has no key)', async () => {
     const sessions = makeInMemorySessions({ sessionId: 'c1' });
     let threw = false;

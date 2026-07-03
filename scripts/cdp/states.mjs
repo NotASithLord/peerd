@@ -70,6 +70,8 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+// heap-split phase 1: the offscreen pure-reasoning subagent state.
+let reasoningState = { spawned: 0, childCalls: 0 };
 
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
 // An order page served over localhost. The order lines are ANCHOR text so the
@@ -516,6 +518,60 @@ export const STATES = [
       rec.check('Stop returns the chat to idle', busy === false);
       const noLeak = await evalIn(ctx.page, `![...document.querySelectorAll('.message-assistant .bubble')].some((b) => b.textContent.includes('this-never-renders'))`);
       rec.check('the hung actor reply never renders', noLeak === true);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: a pure-reasoning subagent runs in its OWN offscreen heap ---
+  // Heap-split phase 1. The orchestrator spawns a sync tools:[] subagent; that
+  // child's loop runs in a dedicated offscreen Worker (its own heap, no key),
+  // relaying its model call back to the SW. Proof: the child model call happens
+  // (its prompt carries the EPHEMERAL ACTOR block), the result round-trips into
+  // the orchestrator's final answer, AND the subagent_ran_offscreen audit marker
+  // is present (it fired only on the offscreen path, never the in-SW fallback).
+  {
+    name: 'reasoning-offscreen', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      // The CHILD's model call — its system prompt is the ephemeral-actor block.
+      // why the IDENTITY line, not just "EPHEMERAL ACTOR": the ORCHESTRATOR prompt
+      // also contains "EPHEMERAL ACTOR" (describing spawn_subagent), so the broad
+      // match mis-classified the orchestrator's own first call as the child.
+      if (body.includes('You are an EPHEMERAL ACTOR')) { reasoningState.childCalls += 1; return { sse: sseText('REASONED-FOURTY-TWO') }; }
+      // ORCHESTRATOR — spawn ONE sync pure-reasoning child, then (post tool-result) answer.
+      if (reasoningState.spawned === 0) {
+        reasoningState.spawned += 1;
+        return { sse: sseToolCall('spawn_subagent', { task: 'compute the answer to life', tools: [], sync: true }) };
+      }
+      return { sse: sseText('FINAL-ANSWER-42') };
+    },
+    async run(ctx, rec) {
+      reasoningState = { spawned: 0, childCalls: 0 };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'reason about the answer to life' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-ANSWER-42') && !out.busy;
+      }, { budgetMs: 30_000 });
+
+      // The offscreen PROOF: the child ran in its own worker heap (this audit
+      // type is appended ONLY on the offscreen path; the in-SW fallback appends
+      // subagent_offscreen_fallback instead).
+      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
+      const entries = (audit && audit.entries) || [];
+      const ranOffscreen = entries.some((e) => e.type === 'subagent_ran_offscreen');
+      const fellBack = entries.some((e) => e.type === 'subagent_offscreen_fallback');
+      const subagentTypes = entries.filter((e) => String(e.type).startsWith('subagent')).map((e) => e.type);
+      rec.check('the child sub-loop ran (EPHEMERAL ACTOR prompt seen)', reasoningState.childCalls >= 1, `childCalls=${reasoningState.childCalls}`);
+      rec.check('the pure-reasoning child ran in its OWN offscreen heap (subagent_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack} bubbles=${JSON.stringify(out.bubbles)} subagentAudits=${JSON.stringify(subagentTypes)}`);
+      rec.check('it did NOT silently fall back to the in-SW loop', fellBack === false);
+      rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-ANSWER-42'));
+      rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },
   },
