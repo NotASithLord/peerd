@@ -1,28 +1,159 @@
 // @ts-check
-// actor-worker-core — the PURE, worker-portable core of an offscreen BOUND-ACTOR
-// loop (heap-split phase 2). The reasoning sibling (phase 1) had no tools; a
-// bound actor (VM / Notebook / App) HOLDS its kind's engine tools, so this core
-// adds a RELAYED tool dispatch on top of phase 1's relayed model call.
+// actor-worker-core — the PURE, worker-portable core of THE offscreen agent-loop
+// substrate (the "heap split"). ONE loop, ONE relay, ONE heap-isolation story for
+// every non-orchestrator agent loop peerd runs:
+//   - an EPHEMERAL reasoning subagent — `tools:[]`, fire-once, no instance; and
+//   - a BOUND actor — VM / Notebook / App / web, tool-bearing, stateful across
+//     turns (its own accumulated transcript seeds each turn).
+// Post-#137 these are ONE vocabulary (a subagent IS an ephemeral actor), so they
+// are ONE code path here: a reasoning child is just an actor that grants no tools
+// and so never dispatches. (The offscreen/actor-worker.js host + the SW client
+// serve both; see their headers.)
 //
-// TRUST PROPERTY. A bound actor ingests UNTRUSTED INSTANCE OUTPUT — VM stdout,
-// Notebook/App file contents. Running its loop in its OWN Worker heap makes that
-// a memory boundary: the untrusted output can reach neither the orchestrator's
-// memory nor the key. The worker holds NO key, NO engine clients, NO chrome.* —
-// it relays BOTH the model call AND every tool call back to SW-gated routes:
-//   - the model call → the SW adds getSecret + safeFetch (phase 1's route);
+// TRUST PROPERTY — the whole point. Until the heap split, every agent loop ran in
+// the ONE service-worker heap, cooperatively interleaved: the "actor fence" was a
+// PROMPT boundary, one property access from the vault DK. Running each loop in its
+// OWN dedicated Worker makes it a real MEMORY boundary. The worker holds NO key,
+// NO engine clients, NO chrome.* — it ingests untrusted content (page DOM, VM
+// stdout, API/response bodies) that can reach neither the orchestrator's memory
+// nor the key. Its ONLY outward edges are two SW-gated relays:
+//   - the model call → the SW adds getSecret + safeFetch (the key stays in the SW);
 //   - a tool call → the SW builds the actor's instance-PINNED, gated tool context
-//     and dispatches there (the pin + gate + audit + engine clients + tabs are
-//     ALL SW-side). why the SW MUST re-pin+gate: the worker's `call` args are
-//     attacker-influenceable (injected instance output), so the SW never trusts
-//     them — it force-pins the bound instance and runs the full gate, exactly as
-//     the in-SW actor path does today.
+//     and dispatches THERE (the pin + gate + audit + engine clients + tabs are ALL
+//     SW-side). why the SW MUST re-pin+gate: the worker's `call` args are
+//     attacker-influenceable (they derive from injected instance/page output), so
+//     the SW never trusts them — it force-pins the bound instance and runs the
+//     full gate, exactly as the in-SW actor path does.
 //
-// PURE / injected-IO → Bun-testable. Reuses phase 1's session shim + relayed
-// callModel (same module dir).
+// PURE / injected-IO → Bun-testable without a Worker: the imperative shell
+// (offscreen/actor-worker.js) wires self.postMessage/onmessage to these functions;
+// a test wires fakes. Nothing here imports chrome.*, DOM, or the provider adapter —
+// `callModel` and `toolDispatch` arrive as RELAYS.
 
-import { makeInMemorySessions, makeRelayedCallModel, finalAssistantText } from './reasoning-worker-core.js';
+// The web/API actor's rolling-summary self-fence (below) is PURE (wrapUntrusted;
+// no chrome.*/DOM) and lives in the same module dir → intra-module import, worker-
+// portable, Bun-testable.
+import { fenceWebActorSummary, fenceApiActorSummary } from './web-actor.js';
 
-export { makeInMemorySessions, makeRelayedCallModel, finalAssistantText };
+/**
+ * The final assistant text of a session — a loop's return value. Inlined (not
+ * imported from spawn.js) so the worker never pulls spawn.js's SW-side deps
+ * (manifests/permissions) into its heap. Last assistant message with string content.
+ * @param {{ messages?: Array<{ role: string, content: unknown }> }} session
+ * @returns {string}
+ */
+export const finalAssistantText = (session) => {
+  const messages = session?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0) return m.content;
+  }
+  return '';
+};
+
+/**
+ * A minimal in-memory `sessions` store — exactly the surface runUserTurn reads:
+ * get / create / appendMessage / updateAssistantMessage / setTrimSummary / setCost.
+ * No IDB: the worker owns its transcript in its OWN heap and the SW persists after
+ * the run. Seeded with the child/actor record the SW created (its id/provider/model
+ * carry the lineage the SW already stamped).
+ *
+ * @param {{ sessionId: string, provider?: string, model?: string, depth?: number, messages?: any[] }} seed
+ *   `messages` seeds prior history — a BOUND actor is stateful across turns, so the
+ *   worker reasons over its accumulated transcript. An ephemeral reasoning child
+ *   omits it (fresh each spawn). The array is copied (the worker owns its heap's
+ *   transcript; the SW's record is untouched).
+ */
+export const makeInMemorySessions = (seed) => {
+  /** @type {Map<string, any>} */
+  const map = new Map();
+  map.set(seed.sessionId, {
+    sessionId: seed.sessionId,
+    provider: seed.provider ?? 'anthropic',
+    model: seed.model ?? '',
+    kind: 'subagent',
+    depth: seed.depth ?? 1,
+    messages: /** @type {any[]} */ (Array.isArray(seed.messages) ? [...seed.messages] : []),
+  });
+  const store = {
+    get: async (/** @type {string} */ id) => map.get(id),
+    create: async (/** @type {any} */ rec = {}) => {
+      const s = { sessionId: rec.sessionId ?? seed.sessionId, messages: [], ...rec };
+      map.set(s.sessionId, s);
+      return s;
+    },
+    appendMessage: async (/** @type {string} */ id, /** @type {any} */ msg) => {
+      const s = map.get(id); if (!s) return undefined;
+      s.messages.push(msg); return s;
+    },
+    // The loop mutates an in-flight assistant message by id as it streams. The store
+    // contract is (sessionId, messageId, patch) — 3-arg (sessions/store.js). A 2-arg
+    // shim silently dropped the patch (which holds the final content), so
+    // finalAssistantText always returned '' — the child produced a blank answer.
+    updateAssistantMessage: async (/** @type {string} */ sessionId, /** @type {string} */ messageId, /** @type {any} */ patch) => {
+      const s = map.get(sessionId); if (!s) return undefined;
+      const idx = s.messages.findIndex((/** @type {any} */ m) => m.id === messageId);
+      if (idx >= 0) s.messages[idx] = { ...s.messages[idx], ...patch };
+      else s.messages.push({ id: messageId, ...patch });
+      return s;
+    },
+    setTrimSummary: async () => {},
+    setCost: async () => {},
+  };
+  return store;
+};
+
+/**
+ * Build the RELAYED callModel the worker hands to runUserTurn. An async-generator
+ * that DELEGATES the actual streaming call to the SW: it strips the non-serializable
+ * fields (getSecret, safeFetch, signal — functions/AbortSignal that structured-clone
+ * throws on, AND the key/egress path that must never leave the SW), hands the rest to
+ * `requestModel`, and yields back the events the SW accumulated. The SW route re-adds
+ * its OWN getSecret + safeFetch so the key stays there.
+ *
+ * @param {(args: object) => Promise<{ events?: any[], error?: string }>} requestModel
+ * @param {number} [maxOutputTokens]  injected as maxTokens (the output cap), mirroring spawn.js.
+ */
+export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
+  async function* relayedCallModel(/** @type {any} */ args) {
+    // Drop getSecret + safeFetch (FUNCTIONS — structured-clone throws DataCloneError
+    // on a function; a missed strip made the relay throw on EVERY call, silently
+    // falling back to the in-SW loop) AND signal (a non-cloneable AbortSignal).
+    // Belt-and-braces: also drop any OTHER function-valued field so a future loop
+    // addition can't re-break the clone.
+    const { getSecret, safeFetch, signal, ...rest } = args ?? {};
+    void getSecret; void safeFetch; void signal;
+    /** @type {Record<string, unknown>} */
+    const serializable = {};
+    for (const [k, v] of Object.entries(rest)) if (typeof v !== 'function') serializable[k] = v;
+    if (maxOutputTokens != null) serializable.maxTokens = maxOutputTokens;
+    const reply = await requestModel(serializable);
+    if (reply?.error) throw new Error(reply.error);
+    for (const ev of reply?.events ?? []) yield ev;
+  };
+
+/**
+ * Reconstruct a WEB/API actor's rolling-summary SELF-FENCE for the worker loop ctx
+ * (heap-split phase 3). The loop reads `ctx.fenceActorSummary` when it TRIMS context,
+ * wrapping the actor's own (100%-untrusted-provenance) rolling summary so a laundered
+ * injection that survives compression re-enters as DATA, not a command. The SW builds
+ * this closure over `activeTab.url` on the in-SW path; that closure can't cross
+ * postMessage, so the worker rebuilds it here from the PURE fence fns.
+ *
+ * why the origin/tabUrl is turn-START, not live: it's the fence's provenance TAG only
+ * (`web-actor(<url>)`); the BODY-wrap — the security function — is applied regardless,
+ * so a tag that lags a mid-turn navigate is cosmetic. An API actor's origin is FIXED
+ * for its whole life, so it never lags. Returns undefined for a non-web actor (no
+ * self-fence — a VM/Notebook/App actor's summary renders verbatim, as in-SW).
+ *
+ * @param {{ actorType?: string, backing?: string, tabUrl?: string, origin?: string }} [o]
+ * @returns {((text: string) => string) | undefined}
+ */
+export const makeActorSummaryFence = ({ actorType, backing, tabUrl, origin } = {}) => {
+  if (actorType !== 'web') return undefined;
+  if (backing === 'api') return (/** @type {string} */ text) => fenceApiActorSummary(text, { origin });
+  return (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl });
+};
 
 /**
  * Build the RELAYED toolDispatch the actor worker hands to runUserTurn. Each tool
@@ -54,8 +185,10 @@ export const makeRelayedToolDispatch = (requestTool) =>
   };
 
 /**
- * Drive one BOUND-actor turn to completion in the worker heap, returning the same
- * result shape spawn/actor-turn code expects. Accumulates usage, captures the
+ * Drive one agent-loop turn to completion in the worker heap — a BOUND actor turn
+ * (tools + relayed dispatch + prior-history statefulness) OR an ephemeral reasoning
+ * subagent (tools:[] → the relayed dispatch is never invoked). Returns the result
+ * shape both spawn.js and the actor-turn code expect. Accumulates usage, captures the
  * stop reason, surfaces a text-less error (so a failed run isn't a silent blank).
  *
  * @param {Object} deps
@@ -67,15 +200,17 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {(entry: object) => (Promise<unknown> | void)} [deps.appendAudit]
  * @param {(ev: object) => void} [deps.onEvent]
  * @param {Array<{ name: string, description: string, schema: object }>} deps.tools
- * @param {{ sessionId: string, userText: string, maxSteps?: number, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
+ * @param {((text: string) => string)} [deps.fenceActorSummary]  a web/API actor's
+ *   rolling-summary self-fence (heap-split phase 3); absent for engine actors.
+ * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
  * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
-  const { runUserTurn, sessions, callModel, toolDispatch, getSystemPrompt, onEvent, tools } = deps;
+  const { runUserTurn, sessions, callModel, toolDispatch, getSystemPrompt, onEvent, tools, fenceActorSummary } = deps;
   // Defensive (phase-1 lesson): the loop fire-and-forgets audits as
   // appendAudit(...).catch(...) — a sync stub returning undefined would crash it.
   const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
-  const { sessionId, userText, maxSteps, signal, reasoning, contextWindow } = req;
+  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow } = req;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let toolCalls = 0;
   let stopReason;
@@ -100,12 +235,18 @@ export const runActorLoop = async (deps, req) => {
     appendAudit,
     tools,
     toolDispatch,
-    maxSteps,
     persistDeltas: false,
     ...(signal ? { signal } : {}),
     // maxSteps: omit when undefined so runUserTurn uses its OWN default (parity
     // with the in-SW actor path, which passes none). Only cap when the caller asks.
     ...(maxSteps != null ? { maxSteps } : {}),
+    // oneShot: a message_actor delegation may ask the loop to synthesize its reply
+    // from the first clean tool round and stop (no summarize inference) — parity
+    // with the in-SW path (turn-driver threads it to runAgentTurn).
+    ...(oneShot === true ? { oneShot: true } : {}),
+    // A web/API actor self-fences its own untrusted-provenance rolling summary on a
+    // context trim (heap-split phase 3); absent for engine actors → summary verbatim.
+    ...(fenceActorSummary ? { fenceActorSummary } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(contextWindow != null ? { contextWindow } : {}),
   })) {

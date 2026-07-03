@@ -1,7 +1,7 @@
 // Heap-split phase 2 — the pure core of an offscreen BOUND-actor loop: the
 // relayed tool dispatch (the new piece vs phase 1) and the actor loop-driver.
 import { describe, test, expect } from 'bun:test';
-import { makeRelayedToolDispatch, runActorLoop, makeInMemorySessions } from '../../extension/peerd-runtime/subagent/actor-worker-core.js';
+import { makeRelayedToolDispatch, runActorLoop, makeInMemorySessions, makeActorSummaryFence } from '../../extension/peerd-runtime/subagent/actor-worker-core.js';
 
 describe('makeRelayedToolDispatch', () => {
   test('delegates the call across the boundary and returns the SW ToolResult', async () => {
@@ -90,5 +90,68 @@ describe('runActorLoop', () => {
     );
     expect(out.finalText).toBe('');
     expect(out.error).toBe('vm-wedged');
+  });
+
+  // The unification: a REASONING subagent is a tool-less actor. runActorLoop with
+  // tools:[] and a loop that never dispatches drives it exactly like the old
+  // runReasoningLoop — the relayed toolDispatch is simply never invoked.
+  test('drives a tool-less REASONING loop (tools:[], no dispatch)', async () => {
+    const sessions = makeInMemorySessions({ sessionId: 'c1', provider: 'anthropic', model: 'm' });
+    let dispatched = false;
+    const reasoningLoop = async function* (ctx: any) {
+      await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a', role: 'assistant', content: 'the researched answer' });
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+      yield { type: 'stop', stopReason: 'end_turn' };
+    };
+    const out = await runActorLoop(
+      { runUserTurn: reasoningLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => { dispatched = true; return {}; }, getSystemPrompt: () => 'SYS', tools: [] },
+      { sessionId: 'c1', userText: 'research X', maxSteps: 20 },
+    );
+    expect(out.finalText).toBe('the researched answer');
+    expect(out.usage.outputTokens).toBe(5);
+    expect(out.toolCalls).toBe(0);
+    expect(dispatched).toBe(false);   // a tool-less child never dispatches
+  });
+
+  test('the loop never receives a real getSecret/safeFetch (the worker holds no key/egress)', async () => {
+    const sessions = makeInMemorySessions({ sessionId: 'act-1' });
+    let secretThrew = false;
+    let fetchThrew = false;
+    const probeLoop = async function* (ctx: any) {
+      try { await ctx.getSecret('anything'); } catch { secretThrew = true; }
+      try { await ctx.safeFetch('https://x'); } catch { fetchThrew = true; }
+      await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a', role: 'assistant', content: 'done' });
+      yield { type: 'stop', stopReason: 'end_turn' };
+    };
+    await runActorLoop(
+      { runUserTurn: probeLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => ({}), getSystemPrompt: () => 'S', tools: [] },
+      { sessionId: 'act-1', userText: 't', maxSteps: 5 },
+    );
+    expect(secretThrew).toBe(true);   // getSecret in the worker is a throwing stub
+    expect(fetchThrew).toBe(true);    // safeFetch too — no egress in the heap
+  });
+});
+
+describe('makeActorSummaryFence', () => {
+  test('a tab web actor fences its summary as untrusted, tagged with the tab url', () => {
+    const fence = makeActorSummaryFence({ actorType: 'web', tabUrl: 'https://example.com/page' });
+    expect(typeof fence).toBe('function');
+    const wrapped = fence!('did three steps on the page');
+    // the BODY is present and the envelope is an untrusted-data wrap (not a command)
+    expect(wrapped).toContain('did three steps on the page');
+    expect(wrapped).toContain('example.com');
+  });
+
+  test('an API actor fences with its FIXED owned origin', () => {
+    const fence = makeActorSummaryFence({ actorType: 'web', backing: 'api', origin: 'https://api.example.com' });
+    const wrapped = fence!('learned the /v1/users shape');
+    expect(wrapped).toContain('learned the /v1/users shape');
+    expect(wrapped).toContain('api.example.com');
+  });
+
+  test('a non-web (engine) actor gets NO self-fence — its summary renders verbatim', () => {
+    expect(makeActorSummaryFence({ actorType: 'webvm' })).toBeUndefined();
+    expect(makeActorSummaryFence({ actorType: 'notebook' })).toBeUndefined();
+    expect(makeActorSummaryFence({})).toBeUndefined();
   });
 });

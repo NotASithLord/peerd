@@ -24,9 +24,8 @@ import { createBestTranscriber, createModelStore } from '/peerd-runtime/index.js
 // Headless JS jobs (the js_run tool / engine.runJob): a sealed Worker hosted
 // here, no UI. See job-runner.js for its (deliberately seal-only) security note.
 import { runJob } from './job-runner.js';
-// Pure-reasoning subagents in a dedicated Worker (heap-split phase 1).
-import { runReasoning, abortReasoning } from './reasoning-runner.js';
-// Bound engine actors in a dedicated Worker (heap-split phase 2).
+// The heap split: EVERY offscreen agent loop — ephemeral reasoning subagents AND
+// bound actors (VM/Notebook/App/web) — runs in a dedicated Worker via this ONE host.
 import { runActor, abortActor } from './actor-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
@@ -342,36 +341,11 @@ const onJobMessage = (msg, sender, sendResponse) => {
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
 
-// --- pure-reasoning subagents (heap-split phase 1) ---
-// Runs a tools:[] subagent loop in a dedicated Worker (its own heap), relaying
-// each model call to the SW's 'reasoning/model-call' route (the SW holds the
-// key). Same trust posture as onJobMessage: first-party senders only.
-/**
- * @param {any} msg
- * @param {import('webextension-polyfill').Runtime.MessageSender} sender
- * @param {(response: any) => void} sendResponse
- */
-const onReasoningMessage = (msg, sender, sendResponse) => {
-  if (msg?.type !== 'reasoning/run' && msg?.type !== 'reasoning/abort') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  if (msg.type === 'reasoning/abort') { abortReasoning(msg.runId); sendResponse({ ok: true }); return true; }
-  runReasoning(
-    msg.job ?? {},
-    {
-      workerUrl: browser.runtime.getURL('offscreen/reasoning-worker.js'),
-      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
-    },
-  )
-    .then((result) => sendResponse(result))
-    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
-  return true;     // async sendResponse contract
-};
-browser.runtime.onMessage.addListener(/** @type {any} */ (onReasoningMessage));
-
-// --- bound engine actors (heap-split phase 2) ---
-// Runs a VM/Notebook/App actor loop in a dedicated Worker; relays its model call
-// AND every tool call back to the SW (which pins + gates + dispatches). Same
-// first-party trust posture as the reasoning/job handlers.
+// --- the heap split: every offscreen agent loop (reasoning subagents + bound actors) ---
+// Runs a reasoning (tools:[]) OR bound-actor (VM/Notebook/App/web) loop in a dedicated
+// Worker (its own heap), relaying its model call — AND, for a tool-bearing actor, every
+// tool call — back to the SW (which holds the key and pins + gates + dispatches). Same
+// first-party trust posture as onJobMessage: first-party senders only.
 /**
  * @param {any} msg
  * @param {import('webextension-polyfill').Runtime.MessageSender} sender

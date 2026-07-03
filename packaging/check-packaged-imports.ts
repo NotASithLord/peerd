@@ -97,9 +97,10 @@ const entryPoints = (root: string): string[] => {
   } catch { /* no manifest — staging always writes one */ }
   // Static Worker entry points loaded via `new Worker(getURL('…'))` — a STRING,
   // so the <script src> / manifest scan above never sees them and their import
-  // graph would be a blind spot. Seed them explicitly so agent-loop.js + the
-  // reasoning core (which must ship + resolve in the package) get walked.
-  const WORKER_ENTRIES = ['offscreen/reasoning-worker.js', 'offscreen/actor-worker.js'];
+  // graph would be a blind spot. Seed it explicitly so agent-loop.js + the worker
+  // core (which must ship + resolve in the package) get walked. The heap split
+  // uses ONE worker entry for every offscreen loop (reasoning + bound actors).
+  const WORKER_ENTRIES = ['offscreen/actor-worker.js'];
   for (const w of WORKER_ENTRIES) { const p = join(root, w); if (existsSync(p)) entries.add(p); }
   return [...entries];
 };

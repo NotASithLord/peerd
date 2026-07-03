@@ -246,7 +246,6 @@ import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
-import { makeOffscreenReasoningClient } from './offscreen-reasoning-client.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
@@ -1419,14 +1418,6 @@ const forwardSubagentEvent = (/** @type {any} */ ev) => {
   }
 };
 
-// Forward-declared (assigned later, after ensureOffscreen at ~L1930) so both the
-// makeSpawnSubagent deps below AND the dispatcher's lazy 'reasoning/model-call'
-// arrow can close over it without a TDZ. Both only DEREFERENCE it at call time —
-// long after module init assigns it; never read during boot.
-// why: heap-split phase 1 — the offscreen reasoning client (own-heap tools:[] children).
-/** @type {ReturnType<typeof makeOffscreenReasoningClient> | null} */
-let reasoningClient = null;
-
 const spawnSubagentCore = makeSpawnSubagent({
   sessions,
   runUserTurn,
@@ -1447,15 +1438,22 @@ const spawnSubagentCore = makeSpawnSubagent({
     claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
-  // Heap-split phase 1: run a PURE-REASONING (tools:[]) child in a dedicated
-  // offscreen Worker instead of the in-SW loop. A LAZY arrow — reasoningClient is
-  // assigned LATER in module init (after ensureOffscreen), so reading it here at
-  // wiring time would always see null. At call time it's the client, or null on
-  // Firefox / when offscreen is unavailable → return the unavailable sentinel so
-  // spawn.js falls back to the in-SW loop. The key never enters the worker; the
-  // model call relays back to the SW route above.
-  runReasoningOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => reasoningClient
-    ? reasoningClient.run(job, opts)
+  // Heap split: run a PURE-REASONING (tools:[]) child in a dedicated offscreen
+  // Worker instead of the in-SW loop — the SAME substrate a bound actor uses (a
+  // reasoning child is just a tool-less ephemeral actor), so it flows through the
+  // ONE actorClient. A LAZY arrow — actorClient is a const assigned LATER in module
+  // init (after ensureOffscreen); reading it at wiring time would see the TDZ, so we
+  // only DEREFERENCE at call time. null on Firefox / when offscreen is unavailable →
+  // the unavailable sentinel so spawn.js falls back to the in-SW loop. The key never
+  // enters the worker; the model call relays back to the SW route. Adapt the reasoning
+  // job shape (sessionId/task) to the actor run shape (actorSessionId/message + tools:[]).
+  runReasoningOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
+    ? actorClient.run({
+      actorSessionId: job.sessionId, message: job.task, systemPrompt: job.systemPrompt,
+      provider: job.provider, model: job.model, depth: job.depth,
+      maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
+      tools: [],
+    }, opts)
     : Promise.resolve({ ok: false, error: 'reasoning offscreen unavailable' }),
   renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
 });
@@ -1935,25 +1933,11 @@ const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
 
-// Heap-split phase 1: the offscreen reasoning client runs a PURE-REASONING
-// (tools:[]) subagent loop in a dedicated Worker — its own heap. The model call
-// relays back to THIS route (getSecret added here), so the key never enters the
-// worker. Null when offscreen is unavailable (Firefox MV3 path) → spawn.js falls
-// back to the in-SW loop. The 'reasoning/model-call' route is spread into the
-// dispatcher below.
-reasoningClient = offscreenAvailable ? makeOffscreenReasoningClient({
-  ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
-  callModel: /** @type {any} */ (callModel),
-  getSecret,
-  // The provider adapter makes its HTTP request through safeFetch — inject the
-  // SW's real one (the key AND the egress path both stay in the SW).
-  safeFetch,
-}) : null;
-
-// Heap-split phase 2: the offscreen BOUND-actor client (VM/Notebook/App loops in
-// their own Worker heap). Its 'actor/tool-dispatch' route builds the actor's
-// instance-pinned, gated ctx SW-side and dispatches there — the worker holds no
+// The heap split: the ONE offscreen agent-loop client. It runs every non-
+// orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
+// bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
+// 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
+// and dispatches there — the worker holds no
 // key, no engine clients, no chrome.*. Null when offscreen is unavailable.
 const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   ensureOffscreen,
@@ -1965,6 +1949,10 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   buildToolContext,
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   pinActorCall,
+  // Phase 3: a tab-backed web actor's currently-owned tab, read per dispatch (lazy —
+  // webActorTabBindings is defined later, called at turn time). tabFor returns the
+  // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
+  ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
   EXPOSURE_ACTOR,
 }) : null;
 
@@ -2900,7 +2888,7 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 // Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
 // (offscreen unavailable / never started). The worker holds no key, no engine
 // clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
-const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, display }) => {
+const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
   if (!actorClient) return null;
   const rec = await sessions.get(actorSessionId);
   if (!rec) return null;
@@ -2940,6 +2928,20 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
         } catch { /* display best-effort */ }
       }
       : undefined;
+    // Phase 3: the WEB/API actor self-fence provenance (the worker rebuilds
+    // ctx.fenceActorSummary from it — the SW's closure can't cross postMessage). A
+    // tab actor tags its turn-START tab url (the body-wrap is what matters; a tag
+    // that lags a mid-turn navigate is cosmetic); an API actor tags its FIXED origin.
+    let tabUrl;
+    let apiOrigin;
+    if (kind === 'web') {
+      if (rec.backing === 'api') {
+        apiOrigin = instanceId;
+      } else {
+        const ownedTab = actorTabId ?? webActorTabBindings.tabFor(actorSessionId);
+        if (ownedTab != null) tabUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+      }
+    }
     const r = await actorClient.run({
       actorSessionId, message, systemPrompt,
       provider: rec.provider, model: rec.model, depth: rec.depth,
@@ -2947,6 +2949,8 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       // with the in-SW path, not a hardcoded fifth of it). Seed the actor's prior
       // history for statefulness.
       tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
+      // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
+      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
     }, { signal: controller.signal, onEvent });
     if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
     // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
@@ -2966,7 +2970,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
         uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost });
       } catch { /* cost telemetry is best-effort */ }
     }
-    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, persistOk } }).catch(() => {});
+    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
     if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
     return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   } finally {
@@ -3040,12 +3044,14 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
-    // Heap-split phase 2: an ENGINE actor (vm/notebook/app) runs its loop in its
-    // own offscreen Worker heap. Returns the reply, or null to fall back to the
-    // in-SW turn below (offscreen unavailable / never started). Web actors (need a
-    // tab / chrome.*) stay in-SW until phase 3.
-    if (kind === 'webvm' || kind === 'notebook' || kind === 'app') {
-      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, display });
+    // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
+    // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
+    // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
+    // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
+    // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
+    // fall back to the in-SW turn below (offscreen unavailable / never started).
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web') {
+      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
       if (off) return off;
     }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
@@ -3420,21 +3426,12 @@ const ensureSession = ensureCurrentSession;
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
-  // Heap-split phase 1: the offscreen→SW model-call relay for reasoning workers
-  // (getSecret is added in the handler — the key never left the SW). A LAZY
-  // arrow — reasoningClient is defined later in module init (after
-  // ensureOffscreen), so it must not be read at this eager spread; the arrow only
-  // dereferences it when a message actually arrives, long after boot.
-  'reasoning/model-call': (/** @type {any} */ msg) => reasoningClient
-    ? reasoningClient.routes['reasoning/model-call'](msg)
-    : Promise.resolve({ ok: false, error: 'reasoning offscreen unavailable' }),
-  // Fire-and-forget: a forwarded child loop event → the subagent card + cost meter.
-  'reasoning/loop-event': (/** @type {any} */ msg) => reasoningClient
-    ? reasoningClient.routes['reasoning/loop-event'](msg)
-    : Promise.resolve({ ok: true }),
-  // Heap-split phase 2: the offscreen BOUND-actor routes (model-call, the
-  // SW-side pin+gate tool-dispatch, loop-event). actorClient is defined above
-  // (after ensureOffscreen), before this dispatcher literal — safe to spread.
+  // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
+  // (getSecret + safeFetch added in the handler; the key never left the SW), the
+  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the subagent/
+  // actor card + cost meter). Serves both reasoning subagents and bound actors; a
+  // reasoning child never exercises tool-dispatch. actorClient is defined above (after
+  // ensureOffscreen), before this dispatcher literal — safe to spread.
   ...(actorClient?.routes ?? {}),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,

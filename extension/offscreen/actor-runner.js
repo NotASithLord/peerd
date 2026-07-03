@@ -1,9 +1,10 @@
 // @ts-check
-// offscreen/actor-runner.js — hosts BOUND-actor loops in dedicated Workers
-// (heap-split phase 2), the tool-bearing sibling of reasoning-runner. Forks one
-// Worker per actor turn, relays its model-call AND tool-dispatch requests to the
-// SW (which holds the key, engine clients, instance pin, and gate), forwards its
-// loop events, and resolves with the turn result.
+// offscreen/actor-runner.js — hosts EVERY offscreen agent loop in dedicated Workers
+// (the heap split): ephemeral reasoning subagents AND bound actors alike (a reasoning
+// child just carries no tools, so its worker never sends a tool-request). Forks one
+// Worker per turn, relays its model-call AND tool-dispatch requests to the SW (which
+// holds the key, engine clients, instance pin, and gate), forwards its loop events,
+// and resolves with the turn result.
 
 const MAX_CONCURRENT = 4;
 let active = 0;
@@ -19,7 +20,7 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number }} job
+ * @param {{ runId?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any> }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>}
  */
@@ -64,8 +65,10 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         if (m.type === 'done') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }
           const r = m.result ?? {};
-          if (r.error) finish({ ok: false, started: true, error: r.error, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason });
-          else finish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: r.toolCalls ?? 0 });
+          // Propagate the worker's authoritative aborted flag (a clean Stop unwind has
+          // no error yet must still surface as cancelled, not a blank success).
+          if (r.error) finish({ ok: false, started: true, error: r.error, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, aborted: r.aborted === true });
+          else finish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: r.toolCalls ?? 0, aborted: r.aborted === true });
         }
         if (m.type === 'error') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }
@@ -83,6 +86,10 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         // across turns (dropping it made every offscreen turn amnesiac).
         priorMessages: job.priorMessages ?? [],
         maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, reasoning: job.reasoning, contextWindow: job.contextWindow,
+        // Phase 3: oneShot loop mode (parity with the in-SW delegation path) + the
+        // web/API actor's self-fence provenance (actorType/backing/tabUrl/origin →
+        // the worker rebuilds ctx.fenceActorSummary). Undefined for engine actors.
+        oneShot: job.oneShot, actorType: job.actorType, backing: job.backing, tabUrl: job.tabUrl, origin: job.origin,
       });
     });
   } catch (e) {

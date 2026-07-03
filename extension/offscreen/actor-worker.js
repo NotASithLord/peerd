@@ -1,11 +1,13 @@
 // @ts-check
-// offscreen/actor-worker.js — the Worker that runs a BOUND-actor loop (VM /
-// Notebook / App) in its own heap (heap-split phase 2). Imperative shell over
-// actor-worker-core. Relays BOTH the model call AND every tool call to the SW
-// (which holds the key, the engine clients, the instance pin, and the gate); the
-// untrusted instance output stays in this heap. Module worker → strict.
+// offscreen/actor-worker.js — the ONE Worker that runs any non-orchestrator agent
+// loop in its own heap (the heap split): an ephemeral reasoning subagent (tools:[],
+// so the tool-relay below never fires) OR a bound actor (VM / Notebook / App / web,
+// tool-bearing). Imperative shell over actor-worker-core. Relays BOTH the model call
+// AND every tool call to the SW (which holds the key, the engine clients, the
+// instance pin, and the gate); the untrusted instance/page output stays in this
+// heap. Module worker → strict.
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
-import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop } from '/peerd-runtime/subagent/actor-worker-core.js';
+import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/subagent/actor-worker-core.js';
 
 let seq = 0;
 let runId = '';
@@ -49,6 +51,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       const sessions = makeInMemorySessions({ sessionId: m.sessionId, provider: m.provider, model: m.model, depth: m.depth, messages: m.priorMessages });
       const callModel = makeRelayedCallModel(requestModel, m.maxOutputTokens);
       const toolDispatch = makeRelayedToolDispatch(requestTool);
+      // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
+      // summary. The SW's closure (over the live tab url) can't cross postMessage,
+      // so rebuild it here from the pure fence fns using the turn-start provenance.
+      const fenceActorSummary = makeActorSummaryFence({ actorType: m.actorType, backing: m.backing, tabUrl: m.tabUrl, origin: m.origin });
       const result = await runActorLoop(
         {
           runUserTurn, sessions, callModel, toolDispatch,
@@ -56,10 +62,16 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           appendAudit: async () => {},
           onEvent: (/** @type {object} */ event) => self.postMessage({ type: 'loop-event', runId, event }),
           tools: m.tools ?? [],
+          ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
-        { sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps, signal: abort.signal, reasoning: m.reasoning, contextWindow: m.contextWindow },
+        { sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps, oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning, contextWindow: m.contextWindow },
       );
-      self.postMessage({ type: 'done', runId, result });
+      // A Stop/cancel unwinds the loop CLEANLY (the aborted model relay rejects, the
+      // loop stops with no error event and an empty reply) — indistinguishable from a
+      // natural end at the result shape. The worker's OWN abort controller is the
+      // authoritative signal, so stamp it: the caller renders the card 'cancelled'
+      // (not a blank 'ok') and spawn.js records stopReason 'aborted'.
+      self.postMessage({ type: 'done', runId, result: { ...result, aborted: abort.signal.aborted } });
     } catch (e) {
       self.postMessage({ type: 'error', runId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
     }
