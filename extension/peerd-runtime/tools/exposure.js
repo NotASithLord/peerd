@@ -255,6 +255,27 @@ export const actorTargetIdField = (name) =>
   /** @type {Record<string, string|null>} */ (ACTOR_TARGET_ID_FIELD)[name] ?? null;
 
 /**
+ * DESIGN-17 per-instance PIN. Force an actor's tool-call instance-target arg to
+ * its BOUND instance (overwriting any id/name the model — or, in the heap-split,
+ * a possibly-injected worker — supplied), and lock edit_file to the actor's kind.
+ * The gate's pin check is the defense-in-depth backstop; this is the
+ * normalization that makes it pass. Mutates call.args in place. Pure logic,
+ * shared by the in-SW actor turn (turn-driver) AND the offscreen actor tool
+ * relay (SW re-pins the worker's call — never trusts it). Moved here from
+ * turn-driver so both use ONE implementation (no drift on a security seam).
+ * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
+ */
+export const pinActorCall = (call, actorType, instanceId) => {
+  if (!instanceId) return;
+  const field = actorTargetIdField(call?.name);
+  if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
+  // edit_file is cross-kind — also lock it to the actor's own workspace kind.
+  if (call?.name === 'edit_file' && actorType) {
+    call.args = { ...(call.args ?? {}), kind: actorType === 'notebook' ? 'notebook' : 'app' };
+  }
+};
+
+/**
  * The EXPLICIT instance id/name a tool call names, or undefined when it names
  * none (relying on the session-default). Pure — read-only over args.
  * @param {string} name @param {Record<string, any> | null | undefined} args @returns {string | undefined}

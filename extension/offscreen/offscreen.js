@@ -26,6 +26,8 @@ import { createBestTranscriber, createModelStore } from '/peerd-runtime/index.js
 import { runJob } from './job-runner.js';
 // Pure-reasoning subagents in a dedicated Worker (heap-split phase 1).
 import { runReasoning, abortReasoning } from './reasoning-runner.js';
+// Bound engine actors in a dedicated Worker (heap-split phase 2).
+import { runActor, abortActor } from './actor-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
@@ -365,6 +367,32 @@ const onReasoningMessage = (msg, sender, sendResponse) => {
   return true;     // async sendResponse contract
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onReasoningMessage));
+
+// --- bound engine actors (heap-split phase 2) ---
+// Runs a VM/Notebook/App actor loop in a dedicated Worker; relays its model call
+// AND every tool call back to the SW (which pins + gates + dispatches). Same
+// first-party trust posture as the reasoning/job handlers.
+/**
+ * @param {any} msg
+ * @param {import('webextension-polyfill').Runtime.MessageSender} sender
+ * @param {(response: any) => void} sendResponse
+ */
+const onActorMessage = (msg, sender, sendResponse) => {
+  if (msg?.type !== 'actor/run' && msg?.type !== 'actor/abort') return undefined;
+  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (msg.type === 'actor/abort') { abortActor(msg.runId); sendResponse({ ok: true }); return true; }
+  runActor(
+    msg.job ?? {},
+    {
+      workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+    },
+  )
+    .then((result) => sendResponse(result))
+    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
+  return true;
+};
+browser.runtime.onMessage.addListener(/** @type {any} */ (onActorMessage));
 
 // Local WebGPU inference (FEATURE-LOCAL-WEBGPU B). The SW's local-webgpu adapter
 // drives this: status/probe/init/teardown are request→response; generate STREAMS

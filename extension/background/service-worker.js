@@ -227,7 +227,7 @@ import {
   makeAsyncSubagents,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
-  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR,
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -247,6 +247,7 @@ import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { makeOffscreenReasoningClient } from './offscreen-reasoning-client.js';
+import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { decidePullIn } from './panel-affordance.js';
@@ -1950,6 +1951,23 @@ reasoningClient = offscreenAvailable ? makeOffscreenReasoningClient({
   safeFetch,
 }) : null;
 
+// Heap-split phase 2: the offscreen BOUND-actor client (VM/Notebook/App loops in
+// their own Worker heap). Its 'actor/tool-dispatch' route builds the actor's
+// instance-pinned, gated ctx SW-side and dispatches there — the worker holds no
+// key, no engine clients, no chrome.*. Null when offscreen is unavailable.
+const actorClient = offscreenAvailable ? makeOffscreenActorClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+  callModel: /** @type {any} */ (callModel),
+  getSecret,
+  safeFetch,
+  sessions,
+  buildToolContext,
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  pinActorCall,
+  EXPOSURE_ACTOR,
+}) : null;
+
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
 const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
@@ -2875,6 +2893,55 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   if (webActorTabBindings.drop(tabId)) persistWebBindings();
 });
 
+// Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
+// offscreen Worker heap. Renders the actor prompt + descriptors SW-side (the
+// worker never assembles them), seeds the worker with the actor's prior history
+// (statefulness), forwards loop events to the card, and persists the turn back.
+// Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
+// (offscreen unavailable / never started). The worker holds no key, no engine
+// clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
+const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, display }) => {
+  if (!actorClient) return null;
+  const rec = await sessions.get(actorSessionId);
+  if (!rec) return null;
+  const { controller, release } = turnSlots.claim(actorSessionId);
+  try {
+    const systemPrompt = await renderSystemPrompt({ actorType: kind, backing: rec.backing, instanceId });
+    const tools = actorDescriptors(listTools(), kind, rec.backing)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    // Minimal card display: mount on start, mirror the worker's state snapshots,
+    // settle on done. fromIndex = the actor's length BEFORE this turn.
+    const fromIndex = (rec.messages ?? []).length;
+    if (display && uiConnected()) {
+      uiPorts.broadcast({ type: 'turn/actor-start', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+    }
+    const onEvent = (display && uiConnected())
+      ? (/** @type {any} */ ev) => {
+        try {
+          if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+          else if (ev.type === 'usage') uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, usage: ev.usage });
+        } catch { /* display best-effort */ }
+      }
+      : undefined;
+    const r = await actorClient.run({
+      actorSessionId, message, systemPrompt,
+      provider: rec.provider, model: rec.model, depth: rec.depth,
+      tools, maxSteps: 20, priorMessages: rec.messages ?? [],
+    }, { signal: controller.signal, onEvent });
+    if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
+    // Persist the turn to the real actor session (statefulness + the
+    // finalAssistantText read in runActorTurn below).
+    const stamp = new Date().toISOString();
+    await sessions.appendMessage(actorSessionId, /** @type {any} */ ({ id: `off-u-${Date.now()}`, when: stamp, role: 'user', content: message })).catch(() => {});
+    await sessions.appendMessage(actorSessionId, /** @type {any} */ ({ id: `off-a-${Date.now()}`, when: stamp, role: 'assistant', content: r.finalText ?? '' })).catch(() => {});
+    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true } }).catch(() => {});
+    if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
+    return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+  } finally {
+    release();
+  }
+};
+
 const actorMessaging = makeActorMessaging({
   resolveActor: async (/** @type {string} */ instanceId, /** @type {{ senderSessionId?: string | null }} */ opts = {}) => {
     // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
@@ -2941,6 +3008,14 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
+    // Heap-split phase 2: an ENGINE actor (vm/notebook/app) runs its loop in its
+    // own offscreen Worker heap. Returns the reply, or null to fall back to the
+    // in-SW turn below (offscreen unavailable / never started). Web actors (need a
+    // tab / chrome.*) stay in-SW until phase 3.
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app') {
+      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, display });
+      if (off) return off;
+    }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
@@ -3325,6 +3400,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   'reasoning/loop-event': (/** @type {any} */ msg) => reasoningClient
     ? reasoningClient.routes['reasoning/loop-event'](msg)
     : Promise.resolve({ ok: true }),
+  // Heap-split phase 2: the offscreen BOUND-actor routes (model-call, the
+  // SW-side pin+gate tool-dispatch, loop-event). actorClient is defined above
+  // (after ensureOffscreen), before this dispatcher literal — safe to spread.
+  ...(actorClient?.routes ?? {}),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,

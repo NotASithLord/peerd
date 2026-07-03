@@ -154,6 +154,9 @@ export {
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
   actorAllowedToolsFor, isAllowedForActor,
+  // Heap-split phase 2: the per-instance pin, shared by the in-SW actor turn and
+  // the offscreen actor tool relay (one implementation on a security seam).
+  pinActorCall,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.

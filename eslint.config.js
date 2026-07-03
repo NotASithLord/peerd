@@ -381,7 +381,7 @@ export default [
   // modules into a context that has none, throwing at import. So the cross-module
   // rule is relaxed for THIS file only; the dweb/tests/eval guards stay.
   {
-    files: ['extension/offscreen/reasoning-worker.js'],
+    files: ['extension/offscreen/reasoning-worker.js', 'extension/offscreen/actor-worker.js'],
     rules: {
       'no-restricted-imports': ['error', { patterns: [DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] }],
     },

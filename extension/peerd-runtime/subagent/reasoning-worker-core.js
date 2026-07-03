@@ -44,7 +44,11 @@ export const finalAssistantText = (session) => {
  * child record the SW created (its id/provider/model carry the lineage the SW
  * already stamped).
  *
- * @param {{ sessionId: string, provider?: string, model?: string, depth?: number }} seed
+ * @param {{ sessionId: string, provider?: string, model?: string, depth?: number, messages?: any[] }} seed
+ *   `messages` seeds prior history — a BOUND actor is stateful across turns
+ *   (phase 2), so the worker must reason over its accumulated transcript. A
+ *   fresh reasoning child (phase 1) omits it. The array is copied (the worker
+ *   owns its heap's transcript; the SW's record is untouched).
  */
 export const makeInMemorySessions = (seed) => {
   /** @type {Map<string, any>} */
@@ -55,7 +59,7 @@ export const makeInMemorySessions = (seed) => {
     model: seed.model ?? '',
     kind: 'subagent',
     depth: seed.depth ?? 1,
-    messages: /** @type {any[]} */ ([]),
+    messages: /** @type {any[]} */ (Array.isArray(seed.messages) ? [...seed.messages] : []),
   });
   const store = {
     get: async (/** @type {string} */ id) => map.get(id),

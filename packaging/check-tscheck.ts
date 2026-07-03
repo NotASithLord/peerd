@@ -46,7 +46,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // proposal adds delegation-lineage.js (the pure trusted-lineage predicate).
 // 473 → 477: heap-split phase 1 adds reasoning-worker-core.js, reasoning-worker.js,
 // reasoning-runner.js, offscreen-reasoning-client.js (all // @ts-check).
-const COVERED_FLOOR = 478;
+const COVERED_FLOOR = 481;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

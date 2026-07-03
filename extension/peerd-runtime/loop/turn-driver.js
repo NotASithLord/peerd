@@ -25,26 +25,10 @@ import {
 import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
-import { EXPOSURE_ACTOR, actorDescriptors, actorTargetIdField, filterActorSurface } from '../tools/exposure.js';
+import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
 
-/**
- * DESIGN-17 per-instance PIN. Before an actor's tool call dispatches, force
- * the instance-target arg to the actor's BOUND instance (overwriting any id
- * or NAME the model supplied) so an actor can only ever touch its own
- * instance — and lock edit_file to the actor's kind. The gate's pin check is
- * the defense-in-depth backstop; this is the normalization that makes it pass.
- * Mutates call.args in place (it's a per-turn call object).
- * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
- */
-const pinActorCall = (call, actorType, instanceId) => {
-  if (!instanceId) return;
-  const field = actorTargetIdField(call?.name);
-  if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
-  // edit_file is cross-kind — also lock it to the actor's own workspace kind.
-  if (call?.name === 'edit_file' && actorType) {
-    call.args = { ...(call.args ?? {}), kind: actorType === 'notebook' ? 'notebook' : 'app' };
-  }
-};
+// pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
+// relay, a security seam — one implementation, no drift).
 
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
