@@ -65,7 +65,7 @@ export const typeTool = {
       expectedCount: {
         type: 'integer',
         minimum: 1,
-        description: 'Optional deterministic guard for selector actions: fail before typing unless the selector resolves to exactly this many elements.',
+        description: 'Optional deterministic guard: fail before typing unless the target resolves to exactly this many elements (the selector match count; a walk ref resolves to 0 or 1).',
       },
       tabId: {
         type: 'integer',
@@ -88,6 +88,13 @@ export const typeTool = {
     // ToolContext typedef; scripting is typed opaquely — narrow all three.
     const { domRefs, debuggerPool } = /** @type {DomCtxExtras} */ (ctx);
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
+
+    // why: hoisted above the ref branch — the cardinality guard applies to
+    // BOTH resolution channels the injected body serves (selector match count,
+    // walk-ref 0/1), not just selector calls (issue #36).
+    const expectedCount = Number.isInteger(args?.expectedCount) && args.expectedCount > 0
+      ? args.expectedCount
+      : null;
 
     // Ref path (a11y snapshot): exact node, no selector ambiguity. Two
     // resolutions, matching the snapshot's two capture channels
@@ -124,7 +131,7 @@ export const typeTool = {
           const results = await scripting.executeScript({
             target: { tabId: tab.id },
             func: typeInjected,
-            args: [null, args.text, !!args.submit, entry.walkId],
+            args: [null, args.text, !!args.submit, entry.walkId, expectedCount],
           });
           scriptResult = results[0]?.result;
         } catch (e) {
@@ -137,6 +144,10 @@ export const typeTool = {
           content: JSON.stringify({
             typed: scriptResult.typed, submitted: scriptResult.submitted,
             ref, role: entry.role, name: entry.name, tag: scriptResult.tag,
+            // why: keep matchedCount present on every success shape (selector
+            // AND walk ref) so the agent reads one consistent contract; a
+            // resolved walk ref is always exactly 1 (issue #36).
+            matchedCount: scriptResult.matchedCount,
             // Honest about the channel: scripting input is synthetic
             // (isTrusted=false); sites that gate on trusted keystrokes
             // may ignore it, and there is no fallback channel here.
@@ -162,9 +173,6 @@ export const typeTool = {
 
     let scriptResult;
     try {
-      const expectedCount = Number.isInteger(args.expectedCount) && args.expectedCount > 0
-        ? args.expectedCount
-        : null;
       const results = await scripting.executeScript({
         target: { tabId: tab.id },
         func: typeInjected,
@@ -196,7 +204,12 @@ export const typeTool = {
  * @param {number | null} [walkId]
  * @param {number | null} [expectedCount]
  */
-function typeInjected(selector, text, submit, walkId, expectedCount) {
+// why: exported for the Bun tests to exercise the REAL body's walk-ref
+// cardinality guard (mocked scriptResults would hide an omission — #103
+// review lesson). Same precedent as domWalkInjected; `export` is not part
+// of Function.prototype.toString, so executeScript serialization is
+// unchanged.
+export function typeInjected(selector, text, submit, walkId, expectedCount) {
   // why: serialized by chrome.scripting.executeScript and re-evaluated
   // in the page's classic-script world; the calling module's strict
   // mode doesn't carry across. Opt in here.
@@ -212,6 +225,21 @@ function typeInjected(selector, text, submit, walkId, expectedCount) {
     // a standard global, so reach it through an erased cast.
     const reg = /** @type {{ __peerdWalkEls?: Map<number, HTMLElement> }} */ (globalThis).__peerdWalkEls;
     el = reg && typeof reg.get === 'function' ? (reg.get(walkId) ?? null) : null;
+    // why: a walkId names exactly one registered element, so the real match
+    // cardinality is 0 (stale/unregistered) or 1 (found). Enforce the guard
+    // against that count — same code + fields as the selector path — instead
+    // of silently ignoring expectedCount on ref calls (issue #36). Checked
+    // BEFORE the stale return so the 0 case reports the mismatch the caller
+    // asked to be told about, with the re-snapshot hint kept in the text.
+    matchedCount = el && el.isConnected ? 1 : 0;
+    if (expectedCount != null && matchedCount !== expectedCount) {
+      return {
+        ok: false,
+        error: `matched_count_mismatch: walk ref matched ${matchedCount} element(s), expected ${expectedCount}${matchedCount === 0 ? ' — element no longer in the page; re-run snapshot on this tab first' : ''}`,
+        matchedCount,
+        expectedCount,
+      };
+    }
     if (!el || !el.isConnected) {
       return { ok: false, error: 'stale_ref: element no longer in the page — re-run snapshot on this tab first' };
     }

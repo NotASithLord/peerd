@@ -7,8 +7,8 @@
 
 import { describe, test, expect } from 'bun:test';
 import { snapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapshot.js';
-import { clickTool } from '../../../extension/peerd-runtime/tools/defs/click.js';
-import { typeTool } from '../../../extension/peerd-runtime/tools/defs/type.js';
+import { clickTool, clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
+import { typeTool, typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
 import { createRefRegistry } from '../../../extension/peerd-runtime/dom/ref-registry.js';
 
 const WALK_RESULT = {
@@ -72,22 +72,28 @@ describe('click/type — walk-ref dispatch', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error('expected ok result');
     expect(r.content).toContain('"via": "dom-walk"');
-    // The click injection carried [selector=null, nth=0, walkId=1].
-    expect(injections[1].args).toEqual([null, 0, 1]);
+    // matchedCount is part of the walk-ref success contract too (issue #36).
+    expect(r.content).toContain('"matchedCount": 1');
+    // The click injection carried [selector=null, nth=0, walkId=1,
+    // expectedCount=null] — the guard slot is always forwarded.
+    expect(injections[1].args).toEqual([null, 0, 1, null]);
   });
 
   test('type {ref} resolves a walk ref via scripting with the walkId', async () => {
     const { ctx, injections } = makeCtx((req: any) =>
       req.args && req.args[3] != null
-        ? [{ result: { ok: true, typed: 'hi', submitted: false, tag: 'input' } }]
+        ? [{ result: { ok: true, typed: 'hi', submitted: false, tag: 'input', matchedCount: 1 } }]
         : [{ result: WALK_RESULT }]);
     await snapshotTool.execute({}, ctx);
     const r = await typeTool.execute({ ref: '@e2', text: 'hi' }, ctx);
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error('expected ok result');
     expect(r.content).toContain('"via": "dom-walk"');
-    // [selector=null, text, submit, walkId=2]
-    expect(injections[1].args).toEqual([null, 'hi', false, 2]);
+    // matchedCount is part of the walk-ref success contract too (issue #36).
+    expect(r.content).toContain('"matchedCount": 1');
+    // [selector=null, text, submit, walkId=2, expectedCount=null] — the
+    // guard slot is always forwarded.
+    expect(injections[1].args).toEqual([null, 'hi', false, 2, null]);
   });
 
   test('page-side stale walk ref surfaces as stale_ref', async () => {
@@ -131,5 +137,124 @@ describe('click/type — walk-ref dispatch', () => {
     // [selector, text, submit, walkId=null, expectedCount]
     expect(injections[0].args).toEqual(['input[name="assignee"]', 'Ada', false, null, 1]);
     expect(r.content).toContain('"matchedCount": 1');
+  });
+
+  test('click {ref, expectedCount} forwards the guard on the walk-ref injection', async () => {
+    const { ctx, injections } = makeCtx((req: any) =>
+      req.args && req.args[2] != null
+        ? [{ result: { ok: true, clicked: 'walk:1', nth: 0, matchedCount: 1, tag: 'button', text: 'Send' } }]
+        : [{ result: WALK_RESULT }]);
+    await snapshotTool.execute({}, ctx);
+    const r = await clickTool.execute({ ref: '@e1', expectedCount: 1 }, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok result');
+    expect(r.content).toContain('"matchedCount": 1');
+    // [selector=null, nth=0, walkId=1, expectedCount=1]
+    expect(injections[1].args).toEqual([null, 0, 1, 1]);
+  });
+
+  test('type {ref, expectedCount} forwards the guard on the walk-ref injection', async () => {
+    const { ctx, injections } = makeCtx((req: any) =>
+      req.args && req.args[3] != null
+        ? [{ result: { ok: true, typed: 'hi', submitted: false, tag: 'input', matchedCount: 1 } }]
+        : [{ result: WALK_RESULT }]);
+    await snapshotTool.execute({}, ctx);
+    const r = await typeTool.execute({ ref: '@e2', text: 'hi', expectedCount: 1 }, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok result');
+    expect(r.content).toContain('"matchedCount": 1');
+    // [selector=null, text, submit, walkId=2, expectedCount=1]
+    expect(injections[1].args).toEqual([null, 'hi', false, 2, 1]);
+  });
+
+  test('page-side walk-ref count mismatch surfaces through the tool', async () => {
+    // The mocked scriptResult mirrors EXACTLY what the real injected body
+    // returns for this case (pinned by the real-body tests below).
+    const { ctx } = makeCtx((req: any) =>
+      req.args && req.args[2] != null
+        ? [{ result: { ok: false, error: 'matched_count_mismatch: walk ref matched 1 element(s), expected 2', matchedCount: 1, expectedCount: 2 } }]
+        : [{ result: WALK_RESULT }]);
+    await snapshotTool.execute({}, ctx);
+    const r = await clickTool.execute({ ref: '@e1', expectedCount: 2 }, ctx);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error result');
+    expect(r.error).toContain('matched_count_mismatch');
+  });
+});
+
+// The injected bodies themselves — the walk-ref cardinality guard runs
+// BEFORE any DOM interaction, so it is exercisable here against the real
+// functions (no mocked scriptResult that could hide an omission — the
+// #103 review lesson). Success paths need real event dispatch and stay in
+// the in-browser suite (extension/tests/unit/peerd-runtime/dom-walk.test.js).
+describe('injected bodies — walk-ref cardinality guard (real functions)', () => {
+  const walkGlobal = globalThis as any;
+  const withRegistry = (entries: Array<[number, any]>, fn: () => void) => {
+    const prior = walkGlobal.__peerdWalkEls;
+    walkGlobal.__peerdWalkEls = new Map(entries);
+    try { fn(); }
+    finally { walkGlobal.__peerdWalkEls = prior; }
+  };
+  // A registered element the guard can see; the guard only reads isConnected.
+  const liveEl = { isConnected: true };
+
+  test('clickInjected: found walk ref vs expectedCount>1 → matched_count_mismatch with counts', () => {
+    withRegistry([[1, liveEl]], () => {
+      const r: any = clickInjected(null, 0, 1, 2);
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('matched_count_mismatch');
+      expect(r.error).toContain('matched 1 element(s), expected 2');
+      expect(r.matchedCount).toBe(1);
+      expect(r.expectedCount).toBe(2);
+    });
+  });
+
+  test('clickInjected: stale walk ref with expectedCount → mismatch with matchedCount 0 and re-snapshot hint', () => {
+    withRegistry([], () => {
+      const r: any = clickInjected(null, 0, 99, 1);
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('matched_count_mismatch');
+      expect(r.error).toContain('re-run snapshot');
+      expect(r.matchedCount).toBe(0);
+      expect(r.expectedCount).toBe(1);
+    });
+  });
+
+  test('clickInjected: stale walk ref WITHOUT expectedCount still fails as stale_ref', () => {
+    withRegistry([], () => {
+      const r: any = clickInjected(null, 0, 99, null);
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('stale_ref');
+    });
+  });
+
+  test('typeInjected: found walk ref vs expectedCount>1 → matched_count_mismatch with counts', () => {
+    withRegistry([[2, liveEl]], () => {
+      const r: any = typeInjected(null, 'hi', false, 2, 3);
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('matched_count_mismatch');
+      expect(r.error).toContain('matched 1 element(s), expected 3');
+      expect(r.matchedCount).toBe(1);
+      expect(r.expectedCount).toBe(3);
+    });
+  });
+
+  test('typeInjected: stale walk ref with expectedCount → mismatch with matchedCount 0 and re-snapshot hint', () => {
+    withRegistry([], () => {
+      const r: any = typeInjected(null, 'hi', false, 99, 1);
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('matched_count_mismatch');
+      expect(r.error).toContain('re-run snapshot');
+      expect(r.matchedCount).toBe(0);
+      expect(r.expectedCount).toBe(1);
+    });
+  });
+
+  test('typeInjected: stale walk ref WITHOUT expectedCount still fails as stale_ref', () => {
+    withRegistry([], () => {
+      const r: any = typeInjected(null, 'hi', false, 99, null);
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('stale_ref');
+    });
   });
 });
