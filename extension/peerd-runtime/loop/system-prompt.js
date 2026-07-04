@@ -310,8 +310,10 @@ a run that only logs returns nothing. Each run is a FRESH worker: module-level s
 NOT carry between runs — persist across them via peerd.self.writeFile/readFile. Static
 \`import\`, \`export … from\`, and dynamic \`import('./x.js')\` of relative paths all work
 (peerd.self.import is the dynamic alias); \`import { chart, table, sum, mean, median } from
-'peerd:std'\` is the built-in stdlib (chart → SVG, no DOM). Prefer edit_file (SEARCH/REPLACE)
-over js_write_file to change an existing file.`,
+'peerd:std'\` is the built-in stdlib. Charts: RETURN chart({ type, data, x, y }) — type is
+bar | line | scatter | heatmap (heatmap: { x, y, v } bins shaded by v), the ONLY kinds that
+render; a hand-rolled Vega/Vega-Lite/plotly spec is NOT understood and dumps as raw JSON.
+Prefer edit_file (SEARCH/REPLACE) over js_write_file to change an existing file.`,
   app: `Your App is a multi-file artifact (index.html + style.css + script.js + data)
 in a sandboxed iframe — DOM, canvas, full fetch; files in OPFS at peerd-apps/<appId>/.
 Build ITERATIVELY, IN FILES: one app_write_file per file, growing it live — long up-front

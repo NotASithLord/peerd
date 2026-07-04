@@ -30,6 +30,13 @@ describe('peerd:std display helpers (pure descriptors)', () => {
     expect(chart().data).toEqual([]);
     expect(chart({ title: 42 as any }).title).toBe(null);
   });
+
+  test('chart supports heatmap with a v key (density grids — the Clifford-attractor case)', () => {
+    const d = chart({ type: 'heatmap', data: [{ x: 0, y: 0, density: 0.5 }], v: 'density' });
+    expect(d.type).toBe('heatmap');
+    expect(d.v).toBe('density');
+    expect(chart({ type: 'bar' }).v).toBe(null);
+  });
 });
 
 describe('peerd:std data helpers (pure)', () => {

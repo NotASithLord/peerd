@@ -10,6 +10,7 @@
 // back next call.
 
 import { clamp } from '/shared/util.js';
+import { pushValueBlock } from './value-block.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
@@ -126,10 +127,6 @@ const formatEvalResult = (code, r) => {
       lines.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
     }
   }
-  if (r.value !== undefined) {
-    lines.push('[VALUE]');
-    try { lines.push(JSON.stringify(r.value, null, 2)); }
-    catch { lines.push(String(r.value)); }
-  }
+  pushValueBlock(lines, r.value);
   return lines.join('\n');
 };

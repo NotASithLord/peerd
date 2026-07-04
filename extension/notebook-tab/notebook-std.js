@@ -30,19 +30,22 @@ export const table = (rows) => ({
 
 /**
  * Render a chart (SVG, built page-side). `spec`:
- *   type   'bar' | 'line' | 'scatter'   (default 'bar')
+ *   type   'bar' | 'line' | 'scatter' | 'heatmap'   (default 'bar')
  *   data   array of row objects, OR array of numbers (plotted vs index),
  *          OR array of [x, y] pairs
  *   x, y   key names when `data` is row objects (default: first two keys)
+ *   v      heatmap only: the cell-value key (default: third key) — cells are
+ *          shaded by v on a monochrome ramp at their (x, y) grid position
  *   title  optional heading
- * @param {{ type?: string, data?: unknown, x?: unknown, y?: unknown, title?: unknown }} [spec]
+ * @param {{ type?: string, data?: unknown, x?: unknown, y?: unknown, v?: unknown, title?: unknown }} [spec]
  */
 export const chart = (spec = {}) => ({
   __peerd_display: 'chart',
-  type: typeof spec.type === 'string' && ['bar', 'line', 'scatter'].includes(spec.type) ? spec.type : 'bar',
+  type: typeof spec.type === 'string' && ['bar', 'line', 'scatter', 'heatmap'].includes(spec.type) ? spec.type : 'bar',
   data: Array.isArray(spec.data) ? spec.data : [],
   x: spec.x ?? null,
   y: spec.y ?? null,
+  v: spec.v ?? null,
   title: typeof spec.title === 'string' ? spec.title : null,
 });
 
