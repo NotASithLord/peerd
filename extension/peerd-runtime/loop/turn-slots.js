@@ -34,6 +34,7 @@
  *   stop: (sessionId: string) => boolean,
  *   isBusy: (sessionId: string) => boolean,
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
+ *   advanceQueue: (sessionId: string) => void,
  * }}
  * @param {{ onAbort?: (sessionId: string) => void }} [deps]
  *   onAbort fires whenever a session's turn is aborted (a steer-live supersede
@@ -61,8 +62,10 @@ export const makeTurnSlots = ({ onAbort } = {}) => {
     if (q.length === 0) idleQueues.delete(sessionId);
     if (!fn) return;
     // why try/catch: a wake callback must never corrupt the slot map. A
-    // wake that does not claim the slot leaves remaining wakes waiting for
-    // the next real turn — acceptable; our only caller always runs a turn.
+    // wake that does not claim the slot would leave remaining wakes stranded
+    // until the next real turn — so a wake that DECLINES to run a turn (e.g.
+    // the post-Stop gen-skip in actor-messaging) must call advanceQueue below
+    // to keep the pump moving.
     try { fn(); } catch { /* swallowed */ }
   };
 
@@ -104,5 +107,13 @@ export const makeTurnSlots = ({ onAbort } = {}) => {
       q.push(fn);
       idleQueues.set(sessionId, q);
     },
+
+    // A runWhenIdle wake that DECLINED to start a turn (so no claim/release
+    // will re-drain) calls this to hand the idle slot to the next queued wake.
+    // No-op when a turn holds the slot (drainIdle's own guard) — safe to call
+    // unconditionally. Re-entrant with drainIdle: a chain of consecutive
+    // decliners drains synchronously and stops at the first wake that starts a
+    // turn (its async claim then owns the slot; its release re-drains the rest).
+    advanceQueue(sessionId) { drainIdle(sessionId); },
   };
 };

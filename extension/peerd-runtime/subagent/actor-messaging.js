@@ -74,7 +74,7 @@ import { ASYNC_SUBAGENT_ACTORS, mayMessageActor, messageProvenance } from './del
  * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean, actorReply?: { kind: string, instanceId: string, name?: string, failed: boolean } }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn. trusted:true
  *   marks a first-party continuation allowed to message actors (the reply-wake).
- * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void }} deps.turnSlots
+ * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, advanceQueue?: (sessionId: string) => void, stop?: (sessionId: string) => boolean }} deps.turnSlots
  * @param {() => Promise<string | null>} deps.getActiveSessionId
  * @param {(sessionId: string) => Promise<Array<import('./delegation-lineage.js').LineageHop>>} [deps.getAncestry]
  *   Build the sender's lineage chain (sender-first toward the root) from the
@@ -138,8 +138,13 @@ export const makeActorMessaging = (deps) => {
   // supersede (auto-cancelling the older one is a policy call the mailbox has
   // provenance for, but nobody has asked for yet). @type {Map<string, Map<string, number>>}
   const inFlightIntents = new Map();
-  /** @param {string} to @param {string} message */
-  const intentKey = (to, message) => `${to}\u0000${message}`;
+  // Callers key on the resolved actorSessionId (the canonical serialization
+  // target), NOT the display instanceId — a web actor's instanceId is the
+  // constant 'web' for every sender-scoped web actor, so keying on it would
+  // collapse independent actors under one dedupe entry (#8). This helper just
+  // joins its two string args; the first is the actorSessionId at every site.
+  /** @param {string} actorSessionId @param {string} message */
+  const intentKey = (actorSessionId, message) => `${actorSessionId}\u0000${message}`;
   /** @param {string} root @param {string} key */
   const trackIntent = (root, key) => {
     const m = inFlightIntents.get(root) ?? new Map();
@@ -281,7 +286,11 @@ export const makeActorMessaging = (deps) => {
   const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, onReply }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(rootSessionId, actorSessionId);
-    const intentK = intentKey(instanceId, message);
+    // Keyed on actorSessionId, NOT instanceId — must match the live-path track
+    // (a constant 'web' instanceId would alias-collapse sender-scoped web actors;
+    // see the dedupe note in messageActor). clear() untracks with THIS key, so
+    // the track/untrack pair stays symmetric across both paths (#4/#8).
+    const intentK = intentKey(actorSessionId, message);
     // Capture the root's Stop generation NOW — if the user Stops while this turn is
     // queued behind another on the same actor slot, the generation advances and we
     // skip it when the slot finally frees (so Stop reaches queued work, not just the
@@ -311,6 +320,12 @@ export const makeActorMessaging = (deps) => {
       if ((stopGen.get(rootSessionId) ?? 0) !== genAtQueue) {
         if (onReply) onReply(replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true), true);
         clear();
+        // We were handed the idle actor slot but are DECLINING to run a turn
+        // (Stopped after we queued). No claim/release will happen, so nothing
+        // would re-drain the actor's queue — every turn queued behind us would
+        // strand until the next unrelated message to this actor. Hand the slot
+        // to the next queued wake so post-Stop skips cascade to completion.
+        turnSlots.advanceQueue?.(actorSessionId);
         return;
       }
       // Instrumentation (temporary): the actor turn's wall-clock. It spans the
@@ -331,7 +346,7 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void } }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
    *   awaitReply — the SUBAGENT reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'subagent'` sender.
@@ -413,14 +428,21 @@ export const makeActorMessaging = (deps) => {
     if (!actor) {
       return { ok: false, error: `message_actor: no tab-hosted instance found for id '${to}' (use the create/list tools to find one)` };
     }
-    const { instanceId, kind, name } = actor;
+    const { instanceId, kind, name, actorSessionId } = actor;
 
-    // Phase 7 — mechanical dedupe. An IDENTICAL (instance, message) intent
-    // already in flight for this lineage is a double-fire (a parent and its
-    // child both asking, or a loop re-asking): refuse loudly, point at the
-    // in-flight twin. Keyed on the RESOLVED instanceId so two aliases of the
-    // same actor ('web' vs its tabId) can't slip a duplicate through.
-    const intentK = intentKey(instanceId, message);
+    // Phase 7 — mechanical dedupe. An IDENTICAL (actor, message) intent already
+    // in flight for this lineage is a double-fire (a parent and its child both
+    // asking, or a loop re-asking): refuse loudly, point at the in-flight twin.
+    // why keyed on the resolved actorSessionId, not the instanceId: the web
+    // actor's instanceId is the CONSTANT literal 'web' for EVERY sender's own
+    // private, sender-scoped web actor (resolveWebActor keys by ownerChatId =
+    // senderSessionId). Keying on 'web' would alias-collapse two sibling
+    // subagents' INDEPENDENT web actors into one dedupe entry under the shared
+    // root — wrongly refusing the second, which has no channel to observe the
+    // first's reply (#8). actorSessionId is the canonical serialization target:
+    // the SAME for two aliases of one actor ('web' vs its tabId both resolve to
+    // it — still deduped), DISTINCT for two different actors (admitted).
+    const intentK = intentKey(actorSessionId, message);
     if ((inFlightIntents.get(rootSessionId)?.get(intentK) ?? 0) > 0) {
       log('REFUSED', { reason: 'duplicate_intent', senderSessionId, rootSessionId, to: instanceId });
       // why this wording: the in-flight twin may have been sent by a DIFFERENT
@@ -477,12 +499,30 @@ export const makeActorMessaging = (deps) => {
         // "parked forever" failure the timeout exists to prevent. On abort we
         // ALSO stop the actor turn this child was waiting on (stopActorForAwait):
         // it is the child's delegate, so it should die with the child, not run
-        // on orphaned. onReply and onAbort guard each other (first wins; the loser
-        // is a no-op). runEngineDelivery is ALWAYS called so its trackActor/clear
-        // bookkeeping stays symmetric and the mailbox entry is cleaned up even on
-        // abort (its onReply is just a no-op by then).
+        // onReply and onAbort race; the FIRST wins and the loser is a TRUE
+        // no-op. why the `done` guard is load-bearing beyond the resolve: the
+        // abort listener sits on the child's LONG-LIVED signal, so its OWN
+        // wall-clock timeout / cancel can fire onAbort LATE — after a reply
+        // already settled. Ungated, that stale abort would call stopActorForAwait
+        // on an actor this child no longer awaits, and a SHARED engine actor may
+        // be serving a SIBLING by then — bumping the root's Stop generation and
+        // aborting the sibling's turn. Gated, the stale abort returns at once. We
+        // also detach the listener on settle so a subagent making many awaitReply
+        // calls doesn't pile no-op listeners on one signal. runEngineDelivery is
+        // ALWAYS called so its trackActor/clear bookkeeping stays symmetric even
+        // on abort (its onReply just no-ops by then).
         let done = false;
-        const finish = (/** @type {{ text: string, failed: boolean }} */ v) => { if (!done) { done = true; resolve(v); } };
+        const onAbort = () => {
+          if (done) return;                                 // stale abort after the reply → no-op
+          stopActorForAwait(rootSessionId, actor.actorSessionId);
+          finish({ text: replyText(instanceId, kind, name, 'the request was aborted (timeout or cancel) before the actor replied.', true), failed: true });
+        };
+        const finish = (/** @type {{ text: string, failed: boolean }} */ v) => {
+          if (done) return;
+          done = true;
+          try { awaitSignal?.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
+          resolve(v);
+        };
         // Queue the actor turn FIRST — so it captures the current Stop generation
         // BEFORE onAbort bumps it, letting the gen-skip actually cancel a queued turn.
         runEngineDelivery({
@@ -490,10 +530,6 @@ export const makeActorMessaging = (deps) => {
           parentToolUseId: toolUseId, oneShot: oneShot === true,
           onReply: (text, failed) => finish({ text, failed }),
         });
-        const onAbort = () => {
-          stopActorForAwait(rootSessionId, actor.actorSessionId);
-          finish({ text: replyText(instanceId, kind, name, 'the request was aborted (timeout or cancel) before the actor replied.', true), failed: true });
-        };
         if (awaitSignal) {
           if (awaitSignal.aborted) onAbort();               // already aborted → resolve now
           else awaitSignal.addEventListener('abort', onAbort, { once: true });
@@ -571,8 +607,9 @@ export const makeActorMessaging = (deps) => {
       // untrackIntent()s on settle, so a redrained turn that never tracked would
       // decrement — and delete — a DIFFERENT live send's refcount, silently
       // defeating the dedupe guard. Mirror the live path's trackIntent here so
-      // the ref is symmetric. Keyed on the resolved instanceId, as the live path.
-      trackIntent(wakeTarget, intentKey(actor.instanceId, e.message));
+      // the ref is symmetric. Keyed on the resolved actorSessionId, as the live
+      // path (a constant 'web' instanceId would alias-collapse web actors — #8).
+      trackIntent(wakeTarget, intentKey(actor.actorSessionId, e.message));
       // senderSessionId here is the DELIVERY address (deliver() wakes it) and the
       // bookkeeping root on a redrain — for a rerouted entry both are the root.
       runEngineDelivery({ correlationId: e.id, senderSessionId: wakeTarget, rootSessionId: wakeTarget, actor, message: e.message, oneShot: e.oneShot === true });

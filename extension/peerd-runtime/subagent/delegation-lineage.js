@@ -161,3 +161,52 @@ export const messageProvenance = ({ senderSessionId, ancestry = [] }) => {
   path.reverse();                 // root → … → sender
   return { senderSessionId, rootSessionId: path[0], lineagePath: path };
 };
+
+// ── the shell walk — sender-first ancestry from the session store ───────────
+//
+// This is the OTHER half of the gate: it turns session records into the
+// LineageHop[] mayMessageActor/messageProvenance consume, applying the
+// fail-closed trust rules. It lives here (not inlined in the SW) so those rules
+// — the linchpin of the whole trusted-lineage defense — are unit-tested, not
+// only exercised through a hand-built mock. The imperative shell
+// (service-worker.js getAncestry) injects getRecord = sessions.get; the walk
+// itself reads values only.
+
+/**
+ * Walk a sender's ancestry (sender-first toward the root) via an injected record
+ * lookup, producing the LineageHop chain the gate reads. Every rule is
+ * fail-closed:
+ *   - a ROOT (no parentSessionId) is trusted — nothing spawned it.
+ *   - a spawned hop is trusted ONLY when `record.spawnedTrusted === true`; a
+ *     missing or non-true field (a pre-#134 record, or an inbound-spawned child)
+ *     is UNtrusted and taints its subtree.
+ *   - an unknown session (getRecord → null) ENDS the chain, so a broken/forged
+ *     chain never reaches the active root and the gate refuses.
+ *   - a hop cap (default 32) and a cycle guard bound the walk against a corrupt
+ *     or adversarial parent chain.
+ *
+ * @param {Object} req
+ * @param {string} req.sessionId  the sender to start from
+ * @param {(id: string) => Promise<{ parentSessionId?: string | null, spawnedTrusted?: boolean } | null | undefined>} req.getRecord
+ * @param {number} [req.maxHops=32]
+ * @returns {Promise<LineageHop[]>}  sender-first hops
+ */
+export const buildAncestry = async ({ sessionId, getRecord, maxHops = 32 }) => {
+  /** @type {LineageHop[]} */
+  const hops = [];
+  const seen = new Set();
+  let cursor = /** @type {string | null} */ (sessionId);
+  while (cursor && !seen.has(cursor) && hops.length < maxHops) {
+    seen.add(cursor);
+    const record = await getRecord(cursor);
+    if (!record) break;                 // unknown session → chain ends; the gate fails closed
+    const parentSessionId = record.parentSessionId ?? null;
+    hops.push({
+      sessionId: cursor,
+      parentSessionId,
+      spawnedTrusted: parentSessionId ? record.spawnedTrusted === true : true,
+    });
+    cursor = parentSessionId;
+  }
+  return hops;
+};

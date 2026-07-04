@@ -7,6 +7,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSpawnSubagent, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from '../../extension/peerd-runtime/subagent/spawn.js';
 import { makeActorMessaging } from '../../extension/peerd-runtime/subagent/actor-messaging.js';
+import { buildAncestry } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
 import { makeTurnSlots } from '../../extension/peerd-runtime/loop/turn-slots.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -381,6 +382,47 @@ describe('message_actor — the trusted-lineage sender gate (phase 3)', () => {
   });
 });
 
+describe('message_actor — the stamp→walk→gate contract, end to end (no mocked seam) (#6)', () => {
+  // Findings #5/#6: every OTHER gate test injects a hand-built ancestry, so the
+  // stamp↔read contract (spawn.js WRITES spawnedTrusted; buildAncestry READS it
+  // and applies the fail-closed default) is never exercised as one wire. Here a
+  // REAL spawn persists the child, a REAL buildAncestry walks that store, and the
+  // REAL gate decides — so a drift in the field name or the default breaks a test.
+  const wire = async (parentInbound: boolean | undefined) => {
+    const store = makeStore();
+    const root = await store.create({});                       // s-1 — the active chat
+    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop()) as any);
+    const child = await spawn({
+      task: 'go', tools: [], parentSessionId: root.sessionId,
+      ...(parentInbound === undefined ? {} : { parentInbound }),
+    });
+    const { messageActor } = gateHarness({
+      getActiveSessionId: async () => root.sessionId,
+      // the REAL walk over the REAL store the spawn just wrote into
+      getAncestry: (sessionId: string) => buildAncestry({ sessionId, getRecord: store.get }),
+    });
+    return { messageActor, childId: child.sessionId as string };
+  };
+
+  test('a child spawned by a TRUSTED (non-inbound) turn is admitted through the real walk', async () => {
+    const { messageActor, childId } = await wire(false);
+    const r = await messageActor({ to: 'app-1', message: 'do it', senderSessionId: childId, inbound: false });
+    expect(r.ok).toBe(true);
+  });
+
+  test('a child spawned by an INBOUND turn is refused through the real walk (laundering hole stays shut)', async () => {
+    const { messageActor, childId } = await wire(true);
+    const r = await messageActor({ to: 'app-1', message: 'do it', senderSessionId: childId, inbound: false });
+    expect(r.ok).toBe(false);
+  });
+
+  test('a child of an UNKNOWN-verdict spawn (fail-closed default) is refused through the real walk', async () => {
+    const { messageActor, childId } = await wire(undefined);   // no parentInbound → tainted
+    const r = await messageActor({ to: 'app-1', message: 'do it', senderSessionId: childId, inbound: false });
+    expect(r.ok).toBe(false);
+  });
+});
+
 describe('message_actor — root-keyed budgets (phase 4)', () => {
   test('a subagent\'s sends draw from its ROOT\'s rate budget (one bound per delegation tree)', async () => {
     const { messageActor } = gateHarness({
@@ -416,6 +458,29 @@ describe('message_actor — root-keyed budgets (phase 4)', () => {
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain('stopped');
   });
+
+  test('the post-Stop gen-skip hands the actor slot on (advanceQueue) so the queue is not stranded', async () => {
+    // The gen-skip branch DECLINES to run a turn, so no claim/release re-drains
+    // the actor's queue. It must call turnSlots.advanceQueue to keep the pump
+    // going, or every turn queued behind it strands until an unrelated message.
+    const queued: Array<() => void> = [];
+    const advanced: string[] = [];
+    const { messageActor, stopActorsFor } = gateHarness({
+      getAncestry: ancestryOf(trustedChild),
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); },
+        advanceQueue: (sid: string) => { advanced.push(sid); },
+      } as any,
+    });
+    const pending = messageActor({ to: 'app-1', message: 'go', senderSessionId: 'sub-1', inbound: false, awaitReply: true });
+    await tick();
+    stopActorsFor('chat-1');       // Stop the root before the queued turn runs
+    queued.forEach((fn) => fn());  // drain → the queued turn hits the gen-skip
+    const r = await pending;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toContain('stopped');
+    expect(advanced).toContain('res-1');   // the declining skip advanced the actor's queue
+  });
 });
 
 describe('message_actor — mechanical dedupe (phase 7)', () => {
@@ -434,6 +499,68 @@ describe('message_actor — mechanical dedupe (phase 7)', () => {
     await tick();
     // Settled → the same intent may be sent again.
     expect((await messageActor({ to: 'app-1', message: 'same ask', senderSessionId: 'chat-1' })).ok).toBe(true);
+  });
+
+  test('MED-7 — the SAME intent from a DIFFERENT root is admitted (dedupe is per-tree, no false positive)', async () => {
+    // The dedupe key is (rootSessionId, instance+message): a parent and its child
+    // (one tree) asking the same thing collapses, but two UNRELATED lineage trees
+    // must never suppress each other. Real case: two foreground conversations both
+    // driving one shared actor. Model it by flipping the active chat between sends —
+    // each roots at its OWN chat, so both identical intents must go through.
+    const queued: Array<() => void> = [];
+    let active = 'chat-1';
+    const { messageActor, turnsRun } = gateHarness({
+      getActiveSessionId: async () => active,
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); } },
+    });
+    // Tree A (root chat-1) sends and stays in flight (held in the queue).
+    expect((await messageActor({ to: 'app-1', message: 'reprice', senderSessionId: 'chat-1' })).ok).toBe(true);
+    // A SECOND, unrelated tree (root chat-2) sends the identical intent to the same
+    // actor while A is still in flight. Different root → different intent bucket → admitted.
+    active = 'chat-2';
+    const other = await messageActor({ to: 'app-1', message: 'reprice', senderSessionId: 'chat-2' });
+    expect(other.ok).toBe(true);
+    expect(other.error).toBeUndefined();
+    // Control: the SAME tree re-asking IS still a duplicate (the guard didn't just go slack).
+    const dupSameTree = await messageActor({ to: 'app-1', message: 'reprice', senderSessionId: 'chat-2' });
+    expect(dupSameTree.ok).toBe(false);
+    expect(dupSameTree.error).toContain('identical request');
+    // Both distinct-tree sends reached the actor once each.
+    queued.forEach((fn) => fn());
+    await tick();
+    expect(turnsRun.length).toBe(2);
+  });
+
+  test('#8 — two sibling subagents\' independent web actors do NOT alias-collapse under the shared root', async () => {
+    // The web actor is SENDER-scoped: resolveWebActor keys by ownerChatId =
+    // senderSessionId, so each subagent gets its OWN actorSession — yet all share
+    // the constant instanceId 'web'. Keying dedupe on instanceId would collapse
+    // two siblings' independent web actors into one entry under their shared root,
+    // wrongly refusing the second (which has no channel to observe the first's
+    // reply). Keying on the resolved actorSessionId keeps them distinct.
+    const queued: Array<() => void> = [];
+    const { messageActor, turnsRun } = gateHarness({
+      getActiveSessionId: async () => 'chat-1',
+      getAncestry: async (sid: string) => [{ sessionId: sid, parentSessionId: 'chat-1', spawnedTrusted: true }],
+      resolveActor: async (to: string, opts: any) =>
+        to === 'web'
+          ? { instanceId: 'web', kind: 'web', actorSessionId: `web-${opts?.senderSessionId}`, tabId: undefined }
+          : null,
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); } },
+    });
+    // S1 and S2 (siblings, shared root chat-1) each drive their OWN web actor with
+    // the identical message. Under the old instanceId keying both keyed on 'web' → S2 refused.
+    const r1 = await messageActor({ to: 'web', message: 'get BTC price', senderSessionId: 'sub-1', inbound: false });
+    const r2 = await messageActor({ to: 'web', message: 'get BTC price', senderSessionId: 'sub-2', inbound: false });
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);                 // the fix: S2's own web actor is NOT alias-collapsed
+    // Control: the SAME subagent re-sending the SAME intent to ITS web actor IS still deduped.
+    const dup = await messageActor({ to: 'web', message: 'get BTC price', senderSessionId: 'sub-1', inbound: false });
+    expect(dup.ok).toBe(false);
+    expect(dup.error).toContain('identical request');
+    queued.forEach((fn) => fn());
+    await tick();
+    expect(turnsRun.length).toBe(2);          // both independent web actors ran
   });
 });
 
@@ -490,6 +617,30 @@ describe('message_actor — the subagent awaitReply mode', () => {
     });
     expect(r.ok).toBe(false);
     expect(stopped).toContain('res-1');
+  });
+
+  test('a STALE abort AFTER the reply settled does NOT stop the (possibly shared) actor (#HIGH-1)', async () => {
+    // The child got its reply; its abort listener is still on its long-lived
+    // signal, and its OWN wall-clock timeout / cancel fires LATER. That stale
+    // abort must be a no-op — a shared engine actor may be serving a SIBLING by
+    // then, and stopping it (or bumping the root's Stop gen) is collateral.
+    const stopped: string[] = [];
+    const controller = new AbortController();
+    const { messageActor } = gateHarness({
+      getAncestry: ancestryOf(trustedChild),
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => fn(),   // the reply resolves
+        stop: (id: string) => { stopped.push(id); return true; },
+      } as any,
+    });
+    const r = await messageActor({
+      to: 'app-1', message: 'go', senderSessionId: 'sub-1', inbound: false,
+      awaitReply: true, awaitSignal: controller.signal,
+    });
+    expect(r.ok).toBe(true);          // got its reply
+    controller.abort();               // the child's later timeout / cancel fires the stale abort
+    await tick();
+    expect(stopped).toEqual([]);      // NOT stopped — the stale abort was a no-op
   });
 
   test('a failed actor turn resolves ok:false with the fenced error', async () => {

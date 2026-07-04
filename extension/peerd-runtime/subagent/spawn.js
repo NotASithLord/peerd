@@ -567,33 +567,42 @@ export const makeSpawnSubagent = (deps) => {
     /** @param {object} modelArgs */
     const cappedCallModel = (modelArgs) => callModel({ ...modelArgs, maxTokens: maxOutputTokens });
 
-    // Announce the child up-front so the side panel can map the parent's
-    // tool card → this session id and render live, before any loop event.
-    onEvent?.({ type: 'subagent-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
-
-    let toolCalls = 0;
-    let lastStopReason;
     // why: the child's model usage is yielded as 'usage' events but is NOT
     // folded into the parent/main turn tally (the main SW only accumulates its
     // OWN session's usage). That means subagent spend is naturally SEPARATE from
     // main-agent spend (the main context stays clean). We sum it here so the
     // child's token cost is at least VISIBLE to the caller (eval telemetry /
-    // success criterion 5), without polluting main.
+    // success criterion 5), without polluting main. These counters are read
+    // AFTER the finally, so they live in the outer scope.
+    let toolCalls = 0;
+    let lastStopReason;
     const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-    const start = now();
-    // Heap split: EVERY child runs its loop in a dedicated offscreen Worker — its
-    // own heap, no key, no chrome.*, no egress. A tool-LESS child (phase 1) only
-    // relays its model call; a tool-BEARING child (phase 4) also relays each tool
-    // call to the SW, which rebuilds the child's restricted ctx from the persisted
-    // grantedTools and dispatches there (so js_run and friends run from the child's
-    // own heap, keyless). Falls back to the in-SW loop when offscreen isn't wired
-    // (Firefox), when the prompt renderer is absent, or when the offscreen run
-    // HARD-fails to start (a normal completion, even error/abort, does NOT fall back
-    // — that would double-run).
-    const canRunOffscreen = typeof runChildOffscreen === 'function'
-      && typeof renderSystemPromptForChild === 'function';
+    let start = 0;
     let ranOffscreen = false;
+    // MED-3: the slot is CLAIMED, the child REGISTERED, and the wall-clock timer
+    // ARMED above — three resources the finally below is the sole releaser of.
+    // So the try must open HERE, before anything else that can throw. In
+    // particular the subagent-start emit calls an external onEvent forwarder;
+    // when that threw (it sat outside the try before), the timer, slot, and
+    // registration all leaked — a stuck slot blocks the session forever and the
+    // orphan timer later aborts a REUSED controller. Everything downstream of the
+    // resource acquisition now runs guarded.
     try {
+      start = now();
+      // Announce the child up-front so the side panel can map the parent's
+      // tool card → this session id and render live, before any loop event.
+      onEvent?.({ type: 'subagent-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
+      // Heap split: EVERY child runs its loop in a dedicated offscreen Worker — its
+      // own heap, no key, no chrome.*, no egress. A tool-LESS child (phase 1) only
+      // relays its model call; a tool-BEARING child (phase 4) also relays each tool
+      // call to the SW, which rebuilds the child's restricted ctx from the persisted
+      // grantedTools and dispatches there (so js_run and friends run from the child's
+      // own heap, keyless). Falls back to the in-SW loop when offscreen isn't wired
+      // (Firefox), when the prompt renderer is absent, or when the offscreen run
+      // HARD-fails to start (a normal completion, even error/abort, does NOT fall back
+      // — that would double-run).
+      const canRunOffscreen = typeof runChildOffscreen === 'function'
+        && typeof renderSystemPromptForChild === 'function';
       if (canRunOffscreen) {
         const systemPrompt = await renderSystemPromptForChild(task);
         const r = await runChildOffscreen({

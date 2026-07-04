@@ -227,7 +227,7 @@ import {
   makeAsyncSubagents,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
-  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors,
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -3073,32 +3073,14 @@ const actorMessaging = makeActorMessaging({
   reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
-  // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. Builds
-  // the sender-first LineageHop chain by following parentSessionId up the
-  // session store. spawnedTrusted per hop: a ROOT (no parent) is trusted by
-  // construction (nothing spawned it); a PARENTED record must carry an
-  // explicit true — records written before the field existed read as
+  // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. The pure
+  // walk (fail-closed rules + hop cap + cycle guard) lives in delegation-lineage
+  // so it's unit-tested; here we only inject the store read. spawnedTrusted per
+  // hop: a ROOT (no parent) is trusted by construction; a PARENTED record must
+  // carry an explicit true — records written before the field existed read as
   // untrusted (fail-closed; those children never had delegation anyway).
-  // Hop cap far above MAX_DEPTH: purely an anti-hang bound on corrupt data.
-  getAncestry: async (/** @type {string} */ sessionId) => {
-    /** @type {Array<{ sessionId: string, parentSessionId: string | null, spawnedTrusted: boolean }>} */
-    const hops = [];
-    let cursor = /** @type {string | null} */ (sessionId);
-    const seen = new Set();
-    for (let i = 0; i < 32 && cursor && !seen.has(cursor); i++) {
-      seen.add(cursor);
-      const record = await sessions.get(cursor);
-      if (!record) break; // unknown session → chain ends; the gate fails closed
-      const parentSessionId = record.parentSessionId ?? null;
-      hops.push({
-        sessionId: cursor,
-        parentSessionId,
-        spawnedTrusted: parentSessionId ? record.spawnedTrusted === true : true,
-      });
-      cursor = parentSessionId;
-    }
-    return hops;
-  },
+  getAncestry: (/** @type {string} */ sessionId) =>
+    buildAncestry({ sessionId, getRecord: (/** @type {string} */ id) => sessions.get(id) }),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),

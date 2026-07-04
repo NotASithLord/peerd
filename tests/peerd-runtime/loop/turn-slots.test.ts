@@ -119,6 +119,47 @@ describe('makeTurnSlots', () => {
     expect(order).toEqual([1, 2]);
     expect(slots.isBusy('a')).toBe(false);
   });
+
+  // advanceQueue — a wake that DECLINES to start a turn (the post-Stop gen-skip
+  // in actor-messaging) hands the idle slot on, so the queue behind it doesn't
+  // strand. Without this, a skipped wake never claims/releases and every wake
+  // queued behind it waits for an unrelated future turn.
+  test('advanceQueue drains the next wake when a wake DECLINES to start a turn', () => {
+    const slots = makeTurnSlots();
+    const live = slots.claim('a');                 // an actor turn in flight
+    const order: number[] = [];
+    slots.runWhenIdle('a', () => { order.push(1); slots.advanceQueue('a'); }); // declines → advances
+    slots.runWhenIdle('a', () => { order.push(2); });                          // must still run
+    expect(order).toEqual([]);                      // both deferred behind the live turn
+    live.release();                                 // live ends → wake 1 declines + advances
+    expect(order).toEqual([1, 2]);                  // wake 2 drained though wake 1 never claimed
+    expect(slots.isBusy('a')).toBe(false);
+  });
+
+  test('a chain of consecutive decliners all drain, stopping at the first that starts a turn', () => {
+    const slots = makeTurnSlots();
+    const live = slots.claim('a');
+    const order: number[] = [];
+    let realTurn: { release: () => void } | undefined;
+    slots.runWhenIdle('a', () => { order.push(1); slots.advanceQueue('a'); });        // decline
+    slots.runWhenIdle('a', () => { order.push(2); slots.advanceQueue('a'); });        // decline
+    slots.runWhenIdle('a', () => { order.push(3); realTurn = slots.claim('a'); });    // starts a turn
+    slots.runWhenIdle('a', () => { order.push(4); });                                 // waits behind it
+    live.release();
+    expect(order).toEqual([1, 2, 3]);               // 1,2 declined; 3 claimed → 4 held
+    expect(slots.isBusy('a')).toBe(true);
+    realTurn!.release();
+    expect(order).toEqual([1, 2, 3, 4]);            // 3's turn ends → 4 drains
+  });
+
+  test('advanceQueue is a no-op while a turn holds the slot (never jumps the queue)', () => {
+    const slots = makeTurnSlots();
+    slots.claim('a');
+    let ran = false;
+    slots.runWhenIdle('a', () => { ran = true; });
+    slots.advanceQueue('a');                         // slot held → must not run the queued wake
+    expect(ran).toBe(false);
+  });
 });
 
 describe('makeTurnSlots — onAbort (decline parked confirms on abort)', () => {
