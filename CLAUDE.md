@@ -357,6 +357,20 @@ gotchas to know going in:
   dwapp bridge (it builds p2p dwapps that users and agents both use).
   Preview-channel only (the store package prunes the module and CI
   verifies zero dweb traces). See the `peerd-distributed/` code.
+- The **dweb actor** — a fifth bound-actor kind (`actorType:'dweb'`) and the
+  first DAEMON actor: an opt-in (`dwebAgentEnabled`, preview-only, default
+  off), persistent, GLOBAL singleton addressable as `message_actor("dweb",…)`.
+  It ABSORBS the dweb tools (they leave the orchestrator unconditionally —
+  `mainAgentDescriptors` drops them by name + the tier gate refuses them for
+  any non-actor ctx), runs keyless in the same offscreen heap as every actor,
+  and MONITORS inbound mesh traffic: peers reach it on the reserved
+  `peerd-agent` room, whose `direct` events wake it as fenced, INBOUND
+  (untrusted) turns — the sender gate means an inbound message can never make
+  it delegate. Rate-capped (3/min per did, 30/hr global) before any model
+  call; notable findings trickle up to the active chat as an attributed
+  actor-reply bubble (runWhenIdle — never steals a live turn). The envoy for
+  agent-to-agent over the mesh: "a peer's agent" is just an actor whose heap
+  is on another machine.
 
 **Still ahead** (backlog — not version-pinned. Don't front-run; let each
 land with deliberate design work):
