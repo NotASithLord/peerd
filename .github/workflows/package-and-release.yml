@@ -331,22 +331,17 @@ jobs:
             update-feeds/chrome-preview.xml
             update-feeds/firefox-preview.json
           )
+          # Notes come from the tag's CHANGELOG.md section (same helper the
+          # local release path uses). A missing section fails the job here,
+          # so a release is never published with boilerplate notes.
+          bun packaging/release-notes.ts --version="${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "release $GITHUB_REF_NAME exists — re-uploading assets"
             gh release upload "$GITHUB_REF_NAME" --clobber "${ASSETS[@]}"
           else
             gh release create "$GITHUB_REF_NAME" \
               --title "peerd-preview-$GITHUB_REF_NAME" \
-              --notes "peerd preview $GITHUB_REF_NAME — peerd with the decentralized web (dweb) preview enabled.
-
-          The dweb protocol is research-grade and may change. Most users want the store packages (see the README's Install section).
-
-          | artifact | install |
-          |---|---|
-          | peerd-preview-firefox.xpi | Firefox — click to install (recommended path) |
-          | peerd-preview-chrome.crx | Chrome — drag into chrome://extensions (developer mode) |
-
-          Store-channel artifacts for this version are produced by the same CI run and submitted to Chrome Web Store / AMO separately; store review lag is expected." \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
               "${ASSETS[@]}"
           fi
 
