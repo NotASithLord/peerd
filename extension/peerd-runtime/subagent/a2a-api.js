@@ -8,7 +8,7 @@
 // drives the mesh by WRITING JS against a `mesh` client (mesh.peers/card/ask/
 // send/publishCard/inbox), and THIS pure core maps each call to a gated mesh OP
 // and shapes the reply back. We RHYME with A2A's DATA MODEL (the Agent Card,
-// message shape — see peerd-distributed/agent-card.js) so future interop with a
+// message shape — see the dweb agent-card module) so future interop with a
 // non-peerd A2A agent is a thin adapter; we REJECT A2A's HTTP+SSE transport (the
 // mesh is the transport, did:key is the address, the fenced inbound-wake is the
 // stream).
@@ -26,7 +26,7 @@ export class MeshApiError extends Error {
 }
 
 /** A did:key is the peer address (replaces A2A's HTTP url). Light shape check only —
- * the authoritative decode is peerd-distributed/identity. @param {unknown} v */
+ * the authoritative decode lives in the dweb identity module. @param {unknown} v */
 const isDid = (v) => typeof v === 'string' && v.startsWith('did:key:') && v.length > 12;
 
 /** @param {unknown} v @param {string} what */
