@@ -94,7 +94,20 @@ does not need the WebVM. The price list, if triggered:
 - an offscreen-document equivalent (Firefox MV3 event pages can host workers
   directly — tractable refactor, M),
 - a BiDi/Marionette boot-and-provision harness (S/M),
-- no WebVM (permanent, platform-level),
+- no WebVM on extension pages until Mozilla ships extension-page isolation
+  (Bugzilla 1673477 — worth voting with the CheerpX use case). The one real
+  workaround is re-hosting the VM runtime on a COOP/COEP-serving static web
+  origin (the `peerd-site` VM-demo precedent proves CheerpX runs fine in
+  Firefox *web pages* — the gap is extension pages only) bridged back over a
+  content script, since Firefox lacks `externally_connectable`. That is an
+  L-effort fork with real costs: a new web-content trust seam, storage moving
+  to the web origin, and the feature depending on static hosting. Non-fixes,
+  checked: SW header injection (extension pages can't be SW-controlled),
+  iframe opt-in (COI is top-level-only), single-threaded CheerpX (no such
+  mode). A managed fleet could pref-force SAB
+  (`dom.postMessage...bypassCOOP_COEP.insecure.enabled`) + relax the
+  `vm-tab.js` isolation gate — dev/managed-only, insecure by its own name,
+  never shippable to AMO users,
 - synthetic-only page input on trusted-input-sensitive sites.
 
 ## Decisions for @NotASithLord
