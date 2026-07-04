@@ -58,6 +58,7 @@ const main = () => {
   run('typecheck coverage floor', 'bun', ['run', 'check:tscheck']);
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
+  run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
   run('bun tests', 'bun', ['test', './tests']);
   if (args.matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);
