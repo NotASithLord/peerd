@@ -10,6 +10,17 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Fixed
+- **The global instance reads are now fenced.** `js_read_file` and
+  `app_read_file` stay on the orchestrator (cheap inspection without an actor
+  turn), but their content comes back inside the `wrapUntrusted` fence: an
+  instance file is not reliably agent-authored — notebook/app code fetches and
+  persists web data — so an unfenced read was the one remaining laundering
+  path for untrusted bytes into the orchestrator's trusted context. `js_run`
+  gets the matching treatment: a pure-compute run's output stays raw (own
+  code), but a run that called `peerd.egress.fetch` has its value, console,
+  and error text fenced.
+
 ### Added
 - **Actor replies now surface in the chat as their own messages.** When a
   delegated actor (web / WebVM / Notebook / App) replies, the reply appears at
