@@ -189,17 +189,30 @@ export const makeActorMessaging = (deps) => {
     return actorsFor(root);
   };
 
+  // Cancellation scoped to ONE delivery (by correlationId) — what a subagent's
+  // awaitReply abort uses (#1/#3). why not the root Stop generation: a gen bump
+  // is ROOT-wide, so one child's timeout/cancel would gen-skip a SIBLING's
+  // distinct queued turn under the same root (and turnSlots.stop unconditionally
+  // would abort whatever is running on the shared actor — possibly the sibling's
+  // turn). The user's Stop (stopActorsFor) keeps the gen bump because tree-wide
+  // IS its semantics; a child's abort must kill only its OWN delegate.
+  /** @type {Set<string>} correlationIds whose queued delivery must skip */
+  const cancelledDeliveries = new Set();
+  /** @type {Map<string, string>} actorSessionId → correlationId of the turn NOW running on it */
+  const runningOnActor = new Map();
+
   // Stop the ONE actor turn a subagent's awaitReply was waiting on, when that
-  // subagent aborts (#1/#3). Bump the lineage's Stop generation so a still-
-  // QUEUED actor turn skips when its slot frees, and abort a RUNNING one via
-  // turnSlots.stop (optional — the pure-heap test harness injects no stop; the
-  // await resolves either way). Scoped to the single actorSessionId the child
-  // delegated to, not the whole lineage, so a sibling's in-flight actor is
-  // untouched.
-  /** @param {string} root @param {string} actorSessionId */
-  const stopActorForAwait = (root, actorSessionId) => {
-    stopGen.set(root, (stopGen.get(root) ?? 0) + 1);
-    /** @type {{ stop?: (id: string) => boolean }} */ (turnSlots).stop?.(actorSessionId);
+  // subagent aborts. A still-QUEUED delivery is marked cancelled (it skips when
+  // the slot frees); a RUNNING one is slot-aborted ONLY when the running turn is
+  // this delivery's own (runningOnActor match) — a sibling's turn on the same
+  // shared actor is never collateral. turnSlots.stop is optional (the pure-heap
+  // test harness injects no stop; the await resolves either way).
+  /** @param {string} correlationId @param {string} actorSessionId */
+  const stopActorForAwait = (correlationId, actorSessionId) => {
+    cancelledDeliveries.add(correlationId);
+    if (runningOnActor.get(actorSessionId) === correlationId) {
+      /** @type {{ stop?: (id: string) => boolean }} */ (turnSlots).stop?.(actorSessionId);
+    }
   };
 
   /** @param {string} root */
@@ -300,6 +313,13 @@ export const makeActorMessaging = (deps) => {
       decInFlight(rootSessionId);
       untrackActor(rootSessionId, actorSessionId);
       untrackIntent(rootSessionId, intentK);
+      // Self-scoped, like a turn-slot release: the next queued turn may have
+      // already stamped itself onto the actor before this settle unwinds.
+      if (runningOnActor.get(actorSessionId) === correlationId) runningOnActor.delete(actorSessionId);
+      // An abort that fired while this turn was RUNNING added the correlation to
+      // the cancelled set after the queued-wake check had already passed — drop
+      // it on settle so the set never grows past the in-flight deliveries.
+      cancelledDeliveries.delete(correlationId);
       mailbox.remove(correlationId).catch(() => {});
     };
     // ONE reply seam for both modes (see routing note above).
@@ -313,11 +333,14 @@ export const makeActorMessaging = (deps) => {
     // failed actor turn STILL wakes the sender (with an error notice) so the
     // caller is never left hanging.
     turnSlots.runWhenIdle(actorSessionId, () => {
-      // Stopped after we queued → don't start the turn. A woken sender would
-      // re-start unwanted post-Stop activity, so the wake path stays silent —
-      // but an AWAITING caller (onReply) must still resolve, or its tool call
-      // would hang past the Stop that was meant to end it.
-      if ((stopGen.get(rootSessionId) ?? 0) !== genAtQueue) {
+      // Stopped after we queued → don't start the turn. Two cancel signals land
+      // here: the user's tree-wide Stop (the root's generation advanced) and the
+      // awaiting subagent's own abort (THIS delivery marked cancelled — never a
+      // sibling's). A woken sender would re-start unwanted post-Stop activity,
+      // so the wake path stays silent — but an AWAITING caller (onReply) must
+      // still resolve, or its tool call would hang past the Stop/abort that was
+      // meant to end it.
+      if ((stopGen.get(rootSessionId) ?? 0) !== genAtQueue || cancelledDeliveries.has(correlationId)) {
         if (onReply) onReply(replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true), true);
         clear();
         // We were handed the idle actor slot but are DECLINING to run a turn
@@ -335,6 +358,10 @@ export const makeActorMessaging = (deps) => {
       // result, which (with the orchestrator's own turn) is the two-inference cost
       // a simple "run X and report" pays over running it inline.
       const turnStartedAt = now();
+      // Stamp WHOSE delivery now runs on this actor, so an awaitReply abort can
+      // tell "my own turn is running (stop the slot)" from "a sibling's is
+      // (leave it alone)". Cleared self-scoped in clear().
+      runningOnActor.set(actorSessionId, correlationId);
       Promise.resolve(runActorTurn({ actorSessionId, message, actorTabId: tabId, instanceId, kind, parentToolUseId, name, oneShot }))
         .then((res) => {
           log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
@@ -497,24 +524,24 @@ export const makeActorMessaging = (deps) => {
         // await on their own. Without the race, a hung/queued actor turn parks
         // the child, its slot, and its parent's await indefinitely — the exact
         // "parked forever" failure the timeout exists to prevent. On abort we
-        // ALSO stop the actor turn this child was waiting on (stopActorForAwait):
-        // it is the child's delegate, so it should die with the child, not run
-        // onReply and onAbort race; the FIRST wins and the loser is a TRUE
-        // no-op. why the `done` guard is load-bearing beyond the resolve: the
-        // abort listener sits on the child's LONG-LIVED signal, so its OWN
-        // wall-clock timeout / cancel can fire onAbort LATE — after a reply
-        // already settled. Ungated, that stale abort would call stopActorForAwait
-        // on an actor this child no longer awaits, and a SHARED engine actor may
-        // be serving a SIBLING by then — bumping the root's Stop generation and
-        // aborting the sibling's turn. Gated, the stale abort returns at once. We
-        // also detach the listener on settle so a subagent making many awaitReply
-        // calls doesn't pile no-op listeners on one signal. runEngineDelivery is
-        // ALWAYS called so its trackActor/clear bookkeeping stays symmetric even
-        // on abort (its onReply just no-ops by then).
+        // ALSO cancel the actor turn this child was waiting on (stopActorForAwait):
+        // it is the child's delegate, so it should die with the child — scoped by
+        // CORRELATION, so a sibling's distinct queued/running turn on the same
+        // shared actor is never collateral. onReply and onAbort race; the FIRST
+        // wins and the loser is a TRUE no-op. why the `done` guard is load-bearing
+        // beyond the resolve: the abort listener sits on the child's LONG-LIVED
+        // signal, so its OWN wall-clock timeout / cancel can fire onAbort LATE —
+        // after a reply already settled. Ungated, that stale abort would mark a
+        // settled correlation cancelled (a set entry nothing would ever clean).
+        // Gated, the stale abort returns at once. We also detach the listener on
+        // settle so a subagent making many awaitReply calls doesn't pile no-op
+        // listeners on one signal. runEngineDelivery is ALWAYS called so its
+        // trackActor/clear bookkeeping stays symmetric even on abort (its onReply
+        // just no-ops by then).
         let done = false;
         const onAbort = () => {
           if (done) return;                                 // stale abort after the reply → no-op
-          stopActorForAwait(rootSessionId, actor.actorSessionId);
+          stopActorForAwait(correlationId, actor.actorSessionId);
           finish({ text: replyText(instanceId, kind, name, 'the request was aborted (timeout or cancel) before the actor replied.', true), failed: true });
         };
         const finish = (/** @type {{ text: string, failed: boolean }} */ v) => {
@@ -523,8 +550,10 @@ export const makeActorMessaging = (deps) => {
           try { awaitSignal?.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
           resolve(v);
         };
-        // Queue the actor turn FIRST — so it captures the current Stop generation
-        // BEFORE onAbort bumps it, letting the gen-skip actually cancel a queued turn.
+        // Queue the actor turn FIRST — so the delivery's bookkeeping (trackActor,
+        // and the runningOnActor stamp if the idle slot runs it synchronously)
+        // exists before onAbort consults it: an already-aborted signal then either
+        // marks the still-queued delivery cancelled or stops its own running turn.
         runEngineDelivery({
           correlationId, senderSessionId: sender, rootSessionId, actor, message,
           parentToolUseId: toolUseId, oneShot: oneShot === true,
