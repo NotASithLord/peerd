@@ -76,6 +76,8 @@ let reasoningState = { spawned: 0, childCalls: 0 };
 let subagentToolsState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: an offscreen subagent DELEGATING to its own web actor.
 let subagentDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
+// heap-split phase 4: an offscreen subagent BUILDING an app (create + delegate).
+let subagentAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
 // An order page served over localhost. The order lines are ANCHOR text so the
@@ -694,6 +696,65 @@ export const STATES = [
       rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
       rec.check('the web reply round-tripped up through the subagent into the final answer', (out.bubbles || []).includes('FINAL-VIA-SUBAGENT'));
       rec.check('the turn settles idle', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: an offscreen subagent BUILDS an app (create + delegate) ------
+  // Heap-split phase 4, the create-then-delegate chain. A subagent is asked to build
+  // an app. App-mutating tools (app_write_file) are actor-only, so the correct pattern
+  // — for a subagent exactly as for the main agent — is app_create, then message_actor
+  // the created app's actor to write the files. This proves: the subagent's tool RESULT
+  // (the new app id) re-enters its own heap correctly, and it can delegate to a freshly-
+  // created instance's actor, which mints, runs offscreen, and writes.
+  {
+    name: 'subagent-builds-app', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      // APP ACTOR (owns the created app; holds app_write_file).
+      if (body.includes('client-side App builder') || body.includes('Your App is a multi-file artifact')) {
+        subagentAppState.appCalls += 1;
+        if (subagentAppState.appCalls === 1) return { sse: sseToolCall('app_write_file', { path: 'index.html', content: '<!DOCTYPE html><body>REAL LAVA LAMP</body>' }) };
+        return { sse: sseText('APP-ACTOR-WROTE') };
+      }
+      // SUBAGENT (ephemeral): create, capture the app id from the result, delegate.
+      if (body.includes('You are an EPHEMERAL ACTOR')) {
+        subagentAppState.childCalls += 1;
+        if (subagentAppState.childCalls === 1) return { sse: sseToolCall('app_create', { name: 'Lava', files: { 'index.html': '<!-- placeholder -->' } }) };
+        if (!subagentAppState.appId) { const m = body.match(/app-[a-z0-9]+-[a-z0-9]+/); if (m) subagentAppState.appId = m[0]; }
+        if (subagentAppState.childCalls === 2) return { sse: sseToolCall('message_actor', { to: subagentAppState.appId || 'app-unknown', message: 'write the real lava lamp code into index.html' }) };
+        return { sse: sseText('CHILD-BUILT-APP') };
+      }
+      // ORCHESTRATOR — spawn a DEFAULT-toolset subagent (tools omitted) to build.
+      if (subagentAppState.spawned === 0) {
+        subagentAppState.spawned += 1;
+        return { sse: sseToolCall('spawn_subagent', { task: 'build a lava lamp app', sync: true }) };
+      }
+      return { sse: sseText('FINAL-APP-BUILT') };
+    },
+    async run(ctx, rec) {
+      subagentAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'spawn a subagent to build a lava lamp app' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-APP-BUILT') && !out.busy;
+      }, { budgetMs: 45_000 });
+
+      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 1000 });
+      const entries = (audit && audit.entries) || [];
+      const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
+      const appWriteRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'app_write_file');
+      // the app id came back into the subagent's heap → it could delegate to that exact app
+      rec.check("the subagent's app_create result (the new app id) re-entered its heap", typeof subagentAppState.appId === 'string' && subagentAppState.appId.startsWith('app-'), `appId=${subagentAppState.appId}`);
+      rec.check('the subagent reached the freshly-created app actor (delegation worked)', msgActorRan === true && subagentAppState.appCalls >= 1, `msgActorRan=${msgActorRan} appActorCalls=${subagentAppState.appCalls}`);
+      rec.check('the app actor wrote the real file (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
+      rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));
       await rec.shot('final');
     },
   },
