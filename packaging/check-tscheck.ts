@@ -52,7 +52,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // stack (a reasoning subagent is a tool-less ephemeral actor), deleting those four
 // phase-1 files; their code lives on in the (still // @ts-check'd) actor-* stack.
 // A legitimate decrease (files deleted, not directives dropped).
-const COVERED_FLOOR = 478;
+const COVERED_FLOOR = 480;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
