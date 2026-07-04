@@ -70,6 +70,7 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+let dwebActorState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning subagent state.
 let reasoningState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: the offscreen TOOL-BEARING subagent state.
@@ -494,6 +495,54 @@ export const STATES = [
       rec.check('the orchestrator emitted the final user-visible answer', (out.bubbles || []).includes('FINAL-ORCH-REPLY'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // --- functional: the DWEB ACTOR round-trip (opt-in mesh operator) ----------
+  // Enable the agent toggle, delegate via message_actor("dweb"), and prove: the
+  // handle resolves (opt-in), the actor's turn runs on the tuned mesh-operator
+  // prompt in its own heap, and the reply re-enters fenced as an attributed
+  // "dweb actor" bubble. The actor answers in TEXT (no tool call) so the state
+  // never touches the real mesh — the allow-set/gate are unit-pinned.
+  {
+    name: 'dweb-actor-delegate', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      const isDweb = body.includes("peerd's mesh operator");
+      if (isDweb) { dwebActorState.actorCalls += 1; return { sse: sseText('MESH_OPERATOR_REPLY') }; }
+      if (body.includes('you messaged has replied')) return { sse: sseText('DWEB-FINAL') };
+      if (dwebActorState.delegates === 0) {
+        dwebActorState.delegates += 1;
+        return { sse: sseToolCall('message_actor', { to: 'dweb', message: 'who is on the mesh?' }) };
+      }
+      return { sse: sseText('Delegated to the dweb actor; awaiting its reply.') };
+    },
+    async run(ctx, rec) {
+      dwebActorState = { delegates: 0, actorCalls: 0 };
+      const upd = await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: true } });
+      rec.check('the dweb agent toggle flips on', !!upd?.ok, JSON.stringify(upd));
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'check the mesh' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const replies = [...document.querySelectorAll('.message-actor-reply')].map((r) => ({
+            role: r.querySelector('.role')?.textContent || '',
+            body: r.querySelector('.bubble')?.textContent || '',
+          }));
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, replies, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('DWEB-FINAL') && !out.busy;
+      }, { budgetMs: 30_000 });
+      rec.check('the dweb actor loop ran on the mesh-operator prompt', dwebActorState.actorCalls >= 1, `actorCalls=${dwebActorState.actorCalls}`);
+      const reply = (out.replies || []).find((r) => (r.role || '').includes('dweb actor')) || {};
+      rec.check('the reply surfaces as a "dweb actor" bubble', !!reply.role, JSON.stringify(out.replies));
+      rec.check('the bubble carries the actor reply, fence-stripped', (reply.body || '').includes('MESH_OPERATOR_REPLY'), JSON.stringify((reply.body || '').slice(0, 80)));
+      rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('DWEB-FINAL'));
+      await rec.shot('final');
+      await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: false } });
     },
   },
 

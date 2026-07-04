@@ -2733,10 +2733,14 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
     actorType,
     // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
     ...(backing ? { backing } : {}),
-    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    // why actorProviderName (not just ownerChat?.provider): a GLOBAL actor (the
+    // dweb actor) has NO owner chat — without this fallback its session carries
+    // provider: undefined and every model call dies before the wire.
+    ...(actorProviderName ? { provider: actorProviderName } : {}),
     // '' from resolveRunnerModel means "inherit the chat model" — fall back to the
-    // owner chat's model so the empty-pin semantics + the session-create default hold.
-    ...((webActorModel || ownerChat?.model) ? { model: webActorModel || ownerChat?.model } : {}),
+    // owner chat's model, then the active provider's model (the global-actor case).
+    ...((webActorModel || ownerChat?.model || resolveActiveProvider().model)
+      ? { model: webActorModel || ownerChat?.model || resolveActiveProvider().model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
@@ -2863,6 +2867,76 @@ const resolveDwebActor = async () => {
   if (!actorSessionId) actorSessionId = await mintOnce('dweb-actor', () => mintDwebActor());
   return { instanceId: 'dweb', kind: 'dweb', actorSessionId };
 };
+
+// ── The dweb agent's INBOX ──────────────────────────────────────────────────
+// Inbound mesh messages for THIS browser's agent arrive on the reserved agent
+// room (a normal sub-protocol room — no new transport) and reach the SW as the
+// same dweb/base-room/event push the dwapp bridge uses; we consume only our
+// roomId. Every wake is INBOUND (synthetic && !trusted): the actor may observe,
+// use its own dweb tools (ledger, block), and report — it can never delegate.
+// why rate caps HERE (not in the actor): a cap must bind before a model call
+// spends money; the actor's loop is the thing being protected.
+const DWEB_AGENT_ROOM = 'peerd-agent';
+const DWEB_AGENT_NO_REPORT = 'NO_REPORT';
+/** per-did wake timestamps (sliding minute) + a global hourly counter */
+const dwebInboundByDid = new Map();
+let dwebInboundHour = { windowStart: 0, count: 0 };
+const dwebInboundAllowed = (/** @type {string} */ did) => {
+  const nowMs = Date.now();
+  const times = (dwebInboundByDid.get(did) ?? []).filter((/** @type {number} */ t) => nowMs - t < 60_000);
+  if (times.length >= 3) return false;                      // 3/min per did
+  if (nowMs - dwebInboundHour.windowStart > 3_600_000) dwebInboundHour = { windowStart: nowMs, count: 0 };
+  if (dwebInboundHour.count >= 30) return false;            // 30/hour global
+  times.push(nowMs);
+  dwebInboundByDid.set(did, times);
+  dwebInboundHour.count += 1;
+  return true;
+};
+
+const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
+  if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
+  const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
+  if (!dwebInboundAllowed(did)) {
+    auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
+    return;
+  }
+  const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
+  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length } }).catch(() => {});
+  (async () => {
+    const actor = await resolveDwebActor();
+    if (!actor) return;
+    const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
+    const wake = `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+    turnSlots.runWhenIdle(actor.actorSessionId, () => {
+      (async () => {
+        const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
+        // INBOUND: synthetic + NOT trusted — the sender gate refuses any delegation
+        // attempt from this turn; the tier gate holds it to the dweb toolset.
+        await runAgentTurn({ sessionId: actor.actorSessionId, userText: wake, synthetic: true, trusted: false });
+        const s = await sessions.get(actor.actorSessionId);
+        const note = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) })) ?? '';
+        // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
+        // here by the NO_REPORT convention — silence costs the user nothing.
+        if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+        const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+        if (!active) return;
+        const lead = 'Your dweb agent flagged inbound mesh activity:';
+        const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
+        await runAgentTurn({
+          sessionId: active, userText, synthetic: true, trusted: true,
+          actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
+        });
+      })().catch((e) => console.warn('[sw] dweb agent inbound wake failed', e));
+    });
+  })().catch(() => {});
+};
+
+browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
+  if (msg?.type === 'dweb/base-room/event' && msg.roomId === DWEB_AGENT_ROOM && msg.event === 'direct') {
+    handleDwebAgentInbound(msg.data ?? {});
+  }
+  return false;   // never claims the message — the dwapp bridge path is untouched
+});
 
 // Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
 // AUTO-FORMS on first address (the same lazy-mint shape as the web actor). Re-mints when
@@ -3676,6 +3750,14 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     if (r?.ok) {
       console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
       reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+      // The dweb AGENT's inbox: join the reserved agent room so inbound peer
+      // messages flow (as dweb/base-room/event 'direct' events the listener
+      // below consumes). Opt-in — no join, no inbox, no wakes.
+      if (dwebAgentOn()) {
+        browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent' })
+          .then(() => console.log('[sw] dweb agent inbox joined'))
+          .catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+      }
     } else console.warn('[sw] dweb base network start returned', r);
   })().catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
 }
