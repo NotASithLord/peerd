@@ -67,6 +67,8 @@ jobs:
         run: bun run check:boundary
       - name: Packaged import graph (no pruned-but-imported file black-screens a page)
         run: bun run check:imports
+      - name: Doc path references (top-level docs point at real files)
+        run: bun run check:docpaths
       - name: Generated-file drift (dev manifest + channel-config + tscheck badge)
         run: |
           bun run gen:dev
