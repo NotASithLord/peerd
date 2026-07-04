@@ -228,6 +228,8 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
+  // A2A — the mesh dispatch + translation the a2a/call route runs.
+  makeMeshDispatch, meshCallToOp, shapeMeshResult,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -2940,9 +2942,74 @@ const dwebInboundAllowed = (/** @type {string} */ did) => {
   return true;
 };
 
+// ── A2A: the agent-to-agent mesh dispatch (the a2a_run code surface) ─────────
+// ONE dispatch instance (state: pending asks) wired to real mesh IO on the
+// peerd-agent room. The a2a/call route (from the sealed a2a_run worker, relayed)
+// translates the mesh call, resolves per-did CONSENT for signing ops, and runs
+// it here. handleInbound (below) feeds inbound DMs in so a reply resolves a
+// pending ask. why a SW singleton: an ask sent from a worker run must still
+// resolve when the reply lands AFTER that op returned — the pending map lives here.
+const A2A_APPROVED_KEY = 'a2aApprovedDids';
+/** @type {Set<string>} dids the user has cleared for first contact (persisted). */
+const a2aApprovedDids = new Set();
+Promise.resolve(sessionCache.sessionGet(A2A_APPROVED_KEY))
+  .then((v) => { if (Array.isArray(v)) for (const d of v) a2aApprovedDids.add(d); })
+  .catch(() => {});
+const a2aApprove = (/** @type {string} */ did) => {
+  a2aApprovedDids.add(did);
+  sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
+};
+// Per-did FIRST-CONTACT consent: already-approved → allow silently; else pop the
+// standard confirm ("let your agent message <did>?"). A yes is remembered.
+const a2aResolveConsent = async (/** @type {string} */ did, /** @type {string} */ sessionId) => {
+  if (a2aApprovedDids.has(did)) return true;
+  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [did] });
+  const ok = answer === 'yes_once' || answer === 'yes_session';
+  if (ok) a2aApprove(did);
+  auditLog.append({ type: 'a2a_consent', details: { did, approved: ok } }).catch(() => {});
+  return ok;
+};
+const meshHostRoom = (/** @type {object} */ payload) =>
+  browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+const meshDispatch = makeMeshDispatch({
+  sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
+  listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
+  fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
+  publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
+});
+
+// The a2a/call route — invoked by the offscreen relay for each mesh call the
+// a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
+// THE dweb actor before touching the mesh, translate + gate + dispatch.
+const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string }} */ msg) => {
+  try {
+    if (!dwebAgentOn()) return { ok: false, error: 'a2a: the dweb agent is off' };
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'dweb') {
+      return { ok: false, error: 'a2a: not the dweb actor' };
+    }
+    const { op, args, signs } = meshCallToOp({ method: msg.method, args: msg.args });
+    const targetDid = /** @type {{ did?: string }} */ (args).did;
+    // Signing op to an un-approved peer → resolve consent (interactive) HERE, so
+    // the dispatch's own allowed() check passes only for a cleared did.
+    if (signs && targetDid && !a2aApprovedDids.has(targetDid)) {
+      await a2aResolveConsent(targetDid, msg.ownerSessionId ?? '');
+    }
+    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did) });
+    return { ok: true, value: shapeMeshResult(msg.method ?? '', opResult) };
+  } catch (e) {
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
 const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
   if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
   const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
+  // A2A routing FIRST: an inbound a2a REPLY resolves a pending ask and is
+  // consumed (never a wake); an a2a ask/tell falls through to the fenced wake
+  // below (the actor sees a peer's request). A non-a2a DM also falls through.
+  const routed = meshDispatch.handleInbound(did, evt?.data);
+  if (routed.consumed) return;
   if (!dwebInboundAllowed(did)) {
     auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
     return;
@@ -3602,6 +3669,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
   ...(actorClient?.routes ?? {}),
+  // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
+  // consent-gated, dispatched on the peerd-agent room).
+  'a2a/call': (/** @type {any} */ msg) => a2aCallRoute(msg),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,

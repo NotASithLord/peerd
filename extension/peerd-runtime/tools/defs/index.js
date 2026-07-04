@@ -64,6 +64,7 @@ import { dwebPeersTool }               from './dweb-peers.js';
 import { dwebBlockTool }               from './dweb-block.js';
 import { dwebDiscoveryTool }           from './dweb-discovery.js';
 import { dwebGuideTool }               from './dweb-guide.js';
+import { a2aRunTool }                  from './a2a-run.js';
 
 export {
   // inspect
@@ -132,6 +133,7 @@ export {
   dwebBlockTool,
   dwebDiscoveryTool,
   dwebGuideTool,
+  a2aRunTool,
 };
 
 /**
@@ -217,4 +219,5 @@ export const BUILTIN_TOOLS = Object.freeze([
   dwebBlockTool,
   dwebDiscoveryTool,
   dwebGuideTool,
+  a2aRunTool,
 ]);

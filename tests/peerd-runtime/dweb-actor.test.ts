@@ -6,13 +6,15 @@ import { describe, test, expect } from 'bun:test';
 import { actorAllowedTools, actorDescriptors, isAllowedForActor } from '../../extension/peerd-runtime/tools/exposure.js';
 import { actorBlock } from '../../extension/peerd-runtime/loop/system-prompt.js';
 
-const DWEB_TOOLS = ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers', 'dweb_block', 'dweb_discovery', 'dweb_guide'];
+const DWEB_TOOLS = ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers', 'dweb_block', 'dweb_discovery', 'dweb_guide', 'a2a_run'];
 
 describe('dweb actor — the positive allow-set', () => {
-  test('exactly the seven dweb tools, nothing else', () => {
+  test('exactly the dweb family + a2a_run, nothing else', () => {
     const allow = actorAllowedTools('dweb');
     expect([...allow].sort()).toEqual([...DWEB_TOOLS].sort());
-    // the envoy posture: no egress, no DOM, no engine mutation, no delegation
+    // the envoy posture: no egress, no DOM, no engine mutation, no delegation.
+    // a2a_run runs code but in the sealed keyless worker with ONLY the mesh
+    // bridge — no fetch_url/js_run authority (those stay off the dweb actor).
     for (const name of ['fetch_url', 'navigate', 'click', 'app_create', 'app_write_file', 'js_run', 'message_actor', 'spawn_subagent', 'edit_file']) {
       expect(isAllowedForActor(name, 'dweb')).toBe(false);
     }

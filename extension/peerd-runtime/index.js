@@ -99,6 +99,10 @@ export { makeAsyncSubagents } from './subagent/async-subagents.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-subagents shape, specialized).
 export { makeActorMessaging } from './subagent/actor-messaging.js';
+// A2A — the agent-to-agent code surface: the pure translation + the mesh
+// dispatch/correlation the a2a/call route runs.
+export { meshCallToOp, shapeMeshResult } from './subagent/a2a-api.js';
+export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
 // PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
 // (getRecord injected) so the fail-closed trust rules are unit-tested, not just
 // exercised through the SW's inlined walk. The SW passes getRecord = sessions.get.

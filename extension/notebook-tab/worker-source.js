@@ -37,11 +37,12 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
  * @param {string} [opts.entryPath]   resolver entry name (default 'notebook.js')
  * @param {string} opts.notebookId    realm id surfaced as peerd.self.id
  * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
+ * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
  * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false }) => {
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
@@ -224,6 +225,34 @@ const distributedInfo = () => new Promise((resolve, reject) => {
   postMessage({ type: 'distributed-request', rid });
 });
 
+// --- peerd.mesh.* (agent-to-agent) proxy — capability-gated (a2a) ---
+// The code the dweb actor writes drives peers through this client; each call
+// leaves the sealed realm as an a2a-request the host relays to the SW a2a/call
+// route (consent + gated mesh op). Signing calls (ask/send/publishCard) the SW
+// gates; a reply/timeout comes back as a2a-response. why a 130s timeout: an ask
+// awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
+// ABOVE that, else the worker rejects a still-valid ask.
+${a2a ? `
+const pendingMesh = new Map();
+let nextMeshRid = 1;
+const meshCall = (method, args) => new Promise((resolve, reject) => {
+  const rid = nextMeshRid++;
+  pendingMesh.set(rid, { resolve, reject });
+  postMessage({ type: 'a2a-request', rid, method, args });
+  setTimeout(() => { if (pendingMesh.has(rid)) { pendingMesh.delete(rid);
+    reject(new Error('mesh.' + method + ' timed out')); } }, 130000);
+});
+const __mesh = {
+  peers:       () => meshCall('peers', {}),
+  card:        (did) => meshCall('card', { did }),
+  ask:         (did, message, opts) => meshCall('ask', { did, message, timeoutMs: opts && opts.timeoutMs }),
+  send:        (did, message) => meshCall('send', { did, message }),
+  publishCard: (card) => meshCall('publishCard', { card }),
+  inbox:       () => meshCall('inbox', {}),
+};
+globalThis.mesh = __mesh;
+` : ''}
+
 self.addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || typeof m !== 'object') return;
@@ -243,6 +272,14 @@ self.addEventListener('message', (ev) => {
     else { const r = m.result ?? {}; p.resolve({ available: r.ok === true, ...r }); }
     return;
   }
+  ${a2a ? `if (m.type === 'a2a-response') {
+    const p = pendingMesh.get(m.rid);
+    if (!p) return;
+    pendingMesh.delete(m.rid);
+    if (m.error) p.reject(new Error(m.error));
+    else p.resolve(m.result);
+    return;
+  }` : ''}
   // ('fetch-response' is consumed by the realm seal's own listener.)
   if (m.type === 'opfs-response') {
     const p = pendingOpfs.get(m.rid);
