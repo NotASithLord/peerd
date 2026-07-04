@@ -104,7 +104,9 @@ const makeBridge = (name, { timeoutMs, shape } = {}) => {
     pending.set(rid, { resolve, reject });
     postMessage({ type: name + '-request', rid, ...payload });
     if (timeoutMs) setTimeout(() => {
-      if (pending.delete(rid)) reject(new Error(name + ' call timed out'));
+      // keep the op/method in the message — a stuck-bridge error is only
+      // actionable if it says WHICH call hung (payload.op for opfs, .method for a2a).
+      if (pending.delete(rid)) reject(new Error(name + ' ' + (payload.op || payload.method || 'call') + ' timed out'));
     }, timeoutMs);
   });
   // Returns true when the message was ours (routed by type), so the listener
