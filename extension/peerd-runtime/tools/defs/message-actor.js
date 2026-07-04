@@ -18,7 +18,7 @@
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
- * @property {{ aborted: boolean, addEventListener: Function }} [abortSignal]
+ * @property {{ aborted: boolean, addEventListener: Function, removeEventListener?: Function }} [abortSignal]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
