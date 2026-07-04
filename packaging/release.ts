@@ -30,6 +30,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { REPO_ROOT, ARTIFACTS_DIR, readVersion, parseArgs } from './lib.ts';
 import { fetchFeedVersions } from './check-feeds.ts';
+import { buildReleaseNotes } from './release-notes.ts';
 
 const run = (cmd: string, args: string[]) =>
   execFileSync(cmd, args, { cwd: REPO_ROOT, stdio: 'inherit' });
@@ -41,16 +42,11 @@ const die = (msg: string): never => {
   process.exit(1);
 };
 
-const releaseNotes = (version: string) => `peerd preview v${version} — peerd with the decentralized web (dweb) preview enabled.
-
-The dweb protocol is research-grade and may change. Most users want the store packages (see the README's Install section).
-
-| artifact | install |
-|---|---|
-| peerd-preview-firefox.xpi | Firefox — click to install (recommended path) |
-| peerd-preview-chrome.crx | Chrome — drag into chrome://extensions (developer mode) |
-
-Store-channel artifacts for this version are built and verified by the same pipeline and submitted to Chrome Web Store / AMO separately; store review lag is expected.`;
+// Notes come from CHANGELOG.md (packaging/release-notes.ts). Throws when the
+// version has no changelog section, which aborts the release before the tag
+// step: a release is never cut with boilerplate notes.
+const releaseNotes = (version: string) =>
+  buildReleaseNotes(readFileSync(join(REPO_ROOT, 'CHANGELOG.md'), 'utf8'), version);
 
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
@@ -59,6 +55,11 @@ const main = async () => {
   const tag = `v${version}`;
 
   step(`preconditions for ${tag}${dryRun ? ' (dry run)' : ''}`);
+  // Notes must exist BEFORE anything irreversible: a missing changelog
+  // section aborts here, not after the tag is pushed.
+  try { releaseNotes(version); } catch (e) {
+    die(e instanceof Error ? e.message : String(e));
+  }
   if (capture('git', ['branch', '--show-current']) !== 'main') die('not on main');
   // A dry run is what you run BEFORE committing — allow a dirty tree
   // there (with a note); a real release must start clean.
