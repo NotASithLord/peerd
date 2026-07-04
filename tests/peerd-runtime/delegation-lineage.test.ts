@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { mayMessageActor, messageProvenance, ASYNC_SUBAGENT_ACTORS } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
+import { mayMessageActor, messageProvenance, buildAncestry, ASYNC_SUBAGENT_ACTORS } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
 
 // The PURE trust decision for the "subagents as async actors" refactor: may a
 // sender session message an actor? It replaces the sender gate's `=== active`
@@ -113,6 +113,95 @@ describe('messageProvenance — the parent reference the choke-point actor arbit
     const ancestry = [hop('a', 'b', true), hop('b', 'a', true)];
     const p = messageProvenance({ senderSessionId: 'a', ancestry });
     expect(p.lineagePath[p.lineagePath.length - 1]).toBe('a'); // sender is last, walk stopped
+  });
+});
+
+// buildAncestry — the shell walk that turns session records into the
+// LineageHop[] the gate reads. Extracted from the SW so the fail-closed trust
+// rules are unit-tested, not only exercised through a hand-built mock. IO is
+// injected as getRecord; here we back it with a plain map.
+describe('buildAncestry — the fail-closed store walk feeding the gate', () => {
+  // a tiny record store: sessionId -> { parentSessionId, spawnedTrusted }
+  const store = (records: Record<string, { parentSessionId?: string | null; spawnedTrusted?: boolean } | null>) =>
+    async (id: string) => (id in records ? records[id] : null);
+
+  test('a root chat (no parent) is trusted by construction', async () => {
+    const hops = await buildAncestry({ sessionId: ACTIVE, getRecord: store({ [ACTIVE]: { parentSessionId: null } }) });
+    expect(hops).toEqual([{ sessionId: ACTIVE, parentSessionId: null, spawnedTrusted: true }]);
+  });
+
+  test('a child spawned by a trusted turn walks root-ward with every hop trusted', async () => {
+    const hops = await buildAncestry({
+      sessionId: 'sub-1',
+      getRecord: store({
+        'sub-1': { parentSessionId: ACTIVE, spawnedTrusted: true },
+        [ACTIVE]: { parentSessionId: null },
+      }),
+    });
+    expect(hops).toEqual([
+      { sessionId: 'sub-1', parentSessionId: ACTIVE, spawnedTrusted: true },
+      { sessionId: ACTIVE, parentSessionId: null, spawnedTrusted: true },
+    ]);
+    // and the gate admits it — the walk feeds mayMessageActor end to end
+    expect(mayMessageActor({ inbound: false, senderSessionId: 'sub-1', activeSessionId: ACTIVE, ancestry: hops })).toBe(true);
+  });
+
+  test('a parented record with NO spawnedTrusted field reads as untrusted (fail-closed, pre-#134 record)', async () => {
+    const hops = await buildAncestry({
+      sessionId: 'sub-old',
+      getRecord: store({ 'sub-old': { parentSessionId: ACTIVE }, [ACTIVE]: { parentSessionId: null } }),
+    });
+    expect(hops[0].spawnedTrusted).toBe(false);
+    expect(mayMessageActor({ inbound: false, senderSessionId: 'sub-old', activeSessionId: ACTIVE, ancestry: hops })).toBe(false);
+  });
+
+  test('a parented record with spawnedTrusted:false stays untrusted (inbound-spawned child)', async () => {
+    const hops = await buildAncestry({
+      sessionId: 'sub-inj',
+      getRecord: store({ 'sub-inj': { parentSessionId: ACTIVE, spawnedTrusted: false }, [ACTIVE]: { parentSessionId: null } }),
+    });
+    expect(hops[0].spawnedTrusted).toBe(false);
+  });
+
+  test('an unknown session (getRecord -> null) ENDS the chain, so the gate never reaches active', async () => {
+    // sub-1 points at a parent the store has forgotten: the walk stops at sub-1
+    // without a hop for active, so the sender is not provably a descendant → refused.
+    const hops = await buildAncestry({
+      sessionId: 'sub-1',
+      getRecord: store({ 'sub-1': { parentSessionId: 'gone', spawnedTrusted: true } }),
+    });
+    expect(hops).toEqual([{ sessionId: 'sub-1', parentSessionId: 'gone', spawnedTrusted: true }]);
+    expect(mayMessageActor({ inbound: false, senderSessionId: 'sub-1', activeSessionId: ACTIVE, ancestry: hops })).toBe(false);
+  });
+
+  test('the sender itself being unknown yields an empty chain (fail-closed)', async () => {
+    const hops = await buildAncestry({ sessionId: 'ghost', getRecord: store({}) });
+    expect(hops).toEqual([]);
+  });
+
+  test('the hop cap bounds a very deep chain (default 32)', async () => {
+    // a 100-deep parent chain; the walk must stop at maxHops, not run away.
+    const deep: Record<string, { parentSessionId: string | null; spawnedTrusted: boolean }> = {};
+    for (let i = 0; i < 100; i++) deep[`s${i}`] = { parentSessionId: i < 99 ? `s${i + 1}` : null, spawnedTrusted: true };
+    const hops = await buildAncestry({ sessionId: 's0', getRecord: store(deep) });
+    expect(hops.length).toBe(32);
+    expect(hops[0].sessionId).toBe('s0');
+  });
+
+  test('a custom maxHops is honored', async () => {
+    const deep: Record<string, { parentSessionId: string | null; spawnedTrusted: boolean }> = {};
+    for (let i = 0; i < 10; i++) deep[`s${i}`] = { parentSessionId: i < 9 ? `s${i + 1}` : null, spawnedTrusted: true };
+    const hops = await buildAncestry({ sessionId: 's0', getRecord: store(deep), maxHops: 3 });
+    expect(hops.length).toBe(3);
+  });
+
+  test('a cyclic parent chain terminates (cycle guard, never hangs)', async () => {
+    // a -> b -> a: the walk records a and b once each, then the seen-guard stops it.
+    const hops = await buildAncestry({
+      sessionId: 'a',
+      getRecord: store({ a: { parentSessionId: 'b', spawnedTrusted: true }, b: { parentSessionId: 'a', spawnedTrusted: true } }),
+    });
+    expect(hops.map((h) => h.sessionId)).toEqual(['a', 'b']);
   });
 });
 

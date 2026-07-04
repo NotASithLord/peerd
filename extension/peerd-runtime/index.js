@@ -99,6 +99,10 @@ export { makeAsyncSubagents } from './subagent/async-subagents.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-subagents shape, specialized).
 export { makeActorMessaging } from './subagent/actor-messaging.js';
+// PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
+// (getRecord injected) so the fail-closed trust rules are unit-tested, not just
+// exercised through the SW's inlined walk. The SW passes getRecord = sessions.get.
+export { buildAncestry } from './subagent/delegation-lineage.js';
 // DESIGN-17: the WEB actor — the disposable page-driving agent (an
 // `actorType:'web'` actor that owns one tab). Pure core: the tab→session
 // bindings, the action-log rolling-summary prompt, the self-fence.

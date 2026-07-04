@@ -10,6 +10,8 @@
 // parent's permissions through the same six gates, inherits the provider
 // key, and audits every step with parentage + depth. See docs/SUBAGENTS.md.
 
+import { wrapUntrusted } from '../prompt-wrap.js';
+
 // why: the model's tool_result is re-sent on every subsequent turn, so a
 // runaway subagent result would balloon the parent's context + rate-limit
 // budget. Cap the returned text; the full transcript is always available
@@ -169,11 +171,17 @@ const formatSubagentResult = (out) => {
   const flag = out.timedOut ? ' — HIT WALL-CLOCK TIMEOUT, result is partial'
     : out.stopped ? ' — STOPPED before finishing, result is partial'
     : out.exceeded ? ' — HIT STEP CAP, result may be incomplete' : '';
+  // why UNTRUSTED (parity with the async path, async-subagents.js): the child's
+  // result is model-authored from a fresh context over possibly page-derived
+  // bytes, so it is DATA to the parent, not instructions. Only the one-line
+  // framing above is trusted; the body is fenced so a prompt injection the child
+  // relayed can't steer the parent. The sync path fenced nothing before (MED-1).
+  const wrapped = wrapUntrusted({ origin: 'subagent', tool: 'spawn_subagent', body: result || '(subagent returned no text)' });
   const lines = [
     `subagent (session ${out.sessionId}, depth ${out.depth}) — `
       + `${out.toolCalls} tool call${out.toolCalls === 1 ? '' : 's'}, ${out.durationMs}ms${flag}`,
     '',
-    result || '(subagent returned no text)',
+    wrapped,
   ];
   return lines.join('\n');
 };
