@@ -1,5 +1,8 @@
 <p align="center">
+  <br>
   <img src="docs/store/assets/peerd-wordmark.svg" alt="peerd" width="240" height="48">
+  <br>
+  <br>
 </p>
 
 [![CI](https://github.com/NotASithLord/peerd/actions/workflows/package-and-release.yml/badge.svg)](https://github.com/NotASithLord/peerd/actions/workflows/package-and-release.yml)
@@ -11,6 +14,8 @@
 [![types: ts-check coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/NotASithLord/peerd/main/badges/tscheck.json)](packaging/check-tscheck.ts) -->
 [![types: 100% ts-check](https://img.shields.io/badge/types-100%25%20%2F%2F%20%40ts--check-brightgreen.svg)](packaging/check-tscheck.ts)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
+
+<br>
 
 **peerd is the first AI agent harness native to the browser.** It's a
 Chrome/Firefox extension that runs a full agent loop *inside* the
