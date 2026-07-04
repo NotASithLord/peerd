@@ -71,6 +71,7 @@ let pdaToolResultBody = '';
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
 let dwebActorState = { delegates: 0, actorCalls: 0 };
+let a2aState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning subagent state.
 let reasoningState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: the offscreen TOOL-BEARING subagent state.
@@ -541,6 +542,63 @@ export const STATES = [
       rec.check('the reply surfaces as a "dweb actor" bubble', !!reply.role, JSON.stringify(out.replies));
       rec.check('the bubble carries the actor reply, fence-stripped', (reply.body || '').includes('MESH_OPERATOR_REPLY'), JSON.stringify((reply.body || '').slice(0, 80)));
       rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('DWEB-FINAL'));
+      await rec.shot('final');
+      await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: false } });
+    },
+  },
+
+  // --- functional: the A2A code surface runs end to end ----------------------
+  // The dweb actor answers a "check the mesh" delegation by calling a2a_run with
+  // a real script (`await mesh.peers()`). That runs for REAL: sealed keyless
+  // worker → the mesh bridge (a2a-request) → the SW a2a/call route → the mesh
+  // dispatch → base-host peers → back, fenced, into the actor's heap. No live
+  // second peer in one Chrome (roster is empty), so this proves the whole CODE
+  // PIPE (the ask/reply correlation itself is unit-proven in a2a-dispatch); the
+  // tool_executed audit for a2a_run is the ground truth that the code ran.
+  {
+    name: 'a2a-code-surface', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      const isDweb = body.includes("peerd's mesh operator");
+      if (isDweb) {
+        a2aState.actorCalls += 1;
+        // First dweb-actor turn: write + run a mesh script. Second (after the
+        // fenced tool result re-enters its heap): report.
+        if (a2aState.actorCalls === 1) {
+          return { sse: sseToolCall('a2a_run', { code: 'const peers = await mesh.peers(); return { count: peers.length, peers };' }) };
+        }
+        return { sse: sseText('MESH_CHECKED') };
+      }
+      if (body.includes('you messaged has replied')) return { sse: sseText('A2A-FINAL') };
+      if (a2aState.delegates === 0) {
+        a2aState.delegates += 1;
+        return { sse: sseToolCall('message_actor', { to: 'dweb', message: 'check who is on the mesh' }) };
+      }
+      return { sse: sseText('Delegated to the dweb actor.') };
+    },
+    async run(ctx, rec) {
+      a2aState = { delegates: 0, actorCalls: 0 };
+      const upd = await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: true } });
+      rec.check('the dweb agent toggle flips on', !!upd?.ok, JSON.stringify(upd));
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'ask your agent who is on the mesh' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('A2A-FINAL') && !out.busy;
+      }, { budgetMs: 40_000 });
+
+      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
+      const entries = (audit && audit.entries) || [];
+      const a2aRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'a2a_run');
+      rec.check('the dweb actor wrote + ran a mesh script (2 actor turns)', a2aState.actorCalls >= 2, `actorCalls=${a2aState.actorCalls}`);
+      rec.check('a2a_run EXECUTED — the code surface ran through the mesh bridge + SW route (tool_executed audit)', a2aRan === true, `a2aRan=${a2aRan}`);
+      rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('A2A-FINAL'));
+      rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
       await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: false } });
     },
