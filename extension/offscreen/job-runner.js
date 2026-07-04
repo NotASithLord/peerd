@@ -117,6 +117,14 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
         if (m.type === 'log' || m.type === 'display') return;
 
         if (m.type === 'subagent-request') {
+          // An a2a run is the dweb actor's MESH-ONLY surface. Its tool allow-set
+          // grants no delegation (no spawn_subagent), so the worker's
+          // peerd.runtime.runAgent must not re-grant it — refuse at the host, the
+          // authoritative choke point (the worker surface can't be trusted).
+          if (a2a) {
+            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'subagent spawn is disabled for a2a runs (the dweb actor does not delegate)' });
+            return;
+          }
           const a = m.args ?? {};
           try {
             const resp = await sendToSW('subagent/spawn', {
@@ -147,6 +155,14 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
           return;
         }
         if (m.type === 'fetch-request') {
+          // Same envoy posture: the dweb actor has no egress (no fetch_url in its
+          // allow-set). The a2a worker still carries the seal's bridged fetch +
+          // peerd.egress.fetch, so the host is where we deny it — the mesh is the
+          // ONLY outward edge an a2a run gets.
+          if (a2a) {
+            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)' });
+            return;
+          }
           usedEgress = true;   // the run touched the web → its output carries untrusted bytes
           try {
             const resp = await sendToSW('sw/web-fetch', { url: m.url, method: m.method, headers: m.headers, body: m.body });

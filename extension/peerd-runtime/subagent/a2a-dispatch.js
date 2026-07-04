@@ -41,12 +41,18 @@ export const makeMeshDispatch = (deps) => {
     now = Date.now, newReqId, defaultTimeoutMs = 30_000,
   } = deps;
 
-  // reqId → { resolve, timer } for asks awaiting a reply. Lives across the single
-  // a2a_run worker call (the worker relays each op to the SW; the pending map is
-  // SW-side so a reply that lands after the op returns still resolves it).
-  /** @type {Map<string, { resolve: (v: any) => void, timer: any }>} */
+  // reqId → { resolve, timer, did } for asks awaiting a reply. Lives across the
+  // single a2a_run worker call (the worker relays each op to the SW; the pending
+  // map is SW-side so a reply that lands after the op returns still resolves it).
+  // why `did`: a reply is bound to the peer the ask was SENT to — an inbound
+  // 'reply' is only honored when its authenticated mesh sender equals that did,
+  // so a third peer who guesses/observes a reqId can't forge the answer.
+  /** @type {Map<string, { resolve: (v: any) => void, timer: any, did: string }>} */
   const pendingAsks = new Map();
   // Inbound a2a messages (ask/tell) received during a run, drained by inbox().
+  // Bounded: a spamming peer can flood DMs, but the buffer is capped and evicts
+  // oldest-first so it can never grow without limit on the keepalive-pinned SW.
+  const MAX_INBOX = 200;
   /** @type {Array<{ from: string, message: string, ts: number, reqId: string, kind: string }>} */
   let inboxBuffer = [];
 
@@ -96,7 +102,7 @@ export const makeMeshDispatch = (deps) => {
             pendingAsks.delete(reqId);
             resolve({ ok: true, from: null, reply: null, timedOut: true });
           }, timeoutMs);
-          pendingAsks.set(reqId, { resolve, timer });
+          pendingAsks.set(reqId, { resolve, timer, did: args.did });
         });
       }
       case 'inbox': {
@@ -122,7 +128,12 @@ export const makeMeshDispatch = (deps) => {
     const env = /** @type {A2AEnvelope} */ (data);
     if (env.kind === 'reply') {
       const pending = pendingAsks.get(env.reqId);
-      if (pending) {
+      // Only the peer the ask was SENT to may answer it. `from` is the mesh's
+      // cryptographically authenticated sender (signed HELLO), so a third peer
+      // who guessed the reqId can't resolve someone else's ask. A mismatched or
+      // orphan reply is dropped, never resolved — but still CONSUMED, so a forged
+      // reply can't wake the actor either.
+      if (pending && pending.did === from) {
         clearTimeout(pending.timer);
         pendingAsks.delete(env.reqId);
         pending.resolve({ ok: true, from, reply: String(env.message ?? '') });
@@ -132,6 +143,7 @@ export const makeMeshDispatch = (deps) => {
     // ask / tell → buffer for a live inbox() and hand to the caller for the wake.
     const msg = { from, message: String(env.message ?? ''), ts: now(), reqId: env.reqId, kind: env.kind };
     inboxBuffer.push(msg);
+    if (inboxBuffer.length > MAX_INBOX) inboxBuffer.splice(0, inboxBuffer.length - MAX_INBOX);
     return { consumed: false, deliver: { from, kind: env.kind, reqId: env.reqId, message: msg.message } };
   };
 

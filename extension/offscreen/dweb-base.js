@@ -272,8 +272,13 @@ const handleRoomOp = async (msg) => {
     }
     case 'card-get': {
       room.sync.retain('~card');
+      // why max-by-ts, not last-inserted: the retained store is a Map keyed by
+      // sig, so history() yields SIG-INSERTION order — a late-join backfill can
+      // append an OLDER card version after the newer one was seen live. Pick the
+      // newest by envelope ts so a re-advertised card always supersedes.
       const mine = room.sync.history('~card').filter((/** @type {any} */ e) => e.from === msg.did);
-      return { ok: true, card: mine.length ? mine[mine.length - 1].body.data : null };
+      const latest = mine.reduce((/** @type {any} */ best, /** @type {any} */ e) => (!best || (e.ts ?? 0) >= (best.ts ?? 0) ? e : best), null);
+      return { ok: true, card: latest ? latest.body.data : null };
     }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': { const h = await start(); const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files }); return { ok: true, uri, hash }; }

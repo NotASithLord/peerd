@@ -62,6 +62,22 @@ describe('ask / reply correlation', () => {
     expect(d._pendingCount()).toBe(0);
   });
 
+  test('a reply from a DIFFERENT did than the ask targeted does NOT resolve it (forgery protection)', async () => {
+    const d = harness();
+    const p = d.dispatch('ask', { did: DID, message: 'free Tuesday?', timeoutMs: 40 }, { signs: true, allowed: () => true });
+    await tick();
+    expect(d._pendingCount()).toBe(1);
+    // a THIRD peer guesses the reqId and injects a forged reply — dropped, but
+    // still consumed (a reply-kind envelope is never a wake), and the ask stays
+    // pending until the real peer answers or it times out.
+    const routed = d.handleInbound('did:key:z6MkAttacker', { __a2a: 1, kind: 'reply', reqId: 'r1', message: 'forged' });
+    expect(routed.consumed).toBe(true);
+    expect(d._pendingCount()).toBe(1);
+    // the genuine peer's reply (matching did) still resolves it
+    d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId: 'r1', message: 'yes, 2pm' });
+    expect(await p).toEqual({ ok: true, from: DID, reply: 'yes, 2pm' });
+  });
+
   test('ask times out to { timedOut:true } when no reply arrives', async () => {
     const d = harness();
     const r = await d.dispatch('ask', { did: DID, message: 'x', timeoutMs: 5 }, { signs: true, allowed: () => true });
@@ -87,6 +103,15 @@ describe('inbound routing', () => {
     expect(drained.messages).toEqual([{ from: DID, message: 'can you help?', ts: expect.any(Number) }]);
     // drained once — a second inbox() is empty
     expect((await d.dispatch('inbox', {})).messages).toEqual([]);
+  });
+
+  test('inboxBuffer is bounded — a flooding peer cannot grow it without limit (oldest evicted)', async () => {
+    const d = harness();
+    for (let i = 0; i < 250; i += 1) d.handleInbound(DID, { __a2a: 1, kind: 'tell', reqId: `q${i}`, message: `m${i}` });
+    const drained = await d.dispatch('inbox', {});
+    expect(drained.messages.length).toBe(200);            // capped at MAX_INBOX
+    expect(drained.messages[0].message).toBe('m50');      // the oldest 50 were evicted
+    expect(drained.messages[199].message).toBe('m249');
   });
 
   test('a non-a2a DM is passed through untouched (the dweb bridge path is unaffected)', () => {

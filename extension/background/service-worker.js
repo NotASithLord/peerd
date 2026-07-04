@@ -1187,7 +1187,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') a2aRevoke(did); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
@@ -2950,7 +2950,11 @@ const dwebInboundAllowed = (/** @type {string} */ did) => {
 // pending ask. why a SW singleton: an ask sent from a worker run must still
 // resolve when the reply lands AFTER that op returned — the pending map lives here.
 const A2A_APPROVED_KEY = 'a2aApprovedDids';
-/** @type {Set<string>} dids the user has cleared for first contact (persisted). */
+// The consent target for publishCard: it broadcasts the user's OWN card (no peer
+// did), so it can't key on a peer. A fixed sentinel gives it its own allowlist
+// entry — approve "advertise my card" once, revoke it the same way as a peer.
+const A2A_PUBLISH_CARD_KEY = 'self:publishCard';
+/** @type {Set<string>} dids (+ the publishCard sentinel) the user has cleared. */
 const a2aApprovedDids = new Set();
 Promise.resolve(sessionCache.sessionGet(A2A_APPROVED_KEY))
   .then((v) => { if (Array.isArray(v)) for (const d of v) a2aApprovedDids.add(d); })
@@ -2959,14 +2963,24 @@ const a2aApprove = (/** @type {string} */ did) => {
   a2aApprovedDids.add(did);
   sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
 };
-// Per-did FIRST-CONTACT consent: already-approved → allow silently; else pop the
-// standard confirm ("let your agent message <did>?"). A yes is remembered.
-const a2aResolveConsent = async (/** @type {string} */ did, /** @type {string} */ sessionId) => {
-  if (a2aApprovedDids.has(did)) return true;
-  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [did] });
+// Revoke a first-contact grant (wired into dweb_block): blocking a peer must also
+// withdraw its permission to be MESSAGED, else a blocked did stays talk-approved.
+// This is the escape hatch for the grant — a peer approval is not permanent.
+const a2aRevoke = (/** @type {string} */ did) => {
+  if (!a2aApprovedDids.delete(did)) return;
+  sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
+};
+// FIRST-CONTACT consent = a revocable ALLOWLIST decision (who my agent may talk
+// to / that it may advertise me), NOT a per-action confirm. why it persists: the
+// user is shown the exact target and deliberately clears it, like adding a
+// contact; it lives in chrome.storage.session (cleared on browser restart) and is
+// revocable via dweb_block. Already-cleared → silent; else pop the confirm.
+const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message') => {
+  if (a2aApprovedDids.has(target)) return true;
+  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] });
   const ok = answer === 'yes_once' || answer === 'yes_session';
-  if (ok) a2aApprove(did);
-  auditLog.append({ type: 'a2a_consent', details: { did, approved: ok } }).catch(() => {});
+  if (ok) a2aApprove(target);
+  auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok } }).catch(() => {});
   return ok;
 };
 const meshHostRoom = (/** @type {object} */ payload) =>
@@ -2989,11 +3003,19 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
       return { ok: false, error: 'a2a: not the dweb actor' };
     }
     const { op, args, signs } = meshCallToOp({ method: msg.method, args: msg.args });
-    const targetDid = /** @type {{ did?: string }} */ (args).did;
-    // Signing op to an un-approved peer → resolve consent (interactive) HERE, so
-    // the dispatch's own allowed() check passes only for a cleared did.
-    if (signs && targetDid && !a2aApprovedDids.has(targetDid)) {
-      await a2aResolveConsent(targetDid, msg.ownerSessionId ?? '');
+    // Every signing op needs a cleared CONSENT TARGET before it emits onto the
+    // mesh as the user. Per-peer ops (ask/send) key on the peer's did; publishCard
+    // has NO peer — it broadcasts the user's own card — so it keys on a fixed
+    // sentinel. Fail CLOSED: an op with signs=true and no resolvable target, or a
+    // declined prompt, is refused here (the dispatch's did-gate can't see the
+    // no-did publishCard, so enforcement must land in this route).
+    if (signs) {
+      const consentTarget = op === 'publishCard' ? A2A_PUBLISH_CARD_KEY : /** @type {{ did?: string }} */ (args).did;
+      if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
+      if (!a2aApprovedDids.has(consentTarget)) {
+        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
+        if (!approved) return { ok: false, error: `a2a: the user declined ${op} to ${consentTarget}` };
+      }
     }
     const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did) });
     return { ok: true, value: shapeMeshResult(msg.method ?? '', opResult) };

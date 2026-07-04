@@ -23,7 +23,12 @@ import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+// why 135s: the job wall-clock is the OUTERMOST timer — it must sit ABOVE the
+// worker's mesh guard (worker-source.js, 130s) which sits above the SW ask cap
+// (a2a-api.js, 120s). If the job timer were smaller (it was 60s) it would fire
+// first and terminate the worker mid-ask, truncating a valid peer reply and
+// mis-reporting it as a job timeout. Keep the nesting job > worker > ask.
+const DEFAULT_TIMEOUT_MS = 135_000;
 const MAX_TIMEOUT_MS = 180_000;
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
