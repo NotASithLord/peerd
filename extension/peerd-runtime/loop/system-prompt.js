@@ -302,11 +302,16 @@ wedged, not busy — do NOT re-run it in a loop (that piles unexecuted commands 
 shell). Report the timeout plainly and stop; a wedged VM clears with a reset or a fresh
 vm_create, not retries.`,
   notebook: `Your Notebook is a sealed Web Worker + OPFS — vanilla JS, no DOM, network
-via peerd.egress.fetch. Each run is a FRESH worker: module-level state does NOT carry —
-persist via peerd.self.writeFile/readFile. Static \`import\`, \`export … from\`, and dynamic
-\`import('./x.js')\` of relative paths all work (peerd.self.import is the dynamic alias).
-For parsing, transforms, numerical work, exercising a library. Prefer edit_file
-(SEARCH/REPLACE) over js_write_file to change an existing file.`,
+via peerd.egress.fetch. For parsing, transforms, numerical work, exercising a library.
+RETURN a structured result: the body runs as an async function, so \`return <value>\` hands
+that value back as your answer — return the object/array/number the parent can USE (it is
+JSON-serialized), never prose. console.log is TRACING only (captured apart from the result);
+a run that only logs returns nothing. Each run is a FRESH worker: module-level state does
+NOT carry between runs — persist across them via peerd.self.writeFile/readFile. Static
+\`import\`, \`export … from\`, and dynamic \`import('./x.js')\` of relative paths all work
+(peerd.self.import is the dynamic alias); \`import { chart, table, sum, mean, median } from
+'peerd:std'\` is the built-in stdlib (chart → SVG, no DOM). Prefer edit_file (SEARCH/REPLACE)
+over js_write_file to change an existing file.`,
   app: `Your App is a multi-file artifact (index.html + style.css + script.js + data)
 in a sandboxed iframe — DOM, canvas, full fetch; files in OPFS at peerd-apps/<appId>/.
 Build ITERATIVELY, IN FILES: one app_write_file per file, growing it live — long up-front

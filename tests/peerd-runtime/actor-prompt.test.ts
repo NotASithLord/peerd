@@ -160,6 +160,16 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(block.includes('edit_file')).toBe(true);
   });
 
+  test('notebook is OPINIONATED about its outcome: RETURN a structured result, not console.log', () => {
+    // The Notebook exists to hand back a correct computed value; the runtime opinion
+    // (job-runner: "the agent should RETURN its result", body wrapped in an async IIFE)
+    // must reach the actor as a push, not just a description of the sandbox.
+    const block = actorBlock('notebook');
+    expect(block.includes('RETURN a structured result')).toBe(true);
+    expect(block.includes('console.log is TRACING only')).toBe(true);
+    expect(block.includes("'peerd:std'")).toBe(true);   // knows what to reach for
+  });
+
   test('app carries the relocated build mechanics', () => {
     const block = actorBlock('app');
     expect(block.includes('MITHRIL')).toBe(true);
