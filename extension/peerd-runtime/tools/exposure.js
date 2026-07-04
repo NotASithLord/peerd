@@ -61,7 +61,11 @@ export const isHiddenFromMain = (name) => MAIN_AGENT_HIDDEN_TOOLS.has(name);
  * @returns {T[]}
  */
 export const mainAgentDescriptors = (descriptors) =>
-  descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name));
+  // Dweb tools are the DWEB ACTOR's family (owner call 2026-07-04): the main
+  // agent never holds them — mesh work is always message_actor("dweb", ...)
+  // (the actor exists only when the user enables it). Unconditional, so the
+  // orchestrator surface doesn't morph with a setting.
+  descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebTool(t));
 
 // ── Progressive disclosure: instance-gated engine ops ───────────────────
 //
