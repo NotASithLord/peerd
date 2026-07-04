@@ -10,6 +10,8 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-04
+
 ### Added
 - **The dweb actor — a dedicated, opt-in mesh operator** (preview only). When
   the network is on, a second toggle spins up a persistent, keyless agent in
