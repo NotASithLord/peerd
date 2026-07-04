@@ -139,6 +139,10 @@ export const expect = (actual) => ({
   toBeGreaterThan: (n) => {
     if (!(actual > n)) throw new AssertionError({ op: 'toBeGreaterThan', actual, n });
   },
+  /** @param {number} n */
+  toBeLessThan: (n) => {
+    if (!(actual < n)) throw new AssertionError({ op: 'toBeLessThan', actual, n });
+  },
   /**
    * `actual` is a 0-arg sync-or-async function. Optionally pass a
    * predicate that validates the thrown error.

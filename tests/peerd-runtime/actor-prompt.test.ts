@@ -47,6 +47,11 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('reads stay global')).toBe(true);
   });
 
+  test('search is one delegation and background by default (no tab unless it must render)', () => {
+    expect(base.includes('A web SEARCH is the same one delegation')).toBe(true);
+    expect(base.includes('runs in the BACKGROUND by default')).toBe(true);
+  });
+
   test('the browsing section makes the web actor the single entry point (fetch-vs-render is its call)', () => {
     expect(base.includes('browsing — every tab is an actor')).toBe(true);
     // The web actor — addressed by "web", picks its own mechanism (sessionless fetch
@@ -58,11 +63,14 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('do                       — perform an action')).toBe(false); // runner listing gone
   });
 
-  test('the subagents section no longer routes instance work to a child', () => {
-    // A subagent can't mutate (actor-only) nor message_actor (sender-gated),
-    // so the old "pass a child the ids it should act on" guidance is a dead end.
-    expect(base.includes('the ids it should act on')).toBe(false);
-    expect(base.includes('never hand a vm/notebook/')).toBe(true);
+  test('the subagents section reflects the PR #134 trusted-lineage capability', () => {
+    // A subagent still can't MUTATE an instance directly (actor-only), but a
+    // trusted-lineage child MAY now message_actor and gets the reply in its own
+    // tool result — so the prompt no longer tells the model to never delegate to
+    // a child, and no longer claims message_actor is refused from one.
+    expect(base.includes('never hand a vm/notebook/')).toBe(false);
+    expect(base.includes('message_actor is refused')).toBe(false);
+    expect(base.includes('RIGHT IN its')).toBe(true);            // reply-in-tool-result guidance
     expect(base.includes('PARALLELISM is many message_actor')).toBe(true);
   });
 
@@ -109,6 +117,12 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     // DOM-driving lore still present.
     expect(web.includes('re-snapshot')).toBe(true);
     expect(web.includes('UNTRUSTED')).toBe(true);
+    // Search is BACKGROUND-first: fetch the JS-free results page, no tab; render
+    // only when the fetch comes back empty/blocked. (Owner call 2026-07-04 —
+    // a search should not open a visible tab by default.)
+    expect(web.includes('BACKGROUND-FIRST')).toBe(true);
+    expect(web.includes('duckduckgo.com/html/?q=')).toBe(true);
+    expect(web.includes('this fetch IS the search')).toBe(true);
     // the full IGNORE/FLAG/EXCLUDE injection drill. The web actor prompt is now the
     // SOLE home of this defense (the do/get/check runner that used to carry a mirror
     // copy is gone), so pin the SUBSTANCE, not just the labels — a bare 'EXCLUDE it'
@@ -157,6 +171,16 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(block.includes('edit_file')).toBe(true);
   });
 
+  test('notebook is OPINIONATED about its outcome: RETURN a structured result, not console.log', () => {
+    // The Notebook exists to hand back a correct computed value; the runtime opinion
+    // (job-runner: "the agent should RETURN its result", body wrapped in an async IIFE)
+    // must reach the actor as a push, not just a description of the sandbox.
+    const block = actorBlock('notebook');
+    expect(block.includes('RETURN a structured result')).toBe(true);
+    expect(block.includes('console.log is TRACING only')).toBe(true);
+    expect(block.includes("'peerd:std'")).toBe(true);   // knows what to reach for
+  });
+
   test('app carries the relocated build mechanics', () => {
     const block = actorBlock('app');
     expect(block.includes('MITHRIL')).toBe(true);
@@ -196,6 +220,55 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     const out = await renderSystemPrompt({ actorType: 'web', backing: 'api', instanceId: 'https://api.stripe.com' });
     expect(out.includes('API integration')).toBe(true);
     expect(out.includes('You own the origin https://api.stripe.com')).toBe(true);
+  });
+});
+
+// PR #134: a subagent is an EPHEMERAL ACTOR. Its block joins the <actor_agent>
+// family (one vocabulary) but differs from a bound actor: it owns no instance
+// and — the inverted rule — it MAY message_actor.
+describe('the ephemeral-actor (subagent) prompt', () => {
+  test('shares the <actor_agent> framing as the ephemeral kind, carrying the task', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const out = await renderSystemPrompt({ taskOverride: 'summarize the release notes' });
+    expect(out.includes('<actor_agent>')).toBe(true);
+    expect(out.includes('EPHEMERAL ACTOR')).toBe(true);
+    expect(out.includes('summarize the release notes')).toBe(true);           // the task rides in
+    // The return-value contract survives.
+    expect(out.includes('value returned to the parent')).toBe(true);
+    // Old model-facing identity is gone (unified into the actor family).
+    expect(out.includes('<subagent_task>')).toBe(false);
+    expect(out.includes('You are a SUBAGENT')).toBe(false);
+  });
+
+  test('the inverted rule: an ephemeral actor MAY delegate (unlike a bound actor)', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const ephemeral = await renderSystemPrompt({ taskOverride: 'do X' });
+    // it is told it may message_actor and gets the reply in its tool result
+    expect(ephemeral.includes('message_actor')).toBe(true);
+    expect(ephemeral.includes('tool result')).toBe(true);
+    // it still cannot mutate an instance directly (the phrase wraps a line)
+    expect(ephemeral.includes('cannot mutate')).toBe(true);
+    // a BOUND actor, by contrast, is told message_actor is NOT its tool
+    const bound = actorBlock('webvm');
+    expect(bound.includes("message_actor tools named above are the ORCHESTRATOR's")).toBe(true);
+  });
+
+  // Field failure: subagents asked to build an App created an empty/placeholder
+  // App, then flailed trying to fill it (a second create → path_required). The
+  // block spells out the create-once-then-delegate flow — the SAME intent-vs-code
+  // boundary the orchestrator uses: the parent creates the shell, the owning app
+  // actor writes the files (it holds the lore). Two traps named explicitly:
+  // don't cram the whole app into create, don't second-create to fill.
+  test('carries the create-once-then-delegate build guidance (both traps named)', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const out = await renderSystemPrompt({ taskOverride: 'build a lava-lamp App' });
+    expect(out.includes('CREATE ONCE, then DELEGATE')).toBe(true);
+    // trap 1: don't pack the whole app into the create call
+    expect(out.includes('do NOT pack the whole app into the')).toBe(true);
+    // trap 2: don't second-create to fill a placeholder
+    expect(out.includes('do NOT app_create a SECOND time to fill a placeholder')).toBe(true);
+    // the fix: message_actor the returned id to build it out
+    expect(out.includes('then message_actor to build it out')).toBe(true);
   });
 });
 

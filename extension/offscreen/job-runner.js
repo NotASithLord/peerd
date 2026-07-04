@@ -26,7 +26,7 @@
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
-import { buildWorkerSource, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
 
 let jobSeq = 0;
 
@@ -43,7 +43,7 @@ let activeJobs = 0;
  *
  * @param {{ code: string, timeoutMs?: number }} job
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -80,7 +80,11 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
   }
-  const { source, cache } = built;
+  const { source, cache, bodyLine } = built;
+  // Did this run reach the web? The fetch bridge below is the ONLY egress a
+  // sealed worker has, so one flag here is authoritative. js_run fences the
+  // run's output for the model when it's set (fetched bytes are untrusted).
+  let usedEgress = false;
   const revokeCache = () => { for (const entry of cache.values()) if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl); };
 
   const blobUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
@@ -123,6 +127,7 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
           return;
         }
         if (m.type === 'fetch-request') {
+          usedEgress = true;   // the run touched the web → its output carries untrusted bytes
           try {
             const resp = await sendToSW('sw/web-fetch', { url: m.url, method: m.method, headers: m.headers, body: m.body });
             worker.postMessage({
@@ -153,15 +158,20 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
         if (m.type === 'done') {
           clearTimeout(timer);
           try { worker.terminate(); } catch {}
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error: m.error ?? null });
+          // Map blob-URL stack frames back to job.js:<line> — the model reads
+          // this error; a user-code line number is actionable, a blob one isn't.
+          const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error, usedEgress });
         }
       });
 
       worker.addEventListener('error', (e) => {
         clearTimeout(timer);
         try { worker.terminate(); } catch {}
-        const detail = e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)';
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}` });
+        const detail = mapWorkerError(
+          e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
+          blobUrl, bodyLine, 'job.js');
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress });
       });
     });
   } finally {

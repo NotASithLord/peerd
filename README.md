@@ -39,14 +39,20 @@ on decades of hardened browser platform work (V8 isolates for sandboxing,
 WebCrypto for the vault, WebAuthn passkeys to unlock it, opaque-origin
 iframes, Subresource Integrity) and writes none of its own cryptographic
 or process-isolation code. The agent that holds your keys never operates
-an environment itself: each browser tab, VM, notebook, and app is driven
-by its own keyless actor sub-agent that exclusively holds that
-environment's tools. The main agent acts as an orchestrator. It delegates
-a goal to an actor and gets back a summary fenced as untrusted, so raw
-page text and command output never reach the context that holds your
-keys, and a confused or prompt-injected main agent has no tool to touch
-an environment with in the first place. Every action an actor drives is
-verified against the live page before it counts as done. (More at
+an environment itself. Each browser tab, VM, notebook, and app is driven
+by its own actor: a separate agent loop that holds no key and holds only
+that one environment's tools. On Chrome, each actor runs in its own
+worker heap, a separate block of memory, so the untrusted content it
+reads (page text, command output, file contents) stays inside that actor.
+The actor reaches the model, the network, or the page only by asking the
+service worker, which holds the key and re-checks and gates every request
+before running it. The main agent acts as an orchestrator. It delegates a
+goal to an actor and gets back a summary fenced as untrusted, so raw page
+text and command output never reach the context that holds your keys, and
+a confused or prompt-injected main agent has no tool to touch an
+environment in the first place. Every action an actor drives is verified
+against the live page before it counts as done. This isolation is the
+core of peerd's security model, not an add-on. (More at
 [peerd.ai](https://peerd.ai).)
 
 **Status: 0.x, experimental beta.** The initial feature buildout is
@@ -245,8 +251,8 @@ asked to, because it never held the tool.
 |---|---|---|
 | **The vault** (`peerd-egress/vault`) | your API keys + secrets, decrypted only after Touch ID / passkey / passphrase unlock; idle auto-lock | leaving the device — keys go only to the provider you chose |
 | **The orchestrator** (`peerd-runtime/loop`) | the conversation, planning, delegating a goal to an actor via `message_actor` | holding any environment's tools, reading raw page bytes, or running untrusted code directly |
-| **An actor** (`peerd-runtime/subagent`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| **The disposable runner** (`peerd-runtime/runner`) | driving + reading a page keyless via do/get/check — the lineage a web actor and subagents use | holding keys or its own network; its output returns `wrapUntrusted`-fenced |
+| **A bound actor** (`peerd-runtime/subagent`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless, in its own worker heap (Chrome) | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| **A subagent** (`peerd-runtime/subagent`) | a disposable ephemeral actor the orchestrator spawns to decompose a task — keyless, in its own worker heap (Chrome), holding only a narrowed subset of the orchestrator's tools | escalating past its grant, holding keys, or reaching another agent's heap; every tool call is re-checked service-worker-side and its result returns fenced |
 | **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
 | **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |

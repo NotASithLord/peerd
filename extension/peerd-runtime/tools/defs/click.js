@@ -69,7 +69,7 @@ export const clickTool = {
       expectedCount: {
         type: 'integer',
         minimum: 1,
-        description: 'Optional deterministic guard for selector actions: fail before clicking unless the selector resolves to exactly this many elements.',
+        description: 'Optional deterministic guard: fail before clicking unless the target resolves to exactly this many elements (the selector match count; a walk ref resolves to 0 or 1).',
       },
       tabId: {
         type: 'integer',
@@ -89,6 +89,13 @@ export const clickTool = {
     const { domRefs, debuggerPool } = /** @type {DomCtxExtras} */ (ctx);
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
 
+    // why: hoisted above the ref branch — the cardinality guard applies to
+    // BOTH resolution channels the injected body serves (selector match count,
+    // walk-ref 0/1), not just selector calls (issue #36).
+    const expectedCount = Number.isInteger(args?.expectedCount) && args.expectedCount > 0
+      ? args.expectedCount
+      : null;
+
     // Ref path (a11y snapshot): the harness owns the ref→node mapping, so
     // there's no ambiguity and no "selector not found". Two resolutions,
     // matching the snapshot's two capture channels (dom/capture.js):
@@ -101,13 +108,20 @@ export const clickTool = {
       if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first` };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.clickBackendNode === 'function') {
+        // Cardinality guard on the CDP channel too (#36 consistency): a resolved
+        // backendDOMNodeId ref IS exactly one node, so any expectedCount other
+        // than 1 is a mismatch — same shape the walk-ref/selector paths return,
+        // so the guard the schema promises holds identically across channels.
+        if (expectedCount != null && expectedCount !== 1) {
+          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount };
+        }
         try {
           const r = await debuggerPool.clickBackendNode(tab.id, entry.backendDOMNodeId);
           if (!r.ok) return { ok: false, error: r.error ?? 'ref_click_failed' };
           return {
             ok: true,
             content: JSON.stringify({
-              clicked: true, ref, role: entry.role, name: entry.name, tag: r.tag, text: r.text,
+              clicked: true, ref, role: entry.role, name: entry.name, tag: r.tag, text: r.text, matchedCount: 1,
               ...(r.navigated ? { navigated: true } : {}),
               // Action-result attribution: what the click changed on the page.
               result: r.navigated ? 'page navigated' : summarizeMutations(r.mutations),
@@ -124,7 +138,7 @@ export const clickTool = {
           const results = await scripting.executeScript({
             target: { tabId: tab.id },
             func: clickInjected,
-            args: [null, 0, entry.walkId],
+            args: [null, 0, entry.walkId, expectedCount],
           });
           scriptResult = results[0]?.result;
         } catch (e) {
@@ -137,6 +151,10 @@ export const clickTool = {
           content: JSON.stringify({
             clicked: true, ref, role: entry.role, name: entry.name,
             tag: scriptResult.tag, text: scriptResult.text,
+            // why: keep matchedCount present on every success shape (selector
+            // AND walk ref) so the agent reads one consistent contract; a
+            // resolved walk ref is always exactly 1 (issue #36).
+            matchedCount: scriptResult.matchedCount,
             // Honest about the channel: a scripting click is synthetic
             // (isTrusted=false) — sites that gate on trusted input may
             // ignore it, and there is no fallback channel here.
@@ -160,9 +178,6 @@ export const clickTool = {
       return { ok: false, error: 'selector_or_ref_required' };
     }
     const nth = Number.isInteger(args.nth) && args.nth >= 0 ? args.nth : 0;
-    const expectedCount = Number.isInteger(args.expectedCount) && args.expectedCount > 0
-      ? args.expectedCount
-      : null;
 
     let scriptResult;
     try {
@@ -201,7 +216,12 @@ export const clickTool = {
  * @param {number | null} [walkId]
  * @param {number | null} [expectedCount]
  */
-function clickInjected(selector, nth, walkId, expectedCount) {
+// why: exported for the Bun tests to exercise the REAL body's walk-ref
+// cardinality guard (mocked scriptResults would hide an omission — #103
+// review lesson). Same precedent as domWalkInjected; `export` is not part
+// of Function.prototype.toString, so executeScript serialization is
+// unchanged.
+export function clickInjected(selector, nth, walkId, expectedCount) {
   'use strict';
   /** @type {HTMLElement | null} */
   let el;
@@ -214,6 +234,21 @@ function clickInjected(selector, nth, walkId, expectedCount) {
     // a standard global, so reach it through an erased cast.
     const reg = /** @type {{ __peerdWalkEls?: Map<number, HTMLElement> }} */ (globalThis).__peerdWalkEls;
     el = reg && typeof reg.get === 'function' ? (reg.get(walkId) ?? null) : null;
+    // why: a walkId names exactly one registered element, so the real match
+    // cardinality is 0 (stale/unregistered) or 1 (found). Enforce the guard
+    // against that count — same code + fields as the selector path — instead
+    // of silently ignoring expectedCount on ref calls (issue #36). Checked
+    // BEFORE the stale return so the 0 case reports the mismatch the caller
+    // asked to be told about, with the re-snapshot hint kept in the text.
+    matchedCount = el && el.isConnected ? 1 : 0;
+    if (expectedCount != null && matchedCount !== expectedCount) {
+      return {
+        ok: false,
+        error: `matched_count_mismatch: walk ref matched ${matchedCount} element(s), expected ${expectedCount}${matchedCount === 0 ? ' — element no longer in the page; re-run snapshot on this tab first' : ''}`,
+        matchedCount,
+        expectedCount,
+      };
+    }
     if (!el || !el.isConnected) {
       return { ok: false, error: 'stale_ref: element no longer in the page — re-run snapshot on this tab first' };
     }

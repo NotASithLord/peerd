@@ -298,7 +298,13 @@ const extractTopLevelImports = async (code, entryPath, deps, cache) => {
   let body = code;
   const ranges = matches.map((mm) => [mm.start, mm.end]).sort((a, b) => b[0] - a[0]);
   for (const [start, end] of ranges) {
-    body = body.slice(0, start) + body.slice(end);
+    // Preserve LINE POSITIONS: re-insert the removed statement's newlines as
+    // blanks, so a body line number equals its user-code line number — that
+    // equality is what lets a worker error's stack map back to
+    // notebook.js:<line> (worker-source.js mapWorkerError). A single-line
+    // import leaves an empty line; a multi-line import leaves as many.
+    const removedNewlines = (body.slice(start, end).match(/\n/g) ?? []).length;
+    body = body.slice(0, start) + '\n'.repeat(removedNewlines) + body.slice(end);
   }
   return { imports: importsBlock, body };
 };

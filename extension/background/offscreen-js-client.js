@@ -15,7 +15,7 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
    * @param {{ timeoutMs?: number }} [opts]
-   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null }>}
+   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean }>}
    */
   execHeadless: async (code, { timeoutMs } = {}) => {
     await ensureOffscreen();

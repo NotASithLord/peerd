@@ -10,7 +10,72 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The global instance reads are now fenced.** `js_read_file` and
+  `app_read_file` stay on the orchestrator (cheap inspection without an actor
+  turn), but their content comes back inside the `wrapUntrusted` fence: an
+  instance file is not reliably agent-authored — notebook/app code fetches and
+  persists web data — so an unfenced read was the one remaining laundering
+  path for untrusted bytes into the orchestrator's trusted context. `js_run`
+  gets the matching treatment: a pure-compute run's output stays raw (own
+  code), but a run that called `peerd.egress.fetch` has its value, console,
+  and error text fenced.
+
+### Added
+- **Actor replies now surface in the chat as their own messages.** When a
+  delegated actor (web / WebVM / Notebook / App) replies, the reply appears at
+  its place in the conversation as a quiet, attributed bubble ("notebook actor
+  · Esoteric Math"), instead of being buried inside the `message_actor` tool
+  card of an earlier turn. Failures show the same way, marked failed.
+- **Notebook heatmap charts.** `chart({ type: 'heatmap', data, x, y, v })` from
+  `peerd:std` renders a density grid (rows of `{ x, y, v }` bins shaded by `v`)
+  — the missing kind agents kept reaching for with hand-rolled Vega specs.
+- **Notebook errors point at your code.** A run error's stack now maps back to
+  `notebook.js:<line>` (both in the output pane and in the agent's tool
+  result) instead of showing internal blob-URL frames. Applies to the headless
+  `js_run` path too (`job.js:<line>`).
+- **Notebook iteration feel.** When a new run starts, the previous run's
+  output stays visible but dims, so consecutive runs read like a loop while
+  every realm stays fresh. And the toolbar gains a `peerd:std ?` cheat sheet —
+  the import line, the chart spec, and the full helper list at a glance.
+
+### Changed
+- **The heap split — every non-orchestrator agent loop now runs in its own
+  dedicated offscreen Worker heap.** Bound actors (web / WebVM / Notebook /
+  App) and subagents (tool-less reasoning AND tool-bearing) run keyless, in
+  isolated memory, reaching the model and their tools only through
+  service-worker routes that re-check every call. Untrusted page, instance,
+  and response content stays in the actor's heap; it cannot reach the vault
+  key or the orchestrator's memory. The "actor fence" went from a prompt
+  boundary in one shared heap to a real memory boundary — the correct answer
+  to prompt injection (the loop that reads hostile content never holds the
+  authority to act on it). One substrate, one code path: a subagent is an
+  ephemeral actor, so the former reasoning and actor stacks collapsed into
+  one. Chrome-only (needs the offscreen API); Firefox falls back to the
+  keyless in-SW loop until it has one.
+
+### Fixed
+- A subagent could be granted the actor-only DOM/page tools (`read_page`,
+  `page_exec`, `click`, `navigate`, `fetch_url`, …) and read or drive the
+  user's foreground tab — authority the main agent itself lacks. A subagent's
+  grantable toolset is now narrowed from the main-agent surface, so it holds
+  a subset of what its parent holds and delegates web/DOM work to the web
+  actor like the main agent does.
+- The vault-gate code-stream backdrop left faint lighter-than-black bands on
+  every row it had ever typed on (the alpha-wash fade only asymptotes toward
+  the background). The animation now redraws from state each frame and trails
+  decay to exactly zero — idle rows are indistinguishable from untouched
+  background.
+- A Notebook run that returned a huge unrecognized object (e.g. a hand-rolled
+  Vega-Lite spec) dumped the entire JSON — hundreds of KB — into the output
+  pane, and the model's copy of the value was blind-truncated mid-JSON. The
+  pane dump is now capped with a note, and the tool result's `[VALUE]` block
+  is cut cleanly at the source with an actionable instruction to return a
+  compact value or a `chart()`/`table()` descriptor.
+- `peerd.self.import('peerd:std')` failed ("cannot resolve") — the dynamic
+  import shim routed builtins through the OPFS compose path, where a builtin
+  has no file. Builtins now import their real URL directly, matching the
+  static resolver.
 
 ---
 

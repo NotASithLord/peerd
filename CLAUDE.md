@@ -32,7 +32,7 @@ Each maps to one letter and color in the brand wordmark:
 | `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic + OpenRouter + Ollama shipped; OpenAI later; local WebGPU deferred) |
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
 | `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. Three kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). A fourth, the **headless worker** (`js_run`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute. The sandbox is the isolate; a tab is one way to host it (taxonomy in the `peerd-engine/` code). |
-| `r` | green   | `peerd-runtime/`      | Agent loop, tools + do/get/check runner, sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
+| `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
 
 The extension *chassis* lives outside these modules: `background/`,
@@ -191,8 +191,9 @@ prose orientation is this file, and the rest is the source itself.
   for byte/codec work, reverse iteration, retry loops, or early-exit).
   Name things in full so identifiers read like the docs. **Exception: the
   injected-into-page classic-script bodies** (`dom/walk-injected.js`,
-  `dom/framework-state.js`, `background/debugger-pool.js`,
-  `tools/defs/watch-changes.js`) are deliberately ES5 — `var`, `function`
+  `dom/framework-state.js`, `dom/pull-in-hint-injected.js`,
+  `background/debugger-pool.js`, `tools/defs/watch-changes.js`) are
+  deliberately ES5 — `var`, `function`
   bound to a caller `this` — and are exempted in the config. Don't
   "modernize" them. The same one-paragraph reminder rides the `js_create`
   / `app_create` tool results (`tools/defs/code-style-note.js`) so the
@@ -224,11 +225,18 @@ exists today:
 5. **`peerd-runtime`** — agent loop, tool dispatcher, and the tool
    inventory. Registered tools are assembled from `BUILTIN_TOOLS`, clock,
    web tools, and service-worker wiring; do not pin the live counts in
-   prose. Exposure is decided in `tools/exposure.js`: low-level DOM/page
-   tools are runner-only, the main agent reaches the page through
-   `do`/`get`/`check`, and dweb tools are invisible where `DWEB_ENABLED`
-   is false. Plus sessions, clock (temporal grounding), subagent
-   orchestrator, voice (Moonshine WASM + Web Speech fallback).
+   prose. Exposure is decided in `tools/exposure.js`: the low-level
+   DOM/page tools are actor-only, never on the main agent — the
+   orchestrator delegates plain-language goals to per-environment
+   actors (web / webvm / notebook / app) via `message_actor`
+   (`subagent/actor-messaging.js`; `actor_list` enumerates every
+   addressable handle), and replies re-enter it fenced on a later
+   turn — it never blocks. The web actor (`subagent/web-actor.js`) is
+   the single entry point for web work: it picks between a sessionless,
+   denylist-gated `fetch_url` and opening + driving a tab. Dweb tools
+   are invisible where `DWEB_ENABLED` is false. Plus sessions, clock
+   (temporal grounding), subagent orchestrator, voice (Moonshine WASM
+   + Web Speech fallback).
 6. **Wire it together** in `background/service-worker.js` — message
    routing, dependency injection, lifecycle wiring. The SW is wiring
    plus per-route message handlers (one per RPC the side panel /
@@ -263,7 +271,7 @@ gotchas to know going in:
   package and from every Firefox package (`packaging/gen-manifest.ts`
   `STORE_STRIPPED_PERMISSIONS`; re-added to a store update post-approval —
   a one-line flip; `docs/store/OPEN-DECISIONS.md` §1). The DEFAULT
-  browser-subagent path on store-Chrome AND Firefox is
+  path for the web actor's DOM tools on store-Chrome AND Firefox is
   `chrome.scripting`: a DOM-walk pseudo-a11y snapshot
   (`peerd-runtime/dom/walk-injected.js`) feeding the SAME serializer as
   CDP, with selector/`walkId` click/type and a `world:'MAIN'` `read_state`
@@ -278,7 +286,32 @@ gotchas to know going in:
   `background/debugger-pool.js`.
 - Subagents — depth-bounded recursion (default `MAX_DEPTH=5`), tool
   narrowing, output cap. Real implementation at
-  `peerd-runtime/subagent/spawn.js` — not a stub.
+  `peerd-runtime/subagent/spawn.js` — not a stub. Since the async-actor
+  unification (PR #134): a child runs under its own turn slot with an
+  abort signal and a wall-clock timeout (Stop and `subagent_cancel`
+  actually end its work, transitively down the subtree), and a
+  trusted-lineage subagent may `message_actor` — the sender gate walks
+  server-stamped `spawnedTrusted` hops (`subagent/delegation-lineage.js`;
+  an inbound spawn taints its whole subtree), delegation budgets are
+  keyed by the lineage root, and a subagent's actor reply resolves into
+  its tool result (an ephemeral child has no later turn to wake).
+- The heap split — EVERY non-orchestrator agent loop runs in its OWN
+  dedicated offscreen Worker heap (`peerd-runtime/subagent/actor-worker-core.js`
+  drives it; `offscreen/actor-worker.js` + `actor-runner.js` +
+  `background/offscreen-actor-client.js` host + relay it). One substrate,
+  two shapes: a BOUND actor (web/webvm/notebook/app, instance-pinned) and an
+  EPHEMERAL actor (a subagent — tool-less = pure reasoning, tool-bearing =
+  a narrowed-general toolset). The worker holds NO key, NO `chrome.*`, NO
+  engine clients; its only outward edges are two SW-gated relays — the model
+  call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
+  and every tool call (the SW rebuilds the caller's instance-pinned or
+  `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
+  args). So the actor fence is a MEMORY boundary, not a prompt boundary:
+  untrusted page/instance/response content stays behind the heap, one
+  process-eviction from the vault DK no longer reachable. Chrome-only (needs
+  the offscreen API); Firefox falls back to the keyless in-SW loop until it
+  has one. why it matters: prompt injection has no filter — the fix is to
+  never hand untrusted reasoning the authority in the first place.
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
   download, OPFS-cached) with a Web Speech API fallback. Hosted in the
   offscreen doc (`peerd-runtime/voice/`).
@@ -292,15 +325,20 @@ gotchas to know going in:
 - Policy-gated dispatcher with full lineage attached to every tool
   result. The live stack is defined in `gates.js` plus the default
   pre/post tool-use hooks; keep prose at the invariant level so it does
-  not drift. Current posture in code: Plan/Act enforcement, main-vs-runner
-  exposure checks, sensitive-origin blocking, async confirmation, egress
+  not drift. Current posture in code: Plan/Act enforcement, main-vs-actor
+  exposure enforcement (the exposure + actor-capability-tier gates:
+  actor-only tools refused for the main turn, each actor positively
+  pinned to its own kind's toolset and instance), sensitive-origin
+  blocking, async confirmation, egress
   enforcement in the allowlist hook and fetch wrappers, and append-only
   audit. The legacy permission-mode axis was REMOVED
   2026-06-12 — Plan/Act + the denylist carry the safety weight; Plan
   permits pure URL loads only, never clicks (enforced in `gates.js`).
 - The ten-feature buildout — memory, edit + checkpoints, Plan/Act,
   composer (slash commands + @-refs), goal mode (autonomous loop), cost telemetry, skills,
-  review subagent, hooks, and do/get/check — all integrated. Per-feature
+  review subagent, and hooks — all integrated. (The tenth, do/get/check,
+  was CULLED 2026-07-01: the web actor drives pages directly, so one
+  delegation reaches the page instead of two.) Per-feature
   detail lives in the code, under `peerd-runtime/` and its README.
 - Dual distribution: store (no dweb) + preview channels, generated
   `manifest.json` / `channel-config.js` (`bun run gen:dev`). `package.json`,
@@ -329,10 +367,10 @@ land with deliberate design work):
   (the `/tools` presets + `session.toolManifest`; `tools/manifests.js`,
   `tools/manifest-command.js`, enforced in `gates.js`), on top of the
   registration/exposure split. What's still ahead is binding a manifest to
-  a *profile* (rides the Profiles item above). Note: the do/get/check
-  browser-runner is already trimmed to a tight allow-list by
-  construction (`runner/index.js` READ_TOOLSET / DO_TOOLSET) — it never
-  sees the full surface.
+  a *profile* (rides the Profiles item above). Note: the per-environment
+  actors are already trimmed to tight per-kind allow-lists by
+  construction (`tools/exposure.js` `actorAllowedTools`, enforced at
+  dispatch in `gates.js`) — an actor never sees the full surface.
 - OpenAI provider adapter — the file doesn't exist yet (OpenRouter
   covers most vendors meanwhile; Ollama shipped 2026-06-12 with its
   `http://localhost:11434` CSP connect-src entry restored in

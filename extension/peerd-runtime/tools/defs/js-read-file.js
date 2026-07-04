@@ -1,5 +1,14 @@
 // @ts-check
 // js_read_file — read a file from the Notebook's OPFS scratch.
+//
+// The content comes back FENCED (wrapUntrusted): a Notebook file is not
+// reliably agent-authored — notebook code fetches (peerd.egress.fetch) and
+// persists what it fetched to OPFS, so an unfenced read is a laundering path
+// for web bytes into the orchestrator's trusted context (the exact flow the
+// heap split closes everywhere else). Reads stay GLOBAL for ergonomics; the
+// fence is what makes that safe.
+
+import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const jsReadFileTool = {
@@ -34,7 +43,14 @@ export const jsReadFileTool = {
         sessionId: ctx.session?.sessionId,
         notebookId: args.notebook,
       });
-      return { ok: true, content };
+      return {
+        ok: true,
+        content: wrapUntrusted({
+          origin: `notebook:${args.notebook ?? 'current'}/${args.path}`,
+          tool: 'js_read_file',
+          body: content,
+        }),
+      };
     } catch (e) {
       return { ok: false, error: `read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

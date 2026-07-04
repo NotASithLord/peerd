@@ -166,7 +166,29 @@ describe('snapshot → click/type over walk refs — full chain', () => {
       const r = await clickTool.execute({ ref }, ctx);
       expect(r.ok).toBe(true);
       expect(contentOf(r)).toContain('"via": "dom-walk"');
+      // matchedCount rides the walk-ref success shape too — a resolved walk
+      // ref is exactly one element (issue #36 contract consistency).
+      expect(contentOf(r)).toContain('"matchedCount": 1');
       expect(clicks > 0).toBe(true);
+    });
+  });
+
+  it('click {ref, expectedCount≠1} fails matched_count_mismatch BEFORE clicking', async () => {
+    await withFixture(async (host) => {
+      const ctx = makeCtx();
+      let clicks = 0;
+      const btn = /** @type {HTMLButtonElement} */ (host.querySelector('#dw-send'));
+      btn.disabled = false;
+      btn.addEventListener('click', () => { clicks += 1; });
+      const snap = await snapshotTool.execute({ budget: 30000 }, ctx);
+      const ref = /(@e\d+) button "Send order"/.exec(contentOf(snap))?.[1];
+      // A walk ref names exactly one element — expecting 2 is a planning
+      // contradiction the guard must catch deterministically, pre-action.
+      const r = await clickTool.execute({ ref, expectedCount: 2 }, ctx);
+      expect(r.ok).toBe(false);
+      expect(errorOf(r)).toContain('matched_count_mismatch');
+      expect(errorOf(r)).toContain('matched 1 element(s), expected 2');
+      expect(clicks).toBe(0);
     });
   });
 
@@ -202,6 +224,8 @@ describe('snapshot → click/type over walk refs — full chain', () => {
       expect(typeof ref).toBe('string');
       const r = await typeTool.execute({ ref, text: 'Ada Lovelace' }, ctx);
       expect(r.ok).toBe(true);
+      // matchedCount rides the walk-ref success shape too (issue #36).
+      expect(contentOf(r)).toContain('"matchedCount": 1');
       expect(field.value).toBe('Ada Lovelace');
       expect(inputs).toBe(1);
     });

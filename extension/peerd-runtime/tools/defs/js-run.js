@@ -12,6 +12,8 @@
 
 import { clamp } from '/shared/util.js';
 import { JS_PITFALLS_NOTE } from './code-style-note.js';
+import { pushValueBlock } from './value-block.js';
+import { wrapUntrusted } from '../prompt-wrap.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
@@ -30,6 +32,7 @@ const pitfallsDisclosed = new Set();
  * @property {string} [error]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
+ * @property {boolean} [usedEgress]   the run called peerd.egress.fetch (job-runner)
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -103,17 +106,24 @@ const formatRunResult = (code, r) => {
   const oneLineCode = code.length > 200 ? `${code.slice(0, 200)}…` : code;
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')} (headless)`);
   lines.push(`[${r.durationMs}ms]`);
-  if (r.error) lines.push('[ERROR]', r.error);
+  // The run's OUTPUT (error text, console, value) — the parts user code shapes.
+  const body = [];
+  if (r.error) body.push('[ERROR]', r.error);
   if (r.consoleOutput && r.consoleOutput.length) {
-    lines.push('[CONSOLE]');
+    body.push('[CONSOLE]');
     for (const { level, text } of r.consoleOutput) {
-      lines.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
+      body.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
     }
   }
-  if (r.value !== undefined) {
-    lines.push('[VALUE]');
-    try { lines.push(JSON.stringify(r.value, null, 2)); }
-    catch { lines.push(String(r.value)); }
+  pushValueBlock(body, r.value);
+  // Own-code threat model: a pure-compute run's output is the agent's own and
+  // stays raw. But a run that touched the web (peerd.egress.fetch) can carry
+  // fetched bytes in its value/console/error — fence THOSE runs so web content
+  // can't launder into the caller's trusted context through scratch compute.
+  if (r.usedEgress && body.length) {
+    lines.push(wrapUntrusted({ origin: 'js_run (fetched web content)', tool: 'js_run', body: body.join('\n') }));
+  } else {
+    lines.push(...body);
   }
   return lines.join('\n');
 };
