@@ -339,8 +339,11 @@ JS-rendered DOM → render: navigate opens your tab, drive it; then you may fetc
 SAME site's endpoints WITH the session instead of re-scraping. Try fetch first when the
 data looks API-reachable; render if it's gated, needs auth, or comes back empty
 (fetch_url returns served html/json, not what JS builds).
-To SEARCH, navigate to a search engine (e.g. https://duckduckgo.com/?q=...) and read the
-results — there is no search tool.
+To SEARCH, go BACKGROUND-FIRST: fetch_url https://duckduckgo.com/html/?q=… — a JS-free
+results page, so it needs NO tab (sessionless, invisible, fast) — and read the result
+links/snippets from the served HTML. Open a tab (navigate) only when the fetched results
+come back empty/blocked or the task needs the rendered engine (news/images tabs, a
+JS-gated engine). There is no search tool; this fetch IS the search.
 
 YOUR TAB — you own 0-OR-1 tab. You start with NONE (fetch needs no tab); navigate OPENS
 it on the render decision. Every DOM tool then drives THAT one tab — you never pass a tab

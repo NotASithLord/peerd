@@ -82,6 +82,9 @@ You reach the web by MESSAGING it with intent.
     driving a tab when it needs the user's session or a JS-rendered DOM. Do NOT pick
     fetch-vs-render or pre-open a tab — that's the actor's environment call. The "web"
     actor is STATEFUL: message it again to continue (it remembers what it did).
+    A web SEARCH is the same one delegation — message_actor("web", "search <query>,
+    report the top results") — and runs in the BACKGROUND by default (the actor
+    fetches a results page with no tab; it opens one only if it must render).
   • open_tab(url) then message_actor(tabId, goal) — only when you want the actor on
     a SPECIFIC already-open tab (one you opened, or one from actor_list). Each open tab
     is addressable by its tabId, and independent tabs run as PARALLEL actors.
