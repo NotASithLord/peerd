@@ -1,5 +1,12 @@
 // @ts-check
 // app_read_file — read a single file from an App's OPFS subtree.
+//
+// Fenced like js_read_file: an App's files can embed data its actor pulled
+// from the web (full fetch inside the iframe; actor-written data files), so
+// an unfenced global read would launder untrusted bytes into the
+// orchestrator's trusted context. Reads stay global; the fence pays for it.
+
+import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const appReadFileTool = {
@@ -34,7 +41,14 @@ export const appReadFileTool = {
         path: args.path,
         sessionId: ctx.session?.sessionId,
       });
-      return { ok: true, content };
+      return {
+        ok: true,
+        content: wrapUntrusted({
+          origin: `app:${args.appId ?? 'current'}/${args.path}`,
+          tool: 'app_read_file',
+          body: content,
+        }),
+      };
     } catch (e) {
       return { ok: false, error: `app_read_file_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

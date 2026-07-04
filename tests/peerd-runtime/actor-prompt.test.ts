@@ -47,6 +47,11 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('reads stay global')).toBe(true);
   });
 
+  test('search is one delegation and background by default (no tab unless it must render)', () => {
+    expect(base.includes('A web SEARCH is the same one delegation')).toBe(true);
+    expect(base.includes('runs in the BACKGROUND by default')).toBe(true);
+  });
+
   test('the browsing section makes the web actor the single entry point (fetch-vs-render is its call)', () => {
     expect(base.includes('browsing — every tab is an actor')).toBe(true);
     // The web actor — addressed by "web", picks its own mechanism (sessionless fetch
@@ -112,6 +117,12 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     // DOM-driving lore still present.
     expect(web.includes('re-snapshot')).toBe(true);
     expect(web.includes('UNTRUSTED')).toBe(true);
+    // Search is BACKGROUND-first: fetch the JS-free results page, no tab; render
+    // only when the fetch comes back empty/blocked. (Owner call 2026-07-04 —
+    // a search should not open a visible tab by default.)
+    expect(web.includes('BACKGROUND-FIRST')).toBe(true);
+    expect(web.includes('duckduckgo.com/html/?q=')).toBe(true);
+    expect(web.includes('this fetch IS the search')).toBe(true);
     // the full IGNORE/FLAG/EXCLUDE injection drill. The web actor prompt is now the
     // SOLE home of this defense (the do/get/check runner that used to carry a mirror
     // copy is gone), so pin the SUBSTANCE, not just the labels — a bare 'EXCLUDE it'
