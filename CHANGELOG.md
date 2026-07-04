@@ -19,6 +19,14 @@ storage formats may move until the surface stabilizes.
 - **Notebook heatmap charts.** `chart({ type: 'heatmap', data, x, y, v })` from
   `peerd:std` renders a density grid (rows of `{ x, y, v }` bins shaded by `v`)
   — the missing kind agents kept reaching for with hand-rolled Vega specs.
+- **Notebook errors point at your code.** A run error's stack now maps back to
+  `notebook.js:<line>` (both in the output pane and in the agent's tool
+  result) instead of showing internal blob-URL frames. Applies to the headless
+  `js_run` path too (`job.js:<line>`).
+- **Notebook iteration feel.** When a new run starts, the previous run's
+  output stays visible but dims, so consecutive runs read like a loop while
+  every realm stays fresh. And the toolbar gains a `peerd:std ?` cheat sheet —
+  the import line, the chart spec, and the full helper list at a glance.
 
 ### Changed
 - **The heap split — every non-orchestrator agent loop now runs in its own
