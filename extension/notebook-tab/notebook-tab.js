@@ -15,7 +15,7 @@ import { buildModule, createEditor } from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
 // with the headless offscreen job runner so the security surface can't diverge.
-import { buildWorkerSource, NOTEBOOK_BUILTINS } from './worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from './worker-source.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 
 const notebookId = location.hash.slice(1).split(/[?&]/)[0];
@@ -156,12 +156,22 @@ const makeResolverDeps = () => ({
 // file, not to keep RAM warm.
 // ---------------------------------------------------------------------------
 
+// Dim everything already in the output pane when a NEW run starts: the pane is
+// a transcript, so the previous run's output stays visible (a loop feel even
+// though every realm is fresh) while the current run's output reads bright.
+const dimPreviousOutput = () => {
+  for (const child of els.output.children) child.classList.add('nb-prev');
+};
+
 /** @param {string} code @param {number} [timeoutMs] @param {string} [entryPath] */
 const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
+  dimPreviousOutput();
   let source;
+  let bodyLine = 1;
   try {
     const built = await buildWorkerSource(code, { entryPath, notebookId, resolverDeps: makeResolverDeps() });
     source = built.source;
+    bodyLine = built.bodyLine;
     entryCache = built.cache;
     if (entryCache.size > 0) appendLine('log-info', `[import] ${entryCache.size} module(s) resolved`);
   } catch (e) {
@@ -297,10 +307,13 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
             renderReturnValue(els.output, m.value);
             els.outputPane.scrollTop = els.outputPane.scrollHeight;
           }
-          if (m.error) appendLine('log-error', m.error);
+          // Map stack frames in the entry blob back to notebook.js:<line> so
+          // the pane (and the agent's tool result) point at the user's code.
+          const error = m.error ? mapWorkerError(m.error, url, bodyLine, entryPath) : null;
+          if (error) appendLine('log-error', error);
           resolve({
             value: m.value, consoleOutput: m.consoleOutput,
-            durationMs: m.durationMs, error: m.error ?? null,
+            durationMs: m.durationMs, error,
           });
           return;
         }
@@ -312,7 +325,13 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
         const err = e.error;
         let detail = err?.stack || err?.message || e.message || '';
         if (!detail) detail = 'worker crashed (no detail available)';
-        const loc = e.filename ? ` (${e.filename}:${e.lineno}:${e.colno})` : '';
+        detail = /** @type {string} */ (mapWorkerError(detail, url, bodyLine, entryPath));
+        // A SYNTAX error never reaches the entry's catch — it surfaces here
+        // with the blob filename + line. Map it to the user's file too.
+        const userLine = e.lineno - bodyLine + 1;
+        const loc = (e.filename === url && userLine >= 1)
+          ? ` (${entryPath}:${userLine}:${e.colno})`
+          : (e.filename ? ` (${e.filename}:${e.lineno}:${e.colno})` : '');
         appendLine('log-error', `[worker crashed] ${detail}${loc}`);
         resolve({
           value: undefined, consoleOutput: [], durationMs: 0,

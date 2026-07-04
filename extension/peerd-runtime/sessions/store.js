@@ -149,6 +149,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   parentSessionId?: string,
    *   spawnedTrusted?: boolean,
    *   task?: string,
+   *   grantedTools?: string[],
    *   depth?: number,
    *   permissionMode?: string,
    *   confirmActions?: boolean,
@@ -167,6 +168,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     parentSessionId,
     spawnedTrusted,
     task,
+    grantedTools,
     depth = 0,
     permissionMode,
     confirmActions,
@@ -200,6 +202,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // absent (getAncestry treats an unparented record as trusted).
       ...(spawnedTrusted !== undefined ? { spawnedTrusted } : {}),
       ...(task ? { task } : {}),
+      // Heap-split phase 4: a subagent's narrowed toolset, persisted so the offscreen
+      // tool-dispatch route rebuilds the child's restricted ctx from it and re-checks
+      // every relayed call (never the worker's word). Absent for non-tool children.
+      ...(Array.isArray(grantedTools) && grantedTools.length > 0 ? { grantedTools } : {}),
       // DESIGN-17: an actor self-describes the instance it owns + its kind.
       ...(instanceId ? { instanceId } : {}),
       ...(actorType ? { actorType } : {}),

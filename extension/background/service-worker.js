@@ -227,7 +227,7 @@ import {
   makeAsyncSubagents,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
-  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR,
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -246,6 +246,7 @@ import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
+import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { decidePullIn } from './panel-affordance.js';
@@ -1437,6 +1438,27 @@ const spawnSubagentCore = makeSpawnSubagent({
     claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
+  // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
+  // in-SW loop — the SAME substrate a bound actor uses (a subagent is an ephemeral
+  // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
+  // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
+  // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
+  // would see the TDZ, so we only DEREFERENCE at call time. null on Firefox / when
+  // offscreen is unavailable → the unavailable sentinel so spawn.js falls back to the
+  // in-SW loop. The key never enters the worker; the model call and every tool call
+  // relay back to SW-gated routes. Adapt the child job shape (sessionId/task/tools) to
+  // the actor run shape (actorSessionId/message/tools); the 'actor/tool-dispatch' route
+  // rebuilds the child's restricted ctx from the persisted grantedTools (never the
+  // worker's args). Tools default to [] (a pure-reasoning child that never dispatches).
+  runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
+    ? actorClient.run({
+      actorSessionId: job.sessionId, message: job.task, systemPrompt: job.systemPrompt,
+      provider: job.provider, model: job.model, depth: job.depth,
+      maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
+      tools: job.tools ?? [],
+    }, opts)
+    : Promise.resolve({ ok: false, error: 'child offscreen unavailable' }),
+  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
@@ -1912,6 +1934,32 @@ const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.crea
 const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// The heap split: the ONE offscreen agent-loop client. It runs every non-
+// orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
+// bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
+// 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
+// and dispatches there — the worker holds no
+// key, no engine clients, no chrome.*. Null when offscreen is unavailable.
+const actorClient = offscreenAvailable ? makeOffscreenActorClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+  callModel: /** @type {any} */ (callModel),
+  getSecret,
+  safeFetch,
+  sessions,
+  buildToolContext,
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  pinActorCall,
+  // Phase 4: rebuild a subagent's narrowed-general tool ctx SW-side from its persisted
+  // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.
+  restrictCtxCapabilities,
+  // Phase 3: a tab-backed web actor's currently-owned tab, read per dispatch (lazy —
+  // webActorTabBindings is defined later, called at turn time). tabFor returns the
+  // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
+  ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
+  EXPOSURE_ACTOR,
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -2839,6 +2887,103 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   if (webActorTabBindings.drop(tabId)) persistWebBindings();
 });
 
+// Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
+// offscreen Worker heap. Renders the actor prompt + descriptors SW-side (the
+// worker never assembles them), seeds the worker with the actor's prior history
+// (statefulness), forwards loop events to the card, and persists the turn back.
+// Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
+// (offscreen unavailable / never started). The worker holds no key, no engine
+// clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
+const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
+  if (!actorClient) return null;
+  const rec = await sessions.get(actorSessionId);
+  if (!rec) return null;
+  const { controller, release } = turnSlots.claim(actorSessionId);
+  try {
+    // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system
+    // override (rec.customSystemPrompt). Actors get no memory/skills block (same
+    // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
+    const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
+    const systemPrompt = await renderSystemPrompt({
+      actorType: kind, backing: rec.backing, instanceId,
+      temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+    });
+    const tools = actorDescriptors(listTools(), kind, rec.backing)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
+    const reasoning = {
+      enabled: settingsStore.get().reasoningEnabled,
+      budgetTokens: REASONING_BUDGET_TOKENS,
+      effort: REASONING_EFFORT_LEVELS.includes(settingsStore.get().reasoningEffort)
+        ? settingsStore.get().reasoningEffort : DEFAULT_SETTINGS.reasoningEffort,
+    };
+    const contextWindow = /** @type {any} */ (contextWindowFor(rec.model, {
+      overrides: settingsStore.get().contextWindowOverrides,
+      live: liveContextWindow(rec.provider, rec.model),
+    }));
+    // Minimal card display: mount on start, mirror the worker's state snapshots,
+    // settle on done. fromIndex = the actor's length BEFORE this turn.
+    const fromIndex = (rec.messages ?? []).length;
+    if (display && uiConnected()) {
+      uiPorts.broadcast({ type: 'turn/actor-start', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+    }
+    const onEvent = (display && uiConnected())
+      ? (/** @type {any} */ ev) => {
+        try {
+          if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+        } catch { /* display best-effort */ }
+      }
+      : undefined;
+    // Phase 3: the WEB/API actor self-fence provenance (the worker rebuilds
+    // ctx.fenceActorSummary from it — the SW's closure can't cross postMessage). A
+    // tab actor tags its turn-START tab url (the body-wrap is what matters; a tag
+    // that lags a mid-turn navigate is cosmetic); an API actor tags its FIXED origin.
+    let tabUrl;
+    let apiOrigin;
+    if (kind === 'web') {
+      if (rec.backing === 'api') {
+        apiOrigin = instanceId;
+      } else {
+        const ownedTab = actorTabId ?? webActorTabBindings.tabFor(actorSessionId);
+        if (ownedTab != null) tabUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+      }
+    }
+    const r = await actorClient.run({
+      actorSessionId, message, systemPrompt,
+      provider: rec.provider, model: rec.model, depth: rec.depth,
+      // maxSteps omitted → the worker's runUserTurn uses its OWN default (parity
+      // with the in-SW path, not a hardcoded fifth of it). Seed the actor's prior
+      // history for statefulness.
+      tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
+      // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
+      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
+    }, { signal: controller.signal, onEvent });
+    if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
+    // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
+    // tool_result), not a lossy user+finalText pair — so a long-lived actor keeps
+    // its tool-round memory across turns, matching the in-SW path.
+    const newMessages = Array.isArray(r.newMessages) ? r.newMessages : [];
+    let persistOk = true;
+    for (const m of newMessages) {
+      await sessions.appendMessage(actorSessionId, /** @type {any} */ (m)).catch(() => { persistOk = false; });
+    }
+    // Cost PARITY: price the turn's usage and surface it on the card (the reducer
+    // reads `cost`, not raw usage — the earlier `usage` field never populated).
+    if (display && uiConnected() && r.usage) {
+      try {
+        const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
+        const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
+        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost });
+      } catch { /* cost telemetry is best-effort */ }
+    }
+    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
+    if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
+    return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+  } finally {
+    release();
+  }
+};
+
 const actorMessaging = makeActorMessaging({
   resolveActor: async (/** @type {string} */ instanceId, /** @type {{ senderSessionId?: string | null }} */ opts = {}) => {
     // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
@@ -2905,6 +3050,16 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
+    // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
+    // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
+    // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
+    // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
+    // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
+    // fall back to the in-SW turn below (offscreen unavailable / never started).
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web') {
+      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
+      if (off) return off;
+    }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
@@ -2915,7 +3070,7 @@ const actorMessaging = makeActorMessaging({
       ? { result: fresh }
       : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   },
-  reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
+  reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. Builds
@@ -3277,6 +3432,13 @@ const ensureSession = ensureCurrentSession;
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
+  // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
+  // (getSecret + safeFetch added in the handler; the key never left the SW), the
+  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the subagent/
+  // actor card + cost meter). Serves both reasoning subagents and bound actors; a
+  // reasoning child never exercises tool-dispatch. actorClient is defined above (after
+  // ensureOffscreen), before this dispatcher literal — safe to spread.
+  ...(actorClient?.routes ?? {}),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,

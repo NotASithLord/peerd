@@ -25,26 +25,10 @@ import {
 import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
-import { EXPOSURE_ACTOR, actorDescriptors, actorTargetIdField, filterActorSurface } from '../tools/exposure.js';
+import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
 
-/**
- * DESIGN-17 per-instance PIN. Before an actor's tool call dispatches, force
- * the instance-target arg to the actor's BOUND instance (overwriting any id
- * or NAME the model supplied) so an actor can only ever touch its own
- * instance — and lock edit_file to the actor's kind. The gate's pin check is
- * the defense-in-depth backstop; this is the normalization that makes it pass.
- * Mutates call.args in place (it's a per-turn call object).
- * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
- */
-const pinActorCall = (call, actorType, instanceId) => {
-  if (!instanceId) return;
-  const field = actorTargetIdField(call?.name);
-  if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
-  // edit_file is cross-kind — also lock it to the actor's own workspace kind.
-  if (call?.name === 'edit_file' && actorType) {
-    call.args = { ...(call.args ?? {}), kind: actorType === 'notebook' ? 'notebook' : 'app' };
-  }
-};
+// pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
+// relay, a security seam — one implementation, no drift).
 
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
@@ -68,7 +52,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -477,6 +461,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // why: a reintegration wake (DESIGN-11) rides a synthetic user turn —
       // hidden from the chat UI; the normal send path passes synthetic=false.
       synthetic,
+      // why: an actor's reply-wake carries WHO replied so the chat can render
+      // it as its own attributed bubble — `synthetic` alone also marks hidden
+      // plumbing turns (resume/truncation nudges) and can't be un-hidden.
+      ...(actorReply ? { actorReply } : {}),
       // why: auto-resume (maybeAutoResume) re-drives a turn the SW reclaimed
       // mid-flight — no new user message; the loop continues the persisted
       // history. Normal sends pass resume=false.

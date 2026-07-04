@@ -25,6 +25,7 @@
  * @property {string} [thinking]
  * @property {boolean} [streaming]
  * @property {boolean} [synthetic]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
  * @property {unknown[]} [toolResults]

@@ -44,7 +44,15 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // directly now). A legitimate decrease (files deleted, not directives dropped).
 // 471 → 473: main added one // @ts-check'd file post-cull, and the async-actor
 // proposal adds delegation-lineage.js (the pure trusted-lineage predicate).
-const COVERED_FLOOR = 473;
+// 473 → 477: heap-split phase 1 adds reasoning-worker-core.js, reasoning-worker.js,
+// reasoning-runner.js, offscreen-reasoning-client.js (all // @ts-check).
+// 477 → 481: heap-split phase 2 adds actor-worker-core.js, actor-worker.js,
+// actor-runner.js, offscreen-actor-client.js.
+// 481 → 477: heap-split UNIFICATION — the reasoning stack collapses into the actor
+// stack (a reasoning subagent is a tool-less ephemeral actor), deleting those four
+// phase-1 files; their code lives on in the (still // @ts-check'd) actor-* stack.
+// A legitimate decrease (files deleted, not directives dropped).
+const COVERED_FLOOR = 478;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

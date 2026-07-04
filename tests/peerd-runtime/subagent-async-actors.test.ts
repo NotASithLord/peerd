@@ -33,6 +33,7 @@ const makeStore = () => {
         ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
         ...(opts.spawnedTrusted !== undefined ? { spawnedTrusted: opts.spawnedTrusted } : {}),
         ...(opts.task ? { task: opts.task } : {}),
+        ...(opts.grantedTools ? { grantedTools: opts.grantedTools } : {}),
       };
       map.set(s.sessionId, s);
       return s;
@@ -212,6 +213,102 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
     expect(out.result).toBe('complete');
     expect(out.timedOut).toBeUndefined();
     expect(out.stopped).toBeUndefined();
+  });
+});
+
+describe('heap split — routing a child offscreen (reasoning AND tool-bearing)', () => {
+  const withOffscreen = (store: any, offscreen: any, extra: any = {}) => {
+    // A distinctively-texted in-SW loop so we can tell which path ran.
+    const inSwLoop = makeFastLoop('IN-SW answer');
+    return makeSpawnSubagent(spawnDeps(store, inSwLoop, {
+      runChildOffscreen: offscreen,
+      renderSystemPromptForChild: (t: string) => `SYS:${t}`,
+      ...extra,
+    }) as any);
+  };
+
+  test('a tools:[] child runs OFFSCREEN (not the in-SW loop) and returns its finalText', async () => {
+    const store = makeStore();
+    const parent = await store.create({ model: 'parent-model' });
+    let offscreenJob: any = null;
+    const offscreen = async (job: any) => { offscreenJob = job; return { ok: true, finalText: 'OFFSCREEN answer', usage: { inputTokens: 3, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 }, stopReason: 'end_turn', toolCalls: 0 }; };
+    const spawn = withOffscreen(store, offscreen);
+    const out = await spawn({ task: 'reason about X', tools: [], parentSessionId: parent.sessionId });
+    expect(out.result).toBe('OFFSCREEN answer');       // came from the worker, not the in-SW loop
+    expect(out.usage?.outputTokens).toBe(2);
+    // the child's prompt was rendered SW-side and the session/provider threaded in
+    expect(offscreenJob.systemPrompt).toBe('SYS:reason about X');
+    expect(offscreenJob.provider).toBe('anthropic');
+    expect(offscreenJob.model).toBe('parent-model');
+    // the child transcript was reconstructed SW-side (finalAssistantText reads it)
+    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    expect(child.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'OFFSCREEN answer' });
+  });
+
+  test('a child WITH tools ALSO runs offscreen (phase 4), carrying its granted descriptors', async () => {
+    // Phase 4: a tool-bearing child is a tool-bearing ephemeral actor. It runs in its
+    // own heap and relays each tool call; the keyless worker "holds" tools because the
+    // SW executes them. The granted set is persisted on the child so the SW can rebuild
+    // the restricted ctx and re-check every relayed call.
+    const store = makeStore();
+    const parent = await store.create({});
+    let offscreenJob: any = null;
+    const spawn = withOffscreen(store, async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'did it', usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, stopReason: 'end_turn', toolCalls: 1 }; });
+    const out = await spawn({ task: 't', tools: ['a'], parentSessionId: parent.sessionId });
+    expect(out.result).toBe('did it');                       // ran offscreen, not the in-SW loop
+    expect(offscreenJob.tools.map((t: any) => t.name)).toContain('a');   // descriptors relayed to the worker
+    // the granted set is persisted on the child record for the SW-side dispatch to re-check
+    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    expect(child.grantedTools).toContain('a');
+  });
+
+  test('SECURITY: a subagent CANNOT be granted actor-only tools (foreground-tab escalation is closed)', async () => {
+    // DESIGN-17: read_page/page_exec/click/navigate/fetch_url are MAIN_AGENT_HIDDEN
+    // (actor-only), and edit_file is actor-mutating. narrowTools filters from the
+    // MAIN-AGENT surface, so requesting them yields a child that holds NONE of them —
+    // it must delegate web/DOM work to the web actor via message_actor.
+    const store = makeStore();
+    const parent = await store.create({});
+    let offscreenJob: any = null;
+    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop('IN-SW answer'), {
+      runChildOffscreen: async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'ok', stopReason: 'end_turn', toolCalls: 0 }; },
+      renderSystemPromptForChild: (t: string) => `SYS:${t}`,
+      // a registry that DOES include the actor-only tools (the real listTools surface)
+      getToolDescriptors: () => ['read_page', 'page_exec', 'click', 'navigate', 'fetch_url', 'edit_file', 'js_run', 'read_memory']
+        .map((name) => ({ name, description: name, schema: {} })),
+    }) as any);
+    await spawn({ task: 'read the current page', tools: ['read_page', 'page_exec', 'edit_file', 'js_run'], parentSessionId: parent.sessionId });
+    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    const granted = child.grantedTools ?? [];
+    // the actor-only DOM/page + mutating tools were dropped; only the legit one survives
+    expect(granted).toContain('js_run');
+    for (const forbidden of ['read_page', 'page_exec', 'click', 'navigate', 'fetch_url', 'edit_file']) {
+      expect(granted).not.toContain(forbidden);
+    }
+    // and the worker is only advertised the surviving descriptor
+    expect(offscreenJob.tools.map((t: any) => t.name)).toEqual(['js_run']);
+  });
+
+  test('a NEVER-STARTED offscreen failure falls back to the in-SW loop (never dies on infra)', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    const spawn = withOffscreen(store, async () => ({ ok: false, started: false, error: 'offscreen doc unavailable' }));
+    const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
+    expect(out.result).toBe('IN-SW answer');           // fell back, didn't die
+  });
+
+  test('a STARTED-but-errored offscreen run does NOT re-run in-SW (would double-bill)', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let inSwRan = false;
+    const inSwLoop = async function* (ctx: any) { inSwRan = true; await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'IN-SW answer' }); yield { type: 'stop', stopReason: 'end_turn' }; };
+    const spawn = makeSpawnSubagent(spawnDeps(store, inSwLoop, {
+      runChildOffscreen: async () => ({ ok: false, started: true, error: 'provider-http-500', finalText: '' }),
+      renderSystemPromptForChild: (t: string) => `SYS:${t}`,
+    }) as any);
+    const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
+    expect(inSwRan).toBe(false);                        // did NOT double-run
+    expect(out.result).toBe('');                        // surfaced the (empty) offscreen result
   });
 });
 

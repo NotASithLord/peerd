@@ -37,6 +37,9 @@
  * @property {SessionKind} kind               'chat' (default) | 'subagent' | 'actor'
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
  * @property {string} [task]                  the spawning prompt (subagents only)
+ * @property {string[]} [grantedTools]        a subagent's narrowed toolset (post-manifest
+ *   intersection), persisted at spawn so the heap-split offscreen tool-dispatch rebuilds
+ *   the child's restricted ctx from it and re-checks every relayed call — never the worker's.
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
  * @property {boolean} [spawnedTrusted]       was the SPAWNING turn trusted (non-inbound)?
  *   The per-hop verdict the trusted-lineage gate (subagent/delegation-lineage.js)

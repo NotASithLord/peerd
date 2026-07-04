@@ -26,7 +26,7 @@
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
-import { buildWorkerSource, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
 
 let jobSeq = 0;
 
@@ -80,7 +80,7 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
   }
-  const { source, cache } = built;
+  const { source, cache, bodyLine } = built;
   const revokeCache = () => { for (const entry of cache.values()) if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl); };
 
   const blobUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
@@ -153,14 +153,19 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
         if (m.type === 'done') {
           clearTimeout(timer);
           try { worker.terminate(); } catch {}
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error: m.error ?? null });
+          // Map blob-URL stack frames back to job.js:<line> — the model reads
+          // this error; a user-code line number is actionable, a blob one isn't.
+          const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error });
         }
       });
 
       worker.addEventListener('error', (e) => {
         clearTimeout(timer);
         try { worker.terminate(); } catch {}
-        const detail = e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)';
+        const detail = mapWorkerError(
+          e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
+          blobUrl, bodyLine, 'job.js');
         resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}` });
       });
     });

@@ -53,10 +53,12 @@ export const isHiddenFromMain = (name) => MAIN_AGENT_HIDDEN_TOOLS.has(name);
 
 /**
  * Filter a tool descriptor list down to what the MAIN agent should see.
- * Pure — values in, values out.
+ * Pure — values in, values out. Generic so it preserves the descriptor shape
+ * (name/description/schema) for callers that map the survivors.
  *
- * @param {ReadonlyArray<{name: string}>} descriptors
- * @returns {Array<{name: string}>}
+ * @template {{ name: string }} T
+ * @param {ReadonlyArray<T>} descriptors
+ * @returns {T[]}
  */
 export const mainAgentDescriptors = (descriptors) =>
   descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name));
@@ -253,6 +255,27 @@ const ACTOR_TARGET_ID_FIELD = Object.freeze({
 /** The arg field holding this tool's instance target id, or null. Pure. @param {string} name @returns {string|null} */
 export const actorTargetIdField = (name) =>
   /** @type {Record<string, string|null>} */ (ACTOR_TARGET_ID_FIELD)[name] ?? null;
+
+/**
+ * DESIGN-17 per-instance PIN. Force an actor's tool-call instance-target arg to
+ * its BOUND instance (overwriting any id/name the model — or, in the heap-split,
+ * a possibly-injected worker — supplied), and lock edit_file to the actor's kind.
+ * The gate's pin check is the defense-in-depth backstop; this is the
+ * normalization that makes it pass. Mutates call.args in place. Pure logic,
+ * shared by the in-SW actor turn (turn-driver) AND the offscreen actor tool
+ * relay (SW re-pins the worker's call — never trusts it). Moved here from
+ * turn-driver so both use ONE implementation (no drift on a security seam).
+ * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
+ */
+export const pinActorCall = (call, actorType, instanceId) => {
+  if (!instanceId) return;
+  const field = actorTargetIdField(call?.name);
+  if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
+  // edit_file is cross-kind — also lock it to the actor's own workspace kind.
+  if (call?.name === 'edit_file' && actorType) {
+    call.args = { ...(call.args ?? {}), kind: actorType === 'notebook' ? 'notebook' : 'app' };
+  }
+};
 
 /**
  * The EXPLICIT instance id/name a tool call names, or undefined when it names

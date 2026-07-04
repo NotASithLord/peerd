@@ -295,6 +295,23 @@ gotchas to know going in:
   an inbound spawn taints its whole subtree), delegation budgets are
   keyed by the lineage root, and a subagent's actor reply resolves into
   its tool result (an ephemeral child has no later turn to wake).
+- The heap split — EVERY non-orchestrator agent loop runs in its OWN
+  dedicated offscreen Worker heap (`peerd-runtime/subagent/actor-worker-core.js`
+  drives it; `offscreen/actor-worker.js` + `actor-runner.js` +
+  `background/offscreen-actor-client.js` host + relay it). One substrate,
+  two shapes: a BOUND actor (web/webvm/notebook/app, instance-pinned) and an
+  EPHEMERAL actor (a subagent — tool-less = pure reasoning, tool-bearing =
+  a narrowed-general toolset). The worker holds NO key, NO `chrome.*`, NO
+  engine clients; its only outward edges are two SW-gated relays — the model
+  call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
+  and every tool call (the SW rebuilds the caller's instance-pinned or
+  `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
+  args). So the actor fence is a MEMORY boundary, not a prompt boundary:
+  untrusted page/instance/response content stays behind the heap, one
+  process-eviction from the vault DK no longer reachable. Chrome-only (needs
+  the offscreen API); Firefox falls back to the keyless in-SW loop until it
+  has one. why it matters: prompt injection has no filter — the fix is to
+  never hand untrusted reasoning the authority in the first place.
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
   download, OPFS-cached) with a Web Speech API fallback. Hosted in the
   offscreen doc (`peerd-runtime/voice/`).

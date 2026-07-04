@@ -37,7 +37,9 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
  * @param {string} [opts.entryPath]   resolver entry name (default 'notebook.js')
  * @param {string} opts.notebookId    realm id surfaced as peerd.self.id
  * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
- * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }> }>}
+ * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
+ *   bodyLine: the 1-based source line the user code's first line lands on
+ *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
 export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps }) => {
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
@@ -47,6 +49,7 @@ export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', n
   const source = `import ${JSON.stringify(SEAL_MODULE_URL)}; // realm seal — MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
+const PEERD_BUILTINS = ${JSON.stringify(NOTEBOOK_BUILTINS)};
 const consoleOutput = [];
 
 const stringify = (v) => {
@@ -186,6 +189,13 @@ globalThis.peerd = {
 // the fully-transformed source, we wrap it in a WORKER-realm blob URL, and
 // dynamic-import that.
 globalThis.__peerd_dynamic_import = async (opfsPath) => {
+  // A BUILTIN (peerd:std) is not an OPFS file — the compose path would miss and
+  // throw "cannot resolve". Import its real URL directly, same as the static
+  // resolver does (the literal-specifier rewrite already does this at build
+  // time; this covers the non-literal peerd.self.import(name) route).
+  if (Object.prototype.hasOwnProperty.call(PEERD_BUILTINS, opfsPath)) {
+    return import(PEERD_BUILTINS[opfsPath]);
+  }
   const source = await opfsCall('compose-module', { path: opfsPath });
   const blob = new Blob([source], { type: 'application/javascript' });
   const url = URL.createObjectURL(blob);
@@ -246,8 +256,7 @@ self.addEventListener('message', (ev) => {
 
 const __start = performance.now();
 (async () => {
-${body}
-})()
+__PEERD_BODY__})()
   .then((value) => {
     let safe;
     try { JSON.stringify(value); safe = value; }
@@ -265,5 +274,42 @@ ${body}
     });
   });
 `;
-  return { source, cache };
+  // The 1-based source line the body's FIRST line lands on. Import extraction
+  // preserves line positions (module-resolver re-inserts removed newlines), so
+  // user line L sits at source line bodyLine + L - 1 — the offset mapWorkerError
+  // needs to translate a blob-URL stack frame back to <entryPath>:<line>.
+  const markerAt = source.indexOf('__PEERD_BODY__');
+  const bodyLine = source.slice(0, markerAt).split('\n').length;
+  // why a function replacement: a string replacement interprets `$&`/`$1` in
+  // the BODY as substitution patterns and corrupts agent code containing them.
+  return { source: source.replace('__PEERD_BODY__', () => `${body}\n`), cache, bodyLine };
+};
+
+/**
+ * Map a worker error (a stack whose frames point into the entry blob URL) back
+ * to user-code coordinates: `blob:…:<L>:<C>` → `<entryPath>:<L - bodyLine + 1>:<C>`.
+ * Frames outside the body (the injected preamble) and other modules' blob URLs
+ * are left untouched. Pure — shared by the Notebook tab and the headless
+ * job runner so both surfaces report the same mapped location.
+ *
+ * @param {string | null | undefined} raw
+ * @param {string} blobUrl      the entry worker's own blob URL
+ * @param {number} bodyLine     from buildWorkerSource
+ * @param {string} [entryPath]
+ * @returns {string | null | undefined}
+ */
+export const mapWorkerError = (raw, blobUrl, bodyLine, entryPath = 'notebook.js') => {
+  if (typeof raw !== 'string' || !raw || !blobUrl) return raw;
+  const parts = raw.split(`${blobUrl}:`);
+  if (parts.length === 1) return raw;
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i += 1) {
+    const seg = parts[i];
+    const m = /^(\d+):(\d+)/.exec(seg);
+    const userLine = m ? Number(m[1]) - bodyLine + 1 : 0;
+    out += (m && userLine >= 1)
+      ? `${entryPath}:${userLine}:${m[2]}${seg.slice(m[0].length)}`
+      : `${blobUrl}:${seg}`;
+  }
+  return out;
 };
