@@ -64,8 +64,12 @@ export const mainAgentDescriptors = (descriptors) =>
   // Dweb tools are the DWEB ACTOR's family (owner call 2026-07-04): the main
   // agent never holds them — mesh work is always message_actor("dweb", ...)
   // (the actor exists only when the user enables it). Unconditional, so the
-  // orchestrator surface doesn't morph with a setting.
-  descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebTool(t));
+  // orchestrator surface doesn't morph with a setting. why by NAME not the
+  // `dweb:true` flag: the descriptor PROJECTION (getToolDescriptors →
+  // {name,description,schema}) strips the flag, so isDwebTool would be a no-op
+  // on a projected list — the name is the only reliable signal here. (The gate
+  // sees the full registered tool and keeps using the flag.)
+  descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebToolName(t.name));
 
 // ── Progressive disclosure: instance-gated engine ops ───────────────────
 //
@@ -350,6 +354,14 @@ export const filterActorSurface = (descriptors) =>
 // descriptor list the model reads. A tool opts in with `dweb: true`.
 /** @param {Partial<Tool> | null | undefined} tool reads only the dweb flag */
 export const isDwebTool = (tool) => tool?.dweb === true;
+
+// The name-based twin, for descriptor lists where the `dweb:true` flag has been
+// projected away (getToolDescriptors). Every dweb tool is named `dweb_*` and no
+// non-dweb tool is — the naming convention IS the contract. why both exist: the
+// gate holds the full registered tool (flag intact) and uses isDwebTool; the
+// exposure filters see a stripped projection and must go by name.
+/** @param {string} name @returns {boolean} */
+export const isDwebToolName = (name) => typeof name === 'string' && name.startsWith('dweb_');
 
 /**
  * Drop dweb tools from a descriptor list when the dweb is off. Composes after

@@ -46,9 +46,15 @@ import { mainAgentDescriptors } from '../../extension/peerd-runtime/tools/exposu
 import { actorTierGate } from '../../extension/peerd-runtime/tools/gates.js';
 
 describe('dweb tools are actor-only, unconditionally', () => {
-  test('mainAgentDescriptors drops every dweb-flagged tool', () => {
-    const list = [{ name: 'dweb_discover', dweb: true }, { name: 'dweb_share', dweb: true }, { name: 'remember' }];
-    expect(mainAgentDescriptors(list).map((t) => t.name)).toEqual(['remember']);
+  test('mainAgentDescriptors drops dweb tools BY NAME (the projected list has no dweb flag)', () => {
+    // REGRESSION (cynical-swarm): getToolDescriptors projects to {name,description,
+    // schema} — the `dweb:true` flag is stripped — so a flag-based drop would be a
+    // no-op on the real subagent-grantable list. Pin the flagless (name-only) shape.
+    const projected = [{ name: 'dweb_discover' }, { name: 'dweb_share' }, { name: 'remember' }];
+    expect(mainAgentDescriptors(projected).map((t) => t.name)).toEqual(['remember']);
+    // and the flagged shape (registry order) drops too
+    const flagged = [{ name: 'dweb_install', dweb: true }, { name: 'now' }];
+    expect(mainAgentDescriptors(flagged).map((t) => t.name)).toEqual(['now']);
   });
   test('the gate refuses a dweb tool for a MAIN ctx and points at the actor', () => {
     const r = actorTierGate({ name: 'dweb_discover', dweb: true } as any, {}, { exposure: 'main' } as any);
@@ -58,5 +64,20 @@ describe('dweb tools are actor-only, unconditionally', () => {
   test('the same tool passes for a dweb-actor ctx', () => {
     const r = actorTierGate({ name: 'dweb_discover', dweb: true } as any, {}, { exposure: 'actor', actorType: 'dweb', actorInstanceId: 'dweb' } as any);
     expect(r).toBe(null);
+  });
+});
+
+// cynical-swarm regression: the subagent grantable universe must not leak dweb
+// tools even though its descriptor source strips the dweb flag.
+import { filterActorSurface } from '../../extension/peerd-runtime/tools/exposure.js';
+describe('subagent grantable universe excludes dweb tools (flag-stripped list)', () => {
+  test('filterActorSurface(mainAgentDescriptors(projected)) holds no dweb tool', () => {
+    const projected = [
+      { name: 'dweb_install' }, { name: 'dweb_share' }, { name: 'dweb_block' },
+      { name: 'remember' }, { name: 'read_memory' }, { name: 'js_run' },
+    ];
+    const grantable = filterActorSurface(mainAgentDescriptors(projected)).map((t) => t.name);
+    expect(grantable.some((n) => n.startsWith('dweb_'))).toBe(false);
+    expect(grantable).toContain('js_run');
   });
 });
