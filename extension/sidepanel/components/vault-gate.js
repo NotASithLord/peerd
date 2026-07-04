@@ -124,10 +124,10 @@ const SNIPPETS = [
  * Faint typing backdrop behind the gate — short DOM/JS fragments type themselves
  * out, left-to-right, at many random spots at once, each leaving a fading trail:
  * a horizontal take on a code rain, a hint you're entering a browser-native
- * machine. Monochrome and very low-contrast (borrows --fg/--bg, so it themes
- * light/dark for free) — atmosphere, not chrome. prefers-reduced-motion shows a
- * static scatter, no typing. Mounted only while the gate is; the loop is
- * cancelled on unmount.
+ * machine. Monochrome and very low-contrast (borrows --fg on a transparent
+ * canvas, so it themes light/dark for free) — atmosphere, not chrome.
+ * prefers-reduced-motion shows a static scatter, no typing. Mounted only while
+ * the gate is; the loop is cancelled on unmount.
  */
 const CodeStream = {
   /** @param {any} vnode */
@@ -138,11 +138,19 @@ const CodeStream = {
     if (!ctx) return;
     const cs = getComputedStyle(document.documentElement);
     const fg = (cs.getPropertyValue('--fg') || '#e8e6e1').trim();
-    const bg = (cs.getPropertyValue('--bg') || '#0b0d0e').trim();
     const mono = (cs.getPropertyValue('--font-mono') || 'monospace').trim();
     const reduce = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     const ROW = 24;                         // vertical spacing between typer rows
-    /** @typedef {{ x: number, y: number, text: string, i: number, wait: number }} Writer */
+    // Trail decay per tick. why redraw-from-state (clearRect + explicit per-char
+    // alpha) instead of the classic alpha-wash-toward-bg: source-over washing
+    // only ASYMPTOTES to the background — every row ever typed on kept a faint
+    // permanent residue, which read as lighter-than-black bands on the row grid
+    // (owner report 2026-07-04). Clearing each frame and fading by age reaches
+    // EXACT zero, so idle rows are indistinguishable from untouched background.
+    const DECAY = 0.85;                     // matches the old wash (1 - 0.15)
+    const HEAD = 0.8;                       // the bright typing head
+    const FLOOR = 0.02;                     // below this a char is invisible → skip
+    /** @typedef {{ x: number, y: number, text: string, i: number, wait: number, done: number }} Writer */
     /** @type {Writer[]} */
     let writers = [];
     let w = 0, h = 0, cw = 8, raf = 0, last = 0;
@@ -158,6 +166,7 @@ const CodeStream = {
         text,
         i: 0,
         wait: Math.floor(Math.random() * 55), // stagger so they don't move in lockstep
+        done: 0,                              // ticks since the line finished (fade-out age)
       };
     };
 
@@ -178,19 +187,25 @@ const CodeStream = {
       raf = requestAnimationFrame(frame);
       if (t - last < 66) return;             // type cadence (unhurried)
       last = t;
-      ctx.globalAlpha = 0.15;                // wash the frame toward bg → fading trail (rain-like)
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, w, h);
+      ctx.clearRect(0, 0, w, h);             // fresh frame — the page bg shows through, no residue
       ctx.fillStyle = fg;
       writers.forEach((wr, k) => {
         if (wr.wait > 0) { wr.wait -= 1; return; }
-        if (wr.i < wr.text.length) {
-          ctx.globalAlpha = 0.8;             // bright head; the wash dims the tail behind it
-          ctx.fillText(wr.text[wr.i] || '', wr.x + wr.i * cw, wr.y);
-          wr.i += 1;
-        } else {
-          writers[k] = spawn();              // finished → respawn elsewhere; its trail fades out
+        // advance: type the next char, or age a finished line toward respawn
+        if (wr.i < wr.text.length) wr.i += 1;
+        else wr.done += 1;
+        // draw the trail: each typed char fades by its age (newest = the bright
+        // head), and a finished line keeps aging via `done` until fully out.
+        let visible = false;
+        for (let k2 = 0; k2 < wr.i; k2 += 1) {
+          const age = (wr.i - 1 - k2) + wr.done;
+          const alpha = HEAD * DECAY ** age;
+          if (alpha < FLOOR) continue;
+          visible = true;
+          ctx.globalAlpha = alpha;
+          ctx.fillText(wr.text[k2] || '', wr.x + k2 * cw, wr.y);
         }
+        if (wr.done > 0 && !visible) writers[k] = spawn();   // fully faded → respawn elsewhere
       });
       ctx.globalAlpha = 1;
     };
