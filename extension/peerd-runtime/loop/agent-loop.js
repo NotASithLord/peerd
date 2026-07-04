@@ -167,6 +167,10 @@ export async function* asCompleted(promises) {
  *   from the chat UI, like the truncation-continue path). Used by the
  *   async-subagent reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
+ * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [ctx.actorReply]
+ *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
+ *   message so the chat surfaces it as its own attributed bubble (the one
+ *   synthetic turn the UI shows).
  * @param {boolean} [ctx.resume]
  *   Auto-resume mode (loop/resume-detect.js): continue a turn the SW
  *   reclaimed mid-flight. No NEW user message is appended — the persisted
@@ -194,7 +198,7 @@ export async function* runUserTurn(ctx) {
   const {
     sessionId, userText, synthetic, resume, callModel, getSecret, safeFetch,
     sessions, getSystemPrompt, appendAudit,
-    tools, refreshTools, toolDispatch, signal, reasoning,
+    tools, refreshTools, toolDispatch, signal, reasoning, actorReply,
   } = ctx;
   // why: clamp to the hard ceiling so a caller can only ever lower the
   // cap, never raise it past the infinite-loop backstop.
@@ -294,6 +298,10 @@ export async function* runUserTurn(ctx) {
       // the truncation-continue path below. The wake framing is trusted; the
       // child's result text inside it is wrapUntrusted by the caller.
       ...(synthetic ? { synthetic: true } : {}),
+      // why: an ACTOR-REPLY wake additionally carries who replied, so the
+      // chat renders it as its own attributed bubble instead of hiding it
+      // with the other synthetic plumbing turns (resume/truncation nudges).
+      ...(actorReply ? { actorReply } : {}),
       id: uuidv7(now),
       when: now(),
     };

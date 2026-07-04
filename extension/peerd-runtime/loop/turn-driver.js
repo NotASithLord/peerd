@@ -52,7 +52,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -461,6 +461,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // why: a reintegration wake (DESIGN-11) rides a synthetic user turn —
       // hidden from the chat UI; the normal send path passes synthetic=false.
       synthetic,
+      // why: an actor's reply-wake carries WHO replied so the chat can render
+      // it as its own attributed bubble — `synthetic` alone also marks hidden
+      // plumbing turns (resume/truncation nudges) and can't be un-hidden.
+      ...(actorReply ? { actorReply } : {}),
       // why: auto-resume (maybeAutoResume) re-drives a turn the SW reclaimed
       // mid-flight — no new user message; the loop continues the persisted
       // history. Normal sends pass resume=false.

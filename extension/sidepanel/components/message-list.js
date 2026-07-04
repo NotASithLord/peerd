@@ -133,14 +133,17 @@ const renderTranscript = ({ messages, vmStreams, subagents, actors, loadSubagent
   };
   groups.forEach((g) => {
     // Entering a new user turn → flush the PREVIOUS turn's notices first (now
-    // muted, pinned just above this user message).
+    // muted, pinned just above this user message). An actor-reply is NOT a
+    // turn anchor — it lands mid-conversation, inside the user's ongoing turn.
     if (g.type === 'user') { flush(curTurn, false); curTurn = g.message.id; }
     out.push(g.type === 'user'
       ? m(UserMessage, { key: g.message.id, message: g.message })
-      : m(AssistantMessage, {
-          key: g.message.id, message: g.message, toolResults: g.toolResults,
-          vmStreams, subagents, actors, loadSubagent, peerName, depth,
-        }));
+      : g.type === 'actor-reply'
+        ? m(ActorReplyMessage, { key: g.message.id, message: g.message })
+        : m(AssistantMessage, {
+            key: g.message.id, message: g.message, toolResults: g.toolResults,
+            vmStreams, subagents, actors, loadSubagent, peerName, depth,
+          }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
   // unmatched turn (e.g. opened before the first user message) trail after.
@@ -198,10 +201,10 @@ const AgentTabNotice = {
  */
 /**
  * @param {ChatMessage[]} messages
- * @returns {Array<{ type: 'user', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>}
+ * @returns {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>}
  */
 const groupMessages = (messages) => {
-  /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
+  /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
   const out = [];
   /** @type {Map<string, ToolResult>} */
   const resultsByToolUseId = new Map();
@@ -220,6 +223,10 @@ const groupMessages = (messages) => {
       const isToolResultOnly = (!msg.content || msg.content === '')
         && Array.isArray(msg.toolResults) && msg.toolResults.length > 0;
       if (isToolResultOnly) continue; // pair with prior assistant via map
+      // An actor's reply-wake is synthetic (machine-delivered) but it IS the
+      // news the user is waiting on — surface it as its own attributed bubble
+      // at its place in the transcript instead of burying it in the tool card.
+      if (msg.synthetic && msg.actorReply) { out.push({ type: 'actor-reply', message: msg }); continue; }
       // Synthetic continuation nudges (agent-loop truncation recovery)
       // are loop plumbing, not something the user typed — the truncated
       // assistant message's stop-reason chip tells the visible story.
@@ -264,6 +271,31 @@ const UserMessage = {
         renderText(message.content),
         message.error ? m('.error-line', message.error) : null,
       ]),
+    ]);
+  },
+};
+
+// An actor's reply, surfaced as its OWN bubble at its place in the transcript
+// (the trickle-up: delegated work comes BACK as a visible message, not buried
+// in the message_actor card above). Attribution mirrors renderActorCard's
+// label rules; the body is the fence-stripped reply (display-only — the model
+// still receives the full fenced text). The trusted lead line duplicates the
+// attribution label, so it's dropped from the bubble.
+const ActorReplyMessage = {
+  /** @param {{ attrs: { message: ChatMessage } }} vnode */
+  view: ({ attrs: { message } }) => {
+    const reply = message.actorReply ?? /** @type {NonNullable<ChatMessage['actorReply']>} */ ({ kind: 'actor', instanceId: '' });
+    const who = reply.name ?? (reply.instanceId !== reply.kind ? reply.instanceId : '');
+    const label = (reply.kind === 'web' && /^https?:\/\//.test(String(reply.instanceId)))
+      ? `${reply.instanceId} integration`
+      : `${reply.kind} actor${who ? ` · ${who}` : ''}`;
+    const content = String(message.content ?? '');
+    // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
+    // the role label above the bubble already says who this is.
+    const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
+    return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
+      m('.role', [label, reply.failed ? ' · failed' : '']),
+      m('.bubble', renderText(stripUntrustedFences(body))),
     ]);
   },
 };

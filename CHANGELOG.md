@@ -10,6 +10,16 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+- **Actor replies now surface in the chat as their own messages.** When a
+  delegated actor (web / WebVM / Notebook / App) replies, the reply appears at
+  its place in the conversation as a quiet, attributed bubble ("notebook actor
+  · Esoteric Math"), instead of being buried inside the `message_actor` tool
+  card of an earlier turn. Failures show the same way, marked failed.
+- **Notebook heatmap charts.** `chart({ type: 'heatmap', data, x, y, v })` from
+  `peerd:std` renders a density grid (rows of `{ x, y, v }` bins shaded by `v`)
+  — the missing kind agents kept reaching for with hand-rolled Vega specs.
+
 ### Changed
 - **The heap split — every non-orchestrator agent loop now runs in its own
   dedicated offscreen Worker heap.** Bound actors (web / WebVM / Notebook /
@@ -32,6 +42,21 @@ storage formats may move until the surface stabilizes.
   grantable toolset is now narrowed from the main-agent surface, so it holds
   a subset of what its parent holds and delegates web/DOM work to the web
   actor like the main agent does.
+- The vault-gate code-stream backdrop left faint lighter-than-black bands on
+  every row it had ever typed on (the alpha-wash fade only asymptotes toward
+  the background). The animation now redraws from state each frame and trails
+  decay to exactly zero — idle rows are indistinguishable from untouched
+  background.
+- A Notebook run that returned a huge unrecognized object (e.g. a hand-rolled
+  Vega-Lite spec) dumped the entire JSON — hundreds of KB — into the output
+  pane, and the model's copy of the value was blind-truncated mid-JSON. The
+  pane dump is now capped with a note, and the tool result's `[VALUE]` block
+  is cut cleanly at the source with an actionable instruction to return a
+  compact value or a `chart()`/`table()` descriptor.
+- `peerd.self.import('peerd:std')` failed ("cannot resolve") — the dynamic
+  import shim routed builtins through the OPFS compose path, where a builtin
+  has no file. Builtins now import their real URL directly, matching the
+  static resolver.
 
 ---
 

@@ -896,6 +896,15 @@ button.icon:hover { background: var(--bg); }
   background: rgba(74, 95, 208, 0.08);
   border-color: rgba(74, 95, 208, 0.35);
 }
+/* An actor's reply surfaced as its own bubble (the trickle-up). Quiet, on the
+   agent side of the conversation — same elevated grey as assistant bubbles with
+   a hairline inset to read as "delivered from elsewhere"; grayscale per the
+   brand color rule (failure red is the one semantic exception, via .failed). */
+.message-actor-reply .bubble {
+  background: var(--bg-elev);
+  border-left: 2px solid var(--fg-muted);
+}
+.message-actor-reply .role { font-style: italic; }
 .message.streaming .bubble::after {
   content: '▍';
   margin-left: 2px;

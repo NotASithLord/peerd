@@ -71,7 +71,7 @@ import { ASYNC_SUBAGENT_ACTORS, mayMessageActor, messageProvenance } from './del
  *   tool_use id, absent on a boot redrain) keys the actor's live DISPLAY stream
  *   to its card. Contracted to CLAIM the actor's
  *   turn slot (so runWhenIdle drains correctly).
- * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean }) => Promise<unknown>} deps.reenter
+ * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean, actorReply?: { kind: string, instanceId: string, name?: string, failed: boolean } }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn. trusted:true
  *   marks a first-party continuation allowed to message actors (the reply-wake).
  * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void }} deps.turnSlots
@@ -246,12 +246,19 @@ export const makeActorMessaging = (deps) => {
   /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] */
   const deliver = (senderSessionId, instanceId, kind, name, body, failed = false) => {
     const text = replyText(instanceId, kind, name, body, failed);
+    // actorReply rides the wake so the UI can render the reply as its OWN
+    // attributed chat bubble at the bottom (not buried in the tool-call card).
+    // `synthetic` alone can't carry this — it also marks truncation/resume
+    // nudges, which must stay hidden. name is sanitized the same way replyText's
+    // lead is (it renders un-fenced in the bubble's attribution line).
+    const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
+    const actorReply = { kind, instanceId, ...(safeName ? { name: safeName } : {}), failed };
     turnSlots.runWhenIdle(senderSessionId, () => {
       // trusted:true — the reply-wake is a FIRST-PARTY continuation (the sender's
       // own actor replied), so the sender's turn that reads it MAY fire a
       // follow-up message_actor. The reply BODY is still wrapUntrusted-fenced:
       // trusted is about the turn's ORIGIN (peerd's own loop), not its content.
-      Promise.resolve(reenter({ userText: text, sessionId: senderSessionId, synthetic: true, trusted: true }))
+      Promise.resolve(reenter({ userText: text, sessionId: senderSessionId, synthetic: true, trusted: true, actorReply }))
         .catch((e) => log('reenter failed', e));
     });
   };

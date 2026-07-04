@@ -3070,7 +3070,7 @@ const actorMessaging = makeActorMessaging({
       ? { result: fresh }
       : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   },
-  reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
+  reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. Builds

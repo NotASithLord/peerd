@@ -464,7 +464,11 @@ export const STATES = [
           const name = document.querySelector('.tool-actor .tool-name')?.textContent || '';
           const busy = !!document.querySelector('form.input-bar button.stop');
           const users = [...document.querySelectorAll('.message-user')].map((u) => u.textContent.trim());
-          return { bubbles, cardOk, name, busy, users };
+          const replies = [...document.querySelectorAll('.message-actor-reply')].map((r) => ({
+            role: r.querySelector('.role')?.textContent || '',
+            body: r.querySelector('.bubble')?.textContent || '',
+          }));
+          return { bubbles, cardOk, name, busy, users, replies };
         })()`) || {};
         return (out.bubbles || []).includes('FINAL-ORCH-REPLY') && !out.busy;
       }, { budgetMs: 30_000 });
@@ -478,8 +482,15 @@ export const STATES = [
       rec.check('the reply re-entered the orchestrator ASYNC as a fenced wake turn', wake.length >= 1, `wakeCalls=${wake.length}`);
       rec.check('the fenced wake carried the actor reply text (cross-process proof)', wake.some((s) => s.hasActorText));
       rec.check('the actor card flipped pending → ok after the reply landed', out.cardOk === true);
-      rec.check('the synthetic wake stays hidden (only the original user bubble shows)',
+      rec.check('the wake never renders as a USER bubble (only the original user message shows)',
         (out.users || []).length === 1 && (out.users[0] || '').includes('find the cheapest widget X'), JSON.stringify(out.users));
+      // The trickle-up: the actor reply surfaces at the bottom of the chat as its
+      // OWN attributed bubble — fence-stripped body, no trusted-lead duplication.
+      const reply = (out.replies || [])[0] || {};
+      rec.check('the actor reply surfaces as its OWN attributed bubble', (out.replies || []).length === 1, JSON.stringify(out.replies));
+      rec.check('the bubble is attributed to the web actor', (reply.role || '').includes('web actor'), JSON.stringify(reply.role));
+      rec.check('the bubble carries the reply text, fence-stripped',
+        (reply.body || '').includes('PRICE_IS_42') && !(reply.body || '').includes('<untrusted_web_content'), JSON.stringify((reply.body || '').slice(0, 120)));
       rec.check('the orchestrator emitted the final user-visible answer', (out.bubbles || []).includes('FINAL-ORCH-REPLY'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
