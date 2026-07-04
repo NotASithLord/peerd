@@ -279,7 +279,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
               filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
               instanceState,
             ),
-            DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
+            // ABSORPTION: with the dweb AGENT on, the dweb tools are the
+            // ACTOR's (message_actor("dweb", ...) is the orchestrator's path),
+            // so the main list treats them as off — same filter, no new axis.
+            DWEB_ENABLED && !!settingsStore.get().dwebEnabled && !settingsStore.get().dwebAgentEnabled,
           ),
           dwebEngagedSessions.has(sessionId),
         ),

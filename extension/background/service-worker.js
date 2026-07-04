@@ -2712,8 +2712,8 @@ const actorMailbox = {
 // inherited field is a one-site edit, not two that can silently drift.
 // why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
-/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api' }} o */
-const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb' }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web' }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -2730,7 +2730,7 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
     instanceId,
-    actorType: 'web',
+    actorType,
     // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
     ...(backing ? { backing } : {}),
     ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
@@ -2742,7 +2742,7 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
   bind(created.sessionId);
-  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web', backing: backing ?? 'tab' } }).catch(() => {});
+  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: actorType, backing: backing ?? 'tab' } }).catch(() => {});
   return created.sessionId;
 };
 
@@ -2826,6 +2826,43 @@ const mintApiActor = async (/** @type {string} */ ownerChatId, /** @type {string
   backing: 'api',
   bind: (sessionId) => { apiActorBindings.bind(ownerChatId, origin, sessionId); persistApiActors(); },
 });
+
+// The DWEB ACTOR — the mesh operator: a GLOBAL singleton (one per profile, not
+// per chat), addressed by the literal handle 'dweb'. Its session is the durable
+// truth (IDB — its peer/publisher ledger is its memory); the binding here is
+// just a routing cache (chrome.storage.session), so on a binding miss we
+// RECONNECT to the durable session via findActorSession before minting — the
+// API-actor pattern, minus the per-chat scoping. Opt-in: resolvable only when
+// the network is on AND the user turned the agent on (dwebAgentEnabled).
+const DWEB_ACTOR_KEY = 'dwebActorBinding';
+let dwebActorSessionId = /** @type {string | null} */ (null);
+Promise.resolve(sessionCache.sessionGet(DWEB_ACTOR_KEY))
+  .then((v) => { if (typeof v === 'string') dwebActorSessionId = v; })
+  .catch(() => {});
+const bindDwebActor = (/** @type {string} */ sessionId) => {
+  dwebActorSessionId = sessionId;
+  sessionCache.sessionSet(DWEB_ACTOR_KEY, sessionId).catch(() => {});
+};
+const dwebAgentOn = () => DWEB_ENABLED
+  && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
+const mintDwebActor = async () => mintWebSession({
+  instanceId: 'dweb',
+  ownerChatId: null,            // global — no parent chat; replies target the SENDER
+  actorType: 'dweb',
+  bind: bindDwebActor,
+});
+const resolveDwebActor = async () => {
+  if (!dwebAgentOn()) return null;
+  let actorSessionId = dwebActorSessionId;
+  if (actorSessionId && !(await sessions.get(actorSessionId))) actorSessionId = null;
+  if (!actorSessionId) {
+    // binding cache miss (SW/browser restart) → reconnect to the durable session
+    const durable = await sessions.findActorSession({ instanceId: 'dweb', actorType: 'dweb' });
+    if (durable) { bindDwebActor(durable); actorSessionId = durable; }
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce('dweb-actor', () => mintDwebActor());
+  return { instanceId: 'dweb', kind: 'dweb', actorSessionId };
+};
 
 // Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
 // AUTO-FORMS on first address (the same lazy-mint shape as the web actor). Re-mints when
@@ -2993,6 +3030,11 @@ const actorMessaging = makeActorMessaging({
     // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
     // actor owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
     if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
+    // The DWEB ACTOR — the global mesh operator, addressed by the literal 'dweb'.
+    // Resolvable only when the network AND the agent toggle are on (opt-in daemon);
+    // otherwise the handle doesn't exist and the caller gets the standard
+    // no-instance refusal. Non-numeric + no dot + no engine prefix → unambiguous.
+    if (String(instanceId) === 'dweb') return resolveDwebActor();
     // A per-tab WEB actor is addressed by its tabId-as-string (purely numeric, no
     // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
     // match, so the branch is unambiguous.
@@ -3056,7 +3098,7 @@ const actorMessaging = makeActorMessaging({
     // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
     // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
     // fall back to the in-SW turn below (offscreen unavailable / never started).
-    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web') {
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
       const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
       if (off) return off;
     }
