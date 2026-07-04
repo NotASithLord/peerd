@@ -87,20 +87,45 @@ const __peerdDisplay = (value) => {
 // with every raw network primitive hard-blocked. See notebook-neutralizers.js.
 // The host side of the bridge is the 'fetch-request' handler.
 
-// --- peerd.* OPFS proxy ---
-const pendingOpfs = new Map();
-let nextOpfsRid = 1;
-const opfsCall = (op, args) => new Promise((resolve, reject) => {
-  const rid = nextOpfsRid++;
-  pendingOpfs.set(rid, { resolve, reject });
-  postMessage({ type: 'opfs-request', rid, op, args });
-  setTimeout(() => {
-    if (pendingOpfs.has(rid)) {
-      pendingOpfs.delete(rid);
-      reject(new Error('opfs ' + op + ' timed out'));
+// --- worker↔host request/response bridges ---
+// Every capability the worker reaches on the host (OPFS, the embedded subagent,
+// base-network reads, the a2a mesh) speaks the SAME postMessage protocol: mint a
+// monotonic rid, stash the resolver, post a '<name>-request', settle when the
+// matching '<name>-response' lands. makeBridge is that protocol expressed ONCE;
+// each bridge is then one line + a thin arg-shaping wrapper. why not fetch or
+// display here: fetch is owned by the realm seal (its own listener, so untrusted
+// code can't unseat it) and display is one-way (no reply to correlate).
+const bridges = [];
+const makeBridge = (name, { timeoutMs, shape } = {}) => {
+  const pending = new Map();
+  let seq = 0;
+  const call = (payload = {}) => new Promise((resolve, reject) => {
+    const rid = (seq += 1);
+    pending.set(rid, { resolve, reject });
+    postMessage({ type: name + '-request', rid, ...payload });
+    if (timeoutMs) setTimeout(() => {
+      if (pending.delete(rid)) reject(new Error(name + ' call timed out'));
+    }, timeoutMs);
+  });
+  // Returns true when the message was ours (routed by type), so the listener
+  // stops — even if the rid already settled (a late reply after a timeout).
+  const onResponse = (m) => {
+    if (m.type !== name + '-response') return false;
+    const p = pending.get(m.rid);
+    if (p) {
+      pending.delete(m.rid);
+      if (m.error) p.reject(new Error(m.error));
+      else p.resolve(shape ? shape(m.result) : m.result);
     }
-  }, 15000);
-});
+    return true;
+  };
+  bridges.push({ onResponse });
+  return call;
+};
+
+// --- peerd.* OPFS proxy ---
+const opfsRelay = makeBridge('opfs', { timeoutMs: 15000 });
+const opfsCall = (op, args) => opfsRelay({ op, args });
 // ── The peerd capability surface ────────────────────────────────────────
 // An artifact peerd builds (this Notebook today; Apps later) can call back into
 // peerd and COMPOSE it — runAgent is the seed of that. Capabilities are grouped
@@ -204,26 +229,18 @@ globalThis.__peerd_dynamic_import = async (opfsPath) => {
 };
 
 // --- peerd.runtime.runAgent (embedded agent) proxy ---
-const pendingSubagents = new Map();
-let nextSubagentRid = 1;
-const subagentCall = (args) => new Promise((resolve, reject) => {
-  const rid = nextSubagentRid++;
-  pendingSubagents.set(rid, { resolve, reject });
-  postMessage({ type: 'subagent-request', rid, args });
-});
+const subagentRelay = makeBridge('subagent');
+const subagentCall = (args) => subagentRelay({ args });
 
 // --- peerd.distributed.* (base-network read) proxy ---
 // One message type ('distributed-request') fetches the whole base-network info
 // blob; the distributed.* methods above each slice what they need. The host
 // returns { ok, running, did, peers, presence } (or { ok:false, error }); we
 // expose ok as "available" so the surface can render inert when dweb is off.
-const pendingDistributed = new Map();
-let nextDistributedRid = 1;
-const distributedInfo = () => new Promise((resolve, reject) => {
-  const rid = nextDistributedRid++;
-  pendingDistributed.set(rid, { resolve, reject });
-  postMessage({ type: 'distributed-request', rid });
+const distributedRelay = makeBridge('distributed', {
+  shape: (result) => { const r = result ?? {}; return { available: r.ok === true, ...r }; },
 });
+const distributedInfo = () => distributedRelay({});
 
 // --- peerd.mesh.* (agent-to-agent) proxy — capability-gated (a2a) ---
 // The code the dweb actor writes drives peers through this client; each call
@@ -233,15 +250,8 @@ const distributedInfo = () => new Promise((resolve, reject) => {
 // awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
 // ABOVE that, else the worker rejects a still-valid ask.
 ${a2a ? `
-const pendingMesh = new Map();
-let nextMeshRid = 1;
-const meshCall = (method, args) => new Promise((resolve, reject) => {
-  const rid = nextMeshRid++;
-  pendingMesh.set(rid, { resolve, reject });
-  postMessage({ type: 'a2a-request', rid, method, args });
-  setTimeout(() => { if (pendingMesh.has(rid)) { pendingMesh.delete(rid);
-    reject(new Error('mesh.' + method + ' timed out')); } }, 130000);
-});
+const meshRelay = makeBridge('a2a', { timeoutMs: 130000 });
+const meshCall = (method, args) => meshRelay({ method, args });
 const __mesh = {
   peers:       () => meshCall('peers', {}),
   card:        (did) => meshCall('card', { did }),
@@ -253,42 +263,13 @@ const __mesh = {
 globalThis.mesh = __mesh;
 ` : ''}
 
+// ONE listener fans every '<name>-response' out to its bridge. Each bridge's
+// onResponse claims only its own type, so registration order doesn't matter.
+// ('fetch-response' is consumed by the realm seal's own listener, not here.)
 self.addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || typeof m !== 'object') return;
-  if (m.type === 'subagent-response') {
-    const p = pendingSubagents.get(m.rid);
-    if (!p) return;
-    pendingSubagents.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else p.resolve(m.result);
-    return;
-  }
-  if (m.type === 'distributed-response') {
-    const p = pendingDistributed.get(m.rid);
-    if (!p) return;
-    pendingDistributed.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else { const r = m.result ?? {}; p.resolve({ available: r.ok === true, ...r }); }
-    return;
-  }
-  ${a2a ? `if (m.type === 'a2a-response') {
-    const p = pendingMesh.get(m.rid);
-    if (!p) return;
-    pendingMesh.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else p.resolve(m.result);
-    return;
-  }` : ''}
-  // ('fetch-response' is consumed by the realm seal's own listener.)
-  if (m.type === 'opfs-response') {
-    const p = pendingOpfs.get(m.rid);
-    if (!p) return;
-    pendingOpfs.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else p.resolve(m.result);
-    return;
-  }
+  for (const b of bridges) if (b.onResponse(m)) return;
 });
 
 const __start = performance.now();
