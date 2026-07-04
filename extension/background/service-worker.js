@@ -2712,8 +2712,8 @@ const actorMailbox = {
 // inherited field is a one-site edit, not two that can silently drift.
 // why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
-/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api' }} o */
-const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb' }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web' }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -2730,19 +2730,23 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
     instanceId,
-    actorType: 'web',
+    actorType,
     // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
     ...(backing ? { backing } : {}),
-    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    // why actorProviderName (not just ownerChat?.provider): a GLOBAL actor (the
+    // dweb actor) has NO owner chat — without this fallback its session carries
+    // provider: undefined and every model call dies before the wire.
+    ...(actorProviderName ? { provider: actorProviderName } : {}),
     // '' from resolveRunnerModel means "inherit the chat model" — fall back to the
-    // owner chat's model so the empty-pin semantics + the session-create default hold.
-    ...((webActorModel || ownerChat?.model) ? { model: webActorModel || ownerChat?.model } : {}),
+    // owner chat's model, then the active provider's model (the global-actor case).
+    ...((webActorModel || ownerChat?.model || resolveActiveProvider().model)
+      ? { model: webActorModel || ownerChat?.model || resolveActiveProvider().model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
   bind(created.sessionId);
-  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web', backing: backing ?? 'tab' } }).catch(() => {});
+  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: actorType, backing: backing ?? 'tab' } }).catch(() => {});
   return created.sessionId;
 };
 
@@ -2825,6 +2829,178 @@ const mintApiActor = async (/** @type {string} */ ownerChatId, /** @type {string
   ownerChatId,
   backing: 'api',
   bind: (sessionId) => { apiActorBindings.bind(ownerChatId, origin, sessionId); persistApiActors(); },
+});
+
+// The DWEB ACTOR — the mesh operator: a GLOBAL singleton (one per profile, not
+// per chat), addressed by the literal handle 'dweb'. Its session is the durable
+// truth (IDB — its peer/publisher ledger is its memory); the binding here is
+// just a routing cache (chrome.storage.session), so on a binding miss we
+// RECONNECT to the durable session via findActorSession before minting — the
+// API-actor pattern, minus the per-chat scoping. Opt-in: resolvable only when
+// the network is on AND the user turned the agent on (dwebAgentEnabled).
+const DWEB_ACTOR_KEY = 'dwebActorBinding';
+let dwebActorSessionId = /** @type {string | null} */ (null);
+Promise.resolve(sessionCache.sessionGet(DWEB_ACTOR_KEY))
+  .then((v) => { if (typeof v === 'string') dwebActorSessionId = v; })
+  .catch(() => {});
+const bindDwebActor = (/** @type {string} */ sessionId) => {
+  dwebActorSessionId = sessionId;
+  sessionCache.sessionSet(DWEB_ACTOR_KEY, sessionId).catch(() => {});
+};
+const dwebAgentOn = () => DWEB_ENABLED
+  && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
+
+// Agent-inbox room membership. IDEMPOTENT: maybeStartBaseNetwork fires on every
+// unlock/resume, and each raw join op ref-counts the room (dweb-base ensureRoom)
+// — so without this guard repeated unlocks leak refs + presence beacons. The
+// flag resets when the base host tears down (a fresh SW re-joins cleanly).
+let dwebAgentRoomJoined = false;
+const joinDwebAgentInbox = async () => {
+  if (!dwebAgentOn() || dwebAgentRoomJoined) return;
+  const r = /** @type {any} */ (await browser.runtime.sendMessage({
+    type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+  }).catch(() => null));
+  if (r?.ok) { dwebAgentRoomJoined = true; console.log('[sw] dweb agent inbox joined'); }
+};
+const leaveDwebAgentInbox = async () => {
+  if (!dwebAgentRoomJoined) return;
+  dwebAgentRoomJoined = false;
+  await browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'leave' }).catch(() => {});
+  console.log('[sw] dweb agent inbox left');
+};
+// React to the toggle: joining/leaving the inbox when the user flips the agent
+// on/off, so a disable withdraws presence instead of lingering until SW restart.
+// Named onSettingsChanged so it wires to the settings route by shorthand (the
+// deps-wiring meta-test forbids key:value mis-wires).
+const onSettingsChanged = () => {
+  if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
+  else leaveDwebAgentInbox().catch(() => {});
+};
+// The base host tore down (master OFF) → every room closed, incl. the inbox, so
+// clear the SW-side membership flag for a clean re-join on the next start.
+const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
+const mintDwebActor = async () => {
+  // A GLOBAL actor has no owner chat to inherit a provider from, and the sync
+  // resolveActiveProvider mintWebSession falls back to returns 'anthropic'
+  // UNCONDITIONALLY (never checking key/daemon readiness) — so an Ollama-only or
+  // just-keyed-OpenRouter user who enables the agent before their first chat
+  // would get a keyless-anthropic session that fails every wake. ensureActiveProvider
+  // (async) picks + persists the first USABLE provider, exactly as a fresh chat
+  // does; after it runs, mintWebSession's sync fallback reads the good providerName.
+  await ensureActiveProvider().catch(() => {});
+  return mintWebSession({
+    instanceId: 'dweb',
+    ownerChatId: null,          // global — no parent chat; replies target the SENDER
+    actorType: 'dweb',
+    bind: bindDwebActor,
+  });
+};
+const resolveDwebActor = async () => {
+  if (!dwebAgentOn()) return null;
+  let actorSessionId = dwebActorSessionId;
+  if (actorSessionId && !(await sessions.get(actorSessionId))) actorSessionId = null;
+  if (!actorSessionId) {
+    // binding cache miss (SW/browser restart) → reconnect to the durable session
+    const durable = await sessions.findActorSession({ instanceId: 'dweb', actorType: 'dweb' });
+    if (durable) { bindDwebActor(durable); actorSessionId = durable; }
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce('dweb-actor', () => mintDwebActor());
+  return { instanceId: 'dweb', kind: 'dweb', actorSessionId };
+};
+
+// ── The dweb agent's INBOX ──────────────────────────────────────────────────
+// Inbound mesh messages for THIS browser's agent arrive on the reserved agent
+// room (a normal sub-protocol room — no new transport) and reach the SW as the
+// same dweb/base-room/event push the dwapp bridge uses; we consume only our
+// roomId. Every wake is INBOUND (synthetic && !trusted): the actor may observe,
+// use its own dweb tools (ledger, block), and report — it can never delegate.
+// why rate caps HERE (not in the actor): a cap must bind before a model call
+// spends money; the actor's loop is the thing being protected.
+const DWEB_AGENT_ROOM = 'peerd-agent';
+const DWEB_AGENT_NO_REPORT = 'NO_REPORT';
+/** per-did wake timestamps (sliding minute) + a global hourly counter */
+const dwebInboundByDid = new Map();
+let dwebInboundHour = { windowStart: 0, count: 0 };
+const dwebInboundAllowed = (/** @type {string} */ did) => {
+  const nowMs = Date.now();
+  const times = (dwebInboundByDid.get(did) ?? []).filter((/** @type {number} */ t) => nowMs - t < 60_000);
+  if (times.length >= 3) return false;                      // 3/min per did
+  if (nowMs - dwebInboundHour.windowStart > 3_600_000) dwebInboundHour = { windowStart: nowMs, count: 0 };
+  if (dwebInboundHour.count >= 30) return false;            // 30/hour global
+  times.push(nowMs);
+  dwebInboundByDid.set(did, times);
+  dwebInboundHour.count += 1;
+  // Sweep dead entries: dids are free/Sybil (self-minted did:key), so without
+  // eviction the map grows monotonically over the long-lived (keepalive-pinned)
+  // SW. Drop any entry whose timestamps have all aged out. Cheap — bounded by
+  // the 30/hour ADMIT rate, so at most a few dozen live keys ever.
+  for (const [k, ts] of dwebInboundByDid) {
+    if (k !== did && !ts.some((/** @type {number} */ t) => nowMs - t < 60_000)) dwebInboundByDid.delete(k);
+  }
+  return true;
+};
+
+const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
+  if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
+  const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
+  if (!dwebInboundAllowed(did)) {
+    auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
+    return;
+  }
+  const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
+  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length } }).catch(() => {});
+  (async () => {
+    const actor = await resolveDwebActor();
+    if (!actor) return;
+    const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
+    const wake = `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+    turnSlots.runWhenIdle(actor.actorSessionId, () => {
+      (async () => {
+        const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
+        // HEAP ISOLATION: the inbound wake feeds LIVE untrusted peer bytes to the
+        // actor's reasoning, so it MUST run in the offscreen keyless worker like
+        // every other actor turn — never in-SW alongside the vault DK. Mirror the
+        // message_actor path: offscreen first, fall back to the in-SW driver only
+        // where offscreen is unavailable (Firefox). runActorTurnOffscreen claims
+        // the slot itself; we're already inside runWhenIdle, so no double-claim.
+        const off = await runActorTurnOffscreen({
+          actorSessionId: actor.actorSessionId, message: wake,
+          instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
+        });
+        if (!off) {
+          // INBOUND: synthetic + NOT trusted — the sender gate refuses any delegation
+          // from this turn; the tier gate holds it to the dweb toolset.
+          await runAgentTurn({ sessionId: actor.actorSessionId, userText: wake, synthetic: true, trusted: false });
+        }
+        const s = await sessions.get(actor.actorSessionId);
+        const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) })) ?? '';
+        // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
+        // here by the NO_REPORT convention — silence costs the user nothing.
+        if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+        const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+        if (!active) return;
+        const lead = 'Your dweb agent flagged inbound mesh activity:';
+        const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
+        // runWhenIdle on the ACTIVE chat — NEVER steer-abort the user's live turn
+        // (DECISIONS #20 work-theft; the deliver() path guards the same way). The
+        // note is a fenced, untrusted-derived summary, so trusted:false — a mesh
+        // event must not hand the orchestrator delegation authority.
+        turnSlots.runWhenIdle(active, () => {
+          runAgentTurn({
+            sessionId: active, userText, synthetic: true, trusted: false,
+            actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
+          }).catch((e) => console.warn('[sw] dweb agent trickle-up failed', e));
+        });
+      })().catch((e) => console.warn('[sw] dweb agent inbound wake failed', e));
+    });
+  })().catch(() => {});
+};
+
+browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
+  if (msg?.type === 'dweb/base-room/event' && msg.roomId === DWEB_AGENT_ROOM && msg.event === 'direct') {
+    handleDwebAgentInbound(msg.data ?? {});
+  }
+  return false;   // never claims the message — the dwapp bridge path is untouched
 });
 
 // Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
@@ -2993,6 +3169,11 @@ const actorMessaging = makeActorMessaging({
     // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
     // actor owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
     if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
+    // The DWEB ACTOR — the global mesh operator, addressed by the literal 'dweb'.
+    // Resolvable only when the network AND the agent toggle are on (opt-in daemon);
+    // otherwise the handle doesn't exist and the caller gets the standard
+    // no-instance refusal. Non-numeric + no dot + no engine prefix → unambiguous.
+    if (String(instanceId) === 'dweb') return resolveDwebActor();
     // A per-tab WEB actor is addressed by its tabId-as-string (purely numeric, no
     // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
     // match, so the branch is unambiguous.
@@ -3056,7 +3237,7 @@ const actorMessaging = makeActorMessaging({
     // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
     // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
     // fall back to the in-SW turn below (offscreen unavailable / never started).
-    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web') {
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
       const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
       if (off) return off;
     }
@@ -3479,6 +3660,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
     REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
     buildExport, CHANNEL, exportHooks, skillRegistry,
+    // React to the dweb-agent toggle: join/leave the inbox room so a disable
+    // withdraws mesh presence immediately (idempotent; no-op for other keys).
+    onSettingsChanged,
   }),
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
@@ -3490,6 +3674,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
     DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
+    onBaseNetworkStopped,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -3634,6 +3819,10 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     if (r?.ok) {
       console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
       reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+      // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
+      // inbound peer messages flow as dweb/base-room/event 'direct' events the
+      // listener consumes. Opt-in — no join, no inbox, no wakes.
+      joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
     } else console.warn('[sw] dweb base network start returned', r);
   })().catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
 }

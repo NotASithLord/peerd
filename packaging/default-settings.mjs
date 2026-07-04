@@ -203,4 +203,11 @@ export const defaults = {
   // consent gate). On = the dweb UI is live and the commons opens without
   // a pre-step; it does not auto-connect anywhere.
   dwebEnabled: { preview: true },
+
+  // The DWEB AGENT — the mesh-operator actor (a persistent, keyless envoy that
+  // absorbs the dweb tools and monitors inbound mesh traffic). OPT-IN even on
+  // preview: an agent that can be woken by peers is a posture change the user
+  // must choose, not inherit. Only offered when dwebEnabled is on (nested
+  // toggle); the store build prunes it with the rest of the dweb keys.
+  dwebAgentEnabled: { preview: false },
 };

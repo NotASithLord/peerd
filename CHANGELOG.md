@@ -10,6 +10,17 @@ storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+- **The dweb actor — a dedicated, opt-in mesh operator** (preview only). When
+  the network is on, a second toggle spins up a persistent, keyless agent in
+  its own worker heap that absorbs the dweb tools (discover / share / install /
+  block / peers / discovery), keeps a peer-and-publisher reputation ledger, and
+  monitors messages addressed to your agent — surfacing only what's notable.
+  It's addressable in chat as `message_actor("dweb", …)`, can never be made to
+  act by an inbound message (inbound turns may only observe, use its own tools,
+  and report), and installs or shares only with your confirmation. With it on,
+  the mesh tools leave the orchestrator entirely — mesh work is one delegation.
+
 ### Fixed
 - **The global instance reads are now fenced.** `js_read_file` and
   `app_read_file` stay on the orchestrator (cheap inspection without an actor

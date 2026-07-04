@@ -43,7 +43,7 @@
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
-  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActor, actorTargetId,
+  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActor, actorTargetId, isDwebTool,
   actorWebTabTarget,
 } from './exposure.js';
 import {
@@ -130,6 +130,12 @@ export const actorTierGate = (tool, args, ctx) => {
   if (ctx?.exposure !== EXPOSURE_ACTOR) {
     if (isActorMutatingTool(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
+    }
+    // Dweb tools are the DWEB ACTOR's family (owner call 2026-07-04): refused
+    // for every non-actor ctx, unconditionally — the wall behind the
+    // mainAgentDescriptors drop. Mesh work is message_actor("dweb", ...).
+    if (isDwebTool(tool)) {
+      return { allowed: false, reason: `'${tool.name}' is the dweb actor's — delegate via message_actor("dweb", …)` };
     }
     return null;
   }

@@ -24,6 +24,7 @@ export const makeDwebRoutes = (deps) => {
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
     DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
+    onBaseNetworkStopped,
   } = deps;
 
   // The two-input gate every route shares (build flag + user setting).
@@ -215,6 +216,9 @@ export const makeDwebRoutes = (deps) => {
       // drops the mesh + lobby, and clears the re-sub timer (dweb-base.js).
       const contexts = await browser.runtime.getContexts({ contextTypes: /** @type {any} */ (['OFFSCREEN_DOCUMENT']) });
       if (contexts.length) await browser.runtime.sendMessage({ type: 'dweb/base-host/stop' });
+      // The offscreen stop closed every room, incl. the agent inbox — clear any
+      // SW-side membership flag so a later restart re-joins cleanly.
+      try { onBaseNetworkStopped?.(); } catch { /* best-effort */ }
       return { ok: true, running: false };
     },
     'dweb/base/status': async () => {

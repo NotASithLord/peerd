@@ -232,8 +232,10 @@ export const makeActorMessaging = (deps) => {
     // DESIGN-18: an API actor is a web actor whose instanceId is its ORIGIN — render it
     // "The <origin> integration". The origin is canonical (URL.origin: no space/newline/
     // bracket), so it's safe un-fenced in this trusted lead.
-    const subject = (kind === 'web' && instanceId === 'web')
-      ? 'The web actor'
+    // A keyword-addressed singleton (web, dweb) has instanceId === kind; naming
+    // both would double the word ("the dweb actor dweb").
+    const subject = (String(kind) === String(instanceId))
+      ? `The ${kind} actor`
       : (kind === 'web' && /^https?:\/\//.test(String(instanceId)))
         ? `The ${instanceId} integration`
         : `The ${kind} actor ${safeName ? `${safeName} (${instanceId})` : instanceId}`;
@@ -542,8 +544,8 @@ export const makeActorMessaging = (deps) => {
 
     runEngineDelivery({ correlationId, senderSessionId: sender, rootSessionId, actor, message, parentToolUseId: toolUseId, oneShot: oneShot === true });
 
-    const recipient = (kind === 'web' && instanceId === 'web')
-      ? 'the web actor'
+    const recipient = (String(kind) === String(instanceId))
+      ? `the ${kind} actor`
       : (kind === 'web' && /^https?:\/\//.test(String(instanceId)))
         ? `the ${instanceId} integration`
         : `the ${kind} actor (${name ?? instanceId})`;
