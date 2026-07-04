@@ -249,8 +249,8 @@ exists today:
 ## What's shipped vs what's still ahead
 
 **Already shipped** (don't re-implement; extend instead). The code is
-the canonical catalog: read the relevant module and its README before
-assuming something isn't built. The bullets here are the postures and
+the canonical catalog: read the relevant module before assuming
+something isn't built. The bullets here are the postures and
 gotchas to know going in:
 
 - Anthropic provider with streaming, adaptive extended thinking on
@@ -339,7 +339,7 @@ gotchas to know going in:
   review subagent, and hooks — all integrated. (The tenth, do/get/check,
   was CULLED 2026-07-01: the web actor drives pages directly, so one
   delegation reaches the page instead of two.) Per-feature
-  detail lives in the code, under `peerd-runtime/` and its README.
+  detail lives in the code under `peerd-runtime/`.
 - Dual distribution: store (no dweb) + preview channels, generated
   `manifest.json` / `channel-config.js` (`bun run gen:dev`). `package.json`,
   `packaging/preflight.ts`, and CI are the source of truth for release

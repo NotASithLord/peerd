@@ -55,10 +55,11 @@ before running it. The main agent acts as an orchestrator. It delegates a
 goal to an actor and gets back a summary fenced as untrusted, so raw page
 text and command output never reach the context that holds your keys, and
 a confused or prompt-injected main agent has no tool to touch an
-environment in the first place. Every action an actor drives is verified
-against the live page before it counts as done. This isolation is the
-core of peerd's security model, not an add-on. (More at
-[peerd.ai](https://peerd.ai).)
+environment in the first place. Every page action reports back what it
+actually changed on the live page (a navigation or a mutation summary),
+so success is judged from observed effect, not from the model's
+assumption. This isolation is the core of peerd's security model, not an
+add-on. (More at [peerd.ai](https://peerd.ai).)
 
 **Status: 0.x, experimental beta.** The initial feature buildout is
 complete and integrated, but the surface is still
@@ -232,18 +233,19 @@ one top-level module, each owning its public API through `index.js`:
 
 The brand IS the architecture: cross-module imports go through each
 module's `index.js`, never deep paths; nothing outside
-`peerd-distributed/` imports it at all. Each module's README and its
-`index.js` are the dependency graph.
+`peerd-distributed/` imports it at all. Each module's `index.js` is its
+public API and the dependency graph.
 
 ## Trust boundaries
 
 peerd's safety is *who is allowed to do what*: small boundaries
 enforced by the browser platform, not by peerd's own crypto. Two
 principles run through all of it: **the agent that holds your keys never
-touches a raw page or runs untrusted code** — the environment-operating
-tools are not even attached to it, they belong to per-environment actor
-sub-agents — and **the agent never gets the final word on correctness;
-every action is verified against the live page before it counts as done.**
+touches a raw page or runs untrusted code** (the environment-operating
+tools are not even attached to it; they belong to per-environment actor
+sub-agents), and **the agent never gets the final word on correctness:
+every page action reports what it actually changed on the live page, and
+success is judged from that observed effect.**
 
 The orchestrator delegates; an actor does the work. Each tab, VM,
 notebook, and app is owned by one actor that holds only that
@@ -269,11 +271,10 @@ happens. Full detail in [`SECURITY.md`](SECURITY.md) and the
 
 ## Documentation
 
-The code is the spec. Read `CLAUDE.md` for orientation, the per-module
-READMEs under `extension/peerd-*/` for how each module works and its
-public API, and the code itself for the rest. `SECURITY.md` covers the
-trust boundaries; `docs/store/` holds the store-listing and compliance
-material.
+The code is the spec. Read `CLAUDE.md` for orientation, each module's
+`index.js` for its public API, and the code itself for the rest.
+`SECURITY.md` covers the trust boundaries; `docs/store/` holds the
+store-listing and compliance material.
 
 ## Repo layout
 
@@ -287,10 +288,10 @@ peerd/
 │   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
 │   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless js_run worker in offscreen/.
-│   ├── peerd-runtime/        # r · green   — agent loop, tools + do/get/check runner, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, subagent, voice, clock, dom, edit
+│   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + subagents, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
-│   ├── offscreen/            # chassis: SW keepalive + voice host
+│   ├── offscreen/            # chassis: the actor/subagent worker heaps, headless js_run, voice, SW keepalive
 │   ├── sidepanel/            # chassis: chat UI (Mithril)
 │   ├── vm-tab/               # chassis: WebVM tab page (CheerpX + bash + xterm)
 │   ├── notebook-tab/         # chassis: Notebook tab page (Web Worker + OPFS)
@@ -333,8 +334,8 @@ orchestrator picks the lightest kind that fits the task, bootstraps the
 instance, and then delegates the work to that instance's actor; the
 tool lists below are the surface an actor drives, not the main agent. One
 main-agent tool spans all of them: **`actor_list`** enumerates every
-addressable actor — WebVMs, Notebooks, Apps, open tabs, and API
-integrations — each tagged with its `type` and the handle to pass to
+addressable actor (WebVMs, Notebooks, Apps, open tabs, and API
+integrations), each tagged with its `type` and the handle to pass to
 `message_actor`, so discovery is one call instead of five.
 
 **WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB

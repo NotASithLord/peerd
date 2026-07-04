@@ -63,8 +63,8 @@ Understanding the boundaries helps you scope a report:
 ## In scope
 
 - Exfiltration of the vault / API key / conversation off-device.
-- Prompt injection that bypasses the runner boundary and reaches the
-  main agent's tools or memory.
+- Prompt injection that bypasses the actor boundary (the keyless
+  per-environment heap) and reaches the orchestrator's tools or memory.
 - Sandbox escape (WebVM / JS Sandbox / App iframe) reaching the host,
   other origins, or the extension's privileged contexts.
 - Denylist / egress-chokepoint / SSRF-guard bypass.
