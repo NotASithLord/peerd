@@ -576,14 +576,17 @@ describe('message_actor — the subagent awaitReply mode', () => {
   });
   test('an aborted subagent unblocks even if the actor turn never settles (#1/#3)', async () => {
     // The actor turn is held in the queue (never run), so onReply never fires.
-    // The child's abort signal must still unwind the await — and stop the
-    // actor slot it was waiting on.
+    // The child's abort signal must still unwind the await. The QUEUED delivery
+    // is marked cancelled — it skips when the slot drains — and the slot is NOT
+    // stopped (nothing of ours is running; a stop would hit whatever sibling
+    // turn holds the shared actor).
     const stopped: string[] = [];
+    const queued: Array<() => void> = [];
     const controller = new AbortController();
-    const { messageActor } = gateHarness({
+    const { messageActor, turnsRun } = gateHarness({
       getAncestry: ancestryOf(trustedChild),
       turnSlots: {
-        runWhenIdle: (_sid: string, _fn: () => void) => { /* hold: never run the actor turn */ },
+        runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); },
         stop: (id: string) => { stopped.push(id); return true; },
       } as any,
     });
@@ -596,18 +599,21 @@ describe('message_actor — the subagent awaitReply mode', () => {
     const r = await pending;
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain('aborted');
-    // the delegated actor turn was stopped, not left running orphaned
-    expect(stopped).toContain('res-1');
+    expect(stopped).toEqual([]);      // nothing was RUNNING → no slot stop
+    queued.forEach((fn) => fn());     // the slot frees later
+    await tick();
+    expect(turnsRun.length).toBe(0);  // the cancelled delivery never ran the actor
   });
 
-  test('an already-aborted signal resolves immediately and stops the actor', async () => {
+  test('an already-aborted signal resolves immediately and cancels the queued delivery', async () => {
     const stopped: string[] = [];
+    const queued: Array<() => void> = [];
     const controller = new AbortController();
     controller.abort();
-    const { messageActor } = gateHarness({
+    const { messageActor, turnsRun } = gateHarness({
       getAncestry: ancestryOf(trustedChild),
       turnSlots: {
-        runWhenIdle: (_sid: string, _fn: () => void) => { /* hold */ },
+        runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); },
         stop: (id: string) => { stopped.push(id); return true; },
       } as any,
     });
@@ -616,7 +622,79 @@ describe('message_actor — the subagent awaitReply mode', () => {
       awaitReply: true, awaitSignal: controller.signal,
     });
     expect(r.ok).toBe(false);
-    expect(stopped).toContain('res-1');
+    expect(stopped).toEqual([]);      // queued, not running → no slot stop
+    queued.forEach((fn) => fn());
+    await tick();
+    expect(turnsRun.length).toBe(0);  // and it never runs
+  });
+
+  test("a sibling's DIFFERENT queued message to the SAME actor survives another child's abort", async () => {
+    // THE COLLATERAL FIX: A's timeout/cancel used to bump the ROOT-wide Stop
+    // generation, gen-skipping B's distinct queued turn under the same root.
+    // Cancellation is now correlation-scoped: A's delivery skips, B's still runs.
+    const queued: Array<() => void> = [];
+    const controller = new AbortController();
+    const { messageActor, turnsRun } = gateHarness({
+      getAncestry: async (sid: string) => [{ sessionId: sid, parentSessionId: 'chat-1', spawnedTrusted: true }],
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); } },
+    });
+    const a = messageActor({ to: 'app-1', message: 'task A', senderSessionId: 'sub-1', inbound: false, awaitReply: true, awaitSignal: controller.signal });
+    const b = messageActor({ to: 'app-1', message: 'task B', senderSessionId: 'sub-2', inbound: false, awaitReply: true });
+    await tick();
+    controller.abort();                    // A's wall-clock timeout fires
+    const ra = await a;
+    expect(ra.ok).toBe(false);
+    queued.forEach((fn) => fn());          // the actor's slot drains
+    const rb = await b;
+    expect(rb.ok).toBe(true);              // B was NOT collateral
+    expect(turnsRun.map((t) => t.message)).toEqual(['task B']); // A skipped, B ran
+  });
+
+  test("an abort while a SIBLING's message is RUNNING on the shared actor leaves it untouched", async () => {
+    const queued: Array<() => void> = [];
+    const stopped: string[] = [];
+    const controller = new AbortController();
+    let releaseB: any;
+    const { messageActor } = gateHarness({
+      getAncestry: async (sid: string) => [{ sessionId: sid, parentSessionId: 'chat-1', spawnedTrusted: true }],
+      runActorTurn: ({ message }: any) => new Promise((res) => { if (message === 'task B') releaseB = res; }),
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); },
+        stop: (id: string) => { stopped.push(id); return true; },
+      } as any,
+    });
+    const b = messageActor({ to: 'app-1', message: 'task B', senderSessionId: 'sub-2', inbound: false, awaitReply: true });
+    await tick();
+    queued.shift()!();                     // B's turn starts RUNNING (hangs)
+    const a = messageActor({ to: 'app-1', message: 'task A', senderSessionId: 'sub-1', inbound: false, awaitReply: true, awaitSignal: controller.signal });
+    await tick();                          // A queued behind B on the same actor
+    controller.abort();                    // A aborts while B's turn is running
+    const ra = await a;
+    expect(ra.ok).toBe(false);
+    expect(stopped).toEqual([]);           // B's RUNNING turn was NOT slot-stopped
+    releaseB({ result: 'B done' });        // B finishes normally
+    const rb = await b;
+    expect(rb.ok).toBe(true);
+  });
+
+  test("the abort DOES slot-stop the actor when the child's OWN message is the one running", async () => {
+    const stopped: string[] = [];
+    const controller = new AbortController();
+    let hangResolve: any;
+    const { messageActor } = gateHarness({
+      getAncestry: ancestryOf(trustedChild),
+      runActorTurn: () => new Promise((res) => { hangResolve = res; }),  // hangs until stopped
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => fn(),             // idle slot → runs NOW
+        stop: (id: string) => { stopped.push(id); hangResolve({ result: 'stopped', stopped: true }); return true; },
+      } as any,
+    });
+    const pending = messageActor({ to: 'app-1', message: 'go', senderSessionId: 'sub-1', inbound: false, awaitReply: true, awaitSignal: controller.signal });
+    await tick();                          // the turn is now RUNNING (hanging)
+    controller.abort();
+    const r = await pending;
+    expect(r.ok).toBe(false);              // the abort unwound the await
+    expect(stopped).toEqual(['res-1']);    // and stopped the child's OWN running turn
   });
 
   test('a STALE abort AFTER the reply settled does NOT stop the (possibly shared) actor (#HIGH-1)', async () => {
