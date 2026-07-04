@@ -84,6 +84,10 @@ describe('message_actor — happy path + correlation', () => {
     const { messageActor, reentries } = harness();
     const r = await messageActor({ to: 'nope-9', message: 'x', senderSessionId: 'chat-1' });
     expect(r.ok).toBe(false);
+    // the refusal names the missing id and points at the create/list tools, so
+    // the model sees a real error — never a silent no-op it can misread as success.
+    expect(r.error).toContain("no tab-hosted instance found for id 'nope-9'");
+    expect(r.error).toContain('create/list tools');
     await tick();
     expect(reentries.length).toBe(0);
   });

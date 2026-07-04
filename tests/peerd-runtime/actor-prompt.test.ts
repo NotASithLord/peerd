@@ -231,6 +231,24 @@ describe('the ephemeral-actor (subagent) prompt', () => {
     const bound = actorBlock('webvm');
     expect(bound.includes("message_actor tools named above are the ORCHESTRATOR's")).toBe(true);
   });
+
+  // Field failure: subagents asked to build an App created an empty/placeholder
+  // App, then flailed trying to fill it (a second create → path_required). The
+  // block spells out the create-once-then-delegate flow — the SAME intent-vs-code
+  // boundary the orchestrator uses: the parent creates the shell, the owning app
+  // actor writes the files (it holds the lore). Two traps named explicitly:
+  // don't cram the whole app into create, don't second-create to fill.
+  test('carries the create-once-then-delegate build guidance (both traps named)', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const out = await renderSystemPrompt({ taskOverride: 'build a lava-lamp App' });
+    expect(out.includes('CREATE ONCE, then DELEGATE')).toBe(true);
+    // trap 1: don't pack the whole app into the create call
+    expect(out.includes('do NOT pack the whole app into the')).toBe(true);
+    // trap 2: don't second-create to fill a placeholder
+    expect(out.includes('do NOT app_create a SECOND time to fill a placeholder')).toBe(true);
+    // the fix: message_actor the returned id to build it out
+    expect(out.includes('then message_actor to build it out')).toBe(true);
+  });
 });
 
 // Guard the always-on prompt stays lean: the deep per-kind lore lives in
