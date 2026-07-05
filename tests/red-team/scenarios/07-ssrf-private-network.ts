@@ -1,8 +1,8 @@
-// Scenario 07 — private-network URL attempts SSRF.
+// Scenario 07: private-network URL attempts SSRF.
 //
 // Adversary: a malicious page (or a prompt-injected agent acting on its behalf)
-// asks the open-web fetch path to hit an internal target — the cloud metadata
-// endpoint (169.254.169.254), a LAN box, a loopback service — often disguised
+// asks the open-web fetch path to hit an internal target, the cloud metadata
+// endpoint (169.254.169.254), a LAN box, a loopback service, often disguised
 // as an encoded or IPv4-mapped-IPv6 address to slip past a naive string filter.
 //
 // Defense: `webFetch` runs `isPrivateOrLocalHost` on the resolved host BEFORE
@@ -19,7 +19,7 @@ import { makeWebFetch } from '../../../extension/peerd-egress/fetch/web-fetch.js
 import { isPrivateOrLocalHost } from '../../../extension/peerd-egress/fetch/private-network.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';
 
-// A webFetch wired so that ANY network call is observable — if fetchFn ever
+// A webFetch wired so that ANY network call is observable, if fetchFn ever
 // fires for a hostile URL, the guard failed open and the probe leaks.
 const armWebFetch = () => {
   let networkTouched: string | null = null;
@@ -79,7 +79,7 @@ export const scenario: Scenario = {
       const isPrivate = isPrivateOrLocalHost(h);
       probes.push(isPrivate
         ? blocked(`disguise internal host as "${h}"`, 'isPrivateOrLocalHost() = true')
-        : leaked(`disguise internal host as "${h}"`, 'isPrivateOrLocalHost() = false — evasion slipped through'));
+        : leaked(`disguise internal host as "${h}"`, 'isPrivateOrLocalHost() = false, evasion slipped through'));
     }
 
     // 3) A public host that 3xx-redirects toward metadata must fail closed.

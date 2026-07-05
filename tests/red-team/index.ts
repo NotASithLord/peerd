@@ -1,4 +1,4 @@
-// The red-team scenario catalog — the single ordered list every consumer reads.
+// The red-team scenario catalog, the single ordered list every consumer reads.
 //
 // Add a scenario by writing scenarios/NN-name.ts (exporting `scenario`) and
 // importing it here. `red-team.test.ts` gates it in CI; `report.ts` publishes it.

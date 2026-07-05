@@ -1,22 +1,22 @@
-// Scenario 06 — malicious iframe / sandboxed code attempts a sandbox escape.
+// Scenario 06: malicious iframe / sandboxed code attempts a sandbox escape.
 //
-// Adversary: code the agent was induced to run inside a peerd sandbox — a
-// Notebook / headless js_run worker, or an a2a_run — tries to break out: open a
+// Adversary: code the agent was induced to run inside a peerd sandbox, a
+// Notebook / headless js_run worker, or an a2a_run, tries to break out: open a
 // raw socket to exfiltrate, load remote code, recover the native fetch, unseal
 // the bridge, mint a fresh un-sealed realm, or traverse OPFS out of its root.
 //
 // Defense: the realm seal (applyRealmSeal) runs BEFORE any agent code and makes
-// the postMessage bridge the ONLY network primitive — every raw channel throws
+// the postMessage bridge the ONLY network primitive, every raw channel throws
 // NotebookEgressBlockedError, the native fetch is deleted off the prototype chain
 // (not merely shadowed), and the bridge is pinned non-writable/non-configurable
 // so in-realm sabotage can't unseat it. OPFS import paths collapse '..' so a job
 // cannot climb out of its per-instance root.
 //
 // This scenario drives the REAL production seal function against a mock worker
-// global (the browserless twin). The full real-worker-realm proof — actual
+// global (the browserless twin). The full real-worker-realm proof, actual
 // DedicatedWorkerGlobalScope, seal-before-static-import ordering, the a2a run's
 // egress + delegation refusals, and the connect-src 'none' page CSP second fence
-// — runs in the in-browser suite named in `verifiedBy`.
+//, runs in the in-browser suite named in `verifiedBy`.
 
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
@@ -49,7 +49,7 @@ const freshGlobal = () => {
 };
 
 const throwsEgress = (fn: () => unknown): { ok: boolean; detail: string } => {
-  try { fn(); return { ok: false, detail: 'did NOT throw — escape succeeded' }; }
+  try { fn(); return { ok: false, detail: 'did NOT throw, escape succeeded' }; }
   catch (e: any) {
     const ok = e?.name === 'NotebookEgressBlockedError' || /peerd\.egress\.fetch/.test(String(e?.message));
     return { ok, detail: ok ? `${e?.name}: ${String(e?.message).slice(0, 48)}` : `threw wrong error: ${String(e)}` };
@@ -84,7 +84,7 @@ export const scenario: Scenario = {
       probes.push(r.ok ? blocked(c.label, r.detail) : leaked(c.label, r.detail));
     }
 
-    // 2) Mint a fresh un-sealed realm to recover natives → refused.
+    // 2) Mint a fresh un-sealed realm to recover natives: refused.
     {
       const r = throwsEgress(() => new g.Worker('data:application/javascript,0'));
       probes.push(r.ok
@@ -101,7 +101,7 @@ export const scenario: Scenario = {
         : leaked('recover the native fetch off WorkerGlobalScope.prototype', `protoGone=${protoGone} notNative=${notNative}`));
     }
 
-    // 4) The bridge is pinned — reassign / delete / defineProperty cannot unseal it.
+    // 4) The bridge is pinned, reassign / delete / defineProperty cannot unseal it.
     {
       const sealed = g.fetch;
       try { g.fetch = () => 'evil'; } catch { /* strict throw ok */ }
@@ -120,7 +120,7 @@ export const scenario: Scenario = {
         : leaked('reassign XMLHttpRequest to a working native', r.detail));
     }
 
-    // 5) OPFS path traversal collapses — a job cannot climb out of its root.
+    // 5) OPFS path traversal collapses, a job cannot climb out of its root.
     {
       const traversals = [
         '../../../../../../etc/passwd',
@@ -135,7 +135,7 @@ export const scenario: Scenario = {
       });
       const allContained = escapes.every((e) => !e.climbs);
       probes.push(allContained
-        ? blocked('traverse OPFS out of the instance root via ../ imports', `all '..' collapsed (e.g. "${escapes[0].rel}" → "${escapes[0].resolved}")`)
+        ? blocked('traverse OPFS out of the instance root via ../ imports', `all '..' collapsed (e.g. "${escapes[0].rel}": "${escapes[0].resolved}")`)
         : leaked('traverse OPFS out of the instance root via ../ imports', `escaping: ${JSON.stringify(escapes.filter((e) => e.climbs))}`));
     }
 
@@ -147,7 +147,7 @@ export const scenario: Scenario = {
       const composed = composeApp({ 'index.html': html, 'w.js': workerBreakout }, 'index.html');
       const noRawBreakout = !composed.includes('</script><script>steal()</script>') && composed.includes('\\u003c/script>');
       probes.push(noRawBreakout
-        ? blocked('embed </script> in an inlined App worker to break out of the shim', 'worker source `<` escaped to \\u003c — no executable breakout tag')
+        ? blocked('embed </script> in an inlined App worker to break out of the shim', 'worker source `<` escaped to \\u003c, no executable breakout tag')
         : leaked('embed </script> in an inlined App worker to break out of the shim', 'raw </script><script> survived into the document'));
 
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
@@ -176,7 +176,7 @@ export const scenario: Scenario = {
       const withAuth = normalizeRequest({ url: 'https://x.example/', method: 'GET', auth: 'git' } as any);
       const authDropped = !('auth' in withAuth);
       probes.push(authDropped
-        ? blocked('smuggle an auth field on the WebVM wire to attach the git token', 'normalizeRequest drops the auth field — only host control ops set credentials')
+        ? blocked('smuggle an auth field on the WebVM wire to attach the git token', 'normalizeRequest drops the auth field, only host control ops set credentials')
         : leaked('smuggle an auth field on the WebVM wire to attach the git token', 'auth field survived on the VM request'));
 
       const confirmGate = needsWebWriteConfirm('OPTIONS') && needsWebWriteConfirm('POST') && !needsWebWriteConfirm('GET');

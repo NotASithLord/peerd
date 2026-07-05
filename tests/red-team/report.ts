@@ -1,7 +1,7 @@
 // Red-team report generator (`bun run red-team:report`).
 //
 // Runs the scenario catalog against the real defense code and writes the result
-// matrix to docs/security/RED-TEAM-RESULTS.md — the empirical, re-runnable proof
+// matrix to docs/security/RED-TEAM-RESULTS.md, the empirical, re-runnable proof
 // that backs the threat model. Prints a console summary and exits non-zero if any
 // scenario leaked, so it doubles as a stricter local gate.
 
@@ -24,6 +24,6 @@ console.log(`\nwrote ${out}`);
 
 const anyLeaked = ran.some((r) => !r.result.held);
 if (anyLeaked) {
-  console.error('\n✗ a scenario LEAKED — a defense regressed. See the matrix above.');
+  console.error('\n✗ a scenario LEAKED, a defense regressed. See the matrix above.');
   process.exit(1);
 }

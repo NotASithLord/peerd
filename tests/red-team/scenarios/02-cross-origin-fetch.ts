@@ -1,8 +1,8 @@
-// Scenario 02 — malicious page tries to induce a cross-origin fetch.
+// Scenario 02: malicious page tries to induce a cross-origin fetch.
 //
 // Adversary: a malicious page (or an injected agent) tries to make peerd reach a
-// sensitive origin it should never touch — the user's bank, webmail, or a cloud
-// console where the browser already holds a logged-in cookie — or to smuggle an
+// sensitive origin it should never touch, the user's bank, webmail, or a cloud
+// console where the browser already holds a logged-in cookie, or to smuggle an
 // origin-bound API key onto a DIFFERENT origin so the attacker collects it.
 //
 // Defenses:
@@ -11,7 +11,7 @@
 //     dot or an off-origin port can't slip past, and `*.bank.example` matches
 //     subdomains only. Wired here END-TO-END through the real webFetch.
 //   - Origin-bound credentials authenticate ONLY when the request's URL.origin
-//     exactly equals the actor's owned origin over https — cross-origin, http,
+//     exactly equals the actor's owned origin over https, cross-origin, http,
 //     or a look-alike/userinfo spoof all send anonymously (the key stays home).
 
 import {
@@ -26,7 +26,7 @@ import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.
 // (the shipped seed lists apex + subdomain wildcard separately per site).
 const DENYLIST = ['chase.com', '*.chase.com', 'mail.proton.me', '*.proton.me', 'console.aws.amazon.com'];
 
-// Sensitive targets an attacker might induce a fetch toward — including evasions
+// Sensitive targets an attacker might induce a fetch toward, including evasions
 // of a naive substring / endsWith matcher.
 const DENIED_TARGETS = [
   { label: 'the bank apex', host: 'chase.com' },
@@ -38,7 +38,7 @@ const DENIED_TARGETS = [
   { label: 'cloud console (live cookie)', host: 'console.aws.amazon.com' },
 ];
 
-// Look-alikes that MUST NOT be over-blocked (boundary correctness) — proving the
+// Look-alikes that MUST NOT be over-blocked (boundary correctness), proving the
 // matcher is exact, not a substring hack that would also be trivially bypassable.
 const ALLOWED_LOOKALIKES = ['evilchase.com', 'protonmail.com', 'chase.com.evil.example', 'notchase.com'];
 
@@ -72,12 +72,12 @@ export const scenario: Scenario = {
     }
 
     // B) Boundary correctness: look-alikes are NOT matched (an over-broad matcher
-    //    would be a bypass in disguise — attacker registers evilchase.com).
+    //    would be a bypass in disguise, attacker registers evilchase.com).
     for (const h of ALLOWED_LOOKALIKES) {
       const matched = matchesDenylist(h, DENYLIST);
       probes.push(!matched
-        ? blocked(`confirm matcher is exact, not substring: "${h}"`, 'not matched — no false-positive to hide a bypass behind')
-        : leaked(`confirm matcher is exact, not substring: "${h}"`, `over-matched "${h}" → boundary bug`));
+        ? blocked(`confirm matcher is exact, not substring: "${h}"`, 'not matched, no false-positive to hide a bypass behind')
+        : leaked(`confirm matcher is exact, not substring: "${h}"`, `over-matched "${h}": boundary bug`));
     }
 
     // C) Origin-bound credential never crosses origins. Actor owns https://api.acme.com.
@@ -93,13 +93,13 @@ export const scenario: Scenario = {
       for (const c of crossOriginLeaks) {
         const auth = authOriginForRequestUrl(c.url, owned);
         probes.push(auth === null
-          ? blocked(`send acme key to ${c.note} (${c.url})`, 'authOriginForRequestUrl → null (anonymous; key stays home)')
+          ? blocked(`send acme key to ${c.note} (${c.url})`, 'authOriginForRequestUrl: null (anonymous; key stays home)')
           : leaked(`send acme key to ${c.note} (${c.url})`, `would attach key for origin ${auth}`));
       }
       // Control: the owned origin over https DOES authenticate (not deny-all).
       const authSelf = authOriginForRequestUrl('https://api.acme.com/v1/data', owned);
       probes.push(authSelf === owned
-        ? blocked('control: the key still works on its OWN origin', `authOriginForRequestUrl → ${authSelf}`)
+        ? blocked('control: the key still works on its OWN origin', `authOriginForRequestUrl: ${authSelf}`)
         : leaked('control: the key still works on its OWN origin', `unexpected: ${authSelf}`));
     }
 

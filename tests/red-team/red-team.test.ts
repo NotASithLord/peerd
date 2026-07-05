@@ -2,7 +2,7 @@
 //
 // Every scenario in the catalog must HOLD: each drives a real peerd defense with
 // hostile input and every probe must be blocked. A regression that weakens a
-// defense turns a probe red and fails this test — the security claim is wired to
+// defense turns a probe red and fails this test, the security claim is wired to
 // CI, not just asserted in prose. Runs under the ordinary `bun test ./tests`.
 //
 // The report artifact (docs/security/RED-TEAM-RESULTS.md) is produced separately
@@ -14,7 +14,7 @@ import { runScenario } from './harness.ts';
 
 describe('peerd red-team suite', () => {
   for (const s of CATALOG) {
-    describe(`${s.id} — ${s.title}`, () => {
+    describe(`${s.id}, ${s.title}`, () => {
       test(`holds: ${s.claim}`, async () => {
         const ran = await runScenario(s);
         // Surface every leaked probe by name so a failure points at the exact vector.

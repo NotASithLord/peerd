@@ -1,5 +1,5 @@
 // @ts-check
-// Red-team, in-browser tier: sandbox escape proven in REAL realms — the thing
+// Red-team, in-browser tier: sandbox escape proven in REAL realms, the thing
 // the Bun scenario (tests/red-team/scenarios/06-sandbox-escape.ts) cannot do.
 //
 // Scenario 06 drives the production seal/compose functions against mock globals
@@ -42,7 +42,7 @@ describe('red-team: sandboxed code cannot escape a real Notebook worker realm', 
       worker.postMessage({ type: 'run-probes' });
       const { results, fetchInspection } = await reply;
       // The adversary's toolbox: raw sockets, remote code, beacons, cache-fetch,
-      // and minting a fresh un-sealed realm — all must throw the egress error.
+      // and minting a fresh un-sealed realm, all must throw the egress error.
       for (const channel of [
         'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource',
         'WebTransport', 'Worker', 'SharedWorker', 'importScripts', 'sendBeacon', 'caches',
@@ -80,7 +80,7 @@ describe('red-team: sandboxed code cannot escape a real Notebook worker realm', 
 describe('red-team: the App iframe + Notebook page CSP fences confine untrusted code', () => {
   it('the Notebook page ships connect-src \'none\' as its second fence', async () => {
     // why bare fetch is acceptable: reads our own shipped page source to pin the
-    // CSP (not a network egress) — same rationale as notebook-seal.test.js.
+    // CSP (not a network egress), same rationale as notebook-seal.test.js.
     // eslint-disable-next-line no-restricted-globals
     const html = await (await fetch('/notebook-tab/index.html')).text();
     const meta = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i);
@@ -104,7 +104,7 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
     // eslint-disable-next-line no-restricted-globals
     const runner = await (await fetch('/app-tab/runner.html')).text();
     // The runner intercepts submit events (preventDefault) AND overrides the
-    // legacy Form.prototype.submit() that bypasses the event — both navigation
+    // legacy Form.prototype.submit() that bypasses the event, both navigation
     // leaks out of the sandboxed frame are closed. (meta-refresh stripping is
     // covered at the compose layer by scenario 06's stripMetaRefresh probe.)
     expect(/addEventListener\(['"]submit['"]/.test(runner)).toBe(true);

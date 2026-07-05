@@ -1,4 +1,4 @@
-// Scenario 04 — a malicious peer sends a hostile bundle over the dweb mesh.
+// Scenario 04: a malicious peer sends a hostile bundle over the dweb mesh.
 //
 // Adversary: a peer on the mesh serves a content bundle (a dwapp, data blob, or
 // agent card) that is tampered, re-attributed, amplified to exhaust memory, or
@@ -6,7 +6,7 @@
 //
 // Defenses (peerd-distributed):
 //   - Content addressing: a bundle's address is SHA-256 over the canonical
-//     manifest, and the manifest commits to the ordered chunk hashes — so the
+//     manifest, and the manifest commits to the ordered chunk hashes, so the
 //     signature transitively covers every byte. Tamper any signed field (a chunk
 //     hash, the size, the meta) and verifyManifest fails; the content address no
 //     longer matches, so a tampered bundle cannot masquerade under a good address.
@@ -15,7 +15,7 @@
 //     bundle to a different did breaks the signature.
 //   - Amplification/size-lie guard: assertBundleWithinLimits rejects a manifest
 //     that declares more than the ceiling (including duplicate chunk refs that
-//     reassemble N×) or whose size field under-reports its chunk list — BEFORE any
+//     reassemble N×) or whose size field under-reports its chunk list, BEFORE any
 //     chunk is fetched.
 //   - Poisoned-card containment: a peer agent-card is coerced-and-capped
 //     (parsePeerCard), so a hostile card cannot blow past the name/desc/skill/byte
@@ -55,7 +55,7 @@ export const scenario: Scenario = {
         : leaked('control: an honest signed bundle', `ok=${v.ok} addrCommits=${addrCommits}`));
     }
 
-    // 1) Tamper the chunk list → signature (which covers every byte) fails, and
+    // 1) Tamper the chunk list: signature (which covers every byte) fails, and
     //    the content address changes so it can't reuse the good one.
     {
       const m = structuredClone(good.manifest) as any;
@@ -77,7 +77,7 @@ export const scenario: Scenario = {
         : leaked('tamper the signed size field', `ok=${v.ok}`));
     }
 
-    // 3) Re-attribute the bundle to a different publisher did → signature breaks.
+    // 3) Re-attribute the bundle to a different publisher did: signature breaks.
     {
       const other = await generateIdentity();
       const m = structuredClone(good.manifest) as any;
@@ -88,7 +88,7 @@ export const scenario: Scenario = {
         : leaked('re-attribute the bundle to a different did', `ok=${v.ok}`));
     }
 
-    // 4) Strip the signature but keep the publisher claim → missing_sig.
+    // 4) Strip the signature but keep the publisher claim: missing_sig.
     {
       const m = structuredClone(good.manifest) as any;
       delete m.sig;
@@ -114,9 +114,9 @@ export const scenario: Scenario = {
     // 6a) A moderately-hostile card is coerced within caps; forged identity dropped.
     {
       const coerced = parsePeerCard({
-        name: 'A'.repeat(500),           // → clamped to MAX_CARD_NAME
-        description: 'D'.repeat(5_000),  // → clamped to MAX_CARD_DESC
-        skills: Array(5).fill({ id: 'x'.repeat(500), name: 'n'.repeat(500), description: 'd'.repeat(500) }), // fields → clamped to MAX_SKILL_FIELD
+        name: 'A'.repeat(500),           //: clamped to MAX_CARD_NAME
+        description: 'D'.repeat(5_000),  //: clamped to MAX_CARD_DESC
+        skills: Array(5).fill({ id: 'x'.repeat(500), name: 'n'.repeat(500), description: 'd'.repeat(500) }), // fields: clamped to MAX_SKILL_FIELD
         did: 'not-a-did:key',            // forged / wrong-form identity
         capabilities: { ask: true },
       });
@@ -137,13 +137,13 @@ export const scenario: Scenario = {
         skills: Array(16).fill({ id: 'x'.repeat(128), name: 'n'.repeat(128), description: 'd'.repeat(128) }),
       });
       probes.push(extreme === null
-        ? blocked('exhaust discovery memory with a max-fanned card', `parsePeerCard → null (over the ${MAX_CARD_BYTES}B ceiling even after clamping)`)
+        ? blocked('exhaust discovery memory with a max-fanned card', `parsePeerCard: null (over the ${MAX_CARD_BYTES}B ceiling even after clamping)`)
         : leaked('exhaust discovery memory with a max-fanned card', 'over-ceiling card accepted'));
 
       // A nameless card is rejected outright.
       const nameless = parsePeerCard({ description: 'no name here' });
       probes.push(nameless === null
-        ? blocked('publish a nameless card to break discovery UIs', 'parsePeerCard → null')
+        ? blocked('publish a nameless card to break discovery UIs', 'parsePeerCard: null')
         : leaked('publish a nameless card to break discovery UIs', 'nameless card accepted'));
     }
 

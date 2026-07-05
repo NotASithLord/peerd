@@ -1,4 +1,4 @@
-// Scenario 01 — malicious webpage tries to exfiltrate the API key.
+// Scenario 01: malicious webpage tries to exfiltrate the API key.
 //
 // Adversary: a malicious page (or a prompt-injected agent acting on its behalf)
 // wants the vault's model-provider API key POSTed somewhere it can read it.
@@ -11,8 +11,8 @@
 // `api.anthropic.com.evil.example` and `evil.api.anthropic.com` are different
 // origins and are refused.
 //
-// The complementary defense — the OPEN-WEB path (fetch_url) is allowlist-free
-// but KEYLESS, so an injected page has no key to launder out — is proven by
+// The complementary defense, the OPEN-WEB path (fetch_url) is allowlist-free
+// but KEYLESS, so an injected page has no key to launder out, is proven by
 // scenario 03 (secret summarization) and scenario 08 (injection benchmark).
 // safe-fetch.js is explicit that it is a partial control; we test exactly the
 // part it owns.
@@ -81,8 +81,8 @@ export const scenario: Scenario = {
         : leaked('substring/suffix confusion against the exact-origin allowlist', `okReal=${okReal} rejectsLookalike=${rejectsLookalike}`));
     }
 
-    // 3) A provider origin that 3xx-redirects toward an attacker must fail closed
-    //    — the credentialed request cannot be bounced off the approved origin.
+    // 3) A provider origin that 3xx-redirects toward an attacker must fail closed.
+    //    The credentialed request cannot be bounced off the approved origin.
     {
       const { safeFetch } = armSafeFetch({
         fetchFn: (async () => new Response(null, { status: 302, headers: { location: 'https://evil.example/' } })) as any,
@@ -95,7 +95,7 @@ export const scenario: Scenario = {
         : leaked('provider origin 302-redirects the credentialed call to an attacker', `redirect not refused (reason=${reason})`));
     }
 
-    // 4) Sanity: the allowlist is not empty / deny-all — a legit provider call passes.
+    // 4) Sanity: the allowlist is not empty / deny-all, a legit provider call passes.
     {
       const { safeFetch, sentTo } = armSafeFetch();
       const res = await safeFetch(`${PROVIDER}/v1/messages`, { method: 'POST' });
