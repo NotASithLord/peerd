@@ -304,6 +304,13 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: [test, checks]
+    # serialize demo deploys in push order — without this, two rapid main
+    # pushes can complete out of order and leave the OLDER commit live.
+    # cancel-in-progress stays false: a superseded PENDING run is cancelled by
+    # GitHub anyway, and cancelling a mid-flight wrangler upload buys nothing.
+    concurrency:
+      group: deploy-web-demo
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2

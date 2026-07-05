@@ -109,16 +109,26 @@ export const checkWebBoundary = async (): Promise<void> => {
       const line = lineBase + lineOf(src, imp.ss);
       const kind = imp.d >= 0 ? 'dynamic import' : 'import';
       const resolved = resolveSpec(fromRel, line, kind, spec);
-      // Stub discipline: importers of a stubbed module may only use names the
-      // stub exports. Namespace/default imports are opaque — refuse those too.
-      if (resolved && stubExports.has(resolved) && imp.d < 0) {
-        const stmt = src.slice(imp.ss, imp.se);
+      // Stub discipline: importers of a stubbed module may only use STATIC
+      // NAMED imports of names the stub exports. Namespace/default/mixed
+      // imports and dynamic import() are opaque to this check — the stub
+      // occupies the path so mere existence always passes — refuse them so a
+      // lazy-load refactor upstream cannot ship an undefined binding.
+      if (resolved && stubExports.has(resolved)) {
         const allowed = stubExports.get(resolved)!;
+        if (imp.d >= 0) {
+          f.violations.push(`${fromRel}:${line}  [stub import] dynamic import() of stubbed ${resolved} is unverifiable — use a static named import (stub exports: ${[...allowed].join(', ')})`);
+          continue;
+        }
+        const stmt = src.slice(imp.ss, imp.se);
         const braces = stmt.match(/{([^}]*)}/);
         const names = braces
           ? braces[1].split(',').map((s) => s.trim().split(/\s+as\s+/)[0]).filter(Boolean)
           : null;
-        if (!names) {
+        // a default binding before the braces (`import def, { X } from …`) or
+        // no braces at all (`import def from …`, `import * as ns from …`).
+        const hasDefaultOrNs = /import\s+(?:[A-Za-z_$][\w$]*\s*,|[A-Za-z_$][\w$]*\s+from|\*\s+as)/.test(stmt);
+        if (!names || hasDefaultOrNs) {
           f.violations.push(`${fromRel}:${line}  [stub import] non-named import of stubbed ${resolved} — import { … } only (stub exports: ${[...allowed].join(', ')})`);
         } else {
           for (const n of names) {
@@ -216,9 +226,10 @@ export const checkWebBoundary = async (): Promise<void> => {
     } catch { f.violations.push('build.json is not valid JSON'); }
   }
   const sw = readFileSync(join(WEB_DIST, 'sw.js'), 'utf8');
-  // exact token names, not the prefix — the SW's own comment MENTIONS the
-  // token pattern in prose, which must not read as an unstamped build.
-  if (sw.includes('__PEERD_WEB_BUILD__') || sw.includes("'__PEERD_WEB_PRECACHE__'")) {
+  // exact token names UNQUOTED — the SW comment mentions only the *-pattern
+  // in prose, and matching the quoted form would miss a quoting change in the
+  // template (verified: that shipped the literal token with the gate green).
+  if (sw.includes('__PEERD_WEB_BUILD__') || sw.includes('__PEERD_WEB_PRECACHE__')) {
     f.violations.push('sw.js still contains unstamped __PEERD_WEB_BUILD__/__PEERD_WEB_PRECACHE__ tokens — the build stamp did not apply');
   }
 

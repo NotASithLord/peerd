@@ -57,8 +57,12 @@ jobs:
       - name: Probe demo.peerd.ai freshness
         run: |
           set -u
-          if ! BUILD_JSON="$(curl -fsSL --max-time 30 https://demo.peerd.ai/build.json)"; then
-            CODE=$?
+          # capture curl's exit code on the || side — `if ! cmd; then CODE=$?`
+          # would capture the NEGATED status (always 0), making the DNS branch
+          # dead code and the probe red before the demo even launches.
+          CODE=0
+          BUILD_JSON="$(curl -fsSL --max-time 30 https://demo.peerd.ai/build.json)" || CODE=$?
+          if [ "$CODE" != "0" ]; then
             # curl 6 = host not resolving — the demo hasn't launched yet.
             if [ "$CODE" = "6" ]; then
               echo "::warning::demo.peerd.ai does not resolve — demo not launched yet; probe is a no-op"

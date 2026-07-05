@@ -6,20 +6,28 @@
 // module files. why: the staged tree (/peerd-*/**, /shared/**) is rebuilt
 // fresh from extension source each deploy — a hand-bumped cache name (the old
 // prototype pattern) left returning visitors running STALE staged source,
-// silently defeating the target's inherits-upstream premise. With a per-build
-// name, cache-first on staged files is CORRECT (they are immutable per build).
+// silently defeating the target's inherits-upstream premise.
+//
+// BUILD ATOMICITY: navigations AND modules are both served cache-first from
+// THIS build's cache, so one page load never mixes two builds (network-first
+// HTML over cache-first modules would serve a new page against old modules in
+// the deploy window). Freshness comes from the SW update cycle instead: a new
+// deploy byte-changes sw.js → the new SW installs, precaches its own build,
+// claims, and the page reloads ONCE on controllerchange (index.html).
 //
 // /vendor/ lives in its own long-lived cache: it is multi-MB, changes rarely,
 // and re-downloading the model runtime on every deploy would punish visitors.
 //
-// Served UNBUILT (straight from web/public/), the tokens are left literal: the
-// precache try/catch falls back to [] and the cache name is just odd — the SW
-// degrades to a network-first-with-cache-fallback proxy, fine for dev.
+// Served UNBUILT (straight from web/public/), the tokens are left literal and
+// the fetch handler intercepts NOTHING — pure pass-through, so a dev serve is
+// always network-fresh (an un-stamped cache-first SW would freeze dev on
+// first-visit bytes forever).
 //
 // Bypasses stay as before: non-GET, non-http(s) (blob:/ws:/wss:/data:),
 // cross-origin (the wss peer, Google Fonts, HF weights), range requests. OPFS
 // is not HTTP, so the sealed-worker notebook is never intercepted.
 const BUILD = '__PEERD_WEB_BUILD__';
+const UNBUILT = BUILD.startsWith('__');
 let PRECACHE = [];
 try { PRECACHE = JSON.parse('__PEERD_WEB_PRECACHE__'); } catch { /* unbuilt tree */ }
 
@@ -45,18 +53,29 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+// why !redirected: a redirected response (e.g. /index.html → /) stored in the
+// cache is rejected by respondWith for navigation requests — cache only the
+// canonical 200s.
 const putCache = (cacheName, req, res) => {
-  if (res.ok && res.type === 'basic') {
+  if (res.ok && !res.redirected && res.type === 'basic') {
     const copy = res.clone();
     caches.open(cacheName).then((c) => c.put(req, copy));
   }
   return res;
 };
 
+// scoped to the NAMED cache (not CacheStorage-wide caches.match): during an
+// update window an old SW must never answer from a newer build's cache or
+// vice versa — the cache name IS the build boundary.
 const cacheFirst = (cacheName, req) =>
-  caches.match(req).then((hit) => hit || fetch(req).then((res) => putCache(cacheName, req, res)));
+  caches.open(cacheName)
+    .then((c) => c.match(req))
+    .then((hit) => hit || fetch(req).then((res) => putCache(cacheName, req, res)));
 
 self.addEventListener('fetch', (e) => {
+  // unbuilt dev tree: never intercept — plain network for everything.
+  if (UNBUILT) return;
+
   const req = e.request;
   const url = new URL(req.url);
 
@@ -66,19 +85,22 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   if (req.headers.has('range')) return;
 
-  // navigations: network-first so a new deploy's HTML lands immediately;
-  // cached shell only as the offline fallback.
+  // navigations: THIS build's precached document ('/', the canonical copy —
+  // '/index.html' is a redirect on static hosts and is never cached), network
+  // as first-visit/miss fallback. Freshness = the update cycle, not racing
+  // the network per load.
   if (req.mode === 'navigate') {
     e.respondWith(
-      fetch(req).then((res) => putCache(CACHE_SHELL, req, res))
-        .catch(() => caches.match('/index.html').then((r) => r || caches.match('/')))
+      caches.open(CACHE_SHELL)
+        .then((c) => c.match('/'))
+        .then((hit) => hit || fetch(req).then((res) => putCache(CACHE_SHELL, req, res)))
     );
     return;
   }
 
   // build.json is the freshness probe — never serve it stale.
   if (url.pathname === '/build.json') {
-    e.respondWith(fetch(req).catch(() => caches.match(req)));
+    e.respondWith(fetch(req).catch(() => caches.open(CACHE_SHELL).then((c) => c.match(req))));
     return;
   }
 
