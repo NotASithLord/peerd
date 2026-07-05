@@ -4,7 +4,8 @@
   window (title bar / toolbar / folder tabs / status bar, classic-cyberpunk)
   where each peerd instance is a real-looking TAB. The Home tab is the agent
   chat, front and centre, with precoded prompts (no agent needed). Download
-  Gemma to run a real local agent (WebGPU) that opens arbitrary tabs.
+  a small local model (capability-picked) to run a real local agent (WebGPU)
+  that opens arbitrary tabs.
   Notebook tabs + the Peers tab are REAL. See docs/specs/PEERD-WEB-SURFACE.md.
 -->
 <html lang="en">
@@ -107,7 +108,13 @@
   .cap-yes{color:var(--green);font-weight:600}.cap-no{color:var(--amber);font-weight:600}
   .gemma-dl{font-family:var(--mono);font-size:12.5px;font-weight:600;border:none;border-radius:9px;padding:10px 16px;background:linear-gradient(180deg,#13c3f2,#00a6d6);color:#04222b;cursor:pointer}.gemma-dl:hover{filter:brightness(1.07)}
   .gemma-prog{margin-top:12px}.gemma-bar{height:7px;border-radius:4px;background:rgba(255,255,255,0.08);overflow:hidden}.gemma-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--magenta));transition:width .25s}
-  .gemma-pct{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:6px}
+  .gemma-status{display:flex;align-items:flex-start;gap:8px;margin-top:8px}
+  .gemma-spin{width:14px;height:14px;flex:none;margin-top:1px;border-radius:50%;background:conic-gradient(from 0deg,var(--cyan),var(--magenta),var(--amber),var(--green),var(--red),var(--cyan));-webkit-mask:radial-gradient(closest-side,transparent 56%,#000 58%);mask:radial-gradient(closest-side,transparent 56%,#000 58%);animation:gspin .85s linear infinite}
+  @keyframes gspin{to{transform:rotate(360deg)}}
+  .gemma-msg{flex:1;min-width:0;font-family:var(--mono);font-size:10.5px;color:var(--muted);line-height:1.5}
+  .gemma-pct{font-family:var(--mono);font-size:10.5px;color:inherit}
+  .gemma-dots::after{content:'';animation:gdots 1.3s steps(1,end) infinite}
+  @keyframes gdots{0%{content:''}25%{content:'.'}50%{content:'..'}75%,100%{content:'...'}}
   .precoded-h{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:4px 0 2px}
   .precoded{display:grid;grid-template-columns:1fr 1fr;gap:9px}
   .pc{display:flex;align-items:center;gap:9px;text-align:left;font-family:var(--mono);font-size:12px;color:var(--paper);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 12px;cursor:pointer;transition:.15s}
@@ -117,7 +124,8 @@
   .composer{display:flex;gap:9px;margin-top:4px}
   .composer textarea{flex:1;resize:none;background:#070908;border:1px solid var(--line);border-radius:11px;color:var(--paper);font-family:inherit;font-size:13.5px;padding:11px 13px;height:46px;outline:none}
   .composer textarea:focus{border-color:rgba(0,183,235,.45)}.composer textarea:disabled{opacity:.6}
-  .send{width:46px;height:46px;border-radius:12px;border:none;background:conic-gradient(from 200deg,var(--green),var(--cyan));color:#062712;font-size:17px;cursor:pointer}.send:disabled{opacity:.45;cursor:default}
+  /* match the extension: ONE flat brand color per draft (not a gradient), dark glyph */
+  .send{width:46px;height:46px;border-radius:11px;border:none;background:var(--send-accent,var(--cyan));color:#0a0d10;font-size:17px;cursor:pointer;transition:background-color .18s ease,transform .12s ease}.send:not(:disabled):active{transform:scale(.94)}.send:disabled{opacity:.4;cursor:default;background:#2a2f2c;color:var(--faint)}
 
   /* notebook (real) */
   .nb-editor{font-family:var(--mono);font-size:12px;line-height:1.55;width:100%;min-height:150px;background:#070908;border:1px solid var(--line2);border-radius:9px;color:#dfe6ea;padding:11px 12px;resize:vertical;outline:none;white-space:pre;tab-size:2}.nb-editor:focus{border-color:rgba(0,183,235,.45)}
@@ -178,7 +186,7 @@
       <button class="navbtn" id="navFwd" title="Forward" disabled>›</button>
       <button class="navbtn" id="navReload" title="Reload tab">⟳</button>
       <span class="addr" id="addr"><span class="lock">▲</span><span class="proto">peerd://</span><span id="addrPath">home</span></span>
-      <button class="gchip" id="gchip" title="Local model"><span class="d"></span><span class="gtxt">gemma: not loaded</span></button>
+      <button class="gchip" id="gchip" title="Local model"><span class="d"></span><span class="gtxt">model: not loaded</span></button>
       <button class="install" id="install" hidden>Install app ↓</button>
     </div>
     <div class="bz-tabs" id="strip" role="tablist" aria-label="peerd instances">
@@ -192,14 +200,14 @@
       <section class="tabpanel home-chat" data-panel="home" role="tabpanel">
         <div class="chat-col">
           <div class="chat-log" id="chatLog">
-            <div class="msg bot"><div class="who"><span class="orb"></span> peerd</div><div class="bubble">Hi. I run right here in this page. Download <b>Gemma</b> to give me a real local brain (WebGPU, cached, no key, no server), or try a precoded action below right now.</div></div>
+            <div class="msg bot"><div class="who"><span class="orb"></span> peerd</div><div class="bubble">Hi. I run right here in this page. Download a <b>local model</b> to give me a real local brain (WebGPU, cached, no key, no server), or try a precoded action below right now.</div></div>
           </div>
           <div class="gemma-card" id="gemmaCard">
             <div class="gemma-top"><span class="orb"></span> Run a real agent, locally</div>
-            <p>Download Google's <b>Gemma</b> and run the agent fully on your device over WebGPU. Cached after the first download. Then I can do custom work and open new tabs on my own. This is the default way to use peerd-lite.</p>
+            <p id="gemmaBlurb">Download a small <b>local model</b> and run the agent fully on your device over WebGPU. Cached after the first download. Then I can do custom work and open new tabs on my own. This is the default way to use peerd-lite.</p>
             <div class="gemma-cap" id="gemmaCap">checking your GPU…</div>
-            <button class="gemma-dl" id="gemmaDl">⬇ Download Gemma · run locally</button>
-            <div class="gemma-prog" id="gemmaProg" hidden><div class="gemma-bar"><i id="gemmaFill"></i></div><div class="gemma-pct" id="gemmaPct">starting…</div></div>
+            <button class="gemma-dl" id="gemmaDl">⬇ Download a local model · run locally</button>
+            <div class="gemma-prog" id="gemmaProg" hidden><div class="gemma-bar"><i id="gemmaFill"></i></div><div class="gemma-status"><span class="gemma-spin" id="gemmaSpin"></span><span class="gemma-msg"><span class="gemma-pct" id="gemmaPct">starting</span><span class="gemma-dots" id="gemmaDots"></span></span></div></div>
           </div>
           <div class="precoded-h">// precoded actions — no agent needed</div>
           <div class="precoded">
@@ -208,7 +216,7 @@
             <button class="pc" data-act="peers"><span class="ic k-dweb">◈</span>Show the peer network</button>
             <button class="pc" data-act="app"><span class="ic k-engine">◇</span>Build a small app<span class="soon">soon</span></button>
           </div>
-          <div class="composer"><textarea id="composer" placeholder="Download Gemma to chat freely…" disabled></textarea><button class="send" id="send" disabled>↑</button></div>
+          <div class="composer"><textarea id="composer" placeholder="Download a local model to chat freely…" disabled></textarea><button class="send" id="send" disabled>↑</button></div>
         </div>
       </section>
       <section class="tabpanel" data-panel="peers" role="tabpanel" hidden>
@@ -221,7 +229,7 @@
     </main>
     <div class="bz-status">
       <span id="statPeers"><span class="s-dot"></span>peers: idle</span>
-      <span id="statGemma">gemma: not loaded</span>
+      <span id="statGemma">model: not loaded</span>
       <span class="sp"></span>
       <span>local-first · BYO-nothing · Apache 2.0</span>
     </div>
@@ -231,7 +239,7 @@
 <script type="module">
   import { runNotebook } from '/web/notebook-host.js';
   import { startPeer } from '/web/peer-host.js';
-  import { initGemma, generateGemma } from '/web/gemma.js';
+  import { initGemma, generateGemma, teardownGemma } from '/web/gemma.js';
   import { probeLocalModelCapability } from '/web/local-model-capability.js';
   import { makeAgent } from '/web/agent.js';
 
@@ -342,12 +350,25 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   };
   document.querySelectorAll('.pc[data-act]').forEach(b=> b.addEventListener('click',()=>{ const a=PRECODED[b.dataset.act]; say('user',a.ask); say('bot',a.say); a.go(); }));
 
-  // ---- Gemma local agent (real: WebGPU via web/gemma.js + web/agent.js) ----
+  // ---- Local agent (real: WebGPU via web/gemma.js + web/agent.js) ----
+  // Capability-picked model registry. The page-load GPU probe selects the best
+  // model whose LARGEST single weight tensor fits the GPU's maxStorageBufferBinding.
+  // why: Gemma 3n E2B's per-layer-embedding tensor is ~1.1 GB in ONE storage buffer,
+  // so it OOMs on GPUs that cap a binding at 1 GiB (common on laptops) — there we
+  // fall back to Qwen2.5-1.5B (largest tensor ~0.12 GB, single self-contained ONNX,
+  // and its chat template emits the same <tool_call>{json}</tool_call> we parse).
+  const MODELS = {
+    'gemma-4-e2b': { id:'onnx-community/gemma-4-E2B-it-ONNX', label:'Gemma 3n E2B', vendor:"Google's", modelClass:'Gemma4ForCausalLM', dtype:'q4f16', minBindingGiB:1.8, sizeLabel:'~3 GB', foldSystemIntoUser:true },
+    'qwen2.5-1.5b': { id:'onnx-community/Qwen2.5-1.5B-Instruct', label:'Qwen2.5 1.5B', vendor:"Alibaba's", modelClass:'AutoModelForCausalLM', dtype:'q4f16', minBindingGiB:0.3, sizeLabel:'~1.2 GB', foldSystemIntoUser:false },
+  };
+  const MODEL_ORDER = ['gemma-4-e2b','qwen2.5-1.5b']; // best first; pick first that fits
+  let selectedModel = null, capBindingGiB = 0;
+
   const TOOLS = [
     { type:'function', function:{ name:'run_notebook', description:'Write and run JavaScript in a fresh sealed-worker notebook (opens a new tab). Call peerd.self.display(value) to show output; you may import helpers from "peerd:std" (table, chart, mean, range, sum, …). End with a return value. Returns the console output + result.', parameters:{ type:'object', properties:{ code:{ type:'string', description:'the JavaScript to run' } }, required:['code'] } } },
     { type:'function', function:{ name:'show_peers', description:'Open the live peer-network tab to show who is connected on the peerd dweb.', parameters:{ type:'object', properties:{} } } },
   ];
-  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (Gemma on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY: <tool_call>{"name":"<tool>","arguments":{...}}</tool_call>. After a tool result, either call another tool or give a short final answer in plain text. Prefer run_notebook for anything computational. Be concise.`;
+  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (a small model on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY: <tool_call>{"name":"<tool>","arguments":{...}}</tool_call>. After a tool result, either call another tool or give a short final answer in plain text. Prefer run_notebook for anything computational. Be concise.`;
 
   async function agentRunNotebook(code){
     const id = openTab('notebook', { seed: code });        // open + seed, no auto-run
@@ -370,64 +391,105 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
 
   let agent=null, gemmaReady=false, gemmaLoading=false;
   const composer=document.getElementById('composer'), sendBtn=document.getElementById('send');
-  const setGemmaStat=(t)=>{ document.getElementById('statGemma').textContent='gemma: '+t; };
+  const setGemmaStat=(t)=>{ document.getElementById('statGemma').textContent='model: '+t; };
 
   // Page-load GPU capability check (the extension's probe). Real gate = WebGPU +
-  // shader-f16; the storage-binding heuristic over-rejects Apple Silicon (q4f16
-  // fits a 1 GB binding), so it is NOT used as a blocker.
+  // shader-f16 AND a storage-buffer binding big enough for the model's largest
+  // tensor. We pick the best model that FITS this GPU (Gemma 3n E2B needs a
+  // ~1.2 GB binding for its PLE tensor; many laptop GPUs cap a binding at 1 GiB,
+  // where we step down to Qwen2.5-1.5B). This is a GPU per-buffer limit, NOT a
+  // system-RAM limit — a 32 GB Mac with a 1 GiB binding still can't fit Gemma.
   let gemmaSupported = false;
   (async () => {
     const chip = document.getElementById('gchip'), chipTxt = chip.querySelector('.gtxt');
-    const capEl = document.getElementById('gemmaCap'), dl = document.getElementById('gemmaDl');
+    const capEl = document.getElementById('gemmaCap'), dl = document.getElementById('gemmaDl'), blurb = document.getElementById('gemmaBlurb');
     try {
       const cap = await probeLocalModelCapability();
       const gpu = [cap.gpuVendor, cap.gpuArchitecture].filter(Boolean).join(' ') || cap.webglRenderer || 'your GPU';
-      gemmaSupported = !!(cap.webgpu && cap.shaderF16);
-      if (gemmaSupported) {
-        capEl.innerHTML = `<span class="cap-yes">● Gemma available</span> — WebGPU + shader-f16 detected (${gpu}).`;
-        chipTxt.textContent = 'gemma: available'; chip.classList.add('on'); setGemmaStat('available');
+      const bindingGiB = cap.maxStorageBufferBindingSizeGB || 0;
+      capBindingGiB = bindingGiB;
+      if (cap.webgpu && cap.shaderF16) {
+        for (const k of MODEL_ORDER) { if (bindingGiB >= MODELS[k].minBindingGiB) { selectedModel = MODELS[k]; break; } }
+      }
+      gemmaSupported = !!selectedModel;
+      if (selectedModel) {
+        const m = selectedModel;
+        const steppedDown = m.id !== MODELS['gemma-4-e2b'].id;
+        const note = steppedDown
+          ? ` Gemma 3n E2B needs a single ~1.1 GB GPU buffer and your browser caps a buffer at ${bindingGiB.toFixed(1)} GB (a GPU/driver limit, not your RAM — a newer browser build may raise it), so peerd-lite runs <b>${m.label}</b> instead.`
+          : '';
+        capEl.innerHTML = `<span class="cap-yes">● ${m.label} fits your GPU</span> — WebGPU + shader-f16 detected (${gpu}).${note}`;
+        dl.textContent = `⬇ Download ${m.label} · run locally`;
+        chipTxt.textContent = 'model: available'; chip.classList.add('on'); setGemmaStat('available');
+        if (blurb) blurb.innerHTML = `Download ${m.vendor} <b>${m.label}</b> (${m.sizeLabel}) and run the agent fully on your device over WebGPU. Cached after the first download. Then I can do custom work and open new tabs on my own. This is the default way to use peerd-lite.`;
       } else {
-        const why = !cap.webgpu ? 'WebGPU is unavailable in this browser' : 'this GPU lacks shader-f16 (needed for q4f16)';
-        capEl.innerHTML = `<span class="cap-no">● Gemma not supported here</span> — ${why}. Try desktop Chrome or Edge with a recent GPU. The precoded actions below still work.`;
-        chipTxt.textContent = 'gemma: not supported'; setGemmaStat('not supported');
-        dl.disabled = true; dl.style.opacity = '.5'; dl.style.cursor = 'default'; dl.textContent = '⬇ needs WebGPU + shader-f16';
+        const why = !cap.webgpu ? 'WebGPU is unavailable in this browser'
+          : !cap.shaderF16 ? 'this GPU lacks shader-f16 (needed for q4f16)'
+          : `this GPU's max buffer binding (${bindingGiB.toFixed(1)} GB) is too small for any bundled model`;
+        capEl.innerHTML = `<span class="cap-no">● Local model not supported here</span> — ${why}. Try desktop Chrome or Edge with a recent GPU. The precoded actions below still work.`;
+        chipTxt.textContent = 'model: not supported'; setGemmaStat('not supported');
+        dl.disabled = true; dl.style.opacity = '.5'; dl.style.cursor = 'default'; dl.textContent = '⬇ needs a WebGPU GPU';
       }
     } catch (e) { capEl.textContent = 'couldn’t check GPU: ' + (e?.message || e); }
   })();
 
   document.getElementById('gemmaDl').addEventListener('click', async ()=>{
-    if(!gemmaSupported) return;
+    if(!gemmaSupported || !selectedModel) return;
     if(gemmaReady||gemmaLoading) return; gemmaLoading=true;
-    const prog=document.getElementById('gemmaProg'), fill=document.getElementById('gemmaFill'), pct=document.getElementById('gemmaPct'), btn=document.getElementById('gemmaDl');
-    prog.hidden=false; btn.disabled=true; btn.textContent='⬇ Downloading…'; setGemmaStat('loading…'); pct.style.color='';
-    let watchdog=null, hit100=false;
-    try{
-      await initGemma((p)=>{
-        if(typeof p.overall==='number'){
-          fill.style.width=p.overall.toFixed(1)+'%';
-          if(p.overall>=99.5){
-            // the bar = the DOWNLOAD; the GPU compile happens after, with no
-            // progress events — say so instead of a stuck "100%".
-            pct.textContent='weights downloaded · compiling onto your GPU (first load can take a minute)…';
-            if(!hit100){ hit100=true; watchdog=setTimeout(()=>{ if(!gemmaReady) pct.textContent='still compiling on the GPU… large model — if this stalls for several minutes your GPU may not have enough memory (~3 GB) for Gemma.'; }, 45000); }
-          } else {
-            pct.textContent=`downloading weights · ${p.overall.toFixed(0)}%`;
+    const prog=document.getElementById('gemmaProg'), fill=document.getElementById('gemmaFill'), pct=document.getElementById('gemmaPct'), btn=document.getElementById('gemmaDl'), spin=document.getElementById('gemmaSpin'), dots=document.getElementById('gemmaDots');
+    // the button disappears while loading; the spinning orb + animated dots carry it.
+    btn.hidden=true; prog.hidden=false; spin.hidden=false; dots.hidden=false; setGemmaStat('loading');
+
+    // Self-healing: try the picked model, then auto-fall back to any smaller model
+    // that also fits this GPU if the bigger one is rejected at session-create (the
+    // binding heuristic can't perfectly predict an OOM, so the real load is truth).
+    const startIdx = MODEL_ORDER.findIndex(k=>MODELS[k].id===selectedModel.id);
+    let candidates = MODEL_ORDER.slice(startIdx).map(k=>MODELS[k]).filter(m=>capBindingGiB>=m.minBindingGiB);
+    if(!candidates.length) candidates=[selectedModel];
+
+    let lastErr=null;
+    for(let i=0;i<candidates.length;i++){
+      const m=candidates[i]; let watchdog=null, hit100=false;
+      spin.hidden=false; dots.hidden=false; pct.style.color=''; fill.style.width='0%';
+      pct.textContent = i===0 ? 'starting' : `loading ${m.label}`;
+      try{
+        if(i>0) await teardownGemma();   // fresh worker: the prior GPU device may be wedged after an OOM
+        await initGemma((p)=>{
+          if(typeof p.overall==='number'){
+            fill.style.width=p.overall.toFixed(1)+'%';
+            if(p.overall>=99.5){
+              // the bar = the DOWNLOAD; the GPU compile happens after, with no
+              // progress events — say so instead of a stuck "100%".
+              pct.textContent='weights downloaded · compiling onto your GPU (first load can take a minute)';
+              if(!hit100){ hit100=true; watchdog=setTimeout(()=>{ if(!gemmaReady) pct.textContent=`still compiling on the GPU — if this stalls for several minutes your GPU may not have enough memory for ${m.label}`; }, 60000); }
+            } else {
+              pct.textContent=`downloading ${m.label} · ${p.overall.toFixed(0)}%`;
+            }
+          } else if(p.status==='phase'){
+            if(p.phase==='compiling') pct.textContent='compiling onto your GPU (first load can take a minute)';
+            else pct.textContent=p.phase==='ready'?'finalizing':p.phase;
           }
-        } else if(p.status==='phase'){ pct.textContent=p.phase==='ready'?'finalizing…':p.phase; }
-      });
-      clearTimeout(watchdog);
-      gemmaReady=true; gemmaLoading=false; fill.style.width='100%'; pct.style.color='var(--green)'; pct.textContent='ready · running locally on your GPU';
-      const gc=document.getElementById('gchip'); gc.classList.add('on'); gc.querySelector('.gtxt').textContent='gemma: ready';
-      setGemmaStat('ready · local'); btn.textContent='✓ Gemma loaded';
-      composer.disabled=false; sendBtn.disabled=false; composer.placeholder='Ask Gemma to do something…'; composer.focus();
-      agent = makeAgent({ generate: generateGemma, runTool, tools: TOOLS, system: SYSTEM });
-      say('bot','Gemma is loaded and running on your GPU — no key, no server. Ask me anything: I can write and run notebooks, open the peer network, and more. Try <i>"chart the first 10 fibonacci numbers"</i>.');
-    }catch(e){
-      clearTimeout(watchdog);
-      gemmaLoading=false; btn.disabled=false; btn.textContent='⬇ Download Gemma · run locally';
-      pct.style.color='var(--red)'; pct.textContent='couldn’t start: '+(e?.message||e); setGemmaStat('unavailable');
-      console.error('[gemma] load error', e);
+        }, m);
+        clearTimeout(watchdog);
+        // success — the download card has served its purpose; collapse it entirely
+        // (the chat message + the toolbar chip + the status bar all show "ready").
+        gemmaReady=true; gemmaLoading=false;
+        document.getElementById('gemmaCard').hidden=true;
+        const gc=document.getElementById('gchip'); gc.classList.add('on'); gc.querySelector('.gtxt').textContent='model: ready';
+        setGemmaStat('ready · local');
+        composer.disabled=false; sendBtn.disabled=false; composer.placeholder=`Ask ${m.label} to do something…`; composer.focus();
+        agent = makeAgent({ generate: generateGemma, runTool, tools: TOOLS, system: SYSTEM });
+        say('bot',`${m.label} is loaded and running on your GPU — no key, no server. Ask me anything: I can write and run notebooks, open the peer network, and more. Try <i>"chart the first 10 fibonacci numbers"</i>.`);
+        return;
+      }catch(e){
+        clearTimeout(watchdog); lastErr=e; console.warn(`[model] ${m.label} failed to load`, e);
+        const next=candidates[i+1];
+        if(next){ pct.style.color='var(--amber)'; pct.textContent=`${m.label} couldn’t fit your GPU — falling back to ${next.label}…`; await new Promise(r=>setTimeout(r,1300)); }
+      }
     }
+    // every candidate failed
+    gemmaLoading=false; spin.hidden=true; dots.hidden=true; btn.hidden=false; btn.disabled=false; btn.textContent='⬇ Retry';
+    pct.style.color='var(--red)'; pct.textContent='couldn’t start: '+(lastErr?.message||lastErr); setGemmaStat('unavailable');
   });
 
   async function sendToAgent(){
@@ -447,6 +509,9 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   }
   sendBtn.addEventListener('click', sendToAgent);
   composer.addEventListener('keydown',(e)=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendToAgent(); } });
+  // mirror the extension's send disc: ONE random brand color per fresh draft.
+  const SEND_ACCENTS=['--cyan','--red','--amber','--green','--magenta'];
+  composer.addEventListener('input',()=>{ if(composer.value.length===1){ sendBtn.style.setProperty('--send-accent','var('+SEND_ACCENTS[Math.floor(Math.random()*SEND_ACCENTS.length)]+')'); } });
 
   // PWA
   if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));

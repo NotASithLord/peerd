@@ -6,7 +6,7 @@
 // the SW never sees it. Same-origin GETs use cache-first (shell + vendored
 // modules) and network-first for navigations. This keeps the sealed-worker
 // notebook, dynamic ES imports, the live dweb peer, and OPFS untouched.
-const CACHE = 'peerd-lite-v6';
+const CACHE = 'peerd-lite-v10';
 const SHELL = [
   '/',
   '/index.html',
@@ -14,6 +14,8 @@ const SHELL = [
   '/favicon.svg',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
+  '/web/gemma.js',
+  '/web/gemma-worker.js',
   '/web/notebook-host.js',
   '/notebook-tab/worker-source.js',
   '/notebook-tab/realm-seal.js',
@@ -43,6 +45,18 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+const putCache = (req, res) => {
+  if (res.ok && res.type === 'basic') { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
+  return res;
+};
+// network-first: always try the network (so code edits land immediately), fall
+// back to cache offline. why: cache-first on app code masked new builds per-browser
+// (a stale SW kept serving the old single-model app in one browser after a deploy).
+const networkFirst = (req) => fetch(req).then((res) => putCache(req, res)).catch(() => caches.match(req));
+// cache-first: for the heavy, effectively-immutable vendored assets (transformers,
+// ORT wasm, notebook-tab, peerd-engine, p2p, shared/bundle) — don't re-download MBs.
+const cacheFirst = (req) => caches.match(req).then((hit) => hit || fetch(req).then((res) => putCache(req, res)));
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
@@ -55,21 +69,13 @@ self.addEventListener('fetch', (e) => {
 
   // navigations: network-first, fall back to cached shell offline.
   if (req.mode === 'navigate') {
-    e.respondWith(fetch(req).catch(() => caches.match('/index.html').then((r) => r || caches.match('/'))));
+    e.respondWith(fetch(req).then((res) => putCache(req, res)).catch(() => caches.match('/index.html').then((r) => r || caches.match('/'))));
     return;
   }
 
-  // shell + vendored modules: cache-first, populate on miss.
-  e.respondWith(
-    caches.match(req).then((hit) =>
-      hit ||
-      fetch(req).then((res) => {
-        if (res.ok && res.type === 'basic') {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy));
-        }
-        return res;
-      })
-    )
-  );
+  // app code (the page's own HTML/JS) is network-first so updates are never masked
+  // by a stale cache; everything else same-origin (vendored MBs) is cache-first.
+  const isAppCode = url.pathname === '/' || url.pathname === '/index.html'
+    || url.pathname === '/manifest.json' || url.pathname.startsWith('/web/');
+  e.respondWith(isAppCode ? networkFirst(req) : cacheFirst(req));
 });
