@@ -282,6 +282,8 @@ import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
 import { makeModelCatalog } from './model-catalog.js';
 import { makeTabAffordances } from './tab-affordances.js';
+import { makeMintOnce } from './mint-once.js';
+import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
 import { makeHooksRoutes } from './routes/hooks.js';
@@ -2370,15 +2372,9 @@ const ACTOR_REGISTRY_BY_PREFIX = {
 // promise collapses them to ONE mint; the entry clears when it settles. why a
 // shared map: engine ids carry a prefix and web keys are `web:<tabId>`, so they
 // never collide. @type {Map<string, Promise<string>>} */
-const mintInFlight = new Map();
-/** @param {string} key @param {() => Promise<string>} fn @returns {Promise<string>} */
-const mintOnce = (key, fn) => {
-  const existing = mintInFlight.get(key);
-  if (existing) return existing;
-  const p = (async () => { try { return await fn(); } finally { mintInFlight.delete(key); } })();
-  mintInFlight.set(key, p);
-  return p;
-};
+// Single-flight dedup for lazy actor minting (background/mint-once.js): two
+// message_actor calls racing to the same instance collapse onto ONE mint.
+const { mintOnce } = makeMintOnce();
 
 // Start the actor process on demand: lazily mint an actor session for an
 // instance (on the first message_actor). Inherits the spawning chat's RESOLVED
@@ -2426,15 +2422,22 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // session storage (ephemeral by design — on a cold miss we re-mint against the
 // live tab, whose DOM re-derives state). The address the orchestrator uses is the
 // tabId AS A STRING (the actor's instanceId).
+// A registry's chrome.storage.session persistence: the persist thunk + the
+// best-effort boot rehydrate, shared by the three actor registries below (a
+// missing/garbage stored value just starts empty). Ephemeral by design — every
+// one of these is a routing cache whose durable truth lives on the session record.
+const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
+  () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
+const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) => {
+  Promise.resolve(sessionCache.sessionGet(key))
+    .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
+    .catch(() => {});
+};
+
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
-const persistWebBindings = () => {
-  sessionCache.sessionSet(WEB_BINDINGS_KEY, webActorTabBindings.entries()).catch(() => {});
-};
-// Rehydrate on SW boot (best-effort; a missing/garbage value just starts empty).
-Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
-  .then((e) => { if (Array.isArray(e)) webActorTabBindings.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistWebBindings = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -2443,12 +2446,8 @@ Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
 // the tab bindings — ephemeral is fine (re-mint on loss).
 const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
-const persistWebActors = () => {
-  sessionCache.sessionSet(WEB_ACTOR_KEY, webActorRegistry.entries()).catch(() => {});
-};
-Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
-  .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
+hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
@@ -2463,12 +2462,8 @@ Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
 // no unbounded growth + no cleanup hook needed) while the durable session is the truth.
 const apiActorBindings = makeApiActorBindings();
 const API_ACTOR_KEY = 'apiActorBindings';
-const persistApiActors = () => {
-  sessionCache.sessionSet(API_ACTOR_KEY, apiActorBindings.entries()).catch(() => {});
-};
-Promise.resolve(sessionCache.sessionGet(API_ACTOR_KEY))
-  .then((e) => { if (Array.isArray(e)) apiActorBindings.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistApiActors = persistRegistry(API_ACTOR_KEY, apiActorBindings);
+hydrateRegistry(API_ACTOR_KEY, apiActorBindings);
 
 // DESIGN-18 P2 — the API-integration discovery surface (injected as ctx.listApiIntegrations,
 // the integration rows of actor_list). The addressable set is the chat's FORMED integrations (origins it
@@ -2742,27 +2737,9 @@ const resolveDwebActor = async () => {
 // spends money; the actor's loop is the thing being protected.
 const DWEB_AGENT_ROOM = 'peerd-agent';
 const DWEB_AGENT_NO_REPORT = 'NO_REPORT';
-/** per-did wake timestamps (sliding minute) + a global hourly counter */
-const dwebInboundByDid = new Map();
-let dwebInboundHour = { windowStart: 0, count: 0 };
-const dwebInboundAllowed = (/** @type {string} */ did) => {
-  const nowMs = Date.now();
-  const times = (dwebInboundByDid.get(did) ?? []).filter((/** @type {number} */ t) => nowMs - t < 60_000);
-  if (times.length >= 3) return false;                      // 3/min per did
-  if (nowMs - dwebInboundHour.windowStart > 3_600_000) dwebInboundHour = { windowStart: nowMs, count: 0 };
-  if (dwebInboundHour.count >= 30) return false;            // 30/hour global
-  times.push(nowMs);
-  dwebInboundByDid.set(did, times);
-  dwebInboundHour.count += 1;
-  // Sweep dead entries: dids are free/Sybil (self-minted did:key), so without
-  // eviction the map grows monotonically over the long-lived (keepalive-pinned)
-  // SW. Drop any entry whose timestamps have all aged out. Cheap — bounded by
-  // the 30/hour ADMIT rate, so at most a few dozen live keys ever.
-  for (const [k, ts] of dwebInboundByDid) {
-    if (k !== did && !ts.some((/** @type {number} */ t) => nowMs - t < 60_000)) dwebInboundByDid.delete(k);
-  }
-  return true;
-};
+// Inbound wake rate cap (background/dweb-inbound-rate-cap.js): 3/min per did +
+// 30/hour global, bound BEFORE any model call so a Sybil peer can't drain budget.
+const { allow: dwebInboundAllowed } = makeDwebInboundRateCap();
 
 // ── A2A: the agent-to-agent mesh dispatch (the a2a_run code surface) ─────────
 // ONE dispatch instance (state: pending asks) wired to real mesh IO on the
