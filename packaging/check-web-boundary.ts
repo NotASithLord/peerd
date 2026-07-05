@@ -1,47 +1,59 @@
 // check-web-boundary.ts — the honesty gate for the `web` target (spec §10,
-// mirrors the spirit of check-dweb-boundary.ts). It proves the staged web-dist/
-// is IMPORT-CLOSED: every static/side-effect/dynamic import specifier resolves
-// to a file that actually exists in the tree. A dangling import means a curated
-// module reaches into pruned chassis code (e.g. /background/*, /offscreen/*) and
-// would 404 at module load on a page — the exact failure mode a naive
-// "stage + prune" build hits. It also asserts the browser-polyfill was swapped
-// for the no-throw shim, and lists any top-level chrome./browser. touches for review.
+// the web analogue of verify-store-artifact.ts). Runs over the ASSEMBLED
+// web-dist/ tree and proves it is actually shippable:
 //
-// Run: bun run check:web   (after bun run package:web)
-// why here, not eslint: eslint's no-restricted-imports runs on SOURCE and can't
-// see the effect of staging/pruning. This runs on the ASSEMBLED tree, so it
-// catches a NEW upstream import escaping the curated set the moment it lands.
+//   1. IMPORT CLOSURE — every static/dynamic import specifier (parsed with
+//      es-module-lexer, not regexes: real declarations only, so prose in
+//      strings/comments can't false-fail and multi-line forms can't slip) in
+//      every .js/.mjs file AND in index.html's module scripts resolves to a
+//      file that exists in the tree. `new Worker('…')` paths are covered too.
+//      A dangling import means curated code reaches pruned chassis — the 404
+//      that would kill the page at module load.
+//   2. SWAP FIDELITY — every swapped file (browser-polyfill shim, the two
+//      /background/ stubs, the dweb loader) is byte-identical to its committed
+//      template, and imports FROM a stubbed module use only names the stub
+//      exports (a second constant added upstream fails here, not at runtime).
+//   3. CHANNEL POSTURE — shared/channel-config.js carries CHANNEL "web" and
+//      DWEB_ENABLED false.
+//   4. BUILD STAMP — build.json exists and sw.js's __PEERD_WEB_*__ tokens were
+//      replaced (the per-build cache name is what invalidates staged modules
+//      on deploy).
+//   5. SHIPPABILITY — no file exceeds Cloudflare Pages' 25 MiB upload limit.
+//   6. PLATFORM-TOUCH RATCHET — module-scope chrome./browser. touches must be
+//      in web-target.ts's reviewed KNOWN_BROWSER_TOUCHES allowlist; a NEW
+//      touch fails until the shim's coverage is reviewed and the list bumped
+//      (same posture as the tscheck floor).
+//
+// Run: bun run check:web (also auto-runs at the end of `bun run package:web`).
 
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, resolve, dirname } from 'node:path';
-import { REPO_ROOT } from './lib.ts';
-import { WEB_DIST } from './web-target.ts';
+import { init, parse } from 'es-module-lexer';
+import { REPO_ROOT, TEMPLATES_DIR, STORE_LOADER_TEMPLATE } from './lib.ts';
+import {
+  WEB_DIST, WEB_SWAPS, WEB_STUB_PATHS, KNOWN_BROWSER_TOUCHES,
+  PAGES_FILE_LIMIT, PAGES_FILE_WARN,
+} from './web-target.ts';
 
-// The shim must carry this marker; its absence means the swap did not apply.
-const SHIM_MARKER = 'browser-polyfill.web.js';
+interface Findings { violations: string[]; warnings: string[]; }
 
-// Strip block + line comments so import-like text in JSDoc / prose isn't scanned
-// (e.g. `@param {import('webextension-polyfill')…}` or a `//  import … from 'x'`
-// example). Not a full tokenizer, but combined with statement-anchoring below it
-// removes the false positives without missing real import statements.
+const walk = (dir: string, out: string[] = []): string[] => {
+  for (const entry of readdirSync(dir)) {
+    const p = join(dir, entry);
+    if (statSync(p).isDirectory()) walk(p, out);
+    else out.push(p);
+  }
+  return out;
+};
+
+// Specifier schemes that are not file paths by design: the Notebook's
+// peerd:std builtin, and blob:/data: URLs the resolvers construct.
+const isFileSpecifier = (spec: string): boolean =>
+  !/^(peerd:|blob:|data:|https?:)/.test(spec);
+
 const stripComments = (src: string): string =>
   src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
     .replace(/(^|[^:])\/\/[^\n]*/g, (_m, p1) => p1);
-
-// A specifier that is a real, resolvable module path (not a template/placeholder
-// built as data, and not the notebook `peerd:std` builtin scheme).
-const isRealSpecifier = (spec: string): boolean =>
-  spec.length > 0 && !/[\s<>${}]/.test(spec) && !spec.startsWith('peerd:');
-
-// Import forms, anchored to STATEMENT position (line start, or a `}` continuation
-// line for multi-line named imports) so specifiers built inside template strings
-// (module-resolver.js constructs `import … from '…'` as data) are not matched.
-const SPEC_PATTERNS: Array<{ kind: string; re: RegExp }> = [
-  { kind: 'import/export-from', re: /(?:^|\n)\s*(?:import|export)\b[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/g },
-  { kind: 'continuation-from', re: /(?:^|\n)\s*}\s*from\s*['"]([^'"]+)['"]/g },
-  { kind: 'side-effect import', re: /(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g },
-  { kind: 'dynamic import', re: /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g },
-];
 
 const lineOf = (text: string, index: number): number => {
   let n = 1;
@@ -49,78 +61,189 @@ const lineOf = (text: string, index: number): number => {
   return n;
 };
 
-const walk = (dir: string, out: string[] = []): string[] => {
-  for (const entry of readdirSync(dir)) {
-    const p = join(dir, entry);
-    if (statSync(p).isDirectory()) {
-      // vendor/ is third-party and self-contained; don't scan its internals.
-      if (entry === 'vendor') continue;
-      walk(p, out);
-    } else if (/\.(js|mjs)$/.test(entry)) {
-      out.push(p);
-    }
+export const checkWebBoundary = async (): Promise<void> => {
+  if (!existsSync(WEB_DIST)) {
+    throw new Error('web-dist/ not found — run `bun run package:web` first.');
   }
-  return out;
-};
+  await init;
+  const f: Findings = { violations: [], warnings: [] };
 
-const dangling: string[] = [];
-const suspicious: string[] = [];   // top-level chrome./browser. touches (warn)
-const chromeAtLineStart = /^\s*(?:globalThis\.)?(chrome|browser)\.\w/;
+  const allFiles = walk(WEB_DIST).map((p) => relative(WEB_DIST, p));
+  const stubExports = new Map<string, Set<string>>(); // staged rel path -> exported names
+  for (const rel of WEB_STUB_PATHS) {
+    const [, exports] = parse(readFileSync(join(TEMPLATES_DIR, WEB_SWAPS[rel]), 'utf8'));
+    stubExports.set(rel, new Set(exports.map((e) => e.n)));
+  }
 
-if (!existsSync(WEB_DIST)) {
-  console.error('web-dist/ not found — run `bun run package:web` first.');
-  process.exit(1);
-}
+  // resolve a specifier from a file; record a violation if it doesn't exist.
+  // Returns the WEB_DIST-relative resolved path (for the stub check) or null.
+  const resolveSpec = (fromRel: string, line: number, kind: string, spec: string): string | null => {
+    if (!isFileSpecifier(spec)) return null;
+    const clean = spec.split('?')[0].split('#')[0];
+    let abs: string;
+    if (clean.startsWith('/')) abs = join(WEB_DIST, clean);
+    else if (clean.startsWith('.')) abs = resolve(join(WEB_DIST, dirname(fromRel)), clean);
+    else {
+      f.violations.push(`${fromRel}:${line}  [${kind}] bare specifier "${spec}" (no importmap ships — use a root-relative path)`);
+      return null;
+    }
+    if (!existsSync(abs)) {
+      f.violations.push(`${fromRel}:${line}  [${kind}] "${spec}" -> ${relative(WEB_DIST, abs)} (missing)`);
+      return null;
+    }
+    return relative(WEB_DIST, abs);
+  };
 
-for (const file of walk(WEB_DIST)) {
-  const rel = relative(WEB_DIST, file);
-  const raw = readFileSync(file, 'utf8');
-  const src = stripComments(raw);
-  const fileDir = dirname(file);
+  // Scan one module source (a .js file or an inline <script type=module> body).
+  const scanModule = (fromRel: string, src: string, lineBase = 0): void => {
+    let imports;
+    try { [imports] = parse(src, fromRel); }
+    catch (e: any) {
+      f.warnings.push(`${fromRel}: es-module-lexer could not parse (${e?.message ?? e}) — imports unchecked`);
+      return;
+    }
+    for (const imp of imports) {
+      if (imp.d === -2) continue;                    // import.meta
+      const spec = imp.n;
+      if (spec === undefined) continue;              // dynamic import with non-literal arg
+      const line = lineBase + lineOf(src, imp.ss);
+      const kind = imp.d >= 0 ? 'dynamic import' : 'import';
+      const resolved = resolveSpec(fromRel, line, kind, spec);
+      // Stub discipline: importers of a stubbed module may only use names the
+      // stub exports. Namespace/default imports are opaque — refuse those too.
+      if (resolved && stubExports.has(resolved) && imp.d < 0) {
+        const stmt = src.slice(imp.ss, imp.se);
+        const allowed = stubExports.get(resolved)!;
+        const braces = stmt.match(/{([^}]*)}/);
+        const names = braces
+          ? braces[1].split(',').map((s) => s.trim().split(/\s+as\s+/)[0]).filter(Boolean)
+          : null;
+        if (!names) {
+          f.violations.push(`${fromRel}:${line}  [stub import] non-named import of stubbed ${resolved} — import { … } only (stub exports: ${[...allowed].join(', ')})`);
+        } else {
+          for (const n of names) {
+            if (!allowed.has(n)) {
+              f.violations.push(`${fromRel}:${line}  [stub import] "${n}" is not exported by the web stub for ${resolved} — extend packaging/templates/${WEB_SWAPS[resolved]} (and verify the value against the real file)`);
+            }
+          }
+        }
+      }
+    }
+    // Worker entry points are module loads too. Only ROOT-relative paths are
+    // checked: those are page-context loads against this origin (e.g.
+    // /web/gemma-worker.js). Relative/bare worker paths in staged module code
+    // are data for OTHER contexts (the App composer emits `new Worker('…')`
+    // into opaque-iframe harness code, resolved against a blob origin) — not
+    // resolvable here. Comment-stripped so doc examples don't match at all.
+    const workerRe = /new\s+(?:Shared)?Worker\s*\(\s*['"](\/[^'"]+)['"]/g;
+    const strippedSrc = stripComments(src);
+    let w: RegExpExecArray | null;
+    while ((w = workerRe.exec(strippedSrc))) {
+      resolveSpec(fromRel, lineBase + lineOf(strippedSrc, w.index), 'worker', w[1]);
+    }
+  };
 
-  // top-level (column 0) extension-global touch — a module-load throw risk.
-  src.split('\n').forEach((line, i) => {
-    if (chromeAtLineStart.test(line)) suspicious.push(`${rel}:${i + 1}  ${raw.split('\n')[i]?.trim() ?? line.trim()}`);
-  });
+  const suspicious: string[] = [];
+  const chromeTouchRe = /^\s*(?:globalThis\.)?(chrome|browser)[.?]/;
 
-  for (const { kind, re } of SPEC_PATTERNS) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(src))) {
-      const spec = m[1];
-      if (!isRealSpecifier(spec)) continue;
-      const at = `${rel}:${lineOf(src, m.index)}`;
-      let resolved: string;
-      if (spec.startsWith('/')) resolved = join(WEB_DIST, spec);
-      else if (spec.startsWith('.')) resolved = resolve(fileDir, spec);
-      else { dangling.push(`${at}  [${kind}] bare/non-relative specifier "${spec}" (no importmap ships)`); continue; }
-      if (!existsSync(resolved)) {
-        dangling.push(`${at}  [${kind}] "${spec}" -> ${relative(WEB_DIST, resolved)} (missing)`);
+  for (const rel of allFiles) {
+    // vendor/ is self-contained third-party (its own internal graph is not
+    // ours to gate); the swapped polyfill is byte-verified below instead.
+    if (rel.startsWith('vendor/')) continue;
+
+    if (rel.endsWith('.js') || rel.endsWith('.mjs')) {
+      const raw = readFileSync(join(WEB_DIST, rel), 'utf8');
+      scanModule(rel, raw);
+      // module-scope platform-touch ratchet (line-start heuristic over
+      // comment-stripped source; entries are reviewed into the allowlist).
+      const stripped = stripComments(raw);
+      const rawLines = raw.split('\n');
+      stripped.split('\n').forEach((line, i) => {
+        if (chromeTouchRe.test(line)) suspicious.push(`${rel}|${(rawLines[i] ?? line).trim()}`);
+      });
+    } else if (rel.endsWith('.html')) {
+      const html = readFileSync(join(WEB_DIST, rel), 'utf8');
+      const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+      let s: RegExpExecArray | null;
+      while ((s = scriptRe.exec(html))) {
+        const attrs = s[1];
+        if (!/type\s*=\s*["']?module["']?/.test(attrs)) continue;
+        const srcAttr = attrs.match(/src\s*=\s*["']([^"']+)["']/);
+        if (srcAttr) resolveSpec(rel, lineOf(html, s.index), 'script src', srcAttr[1]);
+        else scanModule(rel, s[2], lineOf(html, s.index) - 1);
       }
     }
   }
-}
 
-// The polyfill must be the no-throw shim, not the real vendored one.
-const polyfill = join(WEB_DIST, 'vendor', 'browser-polyfill.js');
-if (!existsSync(polyfill)) {
-  dangling.push('vendor/browser-polyfill.js is missing (the shim swap did not run)');
-} else if (!readFileSync(polyfill, 'utf8').includes(SHIM_MARKER)) {
-  dangling.push('vendor/browser-polyfill.js is not the page shim — the swap did not apply');
-}
+  // Platform-touch ratchet vs the reviewed allowlist.
+  for (const touch of suspicious) {
+    if (!KNOWN_BROWSER_TOUCHES.has(touch)) {
+      f.violations.push(
+        `[platform touch] NEW module-scope chrome./browser. use: ${touch.replace('|', ':  ')}\n`
+        + '    → verify packaging/templates/browser-polyfill.web.js covers this API, then add the entry to KNOWN_BROWSER_TOUCHES in packaging/web-target.ts',
+      );
+    }
+  }
+  for (const known of KNOWN_BROWSER_TOUCHES) {
+    if (!suspicious.includes(known)) f.warnings.push(`stale KNOWN_BROWSER_TOUCHES entry (no longer matches): ${known}`);
+  }
 
-if (suspicious.length > 0) {
-  console.warn(`\n⚠  ${suspicious.length} chrome./browser. touch(es) — verify the page shim (packaging/templates/browser-polyfill.web.js) covers these APIs:`);
-  for (const s of suspicious.slice(0, 40)) console.warn('   ' + s);
-  if (suspicious.length > 40) console.warn(`   … and ${suspicious.length - 40} more`);
-}
+  // Swap fidelity: byte-identical to the committed templates.
+  for (const [rel, template] of Object.entries(WEB_SWAPS)) {
+    const staged = join(WEB_DIST, rel);
+    if (!existsSync(staged)) { f.violations.push(`swap missing: ${rel} (template ${template}) was not written`); continue; }
+    if (!readFileSync(staged).equals(readFileSync(join(TEMPLATES_DIR, template)))) {
+      f.violations.push(`swap drift: ${rel} is not byte-identical to packaging/templates/${template}`);
+    }
+  }
+  const loader = join(WEB_DIST, 'shared', 'dweb-loader.js');
+  if (!existsSync(loader) || !readFileSync(loader).equals(readFileSync(STORE_LOADER_TEMPLATE))) {
+    f.violations.push('shared/dweb-loader.js is not the committed store stub template — the agent-side dweb gate is open');
+  }
 
-if (dangling.length > 0) {
-  console.error(`\nWEB BOUNDARY VIOLATION — ${dangling.length} import(s) in web-dist/ do not resolve within the staged tree.`);
-  console.error('The web target reaches pruned chassis code (or a bare specifier). Fix curation in');
-  console.error('packaging/web-target.ts (include the file, add a stub, or shim it), then re-run `bun run package:web`:\n');
-  for (const v of dangling) console.error('  ' + v);
-  process.exit(1);
-}
+  // Channel posture.
+  const cfg = readFileSync(join(WEB_DIST, 'shared', 'channel-config.js'), 'utf8');
+  if (!cfg.includes('CHANNEL = "web"')) f.violations.push('channel-config: CHANNEL is not "web"');
+  if (!cfg.includes('DWEB_ENABLED = false')) f.violations.push('channel-config: DWEB_ENABLED is not false in the web build');
 
-console.log(`web boundary OK — every import in ${relative(REPO_ROOT, WEB_DIST)}/ resolves; polyfill shim in place.`);
+  // Build stamp.
+  const buildJson = join(WEB_DIST, 'build.json');
+  if (!existsSync(buildJson)) f.violations.push('build.json missing — package-web did not stamp the build');
+  else {
+    try {
+      const b = JSON.parse(readFileSync(buildJson, 'utf8'));
+      if (!b.version || !b.buildId) f.violations.push('build.json lacks version/buildId');
+    } catch { f.violations.push('build.json is not valid JSON'); }
+  }
+  const sw = readFileSync(join(WEB_DIST, 'sw.js'), 'utf8');
+  // exact token names, not the prefix — the SW's own comment MENTIONS the
+  // token pattern in prose, which must not read as an unstamped build.
+  if (sw.includes('__PEERD_WEB_BUILD__') || sw.includes("'__PEERD_WEB_PRECACHE__'")) {
+    f.violations.push('sw.js still contains unstamped __PEERD_WEB_BUILD__/__PEERD_WEB_PRECACHE__ tokens — the build stamp did not apply');
+  }
+
+  // Shippability: Cloudflare Pages per-file limit.
+  for (const rel of allFiles) {
+    const size = statSync(join(WEB_DIST, rel)).size;
+    if (size > PAGES_FILE_LIMIT) {
+      f.violations.push(`${rel} is ${(size / 1048576).toFixed(1)} MiB — over Cloudflare Pages' 25 MiB per-file limit; the deploy WILL fail`);
+    } else if (size > PAGES_FILE_WARN) {
+      f.warnings.push(`${rel} is ${(size / 1048576).toFixed(1)} MiB — within ${((PAGES_FILE_LIMIT - size) / 1048576).toFixed(1)} MiB of the Pages 25 MiB limit`);
+    }
+  }
+
+  for (const w of f.warnings) console.warn(`⚠  ${w}`);
+  if (f.violations.length > 0) {
+    const msg =
+      `WEB BOUNDARY VIOLATION — ${f.violations.length} problem(s) in web-dist/.\n`
+      + 'Fix curation in packaging/web-target.ts (include the file, extend a stub template, or shim it), then re-run `bun run package:web`:\n\n  '
+      + f.violations.join('\n  ');
+    throw new Error(msg);
+  }
+  console.log(`web boundary OK — imports closed, swaps byte-identical, channel posture + build stamp verified (${relative(REPO_ROOT, WEB_DIST)}/).`);
+};
+
+if (import.meta.main) {
+  try { await checkWebBoundary(); }
+  catch (e: any) { console.error('\n' + (e?.message ?? e)); process.exit(1); }
+}

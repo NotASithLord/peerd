@@ -45,10 +45,20 @@ let sessionMem = {};
 
 const messageListeners = new Set();
 
+// inert event surface (addListener/removeListener/hasListener), reused for
+// every on* the shimmed modules may subscribe to.
+const inertEvent = () => ({ addListener: noop, removeListener: noop, hasListener: () => false });
+
 const browser = {
   runtime: {
     id: 'peerd-web',                                  // truthy so runtime.id guards pass
-    getURL: (path) => (path?.startsWith('/') ? path : '/' + (path ?? '')),
+    // why absolute: the real polyfill returns an absolute URL — callers do
+    // `new URL(browser.runtime.getURL(x))` and sender-trust derives an ORIGIN
+    // from getURL(''); a bare path would throw / compare wrong.
+    getURL: (path) => location.origin + (path?.startsWith('/') ? path : '/' + (path ?? '')),
+    // NOTE: resolves undefined by design (there is no SW to answer). Callers
+    // must read replies defensively (`r?.ok`), the same rule the extension
+    // already follows for {ok:false} handler replies.
     sendMessage: asyncNoop,
     connect: () => ({ postMessage: noop, disconnect: noop, onMessage: { addListener: noop }, onDisconnect: { addListener: noop } }),
     onMessage: {
@@ -61,11 +71,13 @@ const browser = {
   storage: {
     local: makeArea(readLocal, writeLocal),
     session: makeArea(() => sessionMem, (all) => { sessionMem = all; }),
+    // inert: nothing on a single page mutates storage behind the caller's back.
+    onChanged: inertEvent(),
   },
   // No browser tabs/windows on a page; the host adapters own real "tabs".
   tabs: { create: asyncNoop, update: asyncNoop, query: async () => [] },
   windows: { create: asyncNoop, update: asyncNoop },
-  commands: { onCommand: { addListener: noop } },
+  commands: { onCommand: inertEvent() },
   sidebarAction: { open: asyncNoop, close: asyncNoop },
 };
 

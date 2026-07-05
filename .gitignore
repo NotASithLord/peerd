@@ -50,6 +50,9 @@ web-ext-artifacts/
 # The web target's staged tree — regenerated fresh from live extension/ source
 # by `bun run package:web` (packaging/package-web.ts). Never committed.
 /web-dist/
+# wrangler's local cache (deploy metadata incl. the Cloudflare account id) —
+# never commit it (one leaked from web-prototype once; removed 2026-07-05).
+.wrangler/
 
 # Local dev / test artifacts
 /scratch/

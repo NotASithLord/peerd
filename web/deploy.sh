@@ -29,13 +29,22 @@ fi
 if [ "$BUILD_ONLY" -eq 0 ]; then
   [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "CLOUDFLARE_API_TOKEN not set" >&2; exit 1; }
   [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || { echo "CLOUDFLARE_ACCOUNT_ID not set" >&2; exit 1; }
+  # demo.peerd.ai is the PRODUCTION deployment and tracks main. In CI the
+  # workflow's own ref gate decides; locally, refuse a feature-branch deploy
+  # unless explicitly forced (FORCE_DEPLOY=1) — running this from WIP would
+  # silently ship the WIP as the live demo.
+  if [ -z "${GITHUB_ACTIONS:-}" ] && [ "${FORCE_DEPLOY:-}" != "1" ]; then
+    BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    if [ "$BRANCH" != "main" ]; then
+      echo "refusing to deploy demo.peerd.ai from branch '$BRANCH' (not main)." >&2
+      echo "set FORCE_DEPLOY=1 to override deliberately." >&2
+      exit 1
+    fi
+  fi
 fi
 
-echo "→ building web-dist/ from live extension/ source"
+echo "→ building web-dist/ from live extension/ source (boundary gate auto-runs)"
 bun run package:web
-
-echo "→ verifying the staged tree is import-closed"
-bun run check:web
 
 if [ "$BUILD_ONLY" -eq 1 ]; then
   echo "→ --build-only: web-dist/ ready. Preview: npx serve -l 8126 web-dist"
@@ -43,4 +52,6 @@ if [ "$BUILD_ONLY" -eq 1 ]; then
 fi
 
 echo "→ deploying web-dist/ to Cloudflare Pages (peerd-demo → demo.peerd.ai)"
-npx --yes wrangler@latest pages deploy web-dist --project-name=peerd-demo --branch=main --commit-dirty=true
+# wrangler pinned to a major: an unpinned @latest in an unattended deploy path
+# means a future CLI major can break deploys with no repo change to bisect.
+npx --yes wrangler@4 pages deploy web-dist --project-name=peerd-demo --branch=main --commit-dirty=true

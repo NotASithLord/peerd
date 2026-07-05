@@ -44,3 +44,33 @@ jobs:
           [ "$CHROME_VER" = "$EXPECTED" ] || { echo "::error::chrome feed is stale ($CHROME_VER, expected $EXPECTED) — preview installs are not updating"; FAIL=1; }
           [ "$FIREFOX_VER" = "$EXPECTED" ] || { echo "::error::firefox feed is stale ($FIREFOX_VER, expected $EXPECTED) — preview installs are not updating"; FAIL=1; }
           exit $FAIL
+
+  # Same silently-stale hole, web-demo flavor: demo.peerd.ai is supposed to
+  # track main (CI's deploy-web job on every green push; build.json is stamped
+  # by packaging/package-web.ts). A broken deploy or dead Pages project has no
+  # user-visible error either — probe it daily. Before the demo LAUNCHES
+  # (DNS not resolving yet), warn-and-pass instead of paging.
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5   # main's package.json = the expected version
+      - name: Probe demo.peerd.ai freshness
+        run: |
+          set -u
+          if ! BUILD_JSON="$(curl -fsSL --max-time 30 https://demo.peerd.ai/build.json)"; then
+            CODE=$?
+            # curl 6 = host not resolving — the demo hasn't launched yet.
+            if [ "$CODE" = "6" ]; then
+              echo "::warning::demo.peerd.ai does not resolve — demo not launched yet; probe is a no-op"
+              exit 0
+            fi
+            echo "::error::demo.peerd.ai/build.json unreachable (curl exit $CODE) — the demo deploy is broken"
+            exit 1
+          fi
+          LIVE="$(printf '%s' "$BUILD_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          EXPECTED="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          echo "demo serves v$LIVE; main is v$EXPECTED"
+          if [ "$LIVE" != "$EXPECTED" ]; then
+            echo "::error::demo.peerd.ai serves v$LIVE but main is v$EXPECTED — the demo is stale (deploy-web failing?)"
+            exit 1
+          fi
