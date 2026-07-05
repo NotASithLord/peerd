@@ -103,6 +103,10 @@ export const makeActorMessaging = (deps) => {
     mailbox = { append: async () => {}, remove: async () => {}, load: async () => [] },
   } = deps;
 
+  // The kinds oneShot is honored for — the agent's OWN engine sandboxes, whose
+  // raw results are (relatively) trusted instance output. Never web/api/dweb.
+  const ONESHOT_KINDS = new Set(['webvm', 'notebook', 'app']);
+
   const OUTSTANDING_CAP = caps.outstanding ?? 4;
   const RATE_CAP = caps.rateCap ?? 8;
   const RATE_WINDOW_MS = caps.rateWindowMs ?? 60_000;
@@ -458,6 +462,17 @@ export const makeActorMessaging = (deps) => {
       return { ok: false, error: `message_actor: no tab-hosted instance found for id '${to}' (use the create/list tools to find one)` };
     }
     const { instanceId, kind, name, actorSessionId } = actor;
+
+    // oneShot is SANDBOX-ONLY (owner call 2026-07-05): it hands the actor's RAW
+    // result straight back, skipping the summarize turn — and that turn is what
+    // incidentally COMPRESSES untrusted content. A web/API/dweb reply is
+    // page/peer-derived bytes, so it must always ride the summarized (fenced)
+    // reply; only an engine sandbox (webvm/notebook/app — the agent's own
+    // instance) may hand results back raw. Refuse loudly, never silently strip:
+    // a dropped flag would make the model believe the cheap mode worked.
+    if (oneShot === true && !ONESHOT_KINDS.has(String(kind))) {
+      return { ok: false, error: `message_actor: oneShot is sandbox-only (webvm/notebook/app) — a ${kind} actor's reply is untrusted web/peer content and always returns summarized. Re-send without oneShot.` };
+    }
 
     // Phase 7 — mechanical dedupe. An IDENTICAL (actor, message) intent already
     // in flight for this lineage is a double-fire (a parent and its child both

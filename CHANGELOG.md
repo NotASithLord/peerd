@@ -39,6 +39,15 @@ and storage formats may move until the surface stabilizes.
   WebRTC test.
 
 ### Changed
+- **`oneShot` delegation is sandbox-only now.** `message_actor`'s oneShot mode
+  (skip the actor's summary turn, hand the raw result straight back) is
+  honored only for the agent's own engine sandboxes (webvm/notebook/app) and
+  refused loudly for every other target — the summary turn is what
+  incidentally compresses untrusted content, so a web/API/dweb reply always
+  comes back summarized. The orchestrator prompt now actually teaches the
+  shortcut ("run `pytest`" → oneShot:true) instead of leaving it buried in
+  schema fine print, where models — small local ones especially — never
+  found it.
 - **The orchestrator's tool surface got a hard slim: 27 → 18 always-on.**
   Three moves, one rule: the main agent bootstraps and delegates, and every
   instance byte stays behind an actor heap.
