@@ -125,6 +125,29 @@ export const shapeActorsResult = (method, opResult) => {
   return spec.shape(opResult);
 };
 
+/**
+ * Map a messageActor(awaitReply) settle into the ask op's wire result — the
+ * security-relevant fork, extracted pure so it is provable:
+ *   • timeout (this route's own timer) → a REFUSAL the script's await rejects
+ *     with, naming the target + budget;
+ *   • a SYSTEM refusal (messageActor's own 'message_actor:'-prefixed errors —
+ *     sender gate, rate caps, duplicate intent, the oneShot sandbox rule) →
+ *     rejected verbatim, so policy is felt as policy;
+ *   • anything else in the error slot is the DELIVERED actor turn's own
+ *     failure text → returned as { failed:true } for the script to handle
+ *     in code (retry, fall back, report) instead of an exception.
+ * @param {{ ok: boolean, content?: string, error?: string }} r
+ * @param {{ timedOut: boolean, timeoutMs: number, to: string }} o
+ * @returns {{ ok: true, reply: string | null, failed: boolean } | { ok: false, error: string }}
+ */
+export const askOutcome = (r, { timedOut, timeoutMs, to }) => {
+  if (timedOut) return { ok: false, error: `actors.ask: timed out after ${timeoutMs}ms awaiting '${to}'` };
+  if (r.ok) return { ok: true, reply: r.content ?? null, failed: false };
+  const err = String(r.error ?? 'ask failed');
+  if (err.startsWith('message_actor:')) return { ok: false, error: err };
+  return { ok: true, reply: err, failed: true };
+};
+
 // ── the ops TRACE — the observability half of this surface ────────────────
 //
 // why: a script that delegates is otherwise a black box until it returns — the
@@ -141,30 +164,20 @@ export const shapeActorsResult = (method, opResult) => {
 const GOAL_PREVIEW_CHARS = 60;
 
 /**
- * Start a trace entry from a validated op. The goal preview is MODEL-authored
- * (it wrote the script), so it is safe to show outside the fence.
- * @param {number} seq @param {string} method @param {Record<string, any>} args
- * @returns {Omit<ActorsTraceEntry, 'ok' | 'ms'>}
- */
-export const traceEntryStart = (seq, method, args) => ({
-  seq,
-  method,
-  ...(typeof args?.to === 'string' ? { to: args.to } : {}),
-  ...(typeof args?.goal === 'string'
-    ? { goal: args.goal.length > GOAL_PREVIEW_CHARS ? `${args.goal.slice(0, GOAL_PREVIEW_CHARS)}…` : args.goal }
-    : {}),
-});
-
-/**
- * Render the fence-SAFE trace lines: outcome + timing per op, never the error
- * detail (which may carry actor-derived bytes). '' entries for an empty trace.
+ * Render the fence-SAFE trace lines: outcome + timing per op, with the goal
+ * previewed (it is MODEL-authored — the model wrote the script — so it is safe
+ * outside the fence), never the error detail (which may carry actor-derived
+ * bytes). [] for an empty trace.
  * @param {ReadonlyArray<ActorsTraceEntry>} trace
  * @returns {string[]}
  */
 export const renderTraceLines = (trace) =>
   trace.map((t) => {
     const target = t.to ? ` ${t.to}` : '';
-    const goal = t.goal ? ` "${t.goal}"` : '';
+    const preview = typeof t.goal === 'string'
+      ? (t.goal.length > GOAL_PREVIEW_CHARS ? `${t.goal.slice(0, GOAL_PREVIEW_CHARS)}…` : t.goal)
+      : '';
+    const goal = preview ? ` "${preview}"` : '';
     return `  #${t.seq} ${t.method}${target}${goal} → ${t.ok ? 'ok' : 'FAILED'} ${t.ms}ms`;
   });
 

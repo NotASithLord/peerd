@@ -6,9 +6,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  actorsCallToOp, shapeActorsResult, actorsMethodDelegates,
+  actorsCallToOp, shapeActorsResult, actorsMethodDelegates, askOutcome,
   ACTORS_API_METHODS, ACTORS_ASK_MAX_TIMEOUT_MS, ActorsApiError,
-  traceEntryStart, renderTraceLines, traceErrorDetails,
+  renderTraceLines, traceErrorDetails,
 } from '../../extension/peerd-runtime/subagent/actors-api.js';
 
 describe('the method table', () => {
@@ -78,11 +78,10 @@ describe('the ops trace — the observability contract', () => {
     { seq: 3, method: 'ask', to: 'web', goal: 'price?', ok: false, ms: 30_000, error: 'ask timed out — <possible page text>' },
   ];
 
-  test('traceEntryStart previews the goal (model-authored → fence-safe) and caps it', () => {
-    const e = traceEntryStart(2, 'ask', { to: 'vm-9', goal: 'x'.repeat(100) });
-    expect(e.to).toBe('vm-9');
-    expect((e.goal ?? '').length).toBeLessThan(70);
-    expect(e.goal?.endsWith('…')).toBe(true);
+  test('renderTraceLines caps the goal preview (model-authored → fence-safe)', () => {
+    const [line] = renderTraceLines([{ seq: 1, method: 'ask', to: 'vm-9', goal: 'x'.repeat(100), ok: true, ms: 5 }]);
+    expect(line).toContain('…"');
+    expect(line.length).toBeLessThan(110);
   });
 
   test('renderTraceLines shows op/target/outcome/timing and NEVER the error detail', () => {
@@ -101,5 +100,25 @@ describe('the ops trace — the observability contract', () => {
     expect(details.length).toBe(1);
     expect(details[0]).toContain('#3 ask web');
     expect(details[0]).toContain('possible page text');
+  });
+});
+
+describe('askOutcome — the timeout / system-refusal / actor-failure fork', () => {
+  test('timeout rejects with the target + budget, regardless of what settled', () => {
+    const r = askOutcome({ ok: true, content: 'late reply' }, { timedOut: true, timeoutMs: 5000, to: 'vm-9' });
+    expect(r).toEqual({ ok: false, error: "actors.ask: timed out after 5000ms awaiting 'vm-9'" });
+  });
+  test('a clean reply returns { reply, failed:false }', () => {
+    expect(askOutcome({ ok: true, content: 'done: 42' }, { timedOut: false, timeoutMs: 5000, to: 'vm-9' }))
+      .toEqual({ ok: true, reply: 'done: 42', failed: false });
+  });
+  test("a SYSTEM refusal (message_actor: prefix) rejects verbatim — policy is felt as policy", () => {
+    const refusal = 'message_actor: oneShot is sandbox-only (webvm/notebook/app) — …';
+    expect(askOutcome({ ok: false, error: refusal }, { timedOut: false, timeoutMs: 5000, to: 'web' }))
+      .toEqual({ ok: false, error: refusal });
+  });
+  test("the delivered actor turn's own failure RETURNS as failed:true (script handles it)", () => {
+    expect(askOutcome({ ok: false, error: 'the webvm actor "builder" failed: pytest exited 1' }, { timedOut: false, timeoutMs: 5000, to: 'vm-9' }))
+      .toEqual({ ok: true, reply: 'the webvm actor "builder" failed: pytest exited 1', failed: true });
   });
 });

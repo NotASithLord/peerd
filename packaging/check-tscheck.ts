@@ -62,7 +62,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // shared tools/defs/kind-dispatch.js (+1).
 // +1: extension/tests/unit/red-team/sandbox-escape.test.js (the in-browser
 // red-team tier — real-realm seal + CSP-fence assertions).
-const COVERED_FLOOR = 488;
+// 488 → 490: the actors-in-script surface adds subagent/actors-api.js (the
+// pure delegation core) and background/script-runs.js (the live-run registry).
+const COVERED_FLOOR = 490;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

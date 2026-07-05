@@ -70,6 +70,7 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+let scriptFanState = { scripts: 0, seen: [] };
 let dwebActorState = { delegates: 0, actorCalls: 0 };
 let a2aState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning subagent state.
@@ -416,6 +417,77 @@ export const STATES = [
     },
   },
 
+  // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.ask) ----
+  // The actors-in-script surface end to end: the model writes ONE script whose
+  // code awaits actors.ask('web', …); the ask relays offscreen-worker → SW
+  // actors/call → messageActor(awaitReply) → a REAL web-actor turn, and the
+  // reply resolves back INTO the running script, which returns a value derived
+  // from it. Proves: the bridge chain, the [DELEGATIONS] trace + fencing in the
+  // tool result, and the live op feed on the script card.
+  {
+    name: 'script-fanout', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      const isActor = body.includes('<actor_agent>');
+      scriptFanState.seen.push({
+        isActor,
+        isWebActor: body.includes("You are peerd's web actor"),
+        // why GOT: (not '[DELEGATIONS]'): the prompt lore itself mentions the
+        // trace header now, so every request body contains it — the round-trip
+        // VALUE marker (built by the script FROM the actor's reply) is the
+        // discriminator that proves the reply entered the script's realm.
+        hasScriptResult: body.includes('GOT:WIDGET_PRICE_777'),
+      });
+      // WEB ACTOR turn (spawned by the script's ask): answer in plain text.
+      if (isActor) return { sse: sseText('WIDGET_PRICE_777') };
+      // ORCHESTRATOR sees the script result (value derived from the reply) →
+      // final answer.
+      if (body.includes('GOT:WIDGET_PRICE_777')) return { sse: sseText('SCRIPT-FAN-DONE') };
+      // ORCHESTRATOR first step: ONE script that asks the web actor and
+      // returns a value computed FROM the reply (proves the reply entered
+      // the script's realm, not just the chat).
+      if (scriptFanState.scripts === 0) {
+        scriptFanState.scripts += 1;
+        return { sse: sseToolCall('script', {
+          code: "const r = await actors.ask('web', 'price of widget X?'); return 'GOT:' + r.reply + ':' + r.failed;",
+        }) };
+      }
+      return { sse: sseText('unexpected extra orchestrator step') };
+    },
+    async run(ctx, rec) {
+      scriptFanState = { scripts: 0, seen: [] };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'script-check the widget price' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      // The live delegation feed appears on the pending script card.
+      const opsSeen = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call .script-ops .script-op')`),
+        { budgetMs: 20_000, pollMs: 100 });
+      rec.check('the live delegation feed renders on the pending script card', !!opsSeen);
+      if (opsSeen) await rec.shot('script-ops-live');
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          const results = [...document.querySelectorAll('.tool-call .tool-result')].map((r) => r.textContent || '');
+          const cardOk = !!document.querySelector('.tool-call.tool-ok .tool-name') &&
+            [...document.querySelectorAll('.tool-call .tool-name')].some((n) => n.textContent === 'script');
+          return { bubbles, busy, results, cardOk };
+        })()`) || {};
+        return (out.bubbles || []).includes('SCRIPT-FAN-DONE') && !out.busy;
+      }, { budgetMs: 45_000 });
+
+      const seen = scriptFanState.seen;
+      const actorTurns = seen.filter((s) => s.isActor && s.isWebActor);
+      const resultTurn = seen.filter((s) => !s.isActor && s.hasScriptResult);
+      rec.check('the model called script exactly once', scriptFanState.scripts === 1, `scripts=${scriptFanState.scripts}`);
+      rec.check("the script's actors.ask spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
+      rec.check("the orchestrator read a result whose value was built FROM the actor's reply", resultTurn.length >= 1, `resultTurns=${resultTurn.length}`);
+      rec.check('the final orchestrator answer landed', (out.bubbles || []).includes('SCRIPT-FAN-DONE'));
+      rec.check('the script card settled ok', out.cardOk === true);
+      await rec.shot('script-fanout-done');
+    },
+  },
   // --- functional: the actor-model delegation flow (message_actor end to end) --
   // The headline of #61: the orchestrator delegates a web read to the chat's web
   // actor via message_actor, gets a SYNC ack and ends its turn (async-everything,
@@ -427,6 +499,7 @@ export const STATES = [
   // actor system-prompt marker (callIndex is fragile — the two slots interleave).
   {
     name: 'actor-delegate', kind: 'functional', phase: 'post-unlock',
+
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       const isActor = body.includes('<actor_agent>');

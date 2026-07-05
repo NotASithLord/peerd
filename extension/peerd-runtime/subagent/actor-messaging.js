@@ -301,8 +301,8 @@ export const makeActorMessaging = (deps) => {
   //
   // Bookkeeping is keyed by rootSessionId (phase 4/5): the lineage root shares
   // one budget and one Stop generation, whoever in the tree actually sent.
-  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, onReply?: (text: string, failed: boolean) => void }} o */
-  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, onReply }) => {
+  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, onReply?: (text: string, failed: boolean) => void }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, onReply }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(rootSessionId, actorSessionId);
     // Keyed on actorSessionId, NOT instanceId — must match the live-path track
@@ -328,10 +328,16 @@ export const makeActorMessaging = (deps) => {
       cancelledDeliveries.delete(correlationId);
       mailbox.remove(correlationId).catch(() => {});
     };
-    // ONE reply seam for both modes (see routing note above).
+    // ONE reply seam for both modes (see routing note above). `bare` hands the
+    // awaiting caller the RAW reply body instead of the formatted lead+fence:
+    // the script surface's asks resolve into CODE, where fence markup is
+    // plumbing noise (a reply fed into the next actor's goal would embed it) —
+    // the fence is re-applied at the script-RESULT boundary, the one place the
+    // bytes meet a model (script.js usedActors fencing). Model-facing resolves
+    // (a subagent's awaitReply) keep the formatted text.
     /** @param {string} body @param {boolean} failed */
     const settle = (body, failed) => {
-      if (onReply) { onReply(replyText(instanceId, kind, name, body, failed), failed); return; }
+      if (onReply) { onReply(bare ? body : replyText(instanceId, kind, name, body, failed), failed); return; }
       deliver(senderSessionId, instanceId, kind, name, body, failed);
     };
     // Serialize on the ACTOR's slot — runWhenIdle runs the turn the moment the
@@ -347,7 +353,7 @@ export const makeActorMessaging = (deps) => {
       // still resolve, or its tool call would hang past the Stop/abort that was
       // meant to end it.
       if ((stopGen.get(rootSessionId) ?? 0) !== genAtQueue || cancelledDeliveries.has(correlationId)) {
-        if (onReply) onReply(replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true), true);
+        if (onReply) onReply(bare ? 'the request was stopped before the actor ran it.' : replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true), true);
         clear();
         // We were handed the idle actor slot but are DECLINING to run a turn
         // (Stopped after we queued). No claim/release will happen, so nothing
@@ -379,7 +385,7 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, via?: string, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
    *   awaitReply — the SUBAGENT reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'subagent'` sender.
@@ -389,7 +395,7 @@ export const makeActorMessaging = (deps) => {
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageActor = async (req) => {
-    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, via } = req;
+    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, via, bareReply } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
     }
@@ -559,7 +565,8 @@ export const makeActorMessaging = (deps) => {
         const onAbort = () => {
           if (done) return;                                 // stale abort after the reply → no-op
           stopActorForAwait(correlationId, actor.actorSessionId);
-          finish({ text: replyText(instanceId, kind, name, 'the request was aborted (timeout or cancel) before the actor replied.', true), failed: true });
+          const notice = 'the request was aborted (timeout or cancel) before the actor replied.';
+          finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, true), failed: true });
         };
         const finish = (/** @type {{ text: string, failed: boolean }} */ v) => {
           if (done) return;
@@ -573,7 +580,7 @@ export const makeActorMessaging = (deps) => {
         // marks the still-queued delivery cancelled or stops its own running turn.
         runEngineDelivery({
           correlationId, senderSessionId: sender, rootSessionId, actor, message,
-          parentToolUseId: toolUseId, oneShot: oneShot === true,
+          parentToolUseId: toolUseId, oneShot: oneShot === true, bare: bareReply === true,
           onReply: (text, failed) => finish({ text, failed }),
         });
         if (awaitSignal) {

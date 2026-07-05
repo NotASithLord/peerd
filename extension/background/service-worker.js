@@ -226,7 +226,7 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
-  actorsCallToOp, shapeActorsResult, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
@@ -2851,28 +2851,21 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
       const r = await actorMessaging.messageActor({
         to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
         toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
-        awaitReply: true, awaitSignal: askController.signal,
+        // bareReply: the reply resolves into CODE — the fence is re-applied at
+        // the script-result boundary (the one model-facing seam), so the raw
+        // body is what plumbing composes with (no fence markup in goals).
+        awaitReply: true, bareReply: true, awaitSignal: askController.signal,
       });
       const ms = Date.now() - t0;
-      if (timedOut) {
-        pushOp('failed', { ms, error: 'timeout' });
-        return { ok: false, error: `actors.ask: timed out after ${askTimeoutMs}ms awaiting '${target.to}'` };
+      // The timeout / system-refusal / actor-failure fork is the pure
+      // askOutcome (actors-api.js) — provable without this route.
+      const outcome = askOutcome(/** @type {any} */ (r), { timedOut, timeoutMs: askTimeoutMs, to: target.to });
+      if (!outcome.ok) {
+        pushOp('failed', { ms, error: timedOut ? 'timeout' : 'refused' });
+        return { ok: false, error: outcome.error };
       }
-      if (r.ok) {
-        pushOp('replied', { ms });
-        return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: r.content, failed: false }) };
-      }
-      const err = String(r.error ?? 'ask failed');
-      // messageActor's SYSTEM refusals are 'message_actor:'-prefixed (gate,
-      // caps, dedupe, oneShot rule) → the script's await REJECTS with the
-      // reason. Anything else is the DELIVERED actor turn's own failure text —
-      // returned as { failed:true } so the script decides (retry, fall back).
-      if (err.startsWith('message_actor:')) {
-        pushOp('failed', { ms, error: 'refused' });
-        return { ok: false, error: err };
-      }
-      pushOp('replied', { ms, failed: true });
-      return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: err, failed: true }) };
+      pushOp('replied', { ms, ...(outcome.failed ? { failed: true } : {}) });
+      return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: outcome.reply, failed: outcome.failed }) };
     } finally {
       clearTimeout(timer);
       if (runSignal) { try { runSignal.removeEventListener?.('abort', onRunAbort); } catch { /* stub */ } }

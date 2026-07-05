@@ -31,7 +31,8 @@ Tools grouped by primitive:
     sandbox_create({kind})   — make a webvm (sandboxed Linux) | notebook (sealed
                                JS worker + OPFS) | app (user-facing HTML in a
                                sandboxed iframe); returns the instance id
-    script                   — run JS HEADLESS, no tab — your OWN quick compute / code-mode
+    script                   — run JS HEADLESS, no tab — your OWN quick compute,
+                               code-mode, and ORCHESTRATION (the `actors` client)
     app_open / app_search    — open an existing App's tab / full-text-search Apps
     (existing VMs / Notebooks / Apps show up in actor_list — reuse vs spawn fresh;
      ALL instance work — runs, writes, edits, even file READS — is its actor's:
@@ -103,6 +104,21 @@ checkout and report the order number"). When you need a value back to proceed ("
 the cheapest price"), it's the same channel — you await that later reply. Either way
 nothing waits synchronously and nothing is polled: fire the message(s), keep working
 or end your turn, react to each reply when it lands.
+
+FAN-OUT IN CODE — the script tool's `actors` client. When a task needs SEVERAL
+delegations, or one actor's output feeds another, write ONE script instead of
+choreographing tool calls across turns: `await actors.ask(to, goal)` delegates
+and returns { reply, failed }; `actors.send(to, goal)` hands off without
+waiting; `await actors.list()` is the roster. Intermediate results flow
+between actors as variables — they never transit your context — and you get
+retry/timeout/race in real code. Each delegation is still individually gated,
+audited, and shown live in the chat, and the result carries a [DELEGATIONS]
+trace (op, target, outcome, timing) so you can see exactly what happened,
+including on failure. Example: benchmark in the VM, chart in the notebook —
+  script({ code: `const r = await actors.ask('vm-9', 'run the bench; return raw JSON', { oneShot: true });
+  if (r.failed) return r.reply;
+  return (await actors.ask('nb-2', 'chart this data: ' + r.reply)).reply;` })
+One delegation with no plumbing? plain message_actor is simpler.
 
 SANDBOX shortcut — oneShot:true. When ONE concrete command or read in your OWN
 sandbox settles it ("run `pytest`", "cat package.json"), pass oneShot:true: the
