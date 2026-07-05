@@ -30,6 +30,18 @@ import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '/notebook-
 
 let jobSeq = 0;
 
+// Live jobs by the SW-minted runId, so a Stop can TERMINATE the worker instead
+// of letting an abandoned script run to its wall-clock. Registered only for
+// runs that carry a runId (the actors-enabled script path mints one).
+/** @type {Map<string, () => void>} */
+const liveJobs = new Map();
+
+/** Terminate a live job by runId (Stop plumbing). No-op when already done. @param {string} runId */
+export const abortJob = (runId) => {
+  const kill = liveJobs.get(runId);
+  if (kill) kill();
+};
+
 // Cap concurrent headless workers so a loop (or many parallel script calls /
 // sub-agents) can't fork-bomb the offscreen renderer. Each job is its own thread
 // + ephemeral OPFS; a handful at once is plenty. (The capability surface's own
@@ -41,9 +53,9 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, a2a?: boolean, ownerSessionId?: string }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, actorsTrace?: Array<object> }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -55,14 +67,15 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, a2a?: boolean, ownerSessionId?: string }} job
- *   a2a: expose the `mesh` client (agent-to-agent); ownerSessionId: the dweb
- *   actor whose identity/room the mesh ops act as — attached to every a2a/call
- *   from TRUSTED job params, never from the worker message.
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
+ *   delegation client (the orchestrator's script surface). ownerSessionId /
+ *   ownerToolUseId / runId are attached to every relay from TRUSTED job params,
+ *   never from the worker message (the worker can't spoof who it acts as).
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  *   sendToSW relays a worker bridge message to the SW route of that name.
  */
-const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId }, { sendToSW }) => {
+const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, ownerSessionId, ownerToolUseId, runId }, { sendToSW }) => {
   const jobId = `job-${Date.now().toString(36)}-${++jobSeq}`;
   // Per-job EPHEMERAL OPFS subtree — peerd.self.* + relative imports work within
   // the run, then it's nuked. Durable state belongs in a Notebook, not here.
@@ -78,7 +91,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
 
   let built;
   try {
-    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a });
+    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors });
   } catch (e) {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -88,6 +101,14 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
   // sealed worker has, so one flag here is authoritative. script fences the
   // run's output for the model when it's set (fetched bytes are untrusted).
   let usedEgress = false;
+  // The DELEGATIONS trace — one entry per actors op this run made. This is the
+  // observability spine of the script surface: the orchestrator reads it back
+  // (which op, to whom, outcome, how long) even when the script itself failed
+  // mid-way, and the ops keep flowing into it right up to a termination.
+  /** @type {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }>} */
+  const actorsTrace = [];
+  let actorsSeq = 0;
+  let usedActors = false;
   const revokeCache = () => { for (const entry of cache.values()) if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl); };
 
   const blobUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
@@ -104,8 +125,17 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
         try { worker.terminate(); } catch {}
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms` });
+        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, actorsTrace });
       }, timeoutMs);
+      // Stop plumbing: a runId-carrying job can be terminated from the SW
+      // (script tool abort). The trace survives — partial work stays visible.
+      if (runId) {
+        liveJobs.set(runId, () => {
+          clearTimeout(timer);
+          try { worker.terminate(); } catch {}
+          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, actorsTrace });
+        });
+      }
 
       worker.addEventListener('message', async (ev) => {
         // why any: worker postMessage payload, discriminated by m.type below.
@@ -134,6 +164,44 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
             else worker.postMessage({ type: 'subagent-response', rid: m.rid, result: resp.result });
           } catch (e) {
             worker.postMessage({ type: 'subagent-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+          }
+          return;
+        }
+        if (m.type === 'actors-request') {
+          // Relay a delegation call to the SW actors/call route. The owner ids
+          // ride from TRUSTED job params; the SW re-gates every op (sender gate,
+          // rate caps, oneShot sandbox-only) — the worker's word buys nothing.
+          if (!actors || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'actors-response', rid: m.rid, error: 'actors capability is disabled for this run' });
+            return;
+          }
+          usedActors = true;   // actor replies are untrusted content → fence the run's output
+          const seq = ++actorsSeq;
+          const goalRaw = m?.args?.goal;
+          /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }} */
+          const entry = {
+            seq,
+            method: typeof m.method === 'string' ? m.method : String(m.method),
+            ...(typeof m?.args?.to === 'string' ? { to: m.args.to } : {}),
+            ...(typeof goalRaw === 'string' ? { goal: goalRaw.slice(0, 200) } : {}),
+            ok: false, ms: 0,
+          };
+          actorsTrace.push(entry);
+          const t0 = performance.now();
+          try {
+            const resp = await sendToSW('actors/call', { method: m.method, args: m.args, ownerSessionId, ownerToolUseId, runId, seq });
+            entry.ms = Math.round(performance.now() - t0);
+            if (resp?.ok) {
+              entry.ok = true;
+              worker.postMessage({ type: 'actors-response', rid: m.rid, result: resp.value });
+            } else {
+              entry.error = resp?.error ?? 'actors call failed';
+              worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
+            }
+          } catch (e) {
+            entry.ms = Math.round(performance.now() - t0);
+            entry.error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+            worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
           }
           return;
         }
@@ -197,7 +265,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
           // Map blob-URL stack frames back to job.js:<line> — the model reads
           // this error; a user-code line number is actionable, a blob one isn't.
           const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error, usedEgress });
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error, usedEgress, usedActors, actorsTrace });
         }
       });
 
@@ -207,10 +275,11 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
         const detail = mapWorkerError(
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress });
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, actorsTrace });
       });
     });
   } finally {
+    if (runId) liveJobs.delete(runId);
     URL.revokeObjectURL(blobUrl);
     revokeCache();
     await opfs.nuke().catch(() => {});

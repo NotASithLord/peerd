@@ -102,6 +102,10 @@ export { makeActorMessaging } from './subagent/actor-messaging.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './subagent/a2a-api.js';
+export {
+  actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
+  ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+} from './subagent/actors-api.js';
 export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
 // PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
 // (getRecord injected) so the fail-closed trust rules are unit-tested, not just

@@ -379,7 +379,7 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, via?: string, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
    *   awaitReply — the SUBAGENT reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'subagent'` sender.
@@ -389,7 +389,7 @@ export const makeActorMessaging = (deps) => {
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageActor = async (req) => {
-    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal } = req;
+    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, via } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
     }
@@ -503,7 +503,7 @@ export const makeActorMessaging = (deps) => {
     recentSends.set(rootSessionId, recent);
     inFlight.set(rootSessionId, (inFlight.get(rootSessionId) ?? 0) + 1);
     trackIntent(rootSessionId, intentK);
-    appendAudit({ type: 'actor_message', details: { to: instanceId, kind, senderSessionId, rootSessionId, lineagePath: provenance.lineagePath } }).catch(() => {});
+    appendAudit({ type: 'actor_message', details: { to: instanceId, kind, senderSessionId, rootSessionId, lineagePath: provenance.lineagePath, ...(typeof via === 'string' ? { via } : {}) } }).catch(() => {});
 
     // ASYNC for EVERY long-lived sender — web included. The orchestrator never
     // blocks: it hands a task to the actor and gets woken with the reply on a

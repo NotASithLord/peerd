@@ -163,6 +163,12 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list'],
   messageActor:    ['message_actor'],
+  // The script tool's run registry (Stop plumbing for its actors surface). A
+  // narrowed child without the script grant loses it; one granted script but
+  // not message_actor keeps the registry yet loses the messageActor closure —
+  // and script's actors mint requires BOTH, so its delegation surface composes
+  // off exactly the same grant that message_actor itself needs.
+  scriptRuns:      ['script'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
   // web actor (which has navigate), stripped from any kind whose toolset lacks it.

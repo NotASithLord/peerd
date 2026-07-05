@@ -14,15 +14,28 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number, a2a?: boolean, ownerSessionId?: string }} [opts]
-   *   a2a: expose the `mesh` agent-to-agent client; ownerSessionId: the dweb
-   *   actor the mesh acts as (relayed to the a2a/call route as trusted owner).
-   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean }>}
+   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} [opts]
+   *   a2a: expose the `mesh` agent-to-agent client; actors: expose the `actors`
+   *   delegation client (the script surface). ownerSessionId / ownerToolUseId /
+   *   runId ride as trusted job params to the relay routes.
+   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }> }>}
    */
-  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId } = {}) => {
+  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId } = {}) => {
     await ensureOffscreen();
-    const reply = await sendMessage({ type: 'job/run', code, timeoutMs, ...(a2a ? { a2a: true, ownerSessionId } : {}) });
+    const reply = await sendMessage({
+      type: 'job/run', code, timeoutMs,
+      ...(a2a ? { a2a: true, ownerSessionId } : {}),
+      ...(actors ? { actors: true, ownerSessionId, ownerToolUseId, runId } : {}),
+    });
     if (!reply?.ok) throw new Error(reply?.error ?? 'headless job failed');
     return reply.result;
+  },
+  /**
+   * Terminate a runId-carrying headless job (Stop plumbing). Best-effort —
+   * a job that already finished is a no-op.
+   * @param {string} runId
+   */
+  abortHeadless: async (runId) => {
+    try { await sendMessage({ type: 'job/abort', runId }); } catch { /* offscreen gone = job gone */ }
   },
 });
