@@ -66,6 +66,9 @@ import './unit/peerd-engine/personal-index-durability.test.js';
 import './unit/notebook-tab/notebook-seal.test.js';
 import './unit/notebook-tab/notebook-output-render.test.js';
 
+// --- chassis: vm-tab ---
+import './unit/vm-tab/firefox-webvm-note.test.js';
+
 // --- chassis: offscreen (headless JS jobs / js_run) ---
 import './unit/offscreen/job-runner.test.js';
 

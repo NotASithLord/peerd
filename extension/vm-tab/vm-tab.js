@@ -37,6 +37,14 @@ import {
 import { base64ToBytes } from '/shared/util.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { PEERD_PRINTF_RE, stripChunk } from '/vm-tab/marker-strip.js';
+import { buildFirefoxWebVmNote } from '/vm-tab/firefox-webvm-note.js';
+
+// WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
+// it via the COOP/COEP manifest keys; Firefox doesn't honor them, so the boot
+// pre-flight below fails there. Detect Firefox so that failure explains the real
+// (platform) cause + points at the open bug/standards threads, not a manifest
+// error that would only ever be true on Chrome.
+const IS_FIREFOX = /firefox/i.test(navigator.userAgent);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1193,6 +1201,11 @@ const boot = async () => {
   trace(isolated && sab ? 'info' : 'warn',
     `crossOriginIsolated=${isolated} SharedArrayBuffer=${sab}`);
   if (!isolated || !sab) {
+    // why: on Firefox this is expected, not a config error — an extension page
+    // can't be cross-origin isolated (Firefox bug 1673477), so there's no
+    // SharedArrayBuffer for CheerpX. Show the honest platform-limitation notice
+    // + the open threads instead of the misleading "manifest must declare…".
+    if (IS_FIREFOX) { failBootFirefoxWebVM(); return; }
     failBoot('Cross-origin isolation is OFF',
       new Error('manifest must declare cross_origin_embedder_policy + cross_origin_opener_policy'));
     return;
@@ -1363,6 +1376,19 @@ const failBoot = (/** @type {string} */ stage, /** @type {any} */ err) => {
   setStage('Boot failed', `${stage}: ${err?.message ?? String(err)}`);
   DOM.bootCard.classList.add('is-failed');
   trace('error', `boot failed @ ${stage}: ${err?.message ?? String(err)}`);
+};
+
+// The Firefox WebVM-unavailable stop: not a "boot failed" error but a clear
+// "this browser can't host it yet" notice with the open bug + standards threads.
+// Idempotent — a re-run won't stack a second card.
+const failBootFirefoxWebVM = () => {
+  setStatus('WebVM unavailable', 'failed');
+  setStage('WebVM needs cross-origin isolation Firefox can’t grant yet');
+  DOM.bootCard.classList.add('is-failed');
+  trace('warn', 'WebVM unavailable on Firefox: an extension page can’t be cross-origin isolated, so there’s no SharedArrayBuffer for CheerpX. See Firefox bug 1673477 + w3c/webextensions.');
+  if (!DOM.bootCard.querySelector('.boot-firefox-note')) {
+    DOM.bootCard.appendChild(buildFirefoxWebVmNote());
+  }
 };
 
 // ---------------------------------------------------------------------------
