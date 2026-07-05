@@ -519,8 +519,22 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   const SEND_ACCENTS=['--cyan','--red','--amber','--green','--magenta'];
   composer.addEventListener('input',()=>{ if(composer.value.length===1){ sendBtn.style.setProperty('--send-accent','var('+SEND_ACCENTS[Math.floor(Math.random()*SEND_ACCENTS.length)]+')'); } });
 
-  // PWA
-  if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+  // PWA. The SW serves everything cache-first per BUILD (see sw.js): when a
+  // new deploy's SW takes over (controllerchange), reload ONCE so the page
+  // re-loads atomically from the new build's cache — this is the freshness
+  // path; racing the network per-request would mix builds mid-deploy.
+  if('serviceWorker' in navigator){
+    window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+    // hadController distinguishes an UPDATE (a controller existed when the
+    // page loaded → new build took over → reload once) from the first-visit
+    // claim (no prior controller → the page already IS the fresh build).
+    let hadController=!!navigator.serviceWorker.controller, reloaded=false;
+    navigator.serviceWorker.addEventListener('controllerchange',()=>{
+      if(!hadController){ hadController=true; return; }
+      if(reloaded) return;
+      reloaded=true; location.reload();
+    });
+  }
   let deferred=null; const installBtn=document.getElementById('install');
   const standalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone===true;
   window.addEventListener('beforeinstallprompt',(e)=>{ e.preventDefault(); deferred=e; if(!standalone) installBtn.hidden=false; });

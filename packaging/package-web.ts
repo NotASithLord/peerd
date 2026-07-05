@@ -44,8 +44,15 @@ const isPruned = (rel: string): boolean =>
   // swapped files are written from templates, not copied from source
   || Object.prototype.hasOwnProperty.call(WEB_SWAPS, rel);
 
+// why the .DS_Store filter here too: staged source is filtered by isPruned,
+// but the shell overlay + the hash/precache walk must apply the same hygiene —
+// a Finder browse of web/public/ must not deploy junk, pollute the precache,
+// or roll the buildId (local vs CI divergence for the same commit).
+const isJunk = (name: string): boolean => name === '.DS_Store';
+
 const walk = (dir: string, out: string[] = []): string[] => {
   for (const entry of readdirSync(dir)) {
+    if (isJunk(entry)) continue;
     const p = join(dir, entry);
     if (statSync(p).isDirectory()) walk(p, out);
     else out.push(p);
@@ -138,7 +145,7 @@ export const buildWebTarget = async (): Promise<void> => {
   copyFileSync(STORE_LOADER_TEMPLATE, join(WEB_DIST, 'shared', 'dweb-loader.js'));
 
   assertNoShellCollisions();
-  cpSync(WEB_SHELL_DIR, WEB_DIST, { recursive: true });
+  cpSync(WEB_SHELL_DIR, WEB_DIST, { recursive: true, filter: (src) => !isJunk(basename(src)) });
 
   // Build identity: content-hash the whole tree (sw.js and build.json excluded
   // — they embed the hash). Deterministic for identical inputs; any source or
@@ -160,17 +167,29 @@ export const buildWebTarget = async (): Promise<void> => {
   // Stamp sw.js: per-build cache name + a GENERATED precache list (every
   // non-vendor file — ~3 MB — so an installed PWA works offline without a
   // hand-maintained SHELL list that drifts from the real import graph).
+  // '/index.html' is deliberately NOT precached: static hosts redirect it to
+  // '/', and a cached REDIRECTED response is rejected by respondWith for
+  // navigations — '/' is the canonical precached document.
   const precache = ['/', ...files
-    .filter((rel) => !rel.startsWith('vendor/') && rel !== '_headers')
+    .filter((rel) => !rel.startsWith('vendor/') && rel !== '_headers' && rel !== 'index.html')
     .map((rel) => '/' + rel)];
   const swPath = join(WEB_DIST, 'sw.js');
   const swSrc = readFileSync(swPath, 'utf8');
   if (!swSrc.includes('__PEERD_WEB_BUILD__') || !swSrc.includes('__PEERD_WEB_PRECACHE__')) {
-    throw new Error('web/public/sw.js is missing the __PEERD_WEB_*__ stamp tokens — the SW template drifted.');
+    throw new Error('web/public/sw.js is missing a __PEERD_WEB_*__ stamp token — the SW template drifted.');
   }
-  writeFileSync(swPath, swSrc
+  // quote-agnostic: match the PRECACHE token however it is quoted, then assert
+  // NOTHING token-shaped survived — a quoting change in sw.js must fail the
+  // build, never silently ship the literal token (verified failure mode:
+  // JSON.parse of the literal throws, is caught, and the PWA loses its
+  // entire precache with every gate green).
+  const stamped = swSrc
     .replace('__PEERD_WEB_BUILD__', buildId)
-    .replace("'__PEERD_WEB_PRECACHE__'", JSON.stringify(JSON.stringify(precache))));
+    .replace(/['"`]__PEERD_WEB_PRECACHE__['"`]/, JSON.stringify(JSON.stringify(precache)));
+  if (stamped.includes('__PEERD_WEB_BUILD__') || stamped.includes('__PEERD_WEB_PRECACHE__')) {
+    throw new Error('web/public/sw.js stamp did not apply — a __PEERD_WEB_*__ token is malformed in the SW template.');
+  }
+  writeFileSync(swPath, stamped);
 
   console.log(`web target staged -> ${relative(REPO_ROOT, WEB_DIST)}/ (web v${version}, build ${buildId})`);
 
