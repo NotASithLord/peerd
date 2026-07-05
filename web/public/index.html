@@ -107,7 +107,13 @@
   .gemma-cap{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:0 0 13px}
   .cap-yes{color:var(--green);font-weight:600}.cap-no{color:var(--amber);font-weight:600}
   .gemma-dl{font-family:var(--mono);font-size:12.5px;font-weight:600;border:none;border-radius:9px;padding:10px 16px;background:linear-gradient(180deg,#13c3f2,#00a6d6);color:#04222b;cursor:pointer}.gemma-dl:hover{filter:brightness(1.07)}
-  .gemma-prog{margin-top:12px}.gemma-bar{height:7px;border-radius:4px;background:rgba(255,255,255,0.08);overflow:hidden}.gemma-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--magenta));transition:width .25s}
+  /* progress fill reveals the brand spectrum in LOGO ORDER (p cyan, e red,
+     e amber, r green, d magenta) as it expands: the fill ALWAYS carries the
+     full-track gradient and progress just unclips it left→right (clip-path,
+     driven by setFill in JS — overflow can't clip an abs-positioned pseudo),
+     so 20% shows cyan→red and 100% completes on the magenta 'd'. */
+  .gemma-prog{margin-top:12px}.gemma-bar{position:relative;height:7px;border-radius:4px;background:rgba(255,255,255,0.08);overflow:hidden}
+  .gemma-bar i{position:absolute;inset:0;background:linear-gradient(90deg,var(--cyan),var(--red),var(--amber),var(--green),var(--magenta));clip-path:inset(0 100% 0 0);transition:clip-path .25s}
   .gemma-status{display:flex;align-items:flex-start;gap:8px;margin-top:8px}
   .gemma-spin{width:14px;height:14px;flex:none;margin-top:1px;border-radius:50%;background:conic-gradient(from 0deg,var(--cyan),var(--magenta),var(--amber),var(--green),var(--red),var(--cyan));-webkit-mask:radial-gradient(closest-side,transparent 56%,#000 58%);mask:radial-gradient(closest-side,transparent 56%,#000 58%);animation:gspin .85s linear infinite}
   @keyframes gspin{to{transform:rotate(360deg)}}
@@ -448,6 +454,8 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     if(!gemmaSupported || !selectedModel) return;
     if(gemmaReady||gemmaLoading) return; gemmaLoading=true;
     const prog=document.getElementById('gemmaProg'), fill=document.getElementById('gemmaFill'), pct=document.getElementById('gemmaPct'), btn=document.getElementById('gemmaDl'), spin=document.getElementById('gemmaSpin'), dots=document.getElementById('gemmaDots');
+    // progress = unclip the full-track brand spectrum left→right (see .gemma-bar CSS)
+    const setFill=(p)=>{ fill.style.clipPath=`inset(0 ${(100-p).toFixed(1)}% 0 0)`; };
     // the button disappears while loading; the spinning orb + animated dots carry it.
     btn.hidden=true; prog.hidden=false; spin.hidden=false; dots.hidden=false; setGemmaStat('loading');
 
@@ -461,13 +469,13 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     let lastErr=null;
     for(let i=0;i<candidates.length;i++){
       const m=candidates[i]; let watchdog=null, hit100=false;
-      spin.hidden=false; dots.hidden=false; pct.style.color=''; fill.style.width='0%';
+      spin.hidden=false; dots.hidden=false; pct.style.color=''; setFill(0);
       pct.textContent = i===0 ? 'starting' : `loading ${m.label}`;
       try{
         if(i>0) await teardownGemma();   // fresh worker: the prior GPU device may be wedged after an OOM
         await initGemma((p)=>{
           if(typeof p.overall==='number'){
-            fill.style.width=p.overall.toFixed(1)+'%';
+            setFill(p.overall);
             if(p.overall>=99.5){
               // the bar = the DOWNLOAD; the GPU compile happens after, with no
               // progress events — say so instead of a stuck "100%".
