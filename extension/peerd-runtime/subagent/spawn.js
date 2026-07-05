@@ -31,8 +31,8 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 // actor-only DOM/page/fetch tools — read_page, page_exec, click, navigate, fetch_url,
 // …) so a subagent cannot reach the user's foreground tab (DESIGN-17: web/DOM work
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
-// drops the instance-mutating tier (vm_*/js_write/app_*/edit_file — actor-only, already
-// gate-refused for a non-actor). Both are pure.
+// drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
+// fenced reads, already gate-refused for a non-actor). Both are pure.
 import { mainAgentDescriptors, filterActorSurface } from '../tools/exposure.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
@@ -134,10 +134,10 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   subagentTasks:      ['subagent_tasks'],
   subagentCancel:     ['subagent_cancel'],
   requestReview:      ['request_review'],
-  // app_create reads ctx.dweb to decide whether to build a dwapp, so it keeps
-  // the dweb closure alongside the dweb_* tools.
+  // sandbox_create's app arm reads ctx.dweb to decide whether to build a
+  // dwapp, so it keeps the dweb closure alongside the dweb_* tools.
   dweb:               ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers',
-    'dweb_block', 'dweb_discovery', 'dweb_guide', 'app_create'],
+    'dweb_block', 'dweb_discovery', 'dweb_guide', 'sandbox_create'],
   // DESIGN-17: the engine instance closures buildToolContext injects into EVERY
   // ctx — the SW-side clients + registries + tab trackers that the
   // vm_*/js_*/app_*/edit_file tools reach through. Listing them here strips them
@@ -152,13 +152,13 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // (plus tabs + listApiIntegrations, which are ungated/always present) to build
   // the unified catalog — so it appears in every engine registry+tracker list.
   vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
-  vmRegistry:         ['vm_create', 'vm_delete', 'vm_boot', 'actor_list'],
-  vmTabTracker:       ['vm_create', 'vm_delete', 'actor_list'],
+  vmRegistry:         ['sandbox_create', 'vm_delete', 'vm_boot', 'actor_list'],
+  vmTabTracker:       ['sandbox_create', 'vm_delete', 'actor_list'],
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
-  jsRegistry:         ['js_notebook', 'js_create', 'js_delete', 'edit_file', 'actor_list'],
-  jsTabTracker:       ['js_create', 'js_delete', 'actor_list'],
+  jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
+  jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list'],
   jsOffscreenClient:  ['js_run', 'a2a_run'],
-  appClient:          ['app_create', 'app_open', 'app_update', 'app_write_file',
+  appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list'],

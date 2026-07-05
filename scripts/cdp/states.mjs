@@ -821,7 +821,7 @@ export const STATES = [
   // --- functional: an offscreen subagent BUILDS an app (create + delegate) ------
   // Heap-split phase 4, the create-then-delegate chain. A subagent is asked to build
   // an app. App-mutating tools (app_write_file) are actor-only, so the correct pattern
-  // — for a subagent exactly as for the main agent — is app_create, then message_actor
+  // — for a subagent exactly as for the main agent — is sandbox_create({kind:'app'}), then message_actor
   // the created app's actor to write the files. This proves: the subagent's tool RESULT
   // (the new app id) re-enters its own heap correctly, and it can delegate to a freshly-
   // created instance's actor, which mints, runs offscreen, and writes.
@@ -838,7 +838,7 @@ export const STATES = [
       // SUBAGENT (ephemeral): create, capture the app id from the result, delegate.
       if (body.includes('You are an EPHEMERAL ACTOR')) {
         subagentAppState.childCalls += 1;
-        if (subagentAppState.childCalls === 1) return { sse: sseToolCall('app_create', { name: 'Lava', files: { 'index.html': '<!-- placeholder -->' } }) };
+        if (subagentAppState.childCalls === 1) return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Lava', files: { 'index.html': '<!-- placeholder -->' } }) };
         if (!subagentAppState.appId) { const m = body.match(/app-[a-z0-9]+-[a-z0-9]+/); if (m) subagentAppState.appId = m[0]; }
         if (subagentAppState.childCalls === 2) return { sse: sseToolCall('message_actor', { to: subagentAppState.appId || 'app-unknown', message: 'write the real lava lamp code into index.html' }) };
         return { sse: sseText('CHILD-BUILT-APP') };
@@ -869,7 +869,7 @@ export const STATES = [
       const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
       const appWriteRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'app_write_file');
       // the app id came back into the subagent's heap → it could delegate to that exact app
-      rec.check("the subagent's app_create result (the new app id) re-entered its heap", typeof subagentAppState.appId === 'string' && subagentAppState.appId.startsWith('app-'), `appId=${subagentAppState.appId}`);
+      rec.check("the subagent's sandbox_create result (the new app id) re-entered its heap", typeof subagentAppState.appId === 'string' && subagentAppState.appId.startsWith('app-'), `appId=${subagentAppState.appId}`);
       rec.check('the subagent reached the freshly-created app actor (delegation worked)', msgActorRan === true && subagentAppState.appCalls >= 1, `msgActorRan=${msgActorRan} appActorCalls=${subagentAppState.appCalls}`);
       rec.check('the app actor wrote the real file (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
       rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));

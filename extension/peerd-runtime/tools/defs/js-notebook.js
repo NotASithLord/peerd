@@ -33,7 +33,7 @@ export const jsNotebookTool = {
     'tab. For a quick result with NO tab (headless, ephemeral), use js_run',
     'instead. The code is an async function body — top-level await works and',
     '`return <value>` sends the result back. ✅ parsing, transforms, numeric work,',
-    'exercising a library. ❌ DOM (no document/window — use app_create) or',
+    'exercising a library. ❌ DOM (no document/window — use sandbox_create kind:"app") or',
     'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
     'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
     'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',

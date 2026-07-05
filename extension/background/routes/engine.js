@@ -265,7 +265,7 @@ export const makeEngineRoutes = (deps) => {
       };
       let result;
       if (kind === 'app') {
-        // appClient.create is the same path the agent's app_create takes:
+        // appClient.create is the same path the agent's sandbox_create app arm takes:
         // fresh id, registry record, OPFS writes.
         let record;
         try {

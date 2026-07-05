@@ -35,7 +35,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
     sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
-    computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
+    filterByDwebActive, filterByDwebEnabled,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
     filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
@@ -232,8 +232,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // mid-turn changes (e.g. user adds a key while tools are firing)
   // don't surface inconsistent readings. exposure:'main' makes the
   // exposure gate refuse actor-only tools the model shouldn't reach.
-  // Built BEFORE the descriptor list so refreshMainTools (below) can restamp
-  // its instanceState each step — progressive disclosure.
   //
   // DESIGN-17: an actor turn builds an 'actor' ctx instead — the keyless,
   // kind-scoped, instance-pinned tool context (buildToolContext applies the
@@ -245,20 +243,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
 
-  // THIRD cut: progressive disclosure. The vm/js/app SECONDARY ops are hidden
-  // until the chat has a current instance of that kind (filterByInstanceState).
-  // Recomputed PER STEP (passed to the loop as refreshTools) so an instance
-  // created mid-turn reveals its ops on the very next model step — and the same
-  // recompute restamps toolContext.instanceState so the sync exposure gate
-  // stays in lockstep with what the model is shown. Entry + auto-creating tools
-  // (vm_create/vm_boot, js_create/js_notebook, app_create/open/search) stay
-  // always-on, so every family is bootstrappable in one call.
+  // THIRD cut (was progressive disclosure — DELETED 2026-07-05: every engine
+  // instance op is actor-only now, so there is nothing instance-state-dependent
+  // left on the main surface; the per-step recompute below remains for the
+  // dweb/goal cuts, which DO change mid-turn).
   const refreshMainTools = async () => {
-    const instanceState = await computeMainInstanceState(sessionId);
-    // why: build the descriptor list BEFORE mutating the shared gate state, so
-    // a throw in the build can never leave toolContext.instanceState ahead of
-    // the list the model was actually shown (the loop's catch keeps the prior
-    // activeTools — this keeps the gate in lockstep with it). Assign last.
     // FOURTH cut: dweb tools (publish/discover/install) only when the dweb is on.
     // Runs BEFORE the .map (which drops the `dweb` flag) so the agent never sees
     // them on the store build (DWEB_ENABLED false) or with the setting off.
@@ -275,10 +264,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       filterByGoalActive(
         filterByDwebActive(
           filterByDwebEnabled(
-            filterByInstanceState(
-              filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
-              instanceState,
-            ),
+            filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
             DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
           ),
           dwebEngagedSessions.has(sessionId),
@@ -286,7 +272,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         !!goalActiveFor?.(sessionId),
       ),
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
-    toolContext.instanceState = instanceState;
     return descriptors;
   };
   // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
@@ -483,10 +468,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
       tools: toolDescriptors,
-      // why: progressive disclosure — the loop calls this each step to get the
-      // current tool list, so an instance created mid-turn reveals its ops on
-      // the next step (and restamps toolContext.instanceState for the gate). A
-      // actor uses a fixed-set refresh (no disclosure; the gate is the wall).
+      // why: the loop calls this each step to get the current tool list, so a
+      // mid-turn exposure change (dweb engagement, goal start/stop) shows on
+      // the next step. An actor uses a fixed-set refresh (the gate is the wall).
       refreshTools,
       toolDispatch,
       classifyToolCall,

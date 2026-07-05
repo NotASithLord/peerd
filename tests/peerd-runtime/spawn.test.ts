@@ -106,8 +106,8 @@ describe('restrictCtxCapabilities', () => {
     expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['vm_import']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
-    // app_create keeps the dweb closure (it reads ctx.dweb for the dwapp flag)
-    expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['app_create']))).toBe(true);
+    // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
+    expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);
   });
 

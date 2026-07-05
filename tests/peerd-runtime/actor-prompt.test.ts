@@ -42,9 +42,12 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   test('the direct-drive tool listing + progressive-disclosure prose are gone', () => {
     expect(base.includes('run a shell command in a VM')).toBe(false);
     expect(base.includes('its ops appear')).toBe(false);
-    // create/open/read tools stay on the main agent.
-    expect(base.includes('vm_create')).toBe(true);
-    expect(base.includes('reads stay global')).toBe(true);
+    // the ONE cross-kind create stays on the main agent; the per-kind creates
+    // and the "reads stay global" promise (reversed 2026-07-05) are gone.
+    expect(base.includes('sandbox_create({kind})')).toBe(true);
+    for (const gone of ['vm_create', 'js_create', 'app_create', 'reads stay global']) {
+      expect(base.includes(gone)).toBe(false);
+    }
   });
 
   test('search is one delegation and background by default (no tab unless it must render)', () => {
@@ -144,7 +147,7 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     // App writes UI code → style note + the iframe-runtime gotcha; Notebook writes
     // compute → style + correctness. The App ACTOR is the agent that writes the
     // page files, so the worker/cross-file-module note must reach IT (not the
-    // orchestrator's app_create result, which no longer carries the style note).
+    // orchestrator's sandbox_create result, which no longer carries the style note).
     const app = actorBlock('app');
     expect(app.includes('<code-style>')).toBe(true);
     expect(app.includes('<app-runtime>')).toBe(true);
@@ -266,7 +269,7 @@ describe('the ephemeral-actor (subagent) prompt', () => {
     // trap 1: don't pack the whole app into the create call
     expect(out.includes('do NOT pack the whole app into the')).toBe(true);
     // trap 2: don't second-create to fill a placeholder
-    expect(out.includes('do NOT app_create a SECOND time to fill a placeholder')).toBe(true);
+    expect(out.includes('do NOT sandbox_create a SECOND time to fill a placeholder')).toBe(true);
     // the fix: message_actor the returned id to build it out
     expect(out.includes('then message_actor to build it out')).toBe(true);
   });

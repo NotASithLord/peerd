@@ -10,18 +10,18 @@ import {
 describe('extractInstanceHandle', () => {
   test('reads id + name from a raw create body (JSON-then-notes)', () => {
     const body = JSON.stringify({ id: 'app-7f3a', name: 'dashboard', url: 'x' }) + '\n<note>ok</note>';
-    expect(extractInstanceHandle('app', body)).toEqual({ id: 'app-7f3a', name: 'dashboard' });
+    expect(extractInstanceHandle('app', body)).toEqual({ id: 'app-7f3a', name: 'dashboard', kind: 'app' });
   });
 
   test('reads id alone when there is no name', () => {
-    expect(extractInstanceHandle('webvm', '{"id":"vm-9"}')).toEqual({ id: 'vm-9', name: '' });
+    expect(extractInstanceHandle('webvm', '{"id":"vm-9"}')).toEqual({ id: 'vm-9', name: '', kind: 'webvm' });
   });
 
   test('reads the handle back out of a rendered lineage spine', () => {
     const spine = '‹elided› notebook_create · notebook · ok · id=nb-1 "scratch" · 88 chars';
-    expect(extractInstanceHandle('notebook', spine)).toEqual({ id: 'nb-1', name: 'scratch' });
+    expect(extractInstanceHandle('notebook', spine)).toEqual({ id: 'nb-1', name: 'scratch', kind: 'notebook' });
     const spineNoName = '‹elided› webvm · webvm · ok · id=vm-9 · 88 chars';
-    expect(extractInstanceHandle('webvm', spineNoName)).toEqual({ id: 'vm-9', name: '' });
+    expect(extractInstanceHandle('webvm', spineNoName)).toEqual({ id: 'vm-9', name: '', kind: 'webvm' });
   });
 
   test('is scoped to engine primitives — a stray id in a web/page result is ignored', () => {
@@ -30,6 +30,17 @@ describe('extractInstanceHandle', () => {
     expect(extractInstanceHandle(undefined, '{"id":"x"}')).toBe(null);
     expect(ENGINE_PRIMITIVES.has('app')).toBe(true);
     expect(ENGINE_PRIMITIVES.has('web')).toBe(false);
+  });
+
+  test("the cross-kind 'engine' primitive (sandbox_create) resolves kind from the body", () => {
+    // sandbox_create stamps kind into its result JSON — the harvest reads it
+    // back so the handle still says WHICH kind of instance the id is.
+    const body = JSON.stringify({ id: 'vm-3', name: 'builder', kind: 'webvm', isCurrent: true });
+    expect(extractInstanceHandle('engine', body)).toEqual({ id: 'vm-3', name: 'builder', kind: 'webvm' });
+    // a missing/invalid kind falls back to the primitive itself, never null
+    expect(extractInstanceHandle('engine', '{"id":"a-1","kind":"nonsense"}'))
+      .toEqual({ id: 'a-1', name: '', kind: 'engine' });
+    expect(ENGINE_PRIMITIVES.has('engine')).toBe(true);
   });
 
   test('null on non-string / no id / empty', () => {

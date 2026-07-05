@@ -153,12 +153,11 @@ export { GATES } from './tools/gates.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export {
   mainAgentDescriptors, isHiddenFromMain, MAIN_AGENT_HIDDEN_TOOLS,
-  filterByInstanceState, isInstanceGatedOut, instanceGateKind, INSTANCE_GATED_TOOLS,
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
   // DESIGN-17: the actor capability tier vocabulary.
-  EXPOSURE_ACTOR, ACTOR_MUTATING_TOOLS, isActorMutatingTool,
+  EXPOSURE_ACTOR, ACTOR_ONLY_TOOLS, isActorOnlyTool,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
   actorAllowedToolsFor, isAllowedForActor,

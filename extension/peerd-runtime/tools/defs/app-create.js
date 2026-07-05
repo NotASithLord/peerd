@@ -1,5 +1,7 @@
 // @ts-check
-// app_create — author a new App for the user.
+// The app arm of sandbox_create — author a new App for the user.
+// (Was the standalone app_create tool; merged into sandbox_create({kind:'app'})
+// 2026-07-05 — one create tool, three kinds.)
 //
 // Apps are multi-file. Pass `files` as a path → content map; the
 // agent's HTML body lives at index.html (default entry). If you only
@@ -9,56 +11,13 @@ import { APP_RUNTIME_NOTE } from './code-style-note.js';
 
 const MAX_TOTAL_CHARS = 2_000_000;
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const appCreateTool = {
-  name: 'app_create',
-  primitive: 'app',
-  description: [
-    'Create a user-facing App (multi-file HTML in a sandboxed iframe —',
-    'full DOM, no extension/parent access) and open it in its own tab.',
-    '✅ "build a TODO app / calculator / interactive dashboard". ❌ a DATA CHART',
-    'or explained analysis — that\'s a Notebook (js_create; peerd:std chart renders',
-    'SVG bar/line/scatter with NO DOM). ❌ headless compute (js_create). ❌ POSIX',
-    '(a WebVM). Call this IMMEDIATELY',
-    'with a minimal index.html shell, then grow it file-by-file with',
-    'app_write_file while the user watches. Pass `files` as a path→content',
-    'map (entry defaults to index.html; tag-relative <link>/<script> are',
-    'inlined). `html` shorthand = { "index.html": html }. For a MULTIPLAYER /',
-    'shared app that talks to peers over the dweb, pass dwapp:true (attaches',
-    'the dweb bridge) and follow dweb_guide for the client. Returns the app',
-    'id and entry path.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      name: { type: 'string', description: 'Display name (≤80 chars).' },
-      files: {
-        type: 'object',
-        description: 'path → content map. Must include the entry (default index.html).',
-        additionalProperties: { type: 'string' },
-      },
-      html: { type: 'string', description: 'Shorthand for files:{index.html: html}.' },
-      entryFile: { type: 'string', description: 'Entry filename (default index.html).' },
-      tags: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'Optional tags (improves search).',
-      },
-      dwapp: {
-        type: 'boolean',
-        description: 'Build a MULTIPLAYER / shared dwapp: marks the app so the '
-          + 'app-tab attaches the dweb BRIDGE — only then can the app call '
-          + "dweb('join'/'publish'/'subscribe'/'dm-send'/…). REQUIRED for any app "
-          + "that talks to peers: without it there is no bridge and the app's "
-          + 'hello() never answers ("no dweb bridge"). Pair with dweb_guide.',
-      },
-    },
-    required: ['name'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
-
-  execute: async (args, ctx) => {
+/**
+ * Create + open an App from files/html; returns { id, name, kind, entryFile,
+ * fileCount, opened } plus the App runtime note.
+ * @param {any} args @param {import('/shared/tool-types.js').ToolContext} ctx
+ * @returns {Promise<import('/shared/tool-types.js').ToolResult>}
+ */
+export const createAppSandbox = async (args, ctx) => {
     if (typeof args?.name !== 'string' || !args.name.trim()) {
       return { ok: false, error: 'name_required' };
     }
@@ -110,6 +69,9 @@ export const appCreateTool = {
       const summary = JSON.stringify({
         id: record.id,
         name: record.name,
+        // why kind: the merged sandbox_create result is the durable-handle
+        // carrier — instance-handle.js reads it to label the harvested id.
+        kind: 'app',
         entryFile: record.entryFile,
         fileCount: Object.keys(files).length,
         opened: true,
@@ -124,5 +86,4 @@ export const appCreateTool = {
     } catch (e) {
       return { ok: false, error: `app_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
-  },
-};
+  };

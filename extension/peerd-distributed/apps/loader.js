@@ -18,7 +18,7 @@
 import { manifestHash, verifyManifest } from '../content/manifest.js';
 import { unpackBundleText } from '../content/bundle.js';
 
-// The dweb-install ceiling is SEPARATE from the agent's app_create cap (2 MB /
+// The dweb-install ceiling is SEPARATE from the agent's sandbox_create app cap (2 MB /
 // 64 files): a peer-installed app may carry WASM + assets, so it gets a larger
 // bound (PROPAGATION.md "big apps"). It is still bounded — a malicious bundle
 // can't be unbounded — and the Library warns from the card's `size` before the

@@ -22,9 +22,11 @@
  *   notebook  — Notebook (Web Worker + OPFS)
  *   app       — stored-HTML App in a sandboxed iframe
  *   subagent  — orchestration: a child session running the agent loop
+ *   engine    — cross-kind sandbox ops (sandbox_create spans webvm/notebook/app;
+ *               its result stamps the concrete `kind` for the handle harvest)
  *   memory    — file-based AGENTS.md memory (read/confirm-gated write)
  *
- * @typedef {'inspect' | 'tab' | 'web' | 'time' | 'webvm' | 'notebook' | 'app' | 'subagent' | 'memory'} Primitive
+ * @typedef {'inspect' | 'tab' | 'web' | 'time' | 'webvm' | 'notebook' | 'app' | 'engine' | 'subagent' | 'memory'} Primitive
  */
 
 /**

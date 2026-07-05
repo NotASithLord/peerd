@@ -42,8 +42,8 @@
 // composer/resolvers.js and tools/defs/dom-helpers.js.
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
-  isHiddenFromMain, isInstanceGatedOut, instanceGateKind,
-  EXPOSURE_ACTOR, isActorMutatingTool, isAllowedForActor, actorTargetId, isDwebTool,
+  isHiddenFromMain,
+  EXPOSURE_ACTOR, isActorOnlyTool, isAllowedForActor, actorTargetId, isDwebTool,
   actorWebTabTarget,
 } from './exposure.js';
 import {
@@ -67,7 +67,6 @@ import {
  * @typedef {ToolContext & {
  *   permission?: { mode?: string, confirmActions?: boolean },
  *   exposure?: string,
- *   instanceState?: { webvm?: boolean, notebook?: boolean, app?: boolean } | null,
  *   toolAllow?: Set<string> | null,
  *   toolManifestLabel?: string,
  *   actorInstanceId?: string,
@@ -114,8 +113,9 @@ const personaGate = (tool, _args, ctx) => {
  * DESIGN-17 actor capability tier — pure. Returns a REFUSAL
  * `{allowed:false, reason}` when the call violates the tier, or `null` when the
  * tier has no opinion (the gate continues). The rules:
- *   (1) non-actor ctx → the instance-MUTATING set is refused (it's actor-
- *       only); a `spawn_subagent({tools:['app_delete']})` can't escalate.
+ *   (1) non-actor ctx → the instance-OPERATION set (writes AND the fenced
+ *       reads) is refused (it's actor-only); a
+ *       `spawn_subagent({tools:['app_delete']})` can't escalate.
  *   (2) actor ctx → POSITIVELY constrained to its own kind's toolset (a
  *       hallucinated/injected non-env tool fails closed here, not just in the
  *       descriptor list — the keyless, narrow trust model).
@@ -128,7 +128,7 @@ const personaGate = (tool, _args, ctx) => {
  */
 export const actorTierGate = (tool, args, ctx) => {
   if (ctx?.exposure !== EXPOSURE_ACTOR) {
-    if (isActorMutatingTool(tool.name)) {
+    if (isActorOnlyTool(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
     }
     // Dweb tools are the DWEB ACTOR's family (owner call 2026-07-04): refused
@@ -201,17 +201,6 @@ export const exposureGate = (tool, args, ctx) => {
   if (ctx?.exposure === 'main') {
     if (isHiddenFromMain(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is actor-only — message a tab's actor to reach the page` };
-    }
-    // Progressive disclosure: an instance-gated op (webvm/notebook/app secondary
-    // op) is refused until the chat has a current instance of that kind. The
-    // descriptor list already hides it from the model; this makes the boundary
-    // real at dispatch — a hallucinated/injected early call FAILS CLOSED with a
-    // recovery hint. ctx.instanceState is restamped per step (SW refreshTools),
-    // so an op revealed after a mid-turn create also passes the gate.
-    if (isInstanceGatedOut(tool.name, ctx.instanceState)) {
-      const kind = instanceGateKind(tool.name);
-      const create = kind === 'app' ? 'app_create' : kind === 'notebook' ? 'js_create or js_notebook' : 'vm_create or vm_boot';
-      return { allowed: false, reason: `'${tool.name}' needs a current ${kind} in this chat — create one first (${create})` };
     }
   }
   // DESIGN-17: the actor capability tier (see tools/exposure.js). The WALL

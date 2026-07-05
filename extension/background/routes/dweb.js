@@ -72,7 +72,7 @@ export const makeDwebRoutes = (deps) => {
 
     // Install a VERIFIED bundle as an engine App. The verification happened
     // in the calling page (fetchBundle + installAppBundle); this route is
-    // the storage arm. files is a path → text map, same shape app_create
+    // the storage arm. files is a path → text map, same shape sandbox_create
     // uses, same size ceiling enforced in appClient.
     'dweb/app-install': async ({ name, files, entryFile, dweb }) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };

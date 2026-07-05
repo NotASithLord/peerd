@@ -1,10 +1,9 @@
 import { describe, test, expect } from 'bun:test';
 import {
   mainAgentDescriptors, isHiddenFromMain,
-  filterByInstanceState, isInstanceGatedOut, instanceGateKind,
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool,
-  isActorMutatingTool, actorAllowedTools, isAllowedForActorType,
+  isActorOnlyTool, actorAllowedTools, isAllowedForActorType,
   actorAllowedToolsFor, isAllowedForActor,
   actorTargetId, actorTargetIdField, actorDescriptors, filterActorSurface,
   EXPOSURE_ACTOR,
@@ -23,16 +22,16 @@ const eg = (tool: { name: string }, args: unknown, ctx: object) =>
   exposureGateRaw(tool as unknown as ToolT, args, ctx as GateCtxT);
 
 describe('dweb tool exposure (off the store build)', () => {
-  const tools = [{ name: 'app_create' }, { name: 'dweb_share', dweb: true }, { name: 'remember' }, { name: 'dweb_discover', dweb: true }];
+  const tools = [{ name: 'sandbox_create' }, { name: 'dweb_share', dweb: true }, { name: 'remember' }, { name: 'dweb_discover', dweb: true }];
   test('isDwebTool reads the dweb flag', () => {
     expect(isDwebTool({ name: 'dweb_share', dweb: true })).toBe(true);
-    expect(isDwebTool({ name: 'app_create' })).toBe(false);
+    expect(isDwebTool({ name: 'sandbox_create' })).toBe(false);
   });
   test('hides dweb tools when the dweb is off; keeps the rest', () => {
-    expect(filterByDwebEnabled(tools, false).map((t) => t.name)).toEqual(['app_create', 'remember']);
+    expect(filterByDwebEnabled(tools, false).map((t) => t.name)).toEqual(['sandbox_create', 'remember']);
   });
   test('keeps dweb tools when the dweb is on', () => {
-    expect(filterByDwebEnabled(tools, true).map((t) => t.name)).toEqual(['app_create', 'dweb_share', 'remember', 'dweb_discover']);
+    expect(filterByDwebEnabled(tools, true).map((t) => t.name)).toEqual(['sandbox_create', 'dweb_share', 'remember', 'dweb_discover']);
   });
 });
 
@@ -40,17 +39,17 @@ describe('dweb tool exposure (progressive disclosure of the SECONDARY surface)',
   const dwebOn = [
     { name: 'dweb_discover' }, { name: 'dweb_share' }, { name: 'dweb_install' },
     { name: 'dweb_peers' }, { name: 'dweb_block' }, { name: 'dweb_discovery' }, { name: 'dweb_guide' },
-    { name: 'app_create' },
+    { name: 'sandbox_create' },
   ];
   test('isDwebSecondaryTool flags exactly the deferred set (dweb_guide is ENTRY, not deferred)', () => {
     for (const n of ['dweb_peers', 'dweb_block', 'dweb_discovery']) expect(isDwebSecondaryTool(n)).toBe(true);
     // dweb_guide is an ENTRY tool — the prompt tells the agent to call it FIRST,
     // before any other dweb tool, so it must NOT be gated behind engagement.
-    for (const n of ['dweb_discover', 'dweb_share', 'dweb_install', 'dweb_guide', 'app_create']) expect(isDwebSecondaryTool(n)).toBe(false);
+    for (const n of ['dweb_discover', 'dweb_share', 'dweb_install', 'dweb_guide', 'sandbox_create']) expect(isDwebSecondaryTool(n)).toBe(false);
   });
   test('hides the secondary tools until the session has engaged the dweb; dweb_guide stays visible', () => {
     expect(filterByDwebActive(dwebOn, false).map((t) => t.name))
-      .toEqual(['dweb_discover', 'dweb_share', 'dweb_install', 'dweb_guide', 'app_create']); // entry tools (incl. guide) survive
+      .toEqual(['dweb_discover', 'dweb_share', 'dweb_install', 'dweb_guide', 'sandbox_create']); // entry tools (incl. guide) survive
   });
   test('reveals the secondary tools once engaged', () => {
     expect(filterByDwebActive(dwebOn, true).map((t) => t.name)).toEqual(dwebOn.map((t) => t.name));
@@ -105,89 +104,20 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
   });
 });
 
-describe('progressive disclosure — instance-gated engine ops', () => {
-  const NONE = { webvm: false, notebook: false, app: false };
-  const ALL = { webvm: true, notebook: true, app: true };
-
-  test('instanceGateKind maps ops to their kind, null for everything else', () => {
-    expect(instanceGateKind('vm_write_file')).toBe('webvm');
-    expect(instanceGateKind('js_read_file')).toBe('notebook');
-    expect(instanceGateKind('app_update')).toBe('app');
-    // entry + auto-creating + unrelated tools are NOT gated
-    for (const n of ['vm_create', 'vm_boot', 'js_create', 'js_notebook', 'app_create', 'app_open', 'remember']) {
-      expect(instanceGateKind(n)).toBeNull();
+describe('the instance-gating machinery is GONE (folded into the actor tier)', () => {
+  test('a create/entry tool passes on the main turn with no instances anywhere', () => {
+    // No instanceState anywhere in the ctx — the gate must not care.
+    for (const n of ['sandbox_create', 'actor_list', 'app_open', 'app_search', 'js_run']) {
+      expect(eg({ name: n }, {}, { exposure: 'main' }).allowed).toBe(true);
     }
   });
 
-  test('ops are hidden with no instance, shown once the matching kind exists', () => {
-    expect(isInstanceGatedOut('vm_write_file', NONE)).toBe(true);
-    expect(isInstanceGatedOut('vm_write_file', { webvm: true })).toBe(false);
-    expect(isInstanceGatedOut('app_update', NONE)).toBe(true);
-    expect(isInstanceGatedOut('app_update', { app: true })).toBe(false);
-    // only the MATCHING kind reveals it
-    expect(isInstanceGatedOut('js_delete', { webvm: true, app: true })).toBe(true);
-    expect(isInstanceGatedOut('js_delete', { notebook: true })).toBe(false);
-  });
-
-  test('null/absent instanceState fails CLOSED (gated ops stay hidden)', () => {
-    expect(isInstanceGatedOut('vm_import', null)).toBe(true);
-    expect(isInstanceGatedOut('app_write_file', undefined)).toBe(true);
-  });
-
-  test('non-gated tools (entry + auto-create + unrelated) are never gated', () => {
-    for (const n of ['vm_boot', 'js_notebook', 'app_create', 'vm_create', 'app_open', 'remember', 'open_tab']) {
-      expect(isInstanceGatedOut(n, NONE)).toBe(false);
-      expect(isInstanceGatedOut(n, null)).toBe(false);
-    }
-  });
-
-  test('filterByInstanceState reveals a kind only when its instance exists', () => {
-    const all = [
-      { name: 'vm_create' }, { name: 'vm_boot' }, { name: 'vm_write_file' },
-      { name: 'app_create' }, { name: 'app_update' }, { name: 'remember' },
-    ];
-    expect(filterByInstanceState(all, NONE).map((t) => t.name))
-      .toEqual(['vm_create', 'vm_boot', 'app_create', 'remember']);
-    expect(filterByInstanceState(all, { webvm: true }).map((t) => t.name))
-      .toEqual(['vm_create', 'vm_boot', 'vm_write_file', 'app_create', 'remember']);
-    expect(filterByInstanceState(all, ALL).map((t) => t.name)).toEqual(all.map((t) => t.name));
-  });
-});
-
-describe('exposureGate — instance gating at dispatch (fails closed)', () => {
-  test('refuses a gated op on the main turn when the kind has no instance, with a create hint', () => {
-    const r = eg({ name: 'app_write_file' }, {}, { exposure: 'main', instanceState: { app: false } });
+  test('a premature instance op is refused as ACTOR-ONLY (not "create one first")', () => {
+    // The old machinery answered "needs a current app — create one first";
+    // the honest answer is that the op belongs to the instance actor.
+    const r = eg({ name: 'app_write_file' }, {}, { exposure: 'main' });
     expect(r.allowed).toBe(false);
-    expect(r.reason).toContain('app_create');
-  });
-
-  test('allows the gated op once the instance exists', () => {
-    // The MUTATING ops are actor-only even with an instance present; the READ
-    // ops (which stay on the main agent) are what instance-gating still admits
-    // once their kind exists.
-    expect(eg({ name: 'app_read_file' }, {}, { exposure: 'main', instanceState: { app: true } }).allowed).toBe(true);
-    expect(eg({ name: 'js_read_file' }, {}, { exposure: 'main', instanceState: { notebook: true } }).allowed).toBe(true);
-  });
-
-  test('fails closed when instanceState is absent on the main turn', () => {
-    expect(eg({ name: 'js_read_file' }, {}, { exposure: 'main' }).allowed).toBe(false);
-  });
-
-  test('never instance-gates a non-main context (actor / subagent hold full tools)', () => {
-    // Instance gating is main-only; a non-main ctx is never instance-gated. Uses
-    // READ ops (non-tiered) so the DESIGN-17 actor tier doesn't mask the point.
-    expect(eg({ name: 'app_read_file' }, {}, {}).allowed).toBe(true);
-    expect(eg({ name: 'js_read_file' }, {}, { exposure: null }).allowed).toBe(true);
-  });
-
-  test('always-on ops (create/entry) pass on the main agent even with no instances', () => {
-    const none = { webvm: false, notebook: false, app: false };
-    // The create/list/open entry tools stay on the main agent (it bootstraps an
-    // instance, then delegates). The RUN tools (vm_boot/js_notebook) are now
-    // actor-only — proven in the actor-tier gate tests below.
-    for (const n of ['app_create', 'vm_create', 'actor_list', 'js_create', 'app_open']) {
-      expect(eg({ name: n }, {}, { exposure: 'main', instanceState: none }).allowed).toBe(true);
-    }
+    expect(r.reason).toContain('actor-only');
   });
 });
 
@@ -199,17 +129,17 @@ const rt = (tool: { name: string }, args: unknown, ctx: object) =>
   actorTierGate(tool as unknown as ToolT, args, ctx as GateCtxT);
 
 describe('DESIGN-17 actor tier — the tool sets', () => {
-  test('the MUTATING tier is what leaves the main agent (reads stay global)', () => {
+  test('the actor-only tier is what leaves the main agent — writes AND the fenced reads', () => {
     for (const n of ['vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
-      'js_notebook', 'js_write_file', 'js_delete',
-      'app_update', 'app_write_file', 'app_delete_file', 'app_delete', 'edit_file']) {
-      expect(isActorMutatingTool(n)).toBe(true);
+      'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
+      'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
+      'app_delete_file', 'app_delete', 'edit_file']) {
+      expect(isActorOnlyTool(n)).toBe(true);
     }
-    // Reads + entry/catalog tools + js_run stay GLOBAL — NOT tiered (spec).
-    for (const n of ['js_read_file', 'app_read_file', 'app_list_files',
-      'vm_create', 'actor_list', 'js_create', 'js_run',
-      'app_create', 'app_open', 'app_search', 'message_actor']) {
-      expect(isActorMutatingTool(n)).toBe(false);
+    // The bootstrap/catalog surface + js_run stay on the orchestrator.
+    for (const n of ['sandbox_create', 'actor_list', 'js_run',
+      'app_open', 'app_search', 'message_actor']) {
+      expect(isActorOnlyTool(n)).toBe(false);
     }
   });
 
@@ -260,10 +190,17 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
     expect(rt({ name: 'edit_file' }, {}, { exposure: 'main' })?.allowed).toBe(false);
   });
 
-  test('reads are NOT tiered — a non-actor may still read globally', () => {
-    expect(rt({ name: 'app_read_file' }, {}, {})).toBeNull();
-    expect(rt({ name: 'app_list_files' }, {}, { exposure: 'main' })).toBeNull();
-    expect(rt({ name: 'js_read_file' }, {}, {})).toBeNull();
+  test('the fenced reads ARE tiered — refused for every non-actor ctx (owner call 2026-07-05)', () => {
+    // The old "cheap global read" affordance let untrusted instance bytes
+    // (notebook/app code persists web data) reach the orchestrator's context
+    // even fenced — culled; a read is an actor turn like any other op.
+    for (const n of ['app_read_file', 'app_list_files', 'js_read_file']) {
+      expect(rt({ name: n }, {}, {})?.allowed).toBe(false);
+      expect(rt({ name: n }, {}, { exposure: 'main' })?.allowed).toBe(false);
+    }
+    // ...and each remains allowed for ITS OWN kind's actor.
+    expect(rt({ name: 'js_read_file' }, {}, { exposure: EXPOSURE_ACTOR, actorType: 'notebook', actorInstanceId: 'nb-1' })).toBeNull();
+    expect(rt({ name: 'app_read_file' }, {}, { exposure: EXPOSURE_ACTOR, actorType: 'app', actorInstanceId: 'app-1' })).toBeNull();
   });
 
   test('an actor may call its own kind; foreign/non-env tools fail closed', () => {
@@ -301,7 +238,7 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
     // is allowed (the non-mutating delegation channel), while the mutating tier is
     // refused on the main agent — it must go through the instance's actor.
     expect(eg({ name: 'message_actor' }, {}, { exposure: 'main' }).allowed).toBe(true);
-    const r = eg({ name: 'app_update' }, {}, { exposure: 'main', instanceState: { app: true } });
+    const r = eg({ name: 'app_update' }, {}, { exposure: 'main' });
     expect(r.allowed).toBe(false);
     expect(r.reason).toContain('actor-only');
   });
@@ -379,7 +316,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // positive kind-scope; they're contained for MAIN by isHiddenFromMain (the
     // exposure axis), NOT by the mutating tier — so the tier has no opinion.
     for (const n of ['click', 'type', 'navigate']) {
-      expect(isActorMutatingTool(n)).toBe(false);
+      expect(isActorOnlyTool(n)).toBe(false);
       expect(rt({ name: n }, {}, {})).toBeNull();                   // subagent (exposure unset)
       expect(rt({ name: n }, {}, { exposure: 'main' })).toBeNull(); // tier no-opinion (exposure hides it)
     }

@@ -15,8 +15,11 @@
 // Engine-instance primitives — results from these carry a DURABLE handle
 // (an App / Notebook / WebVM id) the agent may need to reference later. A
 // stray `"id":` in a web/page result must NOT be mined as a handle, so the
-// extractor is scoped to exactly these.
-export const ENGINE_PRIMITIVES = new Set(['app', 'notebook', 'webvm']);
+// extractor is scoped to exactly these. 'engine' is the merged
+// sandbox_create's cross-kind primitive — its result JSON stamps a `kind`
+// field naming which of the three it made (read back below, so the harvested
+// handle still says WHICH kind of instance the id is).
+export const ENGINE_PRIMITIVES = new Set(['app', 'notebook', 'webvm', 'engine']);
 
 /**
  * Pull a durable instance id (+ name when present) out of an engine-instance
@@ -33,7 +36,7 @@ export const ENGINE_PRIMITIVES = new Set(['app', 'notebook', 'webvm']);
  *
  * @param {string|undefined} primitive   the result's engine primitive
  * @param {unknown} content              the result body (raw or spine)
- * @returns {{ id: string, name: string } | null}
+ * @returns {{ id: string, name: string, kind: string } | null}
  */
 export const extractInstanceHandle = (primitive, content) => {
   if (typeof primitive !== 'string' || !ENGINE_PRIMITIVES.has(primitive)
@@ -46,18 +49,27 @@ export const extractInstanceHandle = (primitive, content) => {
     const m = content.match(/\bid=([\w:.\-]{1,80})(?:\s+"([^"]{1,80})")?/);
     if (m) { id = m[1]; name = m[2] ?? ''; }
   }
-  return id ? { id, name } : null;
+  if (!id) return null;
+  // The cross-kind 'engine' primitive (sandbox_create) says which kind it made
+  // in the body; a per-kind primitive IS the kind. Anchored + enum-bound, same
+  // defensive posture as the id pattern.
+  const kind = primitive === 'engine'
+    ? (content.match(/"kind"\s*:\s*"(app|notebook|webvm)"/)?.[1] ?? 'engine')
+    : primitive;
+  return { id, name, kind };
 };
 
 /**
  * A glanceable one-line handle for the trim summary's "Artifacts / handles"
  * section — `app app-7f3a "dashboard"` (name dropped when absent). Distinct
  * from the spine's `id=…` rendering: this line stands alone in the summary,
- * so it leads with the primitive for context.
+ * so it leads with the kind for context. The handle's own `kind` (resolved by
+ * extractInstanceHandle — the real engine kind even under the cross-kind
+ * 'engine' primitive) wins over the raw primitive string.
  *
  * @param {string} primitive
- * @param {{ id: string, name: string }} handle
+ * @param {{ id: string, name: string, kind?: string }} handle
  * @returns {string}
  */
-export const renderHandleLine = (primitive, { id, name }) =>
-  name ? `${primitive} ${id} "${name}"` : `${primitive} ${id}`;
+export const renderHandleLine = (primitive, { id, name, kind }) =>
+  name ? `${kind || primitive} ${id} "${name}"` : `${kind || primitive} ${id}`;

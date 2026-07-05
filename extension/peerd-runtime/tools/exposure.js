@@ -71,85 +71,29 @@ export const mainAgentDescriptors = (descriptors) =>
   // sees the full registered tool and keeps using the flag.)
   descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebToolName(t.name));
 
-// ── Progressive disclosure: instance-gated engine ops ───────────────────
-//
-// The webvm/notebook/app families are large, but most of their tools only make
-// sense once the chat HAS an instance of that kind. We always expose the entry +
-// auto-creating tools (vm_create/vm_boot, js_create/js_notebook,
-// app_create/app_open/app_search) so every family is discoverable and
-// bootstrappable in one call — vm_boot/js_notebook auto-create, app_create IS the
-// create — and the unified actor_list enumerates existing instances across all
-// kinds. The SECONDARY ops below are hidden from the main agent UNTIL a current
-// instance of their kind exists in the chat; they appear the step after one is
-// created (the SW recomputes the descriptor list per step — agent-loop's
-// refreshTools — and every create path sets the session default). This shrinks
-// the always-on surface (~12 tools deferred) for sharper tool selection without
-// breaking any bootstrap flow. Keys match the instanceState shape the SW builds
-// from the engine registries' getDefaultForSession() — the kind vocabulary is
-// { webvm, notebook, app }.
-export const INSTANCE_GATED_TOOLS = Object.freeze({
-  webvm: Object.freeze(['vm_import', 'vm_write_file', 'vm_delete']),
-  notebook: Object.freeze(['js_write_file', 'js_read_file', 'js_delete']),
-  app: Object.freeze([
-    'app_update', 'app_write_file', 'app_read_file',
-    'app_list_files', 'app_delete_file', 'app_delete',
-  ]),
-});
-
-// name → kind reverse index (frozen). null for any non-gated tool.
-const GATED_TOOL_KIND = Object.freeze(
-  Object.entries(INSTANCE_GATED_TOOLS).reduce((m, [kind, names]) => {
-    for (const n of names) m[n] = kind;
-    return m;
-  }, /** @type {Record<string,string>} */ ({})),
-);
-
-/** The engine kind this tool is gated on ('webvm'|'notebook'|'app'), or null. Pure. @param {string} name @returns {string | null} */
-export const instanceGateKind = (name) => GATED_TOOL_KIND[name] ?? null;
-
-/**
- * Should this tool be HIDDEN from the main agent given the current engine-
- * instance state? `instanceState` is { webvm, notebook, app } booleans (does the
- * chat have a current instance of that kind). Non-gated tools are never hidden by
- * this rule. A null/absent instanceState fails CLOSED — gated ops stay hidden
- * until an instance is proven to exist (so a missing snapshot can't widen the
- * surface, and the dispatch gate refuses a premature op). Pure.
- *
- * @param {string} name
- * @param {{ webvm?: boolean, notebook?: boolean, app?: boolean } | null} [instanceState]
- * @returns {boolean}
- */
-export const isInstanceGatedOut = (name, instanceState) => {
-  const kind = /** @type {'webvm' | 'notebook' | 'app' | undefined} */ (GATED_TOOL_KIND[name]);
-  if (!kind) return false;             // not an instance-gated op
-  return !instanceState?.[kind];       // hidden unless that kind's instance exists
-};
-
-/**
- * Filter a descriptor list to what the main agent should see GIVEN the current
- * engine-instance state — drops instance-gated ops whose kind has no current
- * instance. Composes after mainAgentDescriptors() and the manifest filter. Pure.
- *
- * @template {{ name: string }} T
- * @param {ReadonlyArray<T>} descriptors
- * @param {{ webvm?: boolean, notebook?: boolean, app?: boolean } | null} instanceState
- * @returns {T[]}
- */
-export const filterByInstanceState = (descriptors, instanceState) =>
-  descriptors.filter((t) => !isInstanceGatedOut(t.name, instanceState));
+// (The old "progressive disclosure" instance-gating machinery lived here —
+// INSTANCE_GATED_TOOLS / isInstanceGatedOut / filterByInstanceState. It was
+// DELETED 2026-07-05: every instance op it deferred is now in the actor-only
+// tier below, so the main agent never sees them regardless of instance state,
+// and the per-step instanceState recompute had nothing left to gate.)
 
 // ── DESIGN-17: actor tab agents — the capability tier ────────────────────
 //
 // A `kind:'actor'` session OWNS one tab-hosted instance and exclusively
-// holds that environment's MUTATING tools. The split has two sides, both
+// holds that environment's instance tools. The split has two sides, both
 // enforced at the dispatch gate (gates.js — the WALL, not just these
 // descriptor filters which are advisory):
 //
-//   - ACTOR_MUTATING_TOOLS leave the MAIN agent. A non-actor ctx
+//   - ACTOR_ONLY_TOOLS leave the MAIN agent. A non-actor ctx
 //     (main / subagent / review / direct) is REFUSED any of them —
 //     so a one-line `spawn_subagent({tools:['app_delete']})` can't escalate.
-//     Only MUTATION is tiered; READS (app_read_file/app_list_files/
-//     js_read_file) stay GLOBAL + id-addressable, per the spec.
+//     Originally only MUTATION was tiered and the fenced READS
+//     (app_read_file/app_list_files/js_read_file) stayed global for cheap
+//     no-actor-hop inspection; that was reversed (owner call 2026-07-05) —
+//     an instance file is not reliably agent-authored (notebook/app code
+//     fetches and persists web data), so even a fenced read hands untrusted
+//     bytes to the orchestrator's context. The convenience broke the
+//     isolation premise; reads now ride the actor heap like everything else.
 //   - An actor is POSITIVELY constrained to its own kind's toolset
 //     (actorAllowedTools) — a keyless, narrow trust model: a
 //     hallucinated/injected non-env tool from an actor fails closed at the
@@ -161,20 +105,23 @@ export const filterByInstanceState = (descriptors, instanceState) =>
 // bare literal — it's only ever the gate's negative space, never matched by name.
 export const EXPOSURE_ACTOR = 'actor';
 
-// The tiered MUTATION set — refused for every non-actor ctx (the main agent
-// delegates these via message_actor). vm_boot/js_notebook are the RUN tools
-// (they mutate instance state); edit_file is the cross-kind SEARCH/REPLACE write
-// path for App/Notebook files; the rest are write/delete ops. js_run (headless,
-// no instance) stays a parent tool and is deliberately ABSENT.
-export const ACTOR_MUTATING_TOOLS = Object.freeze(new Set([
+// The tiered instance-OPERATION set — refused for every non-actor ctx (the
+// main agent delegates these via message_actor). vm_boot/js_notebook are the
+// RUN tools (they mutate instance state); edit_file is the cross-kind
+// SEARCH/REPLACE write path for App/Notebook files; the *_read_file /
+// app_list_files READS are tiered too (see the isolation note above — instance
+// bytes stay behind the actor heap even for reads). js_run (headless, no
+// instance) stays a parent tool and is deliberately ABSENT.
+export const ACTOR_ONLY_TOOLS = Object.freeze(new Set([
   'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
-  'js_notebook', 'js_write_file', 'js_delete',
-  'app_update', 'app_write_file', 'app_delete_file', 'app_delete',
+  'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
+  'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
+  'app_delete_file', 'app_delete',
   'edit_file',
 ]));
 
-/** Is this a tiered mutating tool (actor-only, off the main agent)? Pure. @param {string} name */
-export const isActorMutatingTool = (name) => ACTOR_MUTATING_TOOLS.has(name);
+/** Is this a tiered instance tool (actor-only, off the main agent)? Pure. @param {string} name */
+export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
 
 // DESIGN-17 web actor — the DOM toolset it owns. This list is the sole source
 // of truth for that set. why these and not page_eval/page_exec: the web actor
@@ -201,7 +148,7 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
     'app_delete_file', 'app_delete', 'edit_file',
   ])),
   // The web actor owns a tab via the DOM toolset. The DOM mutators
-  // (click/type/navigate) are NOT in ACTOR_MUTATING_TOOLS — they're contained
+  // (click/type/navigate) are NOT in ACTOR_ONLY_TOOLS — they're contained
   // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis). Putting
   // them in this POSITIVE set is what lets a web-actor ctx call them (gate rule
   // 2) — the reconciliation. PLUS fetch_url: the web actor's SESSIONLESS
@@ -347,7 +294,7 @@ export const actorDescriptors = (descriptors, kind, backing) => {
  * @param {ReadonlyArray<T>} descriptors @returns {T[]}
  */
 export const filterActorSurface = (descriptors) =>
-  descriptors.filter((t) => !ACTOR_MUTATING_TOOLS.has(t.name));
+  descriptors.filter((t) => !ACTOR_ONLY_TOOLS.has(t.name));
 
 // ── dweb tools: gated on the dweb being enabled ─────────────────────────────
 // The dweb network tools (publish/discover/install) are exposed to the agent
@@ -368,7 +315,7 @@ export const isDwebToolName = (name) => typeof name === 'string' && (name.starts
 
 /**
  * Drop dweb tools from a descriptor list when the dweb is off. Composes after
- * mainAgentDescriptors() + filterByInstanceState(). Pure.
+ * mainAgentDescriptors(). Pure.
  *
  * @template {{ name: string, dweb?: boolean }} T
  * @param {ReadonlyArray<T>} descriptors
@@ -396,7 +343,7 @@ export const filterByDwebEnabled = (descriptors, dwebOn) =>
 // why ENGAGEMENT, not connectivity (for the rest): the base network is always-on
 // and auto-connects to whatever peers are online, so "has peers" is true within
 // seconds for nearly everyone — a useless signal. Calling a dweb tool (dweb_discover
-// is the natural opener) is real intent. Mirrors INSTANCE_GATED_TOOLS.
+// is the natural opener) is real intent.
 export const DWEB_SECONDARY_TOOLS = Object.freeze(new Set([
   'dweb_peers', 'dweb_block', 'dweb_discovery',
 ]));

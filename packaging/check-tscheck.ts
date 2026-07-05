@@ -56,7 +56,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // its in-browser test (+2), then the inspect_* fold deleted the five old
 // inspect tool defs and added tools/defs/inspect.js (−4) — net −2 checked
 // files, all deletions, no directive dropped.
-const COVERED_FLOOR = 485;
+// 485 → 486: the sandbox_create merge — vm_create/js_create/app_create fold
+// into tools/defs/sandbox-create.js (+1; the three old files stay as its
+// // @ts-check'd per-kind handler modules).
+const COVERED_FLOOR = 486;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

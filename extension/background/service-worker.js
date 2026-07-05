@@ -131,7 +131,6 @@ import {
   resolveManifestAllow,
   manifestLabel,
   filterDescriptorsByManifest,
-  filterByInstanceState,
   filterByDwebEnabled,
   filterByDwebActive,
   filterByGoalActive,
@@ -902,12 +901,6 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // the lineage tells the user WHICH manifest excluded the tool.
     toolAllow,
     toolManifestLabel: toolAllow ? manifestLabel(activeSession?.toolManifest) : null,
-    // why: progressive-disclosure state for the exposure gate (which is sync).
-    // ONLY the main turn gates on it; subagents / actors / direct dispatch
-    // hold full tools, so leave it null there (the gate skips the check). The
-    // main turn restamps this per step via refreshTools so an op revealed after
-    // a mid-turn create also passes the gate.
-    instanceState: exposure === 'main' ? await computeMainInstanceState(sessionId) : null,
     session: {
       sessionId: sessionId ?? null,
       // why: the spawn_subagent tool reads ctx.session.depth to compute
@@ -1523,24 +1516,6 @@ const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker })
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
 const appTabTracker = createAppTabTracker({ announce: trackerNote(appRegistry, 'App') });
 const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
-
-// Progressive disclosure: the per-session engine-instance snapshot the main
-// agent's tool exposure keys on. { webvm, notebook, app } booleans = does THIS
-// chat have a current instance of that kind (the secondary ops default to it).
-// The create paths (vm_create/vm_boot, js_create/js_notebook, app_create/app_open)
-// set the session default, so a kind flips true the moment one is made — and the
-// main turn's per-step refresh reveals that kind's ops on the next step. Each
-// query self-heals a stale default; a failure degrades to false (fail-closed:
-// the ops stay hidden rather than wrongly exposed).
-const computeMainInstanceState = async (/** @type {string} */ sid) => {
-  if (!sid) return { webvm: false, notebook: false, app: false };
-  const [webvm, notebook, app] = await Promise.all([
-    vmRegistry.getDefaultForSession(sid).catch(() => null),
-    jsRegistry.getDefaultForSession(sid).catch(() => null),
-    appRegistry.getDefaultForSession(sid).catch(() => null),
-  ]);
-  return { webvm: !!webvm, notebook: !!notebook, app: !!app };
-};
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
 // earlier. Monotonic per session, SW-lifetime (a cold start resets it; the next
@@ -2316,7 +2291,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
-  computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
+  filterByDwebActive, filterByDwebEnabled,
   filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
   filterByGoalActive, goalActiveFor: (/** @type {string} */ sid) => goalRunner?.isActive(sid) ?? false,
   dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
