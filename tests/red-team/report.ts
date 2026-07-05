@@ -1,8 +1,9 @@
 // Red-team report generator (`bun run red-team:report`).
 //
 // Runs the scenario catalog against the real defense code and writes the result
-// matrix to docs/security/RED-TEAM-RESULTS.md, the empirical, re-runnable proof
-// that backs the threat model. Prints a console summary and exits non-zero if any
+// matrix to docs/security/RED-TEAM-RESULTS.md, the re-runnable evidence that backs
+// the threat model. These are runnable probes for the core invariants, not a
+// complete adversarial audit. Prints a console summary and exits non-zero if any
 // scenario leaked, so it doubles as a stricter local gate.
 
 import { writeFileSync } from 'node:fs';
