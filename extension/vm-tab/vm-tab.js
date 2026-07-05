@@ -40,11 +40,18 @@ import { PEERD_PRINTF_RE, stripChunk } from '/vm-tab/marker-strip.js';
 import { buildFirefoxWebVmNote } from '/vm-tab/firefox-webvm-note.js';
 
 // WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
-// it via the COOP/COEP manifest keys; Firefox doesn't honor them, so the boot
-// pre-flight below fails there. Detect Firefox so that failure explains the real
-// (platform) cause + points at the open bug/standards threads, not a manifest
-// error that would only ever be true on Chrome.
-const IS_FIREFOX = /firefox/i.test(navigator.userAgent);
+// it via the COOP/COEP manifest keys; Firefox doesn't honor them, so
+// packaging/gen-manifest.ts STRIPS them from every Firefox package — which makes
+// the shipped manifest itself the ground truth for "this build cannot isolate by
+// design". Feature-detect that (not a UA sniff): a UA-overridden Firefox or a
+// Gecko fork still gets the honest platform notice, and if Firefox one day
+// honors the keys and we ship them, an isolation failure correctly falls back to
+// the generic manifest error instead of masquerading as a platform limit.
+// (cast: COOP/COEP are Chromium-only manifest keys the polyfill's Firefox-shaped
+// WebExtensionManifest type doesn't declare — absence is exactly the signal.)
+const BUILD_CANNOT_ISOLATE = !(/** @type {Record<string, unknown>} */ (
+  /** @type {unknown} */ (browser.runtime.getManifest())
+)).cross_origin_embedder_policy;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1202,10 +1209,11 @@ const boot = async () => {
     `crossOriginIsolated=${isolated} SharedArrayBuffer=${sab}`);
   if (!isolated || !sab) {
     // why: on Firefox this is expected, not a config error — an extension page
-    // can't be cross-origin isolated (Firefox bug 1673477), so there's no
+    // can't be cross-origin isolated (Firefox bug 1673477), so the Firefox
+    // manifest ships without the (dead) COOP/COEP keys and there's no
     // SharedArrayBuffer for CheerpX. Show the honest platform-limitation notice
     // + the open threads instead of the misleading "manifest must declare…".
-    if (IS_FIREFOX) { failBootFirefoxWebVM(); return; }
+    if (BUILD_CANNOT_ISOLATE) { failBootFirefoxWebVM(); return; }
     failBoot('Cross-origin isolation is OFF',
       new Error('manifest must declare cross_origin_embedder_policy + cross_origin_opener_policy'));
     return;
