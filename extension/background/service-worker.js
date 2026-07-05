@@ -30,7 +30,6 @@
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
-import { openHome } from '/shared/open-home.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
 import {
@@ -237,8 +236,6 @@ import {
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
   finalAssistantText,
-  // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
-  pullInHintInjected,
 } from '/peerd-runtime/index.js';
 
 import { flattenCategorisedDenylist, normalizeDenylistPattern } from '/peerd-egress/index.js';
@@ -251,7 +248,6 @@ import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
-import { decidePullIn } from './panel-affordance.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import {
@@ -284,6 +280,10 @@ import { makeDenylistStore } from './denylist-store.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
+import { makeModelCatalog } from './model-catalog.js';
+import { makeTabAffordances } from './tab-affordances.js';
+import { makeMintOnce } from './mint-once.js';
+import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
 import { makeHooksRoutes } from './routes/hooks.js';
@@ -498,203 +498,10 @@ const maskKey = (/** @type {string} */ k) => {
   return `${s.slice(0, 7)}…${s.slice(-3)} · ${s.length} chars`;
 };
 
-// Curated model options per provider, for the per-chat model picker.
-// Conservative on purpose — only ids we're confident resolve, so the
-// picker never offers a 404. Exotic models go through the free-form
-// model field in Settings. The picker also appends whatever model the
-// user has configured in Settings if it isn't already listed here.
-const MODEL_CATALOG = Object.freeze({
-  anthropic: [
-    { model: 'claude-opus-4-8',            label: 'Claude Opus 4.8' },
-    { model: 'claude-sonnet-4-6',          label: 'Claude Sonnet 4.6' },
-    { model: 'claude-haiku-4-5-20251001',  label: 'Claude Haiku 4.5' },
-  ],
-  // The fallback set shown until the user curates their own (openrouterChatCatalog).
-  // Led by the current best open-weights tool-calling models (mid-2026), so a
-  // fresh OpenRouter user gets a strong default without curating first.
-  openrouter: [
-    { model: 'z-ai/glm-5.1',          label: 'GLM-5.1 (open · tool-calling)' },
-    { model: 'moonshotai/kimi-k2.6',  label: 'Kimi K2.6 (open)' },
-    { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
-    { model: 'openai/gpt-4o',         label: 'GPT-4o' },
-  ],
-  // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
-  'local-webgpu': [
-    { model: LOCAL_MODEL_ID, label: 'Gemma 4 E2B' },
-  ],
-});
-
-// Live model inventory cache (providers with `liveModels`, i.e. Ollama
-// /api/tags). Short TTL: chat-view mounts call models/options freely, and
-// hammering the local daemon buys nothing. A FAILED probe (daemon down)
-// is cached as null for the same TTL so the picker degrades quietly
-// instead of retry-storming localhost.
-const LIVE_MODELS_TTL_MS = 30_000;
-/** @type {Map<string, { at: number, list: Array<{model:string,label:string}> | null }>} */
-const liveModelsCache = new Map();
-const liveProviderModels = async (/** @type {string} */ name) => {
-  const hit = liveModelsCache.get(name);
-  if (hit && Date.now() - hit.at < LIVE_MODELS_TTL_MS) return hit.list;
-  let list = null;
-  // ollamaHost (issue #104) lets the live inventory fetch a remote daemon's
-  // /api/tags; non-ollama adapters ignore it.
-  try { list = await listProviderModels(name, { safeFetch, ollamaHost: settingsStore.get().ollamaHost }); }
-  catch { list = null; }
-  liveModelsCache.set(name, { at: Date.now(), list });
-  return list;
-};
-
-// OpenRouter's chat catalog = the user's CURATED selection (Settings →
-// Providers), each id mapped to a picker option. why curated and not the live
-// ~300-model list: the gateway has too many models to dump into a chat
-// dropdown. Until the user curates, fall back to the small static set we KNOW
-// resolves, so a fresh OpenRouter user still gets a working picker (no 404).
-const openrouterChatCatalog = () => {
-  const picked = Array.isArray(settingsStore.get().openrouterModels) ? settingsStore.get().openrouterModels : [];
-  const ids = picked.filter((/** @type {any} */ id) => typeof id === 'string' && id.trim()).map((/** @type {any} */ id) => id.trim());
-  if (ids.length === 0) return MODEL_CATALOG.openrouter;
-  return ids.map((/** @type {any} */ id) => ({ model: id, label: id }));
-};
-
-// Live per-model context window, for the dynamic trim trigger. A model's
-// window is effectively constant for its id, so once we learn it we keep it
-// for the LIFETIME of this service worker — no timer, no TTL. The cache is a
-// plain Map checked lazily when a turn needs the value; the MV3 SW's own
-// frequent teardown (idle reclaim wipes module state) is what eventually
-// re-fetches, so a time-based expiry would be redundant theater on top of it.
-//
-// why NON-BLOCKING: the lookup is a network round-trip and the trigger has a
-// correct static-table fallback, so blocking the turn on it would add latency
-// for no correctness gain. A cache MISS returns undefined (the turn uses the
-// table) and kicks off a one-shot background fetch; the live value refines
-// LATER turns — the mechanical-fallback-then-async-refine shape used
-// elsewhere (trim enrichment). We cache only SUCCESSES; a failed/null lookup
-// is left UNCACHED so a transient failure (locked vault, daemon briefly down)
-// is retried next turn instead of sticking.
-/** @type {Map<string, { window: number } | { fetching: true }>} */
-/** @type {Map<string, any>} */ const contextWindowCache = new Map();
-const liveContextWindow = (/** @type {string} */ provider, /** @type {string} */ model) => {
-  if (!provider || !model) return undefined;
-  const key = `${provider}::${model}`;
-  const hit = contextWindowCache.get(key);
-  if (hit && typeof hit.window === 'number') return hit.window; // learned → keep for SW lifetime
-  if (hit && hit.fetching) return undefined;                    // in-flight → don't fire a second
-  contextWindowCache.set(key, { fetching: true });
-  // ollamaHost (issue #104): the live per-model window comes from the daemon's
-  // /api/show, so a remote Ollama needs its host or it would query localhost and
-  // silently fall back to the static table; other adapters ignore it.
-  providerModelContextWindow(provider, model, { getSecret, safeFetch, ollamaHost: settingsStore.get().ollamaHost })
-    .then((w) => {
-      if (typeof w === 'number') contextWindowCache.set(key, { window: w });
-      else contextWindowCache.delete(key); // miss → drop so the next turn retries
-    })
-    .catch(() => contextWindowCache.delete(key));
-  return undefined;
-};
-
-/**
- * Build the per-chat model options + the currently-selected value
- * (`provider::model`). The side panel shows a picker above the composer when
- * there are 2+ options.
- *
- * Two modes:
- *   - FRESH chat (no sessionId, or the session doesn't exist): every
- *     key-configured provider's catalog + the Settings-configured model;
- *     `selected` follows the active provider; `sessionProvider` is null.
- *   - MID-SESSION (sessionId resolves to a session): scoped to THAT session's
- *     provider only (model-only switching — the provider is fixed once a chat
- *     starts); `selected` is the session's current model and is always present
- *     even if it's a custom id; `sessionProvider` names the locked provider.
- *
- * Keyless/live providers (Ollama): the "has a key" gate becomes "the daemon
- * answered" — its real pulled-model inventory is the catalog. OpenRouter uses
- * the curated catalog above.
- *
- * @param {{ sessionId?: string | null }} [opts]
- */
-const buildModelOptions = async ({ sessionId = null } = {}) => {
-  const sess = sessionId ? await sessions.get(sessionId).catch(() => null) : null;
-  const lockProvider = sess?.provider ?? null;
-
-  const options = [];
-  for (const p of listProviders()) {
-    // Mid-session is model-only within the session's provider.
-    if (lockProvider && p.name !== lockProvider) continue;
-    let hasKey = false;
-    if (p.keyless) {
-      hasKey = true;
-    } else {
-      try { hasKey = !!(await vault.getSecret(/** @type {string} */ (p.vaultSecretName))); }
-      catch { hasKey = false; }
-    }
-    // why: when locked to a session whose provider key was since removed we
-    // still surface that provider's models (and the current one) rather than
-    // render an empty picker; the missing-key skip applies to fresh chats only.
-    if (!hasKey && !lockProvider) continue;
-    // The local WebGPU model only appears once downloaded + resident (the
-    // offscreen engine reports `available`); otherwise selecting it would error
-    // on the first turn ("local model not loaded"). Hardware capability is gated
-    // earlier, at download time (Settings → WebGPU models).
-    if (p.name === 'local-webgpu' && !localModelState.available()) continue;
-    let catalog = (/** @type {any} */ (MODEL_CATALOG))[p.name] ?? [{ model: p.defaultModel, label: p.defaultModel }];
-    if (p.name === 'openrouter') catalog = openrouterChatCatalog();
-    if (p.liveModels) {
-      const live = await liveProviderModels(p.name);
-      if (live) catalog = live;
-      else if (!lockProvider) continue; // unreachable → offer nothing, not a guess
-    }
-    for (const c of catalog) {
-      options.push({
-        provider: p.name,
-        providerLabel: p.label,
-        model: c.model,
-        label: c.label,
-        value: `${p.name}::${c.model}`,
-      });
-    }
-    // Append the user's Settings-configured model for this provider if
-    // it's a custom id not already in the catalog.
-    if (settingsStore.get().providerName === p.name && settingsStore.get().providerModel
-        && !options.some((o) => o.value === `${p.name}::${settingsStore.get().providerModel}`)) {
-      options.push({
-        provider: p.name,
-        providerLabel: p.label,
-        model: settingsStore.get().providerModel,
-        label: `${settingsStore.get().providerModel} (custom)`,
-        value: `${p.name}::${settingsStore.get().providerModel}`,
-      });
-    }
-  }
-
-  /** @type {any} */ let selected;
-  let sessionProvider = null;
-  if (sess?.provider) {
-    sessionProvider = sess.provider;
-    selected = `${sess.provider}::${sess.model}`;
-    // Always keep the session's CURRENT model selectable, even if it's a
-    // custom id outside the catalog — otherwise the dropdown would show the
-    // wrong value as selected.
-    if (!options.some((o) => o.value === selected)) {
-      options.push({
-        provider: sess.provider,
-        providerLabel: listProviders().find((p) => p.name === sess.provider)?.label ?? sess.provider,
-        model: sess.model,
-        label: `${sess.model} (current)`,
-        value: selected,
-      });
-    }
-  } else {
-    const active = resolveActiveProvider();
-    selected = `${active.name}::${active.model}`;
-    // If the active selection isn't a usable option (e.g. its provider has
-    // no key), fall back to the first option so the picker shows something
-    // valid.
-    if (!options.some((o) => o.value === selected)) {
-      selected = options[0]?.value ?? selected;
-    }
-  }
-  return { options, selected, sessionProvider };
-};
+// The per-chat model picker's catalog assembly lives in background/model-catalog.js
+// (curated catalog, live Ollama inventory, OpenRouter curated mapping, live
+// context window, buildModelOptions). The factory is invoked further down, after
+// its collaborators (safeFetch, getSecret, sessions) are created.
 
 // The user-configured Ollama host (issue #104). Its exact origin joins the
 // allowlist so safeFetch permits a remote daemon — the loopback default is
@@ -817,6 +624,14 @@ const contacts = createContactsStore({ idb });
 // pushState doesn't re-read IDB on every push and onboarding/complete can reach
 // it via deps. profileState.get() ensures+caches; completeOnboarding refreshes.
 const profileState = makeProfileState({ profiles });
+
+// The per-chat model picker's catalog assembly (background/model-catalog.js).
+// localModelAvailable is a thunk because localModelState is created later.
+const { liveProviderModels, liveContextWindow, buildModelOptions } = makeModelCatalog({
+  listProviders, listProviderModels, providerModelContextWindow,
+  localModelId: LOCAL_MODEL_ID, localModelAvailable: () => localModelState.available(),
+  settingsStore, vault, sessions, resolveActiveProvider, getSecret, safeFetch,
+});
 
 // ---------------------------------------------------------------------------
 // Tool layer
@@ -2070,6 +1885,15 @@ const closeSidePanel = async () => {
   }
 };
 
+// How peerd shows up in the tab strip (background/tab-affordances.js): the
+// agent-tab card, the "pull peerd in" web-tab hint, and the toolbar-icon /
+// Alt+Shift+P front door. It owns all the tab-strip state + listeners; the SW
+// calls noteAgentTab/scheduleWebTabHint/broadcastAgentTab/showWebTabHint from
+// its tool-context + port wiring, and setTabAnchor from the actor-turn start.
+const {
+  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen,
+} = makeTabAffordances({ browser, uiPorts, denylistStore, closeSidePanel });
+
 // Confirmation coordinator. The dispatcher's async confirmation step
 // calls ctx.confirm(prompt); this pushes a 'confirm/request' to the side
 // panel and resolves when the panel posts back 'confirm/answer'.
@@ -2548,15 +2372,9 @@ const ACTOR_REGISTRY_BY_PREFIX = {
 // promise collapses them to ONE mint; the entry clears when it settles. why a
 // shared map: engine ids carry a prefix and web keys are `web:<tabId>`, so they
 // never collide. @type {Map<string, Promise<string>>} */
-const mintInFlight = new Map();
-/** @param {string} key @param {() => Promise<string>} fn @returns {Promise<string>} */
-const mintOnce = (key, fn) => {
-  const existing = mintInFlight.get(key);
-  if (existing) return existing;
-  const p = (async () => { try { return await fn(); } finally { mintInFlight.delete(key); } })();
-  mintInFlight.set(key, p);
-  return p;
-};
+// Single-flight dedup for lazy actor minting (background/mint-once.js): two
+// message_actor calls racing to the same instance collapse onto ONE mint.
+const { mintOnce } = makeMintOnce();
 
 // Start the actor process on demand: lazily mint an actor session for an
 // instance (on the first message_actor). Inherits the spawning chat's RESOLVED
@@ -2604,15 +2422,22 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // session storage (ephemeral by design — on a cold miss we re-mint against the
 // live tab, whose DOM re-derives state). The address the orchestrator uses is the
 // tabId AS A STRING (the actor's instanceId).
+// A registry's chrome.storage.session persistence: the persist thunk + the
+// best-effort boot rehydrate, shared by the three actor registries below (a
+// missing/garbage stored value just starts empty). Ephemeral by design — every
+// one of these is a routing cache whose durable truth lives on the session record.
+const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
+  () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
+const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) => {
+  Promise.resolve(sessionCache.sessionGet(key))
+    .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
+    .catch(() => {});
+};
+
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
-const persistWebBindings = () => {
-  sessionCache.sessionSet(WEB_BINDINGS_KEY, webActorTabBindings.entries()).catch(() => {});
-};
-// Rehydrate on SW boot (best-effort; a missing/garbage value just starts empty).
-Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
-  .then((e) => { if (Array.isArray(e)) webActorTabBindings.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistWebBindings = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -2621,12 +2446,8 @@ Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
 // the tab bindings — ephemeral is fine (re-mint on loss).
 const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
-const persistWebActors = () => {
-  sessionCache.sessionSet(WEB_ACTOR_KEY, webActorRegistry.entries()).catch(() => {});
-};
-Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
-  .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
+hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
@@ -2641,12 +2462,8 @@ Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
 // no unbounded growth + no cleanup hook needed) while the durable session is the truth.
 const apiActorBindings = makeApiActorBindings();
 const API_ACTOR_KEY = 'apiActorBindings';
-const persistApiActors = () => {
-  sessionCache.sessionSet(API_ACTOR_KEY, apiActorBindings.entries()).catch(() => {});
-};
-Promise.resolve(sessionCache.sessionGet(API_ACTOR_KEY))
-  .then((e) => { if (Array.isArray(e)) apiActorBindings.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistApiActors = persistRegistry(API_ACTOR_KEY, apiActorBindings);
+hydrateRegistry(API_ACTOR_KEY, apiActorBindings);
 
 // DESIGN-18 P2 — the API-integration discovery surface (injected as ctx.listApiIntegrations,
 // the integration rows of actor_list). The addressable set is the chat's FORMED integrations (origins it
@@ -2920,27 +2737,9 @@ const resolveDwebActor = async () => {
 // spends money; the actor's loop is the thing being protected.
 const DWEB_AGENT_ROOM = 'peerd-agent';
 const DWEB_AGENT_NO_REPORT = 'NO_REPORT';
-/** per-did wake timestamps (sliding minute) + a global hourly counter */
-const dwebInboundByDid = new Map();
-let dwebInboundHour = { windowStart: 0, count: 0 };
-const dwebInboundAllowed = (/** @type {string} */ did) => {
-  const nowMs = Date.now();
-  const times = (dwebInboundByDid.get(did) ?? []).filter((/** @type {number} */ t) => nowMs - t < 60_000);
-  if (times.length >= 3) return false;                      // 3/min per did
-  if (nowMs - dwebInboundHour.windowStart > 3_600_000) dwebInboundHour = { windowStart: nowMs, count: 0 };
-  if (dwebInboundHour.count >= 30) return false;            // 30/hour global
-  times.push(nowMs);
-  dwebInboundByDid.set(did, times);
-  dwebInboundHour.count += 1;
-  // Sweep dead entries: dids are free/Sybil (self-minted did:key), so without
-  // eviction the map grows monotonically over the long-lived (keepalive-pinned)
-  // SW. Drop any entry whose timestamps have all aged out. Cheap — bounded by
-  // the 30/hour ADMIT rate, so at most a few dozen live keys ever.
-  for (const [k, ts] of dwebInboundByDid) {
-    if (k !== did && !ts.some((/** @type {number} */ t) => nowMs - t < 60_000)) dwebInboundByDid.delete(k);
-  }
-  return true;
-};
+// Inbound wake rate cap (background/dweb-inbound-rate-cap.js): 3/min per did +
+// 30/hour global, bound BEFORE any model call so a Sybil peer can't drain budget.
+const { allow: dwebInboundAllowed } = makeDwebInboundRateCap();
 
 // ── A2A: the agent-to-agent mesh dispatch (the a2a_run code surface) ─────────
 // ONE dispatch instance (state: pending asks) wired to real mesh IO on the
@@ -3304,7 +3103,7 @@ const actorMessaging = makeActorMessaging({
         : kind === 'notebook' ? jsTabTracker.getTabId(instanceId)
         : kind === 'app' ? appTabTracker.getTabId(instanceId)
         : null;
-      if (typeof ownedTab === 'number') tabMsgAnchor.set(ownedTab, parentToolUseId);
+      if (typeof ownedTab === 'number') setTabAnchor(ownedTab, parentToolUseId);
     }
     // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_actor
     // call (parentToolUseId present — absent on a boot redrain), pass a `display`
@@ -3388,147 +3187,6 @@ const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = nu
   try { uiPorts.broadcast({ type: 'turn/system-note', text, ...(action ? { action } : {}) }); }
   catch { /* panel gone */ }
 };
-
-// The CURRENT AGENT TAB — the single tab the loop most recently created OR
-// interacted with (ran a command in, navigated, clicked, …). Agent tabs open in
-// the BACKGROUND now (never steal focus), so the chat shows ONE persistent,
-// sticky "go to the tab peerd is working in" card pointing here; clicking it is
-// the user gesture that focuses the tab AND opens the side panel (Chrome won't
-// let the agent/SW open the panel on its own — DESIGN-12). Updated on every
-// touch, so it always tracks where the agent IS, not just the last tab created.
-// p·cyan e·red e·amber r·green d·magenta — the home agent-tab card's Open button
-// draws a fresh one each time the card is (re)generated.
-const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
-// DESIGN-17/18 tab-card anchoring: maps an agent tab → the message_actor tool_use that
-// LAST drove it. The inline "peerd opened …" notice anchors to THAT message's turn, not
-// the wall-clock-latest user message — actor work is async, so a physical tab touch
-// (engine ensureTab / web DOM noteTab) often lands during a later turn, which would clump
-// the cards at the chat's end. Set at each actor-turn start (runActorTurn) for the actor's
-// owned tab; never cleared — overwritten only when a NEW message re-drives that tab, which
-// is exactly when the card should resurface to the newer turn. Orchestrator-opened tabs
-// (open_tab) are absent here → they keep the wall-clock anchor (correct; they're synchronous).
-/** @type {Map<number, string>} tabId → parentToolUseId */
-const tabMsgAnchor = new Map();
-/** @type {number | null} */ let agentTabId = null;
-/** @type {any} */ let agentTabInfo = null;   // the last { tabId, windowId, kind, name, label, color } noted
-/** @type {number | null} */ let activeTabId = null;    // the currently-active tab — hide the card when you're ON it
-// Broadcast the current-agent-tab pointer. `noted` is true ONLY when this fires
-// from a real agent touch (noteAgentTab) — the inline notice creates/resurfaces
-// on those; a passive refresh (tab activation, a fresh surface replay) sends
-// noted:false so clicking around tabs never bumps a notice.
-const broadcastAgentTab = (noted = false) => {
-  uiPorts.broadcast({
-    type: 'agent/tab',
-    tab: agentTabInfo ? { ...agentTabInfo, current: agentTabInfo.tabId === activeTabId, noted } : null,
-  });
-};
-const noteAgentTab = async (/** @type {number} */ tabId, /** @type {any} */ info = {}) => {
-  if (typeof tabId !== 'number') return;
-  const { kind = null, name = null, label = null, opened = true, parentToolUseId: ptuArg = null } = (typeof info === 'string' ? { label: info } : info);
-  // The message_actor turn driving this tab (see tabMsgAnchor) — caller-supplied or the
-  // last actor-turn-start mapping. Flows to the agent/tab event so the notice anchors to
-  // that message's turn instead of the wall-clock-latest user message.
-  const parentToolUseId = ptuArg ?? tabMsgAnchor.get(tabId) ?? null;
-  let windowId; let title = null;
-  try { const t = await browser.tabs.get(tabId); windowId = t.windowId; title = t.title || t.url || null; }
-  catch { return; } // tab already gone — don't point the card at a dead tab
-  agentTabId = tabId;
-  // Instance tabs carry a kind + the instance NAME (the card reads like a tab:
-  // "Notebook | my-nb"); a web tab (open_tab / DOM) just shows its page label.
-  const text = (kind && name) ? `${kind} · ${name}` : (label || title || 'a tab');
-  // why a fresh brand color each generation (owner): the home card's Open button
-  // cycles a peerd brand color (p·cyan e·red e·amber r·green d·magenta) so it
-  // stays eye-catching — the sanctioned "peers/actions are the content" accent.
-  const color = AGENT_TAB_COLORS[Math.floor(Math.random() * AGENT_TAB_COLORS.length)];
-  // `opened`: true when peerd OPENED this tab (open_tab / an engine create) — the
-  // only case that mints an inline notice; false when the web actor merely ACTED
-  // on a tab, which resurfaces an existing notice but never invents one for a tab
-  // the USER opened. `noted: true` marks this as a real agent touch (vs. a
-  // passive current-flag refresh on tab activation).
-  agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened, parentToolUseId };
-  broadcastAgentTab(true);
-};
-// Track the active tab so the card hides when you're on the agent tab, and shows
-// again when you move away.
-browser.tabs?.onActivated?.addListener(({ tabId }) => {
-  activeTabId = tabId;
-  if (agentTabInfo) broadcastAgentTab();
-});
-// Clear the card when the agent tab closes (clicking a dead tab does nothing).
-browser.tabs?.onRemoved?.addListener((tabId) => {
-  if (tabId === agentTabId) { agentTabId = null; agentTabInfo = null; broadcastAgentTab(); }
-});
-
-// "Pull peerd in" reminder on the regular web pages peerd opens. A peerd-opened
-// WEB tab gets a brief, auto-dismissing caption (top-right) that types out
-// "Press <shortcut> to pull peerd in" — engine tabs carry the real button, a
-// third-party page can't, so this points you at the shortcut/icon. INFORMATIONAL
-// ONLY (it never messages the SW back), so it crosses no boundary and needs no
-// new permission (docs/PULL-IN-PEERD-WEB-SCOPE.md). One-shot, on first load, via
-// chrome.scripting; never on a denylisted/sensitive origin; the injected script
-// itself waits until the tab is actually visible before it shows.
-// Peerd-opened web tabs (tabId → origin), tracked persistently so we can show
-// the reminder at the RIGHT moment: when the user is ACTIVELY VIEWING one with
-// the SIDEBAR CLOSED — they walked onto it, OR they closed the panel while on it.
-// The page world can't read sidebar state, so the SW gates the inject; the
-// injected script is idempotent + auto-dismissing, so re-injecting is safe.
-/** @type {Map<number, string>} */
-const peerdWebTabs = new Map();
-// The peerd toolbar icon as a data: URL, so the injected hint can show it on a
-// third-party page without a chrome-extension:// fetch (no web_accessible_
-// resources needed). Fetched + cached once; '' if it ever fails (the hint then
-// falls back to the wordmark text).
-/** @type {string | null} */ let pullInIconUrl = null;
-const getPullInIconUrl = async () => {
-  if (pullInIconUrl !== null) return pullInIconUrl;
-  try {
-    const res = await fetch(browser.runtime.getURL('icons/icon32.png'));
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    pullInIconUrl = `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}`;
-  } catch (e) {
-    console.debug('[sw] pull-in icon load failed', (/** @type {{ message?: string }} */ (e))?.message ?? e);
-    pullInIconUrl = '';
-  }
-  return pullInIconUrl;
-};
-const showWebTabHint = async (/** @type {number} */ tabId) => {
-  if (!peerdWebTabs.has(tabId)) return;
-  if (uiPorts.hasNamed('sidepanel')) return;          // sidebar open → the chat's already here
-  let tab;
-  try { tab = await browser.tabs.get(tabId); } catch { return; }
-  if (!tab || tab.status !== 'complete' || tab.active !== true) return; // only when actually being viewed
-  // Still the page peerd opened? (don't graffiti the user's own later navigation.)
-  let origin;
-  try { origin = new URL(/** @type {string} */ (tab.url)).origin; } catch { return; }
-  if (origin !== peerdWebTabs.get(tabId)) { peerdWebTabs.delete(tabId); return; }
-  let shortcut = '';
-  try {
-    const cmds = await browser.commands?.getAll?.();
-    shortcut = (cmds ?? []).find((c) => c.name === 'pull-in-peerd')?.shortcut || '';
-  } catch { /* no commands API in this build */ }
-  const iconUrl = await getPullInIconUrl();
-  try {
-    await browser.scripting.executeScript({ target: { tabId }, func: pullInHintInjected, args: [shortcut, iconUrl] });
-  } catch (e) {
-    // Pages the browser refuses to inject into (chrome:, the stores, a hard CSP)
-    // — harmless; the hint just doesn't show.
-    console.debug('[sw] pull-in hint inject skipped', (/** @type {{ message?: string }} */ (e))?.message ?? e);
-  }
-};
-const scheduleWebTabHint = (/** @type {number} */ tabId, /** @type {string} */ url) => {
-  if (typeof tabId !== 'number' || typeof url !== 'string') return;
-  let u;
-  try { u = new URL(url); } catch { return; } // not a real web URL → no hint
-  if (!u.protocol.startsWith('http')) return;
-  if (matchesDenylist(u.hostname, denylistStore.patterns())) return; // never graffiti a sensitive site
-  peerdWebTabs.set(tabId, u.origin);
-  showWebTabHint(tabId); // if the user is already viewing it with the sidebar closed
-};
-// Show when the user WALKS ONTO a peerd web tab, or it finishes loading while
-// they're on it. (Sidebar-close is handled at the port disconnect, below.)
-browser.tabs?.onActivated?.addListener(({ tabId }) => { showWebTabHint(tabId); });
-browser.tabs?.onUpdated?.addListener((tabId, changeInfo) => { if (changeInfo.status === 'complete') showWebTabHint(tabId); });
-browser.tabs?.onRemoved?.addListener((tabId) => { peerdWebTabs.delete(tabId); });
 
 // /init orchestration lives in peerd-runtime/memory/init-orchestrator.js
 // (scan → draft → confirm → persist); the SW binds the IO. The
@@ -3781,98 +3439,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...(/** @type {any} */ (originCredentialRoutes)),
 })));
 
-// ---------------------------------------------------------------------------
-// 7. Toolbar icon + "pull in peerd" shortcut → home, or pull the chat to the side
-// ---------------------------------------------------------------------------
-
-// The toolbar icon is peerd's FRONT DOOR. With no home up yet it opens the
-// full-page home — peerd should feel first-party, not a bolted-on sidebar
-// (DESIGN-12, owner 2026-06-20). Once home IS up, the icon COMPLEMENTS: it pulls
-// the chat into the window-global side panel (Chrome) / sidebar (Firefox) so the
-// chat follows you onto ANY tab — including a plain web page peerd opened, the
-// case the engine-tab "pull in peerd" button couldn't reach without breaching the
-// fail-closed SW boundary (docs/PULL-IN-PEERD-WEB-SCOPE.md). The Alt+Shift+P
-// command is the dedicated twin: it ALWAYS pulls the panel in, from anywhere.
-//
-// Hard constraint: sidePanel.open()/sidebarAction.open() must run SYNCHRONOUSLY
-// inside the click/keystroke gesture — no await before them or the activation is
-// dropped. So every decision input must be available without awaiting: the
-// window id (from the listener's tab arg) and "is home open?" (two sync signals
-// below). We cannot tabs.query() in the gesture; decidePullIn is a pure sync fn.
-
-// Sync "is home open?" — a boot-seeded set of home tab ids OR a live home port.
-// why both: the set survives an SW respawn (the home port may not have
-// reconnected in the instant the icon fires); the port covers a home tab the set
-// hasn't learned yet. A miss is benign — openHome() is focus-or-create, so the
-// worst case is the first post-respawn click focusing home instead of the panel.
-const HOME_URL = browser.runtime.getURL('home/home.html');
-/** @type {Set<number>} */
-const homeTabIds = new Set();
-const trackHomeTab = (/** @type {number} */ tabId, /** @type {string} */ url) => {
-  if (typeof url !== 'string') return;
-  if (url.startsWith(HOME_URL)) homeTabIds.add(tabId);
-  else homeTabIds.delete(tabId);
-};
-browser.tabs?.query?.({}).then((tabs) => {
-  for (const t of tabs) if (t.id != null) trackHomeTab(t.id, t.url ?? '');
-}).catch((e) => console.debug('[sw] home-tab bootstrap failed', e));
-// A second onUpdated/onRemoved pair (the DOM-ref ones live earlier) — keeping the
-// home-tab bookkeeping self-contained here reads cleaner than threading it in.
-browser.tabs?.onUpdated?.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.url != null || tab?.url != null) trackHomeTab(tabId, /** @type {string} */ (changeInfo.url ?? tab.url));
-});
-browser.tabs?.onRemoved?.addListener((tabId) => { homeTabIds.delete(tabId); });
-const isHomeOpen = () => homeTabIds.size > 0 || uiPorts.hasNamed('home');
-
-// A synchronous current-window id for sidePanel.open({ windowId }). onClicked and
-// (modern) onCommand both supply the tab, so this only backstops engines whose
-// command callback omits it. Seeded at boot, kept warm on focus changes.
-/** @type {number | null} */ let lastFocusedWindowId = null;
-browser.windows?.getLastFocused?.().then((w) => { lastFocusedWindowId = w?.id ?? lastFocusedWindowId; }).catch(() => {});
-browser.windows?.onFocusChanged?.addListener((winId) => {
-  if (winId != null && winId !== browser.windows.WINDOW_ID_NONE) lastFocusedWindowId = winId;
-});
-
-// The pull-in itself — open() runs synchronously (no await before it) to keep the
-// gesture; a failed/declined open falls back to home so the icon never dead-ends.
-const pullInPeerd = (/** @type {number} */ windowId, { fromShortcut = false } = {}) => {
-  const target = decidePullIn({
-    homeOpen: isHomeOpen(),
-    panelOpen: uiPorts.hasNamed('sidepanel'),
-    hasSidePanel: !!(/** @type {any} */ (browser)).sidePanel?.open,
-    hasSidebar: !!browser.sidebarAction?.open,
-    fromShortcut,
-  });
-  // Toggle-closed (shortcut only) — close needs no gesture, so fire and forget.
-  if (target === 'close') { closeSidePanel(); return; }
-  try {
-    if (target === 'panel' && windowId != null) {
-      const p = (/** @type {any} */ (browser)).sidePanel.open({ windowId });
-      if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidePanel.open failed', e); openHome(); });
-      return;
-    }
-    if (target === 'sidebar') {
-      const p = browser.sidebarAction.open();
-      if (p?.catch) p.catch((e) => { console.warn('[sw] sidebarAction.open failed', e); openHome(); });
-      return;
-    }
-  } catch (e) { console.warn('[sw] pull-in open threw', e); }
-  openHome();
-};
-
-browser.action?.onClicked?.addListener((tab) => {
-  pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: false });
-});
-// Alt+Shift+P (user-rebindable at the browser's extension-shortcuts page) —
-// TOGGLES the panel: pulls it in, or closes it if already open. The command
-// handler is a VALID user-gesture context on BOTH Chrome and Firefox, so it needs
-// no content-script relay — and thus no hole in the fail-closed SW boundary the
-// injected-web-page button would have required.
-browser.commands?.onCommand?.addListener((command, tab) => {
-  if (command !== 'pull-in-peerd') return;
-  pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: true });
-});
-
+// The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel
+// in) lives in background/tab-affordances.js alongside the agent-tab card and
+// web-tab hint — it owns the sync-gesture pull-in and its listeners.
 loadUserEndpoints();
 loadSettings();
 
