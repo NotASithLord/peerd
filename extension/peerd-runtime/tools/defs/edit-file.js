@@ -136,7 +136,7 @@ export const editFileTool = {
       if (registry?.getDefaultForSession) {
         const currentId = await registry.getDefaultForSession(sessionId).catch(() => null);
         if (!currentId) {
-          const create = kind === 'app' ? 'app_create' : 'js_create or js_notebook';
+          const create = kind === 'app' ? "sandbox_create({kind:'app'})" : "sandbox_create({kind:'notebook'}) or js_notebook";
           return {
             ok: false,
             code: 'no_current_instance',

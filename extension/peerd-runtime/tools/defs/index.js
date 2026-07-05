@@ -27,15 +27,13 @@ import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
 import { vmImportTool }               from './vm-import.js';
 import { vmWriteFileTool }           from './vm-write-file.js';
-import { vmCreateTool }               from './vm-create.js';
 import { vmDeleteTool }               from './vm-delete.js';
-import { jsCreateTool }               from './js-create.js';
+import { sandboxCreateTool }          from './sandbox-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { jsRunTool }                  from './js-run.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
-import { appCreateTool }              from './app-create.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
 import { appSearchTool }              from './app-search.js';
@@ -81,21 +79,20 @@ export {
   // sessions
   actorListTool,
   openTabTool,
+  // engine (the one cross-kind create; per-kind ops below)
+  sandboxCreateTool,
   // engine (WebVM)
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
-  vmCreateTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsCreateTool,
   jsNotebookTool,
   jsRunTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appCreateTool,
   appUpdateTool,
   appOpenTool,
   appSearchTool,
@@ -158,21 +155,22 @@ export const BUILTIN_TOOLS = Object.freeze([
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
+  // engine — sandbox_create is the one cross-kind bootstrap (it folded
+  // vm_create/js_create/app_create); the per-kind ops below are all
+  // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.
+  sandboxCreateTool,
   // engine (WebVM)
-  vmCreateTool,
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsCreateTool,
   jsNotebookTool,
   jsRunTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appCreateTool,
   appUpdateTool,
   appOpenTool,
   appSearchTool,

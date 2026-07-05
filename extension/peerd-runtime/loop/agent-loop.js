@@ -344,11 +344,9 @@ export async function* runUserTurn(ctx) {
       return;
     }
 
-    // Progressive disclosure: recompute the advertised tools for THIS step so
-    // an instance created earlier this turn reveals its ops now. refreshTools
-    // also restamps the dispatch ctx's instanceState (SW side), keeping the
-    // exposure gate in lockstep with what the model is shown. A failure keeps
-    // the prior set — never break the turn on a tool refresh.
+    // Recompute the advertised tools for THIS step — mid-turn exposure changes
+    // (dweb engagement, a goal run starting/stopping) show on the next step.
+    // A failure keeps the prior set — never break the turn on a tool refresh.
     if (typeof refreshTools === 'function') {
       try { activeTools = await refreshTools(); }
       catch { /* keep the prior tool set */ }

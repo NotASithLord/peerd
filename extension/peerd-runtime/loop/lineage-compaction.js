@@ -84,7 +84,14 @@ const contentLen = (content) => (typeof content === 'string' ? content.length : 
 const extractHandle = (meta, content) => {
   const handle = meta ? extractInstanceHandle(meta.primitive, content) : null;
   if (!handle) return '';
-  return handle.name ? `id=${handle.id} "${handle.name}"` : `id=${handle.id}`;
+  // why the kind= suffix: under the cross-kind 'engine' primitive
+  // (sandbox_create) the spine's own primitive slot says only 'engine', and
+  // trim re-harvests handles FROM the spine after the raw body (which carried
+  // "kind":"…") is gone — without carrying the resolved kind here, the trim
+  // summary could no longer say WHICH kind of instance the id is. Per-kind
+  // primitives already carry it (kind === primitive), so no suffix there.
+  const base = handle.name ? `id=${handle.id} "${handle.name}"` : `id=${handle.id}`;
+  return handle.kind !== meta.primitive ? `${base} kind=${handle.kind}` : base;
 };
 
 /**

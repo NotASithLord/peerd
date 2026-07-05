@@ -37,7 +37,27 @@ and storage formats may move until the surface stabilizes.
   WebRTC test.
 
 ### Changed
-- **The five `inspect_*` introspection tools became one `inspect`.**
+- **The orchestrator's tool surface got a hard slim: 27 → 18 always-on.**
+  Three moves, one thesis — the main agent bootstraps and delegates; every
+  instance byte stays behind an actor heap:
+  - **The engine file READS are actor-only now.** `js_read_file`,
+    `app_read_file`, and `app_list_files` had stayed on the orchestrator as
+    fenced "cheap reads" — but an instance file is not reliably
+    agent-authored (notebook/app code fetches and persists web data), so even
+    a fenced read handed untrusted bytes to the orchestrator's context. The
+    convenience broke the isolation premise; reads now ride the instance's
+    actor like every other op.
+  - **One `sandbox_create({ kind })` replaces `vm_create` / `js_create` /
+    `app_create`.** Same bootstrap, one tool: the webvm/notebook/app taxonomy
+    is laid out side-by-side in a single description where the model actually
+    picks, instead of repeated across three. The per-kind create behavior is
+    unchanged (background tab, go-there card, chat's current, id returned),
+    and the durable-handle harvest still records which kind an id is (the
+    result stamps `kind`; the compaction/trim extractors read it).
+  - **The instance-gating ("progressive disclosure") machinery is deleted.**
+    Every op it deferred is actor-only now, so it had nothing left to gate —
+    and its "create one first" refusal for a premature call was the wrong
+    message anyway (the honest answer is "that's the actor's tool").
   `inspect_provider_config`, `inspect_storage`, `inspect_session_access`,
   `inspect_denylist`, and `inspect_audit_log` were five near-identical
   read-only tools; they collapse into a single `inspect({ kind })` (kinds:

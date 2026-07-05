@@ -1,5 +1,7 @@
 // @ts-check
-// js_create — spin up a fresh Notebook.
+// The notebook arm of sandbox_create — spin up a fresh Notebook.
+// (Was the standalone js_create tool; merged into sandbox_create({kind:'notebook'})
+// 2026-07-05 — one create tool, three kinds.)
 //
 // Creates a Notebook record + spawns its tab in the background. The new
 // Notebook becomes this chat's current — subsequent js_notebook calls
@@ -37,35 +39,13 @@ const NOTEBOOK_NOTE = [
   '</notebook>',
 ].join('\n');
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const jsCreateTool = {
-  name: 'js_create',
-  primitive: 'notebook',
-  description: [
-    'Create a fresh Notebook: a CodeMirror JS IDE with a file tree, its own',
-    'sealed realm, and an OPFS scratch directory. Lightweight (~hundreds of ms',
-    'to boot) compared to a WebVM. Use when vanilla JS is enough — JSON',
-    'processing, parsers, numerical work, library exercising, and DATA ANALYSIS',
-    'WITH CHARTS + TABLES: `import { chart, table, mean } from \'peerd:std\'`',
-    'renders bar/line/scatter as SVG and tables from row objects — no DOM, so a',
-    'Notebook (NOT an App) is the right tool to explain + visualize data; or',
-    'CODE MODE —',
-    'orchestrate many audited fetches/compute in one script and return just the',
-    'result, instead of many separate tool calls. Each run is a FRESH realm (no',
-    'kernel state); split code across multiple .js files and keep cross-run state',
-    'in OPFS. The new Notebook becomes the chat\'s current. Optional name labels',
-    'the tab.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      name: { type: 'string', description: 'Human-friendly name (≤40 chars).' },
-    },
-  },
-  sideEffect: 'write',
-  origins: () => [],
-
-  execute: async (args, ctx) => {
+/**
+ * Create a Notebook record + its background tab; returns { id, name, kind,
+ * isCurrent } plus the Notebook runtime note.
+ * @param {any} args @param {import('/shared/tool-types.js').ToolContext} ctx
+ * @returns {Promise<import('/shared/tool-types.js').ToolResult>}
+ */
+export const createNotebookSandbox = async (args, ctx) => {
     // why: the Notebook registry + tab tracker ride the opaque ctx contract
     // (not on the ToolContext typedef); narrow to the surface this tool uses.
     const jsRegistry = /** @type {{ create: (opts: { name?: string, ownerSessionId: string | null }) => Promise<{ id: string, name: string }>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
@@ -103,6 +83,9 @@ export const jsCreateTool = {
     const summary = JSON.stringify({
       id: record.id,
       name: record.name,
+      // why kind: the merged sandbox_create result is the durable-handle
+      // carrier — instance-handle.js reads it to label the harvested id.
+      kind: 'notebook',
       isCurrent: !!sessionId,
     }, null, 2);
     // The Notebook ACTOR writes + runs the code, so the style + correctness
@@ -111,5 +94,4 @@ export const jsCreateTool = {
       ok: true,
       content: `${summary}\n\n${NOTEBOOK_NOTE}`,
     };
-  },
-};
+  };
