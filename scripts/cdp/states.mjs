@@ -40,7 +40,7 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 const SMOKE_TEXT = 'e2e-smoke-ok';
 
 // The local-first personal-data agent, end to end through the REAL stack: the
-// faked model calls js_run, the sealed worker builds an on-device index in OPFS
+// faked model calls script, the sealed worker builds an on-device index in OPFS
 // and queries it, and the agent reports the answer — every byte computed on
 // device (the realm seal makes the worker incapable of egress).
 const PDA_SCRIPT = `
@@ -56,7 +56,7 @@ const total = rows.reduce((a, r) => a + r.amount, 0);
 return { total, count: rows.length, source: 'on-device OPFS index' };
 `;
 
-// Captures the model's SECOND request body (which carries the js_run tool result
+// Captures the model's SECOND request body (which carries the script tool result
 // back to the model) so the state can prove the sealed worker REALLY computed the
 // answer — not that the faked final turn merely claims it.
 let pdaToolResultBody = '';
@@ -181,8 +181,8 @@ export const STATES = [
   {
     name: 'personal-data', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
-      if (callIndex === 0) return { sse: sseToolCall('js_run', { code: PDA_SCRIPT }) };
-      // call 1 carries the js_run tool result back — capture it for the assertion.
+      if (callIndex === 0) return { sse: sseToolCall('script', { code: PDA_SCRIPT }) };
+      // call 1 carries the script tool result back — capture it for the assertion.
       if (callIndex === 1) pdaToolResultBody = (request && request.postData) || '';
       return { sse: sseText('You spent $50.00 across 3 orders — computed on-device, nothing left your machine.') };
     },
@@ -193,12 +193,12 @@ export const STATES = [
       let out = {};
       await waitFor(async () => { out = await probe(ctx); return out.assistantText && !out.busy; }, { budgetMs: 30_000 });
       const calls = ctx.modelCallCount();
-      rec.check('the agent ran the js_run tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
+      rec.check('the agent ran the script tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
       // the load-bearing proof: the sealed worker actually built + queried the
       // OPFS index — the computed total/count only exist in the worker's result
       // JSON, not in PDA_SCRIPT's source text or the code argument echoed back.
       // why parse, not substring-match the raw body: pdaToolResultBody is the
-      // raw request postData, where the js_run result is a JSON string NESTED in
+      // raw request postData, where the script result is a JSON string NESTED in
       // the request JSON — so its quotes are escaped (\"total\":50) and a raw
       // `"total":50` check never matches (this is why the check was red). Parse
       // the request, pull the tool-result message content (now unescaped), and
@@ -212,9 +212,9 @@ export const STATES = [
           .map((m) => (typeof m.content === 'string' ? m.content : ''))
           .find((c) => c.includes('on-device OPFS index')) || '';
       } catch { /* leave '' — the check fails with a clear detail */ }
-      rec.check('js_run REALLY computed on-device (computed total in tool result, not script source)',
+      rec.check('script REALLY computed on-device (computed total in tool result, not script source)',
         /"total"\s*:\s*50\b/.test(pdaResult) && /"count"\s*:\s*3\b/.test(pdaResult),
-        `js_run tool result: ${pdaResult.slice(0, 200)}`);
+        `script tool result: ${pdaResult.slice(0, 200)}`);
       rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
       await rec.shot('final');
     },
@@ -247,7 +247,7 @@ export const STATES = [
         return { sse: sseText('Delegated to the web actor; awaiting the page read.') };
       }
       const ot = harvestOrchTurn++;
-      if (ot === 0) return { sse: sseToolCall('js_run', { code: HARVEST_SCRIPT }) };
+      if (ot === 0) return { sse: sseToolCall('script', { code: HARVEST_SCRIPT }) };
       return { sse: sseText('You spent $35.50 across 3 orders — Coffee Mug, Notebook, Pen Set — harvested from the page and indexed on-device.') };
     },
     async run(ctx, rec) {
@@ -701,28 +701,28 @@ export const STATES = [
   },
 
   // --- functional: a TOOL-BEARING subagent runs in its OWN offscreen heap ---
-  // Heap-split phase 4. The orchestrator spawns a sync subagent GRANTED js_run;
+  // Heap-split phase 4. The orchestrator spawns a sync subagent GRANTED script;
   // that child's loop runs in a dedicated offscreen Worker (its own heap, no key)
-  // and RELAYS its js_run call back to the SW, which rebuilds the child's restricted
-  // ctx from the persisted grantedTools and dispatches js_run in the offscreen
-  // job-runner. Proof: the child looped (two model calls: emit js_run, then answer),
+  // and RELAYS its script call back to the SW, which rebuilds the child's restricted
+  // ctx from the persisted grantedTools and dispatches script in the offscreen
+  // job-runner. Proof: the child looped (two model calls: emit script, then answer),
   // the subagent_ran_offscreen audit fired (offscreen path, not the in-SW fallback),
-  // AND a tool_executed audit for js_run is present (the relayed tool actually ran).
+  // AND a tool_executed audit for script is present (the relayed tool actually ran).
   {
     name: 'subagent-tools-offscreen', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
-      // The CHILD's model calls (ephemeral-actor prompt). First call emits js_run;
+      // The CHILD's model calls (ephemeral-actor prompt). First call emits script;
       // second call (after the tool result re-enters its heap) answers.
       if (body.includes('You are an EPHEMERAL ACTOR')) {
         subagentToolsState.childCalls += 1;
-        if (subagentToolsState.childCalls === 1) return { sse: sseToolCall('js_run', { code: 'return 6 * 7;' }) };
+        if (subagentToolsState.childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
         return { sse: sseText('CHILD-RAN-JS') };
       }
-      // ORCHESTRATOR — spawn ONE sync subagent granted js_run, then answer.
+      // ORCHESTRATOR — spawn ONE sync subagent granted script, then answer.
       if (subagentToolsState.spawned === 0) {
         subagentToolsState.spawned += 1;
-        return { sse: sseToolCall('spawn_subagent', { task: 'compute six times seven with js_run', tools: ['js_run'], sync: true }) };
+        return { sse: sseToolCall('spawn_subagent', { task: 'compute six times seven with script', tools: ['script'], sync: true }) };
       }
       return { sse: sseText('FINAL-WITH-CHILD') };
     },
@@ -744,10 +744,10 @@ export const STATES = [
       const entries = (audit && audit.entries) || [];
       const ranOffscreen = entries.some((e) => e.type === 'subagent_ran_offscreen');
       const fellBack = entries.some((e) => e.type === 'subagent_offscreen_fallback');
-      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'js_run');
-      rec.check('the tool-bearing child looped in its heap (js_run emitted, then answered) — 2 child calls', subagentToolsState.childCalls >= 2, `childCalls=${subagentToolsState.childCalls}`);
+      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
+      rec.check('the tool-bearing child looped in its heap (script emitted, then answered) — 2 child calls', subagentToolsState.childCalls >= 2, `childCalls=${subagentToolsState.childCalls}`);
       rec.check('the child ran in its OWN offscreen heap (subagent_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
-      rec.check('js_run actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
+      rec.check('script actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
       rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
       rec.check('the turn settles idle', out.busy === false);

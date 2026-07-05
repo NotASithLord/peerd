@@ -1,4 +1,4 @@
-// js_run — clean "unavailable" signal when the offscreen host is absent.
+// script — clean "unavailable" signal when the offscreen host is absent.
 //
 // On Firefox there is no chrome.offscreen, so the SW injects a NULL
 // jsOffscreenClient into the tool context (service-worker.js: gated on
@@ -12,18 +12,18 @@
 // null on Firefox is pinned separately by tests/background/offscreen-gate.test.ts.
 
 import { describe, test, expect } from 'bun:test';
-import { jsRunTool } from '../../extension/peerd-runtime/tools/defs/js-run.js';
+import { scriptTool } from '../../extension/peerd-runtime/tools/defs/script.js';
 
 const ctx = (over: any = {}) => ({ session: { sessionId: 's1' }, ...over });
 
-describe('js_run — offscreen host availability', () => {
+describe('script — offscreen host availability', () => {
   test('no jsOffscreenClient (Firefox) → headless_js_unavailable', async () => {
-    const r = await jsRunTool.execute({ code: 'return 1' }, ctx() as any);
+    const r = await scriptTool.execute({ code: 'return 1' }, ctx() as any);
     expect(r).toEqual({ ok: false, error: 'headless_js_unavailable' });
   });
 
   test('client present but missing execHeadless → headless_js_unavailable', async () => {
-    const r = await jsRunTool.execute(
+    const r = await scriptTool.execute(
       { code: 'return 1' },
       ctx({ jsOffscreenClient: {} }) as any,
     );
@@ -31,13 +31,13 @@ describe('js_run — offscreen host availability', () => {
   });
 
   test('empty code is rejected before the availability check', async () => {
-    const r = await jsRunTool.execute({ code: '' }, ctx() as any);
+    const r = await scriptTool.execute({ code: '' }, ctx() as any);
     expect(r).toEqual({ ok: false, error: 'code_required' });
   });
 
   test('a live client still dispatches (the tool contract holds with a real client)', async () => {
     let dispatched = false;
-    const r = await jsRunTool.execute(
+    const r = await scriptTool.execute(
       { code: 'return 1' },
       ctx({
         jsOffscreenClient: {

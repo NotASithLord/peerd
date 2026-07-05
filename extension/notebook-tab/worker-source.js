@@ -170,7 +170,7 @@ globalThis.peerd = {
   },
   // e · engine (amber) — execution environments. PLACEHOLDER. The sandbox
   // SPECTRUM (DECISIONS #25): runJob = headless own-code Worker (the MAIN agent
-  // reaches it via the js_run tool); runUntrusted = headless opaque-origin iframe
+  // reaches it via the script tool); runUntrusted = headless opaque-origin iframe
   // for untrusted code. The peerd.* (app-spawns-a-job) forms stay notWired until
   // per-app grant + quota exist.
   engine: {

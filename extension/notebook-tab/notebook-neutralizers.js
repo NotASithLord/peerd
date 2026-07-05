@@ -26,7 +26,7 @@
 // (notebook-tab/index.html, connect-src 'none') backstops the seal in the
 // Notebook TAB — inherited by the blob worker, so even a fresh realm there
 // can't leave. But the SAME sealed worker also runs HEADLESS in the offscreen
-// document (offscreen/job-runner.js, for js_run), whose CSP must allow https:
+// document (offscreen/job-runner.js, for script), whose CSP must allow https:
 // (the voice model downloads there) — so in that host the realm seal is the
 // ONLY fence. Every network-capable primitive must therefore be sealed by the
 // realm itself, not deferred to the page CSP.
@@ -188,7 +188,7 @@ export function applyRealmSeal(global) {
 
   // The Cache API: cache.add()/addAll() run the Fetch algorithm — a REAL network
   // GET that escapes the audited bridge. The Notebook tab's connect-src 'none'
-  // would fence it, but the offscreen js_run host that runs this SAME worker
+  // would fence it, but the offscreen script host that runs this SAME worker
   // allows https:, so the realm must block it directly. Replace the whole
   // CacheStorage with throwing stubs (open/match/has/delete/keys); the sandbox's
   // sanctioned storage is OPFS. seal() deletes the prototype getter the same way

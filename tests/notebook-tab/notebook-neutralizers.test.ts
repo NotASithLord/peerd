@@ -90,7 +90,7 @@ describe('realm seal — raw channels are hard-blocked', () => {
   });
 
   test('the Cache API is sealed — its network verbs cannot reach the host', () => {
-    // cache.add()/addAll() run the Fetch algorithm; the offscreen js_run host
+    // cache.add()/addAll() run the Fetch algorithm; the offscreen script host
     // that runs this SAME sealed worker allows https:, so the seal (not the page
     // CSP) must block it. The whole CacheStorage is replaced with throwing stubs.
     const { g, proto } = freshGlobal();

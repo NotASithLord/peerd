@@ -131,7 +131,7 @@ export const includesCI = (haystack, needle) =>
 /**
  * Did the agent use any of these tools this turn? Lets a check assert the
  * agent took the RIGHT PATH (e.g. used `get` to inspect rather than guessing
- * from prior knowledge, or `js_run` to actually compute) — the same discipline
+ * from prior knowledge, or `script` to actually compute) — the same discipline
  * get-count/get-framework already key on, factored out for reuse.
  */
 /** @param {unknown} tools @param {unknown} names */

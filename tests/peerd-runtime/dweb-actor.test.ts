@@ -14,8 +14,8 @@ describe('dweb actor — the positive allow-set', () => {
     expect([...allow].sort()).toEqual([...DWEB_TOOLS].sort());
     // the envoy posture: no egress, no DOM, no engine mutation, no delegation.
     // a2a_run runs code but in the sealed keyless worker with ONLY the mesh
-    // bridge — no fetch_url/js_run authority (those stay off the dweb actor).
-    for (const name of ['fetch_url', 'navigate', 'click', 'app_create', 'app_write_file', 'js_run', 'message_actor', 'spawn_subagent', 'edit_file']) {
+    // bridge — no fetch_url/script authority (those stay off the dweb actor).
+    for (const name of ['fetch_url', 'navigate', 'click', 'app_create', 'app_write_file', 'script', 'message_actor', 'spawn_subagent', 'edit_file']) {
       expect(isAllowedForActor(name, 'dweb')).toBe(false);
     }
   });
@@ -76,10 +76,10 @@ describe('subagent grantable universe excludes dweb tools (flag-stripped list)',
   test('filterActorSurface(mainAgentDescriptors(projected)) holds no dweb tool', () => {
     const projected = [
       { name: 'dweb_install' }, { name: 'dweb_share' }, { name: 'dweb_block' },
-      { name: 'remember' }, { name: 'read_memory' }, { name: 'js_run' },
+      { name: 'remember' }, { name: 'read_memory' }, { name: 'script' },
     ];
     const grantable = filterActorSurface(mainAgentDescriptors(projected)).map((t) => t.name);
     expect(grantable.some((n) => n.startsWith('dweb_'))).toBe(false);
-    expect(grantable).toContain('js_run');
+    expect(grantable).toContain('script');
   });
 });

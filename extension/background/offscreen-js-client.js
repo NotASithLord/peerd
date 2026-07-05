@@ -1,7 +1,7 @@
 // @ts-check
 // background/offscreen-js-client.js — SW-side client for headless JS jobs.
 //
-// Runs the agent's `js_run` code in a sealed Worker hosted by the OFFSCREEN
+// Runs the agent's `script` code in a sealed Worker hosted by the OFFSCREEN
 // document (no tab). It ensures the offscreen doc exists, dispatches the job,
 // and returns the run result. Dependencies are injected (ensureOffscreen +
 // sendMessage) so it stays a pure, testable shell.

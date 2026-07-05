@@ -3,7 +3,7 @@
 //
 // Why here and not the SW: pdf.js parses in a Worker (GlobalWorkerOptions
 // .workerSrc), and a service worker cannot host a nested Worker. The
-// offscreen document can — the same reason voice (Moonshine) and js_run
+// offscreen document can — the same reason voice (Moonshine) and script
 // (the sealed worker) live here. The read_pdf tool (SW) calls in via
 // background/offscreen-pdf-client.js → a 'pdf/extract' message → here.
 //

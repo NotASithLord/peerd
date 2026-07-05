@@ -1,5 +1,5 @@
 // @ts-check
-// offscreen job-runner — the headless sealed-Worker substrate behind js_run.
+// offscreen job-runner — the headless sealed-Worker substrate behind script.
 // Exercised against a REAL worker; `sendToSW` is stubbed to stand in for the
 // SW's audited routes (sw/web-fetch, subagent/spawn). Pins the load-bearing
 // behavior: code returns its value, console accumulates, peerd.egress.fetch
@@ -62,7 +62,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
 
   // The idiomatic form the agent writes for headless math: a STATIC top-level
   // `import { … } from 'peerd:std'` (resolved via buildEntry's builtins, same as
-  // a Notebook). Pins math PARITY between js_run and js_notebook — the headless
+  // a Notebook). Pins math PARITY between script and js_notebook — the headless
   // worker must reach the same stdlib helpers the visible Notebook does.
   it('peerd:std STATIC imports resolve in a headless job (math parity with notebooks)', async () => {
     const r = await runJob(

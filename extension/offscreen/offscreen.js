@@ -21,7 +21,7 @@ import browser from '/vendor/browser-polyfill.js';
 // why /peerd-runtime/index.js (not /voice/index.js): index.js is the
 // module's public API; the top-level barrel re-exports createBestTranscriber.
 import { createBestTranscriber, createModelStore } from '/peerd-runtime/index.js';
-// Headless JS jobs (the js_run tool / engine.runJob): a sealed Worker hosted
+// Headless JS jobs (the script tool / engine.runJob): a sealed Worker hosted
 // here, no UI. See job-runner.js for its (deliberately seal-only) security note.
 import { runJob } from './job-runner.js';
 // The heap split: EVERY offscreen agent loop — ephemeral reasoning subagents AND
@@ -317,7 +317,7 @@ const onVoiceMessage = (msg, _sender, sendResponse) => {
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onVoiceMessage));
 
-// --- headless JS jobs (js_run tool → engine.runJob) ---
+// --- headless JS jobs (script tool → engine.runJob) ---
 // Spawns the sealed Worker here and relays its egress/subagent bridges back to
 // the SW's audited routes. A separate listener so voice is untouched.
 /**

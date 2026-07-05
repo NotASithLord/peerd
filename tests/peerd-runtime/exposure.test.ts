@@ -107,7 +107,7 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
 describe('the instance-gating machinery is GONE (folded into the actor tier)', () => {
   test('a create/entry tool passes on the main turn with no instances anywhere', () => {
     // No instanceState anywhere in the ctx — the gate must not care.
-    for (const n of ['sandbox_create', 'actor_list', 'app_open', 'app_search', 'js_run']) {
+    for (const n of ['sandbox_create', 'actor_list', 'app_open', 'app_search', 'script']) {
       expect(eg({ name: n }, {}, { exposure: 'main' }).allowed).toBe(true);
     }
   });
@@ -136,8 +136,8 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
       'app_delete_file', 'app_delete', 'edit_file']) {
       expect(isActorOnlyTool(n)).toBe(true);
     }
-    // The bootstrap/catalog surface + js_run stay on the orchestrator.
-    for (const n of ['sandbox_create', 'actor_list', 'js_run',
+    // The bootstrap/catalog surface + script stay on the orchestrator.
+    for (const n of ['sandbox_create', 'actor_list', 'script',
       'app_open', 'app_search', 'message_actor']) {
       expect(isActorOnlyTool(n)).toBe(false);
     }

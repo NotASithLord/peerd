@@ -30,7 +30,7 @@ import { vmWriteFileTool }           from './vm-write-file.js';
 import { vmDeleteTool }               from './vm-delete.js';
 import { sandboxCreateTool }          from './sandbox-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
-import { jsRunTool }                  from './js-run.js';
+import { scriptTool }                  from './script.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
@@ -88,7 +88,7 @@ export {
   vmDeleteTool,
   // engine (Notebook)
   jsNotebookTool,
-  jsRunTool,
+  scriptTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
@@ -166,7 +166,7 @@ export const BUILTIN_TOOLS = Object.freeze([
   vmDeleteTool,
   // engine (Notebook)
   jsNotebookTool,
-  jsRunTool,
+  scriptTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,

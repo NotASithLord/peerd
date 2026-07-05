@@ -30,7 +30,7 @@ import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '/notebook-
 
 let jobSeq = 0;
 
-// Cap concurrent headless workers so a loop (or many parallel js_run calls /
+// Cap concurrent headless workers so a loop (or many parallel script calls /
 // sub-agents) can't fork-bomb the offscreen renderer. Each job is its own thread
 // + ephemeral OPFS; a handful at once is plenty. (The capability surface's own
 // rule: engine.spawn* → resource exhaustion → hard caps.)
@@ -85,7 +85,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId },
   }
   const { source, cache, bodyLine } = built;
   // Did this run reach the web? The fetch bridge below is the ONLY egress a
-  // sealed worker has, so one flag here is authoritative. js_run fences the
+  // sealed worker has, so one flag here is authoritative. script fences the
   // run's output for the model when it's set (fetched bytes are untrusted).
   let usedEgress = false;
   const revokeCache = () => { for (const entry of cache.values()) if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl); };

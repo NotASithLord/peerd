@@ -6,15 +6,15 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { jsRunTool } from '../../extension/peerd-runtime/tools/defs/js-run.js';
+import { scriptTool } from '../../extension/peerd-runtime/tools/defs/script.js';
 
 describe('runAgent doctrine in tool descriptions', () => {
-  test('js_run (headless scratch) never advertises peerd.runtime.runAgent', () => {
-    // headless js_run is the agent's OWN compute, never a user-facing artifact —
+  test('script (headless scratch) never advertises peerd.runtime.runAgent', () => {
+    // headless script is the agent's OWN compute, never a user-facing artifact —
     // runAgent has no doctrine-legitimate use there, so it must not be nudged.
-    expect(jsRunTool.description).not.toContain('runAgent');
+    expect(scriptTool.description).not.toContain('runAgent');
     // and own-work delegation is pointed at the spawn_subagent tool instead.
-    expect(jsRunTool.description).toContain('spawn_subagent');
+    expect(scriptTool.description).toContain('spawn_subagent');
   });
 
   test('js_create scopes runAgent to user-facing artifacts, not orchestration', () => {

@@ -99,7 +99,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
 
 describe("routes['actor/tool-dispatch'] — SUBAGENT (phase 4): narrowed-general ctx from grantedTools", () => {
   const subDeps = (over: any = {}) => baseDeps({
-    sessions: { get: async () => ({ kind: 'subagent', parentSessionId: 'p1', depth: 1, grantedTools: ['js_run', 'read_memory'] }) },
+    sessions: { get: async () => ({ kind: 'subagent', parentSessionId: 'p1', depth: 1, grantedTools: ['script', 'read_memory'] }) },
     restrictCtxCapabilities: (ctx: any, allowed: Set<string>) => ({ ...ctx, _restrictedTo: [...allowed] }),
     buildToolContext: async (o: any) => ({ built: o, audit: async () => {} }),
     dispatchToolCall: async (call: any, ctx: any) => ({ ok: true, ran: call.name, restrictedTo: ctx._restrictedTo }),
@@ -108,11 +108,11 @@ describe("routes['actor/tool-dispatch'] — SUBAGENT (phase 4): narrowed-general
 
   test('a GRANTED tool builds the restricted ctx (from grantedTools) and dispatches', async () => {
     const client = makeOffscreenActorClient(subDeps());
-    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'js_run', args: { code: 'x' } } });
+    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'script', args: { code: 'x' } } });
     expect(out.ok).toBe(true);
-    expect(out.result.ran).toBe('js_run');
+    expect(out.result.ran).toBe('script');
     // the ctx was restricted to exactly the persisted granted set (never the worker's word)
-    expect(out.result.restrictedTo.sort()).toEqual(['js_run', 'read_memory']);
+    expect(out.result.restrictedTo.sort()).toEqual(['read_memory', 'script']);
   });
 
   test('an UNGRANTED tool the worker asks for is REFUSED before any dispatch (never trust the worker)', async () => {
@@ -126,7 +126,7 @@ describe("routes['actor/tool-dispatch'] — SUBAGENT (phase 4): narrowed-general
 
   test('a subagent tool-dispatch needs restrictCtxCapabilities wired (fails closed without it)', async () => {
     const client = makeOffscreenActorClient(subDeps({ restrictCtxCapabilities: undefined }));
-    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'js_run', args: {} } });
+    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'script', args: {} } });
     expect(out.ok).toBe(false);
     expect(out.error).toContain('not wired');
   });

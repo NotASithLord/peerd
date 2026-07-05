@@ -36,13 +36,13 @@ export const APP_RUNTIME_NOTE = [
   'For heavy compute, put the work in its own file and use new Worker(\'worker.js\')',
   "— it runs automatically (wired to a blob worker). Keep the worker self-contained:",
   "a blob worker can't import other app files. Or tile work across",
-  'requestAnimationFrame frames; for pure no-UI compute, a Notebook/js_run are simpler.',
+  'requestAnimationFrame frames; for pure no-UI compute, a Notebook/script are simpler.',
   '</app-runtime>',
 ].join('\n');
 
 // CORRECTNESS, not style: the JS footguns that yield a WRONG ANSWER (silently),
 // plus the nudge to reach for the stdlib instead of hand-rolling. Disclosed
-// where the agent writes compute JS — js_run (once per session) and the notebook arm
+// where the agent writes compute JS — script (once per session) and the notebook arm
 // (Notebook). Deliberately general, not a recipe for any one problem; kept terse
 // for the same context-budget reason as CODE_STYLE_NOTE.
 export const JS_PITFALLS_NOTE = [

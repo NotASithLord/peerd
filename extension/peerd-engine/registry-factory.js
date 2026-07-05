@@ -1,6 +1,6 @@
 // @ts-check
 // Shared factory for the three peerd-engine instance registries
-// (WebVM, Notebook, App). The fourth execution kind, the headless js_run
+// (WebVM, Notebook, App). The fourth execution kind, the headless script
 // worker, is ephemeral (no persisted instances), so it has no registry.
 //
 // why: vm/js/app-registry were ~95% the same code — same persistence

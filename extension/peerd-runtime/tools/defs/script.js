@@ -1,5 +1,5 @@
 // @ts-check
-// js_run — run JS HEADLESS (no tab).
+// script — run JS HEADLESS (no tab).
 //
 // The headless sibling of js_notebook (DECISIONS #25, "runJob"): the SAME sealed
 // worker (realm seal + peerd.* surface), hosted in the offscreen document with
@@ -18,9 +18,9 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 
-// why once per session: js_run is the agent's OWN quick-compute path (the
+// why once per session: script is the agent's OWN quick-compute path (the
 // precision / off-by-one class of bug lands here, e.g. large-integer math), so
-// the correctness note matters most here — but js_run is called repeatedly, so
+// the correctness note matters most here — but script is called repeatedly, so
 // we disclose it on the FIRST run and stay silent after, paying the tokens once.
 // Bounded by distinct sessions in one SW lifetime (tiny); an SW restart re-arms.
 /** @type {Set<string>} */
@@ -36,8 +36,8 @@ const pitfallsDisclosed = new Set();
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const jsRunTool = {
-  name: 'js_run',
+export const scriptTool = {
+  name: 'script',
   primitive: 'notebook',
   description: [
     'Run JS HEADLESS — a fast sealed Web Worker with NO tab (the cheap, invisible',
@@ -91,7 +91,7 @@ export const jsRunTool = {
       return { ok: true, content };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `js_run_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+      return { ok: false, error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     }
   },
 };
@@ -121,7 +121,7 @@ const formatRunResult = (code, r) => {
   // fetched bytes in its value/console/error — fence THOSE runs so web content
   // can't launder into the caller's trusted context through scratch compute.
   if (r.usedEgress && body.length) {
-    lines.push(wrapUntrusted({ origin: 'js_run (fetched web content)', tool: 'js_run', body: body.join('\n') }));
+    lines.push(wrapUntrusted({ origin: 'script (fetched web content)', tool: 'script', body: body.join('\n') }));
   } else {
     lines.push(...body);
   }

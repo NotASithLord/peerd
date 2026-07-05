@@ -102,7 +102,7 @@ export const EXPOSURE_ACTOR = 'actor';
 // Each ENGINE kind's full operational surface — runs, writes, deletes, AND the
 // fenced reads (see the isolation note above: instance bytes stay behind the
 // actor heap even for reads). edit_file is the cross-kind SEARCH/REPLACE write
-// path for App/Notebook files. js_run (headless, no instance) is deliberately
+// path for App/Notebook files. script (headless, no instance) is deliberately
 // ABSENT — it stays a parent tool. These per-kind sets are BOTH the positive
 // allow-list of that kind's actor (ACTOR_TYPE_TOOLS below) AND, unioned, the
 // tier that leaves the main agent — one source of truth, so a new instance op

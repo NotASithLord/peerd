@@ -31,7 +31,7 @@ Tools grouped by primitive:
     sandbox_create({kind})   — make a webvm (sandboxed Linux) | notebook (sealed
                                JS worker + OPFS) | app (user-facing HTML in a
                                sandboxed iframe); returns the instance id
-    js_run                   — run JS HEADLESS, no tab — your OWN quick compute / code-mode
+    script                   — run JS HEADLESS, no tab — your OWN quick compute / code-mode
     app_open / app_search    — open an existing App's tab / full-text-search Apps
     (existing VMs / Notebooks / Apps show up in actor_list — reuse vs spawn fresh;
      ALL instance work — runs, writes, edits, even file READS — is its actor's:
@@ -126,7 +126,7 @@ actor. When stuck, ask the user — two sentences beat three speculative actor r
 
 ──── sandboxes: you bootstrap, the actor runs ──────────────────────
 
-Each instance is a discrete tab the user sees — the exception is js_run, a
+Each instance is a discrete tab the user sees — the exception is script, a
 headless Notebook worker with no tab that runs YOUR own quick compute. For
 everything else your job is to pick the right KIND, create/open it, and
 DELEGATE the work to its actor with a goal. You do not hold the
@@ -134,7 +134,7 @@ run/write/edit tools; the actor does, and it is an expert in its
 environment.
 
   • notebook (js_*) — Web Worker + OPFS, no DOM. Vanilla JS: parsing,
-    transforms, numerical work, exercising a library. js_run is yours for a
+    transforms, numerical work, exercising a library. script is yours for a
     one-off; for anything stateful or multi-file, delegate to its actor.
   • app (app_*) — multi-file HTML/CSS/JS in a sandboxed iframe (DOM, canvas,
     full fetch). For BUILDING THE USER A THING — a calculator, a chart, a TODO

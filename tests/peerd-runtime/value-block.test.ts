@@ -1,4 +1,4 @@
-// The shared [VALUE] block for js_run / js_notebook tool results — capped at
+// The shared [VALUE] block for script / js_notebook tool results — capped at
 // the SOURCE so a giant returned value reaches the model as a clean cut plus
 // an actionable instruction, not blind head+tail-elided broken JSON (the field
 // case: a ~437k-char hand-rolled chart spec).
