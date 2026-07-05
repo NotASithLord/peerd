@@ -36,12 +36,19 @@ const nonEmptyString = (v, what) => {
   return v;
 };
 
-// The per-ask ceiling. Sits UNDER the worker bridge guard and the job
-// wall-clock (script.js keeps the nesting job > bridge > ask, same reasoning
-// as a2a-run's timer note) so a stuck actor turn fails as an ask timeout the
-// script can handle, not a mid-run worker termination.
+// The timeout TOWER, defined once so it cannot drift apart (the nesting
+// job wall-clock > worker bridge guard > per-ask cap is what makes a stuck
+// actor turn fail as an ask timeout the script can handle, not a mid-run
+// worker termination — same reasoning as a2a-run's timer note). Every layer
+// DERIVES from the ask ceiling: bump it and the tower moves together.
 export const ACTORS_ASK_MAX_TIMEOUT_MS = 240_000;
 export const ACTORS_ASK_DEFAULT_TIMEOUT_MS = 120_000;
+// The worker-side bridge guard — sits ABOVE the ask cap so the SW's timeout
+// (a handleable rejection) always fires before the bridge gives up.
+export const ACTORS_BRIDGE_GUARD_MS = ACTORS_ASK_MAX_TIMEOUT_MS + 10_000;
+// The job wall-clock for a delegating run — sits ABOVE the bridge guard.
+export const ACTORS_JOB_DEFAULT_TIMEOUT_MS = ACTORS_BRIDGE_GUARD_MS + 20_000;
+export const ACTORS_JOB_MAX_TIMEOUT_MS = ACTORS_BRIDGE_GUARD_MS + 50_000;
 
 /**
  * @typedef {{ op: string, toArgs: (a: any) => object, shape: (c: any) => any, delegates?: boolean }} ActorsMethodSpec
@@ -91,7 +98,9 @@ const ACTORS_METHODS = {
   },
 };
 
-/** The method names — drives the worker stub + the lore. */
+/** The canonical method list. The worker stub (worker-source.js) and the
+ * prompt lore are hand-written mirrors — the actors-api tests are what keep
+ * them honest, not this constant (nothing generates from it). */
 export const ACTORS_API_METHODS = Object.freeze(Object.keys(ACTORS_METHODS));
 
 /** Does this method hand a goal to an actor (vs a read)? Pure. @param {string} method */
@@ -136,12 +145,16 @@ export const shapeActorsResult = (method, opResult) => {
  *   • anything else in the error slot is the DELIVERED actor turn's own
  *     failure text → returned as { failed:true } for the script to handle
  *     in code (retry, fall back, report) instead of an exception.
+ * A Stop-abort (the run signal fired, not this route's timer) must reject —
+ * without the `aborted` fork it would masquerade as an actor-level failure
+ * and a retry-in-code loop would grind through fully-audited post-Stop asks.
  * @param {{ ok: boolean, content?: string, error?: string }} r
- * @param {{ timedOut: boolean, timeoutMs: number, to: string }} o
+ * @param {{ timedOut: boolean, aborted?: boolean, timeoutMs: number, to: string }} o
  * @returns {{ ok: true, reply: string | null, failed: boolean } | { ok: false, error: string }}
  */
-export const askOutcome = (r, { timedOut, timeoutMs, to }) => {
+export const askOutcome = (r, { timedOut, aborted, timeoutMs, to }) => {
   if (timedOut) return { ok: false, error: `actors.ask: timed out after ${timeoutMs}ms awaiting '${to}'` };
+  if (aborted) return { ok: false, error: `actors.ask: aborted (Stop) while awaiting '${to}'` };
   if (r.ok) return { ok: true, reply: r.content ?? null, failed: false };
   const err = String(r.error ?? 'ask failed');
   if (err.startsWith('message_actor:')) return { ok: false, error: err };
@@ -159,26 +172,54 @@ export const askOutcome = (r, { timedOut, timeoutMs, to }) => {
 // may carry actor/web-derived bytes, so renderTraceLines keeps them out; the
 // caller places them in the fenced body via traceErrorDetails).
 
-/** @typedef {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }} ActorsTraceEntry */
+/** @typedef {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }} ActorsTraceEntry */
 
 const GOAL_PREVIEW_CHARS = 60;
 
+// Fence-safe target: a chained call's `to` is a RUNTIME value (it can equal a
+// prior actor reply — attacker-influenceable), so only handle-shaped
+// characters survive outside the fence; anything else is elided. Same
+// defensive posture as instance-handle's anchored id patterns.
+/** @param {unknown} to @returns {string} */
+const safeTarget = (to) => {
+  if (typeof to !== 'string') return '';
+  const clean = to.replace(/[^A-Za-z0-9_.:\/-]/g, '').slice(0, 48);
+  return clean.length === to.length ? clean : `${clean}⁈`;
+};
+
 /**
- * Render the fence-SAFE trace lines: outcome + timing per op, with the goal
- * previewed (it is MODEL-authored — the model wrote the script — so it is safe
- * outside the fence), never the error detail (which may carry actor-derived
- * bytes). [] for an empty trace.
+ * Render the fence-SAFE trace lines: method + sanitized target + outcome +
+ * timing per op — and NOTHING runtime-shaped beyond that. why no goal here:
+ * a chained goal (`actors.ask(next, prior.reply)`) carries whatever the prior
+ * actor (or a fetched page) said — exactly the bytes the fence exists for —
+ * so goal previews render only INSIDE the fenced body (traceGoalLines), and
+ * error detail likewise (traceErrorDetails). An op the run died around
+ * (settled === false) says so instead of masquerading as an instant failure.
  * @param {ReadonlyArray<ActorsTraceEntry>} trace
  * @returns {string[]}
  */
 export const renderTraceLines = (trace) =>
   trace.map((t) => {
-    const target = t.to ? ` ${t.to}` : '';
-    const preview = typeof t.goal === 'string'
-      ? (t.goal.length > GOAL_PREVIEW_CHARS ? `${t.goal.slice(0, GOAL_PREVIEW_CHARS)}…` : t.goal)
-      : '';
-    const goal = preview ? ` "${preview}"` : '';
-    return `  #${t.seq} ${t.method}${target}${goal} → ${t.ok ? 'ok' : 'FAILED'} ${t.ms}ms`;
+    const target = t.to ? ` ${safeTarget(t.to)}` : '';
+    const state = t.settled === false
+      ? 'IN FLIGHT when the run ended (no reply seen)'
+      : t.ok
+        ? (t.actorFailed ? `replied — the actor REPORTED FAILURE ${t.ms}ms` : `ok ${t.ms}ms`)
+        : `FAILED ${t.ms}ms`;
+    return `  #${t.seq} ${t.method}${target} → ${state}`;
+  });
+
+/**
+ * The goal previews, for the FENCED body: which text each op actually sent.
+ * Runtime-shaped by design (chained goals carry prior replies), hence fenced.
+ * @param {ReadonlyArray<ActorsTraceEntry>} trace
+ * @returns {string[]}
+ */
+export const traceGoalLines = (trace) =>
+  trace.filter((t) => typeof t.goal === 'string' && t.goal.length > 0).map((t) => {
+    const g = /** @type {string} */ (t.goal);
+    const preview = g.length > GOAL_PREVIEW_CHARS ? `${g.slice(0, GOAL_PREVIEW_CHARS)}…` : g;
+    return `  #${t.seq} → "${preview}"`;
   });
 
 /**
@@ -189,4 +230,4 @@ export const renderTraceLines = (trace) =>
  * @returns {string[]}
  */
 export const traceErrorDetails = (trace) =>
-  trace.filter((t) => !t.ok && t.error).map((t) => `  #${t.seq} ${t.method}${t.to ? ` ${t.to}` : ''}: ${t.error}`);
+  trace.filter((t) => !t.ok && t.error).map((t) => `  #${t.seq} ${t.method}${t.to ? ` ${safeTarget(t.to)}` : ''}: ${t.error}`);

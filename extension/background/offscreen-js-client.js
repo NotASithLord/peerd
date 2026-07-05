@@ -33,9 +33,9 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * Terminate a runId-carrying headless job (Stop plumbing). Best-effort —
    * a job that already finished is a no-op.
-   * @param {string} runId
+   * @param {string} runId @param {string} [ownerSessionId]
    */
-  abortHeadless: async (runId) => {
-    try { await sendMessage({ type: 'job/abort', runId }); } catch { /* offscreen gone = job gone */ }
+  abortHeadless: async (runId, ownerSessionId) => {
+    try { await sendMessage({ type: 'job/abort', runId, ownerSessionId }); } catch { /* offscreen gone = job gone */ }
   },
 });

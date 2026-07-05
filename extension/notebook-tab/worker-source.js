@@ -39,11 +39,12 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
  * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
  * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
+ * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
  * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000 }) => {
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
@@ -273,12 +274,11 @@ globalThis.mesh = __mesh;
 // --- actors.* (the orchestrator's OWN actors) proxy — capability-gated ---
 // The script tool's delegation client: ask/send hand a GOAL to a local actor
 // (vm/notebook/app instance, "web", an API origin) through the SW actors/call
-// route — the full message_actor gate chain runs per call. why a 250s guard:
-// an ask awaits a real actor TURN (the SW caps it at 240s), so the worker
-// guard sits ABOVE that, and the script tool's job wall-clock sits above BOTH
-// (script.js — keep the nesting job > bridge > ask, same rule as a2a).
+// route — the full message_actor gate chain runs per call. The guard value is
+// INTERPOLATED from the timeout tower (actors-api.js): it sits above the
+// per-ask cap by construction, and the job wall-clock sits above it.
 ${actors ? `
-const actorsRelay = makeBridge('actors', { timeoutMs: 250000, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
+const actorsRelay = makeBridge('actors', { timeoutMs: ${JSON.stringify(actorsGuardMs)}, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
 const actorsCall = (method, args) => actorsRelay({ method, args });
 const __actors = {
   list: () => actorsCall('list', {}),

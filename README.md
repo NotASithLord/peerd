@@ -287,11 +287,11 @@ peerd/
 │   ├── manifest.json
 │   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
-│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless js_run worker in offscreen/.
+│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless script worker in offscreen/.
 │   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + subagents, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
-│   ├── offscreen/            # chassis: the actor/subagent worker heaps, headless js_run, voice, SW keepalive
+│   ├── offscreen/            # chassis: the actor/subagent worker heaps, headless script runs, voice, SW keepalive
 │   ├── sidepanel/            # chassis: chat UI (Mithril)
 │   ├── vm-tab/               # chassis: WebVM tab page (CheerpX + bash + xterm)
 │   ├── notebook-tab/         # chassis: Notebook tab page (Web Worker + OPFS)
@@ -328,7 +328,7 @@ paths. ESLint enforces. Within a module, deep imports are fine.
 discrete, persistent browser tabs the user can
 see, focus, and close, grouped under "peerd" in the tab strip and
 surviving browser restarts: the WebVM, the Notebook, and the App. The
-fourth, the headless worker (`js_run`), runs the Notebook's sealed worker
+fourth, the headless worker (`script`), runs the Notebook's sealed worker
 offscreen with no tab: ephemeral, for the agent's own quick compute. The
 orchestrator picks the lightest kind that fits the task, bootstraps the
 instance, and then delegates the work to that instance's actor; the
@@ -358,11 +358,11 @@ worker's only network, routed through `peerd-egress` so it's honest. Each
 `peerd.self.writeFile`/`readFile` to the OPFS file tree.
 
 ```
-js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
+sandbox_create   js_notebook   script   js_write_file   js_read_file   js_delete
 ```
 
 **Headless worker** is the same sealed worker as a Notebook, but headless:
-`js_run` runs it in the offscreen document with no tab, ephemeral scratch
+`script` runs it in the offscreen document with no tab, ephemeral scratch
 discarded after. It's the agent's own quick compute and peerd's code mode
 (one script instead of a chain of tool/MCP calls), not a workspace you
 watch. A distinct kind from the Notebook, same substrate.

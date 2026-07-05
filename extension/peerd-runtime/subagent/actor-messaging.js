@@ -267,16 +267,19 @@ export const makeActorMessaging = (deps) => {
   // user's live turn (the focus/work-theft bug, DECISIONS #20). Only the one-line
   // lead is trusted; the actor's body is fenced (mandatory for App actors,
   // which render attacker content).
-  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] */
-  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false) => {
+  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] */
+  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined) => {
     const text = replyText(instanceId, kind, name, body, failed);
     // actorReply rides the wake so the UI can render the reply as its OWN
     // attributed chat bubble at the bottom (not buried in the tool-call card).
     // `synthetic` alone can't carry this — it also marks truncation/resume
     // nudges, which must stay hidden. name is sanitized the same way replyText's
-    // lead is (it renders un-fenced in the bubble's attribution line).
+    // lead is (it renders un-fenced in the bubble's attribution line). `via`
+    // marks a delegation a SCRIPT fired (actors.send): its reply can land
+    // minutes later mid-unrelated-conversation, and an unattributed bubble
+    // would be unexplainable to a user who never saw the fan-out.
     const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
-    const actorReply = { kind, instanceId, ...(safeName ? { name: safeName } : {}), failed };
+    const actorReply = { kind, instanceId, ...(safeName ? { name: safeName } : {}), failed, ...(via ? { via } : {}) };
     turnSlots.runWhenIdle(senderSessionId, () => {
       // trusted:true — the reply-wake is a FIRST-PARTY continuation (the sender's
       // own actor replied), so the sender's turn that reads it MAY fire a
@@ -301,8 +304,8 @@ export const makeActorMessaging = (deps) => {
   //
   // Bookkeeping is keyed by rootSessionId (phase 4/5): the lineage root shares
   // one budget and one Stop generation, whoever in the tree actually sent.
-  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, onReply?: (text: string, failed: boolean) => void }} o */
-  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, onReply }) => {
+  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean) => void }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, via, onReply }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(rootSessionId, actorSessionId);
     // Keyed on actorSessionId, NOT instanceId — must match the live-path track
@@ -338,7 +341,7 @@ export const makeActorMessaging = (deps) => {
     /** @param {string} body @param {boolean} failed */
     const settle = (body, failed) => {
       if (onReply) { onReply(bare ? body : replyText(instanceId, kind, name, body, failed), failed); return; }
-      deliver(senderSessionId, instanceId, kind, name, body, failed);
+      deliver(senderSessionId, instanceId, kind, name, body, failed, via);
     };
     // Serialize on the ACTOR's slot — runWhenIdle runs the turn the moment the
     // actor is idle (never interrupting an in-flight actor turn). A thrown/
@@ -593,7 +596,7 @@ export const makeActorMessaging = (deps) => {
         : { ok: true, content: settled.text };
     }
 
-    runEngineDelivery({ correlationId, senderSessionId: sender, rootSessionId, actor, message, parentToolUseId: toolUseId, oneShot: oneShot === true });
+    runEngineDelivery({ correlationId, senderSessionId: sender, rootSessionId, actor, message, parentToolUseId: toolUseId, oneShot: oneShot === true, via });
 
     const recipient = (String(kind) === String(instanceId))
       ? `the ${kind} actor`

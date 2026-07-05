@@ -452,7 +452,13 @@ export const reduceChat = (state, msg) => {
       else list.push(entry);
       ops[tid] = list;
       const keys = Object.keys(ops);
-      if (keys.length > 20) delete ops[keys[0]];    // oldest run's feed ages out
+      if (keys.length > 20) {
+        // Age out a SETTLED run's feed first (never a live one); fall back to
+        // the first key. toolUseIds are non-numeric strings, so object key
+        // order is insertion order — oldest first.
+        const evict = keys.find((k) => k !== tid && (ops[k] ?? []).every((o) => o.phase !== 'sent')) ?? keys.find((k) => k !== tid);
+        if (evict) delete ops[evict];
+      }
       return { ...state, scriptOps: ops };
     }
     case 'async-tasks/update':

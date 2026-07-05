@@ -104,7 +104,7 @@ export { makeActorMessaging } from './subagent/actor-messaging.js';
 export { meshCallToOp, shapeMeshResult } from './subagent/a2a-api.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
-  askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
 } from './subagent/actors-api.js';
 export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
 // PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure

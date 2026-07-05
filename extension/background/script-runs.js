@@ -16,13 +16,20 @@
  */
 
 export const createScriptRunRegistry = () => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike }>} */
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>> }>} */
   const runs = new Map();
   let seq = 0;
 
   return {
-    /** Mint a collision-proof run id. @param {string} sessionId */
-    mintRunId: (sessionId) => `scriptrun-${sessionId}-${++seq}`,
+    /**
+     * Mint a run id unique ACROSS SW restarts too: the offscreen document
+     * (and a still-running orphan job) can outlive the SW whose counter
+     * reset — a bare seq would collide and cross-wire the two jobs' kill
+     * switches. The time+random suffix makes that practically impossible.
+     * @param {string} sessionId
+     */
+    mintRunId: (sessionId) =>
+      `scriptrun-${sessionId}-${++seq}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
 
     /**
      * Register a live run. Chains the run's own controller to the caller's
@@ -31,8 +38,8 @@ export const createScriptRunRegistry = () => {
      */
     register: (runId, outerSignal) => {
       const controller = new AbortController();
-      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike }} */
-      const entry = { controller };
+      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>> }} */
+      const entry = { controller, ops: [] };
       if (outerSignal) {
         const onOuterAbort = () => controller.abort();
         if (outerSignal.aborted) controller.abort();
@@ -43,6 +50,23 @@ export const createScriptRunRegistry = () => {
       runs.set(runId, entry);
     },
 
+    /**
+     * The SW-side op mirror — the actors/call route records each op here so
+     * the chain-of-events SURVIVES an offscreen crash (the worker-held trace
+     * dies with the worker; this copy is what the script tool's failure path
+     * reads back). Capped — a runaway op loop can't grow it unbounded.
+     * @param {string} runId @param {Record<string, unknown>} op
+     */
+    recordOp: (runId, op) => {
+      const entry = runs.get(runId);
+      if (!entry) return;
+      if (entry.ops.length >= 50) entry.ops.shift();
+      entry.ops.push(op);
+    },
+
+    /** The mirrored ops for a run (copy), [] when unknown. @param {string} runId */
+    opsFor: (runId) => [...(runs.get(runId)?.ops ?? [])],
+
     /** The run's abort signal for pending asks, or null when unregistered. @param {string} runId */
     signalFor: (runId) => runs.get(runId)?.controller.signal ?? null,
 
@@ -50,13 +74,20 @@ export const createScriptRunRegistry = () => {
     abort: (runId) => { runs.get(runId)?.controller.abort(); },
 
     /**
-     * Release a finished run. Detaches the outer-signal listener so a
-     * long-lived turn signal doesn't accumulate dead handlers.
+     * Release a finished run. ABORTS FIRST: the run is over, so any ask still
+     * pending SW-side is an orphan whose actor turn must die with it (a job
+     * timeout / worker crash reaches here without the Stop signal ever firing
+     * — without this abort those turns would burn tokens for up to the
+     * per-ask cap after the script already returned). Then detaches the
+     * outer-signal listener so a long-lived turn signal doesn't accumulate
+     * dead handlers.
      * @param {string} runId
      */
     release: (runId) => {
       const entry = runs.get(runId);
-      if (entry?.outer && entry.onOuterAbort) {
+      if (!entry) return;
+      entry.controller.abort();
+      if (entry.outer && entry.onOuterAbort) {
         try { entry.outer.removeEventListener?.('abort', entry.onOuterAbort); } catch { /* stub signal */ }
       }
       runs.delete(runId);

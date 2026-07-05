@@ -356,7 +356,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
 const onJobAbort = (msg, sender, sendResponse) => {
   if (msg?.type !== 'job/abort') return undefined;
   if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  if (typeof msg.runId === 'string' && msg.runId) abortJob(msg.runId);
+  if (typeof msg.runId === 'string' && msg.runId) abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
   sendResponse({ ok: true });
   return true;
 };

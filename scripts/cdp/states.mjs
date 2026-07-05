@@ -499,7 +499,6 @@ export const STATES = [
   // actor system-prompt marker (callIndex is fragile — the two slots interleave).
   {
     name: 'actor-delegate', kind: 'functional', phase: 'post-unlock',
-
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       const isActor = body.includes('<actor_agent>');

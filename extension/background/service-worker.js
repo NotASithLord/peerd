@@ -2823,13 +2823,23 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
         : { ok: false, error: /** @type {any} */ (r)?.error ?? 'actor_list failed' };
     }
     const target = /** @type {{ to: string, goal: string, timeoutMs?: number, oneShot?: boolean }} */ (args);
-    pushOp('sent', { to: target.to, goalPreview: target.goal.slice(0, 60) });
+    // The UI preview: a chained goal can carry actor/web-derived bytes, so
+    // collapse whitespace (no line-shaping) and cap — it renders as plain
+    // text (Mithril escapes), same posture as the sanitized actor names.
+    const goalPreview = target.goal.replace(/\s+/g, ' ').slice(0, 60);
+    pushOp('sent', { to: target.to, goalPreview });
+    // The SW-side op mirror: survives an offscreen crash, so the script tool's
+    // failure path can still show the chain of events (script-runs.js).
+    const mirror = (/** @type {Record<string, unknown>} */ opRecord) => {
+      if (typeof msg.runId === 'string') scriptRuns.recordOp(msg.runId, { seq: msg.seq ?? 0, method: msg.method, to: target.to, ...opRecord });
+    };
     if (op === 'send') {
       const r = await actorMessaging.messageActor({
         to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
         toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
       });
       pushOp(r.ok ? 'handed-off' : 'failed', r.ok ? {} : { error: 'refused' });
+      mirror({ ok: r.ok === true, ms: 0, ...(r.ok ? {} : { error: r.error }) });
       return r.ok
         ? { ok: true, value: shapeActorsResult('send', { ok: true }) }
         : { ok: false, error: r.error ?? 'send failed' };
@@ -2857,20 +2867,28 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
         awaitReply: true, bareReply: true, awaitSignal: askController.signal,
       });
       const ms = Date.now() - t0;
-      // The timeout / system-refusal / actor-failure fork is the pure
-      // askOutcome (actors-api.js) — provable without this route.
-      const outcome = askOutcome(/** @type {any} */ (r), { timedOut, timeoutMs: askTimeoutMs, to: target.to });
+      // The timeout / Stop-abort / system-refusal / actor-failure fork is the
+      // pure askOutcome (actors-api.js) — provable without this route.
+      const outcome = askOutcome(/** @type {any} */ (r), {
+        timedOut, aborted: !timedOut && askController.signal.aborted,
+        timeoutMs: askTimeoutMs, to: target.to,
+      });
       if (!outcome.ok) {
         pushOp('failed', { ms, error: timedOut ? 'timeout' : 'refused' });
+        mirror({ ok: false, ms, error: outcome.error });
         return { ok: false, error: outcome.error };
       }
       pushOp('replied', { ms, ...(outcome.failed ? { failed: true } : {}) });
+      mirror({ ok: true, ms, ...(outcome.failed ? { actorFailed: true } : {}) });
       return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: outcome.reply, failed: outcome.failed }) };
     } finally {
       clearTimeout(timer);
       if (runSignal) { try { runSignal.removeEventListener?.('abort', onRunAbort); } catch { /* stub */ } }
     }
   } catch (e) {
+    // A throw after pushOp('sent') would otherwise leave the live-feed line
+    // pulsing 'working…' forever — settle it, then report.
+    pushOp('failed', { error: 'error' });
     return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
   }
 };

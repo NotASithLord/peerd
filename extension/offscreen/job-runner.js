@@ -27,20 +27,41 @@
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
+import { ACTORS_BRIDGE_GUARD_MS } from '/peerd-runtime/index.js';
 
 let jobSeq = 0;
 
 // Live jobs by the SW-minted runId, so a Stop can TERMINATE the worker instead
 // of letting an abandoned script run to its wall-clock. Registered only for
 // runs that carry a runId (the actors-enabled script path mints one).
-/** @type {Map<string, () => void>} */
+/** @type {Map<string, { kill: () => void, owner?: string }>} */
 const liveJobs = new Map();
+// An abort that arrives BEFORE the job registers (Stop racing job startup —
+// buildWorkerSource awaits resolver IO before liveJobs.set) would otherwise be
+// lost and the worker would run to its full wall-clock. Tombstone the runId;
+// registration checks it and kills immediately.
+/** @type {Set<string>} */
+const abortedEarly = new Set();
 
-/** Terminate a live job by runId (Stop plumbing). No-op when already done. @param {string} runId */
-export const abortJob = (runId) => {
-  const kill = liveJobs.get(runId);
-  if (kill) kill();
+/**
+ * Terminate a live job by runId (Stop plumbing). Owner-bound when the caller
+ * supplies one: runIds are not secrets, so a first-party page must not be able
+ * to kill another session's run by guessing (defense-in-depth — no such
+ * sender exists today). No-op when already done.
+ * @param {string} runId @param {string} [owner]
+ */
+export const abortJob = (runId, owner) => {
+  const entry = liveJobs.get(runId);
+  if (!entry) { abortedEarly.add(runId); return; }
+  if (owner && entry.owner && owner !== entry.owner) return;
+  entry.kill();
 };
+
+// Delegating (actors-enabled) runs live up to ~5 minutes — 9x a compute job —
+// so they get their OWN sub-cap under MAX_CONCURRENT_JOBS: a slow fan-out can
+// never starve quick compute or the dweb actor's a2a runs of every slot.
+const MAX_ACTORS_JOBS = 2;
+let activeActorsJobs = 0;
 
 // Cap concurrent headless workers so a loop (or many parallel script calls /
 // sub-agents) can't fork-bomb the offscreen renderer. Each job is its own thread
@@ -61,9 +82,14 @@ export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `headless job rejected: ${MAX_CONCURRENT_JOBS} jobs already running` };
   }
+  const isActorsRun = job.actors === true;
+  if (isActorsRun && activeActorsJobs >= MAX_ACTORS_JOBS) {
+    return { value: undefined, consoleOutput: [], durationMs: 0, error: `headless job rejected: ${MAX_ACTORS_JOBS} delegating (actors) runs already in flight — await their results before fanning out further` };
+  }
   activeJobs++;
+  if (isActorsRun) activeActorsJobs++;
   try { return await _runJob(job, deps); }
-  finally { activeJobs--; }
+  finally { activeJobs--; if (isActorsRun) activeActorsJobs--; }
 };
 
 /**
@@ -91,7 +117,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
 
   let built;
   try {
-    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors });
+    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors, actorsGuardMs: ACTORS_BRIDGE_GUARD_MS });
   } catch (e) {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -105,7 +131,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
   // observability spine of the script surface: the orchestrator reads it back
   // (which op, to whom, outcome, how long) even when the script itself failed
   // mid-way, and the ops keep flowing into it right up to a termination.
-  /** @type {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }>} */
+  /** @type {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }>} */
   const actorsTrace = [];
   let actorsSeq = 0;
   let usedActors = false;
@@ -130,11 +156,14 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
       // Stop plumbing: a runId-carrying job can be terminated from the SW
       // (script tool abort). The trace survives — partial work stays visible.
       if (runId) {
-        liveJobs.set(runId, () => {
+        const kill = () => {
           clearTimeout(timer);
           try { worker.terminate(); } catch {}
           resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, actorsTrace });
-        });
+        };
+        liveJobs.set(runId, { kill, owner: ownerSessionId });
+        // Stop already arrived while we were still building — honor it now.
+        if (abortedEarly.delete(runId)) kill();
       }
 
       worker.addEventListener('message', async (ev) => {
@@ -178,21 +207,29 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
           usedActors = true;   // actor replies are untrusted content → fence the run's output
           const seq = ++actorsSeq;
           const goalRaw = m?.args?.goal;
-          /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }} */
+          /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }} */
           const entry = {
             seq,
             method: typeof m.method === 'string' ? m.method : String(m.method),
             ...(typeof m?.args?.to === 'string' ? { to: m.args.to } : {}),
             ...(typeof goalRaw === 'string' ? { goal: goalRaw.slice(0, 200) } : {}),
-            ok: false, ms: 0,
+            // settled:false until the relay answers — a run that dies first
+            // reports this op as IN FLIGHT, never as an instant failure.
+            ok: false, ms: 0, settled: false,
           };
           actorsTrace.push(entry);
           const t0 = performance.now();
           try {
             const resp = await sendToSW('actors/call', { method: m.method, args: m.args, ownerSessionId, ownerToolUseId, runId, seq });
             entry.ms = Math.round(performance.now() - t0);
+            entry.settled = true;
             if (resp?.ok) {
               entry.ok = true;
+              // Transport ok ≠ delegation ok: an ask whose actor turn FAILED
+              // returns { failed:true } — record it so the trace can't render
+              // a failed delegation as a clean 'ok' (the model-facing record
+              // must agree with the user-facing live feed).
+              if (resp.value && resp.value.failed === true) entry.actorFailed = true;
               worker.postMessage({ type: 'actors-response', rid: m.rid, result: resp.value });
             } else {
               entry.error = resp?.error ?? 'actors call failed';
@@ -200,6 +237,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
             }
           } catch (e) {
             entry.ms = Math.round(performance.now() - t0);
+            entry.settled = true;
             entry.error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
             worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
           }

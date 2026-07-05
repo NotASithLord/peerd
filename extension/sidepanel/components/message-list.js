@@ -294,8 +294,12 @@ const ActorReplyMessage = {
     // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
     // the role label above the bubble already says who this is.
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
+    // A `via:'script'` reply came from a fire-and-forget delegation inside an
+    // earlier script run — it can land minutes later, so name its origin or the
+    // bubble is unexplainable to a user who never saw the fan-out happen.
+    const via = /** @type {{ via?: string }} */ (reply).via;
     return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
-      m('.role', [label, reply.failed ? ' · failed' : '']),
+      m('.role', [label, via === 'script' ? ' · delegated by an earlier script' : '', reply.failed ? ' · failed' : '']),
       m('.bubble', renderText(stripUntrustedFences(body))),
     ]);
   },
