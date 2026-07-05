@@ -247,7 +247,7 @@
   import { startPeer } from '/web/peer-host.js';
   import { initGemma, generateGemma, teardownGemma } from '/web/gemma.js';
   import { probeLocalModelCapability } from '/peerd-provider/local-model-capability.js';
-  import { makeAgent } from '/web/agent.js';
+  import { makeAgent, looksGarbled } from '/web/agent.js';
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
 
@@ -365,8 +365,13 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   // and its chat template emits the same <tool_call>{json}</tool_call> we parse).
   const MODELS = {
     'gemma-4-e2b': { id:'onnx-community/gemma-4-E2B-it-ONNX', label:'Gemma 3n E2B', vendor:"Google's", modelClass:'Gemma4ForCausalLM', dtype:'q4f16', minBindingGiB:1.8, sizeLabel:'~3 GB', foldSystemIntoUser:true },
-    'qwen2.5-1.5b': { id:'onnx-community/Qwen2.5-1.5B-Instruct', label:'Qwen2.5 1.5B', vendor:"Alibaba's", modelClass:'AutoModelForCausalLM', dtype:'q4f16', minBindingGiB:0.3, sizeLabel:'~1.2 GB', foldSystemIntoUser:false },
+    // dtypeFirefox: on Firefox/wgpu, fp16 activations numerically OVERFLOW on
+    // this model (observed live: replies degenerate to one repeated token) —
+    // q4 keeps 4-bit weights but fp32 activations, no f16 anywhere. Gemma has
+    // no such fallback (its fp32 PLE tensor would blow any binding limit).
+    'qwen2.5-1.5b': { id:'onnx-community/Qwen2.5-1.5B-Instruct', label:'Qwen2.5 1.5B', vendor:"Alibaba's", modelClass:'AutoModelForCausalLM', dtype:'q4f16', dtypeFirefox:'q4', minBindingGiB:0.3, sizeLabel:'~1.2 GB', foldSystemIntoUser:false },
   };
+  const IS_FIREFOX = /firefox/i.test(navigator.userAgent);
   const MODEL_ORDER = ['gemma-4-e2b','qwen2.5-1.5b']; // best first; pick first that fits
   let selectedModel = null, capBindingGiB = 0;
 
@@ -379,7 +384,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   // the shortcut SPELLED OUT. One notebook run hands the raw console/return
   // straight back, so one tool call + one short answer settles most tasks;
   // extra turns just burn the local model's tokens/latency.
-  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (a small model on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY: <tool_call>{"name":"<tool>","arguments":{...}}</tool_call>. ONE run_notebook call settles most tasks: do ALL the work in a single notebook run (compute, format, chart in one script — its console output and return value come straight back to you raw), then give a short final answer. Only call again if the result shows you something genuinely new to do. Prefer run_notebook for anything computational. Be concise.`;
+  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (a small model on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY this format — for example: <tool_call>{"name":"run_notebook","arguments":{"code":"const x = 2 + 2; console.log(x); return x;"}}</tool_call> — valid JSON inside the tags, the code as ONE quoted JSON string. ONE run_notebook call settles most tasks: do ALL the work in a single notebook run (compute, format, chart in one script — its console output and return value come straight back to you raw), then give a short final answer. Only call again if the result shows you something genuinely new to do. Prefer run_notebook for anything computational. Be concise.`;
 
   async function agentRunNotebook(code){
     const id = openTab('notebook', { seed: code });        // open + seed, no auto-run
@@ -488,7 +493,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
             if(p.phase==='compiling') pct.textContent='compiling onto your GPU (first load can take a minute)';
             else pct.textContent=p.phase==='ready'?'finalizing':p.phase;
           }
-        }, m);
+        }, (IS_FIREFOX && m.dtypeFirefox) ? { ...m, dtype: m.dtypeFirefox } : m);
         clearTimeout(watchdog);
         // success — the download card has served its purpose; collapse it entirely
         // (the chat message + the toolbar chip + the status bar all show "ready").
@@ -519,9 +524,15 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     const bubble = clog.lastElementChild.querySelector('.bubble');
     const btext = bubble.querySelector('.btext');
     sendBtn.disabled=true;
+    // fp16-overflow tripwire: a saturated WebGPU backend degenerates into one
+    // repeated token — catch it instead of gushing "!!!!…" at the user.
+    const GARBLED_MSG = 'the local model produced garbled output — a known WebGPU float16 bug on some browser builds. Reload to retry'
+      + (IS_FIREFOX ? ' (Firefox now uses the safer q4 build — the first retry re-downloads once).' : '.');
+    const guard=(v)=>looksGarbled(v) ? GARBLED_MSG : v;
     await agent.chat(text, {
-      onDelta:(v)=>{ btext.textContent = v || '…'; clog.scrollTop=clog.scrollHeight; },
-      onText:(v)=>{ btext.textContent = v; clog.scrollTop=clog.scrollHeight; },
+      onDelta:(v)=>{ btext.textContent = guard(v) || '…'; clog.scrollTop=clog.scrollHeight; },
+      onText:(v)=>{ btext.textContent = guard(v); clog.scrollTop=clog.scrollHeight; },
+      onRetry:()=>{ bubble.insertAdjacentHTML('beforeend', '<div class="toolcall"><span class="g">↻</span>fixing tool-call format…</div>'); clog.scrollTop=clog.scrollHeight; },
       onToolCall:(c)=>{ bubble.insertAdjacentHTML('beforeend', `<div class="toolcall"${c.name==='show_peers'?' style="border-left-color:var(--magenta)"':''}><span class="g"${c.name==='show_peers'?' style="background:var(--magenta)"':''}>${c.name==='show_peers'?'◈':'N'}</span>${c.name}</div>`); clog.scrollTop=clog.scrollHeight; },
     });
     sendBtn.disabled=false;
