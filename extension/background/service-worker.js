@@ -284,6 +284,7 @@ import { makeModelCatalog } from './model-catalog.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
+import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
 import { makeHooksRoutes } from './routes/hooks.js';
@@ -1979,8 +1980,12 @@ const confirmAction = async (prompt) => {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
   }
-  // Ephemeral: an actor's yes_session approves THIS call only (no standing grant).
-  return ephemeral && answer === 'yes_session' ? 'yes_once' : answer;
+  // Ephemeral: an actor's yes_session approves THIS call only (no standing grant),
+  // EXCEPT a2a_contact — the sanctioned exception (an explicit first-contact
+  // allowlist decision, the peer did shown to the user), whose raw answer survives
+  // so a2aResolveConsent can honor "Allow for session" vs "Allow once". Decision is
+  // the pure downgradesActorConfirm (background/a2a-consent.js), unit-tested.
+  return downgradesActorConfirm(prompt.tool, ephemeral, answer) ? 'yes_once' : answer;
 };
 
 // Per-SW "current active session" cache (background/session-state.js), behind a
@@ -2777,9 +2782,13 @@ const a2aRevoke = (/** @type {string} */ did) => {
 const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message') => {
   if (a2aApprovedDids.has(target)) return true;
   const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] });
-  const ok = answer === 'yes_once' || answer === 'yes_session';
-  if (ok) a2aApprove(target);
-  auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok } }).catch(() => {});
+  // "Allow for session" adds the peer to the revocable allowlist (silent after —
+  // the intended contact-add); "Allow once" authorizes THIS call only and is NOT
+  // persisted, so a one-time click can't become a standing signing grant. The
+  // { ok, persist } split is the pure a2aConsentOutcome (background/a2a-consent.js).
+  const { ok, persist } = a2aConsentOutcome(answer);
+  if (persist) a2aApprove(target);
+  auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok, standing: persist } }).catch(() => {});
   return ok;
 };
 const meshHostRoom = (/** @type {object} */ payload) =>
