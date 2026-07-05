@@ -74,6 +74,12 @@ export { installAppBundle, BundleRejectedError } from './apps/loader.js';
 export { createDwebBridge } from './apps/bridge.js';
 export { loadSeedApp, COMMONS_SEED } from './apps/seed.js';
 
+// A2A Agent Card validation/caps — exposed so the offscreen base host (dweb-base.js,
+// which reaches this module only via loadDweb, never a static import) can enforce
+// them on the card-set (validate my own card, reject/strip before it hits the mesh)
+// and card-get (clamp an untrusted peer card before handing it to the actor) paths.
+export { normalizeCard, validateCard, parsePeerCard, CardRejectedError } from './agent-card.js';
+
 // --- the core-facing client (shared/dweb-interface.js shape) -------
 // The ONLY entry point core code reaches (via shared/dweb-loader.js,
 // preview packages only). PHASE lives in client.js next to the client.

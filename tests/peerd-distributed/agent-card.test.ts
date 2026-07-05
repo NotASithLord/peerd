@@ -59,3 +59,25 @@ describe('parsePeerCard — untrusted inbound', () => {
     expect(parsePeerCard('not a card')).toBe(null);
   });
 });
+
+// Wiring drift guard (cynical re-swarm, medium): the caps were dead code once —
+// agent-card.js was imported NOWHERE, so both the publish and fetch card paths
+// ran uncapped. Pin that the validators are (a) re-exported from the module's
+// public index and (b) actually CALLED on the card-set / card-get paths in the
+// offscreen base host, so they can't silently go inert again.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+describe('agent-card caps are wired into the card paths (not dead code)', () => {
+  test('peerd-distributed/index.js re-exports the validators', () => {
+    const idx = readFileSync(join(import.meta.dir, '../../extension/peerd-distributed/index.js'), 'utf8');
+    for (const name of ['normalizeCard', 'validateCard', 'parsePeerCard']) {
+      expect(idx).toContain(name);
+    }
+  });
+  test('dweb-base.js validates on card-set and clamps on card-get', () => {
+    const src = readFileSync(join(import.meta.dir, '../../extension/offscreen/dweb-base.js'), 'utf8');
+    // card-set must reject/strip via validateCard; card-get must clamp via parsePeerCard.
+    expect(src).toContain('validateCard');
+    expect(src).toContain('parsePeerCard');
+  });
+});

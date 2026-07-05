@@ -265,7 +265,14 @@ const handleRoomOp = async (msg) => {
     // publishes MY signed card (retained so late joiners backfill), card-get
     // reads a peer's latest card from the retained history by its did.
     case 'card-set': {
-      const card = { ...(msg.card && typeof msg.card === 'object' ? msg.card : {}), did: room.did };
+      // Validate + clamp MY card before it hits the mesh: strips arbitrary extra
+      // fields and REJECTS an oversized one (the agent-card caps — MAX_CARD_BYTES
+      // etc.), so a retained '~card' envelope we emit can't amplify to late-joiners.
+      const client = /** @type {any} */ (await loadDweb());
+      let clean;
+      try { clean = client.validateCard(msg.card).card; }
+      catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? 'agent card rejected' }; }
+      const card = { ...clean, did: room.did };
       room.sync.retain('~card');
       const env = await room.sync.publish('~card', card);
       return { ok: true, did: room.did, id: env.id };
@@ -278,7 +285,11 @@ const handleRoomOp = async (msg) => {
       // newest by envelope ts so a re-advertised card always supersedes.
       const mine = room.sync.history('~card').filter((/** @type {any} */ e) => e.from === msg.did);
       const latest = mine.reduce((/** @type {any} */ best, /** @type {any} */ e) => (!best || (e.ts ?? 0) >= (best.ts ?? 0) ? e : best), null);
-      return { ok: true, card: latest ? latest.body.data : null };
+      // Clamp the UNTRUSTED peer card (parsePeerCard: coerce + cap, null if it
+      // blows the ceiling) before it reaches the actor's a2a_run worker — the caps
+      // exist precisely to bound a malicious multi-MB / unbounded-fields card.
+      const client = /** @type {any} */ (await loadDweb());
+      return { ok: true, card: latest ? client.parsePeerCard(latest.body.data) : null };
     }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': { const h = await start(); const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files }); return { ok: true, uri, hash }; }
