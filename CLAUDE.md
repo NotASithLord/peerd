@@ -84,12 +84,16 @@ prose orientation is this file, and the rest is the source itself.
   from `manifests/*.json` and `packaging/default-settings.mjs`. CI fails on
   drift. Versions live in `package.json` only.
 - **Docs defer to code and CI for live state.** Do not hard-code dynamic
-  facts in prose: test pass counts, tool counts, gate matrices, release
-  artifact lists, generated-file contents, extension IDs, channel behavior,
-  or provider/model inventories. Point readers at the source file, script,
-  generated artifact, or CI/preflight command that computes the answer.
-  Static architectural invariants are fine; operational state belongs in
-  code, generated output, or the release itself.
+  facts in prose: test/tool counts, gate matrices, release artifact lists,
+  generated-file contents, extension IDs, channel behavior, provider/model
+  inventories — and equally the things that quietly drift: **tunable
+  constants and thresholds** (timeouts, caps, depths, retry code lists),
+  **exact dates/PR numbers** as anything more than a passing anchor, and
+  **inventories of a directory's internal files** (they grow with the code).
+  Name the pattern and point at the source file / script / CI command that
+  holds the real value; don't transcribe it. Static architectural
+  invariants are fine; operational state belongs in code, generated output,
+  or the release itself. When in doubt, describe the SHAPE and cite the file.
 - **The dweb boundary.** Nothing outside `peerd-distributed/`
   imports it — not even its `index.js` (stricter than the per-module
   rule below; the store package prunes the module entirely). Core code
@@ -253,15 +257,15 @@ the canonical catalog: read the relevant module before assuming
 something isn't built. The bullets here are the postures and
 gotchas to know going in:
 
-- Anthropic provider with streaming, adaptive extended thinking on
-  4.6+ models, 3-of-4 prompt-cache breakpoints, 429/500/503/529 retry,
+- Anthropic provider with streaming, adaptive extended thinking on newer
+  models, prompt-cache breakpoints, retry on transient/overload statuses,
   and the `anthropic-dangerous-direct-browser-access` ack — plus an
   OpenRouter adapter (OpenAI-compatible gateway) and a keyless Ollama
   adapter (local inference; live `/api/tags` model inventory; GPU-fit
   model recommendation in Settings) (`peerd-provider/`).
 - Vault with passphrase unlock AND WebAuthn PRF (Touch ID / Windows
   Hello) — same DK from either path (`peerd-egress/vault/`). Idle
-  auto-lock ON by default (45min, user-settable); manual Lock button
+  auto-lock ON by default (user-settable); manual Lock button
   in the top bar.
 - `chrome.debugger` usage (CDP) — a CHANNEL-GATED required permission,
   NOT the default. Chrome forbids `debugger` under `optional_permissions`
@@ -284,7 +288,7 @@ gotchas to know going in:
   true` on Trusted-Types pages (Gmail/Notion/Slack), and `page_keys`'
   trusted (`isTrusted`) input. Pool lives in
   `background/debugger-pool.js`.
-- Subagents — depth-bounded recursion (default `MAX_DEPTH=5`), tool
+- Subagents — depth-bounded recursion, tool
   narrowing, output cap. Real implementation at
   `peerd-runtime/subagent/spawn.js` — not a stub. Since the async-actor
   unification (PR #134): a child runs under its own turn slot with an
@@ -334,10 +338,10 @@ gotchas to know going in:
   audit. The legacy permission-mode axis was REMOVED
   2026-06-12 — Plan/Act + the denylist carry the safety weight; Plan
   permits pure URL loads only, never clicks (enforced in `gates.js`).
-- The ten-feature buildout — memory, edit + checkpoints, Plan/Act,
-  composer (slash commands + @-refs), goal mode (autonomous loop), cost telemetry, skills,
-  review subagent, and hooks — all integrated. (The tenth, do/get/check,
-  was CULLED 2026-07-01: the web actor drives pages directly, so one
+- The feature buildout — memory, edit + checkpoints, Plan/Act,
+  composer (slash commands + @-refs), goal mode (autonomous loop), cost
+  telemetry, skills, review subagent, and hooks — all integrated.
+  (do/get/check was CULLED: the web actor drives pages directly, so one
   delegation reaches the page instead of two.) Per-feature
   detail lives in the code under `peerd-runtime/`.
 - Dual distribution: store (no dweb) + preview channels, generated
@@ -366,8 +370,8 @@ gotchas to know going in:
   and MONITORS inbound mesh traffic: peers reach it on the reserved
   `peerd-agent` room, whose `direct` events wake it as fenced, INBOUND
   (untrusted) turns — the sender gate means an inbound message can never make
-  it delegate. Rate-capped (3/min per did, 30/hr global) before any model
-  call; notable findings trickle up to the active chat as an attributed
+  it delegate. Rate-capped (per-did + global caps, `background/dweb-inbound-rate-cap.js`)
+  before any model call; notable findings trickle up to the active chat as an attributed
   actor-reply bubble (runWhenIdle — never steals a live turn). The envoy for
   agent-to-agent over the mesh: "a peer's agent" is just an actor whose heap
   is on another machine.
