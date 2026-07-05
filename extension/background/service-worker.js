@@ -236,6 +236,9 @@ import {
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
   finalAssistantText,
+  // The debug surface: the bundle assembler + the delegation-tree walk the
+  // session/debugBundle route runs (pure; the SW supplies the reads).
+  assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
 import { flattenCategorisedDenylist, normalizeDenylistPattern } from '/peerd-egress/index.js';
@@ -3505,6 +3508,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // PR #134 phase 5: agent/stop also cascades through the live subagent
     // subtree (children run under their own turn slots now).
     subagentLifecycle,
+    // The debug surface: session/debugBundle + session/contextSnapshots.
+    settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,

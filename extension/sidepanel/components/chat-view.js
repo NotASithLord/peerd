@@ -9,7 +9,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
-import { manifestLabel } from '/peerd-runtime/index.js';
+import { manifestLabel, bundleToOtlp } from '/peerd-runtime/index.js';
 import { openOptions } from '/shared/open-options.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
@@ -17,6 +17,20 @@ import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
 import { AsyncTasksBar } from './async-tasks-bar.js';
+import { ContextInspector } from './context-inspector.js';
+
+// The transfer section's Blob + anchor pattern — the panel document is a
+// normal DOM context, so a synthetic download link is all a file save takes.
+/** @param {unknown} payload @param {string} filename */
+const saveJsonFile = (payload, filename) => {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -27,6 +41,9 @@ import { AsyncTasksBar } from './async-tasks-bar.js';
  * @typedef {Object} ChatViewState
  * @property {boolean} goalArmed             the Goal toggle's arm state (UI-only)
  * @property {string|null|undefined} _sid    which chat the arm state belongs to
+ * @property {boolean} [debugMenuOpen]       the debug-export flyout's open state
+ * @property {boolean} [inspectorOpen]       the context-inspector modal's open state
+ * @property {Array<Record<string, any>>|null} [snapshots]  the inspector's fetched snapshots (null = loading)
  */
 
 /**
@@ -186,6 +203,49 @@ export const ChatView = {
         state.session?.toolManifest ? m('span.session-sys-badge', {
           title: `Tool manifest active: ${manifestLabel(state.session.toolManifest)} - only that toolset is exposed to the agent this chat.\n\n"/tools" shows it - "/tools full" restores everything.`,
         }, `/tools ${manifestLabel(state.session.toolManifest)}`) : null,
+        // The debug surface's chat entry point: export this session's debug
+        // bundle (transcript + children + audit slice + cost + settings +
+        // live context snapshots) as one local JSON file, or the same data
+        // as OTLP spans. devMode adds the context inspector. Chip-sized on
+        // purpose — support tooling, not a headline control.
+        state.session?.sessionId ? m('.debug-export', [
+          m('button.debug-export-btn', {
+            title: 'Debug: export this chat\'s debug bundle (a local file — nothing is sent anywhere)',
+            onclick: () => { ui.debugMenuOpen = !ui.debugMenuOpen; },
+          }, 'debug'),
+          ui.debugMenuOpen ? m('.debug-menu', [
+            m('button.debug-menu-item', {
+              onclick: async () => {
+                ui.debugMenuOpen = false;
+                const sessionId = state.session?.sessionId;
+                const reply = await send({ type: 'session/debugBundle', sessionId });
+                if (!reply?.ok) return;
+                saveJsonFile(reply.bundle, `peerd-debug-${String(sessionId).slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.json`);
+              },
+            }, 'export debug bundle (.json)'),
+            m('button.debug-menu-item', {
+              onclick: async () => {
+                ui.debugMenuOpen = false;
+                const sessionId = state.session?.sessionId;
+                const reply = await send({ type: 'session/debugBundle', sessionId });
+                if (!reply?.ok) return;
+                // why converted HERE: bundleToOtlp is pure, so the second
+                // format costs no second route and no SW round trip.
+                saveJsonFile(bundleToOtlp(reply.bundle), `peerd-trace-${String(sessionId).slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.json`);
+              },
+            }, 'export OTel trace (.json)'),
+            state.settings?.devMode ? m('button.debug-menu-item', {
+              onclick: async () => {
+                ui.debugMenuOpen = false;
+                ui.inspectorOpen = true;
+                ui.snapshots = null;
+                const reply = await send({ type: 'session/contextSnapshots', sessionId: state.session?.sessionId });
+                ui.snapshots = reply?.ok ? reply.snapshots : [];
+                m.redraw();
+              },
+            }, 'context inspector') : null,
+          ]) : null,
+        ]) : null,
       ]),
 
       // (The per-chat usage chip lives inside the InputBar action row,
@@ -195,6 +255,12 @@ export const ChatView = {
         goalArmed: ui.goalArmed,
         onGoalSent: () => { ui.goalArmed = false; },
       }),
+
+      // The context inspector modal (devMode, opened from the debug menu).
+      ui.inspectorOpen ? m(ContextInspector, {
+        snapshots: ui.snapshots ?? null,
+        onClose: () => { ui.inspectorOpen = false; },
+      }) : null,
     ]);
   },
 };

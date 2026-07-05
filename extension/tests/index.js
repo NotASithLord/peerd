@@ -96,6 +96,7 @@ import './unit/sidepanel/api-integrations.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
+import './unit/sidepanel/failure-chip.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

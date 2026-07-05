@@ -67,7 +67,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 490 → 493: the debug surface adds observability/failure-classify.js,
 // observability/debug-bundle.js, and observability/otel-export.js (the pure
 // cores of the debug-bundle export + failure classifier + OTel mapper).
-const COVERED_FLOOR = 493;
+// 493 → 496: the debug surface's wiring + UI add background/context-snapshots.js
+// (the capture ring), sidepanel/components/context-inspector.js, and the
+// failure-chip in-browser test.
+const COVERED_FLOOR = 496;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
