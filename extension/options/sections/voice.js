@@ -120,7 +120,7 @@ export const VoiceSection = {
             ? `Downloading voice model… ${Math.round(voiceProgress * 100)}%`
             : 'Preparing…'),
           activeEngine === 'moonshine' ? m('.voice-progress',
-            m('.voice-progress-fill', { style: `width: ${Math.round(voiceProgress * 100)}%` }),
+            m('.voice-progress-fill', { style: `clip-path: inset(0 ${100 - Math.round(voiceProgress * 100)}% 0 0)` }),
           ) : null,
         ]) : null,
 

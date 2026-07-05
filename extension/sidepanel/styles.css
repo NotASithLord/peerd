@@ -1679,6 +1679,7 @@ button.icon:hover { background: var(--bg); }
 
 /* --- voice settings section --- */
 .voice-section .voice-progress {
+  position: relative; /* anchors the fill's full-track spectrum (::before) */
   height: 6px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -1686,10 +1687,20 @@ button.icon:hover { background: var(--bg); }
   overflow: hidden;
   margin-top: 8px;
 }
+/* why a clipped full-track gradient: download progress reveals the brand
+   spectrum in LOGO ORDER (p cyan, e red, e amber, r green, d magenta) as it
+   expands — the fill always spans the whole track and progress just UNCLIPS
+   it left→right (clip-path, set inline by voice.js/ocr.js), so the bar
+   completes on the magenta 'd'. clip-path, not width: overflow can't clip
+   what defines the gradient's full-track scale. Shared by the voice
+   (Moonshine) and OCR (tesseract) model downloads. */
 .voice-section .voice-progress-fill {
-  height: 100%;
-  background: var(--accent);
-  transition: width 80ms linear;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg,
+    var(--cyan), var(--red), var(--amber), var(--green), var(--magenta));
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 80ms linear;
 }
 .voice-section .voice-status {
   display: inline-flex;

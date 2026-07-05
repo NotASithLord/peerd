@@ -75,7 +75,7 @@ export const OcrSection = {
 
       ui.busy ? m('div', [
         m('.voice-status', `Downloading OCR engine… ${Math.round(ui.progress * 100)}%`),
-        m('.voice-progress', m('.voice-progress-fill', { style: `width: ${Math.round(ui.progress * 100)}%` })),
+        m('.voice-progress', m('.voice-progress-fill', { style: `clip-path: inset(0 ${100 - Math.round(ui.progress * 100)}% 0 0)` })),
       ]) : null,
 
       ui.error ? m('.voice-status.is-err', `Error: ${ui.error}`) : null,
