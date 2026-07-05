@@ -42,32 +42,40 @@ const clip = (s, n) => {
 export const shapeModelCall = (args = {}) => {
   const messages = Array.isArray(args.messages) ? args.messages : [];
   const kept = messages.slice(-SNAPSHOT_MAX_MESSAGES);
+  // why EVERY field is clipped/capped, not just the obvious bodies: on the
+  // actor seam these args arrive verbatim from a worker heap — exactly the
+  // adversary the heap split assumes compromised. An unshaped field (a
+  // megabyte "reasoning" object, a 10^6-entry tools array) would let that
+  // worker bloat SW memory and poison the bundle. DoS-only, but free to
+  // close: the whitelist admits nothing unbounded.
+  const capList = (/** @type {unknown} */ v, /** @type {number} */ n) => (Array.isArray(v) ? v.slice(0, n) : []);
   return {
-    provider: args.provider ?? '',
-    model: args.model ?? '',
+    provider: clip(args.provider ?? '', 200),
+    model: clip(args.model ?? '', 200),
     system: clip(args.system ?? '', SNAPSHOT_SYSTEM_CHARS),
     systemChars: typeof args.system === 'string' ? args.system.length : 0,
-    reasoning: args.reasoning ?? null,
-    tools: (Array.isArray(args.tools) ? args.tools : []).map((t) => t?.name ?? '?'),
+    reasoning: args.reasoning == null ? null : clip(args.reasoning, 400),
+    tools: capList(args.tools, 50).map((t) => clip(t?.name ?? '?', 120)),
     droppedMessages: messages.length - kept.length,
     messages: kept.map((m) => ({
-      role: m?.role ?? '?',
+      role: clip(m?.role ?? '?', 40),
       content: clip(m?.content ?? '', SNAPSHOT_CONTENT_CHARS),
       ...(m?.toolUses?.length ? {
-        toolUses: m.toolUses.map((/** @type {Record<string, any>} */ u) => ({
-          name: u?.name ?? '?', input: clip(u?.input, 400),
+        toolUses: capList(m.toolUses, 50).map((/** @type {Record<string, any>} */ u) => ({
+          name: clip(u?.name ?? '?', 120), input: clip(u?.input, 400),
         })),
       } : {}),
       ...(m?.toolResults?.length ? {
-        toolResults: m.toolResults.map((/** @type {Record<string, any>} */ r) => ({
-          tool_use_id: r?.tool_use_id, is_error: r?.is_error === true,
+        toolResults: capList(m.toolResults, 50).map((/** @type {Record<string, any>} */ r) => ({
+          tool_use_id: clip(r?.tool_use_id ?? '', 120), is_error: r?.is_error === true,
           content: clip(r?.content ?? '', SNAPSHOT_CONTENT_CHARS),
           ...(r?.images?.length ? { images: STRIPPED } : {}),
         })),
       } : {}),
       ...(m?.attachments?.length ? {
-        attachments: m.attachments.map((/** @type {Record<string, any>} */ a) => ({
-          name: a?.name, mediaType: a?.mediaType, size: a?.size,
+        attachments: capList(m.attachments, 20).map((/** @type {Record<string, any>} */ a) => ({
+          name: clip(a?.name ?? '', 200), mediaType: clip(a?.mediaType ?? '', 100),
+          size: Number.isFinite(a?.size) ? a.size : 0,
           ...(a?.data ? { data: STRIPPED } : {}),
         })),
       } : {}),

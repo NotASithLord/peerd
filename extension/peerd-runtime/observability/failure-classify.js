@@ -54,7 +54,7 @@ const RULES = [
   { kind: 'provider', test: /\bprovider stream ended early\b/i },
   { kind: 'limits', test: /HTTP 402\b|HTTP 429\b|\busage limit\b|\bspend limit\b|\brate.?limit/i },
   { kind: 'timeout', test: /\btimed? ?out\b|VMRunTimeoutError|\bwall.?clock\b.*\bexceeded\b/i },
-  { kind: 'provider', test: /^Provider '.+' HTTP \d+|\bprovider stream ended early\b|OllamaNotRunning|\bOllama\b.*\b(not running|unreachable)\b/i },
+  { kind: 'provider', test: /^Provider '.+' HTTP \d+|OllamaNotRunning|\bOllama\b.*\b(not running|unreachable)\b/i },
   { kind: 'environment', test: /^no_option_matching:|\bno element matching\b|\bactor tool relay failed\b/i },
   { kind: 'environment', test: /VM(NotReady|BootFailed|TabClosed|NetworkDenied)|\bthe VM tab (was )?closed\b|\bsandbox\b.*\b(crash|failed to boot)\b|\bworker (crashed|terminated unexpectedly)\b/i },
   { kind: 'agent', test: /\bcould not complete your request\b|\bthe actor turn failed\b|\bREPORTED FAILURE\b|\bproduced no text reply\b/i },
@@ -70,9 +70,12 @@ const RULES = [
 export const classifyFailure = (error, context = {}) => {
   // A turn the user stopped is 'aborted' regardless of what text survived.
   if (context.stopReason === 'aborted') return { kind: 'aborted', label: 'aborted' };
-  const text = typeof error === 'string'
+  // why the slice: the chip render path classifies raw transcript strings on
+  // every redraw; the class is always decided in the first bytes, and a
+  // bounded input keeps regex work O(1) even on a megabyte error dump.
+  const text = (typeof error === 'string'
     ? error
-    : String(/** @type {{ message?: unknown }} */ (error)?.message ?? error ?? '');
+    : String(/** @type {{ message?: unknown }} */ (error)?.message ?? error ?? '')).slice(0, 4000);
   for (const rule of RULES) {
     if (rule.test.test(text)) return { kind: rule.kind, label: rule.kind };
   }

@@ -37,6 +37,35 @@ describe('shapeModelCall — bounded and binary-free', () => {
     expect(shaped.messages[0].content).toBe('m15');                // the OLDEST are what's dropped
   });
 
+  test('EVERY worker-controllable field is bounded (a compromised heap cannot bloat the ring)', () => {
+    const shaped = shapeModelCall({
+      provider: 'p'.repeat(10_000), model: 'm'.repeat(10_000),
+      reasoning: { blob: 'r'.repeat(100_000) },
+      tools: Array.from({ length: 500 }, (_, i) => ({ name: `t${i}`.repeat(1000) })),
+      messages: [{
+        role: 'x'.repeat(500), content: '',
+        toolUses: Array.from({ length: 500 }, () => ({ name: 'n'.repeat(9000), input: {} })),
+        toolResults: Array.from({ length: 500 }, () => ({ tool_use_id: 'i'.repeat(9000), content: '' })),
+        attachments: Array.from({ length: 500 }, () => ({ name: 'a'.repeat(9000), mediaType: 'z'.repeat(9000), size: 1 })),
+      }],
+    });
+    expect(shaped.provider.length).toBeLessThanOrEqual(200);
+    expect(shaped.model.length).toBeLessThanOrEqual(200);
+    expect((shaped.reasoning as string).length).toBeLessThanOrEqual(400);
+    expect(shaped.tools.length).toBe(50);
+    expect(shaped.tools[0].length).toBeLessThanOrEqual(120);
+    const msg = shaped.messages[0];
+    expect(msg.role.length).toBeLessThanOrEqual(40);
+    expect(msg.toolUses!.length).toBe(50);
+    expect(msg.toolUses![0].name.length).toBeLessThanOrEqual(120);
+    expect(msg.toolResults!.length).toBe(50);
+    expect(msg.toolResults![0].tool_use_id.length).toBeLessThanOrEqual(120);
+    expect(msg.attachments!.length).toBe(20);
+    expect(msg.attachments![0].name.length).toBeLessThanOrEqual(200);
+    // the whole snapshot stays small even under a hostile payload
+    expect(JSON.stringify(shaped).length).toBeLessThan(120_000);
+  });
+
   test('degenerate shapes never throw', () => {
     expect(() => shapeModelCall(undefined as any)).not.toThrow();
     expect(shapeModelCall({ messages: 'not-an-array' as any }).messages).toEqual([]);
