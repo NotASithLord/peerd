@@ -109,7 +109,7 @@ export async function startPeer({ rootEl, mountEl, statusEl, countEl }) {
   graph.start();
   setStatus('is-connecting', 'joining the peerd network…');
 
-  let identity, room, timer;
+  let identity, room;
   try {
     identity = await generateIdentity();
     room = await joinRoom({ roomId: BASE_TOPIC, identity, url: RENDEZVOUS, kind: 'website' }); // observe-only
@@ -126,7 +126,7 @@ export async function startPeer({ rootEl, mountEl, statusEl, countEl }) {
   const refresh = () => { const roster = buildRoster(room, presence, identity.did); graph.update(roster); setCount(roster.length); };
   refresh();
   room.onPeer(refresh); room.onPeerGone(refresh); presence.onJoin(refresh); presence.onLeave(refresh);
-  timer = setInterval(refresh, 4000);
+  const timer = setInterval(refresh, 4000);
 
   const stop = () => { try { clearInterval(timer); } catch {} try { graph.stop(); } catch {} try { room.leave(); } catch {} };
   window.addEventListener('pagehide', stop, { once: true });

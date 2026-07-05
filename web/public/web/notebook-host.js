@@ -11,8 +11,13 @@
 // worker source and runs on spawn; the worker posts log/display/done plus
 // bridge requests; we render via the real output-render.js and reply to bridges.
 
+// why deep imports (not /peerd-engine/index.js): on a page the module tree is
+// a served bundle, not an API seam — the full engine index statically drags 27
+// files + CodeMirror + vm-net into first paint for the two pure functions this
+// host actually uses. The house no-restricted-imports rule is relaxed for
+// web/public/web/** in eslint.config.js for exactly this reason.
 import { buildWorkerSource, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
-import { buildModule } from '/peerd-engine/index.js';
+import { buildModule } from '/peerd-engine/module-resolver.js';
 import { renderReturnValue } from '/notebook-tab/output-render.js';
 import { opfsHelpers } from '/peerd-engine/opfs.js';
 
@@ -22,13 +27,13 @@ import { opfsHelpers } from '/peerd-engine/opfs.js';
  * @param {{ outputEl: HTMLElement, logEl?: HTMLElement, notebookId?: string, timeoutMs?: number }} opts
  */
 export async function runNotebook(code, { outputEl, logEl, notebookId, timeoutMs = 30000 }) {
-  notebookId = notebookId || ('nb-' + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())));
+  notebookId = notebookId || (`nb-${  crypto.randomUUID ? crypto.randomUUID() : String(Date.now())}`);
   const opfs = opfsHelpers(['peerd-lite', notebookId]);
 
   const log = (cls, text) => {
     if (!logEl) return;
     const d = document.createElement('div');
-    d.className = 'nbline ' + cls;
+    d.className = `nbline ${  cls}`;
     d.textContent = text;
     logEl.appendChild(d);
     logEl.scrollTop = logEl.scrollHeight;
@@ -52,14 +57,14 @@ export async function runNotebook(code, { outputEl, logEl, notebookId, timeoutMs
     built = await buildWorkerSource(code, { notebookId, resolverDeps });
     if (built.cache.size > 0) log('log-info', `[import] ${built.cache.size} module(s) resolved`);
   } catch (e) {
-    log('log-error', 'import resolution failed: ' + (e?.message || String(e)));
+    log('log-error', `import resolution failed: ${  e?.message || String(e)}`);
     return { error: 'import resolution failed' };
   }
 
   const url = URL.createObjectURL(new Blob([built.source], { type: 'application/javascript' }));
   let worker;
   try { worker = new Worker(url, { type: 'module' }); }
-  catch (e) { URL.revokeObjectURL(url); log('log-error', 'worker spawn failed: ' + (e?.message || String(e))); return { error: 'spawn failed' }; }
+  catch (e) { URL.revokeObjectURL(url); log('log-error', `worker spawn failed: ${  e?.message || String(e)}`); return { error: 'spawn failed' }; }
 
   return await new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -72,7 +77,7 @@ export async function runNotebook(code, { outputEl, logEl, notebookId, timeoutMs
       const m = ev.data;
       if (!m || typeof m !== 'object') return;
 
-      if (m.type === 'log') { log('log-' + m.level, m.text); return; }
+      if (m.type === 'log') { log(`log-${  m.level}`, m.text); return; }
 
       if (m.type === 'display') { renderReturnValue(outputEl, m.value); return; }
 
@@ -85,7 +90,7 @@ export async function runNotebook(code, { outputEl, logEl, notebookId, timeoutMs
           else if (m.op === 'compose-module') {
             const sub = await buildModule(m.args.path, resolverDeps, built.cache);
             result = sub.source;
-          } else throw new Error('unknown opfs op: ' + m.op);
+          } else throw new Error(`unknown opfs op: ${  m.op}`);
           worker.postMessage({ type: 'opfs-response', rid: m.rid, result });
         } catch (e) {
           worker.postMessage({ type: 'opfs-response', rid: m.rid, error: e?.message || String(e) });
@@ -125,7 +130,7 @@ export async function runNotebook(code, { outputEl, logEl, notebookId, timeoutMs
       try { worker.terminate(); } catch {}
       URL.revokeObjectURL(url);
       const detail = e.message || (e.error && (e.error.stack || e.error.message)) || 'worker crashed';
-      log('log-error', '[worker crashed] ' + detail);
+      log('log-error', `[worker crashed] ${  detail}`);
       resolve({ error: 'worker crashed' });
     });
   });

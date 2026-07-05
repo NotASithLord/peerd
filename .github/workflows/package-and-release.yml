@@ -1,9 +1,15 @@
 # Dual-distribution CI (PACKAGING.md):
 #
 #   every push/PR   → tests, lint, dweb-boundary check, generated-
-#                     file drift check, then the FULL 2-channel × 2-browser
-#                     artifact matrix (store artifacts are verified to
-#                     contain zero dweb traces as part of packaging).
+#                     file drift check, the WEB target build + its
+#                     import-closure boundary gate, then the FULL
+#                     2-channel × 2-browser artifact matrix (store artifacts
+#                     are verified to contain zero dweb traces as part of
+#                     packaging).
+#   push to main    → additionally: deploy the web demo (web-dist/, staged
+#                     fresh from source) to Cloudflare Pages → demo.peerd.ai
+#                     (skips with a warning until the CLOUDFLARE_* secrets
+#                     and the peerd-demo Pages project exist).
 #   tag push v*     → additionally: signed preview artifacts, a GitHub
 #                     Release titled peerd-preview-v<X.Y.Z> with the
 #                     preview artifacts + update feeds attached, and a
@@ -14,11 +20,14 @@
 # Store uploads (Chrome Web Store / AMO) stay MANUAL — download the
 # verified store artifacts from the release run and submit them after QA.
 #
-# Secrets used by the release job (Settings → Secrets → Actions):
-#   CRX_PRIVATE_KEY   contents of key.pem (the CRX preview signing key —
-#                     same key forever, or every preview install breaks)
-#   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
-#   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
+# Secrets used (Settings → Secrets → Actions):
+#   CRX_PRIVATE_KEY        contents of key.pem (the CRX preview signing key —
+#                          same key forever, or every preview install breaks)
+#   AMO_JWT_ISSUER         addons.mozilla.org API credentials used by
+#   AMO_JWT_SECRET         `web-ext sign` for the Firefox preview package
+#   CLOUDFLARE_API_TOKEN   Pages:Edit token for the deploy-web job
+#   CLOUDFLARE_ACCOUNT_ID  the Cloudflare account that owns the peerd-demo
+#                          Pages project (demo.peerd.ai)
 
 name: package-and-release
 
@@ -69,6 +78,15 @@ jobs:
         run: bun run check:imports
       - name: Doc path references (top-level docs point at real files)
         run: bun run check:docpaths
+      # The web target: stage it fresh from live source, then prove the
+      # assembled tree is import-closed (check-web-boundary auto-runs inside
+      # package:web; the explicit second run keeps the gate visible in logs).
+      # This is what lets demo.peerd.ai inherit upstream safely — an escape
+      # introduced by a PR fails HERE instead of rotting the deployed demo.
+      - name: Web target build (from live source)
+        run: bun run package:web
+      - name: Web import-closure boundary
+        run: bun run check:web
       - name: Generated-file drift (dev manifest + channel-config + tscheck badge)
         run: |
           bun run gen:dev
@@ -258,6 +276,38 @@ jobs:
             artifacts/*.xpi
           if-no-files-found: error
           retention-days: 14
+
+  # Additive job — deploys the web demo to Cloudflare Pages (peerd-demo →
+  # demo.peerd.ai) on every green push to main. why main-cadence, not tags:
+  # the web target's whole design is fresh-from-source anti-rot (package-web
+  # rebuilds from live extension/ each run), releases here are irregular and
+  # sometimes cut off-CI, and a website has no store-review/signing constraint
+  # forcing a slower cadence — prove packageability on every PR (the checks
+  # gate above), ship whenever shipping is free. Gated on [test, checks] so
+  # the demo can never get ahead of a red main. Until the CLOUDFLARE_*
+  # secrets + the peerd-demo Pages project exist, the deploy step skips with
+  # a warning instead of failing the push.
+  deploy-web:
+    name: deploy demo.peerd.ai
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [test, checks]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      - run: bun install
+      - name: Deploy web-dist/ (skips until Cloudflare secrets exist)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets not set — demo deploy skipped. Create them (Pages:Edit token) plus the peerd-demo Pages project + demo.peerd.ai domain to enable."
+            exit 0
+          fi
+          bash web/deploy.sh
 
   release:
     name: GitHub Release (preview channel)

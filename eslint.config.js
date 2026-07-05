@@ -402,4 +402,27 @@ export default [
     files: ['extension/notebook-tab/notebook-neutralizers.js'],
     rules: { 'prefer-arrow-callback': 'off' },
   },
+
+  // --- web/ shell: the demo page host (web/public/, staged over the web
+  // packaging target — see packaging/web-target.ts). Same base rules apply;
+  // two sanctioned relaxations:
+  //   - no-restricted-imports off: on a PAGE the staged module tree is a
+  //     served bundle, not an API seam — the host adapters deep-import leaf
+  //     files precisely to keep the page graph lean (e.g. module-resolver.js
+  //     instead of the full engine index), and the peer host talks to the
+  //     dweb transport directly (the channel gate is the AGENT-side loader,
+  //     which the web build stubs; the shell's observe-only peer is exempt
+  //     by design, like the site's vendored widget).
+  {
+    files: ['web/public/**/*.js'],
+    rules: { 'no-restricted-imports': 'off' },
+  },
+  //   - the service worker is the page's sanctioned fetch chokepoint (it IS
+  //     the cache layer; safeFetch is an agent-context tool, meaningless in
+  //     a SW fetch handler), and it runs in a worker global scope.
+  {
+    files: ['web/public/sw.js'],
+    languageOptions: { globals: { ...globals.serviceworker } },
+    rules: { 'no-restricted-globals': 'off' },
+  },
 ];

@@ -17,9 +17,11 @@
 //   5. regenerate update-feeds/ for this version; commit if changed
 //   6. tag vX.Y.Z; push main + tag
 //   7. gh release create peerd-preview-vX.Y.Z with .crx/.xpi/feeds
-//   8. site deploy (scripts/deploy-site.sh) when CLOUDFLARE_* env is set,
-//      so peerd.ai/updates/ serves the new feeds
-//   9. verify the live feeds advertise the new version
+//   8. web demo deploy (web/deploy.sh → demo.peerd.ai) when CLOUDFLARE_*
+//      env is set. NOTE: peerd.ai itself + the update feeds deploy MANUALLY
+//      from the separate peerd-site repo (copy update-feeds/ there, run its
+//      deploy.sh) — the old in-repo scripts/deploy-site.sh is GONE; this
+//      script prints the reminder instead of calling a deleted path.
 //
 // Keep in sync with the workflow's release job — when Actions billing is
 // healthy, a tag push runs the same flow in CI; this script exists so
@@ -29,7 +31,6 @@ import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { REPO_ROOT, ARTIFACTS_DIR, readVersion, parseArgs } from './lib.ts';
-import { fetchFeedVersions } from './check-feeds.ts';
 import { buildReleaseNotes } from './release-notes.ts';
 
 const run = (cmd: string, args: string[]) =>
@@ -145,7 +146,8 @@ const main = async () => {
       + 'state. A real release would now:\n'
       + `  commit update-feeds/, tag ${tag}, push main+tag,\n`
       + `  gh release view-or-create ${tag} (title peerd-preview-${tag}),\n`
-      + '  deploy the site, and verify the live feeds.',
+      + '  deploy demo.peerd.ai (web/deploy.sh), and print the peerd-site\n'
+      + '  feed-deploy reminder.',
     );
     return;
   }
@@ -198,38 +200,29 @@ const main = async () => {
     ]);
   }
 
-  step('deploy peerd.ai (update feeds go live)');
+  step('deploy demo.peerd.ai (web target, fresh from this release)');
+  // The release is ALREADY COMPLETE at this point (tag pushed, GitHub release
+  // created) — everything below is post-release housekeeping and must warn,
+  // never abort. why web/deploy.sh here: the demo tracks main via CI, but
+  // off-CI releases (Actions billing outages — the reason this script exists)
+  // would otherwise leave demo.peerd.ai a release behind.
   if (process.env.CLOUDFLARE_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID) {
-    run('bash', [join(REPO_ROOT, 'scripts', 'deploy-site.sh')]);
-    step('verify live feeds');
-    // The release is ALREADY COMPLETE at this point (tag pushed, GitHub
-    // release created, site deployed). This poll is a courtesy check that
-    // the edge cache rolled over — its failure is a WARNING, never a
-    // release abort (a die() here would print "ABORTED" on a successful
-    // release). Poll past the ~5-min cache TTL (12 × 30s = 6 min).
-    let ok = false;
-    for (let i = 0; i < 12; i++) {
-      const live = await fetchFeedVersions();
-      if (live.chrome === version && live.firefox === version) { ok = true; break; }
-      console.log(`edge cache not rolled over yet (chrome=${live.chrome}, firefox=${live.firefox}); retrying in 30s…`);
-      await new Promise((r) => setTimeout(r, 30_000));
-    }
-    if (ok) console.log('live feeds verified');
-    else console.warn(
-      'NOTE: live feeds still show the old version after 6 min — usually just\n'
-      + 'a slow edge cache. The release itself succeeded. Confirm later with\n'
-      + '`bun run feeds:check`; if still stale, re-run scripts/deploy-site.sh.',
-    );
+    try { run('bash', [join(REPO_ROOT, 'web', 'deploy.sh')]); }
+    catch { console.warn('web demo deploy FAILED (release itself succeeded) — re-run web/deploy.sh when convenient.'); }
   } else {
     console.warn(
-      'CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — site NOT\n'
-      + 'deployed. The new feeds are committed but peerd.ai still serves the\n'
-      + 'old ones; run scripts/deploy-site.sh, then `bun run feeds:check`.',
+      'CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — demo.peerd.ai\n'
+      + 'NOT deployed (CI\'s deploy-web job covers it on the next main push).',
     );
   }
 
   step(`released peerd-preview-${tag}`);
   console.log(`store artifacts ready for manual submission:\n  ${join(ARTIFACTS_DIR, 'peerd-store-chrome.zip')}\n  ${join(ARTIFACTS_DIR, 'peerd-store-firefox.xpi')}`);
+  console.log(
+    'REMINDER: peerd.ai + the update feeds deploy MANUALLY from the peerd-site\n'
+    + 'repo — copy update-feeds/ there, run its deploy.sh, then `bun run\n'
+    + 'feeds:check` to confirm the live feeds advertise the new version.',
+  );
 };
 
 try {

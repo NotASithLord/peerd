@@ -17,7 +17,7 @@
 // Default config (Gemma 3n E2B) when initGemma is called without one — keeps the
 // exported API back-compatible. index.html passes a capability-picked config.
 const DEFAULT_CFG = { id: 'onnx-community/gemma-4-E2B-it-ONNX', label: 'Gemma 3n E2B', modelClass: 'Gemma4ForCausalLM', dtype: 'q4f16', minBindingGiB: 1.8, foldSystemIntoUser: true };
-const DOWNLOADED_KEY = (id) => 'peerd-lite:downloaded:' + id;
+const DOWNLOADED_KEY = (id) => `peerd-lite:downloaded:${  id}`;
 
 let worker = null, ready = false, loadingPromise = null, loadedCfg = null;
 let progressCb = () => {};
@@ -67,7 +67,7 @@ const ensureWorker = () => {
     }
   };
   worker.onerror = (ev) => {
-    const err = new Error('Gemma worker crashed: ' + (ev?.message || 'unknown error'));
+    const err = new Error(`Gemma worker crashed: ${  ev?.message || 'unknown error'}`);
     loadReject?.(err); loadResolve = loadReject = null;
     for (const [id, h] of genHandlers) { h.reject(err); genHandlers.delete(id); }
   };

@@ -74,14 +74,14 @@ export function makeAgent({ generate, runTool, tools, system, maxTurns = 4 }) {
         hooks.onToolCall && hooks.onToolCall(c);
         let result;
         try { result = await runTool(c.name, c.arguments || {}); }
-        catch (e) { result = 'error: ' + (e?.message || String(e)); }
+        catch (e) { result = `error: ${  e?.message || String(e)}`; }
         result = typeof result === 'string' ? result : JSON.stringify(result);
         hooks.onToolResult && hooks.onToolResult(c, result);
         results.push({ type: 'tool_result', content: result });
       }
       conversation.push({ role: 'user', content: results });
     }
-    hooks.onText && hooks.onText('(stopped after ' + maxTurns + ' tool turns)');
+    hooks.onText && hooks.onText(`(stopped after ${  maxTurns  } tool turns)`);
     return null;
   }
 

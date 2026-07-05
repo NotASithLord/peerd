@@ -20,6 +20,19 @@ export const BROWSERS = ['chrome', 'firefox'] as const;
 export type Channel = (typeof CHANNELS)[number];
 export type Browser = (typeof BROWSERS)[number];
 
+// Channel-config FLAVORS: the two artifact channels plus 'web' (the demo tree
+// deployed to demo.peerd.ai). Deliberately separate from CHANNELS so the
+// extension artifact matrix (channel × browser) never loops over web — the web
+// target is a deployable tree, not a zip, and has no browser/signing axis.
+export const CONFIG_CHANNELS = ['store', 'preview', 'web'] as const;
+export type ConfigChannel = (typeof CONFIG_CHANNELS)[number];
+
+// Committed swap templates (PACKAGING.md: swapped files are wholesale
+// committed-file replacements, never text transforms). Hoisted here so the
+// extension and web pipelines cannot drift on which file is "the" template.
+export const TEMPLATES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'templates');
+export const STORE_LOADER_TEMPLATE = join(TEMPLATES_DIR, 'dweb-loader.store.js');
+
 /** The version single source of truth is package.json. Never hand-edit
  *  versions in manifests — they are generated. */
 export const readVersion = (): string => {
