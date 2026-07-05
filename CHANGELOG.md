@@ -29,7 +29,22 @@ and storage formats may move until the surface stabilizes.
   (and advertising your own card) needs your explicit ok, remembered per did
   and revocable by blocking the peer; peer replies and cards are always
   fenced as untrusted. It's a dweb-actor tool only — the orchestrator never
-  holds it, and the store build prunes the whole surface.
+  holds it, and the store build prunes the whole surface. Hardened after an
+  adversarial re-review: the Agent Card size/field caps are enforced on both
+  the publish and fetch paths, first-contact "Allow once" is a genuine
+  one-shot (only "Allow for session" persists, and blocking a peer revokes
+  it), and the ask/reply round-trip is now covered by a live two-peer
+  WebRTC test.
+
+### Changed
+- **The service worker is slimmer and the worker bridges are unified.** Two
+  internal refactors, no behavior change. The four hand-rolled worker↔host
+  bridges (OPFS, subagent, base-network reads, the a2a mesh) collapse into a
+  single factory, so adding the next one is a one-liner. And the service
+  worker sheds the clusters that were logic rather than wiring — the model
+  picker's catalog, the tab-strip affordances, and a couple of pure actor
+  kernels now live in their own small, tested modules, keeping the service
+  worker to assembly and routing.
 
 ## [0.2.2] - 2026-07-04
 
