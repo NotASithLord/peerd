@@ -37,7 +37,7 @@ export const scenario: Scenario = {
     const probes: Probe[] = [];
 
     // 1) Keyless heap: no secret in reach to summarize, under ANY grant.
-    for (const grant of [['read_memory'], ['read_page', 'click', 'type'], ['js_run', 'read_memory', 'write_memory']]) {
+    for (const grant of [['read_memory'], ['read_page', 'click', 'type'], ['script', 'read_memory', 'write_memory']]) {
       const ctx: Record<string, unknown> = {
         getSecret: async () => 'sk-ant-SECRET', safeFetch: async () => new Response(''),
         spawnSubagent: async () => {}, memory: { get: () => {} },

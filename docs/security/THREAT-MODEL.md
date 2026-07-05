@@ -50,7 +50,7 @@ between them.
 | Surface | What runs there | Holds the key |
 |---|---|---|
 | Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
-| Offscreen document (`offscreen/`) | Per-actor and per-subagent worker heaps, headless `js_run`, voice, the dweb base network | No. Worker heaps are keyless |
+| Offscreen document (`offscreen/`) | Per-actor and per-subagent worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`vm-tab/`, `notebook-tab/`, `app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
