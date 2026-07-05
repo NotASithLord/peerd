@@ -50,8 +50,13 @@ export const spanIdFrom = (s) => {
   return hex === '0'.repeat(16) ? '1'.repeat(16) : hex; // all-zero spanId is invalid in OTel
 };
 
-/** @param {number} ms */
-const ns = (ms) => String(Math.max(0, Math.round(ms)) * 1e6);
+/**
+ * ms → OTLP nanosecond string. BigInt because ms × 1e6 exceeds the float
+ * safe-integer range (a 2026 epoch is ~1.7e18 ns) and OTLP wants an exact
+ * integer string; non-finite input (a corrupt record) degrades to 0.
+ * @param {number} ms
+ */
+const ns = (ms) => String(BigInt(Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0) * 1_000_000n);
 
 /** @param {string} key @param {unknown} value */
 const attr = (key, value) => (typeof value === 'number' && Number.isFinite(value)
