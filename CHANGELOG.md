@@ -10,11 +10,13 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-05
+
 ### Added
 - **Agent-to-agent over the mesh (A2A): the dweb actor talks to other
-  agents by writing code** (preview only). Following the same bet as the web
-  actor — models write a short script more fluently than they fire one gated
-  action per turn — the dweb actor drives peer conversations through a new
+  agents by writing code** (preview only). The same bet as the web actor
+  applies: models write a short script more fluently than they fire one
+  gated action per turn. The dweb actor drives peer conversations through a new
   `a2a_run` tool: it writes JS against a `mesh` client (`mesh.peers()`,
   `mesh.card(did)`, `mesh.ask(did, msg)`, `mesh.send(...)`,
   `mesh.publishCard(...)`, `mesh.inbox()`) and returns the outcome. `ask`
@@ -22,13 +24,13 @@ and storage formats may move until the surface stabilizes.
   Agent Card advertises what your agent can do and is discoverable by other
   peers. The data model rhymes with Google's A2A (Agent Card, message shape)
   so future interop is a thin adapter, but the transport is the mesh, the
-  address is a did:key, and the reply stream is the fenced inbound wake — not
+  address is a did:key, and the reply stream is the fenced inbound wake, not
   A2A's HTTP+SSE. The code runs in the same sealed, keyless worker as
   `js_run` with one added capability, the mesh bridge, and nothing else: an
   a2a run gets no egress and cannot spawn subagents. First contact to a peer
   (and advertising your own card) needs your explicit ok, remembered per did
   and revocable by blocking the peer; peer replies and cards are always
-  fenced as untrusted. It's a dweb-actor tool only — the orchestrator never
+  fenced as untrusted. It's a dweb-actor tool only: the orchestrator never
   holds it, and the store build prunes the whole surface. Hardened after an
   adversarial re-review: the Agent Card size/field caps are enforced on both
   the publish and fetch paths, first-contact "Allow once" is a genuine
@@ -38,14 +40,14 @@ and storage formats may move until the surface stabilizes.
 
 ### Changed
 - **The orchestrator's tool surface got a hard slim: 27 → 18 always-on.**
-  Three moves, one thesis — the main agent bootstraps and delegates; every
-  instance byte stays behind an actor heap:
+  Three moves, one rule: the main agent bootstraps and delegates, and every
+  instance byte stays behind an actor heap.
   - **The engine file READS are actor-only now.** `js_read_file`,
     `app_read_file`, and `app_list_files` had stayed on the orchestrator as
-    fenced "cheap reads" — but an instance file is not reliably
+    fenced "cheap reads". But an instance file is not reliably
     agent-authored (notebook/app code fetches and persists web data), so even
     a fenced read handed untrusted bytes to the orchestrator's context. The
-    convenience broke the isolation premise; reads now ride the instance's
+    convenience broke the isolation premise. Reads now ride the instance's
     actor like every other op.
   - **One `sandbox_create({ kind })` replaces `vm_create` / `js_create` /
     `app_create`.** Same bootstrap, one tool: the webvm/notebook/app taxonomy
@@ -55,23 +57,23 @@ and storage formats may move until the surface stabilizes.
     and the durable-handle harvest still records which kind an id is (the
     result stamps `kind`; the compaction/trim extractors read it).
   - **The instance-gating ("progressive disclosure") machinery is deleted.**
-    Every op it deferred is actor-only now, so it had nothing left to gate —
-    and its "create one first" refusal for a premature call was the wrong
-    message anyway (the honest answer is "that's the actor's tool").
+    Every op it deferred is actor-only now, so it had nothing left to gate.
+    Its "create one first" refusal for a premature call was the wrong
+    message anyway; the honest answer is "that's the actor's tool".
   `inspect_provider_config`, `inspect_storage`, `inspect_session_access`,
   `inspect_denylist`, and `inspect_audit_log` were five near-identical
   read-only tools; they collapse into a single `inspect({ kind })` (kinds:
   `provider_config` / `storage` / `session_access` / `denylist` /
   `audit_log`), exactly the way `actor_list` folded the per-kind list tools
-  into one. Behavior per facet is unchanged — same outputs, same audit-log
-  subagent-error redaction — but the main agent's tool surface shrinks by
+  into one. Behavior per facet is unchanged (same outputs, same audit-log
+  subagent-error redaction), but the main agent's tool surface shrinks by
   four, sharpening tool selection. Existing `/tools` presets that named the
   old tools now name `inspect`.
 - **The service worker is slimmer and the worker bridges are unified.** Two
   internal refactors, no behavior change. The four hand-rolled worker↔host
   bridges (OPFS, subagent, base-network reads, the a2a mesh) collapse into a
   single factory, so adding the next one is a one-liner. And the service
-  worker sheds the clusters that were logic rather than wiring — the model
+  worker sheds the clusters that were logic rather than wiring: the model
   picker's catalog, the tab-strip affordances, and a couple of pure actor
   kernels now live in their own small, tested modules, keeping the service
   worker to assembly and routing.
@@ -80,7 +82,7 @@ and storage formats may move until the surface stabilizes.
 - **WebVM now degrades gracefully on Firefox instead of showing a
   misleading error.** The in-browser Linux VM (CheerpX) needs
   `SharedArrayBuffer`, which the browser grants only to a cross-origin-
-  isolated page — and a Firefox extension page can't isolate itself
+  isolated page, and a Firefox extension page can't isolate itself
   (a Firefox platform limitation, not a peerd bug). The VM boot screen used
   to fail with a "manifest must declare cross_origin_embedder_policy" error
   that read like a config bug; on Firefox it now shows a plain-English notice
