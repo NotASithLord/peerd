@@ -16,6 +16,8 @@
   "scripts": {
     "test": "bun test ./tests",
     "test:watch": "bun test ./tests --watch",
+    "red-team": "bun test ./tests/red-team",
+    "red-team:report": "bun tests/red-team/report.ts",
     "test:netproc": "bun tests/peerd-distributed/netproc/run-cluster.ts",
     "test:twopeer": "bun scripts/cdp/run-dweb-twopeer.mjs",
     "test:twopeer:a2a": "A2A=1 bun scripts/cdp/run-dweb-twopeer.mjs",

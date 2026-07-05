@@ -31,6 +31,16 @@ peerd is `0.x`; only the **latest commit on `main`** (and the most recent
 preview/store build) is supported. There are no backported fixes; they
 land on `main`.
 
+## Formal threat model + red-team suite
+
+For the full formal artifact — actors, trust boundaries, assets, adversaries,
+numbered security invariants, explicit scope, and known residual risks — see
+[`docs/security/THREAT-MODEL.md`](docs/security/THREAT-MODEL.md). Its invariants are
+wired to a public, runnable [red-team suite](tests/red-team/) (`bun test
+./tests/red-team`) whose results are published in
+[`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md) — so peerd's
+security claims are empirically re-checkable, not just asserted here.
+
 ## Trust model (what peerd already defends)
 
 Understanding the boundaries helps you scope a report:
