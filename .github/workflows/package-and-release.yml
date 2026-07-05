@@ -129,6 +129,19 @@ jobs:
             sleep 5
           done
           exit 1
+      - name: Run the two-peer a2a ask/reply round-trip over CDP
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        # Same live mesh, plus the production a2a ask/reply correlation between the
+        # two peers (envelope + did-bound resolve over real WebRTC). Same flake
+        # retry as the gossip run above.
+        run: |
+          for attempt in 1 2 3; do
+            bun run test:twopeer:a2a && exit 0
+            echo "::warning::two-peer a2a attempt $attempt failed (headless-WebRTC flake) — retrying"
+            sleep 5
+          done
+          exit 1
 
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
   # previously run only by hand. Spawns a relay + N real node processes that
