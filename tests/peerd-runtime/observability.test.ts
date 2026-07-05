@@ -16,10 +16,21 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     // [error text as produced, expected kind]
     ["message_actor: 4 actor messages already in flight for this turn", 'policy'],
     ['subagent refused: max depth 2 exceeded (requested depth 3)', 'policy'],
+    // the dispatcher's REAL refusal prefixes (dispatcher.js) — the review
+    // found the first draft matched only invented strings here
+    ['gate_blocked:plan-act:plan mode is read-only; blocks page_mutation actions', 'policy'],
+    ["gate_blocked:exposure:'view' is actor-only — message a tab's actor instead", 'policy'],
+    ['gate_blocked:confirmation:rejected by user', 'policy'],
+    ['hook_blocked:pre-tool-use:matched deny pattern', 'policy'],
+    ['User declined the outbound write.', 'policy'],
     ['EgressDeniedError: https://evil.example is not on the allowlist', 'policy'],
     ['egress denied: denylist matched host tracker.example', 'policy'],
     ['vault is locked — unlock to continue', 'auth'],
     ["Provider 'anthropic' HTTP 401: {\"error\":\"invalid x-api-key\"}", 'auth'],
+    // a bare HTTP 403 in an asset-download failure is NOT a credential
+    // problem — only the provider-anchored shape may classify auth
+    ['fetch_failed: HTTP 403', 'environment'],
+    ['fetch returned HTTP 403', 'environment'],
     ["Provider 'openrouter' HTTP 429: rate limited", 'limits'],
     ['spend limit reached for this session', 'limits'],
     ["Provider 'ollama' HTTP 400: {\"error\":{\"message\":\"bad request\"}}", 'provider'],
@@ -31,6 +42,10 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     ['no_option_matching: "Submit order" — available: Cancel | Back', 'environment'],
     ['actor tool relay failed', 'environment'],
     ['The webvm actor builder (vm-9) could not complete your request:', 'agent'],
+    // agent beats timeout: the actor REPORTED failure; the timeout detail
+    // inside its account must not reclassify who failed
+    ['The web actor could not complete your request: the ask timed out after 120000ms', 'agent'],
+    ['Failed to fetch', 'provider'],
     ['the actor turn failed: pytest exited 1', 'agent'],
     ['(the actor produced no text reply)', 'agent'],
     ['TypeError: cannot read properties of undefined', 'internal'],
@@ -156,7 +171,7 @@ describe('assembleDebugBundle', () => {
 });
 
 describe('bundleToOtlp — the span tree', () => {
-  const child = { ...SESSION, sessionId: '01912345-6789-7abc-8def-0123456789ff', kind: 'actor', actorType: 'web', messages: SESSION.messages.slice(0, 3) };
+  const child = { ...SESSION, sessionId: '01912345-6789-7abc-8def-0123456789ff', kind: 'actor', actorType: 'web', parentSessionId: SESSION.sessionId, messages: SESSION.messages.slice(0, 3) };
   const bundle = assembleDebugBundle({ session: SESSION, childSessions: [child], now: 0 });
   const otlp = bundleToOtlp(bundle);
   const spans = otlp.resourceSpans[0].scopeSpans[0].spans;
@@ -176,6 +191,21 @@ describe('bundleToOtlp — the span tree', () => {
     const actorRoot = spans.find((s: any) => s.name === 'peerd.session actor:web') as any;
     expect(chatRoot.parentSpanId).toBeUndefined();
     expect(actorRoot.parentSpanId).toBe(chatRoot.spanId);
+  });
+
+  test('a GRANDCHILD hangs off its real spawner, not flattened onto the chat root', () => {
+    const sub = { sessionId: 'sub-1', kind: 'subagent', parentSessionId: SESSION.sessionId, messages: [] };
+    const vm = { sessionId: 'vm-1', kind: 'actor', actorType: 'webvm', parentSessionId: 'sub-1', messages: [] };
+    const orphan = { sessionId: 'or-1', kind: 'actor', actorType: 'app', parentSessionId: 'clamped-away', messages: [] };
+    const b = assembleDebugBundle({ session: SESSION, childSessions: [sub, vm, orphan], now: 0 });
+    const tree = bundleToOtlp(b).resourceSpans[0].scopeSpans[0].spans;
+    const root = tree.find((s: any) => s.name === 'peerd.session chat') as any;
+    const subRoot = tree.find((s: any) => s.name === 'peerd.session subagent') as any;
+    const vmRoot = tree.find((s: any) => s.name === 'peerd.session actor:webvm') as any;
+    const orphanRoot = tree.find((s: any) => s.name === 'peerd.session actor:app') as any;
+    expect(subRoot.parentSpanId).toBe(root.spanId);
+    expect(vmRoot.parentSpanId).toBe(subRoot.spanId);        // the real spawner
+    expect(orphanRoot.parentSpanId).toBe(root.spanId);       // clamped-out parent → root fallback
   });
 
   test('failures carry ERROR status + the classified peerd.failure.kind', () => {

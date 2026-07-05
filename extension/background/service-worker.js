@@ -1244,6 +1244,9 @@ const spawnSubagentCore = makeSpawnSubagent({
   sessions,
   runUserTurn,
   callModel: /** @type {any} */ (callModel),
+  // why the closure: contextSnapshots is declared further down the module —
+  // defer the reference to call time (the postChatNote late-dep pattern).
+  recordModelCall: (/** @type {Record<string, any>} */ call) => contextSnapshots.record(call),
   getSecret,
   safeFetch,
   appendAudit: /** @type {any} */ (auditLog.append),

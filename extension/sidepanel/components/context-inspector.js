@@ -55,11 +55,11 @@ const Snapshot = {
 };
 
 /**
- * @typedef {{ snapshots: Array<Record<string, any>> | null, onClose: () => void }} ContextInspectorAttrs
+ * @typedef {{ snapshots: Array<Record<string, any>> | null, error?: string | null, onClose: () => void }} ContextInspectorAttrs
  */
 export const ContextInspector = {
   /** @param {{ attrs: ContextInspectorAttrs }} vnode */
-  view: ({ attrs: { snapshots, onClose } }) => m('.peerd-modal-backdrop', { onclick: onClose },
+  view: ({ attrs: { snapshots, error = null, onClose } }) => m('.peerd-modal-backdrop', { onclick: onClose },
     m('.peerd-modal.context-inspector', { onclick: (/** @type {Event} */ e) => e.stopPropagation() }, [
       m('.ctx-header', [
         m('span.ctx-title', 'context inspector'),
@@ -69,7 +69,9 @@ export const ContextInspector = {
       ]),
       snapshots === null
         ? m('.ctx-empty', 'loading…')
-        : snapshots.length === 0
+        : error
+          ? m('.ctx-empty', `couldn't read the snapshots: ${error}`)
+          : snapshots.length === 0
           ? m('.ctx-empty',
               'No live snapshots for this chat. The ring holds the most recent model calls '
               + 'in the service worker\'s memory only — after a browser restart or worker '

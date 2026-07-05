@@ -44,20 +44,30 @@ const RULES = [
   // auth beats provider (a 401 is a key problem before an API problem).
   { kind: 'aborted', test: /^script_aborted:|stopped before the (actor|run)|aborted \(Stop\)|aborted \(timeout or cancel\)|\bstop was pressed\b/i },
   { kind: 'aborted', test: /^the turn was stopped\b|\bcancelled by the user\b/i },
-  { kind: 'policy', test: /^message_actor:|^subagent refused\b|^tool_blocked\b|not on the main agent's surface/i },
-  { kind: 'policy', test: /\begress denied\b|\bdenylist\b|\bblocked by (policy|the allowlist|plan mode)\b|EgressDeniedError|NotebookEgressBlocked/i },
+  // why gate_blocked/hook_blocked (not 'tool_blocked'): these are the
+  // dispatcher's ACTUAL refusal prefixes in tool results (dispatcher.js);
+  // tool_blocked is only the audit event's type and never reaches a card.
+  { kind: 'policy', test: /^message_actor:|^subagent refused\b|^gate_blocked:|^hook_blocked:/i },
+  { kind: 'policy', test: /\begress denied\b|\bdenylist\b|\bblocked by (policy|the allowlist|plan mode)\b|EgressDeniedError|NotebookEgressBlocked|\bUser declined\b|\bdeclined by (the )?user\b/i },
   { kind: 'auth', test: /\bvault is locked\b|VaultLockedError|\bunlock the vault\b/i },
-  { kind: 'auth', test: /\bAPI key\b.*\b(missing|not set|invalid|rejected)\b|ProviderKeyMissingError|HTTP 40[13]\b/i },
+  // why the 40[13] is anchored to the provider shape: bare "HTTP 403" also
+  // appears in asset-download failures (VM imports, skills, model files),
+  // which are environment trouble, not a credential problem.
+  { kind: 'auth', test: /\bAPI key\b.*\b(missing|not set|invalid|rejected)\b|ProviderKeyMissingError|^Provider '.+' HTTP 40[13]\b/i },
   // why this row sits ABOVE limits: the canned early-EOF string is
   // "provider stream ended early (likely rate limit or network drop)" —
   // the guess in the parenthetical must not reclassify a dead stream.
   { kind: 'provider', test: /\bprovider stream ended early\b/i },
   { kind: 'limits', test: /HTTP 402\b|HTTP 429\b|\busage limit\b|\bspend limit\b|\brate.?limit/i },
-  { kind: 'timeout', test: /\btimed? ?out\b|VMRunTimeoutError|\bwall.?clock\b.*\bexceeded\b/i },
-  { kind: 'provider', test: /^Provider '.+' HTTP \d+|OllamaNotRunning|\bOllama\b.*\b(not running|unreachable)\b/i },
-  { kind: 'environment', test: /^no_option_matching:|\bno element matching\b|\bactor tool relay failed\b/i },
-  { kind: 'environment', test: /VM(NotReady|BootFailed|TabClosed|NetworkDenied)|\bthe VM tab (was )?closed\b|\bsandbox\b.*\b(crash|failed to boot)\b|\bworker (crashed|terminated unexpectedly)\b/i },
+  // why agent sits ABOVE timeout: an actor-reported failure ("could not
+  // complete your request: … timed out …") is the AGENT's account — the
+  // delegated turn ran and failed in its own words; the timeout detail
+  // inside it must not reclassify who failed.
   { kind: 'agent', test: /\bcould not complete your request\b|\bthe actor turn failed\b|\bREPORTED FAILURE\b|\bproduced no text reply\b/i },
+  { kind: 'timeout', test: /\btimed? ?out\b|VMRunTimeoutError|\bwall.?clock\b.*\bexceeded\b/i },
+  { kind: 'provider', test: /^Provider '.+' HTTP \d+|OllamaNotRunning|\bOllama\b.*\b(not running|unreachable)\b|\bFailed to fetch\b/i },
+  { kind: 'environment', test: /^no_option_matching:|\bno element matching\b|\bactor tool relay failed\b|^fetch_failed:|\bfetch returned HTTP\b|\bHTTP \d+ for http/i },
+  { kind: 'environment', test: /VM(NotReady|BootFailed|TabClosed|NetworkDenied)|\bthe VM tab (was )?closed\b|\bsandbox\b.*\b(crash|failed to boot)\b|\bworker (crashed|terminated unexpectedly)\b/i },
 ];
 
 /**

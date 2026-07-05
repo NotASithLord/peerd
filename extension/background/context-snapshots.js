@@ -3,10 +3,11 @@
 //
 // "What did the model actually see?" — per model call, a SHAPED snapshot
 // of the request args (system, messages, tools, params) is recorded into
-// a per-session capped ring. Two SW seams feed it and together cover
+// a per-session capped ring. Three SW seams feed it and together cover
 // every model call peerd makes: the turn driver's failover wrapper (the
-// orchestrator) and the 'actor/model-call' relay route (every actor and
-// subagent heap). Held in SW memory only — the same lifetime posture as
+// orchestrator), the 'actor/model-call' relay route (every actor and
+// subagent heap), and spawn's capped wrapper (the in-SW fallback loop
+// when offscreen isn't available — Firefox). Held in SW memory only — the same lifetime posture as
 // the script-runs op mirror — so it answers "what just happened", not
 // "what happened last week"; the debug bundle exports whatever is live
 // and its provenance says exactly that.

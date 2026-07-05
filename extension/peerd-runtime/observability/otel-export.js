@@ -29,7 +29,8 @@ const STATUS_ERROR = 2;
 export const traceIdFromUuid = (uuid) => {
   const hex = String(uuid ?? '').toLowerCase().replace(/[^0-9a-f]/g, '');
   // why pad/clamp instead of throwing: a corrupt id must not kill the export
-  return (hex + '0'.repeat(32)).slice(0, 32);
+  const id = (hex + '0'.repeat(32)).slice(0, 32);
+  return id === '0'.repeat(32) ? `1${id.slice(1)}` : id; // all-zero traceId is invalid in OTel
 };
 
 /**
@@ -158,8 +159,16 @@ export const bundleToOtlp = (bundle) => {
   const traceId = traceIdFromUuid(session.sessionId);
   const rootSpanId = spanIdFrom(`session:${session.sessionId}`);
   const spans = sessionSpans(session, traceId, undefined);
+  // why real parentage: the delegation TREE is the claim ("delegation =
+  // span parentage") — a grandchild (a VM actor a subagent spawned) must
+  // hang off its spawner, not flatten onto the chat root. Fall back to the
+  // root only when the parent isn't in the bundle (clamped out).
+  const included = new Set([session.sessionId, ...(bundle.childSessions ?? []).map((/** @type {Record<string, any>} */ c) => c.sessionId)]);
   for (const child of bundle.childSessions ?? []) {
-    spans.push(...sessionSpans(child, traceId, rootSpanId));
+    const parentId = child.parentSessionId && included.has(child.parentSessionId)
+      ? spanIdFrom(`session:${child.parentSessionId}`)
+      : rootSpanId;
+    spans.push(...sessionSpans(child, traceId, parentId));
   }
   const cost = bundle.summary?.cost ?? {};
   return {

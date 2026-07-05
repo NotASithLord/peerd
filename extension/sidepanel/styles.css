@@ -2589,6 +2589,12 @@ button.icon:hover { background: var(--bg); }
   cursor: pointer;
 }
 .debug-export-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+.debug-menu-backdrop {
+  /* click-away for the flyout: transparent, under the menu, over the page */
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+}
 .debug-menu {
   position: absolute;
   right: 0;

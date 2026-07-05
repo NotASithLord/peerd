@@ -44,6 +44,7 @@ const saveJsonFile = (payload, filename) => {
  * @property {boolean} [debugMenuOpen]       the debug-export flyout's open state
  * @property {boolean} [inspectorOpen]       the context-inspector modal's open state
  * @property {Array<Record<string, any>>|null} [snapshots]  the inspector's fetched snapshots (null = loading)
+ * @property {string|null} [snapshotsError]  why the fetch failed (locked vault, etc.), for an honest modal
  */
 
 /**
@@ -67,7 +68,16 @@ export const ChatView = {
   /** @param {ChatViewVnode} vnode */
   view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb }, state: ui }) => {
     const sid = state.session?.sessionId;
-    if (sid !== ui._sid) { ui._sid = sid; ui.goalArmed = false; }
+    if (sid !== ui._sid) {
+      ui._sid = sid;
+      ui.goalArmed = false;
+      // The debug surface is per-session UI: a flyout or inspector left open
+      // on chat A must not survive a switch to chat B (B would silently show
+      // A's snapshots).
+      ui.debugMenuOpen = false;
+      ui.inspectorOpen = false;
+      ui.snapshots = null;
+    }
     const messages = state.session?.messages ?? [];
     const hasKey = state.providers?.hasKey;
     // Fingerprint of the settings that shape the model-picker options. The
@@ -213,6 +223,9 @@ export const ChatView = {
             title: 'Debug: export this chat\'s debug bundle (a local file — nothing is sent anywhere)',
             onclick: () => { ui.debugMenuOpen = !ui.debugMenuOpen; },
           }, 'debug'),
+          ui.debugMenuOpen ? m('.debug-menu-backdrop', {
+            onclick: () => { ui.debugMenuOpen = false; },
+          }) : null,
           ui.debugMenuOpen ? m('.debug-menu', [
             m('button.debug-menu-item', {
               onclick: async () => {
@@ -239,8 +252,14 @@ export const ChatView = {
                 ui.debugMenuOpen = false;
                 ui.inspectorOpen = true;
                 ui.snapshots = null;
-                const reply = await send({ type: 'session/contextSnapshots', sessionId: state.session?.sessionId });
-                ui.snapshots = reply?.ok ? reply.snapshots : [];
+                try {
+                  const reply = await send({ type: 'session/contextSnapshots', sessionId: state.session?.sessionId });
+                  ui.snapshots = reply?.ok ? reply.snapshots : [];
+                  ui.snapshotsError = reply?.ok ? null : (reply?.error ?? 'request failed');
+                } catch (e) {
+                  ui.snapshots = [];
+                  ui.snapshotsError = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+                }
                 m.redraw();
               },
             }, 'context inspector') : null,
@@ -259,6 +278,7 @@ export const ChatView = {
       // The context inspector modal (devMode, opened from the debug menu).
       ui.inspectorOpen ? m(ContextInspector, {
         snapshots: ui.snapshots ?? null,
+        error: ui.snapshotsError ?? null,
         onClose: () => { ui.inspectorOpen = false; },
       }) : null,
     ]);

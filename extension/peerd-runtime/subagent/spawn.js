@@ -241,6 +241,9 @@ export const finalAssistantText = (session) => {
  *   and subagentCancel all reach it via the slot's controller. The default is a
  *   standalone stub (a fresh controller per spawn, stop() a no-op) so orchestrators
  *   that never stop children (tests, cheap-call harnesses) need no wiring.
+ * @param {(call: Record<string, any>) => void} [deps.recordModelCall]
+ *   The context inspector's capture hook — sees the in-SW fallback loop's model
+ *   calls (the offscreen path is captured at the actor relay). Optional no-op.
  * @param {(fn: () => void, ms: number) => unknown} [deps.setTimer]
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
@@ -265,6 +268,9 @@ export const makeSpawnSubagent = (deps) => {
       stop: () => false,
     },
     setTimer = (/** @type {() => void} */ fn, /** @type {number} */ ms) => setTimeout(fn, ms),
+    // The context inspector's capture hook (optional no-op, same contract as
+    // the turn driver's): sees the in-SW fallback loop's model calls.
+    recordModelCall = () => {},
     clearTimer = (/** @type {unknown} */ handle) => clearTimeout(/** @type {any} */ (handle)),
     // Heap-split phase 1: run a PURE-REASONING (empty granted toolset) child in a
     // dedicated offscreen Worker — its own heap, no key, no chrome.*, egress-less.
@@ -570,8 +576,14 @@ export const makeSpawnSubagent = (deps) => {
     const getSystemPrompt = () => renderSystemPrompt({ taskOverride: task });
 
     // Guardrail 5 (output cap): inject maxTokens into every model call.
+    // Also the context inspector's THIRD seam: this wrapper only feeds the
+    // in-SW fallback loop (Firefox / offscreen never started) — the
+    // offscreen path's calls are captured at the actor/model-call relay.
     /** @param {object} modelArgs */
-    const cappedCallModel = (modelArgs) => callModel({ ...modelArgs, maxTokens: maxOutputTokens });
+    const cappedCallModel = (modelArgs) => {
+      recordModelCall({ ...modelArgs, sessionId: child.sessionId, label: `subagent d${depth} (in-SW)` });
+      return callModel({ ...modelArgs, maxTokens: maxOutputTokens });
+    };
 
     // why: the child's model usage is yielded as 'usage' events but is NOT
     // folded into the parent/main turn tally (the main SW only accumulates its
