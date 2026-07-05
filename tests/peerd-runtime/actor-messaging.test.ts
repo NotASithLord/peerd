@@ -353,6 +353,42 @@ describe('message_actor — web actor (now ASYNC, same path as engine)', () => {
   });
 });
 
+describe('message_actor — oneShot is sandbox-only (owner call 2026-07-05)', () => {
+  // why: oneShot skips the actor's summarize turn — the turn that incidentally
+  // COMPRESSES untrusted content. A web/API/dweb reply is page/peer bytes, so
+  // it must always come back summarized; only the agent's own engine sandboxes
+  // (webvm/notebook/app) may hand a raw result straight back. Refused LOUDLY,
+  // never silently stripped, so the model re-sends without the flag instead of
+  // believing the cheap mode ran.
+  test('oneShot passes through for an engine sandbox (app id)', async () => {
+    const h = harness();
+    const r = await h.messageActor({ to: 'app-1', message: 'run it', senderSessionId: 'chat-1', oneShot: true });
+    expect(r.ok).toBe(true);
+    expect(h.turnsRun.length).toBe(1);
+  });
+  test('oneShot to a WEB actor is refused before any turn runs', async () => {
+    const h = harness({
+      resolveActor: async () => ({ instanceId: 'web', kind: 'web', actorSessionId: 'res-w', name: 'web', tabId: 3 }),
+    });
+    const r = await h.messageActor({ to: 'web', message: 'fetch the JSON', senderSessionId: 'chat-1', oneShot: true });
+    expect(r.ok).toBe(false);
+    expect(String((r as any).error)).toContain('sandbox-only');
+    expect(h.turnsRun.length).toBe(0);            // refused at the seam — no actor turn
+    // ...and the same message WITHOUT oneShot is accepted (the recovery path).
+    const retry = await h.messageActor({ to: 'web', message: 'fetch the JSON', senderSessionId: 'chat-1' });
+    expect(retry.ok).toBe(true);
+  });
+  test('oneShot to the DWEB actor is refused', async () => {
+    const h = harness({
+      resolveActor: async () => ({ instanceId: 'dweb', kind: 'dweb', actorSessionId: 'res-d', name: 'dweb' }),
+    });
+    const r = await h.messageActor({ to: 'dweb', message: 'who is online?', senderSessionId: 'chat-1', oneShot: true });
+    expect(r.ok).toBe(false);
+    expect(String((r as any).error)).toContain('sandbox-only');
+    expect(h.turnsRun.length).toBe(0);
+  });
+});
+
 describe('message_actor — runaway guard (per sender)', () => {
   test('refuses past the RATE cap within the window', async () => {
     // never-resolving turns keep nothing pending on the rate path; outstanding

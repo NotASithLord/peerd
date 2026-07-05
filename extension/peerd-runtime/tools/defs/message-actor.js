@@ -57,7 +57,7 @@ export const messageActorTool = {
       },
       oneShot: {
         type: 'boolean',
-        description: 'Set true when ONE round settles it — a concrete command or read whose raw result IS the answer ("run `python3 …`", "fetch this URL\'s JSON"). The actor does the single action and hands its result straight back, skipping the extra turn it would otherwise spend re-summarizing — faster and cheaper. Leave false (default) for open-ended or multi-step work where you want the actor to do several things and report back in its own words. If the action errors, the actor recovers normally regardless.',
+        description: 'SANDBOX INSTANCES ONLY (a vm/notebook/app id — never "web", a tabId, an API origin, or "dweb"; those are refused). Set true when ONE round in your own sandbox settles it — a concrete command or read whose raw result IS the answer ("run `python3 …`", "cat the config"). The actor does the single action and hands its result straight back, skipping the extra turn it would otherwise spend re-summarizing — faster and cheaper. Leave false (default) for open-ended or multi-step work, and always for web/API/dweb targets (their replies are untrusted content and always return summarized). If the action errors, the actor recovers normally regardless.',
       },
     },
     required: ['to', 'message'],
