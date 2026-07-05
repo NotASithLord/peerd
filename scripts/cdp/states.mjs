@@ -439,7 +439,12 @@ export const STATES = [
         hasScriptResult: body.includes('GOT:WIDGET_PRICE_777'),
       });
       // WEB ACTOR turn (spawned by the script's ask): answer in plain text.
-      if (isActor) return { sse: sseText('WIDGET_PRICE_777') };
+      // why delayMs: the live-feed check below observes the PENDING script
+      // card; with an instant actor reply the pending window can close faster
+      // than a redraw + 100ms DOM poll on a slow CI runner (flaked in CI on
+      // 2026-07-05). Holding the actor's model call open guarantees the feed
+      // a real lifetime — the run is slower, never racy.
+      if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 1500 };
       // ORCHESTRATOR sees the script result (value derived from the reply) →
       // final answer.
       if (body.includes('GOT:WIDGET_PRICE_777')) return { sse: sseText('SCRIPT-FAN-DONE') };
