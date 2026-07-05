@@ -66,6 +66,9 @@ import './unit/peerd-engine/personal-index-durability.test.js';
 import './unit/notebook-tab/notebook-seal.test.js';
 import './unit/notebook-tab/notebook-output-render.test.js';
 
+// --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
+import './unit/red-team/sandbox-escape.test.js';
+
 // --- chassis: vm-tab ---
 import './unit/vm-tab/firefox-webvm-note.test.js';
 

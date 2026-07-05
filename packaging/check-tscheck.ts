@@ -60,7 +60,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // into tools/defs/sandbox-create.js (+1; the three old files stay as its
 // // @ts-check'd per-kind handler modules) — and the review pass extracted the
 // shared tools/defs/kind-dispatch.js (+1).
-const COVERED_FLOOR = 487;
+// +1: extension/tests/unit/red-team/sandbox-escape.test.js (the in-browser
+// red-team tier — real-realm seal + CSP-fence assertions).
+const COVERED_FLOOR = 488;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
