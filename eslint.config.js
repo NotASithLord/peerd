@@ -251,9 +251,14 @@ export default [
   },
   // system-prompt loader fetches a chrome-extension:// static asset (NOT a
   // network egress). The egress allowlist intentionally wouldn't admit our
-  // own extension origin, so safeFetch isn't the right tool here.
+  // own extension origin, so safeFetch isn't the right tool here. Same for
+  // tab-affordances (the pull-in hint reads our own bundled icon32.png via
+  // runtime.getURL) — extracted from service-worker.js, which had this off.
   {
-    files: ['extension/peerd-runtime/loop/system-prompt.js'],
+    files: [
+      'extension/peerd-runtime/loop/system-prompt.js',
+      'extension/background/tab-affordances.js',
+    ],
     rules: { 'no-restricted-globals': 'off' },
   },
   // voice/model-store loads Moonshine ONNX bytes from CDN URLs (Hugging
