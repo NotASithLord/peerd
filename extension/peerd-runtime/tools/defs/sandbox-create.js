@@ -15,6 +15,7 @@
 // each handler stamps into its result JSON, so compaction/trim still carry
 // "which kind of instance this id is" after the merge.
 
+import { executeByKind, kindEnum } from './kind-dispatch.js';
 import { createWebVmSandbox } from './vm-create.js';
 import { createNotebookSandbox } from './js-create.js';
 import { createAppSandbox } from './app-create.js';
@@ -28,8 +29,6 @@ export const SANDBOX_KIND_HANDLERS = Object.freeze({
   notebook: createNotebookSandbox,
   app: createAppSandbox,
 });
-
-const SANDBOX_KINDS = Object.freeze(Object.keys(SANDBOX_KIND_HANDLERS));
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const sandboxCreateTool = {
@@ -47,8 +46,9 @@ export const sandboxCreateTool = {
     'analysis wants a notebook, NOT an app.',
     '"app" = a user-facing multi-file HTML app in a sandboxed iframe (full DOM,',
     'no extension access). ✅ "build a TODO app / calculator / interactive',
-    'dashboard". For an app, pass `files` (path → content; entry defaults to',
-    'index.html) or `html` shorthand — start with a minimal shell immediately,',
+    'dashboard". An app REQUIRES `name` plus `files` (path → content; entry',
+    'defaults to index.html) or `html` shorthand — start with a minimal shell',
+    'immediately,',
     'then grow it file by file through the app\'s actor. For a MULTIPLAYER app',
     'that talks to peers over the dweb, pass dwapp:true and follow dweb_guide.',
     'The new instance becomes the chat\'s current of its kind and a "go there"',
@@ -61,7 +61,7 @@ export const sandboxCreateTool = {
     properties: {
       kind: {
         type: 'string',
-        enum: [...SANDBOX_KINDS],
+        enum: kindEnum(SANDBOX_KIND_HANDLERS),
         description: 'Which sandbox to create.',
       },
       name: { type: 'string', description: 'Human-friendly label (tab strip + actor_list).' },
@@ -89,14 +89,21 @@ export const sandboxCreateTool = {
   },
   sideEffect: 'write',
   origins: () => [],
-  execute: async (args, ctx) => {
-    const kind = args?.kind;
-    const handler = typeof kind === 'string'
-      ? /** @type {Record<string, (a: any, c: ToolContext) => Promise<ToolResult>>} */ (SANDBOX_KIND_HANDLERS)[kind]
-      : undefined;
-    if (!handler) {
-      return { ok: false, error: `sandbox_create: unknown kind ${JSON.stringify(kind)} — expected one of ${SANDBOX_KINDS.join(', ')}.` };
-    }
-    return handler(args, ctx);
-  },
+  // why the wrapper around executeByKind: refuse (not ignore) app-only args on
+  // other kinds — a notebook create that silently drops `files` looks seeded
+  // when it isn't; the model would delegate "run parse.js" to an actor staring
+  // at an empty OPFS. Fail loud at the seam with the recovery path.
+  execute: (() => {
+    const dispatch = executeByKind('sandbox_create', SANDBOX_KIND_HANDLERS);
+    return /** @type {(args: any, ctx: ToolContext) => Promise<ToolResult>} */ (async (args, ctx) => {
+      const kind = args?.kind;
+      if (typeof kind === 'string' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
+        const appOnly = ['files', 'html', 'entryFile', 'tags', 'dwapp'].filter((k) => args?.[k] !== undefined);
+        if (appOnly.length) {
+          return { ok: false, error: `sandbox_create: ${appOnly.join(', ')} ${appOnly.length === 1 ? 'is' : 'are'} app-only — a ${kind} starts empty; seed its files by messaging its actor after create.` };
+        }
+      }
+      return dispatch(args, ctx);
+    });
+  })(),
 };

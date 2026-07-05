@@ -19,14 +19,14 @@ const MAX_TOTAL_CHARS = 2_000_000;
  */
 export const createAppSandbox = async (args, ctx) => {
     if (typeof args?.name !== 'string' || !args.name.trim()) {
-      return { ok: false, error: 'name_required' };
+      return { ok: false, error: "sandbox_create kind:'app' requires `name` (the app's display name)" };
     }
     /** @type {Record<string, unknown> | null} */
     const files = (args.files && typeof args.files === 'object')
       ? args.files
       : (typeof args.html === 'string' ? { 'index.html': args.html } : null);
     if (!files || !Object.keys(files).length) {
-      return { ok: false, error: 'files_or_html_required' };
+      return { ok: false, error: "sandbox_create kind:'app' requires `files` (path → content map) or `html` — start with a minimal index.html shell" };
     }
     const totalChars = Object.values(files).reduce(
       /** @param {number} n @param {unknown} c */

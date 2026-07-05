@@ -51,10 +51,14 @@ export const extractInstanceHandle = (primitive, content) => {
   }
   if (!id) return null;
   // The cross-kind 'engine' primitive (sandbox_create) says which kind it made
-  // in the body; a per-kind primitive IS the kind. Anchored + enum-bound, same
-  // defensive posture as the id pattern.
+  // in the body — as `"kind":"…"` in the raw create JSON, or as the `kind=…`
+  // suffix the lineage spine carries (extractHandle renders it exactly so this
+  // re-harvest survives compaction). A per-kind primitive IS the kind. Both
+  // patterns are enum-bound, same defensive posture as the id pattern.
   const kind = primitive === 'engine'
-    ? (content.match(/"kind"\s*:\s*"(app|notebook|webvm)"/)?.[1] ?? 'engine')
+    ? (content.match(/"kind"\s*:\s*"(app|notebook|webvm)"/)?.[1]
+      ?? content.match(/\bkind=(app|notebook|webvm)\b/)?.[1]
+      ?? 'engine')
     : primitive;
   return { id, name, kind };
 };
@@ -63,13 +67,12 @@ export const extractInstanceHandle = (primitive, content) => {
  * A glanceable one-line handle for the trim summary's "Artifacts / handles"
  * section — `app app-7f3a "dashboard"` (name dropped when absent). Distinct
  * from the spine's `id=…` rendering: this line stands alone in the summary,
- * so it leads with the kind for context. The handle's own `kind` (resolved by
- * extractInstanceHandle — the real engine kind even under the cross-kind
- * 'engine' primitive) wins over the raw primitive string.
+ * so it leads with the handle's resolved `kind` (the real engine kind even
+ * under the cross-kind 'engine' primitive — extractInstanceHandle always
+ * resolves it, so no separate primitive parameter is needed).
  *
- * @param {string} primitive
- * @param {{ id: string, name: string, kind?: string }} handle
+ * @param {{ id: string, name: string, kind: string }} handle
  * @returns {string}
  */
-export const renderHandleLine = (primitive, { id, name, kind }) =>
-  name ? `${kind || primitive} ${id} "${name}"` : `${kind || primitive} ${id}`;
+export const renderHandleLine = ({ id, name, kind }) =>
+  name ? `${kind} ${id} "${name}"` : `${kind} ${id}`;

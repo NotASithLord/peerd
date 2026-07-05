@@ -105,7 +105,9 @@ export const ACTION_CLASSES = Object.freeze({
 // session. A `write` sideEffect on one of these is WORKSPACE_WRITE; a `write`
 // on a `tab` primitive (click/type/navigate) is EXTERNAL. (dweb_share/install
 // are `mutate_external`, so they're EXTERNAL regardless of primitive.)
-const WORKSPACE_PRIMITIVES = Object.freeze(new Set(['webvm', 'notebook', 'app', 'dweb']));
+// 'engine' is sandbox_create's cross-kind primitive — a create of the agent's
+// own sandbox is a workspace write exactly like the per-kind creates it folded.
+const WORKSPACE_PRIMITIVES = Object.freeze(new Set(['webvm', 'notebook', 'app', 'engine', 'dweb']));
 
 // Specific tools whose write is really code EXECUTION, not a file edit.
 // These live in workspace primitives but get classified SHELL so the

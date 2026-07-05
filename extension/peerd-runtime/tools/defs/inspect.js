@@ -11,6 +11,9 @@
 // unchanged in behavior — each still proves its §02 "sovereignty" property.
 
 import { serializeListResult } from './columnar.js';
+import { executeByKind, kindEnum } from './kind-dispatch.js';
+import { originOfUrl } from './dom-helpers.js';
+import { clamp } from '/shared/util.js';
 // why the DEEP path (not the /peerd-egress/index.js barrel): the barrel pulls
 // the vault/storage surface, which loads browser-polyfill and throws under Bun.
 // The denylist matcher is pure — import it directly, exactly as dom-helpers.js /
@@ -81,11 +84,6 @@ const inspectStorage = async (args, ctx) => {
  * @property {boolean} [active]
  */
 
-/** @param {string | undefined} url @returns {string | null} */
-const tryOriginOf = (url) => {
-  try { return new URL(url ?? '').origin; }
-  catch { return null; }
-};
 /** @param {string | undefined} s @param {number} n @returns {string} */
 const truncate = (s, n) => {
   if (!s) return '';
@@ -116,7 +114,9 @@ const inspectSessionAccess = async (_args, ctx) => {
     const raw = await tabsApi.query({});
     tabs = raw.map((t) => ({
       id: t.id,
-      origin: tryOriginOf(t.url),
+      // originOfUrl (dom-helpers) so the internal-page rendering (chrome://,
+      // about:) agrees with actor_list + the origin gates for the same tab.
+      origin: originOfUrl(t.url),
       title: truncate(t.title, 60),
       active: t.active,
       url: redactSensitivePath(t.url),
@@ -182,7 +182,7 @@ const redactSubagentError = (e) => {
 
 /** @param {any} args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
 const inspectAuditLog = async (args, ctx) => {
-  const limit = Math.max(1, Math.min(args?.limit ?? 50, 500));
+  const limit = clamp(args?.limit ?? 50, 1, 500);
   /** @type {Set<string> | null} */
   const types = Array.isArray(args?.types) && args.types.length > 0 ? new Set(args.types) : null;
   // why: ctx.idb is the opaque `Object` contract slot; narrow it to the getAll
@@ -210,8 +210,6 @@ export const INSPECT_HANDLERS = Object.freeze({
   audit_log: inspectAuditLog,
 });
 
-const INSPECT_KINDS = Object.freeze(Object.keys(INSPECT_HANDLERS));
-
 /** @type {import('/shared/tool-types.js').Tool} */
 export const inspectTool = {
   name: 'inspect',
@@ -232,7 +230,7 @@ export const inspectTool = {
     properties: {
       kind: {
         type: 'string',
-        enum: [...INSPECT_KINDS],
+        enum: kindEnum(INSPECT_HANDLERS),
         description: 'Which facet to inspect.',
       },
       prefix: { type: 'string', description: 'storage only: key prefix filter, e.g. "vault" or "secret:".' },
@@ -244,14 +242,5 @@ export const inspectTool = {
   },
   sideEffect: 'read',
   origins: () => [],
-  execute: async (args, ctx) => {
-    const kind = args?.kind;
-    const handler = typeof kind === 'string'
-      ? /** @type {Record<string, (a: any, c: ToolContext) => ToolResult | Promise<ToolResult>>} */ (INSPECT_HANDLERS)[kind]
-      : undefined;
-    if (!handler) {
-      return { ok: false, error: `inspect: unknown kind ${JSON.stringify(kind)} — expected one of ${INSPECT_KINDS.join(', ')}.` };
-    }
-    return handler(args, ctx);
-  },
+  execute: executeByKind('inspect', /** @type {any} */ (INSPECT_HANDLERS)),
 };

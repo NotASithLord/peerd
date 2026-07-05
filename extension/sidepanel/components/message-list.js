@@ -788,6 +788,7 @@ const PRIMITIVE_MODULE = Object.freeze({
   webvm:    'engine',
   notebook: 'engine',
   app:      'engine',
+  engine:   'engine',
   dweb:     'distributed',
 });
 

@@ -243,23 +243,21 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
 
-  // THIRD cut (was progressive disclosure — DELETED 2026-07-05: every engine
-  // instance op is actor-only now, so there is nothing instance-state-dependent
-  // left on the main surface; the per-step recompute below remains for the
-  // dweb/goal cuts, which DO change mid-turn).
+  // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
+  // goal cuts below change mid-turn, so the advertised list must follow.
   const refreshMainTools = async () => {
-    // FOURTH cut: dweb tools (publish/discover/install) only when the dweb is on.
+    // THIRD cut: dweb tools (publish/discover/install) only when the dweb is on.
     // Runs BEFORE the .map (which drops the `dweb` flag) so the agent never sees
     // them on the store build (DWEB_ENABLED false) or with the setting off.
-    // FIFTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
+    // FOURTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
     // hidden until this session has CALLED a dweb tool — engagement, not the
     // always-on network's peer presence. Composes after the dweb-enabled gate.
-    // SIXTH cut: goal mode. complete_goal is registered always but revealed to
+    // FIFTH cut: goal mode. complete_goal is registered always but revealed to
     // the model ONLY while a goal run is live for this session (goalActiveFor),
     // so a normal chat never sees it. Outermost so it composes over the rest.
-    // SEVENTH cut (DESIGN-17): the actor surface. The instance-mutating tier
-    // LEAVES the main agent (it delegates via message_actor, which it keeps).
-    // Outermost so it composes over everything else.
+    // SIXTH cut (DESIGN-17): the actor surface. The actor-only instance tier
+    // (writes AND the fenced reads) LEAVES the main agent (it delegates via
+    // message_actor, which it keeps). Outermost so it composes over everything.
     const descriptors = filterActorSurface(
       filterByGoalActive(
         filterByDwebActive(

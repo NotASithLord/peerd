@@ -71,12 +71,6 @@ export const mainAgentDescriptors = (descriptors) =>
   // sees the full registered tool and keeps using the flag.)
   descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebToolName(t.name));
 
-// (The old "progressive disclosure" instance-gating machinery lived here —
-// INSTANCE_GATED_TOOLS / isInstanceGatedOut / filterByInstanceState. It was
-// DELETED 2026-07-05: every instance op it deferred is now in the actor-only
-// tier below, so the main agent never sees them regardless of instance state,
-// and the per-step instanceState recompute had nothing left to gate.)
-
 // ── DESIGN-17: actor tab agents — the capability tier ────────────────────
 //
 // A `kind:'actor'` session OWNS one tab-hosted instance and exclusively
@@ -105,20 +99,34 @@ export const mainAgentDescriptors = (descriptors) =>
 // bare literal — it's only ever the gate's negative space, never matched by name.
 export const EXPOSURE_ACTOR = 'actor';
 
+// Each ENGINE kind's full operational surface — runs, writes, deletes, AND the
+// fenced reads (see the isolation note above: instance bytes stay behind the
+// actor heap even for reads). edit_file is the cross-kind SEARCH/REPLACE write
+// path for App/Notebook files. js_run (headless, no instance) is deliberately
+// ABSENT — it stays a parent tool. These per-kind sets are BOTH the positive
+// allow-list of that kind's actor (ACTOR_TYPE_TOOLS below) AND, unioned, the
+// tier that leaves the main agent — one source of truth, so a new instance op
+// added to its kind's set is automatically refused for every non-actor ctx
+// (forgetting the union was previously a silent escalation hole).
+const ENGINE_ACTOR_TOOLS = Object.freeze({
+  webvm: Object.freeze(new Set([
+    'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
+  ])),
+  notebook: Object.freeze(new Set([
+    'js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file',
+  ])),
+  app: Object.freeze(new Set([
+    'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
+    'app_delete_file', 'app_delete', 'edit_file',
+  ])),
+});
+
 // The tiered instance-OPERATION set — refused for every non-actor ctx (the
-// main agent delegates these via message_actor). vm_boot/js_notebook are the
-// RUN tools (they mutate instance state); edit_file is the cross-kind
-// SEARCH/REPLACE write path for App/Notebook files; the *_read_file /
-// app_list_files READS are tiered too (see the isolation note above — instance
-// bytes stay behind the actor heap even for reads). js_run (headless, no
-// instance) stays a parent tool and is deliberately ABSENT.
-export const ACTOR_ONLY_TOOLS = Object.freeze(new Set([
-  'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
-  'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
-  'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
-  'app_delete_file', 'app_delete',
-  'edit_file',
-]));
+// main agent delegates these via message_actor). DERIVED as the union of the
+// per-kind engine sets above, never hand-maintained.
+export const ACTOR_ONLY_TOOLS = Object.freeze(new Set(
+  Object.values(ENGINE_ACTOR_TOOLS).flatMap((set) => [...set]),
+));
 
 /** Is this a tiered instance tool (actor-only, off the main agent)? Pure. @param {string} name */
 export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
@@ -135,18 +143,11 @@ export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
 // kinds' tools, browser/web/memory/spawn tools) is refused for an actor ctx.
-// Keys match the actorType vocabulary { webvm, notebook, app, web }.
+// Keys match the actorType vocabulary { webvm, notebook, app, web, dweb }; the
+// engine kinds are the shared ENGINE_ACTOR_TOOLS sets above (the same sets
+// whose union is the ACTOR_ONLY_TOOLS tier).
 const ACTOR_TYPE_TOOLS = Object.freeze({
-  webvm: Object.freeze(new Set([
-    'vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
-  ])),
-  notebook: Object.freeze(new Set([
-    'js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file',
-  ])),
-  app: Object.freeze(new Set([
-    'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
-    'app_delete_file', 'app_delete', 'edit_file',
-  ])),
+  ...ENGINE_ACTOR_TOOLS,
   // The web actor owns a tab via the DOM toolset. The DOM mutators
   // (click/type/navigate) are NOT in ACTOR_ONLY_TOOLS — they're contained
   // for the main agent by MAIN_AGENT_HIDDEN_TOOLS (the exposure axis). Putting

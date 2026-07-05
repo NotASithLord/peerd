@@ -167,11 +167,8 @@ export const foldDropped = (state, dropped) => {
           // strips it). Append-only, deduped, capped (cleanList).
           const primitive = tr.meta?.primitive;
           const handle = !tr.is_error && extractInstanceHandle(primitive, tr.content);
-          // why: a non-null handle implies extractInstanceHandle accepted
-          // `primitive` as an engine string, so this guard never fails at
-          // runtime — it just lets the type narrow from `primitive | undefined`.
-          if (handle && typeof primitive === 'string') {
-            next.handles.push(renderHandleLine(primitive, handle));
+          if (handle) {
+            next.handles.push(renderHandleLine(handle));
           }
         }
         next.handles = cleanList(next.handles);

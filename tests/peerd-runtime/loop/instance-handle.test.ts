@@ -64,8 +64,21 @@ describe('extractInstanceHandle', () => {
 });
 
 describe('renderHandleLine', () => {
-  test('leads with the primitive; drops the name when absent', () => {
-    expect(renderHandleLine('app', { id: 'app-7f3a', name: 'dashboard' })).toBe('app app-7f3a "dashboard"');
-    expect(renderHandleLine('webvm', { id: 'vm-9', name: '' })).toBe('webvm vm-9');
+  test('leads with the resolved kind; drops the name when absent', () => {
+    expect(renderHandleLine({ id: 'app-7f3a', name: 'dashboard', kind: 'app' })).toBe('app app-7f3a "dashboard"');
+    expect(renderHandleLine({ id: 'vm-9', name: '', kind: 'webvm' })).toBe('webvm vm-9');
+  });
+});
+
+describe('the compaction→trim round trip keeps the kind (the spine carries kind=…)', () => {
+  test('a spine with a kind= suffix re-harvests to the concrete kind under the engine primitive', () => {
+    // lineage-compaction renders an 'engine' (sandbox_create) handle as
+    // `id=… "name" kind=webvm`; trim re-extracts from that spine after the
+    // raw body (and its "kind":"…" JSON) is gone.
+    const spine = '‹elided› sandbox_create · engine · ok · id=vm-9 "builder" kind=webvm · 120 chars';
+    expect(extractInstanceHandle('engine', spine)).toEqual({ id: 'vm-9', name: 'builder', kind: 'webvm' });
+    // without the suffix (a legacy spine), the fallback stays 'engine' — degraded, never wrong
+    const legacy = '‹elided› sandbox_create · engine · ok · id=vm-9 "builder" · 120 chars';
+    expect(extractInstanceHandle('engine', legacy)).toEqual({ id: 'vm-9', name: 'builder', kind: 'engine' });
   });
 });
