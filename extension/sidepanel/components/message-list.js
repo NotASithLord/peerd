@@ -68,6 +68,7 @@ import { formatBytes } from '/peerd-runtime/index.js';
  * @property {Record<string, { stdout: string, stderr: string }>} [vmStreams]
  * @property {{ byToolUse?: Record<string, string>, sessions?: Record<string, SubagentSession> }} [subagents]
  * @property {Record<string, any>} [actors]
+ * @property {Record<string, any[]>} [scriptOps]
  * @property {(sessionId: string) => void} [loadSubagent]
  * @property {string} [peerName]
  * @property {number} [depth]
@@ -103,7 +104,7 @@ const MAX_NESTED_DEPTH = 5;
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, subagents, actors, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
+const renderTranscript = ({ messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
   const groups = groupMessages(messages ?? []);
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
@@ -142,7 +143,7 @@ const renderTranscript = ({ messages, vmStreams, subagents, actors, loadSubagent
         ? m(ActorReplyMessage, { key: g.message.id, message: g.message })
         : m(AssistantMessage, {
             key: g.message.id, message: g.message, toolResults: g.toolResults,
-            vmStreams, subagents, actors, loadSubagent, peerName, depth,
+            vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth,
           }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
@@ -163,9 +164,9 @@ export const MessageList = {
   onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
 
   /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, subagents, actors, loadSubagent, peerName, tabEvents, uiActions } }) =>
+  view: ({ attrs: { messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, tabEvents, uiActions } }) =>
     m('.message-list',
-      renderTranscript({ messages, vmStreams, subagents, actors, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
+      renderTranscript({ messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -307,11 +308,12 @@ const AssistantMessage = {
    *   vmStreams?: Record<string, { stdout: string, stderr: string }>,
    *   subagents?: TranscriptArgs['subagents'],
    *   actors?: Record<string, any>,
+   *   scriptOps?: Record<string, any[]>,
    *   loadSubagent?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
    * } }} vnode
    */
-  view: ({ attrs: { message, toolResults, vmStreams, subagents, actors, loadSubagent, peerName, depth } }) => {
+  view: ({ attrs: { message, toolResults, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth } }) => {
     const hasText = typeof message.content === 'string' && message.content.length > 0;
     const hasToolUses = toolResults.length > 0;
     const hasThinking = typeof message.thinking === 'string' && message.thinking.length > 0;
@@ -375,6 +377,7 @@ const AssistantMessage = {
               liveStream: vmStreams?.[toolUse.id] ?? null,
               subagents,
               actors,
+              scriptOps,
               loadSubagent,
               peerName,
               depth: depth ?? 0,
@@ -480,13 +483,14 @@ const ToolCall = {
    *     liveStream?: { stdout: string, stderr: string }|null,
    *     subagents?: TranscriptArgs['subagents'],
    *     actors?: Record<string, any>,
+   *     scriptOps?: Record<string, any[]>,
    *     loadSubagent?: (sessionId: string) => void,
    *     peerName?: string, depth?: number,
    *   },
    *   state: ToolCallState,
    * }} vnode
    */
-  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, actors, loadSubagent, peerName, depth }, state: ui }) => {
+  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, actors, scriptOps, loadSubagent, peerName, depth }, state: ui }) => {
     // spawn_subagent gets its own card: the expanded body is the child's
     // full transcript rendered inline (recursively), not a result blob.
     if (toolUse.name === 'spawn_subagent') {
@@ -507,6 +511,13 @@ const ToolCall = {
       : (interrupted ? 'cancelled' : 'pending');
     const showLiveStream = toolUse.name === 'vm_boot' && !toolResult
       && liveStream && (liveStream.stdout || liveStream.stderr);
+    // The live DELEGATION feed for a `script` run: one line per actors op
+    // (→ target "goal…" · state). Auto-shown while pending — the user watches
+    // the fan-out happen instead of a silent "running…" chip — and kept after
+    // completion for a beat of continuity (the durable record is the
+    // [DELEGATIONS] trace in the result body).
+    const ops = toolUse.name === 'script' ? (scriptOps?.[toolUse.id] ?? null) : null;
+    const showOps = ops && ops.length > 0 && (!toolResult || status === 'pending');
     // why: a single compact line is the resting state — a status dot,
     // the tool name, a one-line arg summary, and a duration. The §02
     // lineage (primitive + gates) and the full result move INTO the
@@ -537,6 +548,17 @@ const ToolCall = {
         liveStream.stderr
           ? m('pre.vm-stream-stderr', liveStream.stderr) : null,
       ]) : null,
+      showOps ? m('.script-ops', ops.map((/** @type {any} */ o) => m('.script-op', { key: o.seq }, [
+        m(`span.script-op-dot.dot-${o.phase === 'sent' ? 'pending' : (o.failed ? 'failed' : 'ok')}`),
+        m('span.script-op-line', [
+          `${o.method}${o.to ? ` ${o.to}` : ''}`,
+          o.goalPreview ? m('span.script-op-goal', ` "${o.goalPreview}"`) : null,
+        ]),
+        m('span.script-op-state',
+          o.phase === 'sent' ? 'working…'
+            : o.phase === 'handed-off' ? 'handed off'
+            : `${o.failed ? 'failed' : 'replied'}${typeof o.ms === 'number' ? ` · ${(o.ms / 1000).toFixed(1)}s` : ''}`),
+      ]))) : null,
       ui.expanded ? m('.tool-detail', [
         m('.tool-lineage', [
           m('.lineage-row', [

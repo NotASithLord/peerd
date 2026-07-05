@@ -130,6 +130,10 @@ export const ChatView = {
             // DESIGN-17 P1: actor display cards (glass pane) — keyed by the
             // message_actor tool_use id; rendered inline under that card.
             actors: state.actors,
+            // Live delegation feed for in-flight `script` runs (keyed by the
+            // script call's toolUseId) — the chain-of-events line the user
+            // watches while a script fans work out to actors.
+            scriptOps: state.scriptOps,
             loadSubagent: uiActions?.loadSubagent,
             // "peerd opened a tab" notices render INLINE in the transcript at the
             // turn they happened (and fade into the backlog as the chat continues)
