@@ -8,11 +8,7 @@
 // auditability. /verify (V1.4 stub via system-prompt injection) walks
 // the agent through all five in order.
 
-import { inspectStorageTool }        from './inspect-storage.js';
-import { inspectAuditLogTool }       from './inspect-audit-log.js';
-import { inspectSessionAccessTool }  from './inspect-session-access.js';
-import { inspectDenylistTool }       from './inspect-denylist.js';
-import { inspectProviderConfigTool } from './inspect-provider-config.js';
+import { inspectTool }               from './inspect.js';
 import { readPageTool }              from './read-page.js';
 import { snapshotTool }              from './snapshot.js';
 import { readStateTool }             from './read-state.js';
@@ -68,11 +64,7 @@ import { a2aRunTool }                  from './a2a-run.js';
 
 export {
   // inspect
-  inspectStorageTool,
-  inspectAuditLogTool,
-  inspectSessionAccessTool,
-  inspectDenylistTool,
-  inspectProviderConfigTool,
+  inspectTool,
   // DOM
   readPageTool,
   snapshotTool,
@@ -141,12 +133,9 @@ export {
  * each tool.
  */
 export const BUILTIN_TOOLS = Object.freeze([
-  // inspect
-  inspectProviderConfigTool,
-  inspectStorageTool,
-  inspectSessionAccessTool,
-  inspectDenylistTool,
-  inspectAuditLogTool,
+  // inspect (one kind-discriminated tool: provider_config | storage |
+  // session_access | denylist | audit_log)
+  inspectTool,
   // sessions — actor_list is the single discovery surface (instances + open
   // tabs + API integrations) that collapsed vm_list/js_list/app_list/list_tabs/
   // list_integrations into one columnar result keyed by `type`.

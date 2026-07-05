@@ -52,7 +52,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // stack (a reasoning subagent is a tool-less ephemeral actor), deleting those four
 // phase-1 files; their code lives on in the (still // @ts-check'd) actor-* stack.
 // A legitimate decrease (files deleted, not directives dropped).
-const COVERED_FLOOR = 487;
+// 487 → 485: the Firefox WebVM notice added vm-tab/firefox-webvm-note.js +
+// its in-browser test (+2), then the inspect_* fold deleted the five old
+// inspect tool defs and added tools/defs/inspect.js (−4) — net −2 checked
+// files, all deletions, no directive dropped.
+const COVERED_FLOOR = 485;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

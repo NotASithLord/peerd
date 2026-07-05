@@ -78,7 +78,7 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
     const names = mainListFor('research');
     // fetch_url is actor-only (correctly NOT in the main list); the main
     // agent's web channel is the actor (message_actor) + tab management.
-    for (const keep of ['message_actor', 'actor_list', 'open_tab', 'remember', 'read_memory', 'inspect_audit_log']) {
+    for (const keep of ['message_actor', 'actor_list', 'open_tab', 'remember', 'read_memory', 'inspect']) {
       expect(names).toContain(keep);
     }
     // the DOM tools go to the actor; execution/edit/spawn dropped by the preset.

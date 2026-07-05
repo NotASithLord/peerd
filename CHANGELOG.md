@@ -37,6 +37,16 @@ and storage formats may move until the surface stabilizes.
   WebRTC test.
 
 ### Changed
+- **The five `inspect_*` introspection tools became one `inspect`.**
+  `inspect_provider_config`, `inspect_storage`, `inspect_session_access`,
+  `inspect_denylist`, and `inspect_audit_log` were five near-identical
+  read-only tools; they collapse into a single `inspect({ kind })` (kinds:
+  `provider_config` / `storage` / `session_access` / `denylist` /
+  `audit_log`), exactly the way `actor_list` folded the per-kind list tools
+  into one. Behavior per facet is unchanged — same outputs, same audit-log
+  subagent-error redaction — but the main agent's tool surface shrinks by
+  four, sharpening tool selection. Existing `/tools` presets that named the
+  old tools now name `inspect`.
 - **The service worker is slimmer and the worker bridges are unified.** Two
   internal refactors, no behavior change. The four hand-rolled worker↔host
   bridges (OPFS, subagent, base-network reads, the a2a mesh) collapse into a
@@ -45,6 +55,18 @@ and storage formats may move until the surface stabilizes.
   picker's catalog, the tab-strip affordances, and a couple of pure actor
   kernels now live in their own small, tested modules, keeping the service
   worker to assembly and routing.
+
+### Fixed
+- **WebVM now degrades gracefully on Firefox instead of showing a
+  misleading error.** The in-browser Linux VM (CheerpX) needs
+  `SharedArrayBuffer`, which the browser grants only to a cross-origin-
+  isolated page — and a Firefox extension page can't isolate itself
+  (a Firefox platform limitation, not a peerd bug). The VM boot screen used
+  to fail with a "manifest must declare cross_origin_embedder_policy" error
+  that read like a config bug; on Firefox it now shows a plain-English notice
+  explaining the limitation, noting WebVM works in the Chrome build, and
+  linking the two open upstream threads (Bugzilla 1673477 and the W3C
+  WebExtensions issues) to push on.
 
 ## [0.2.2] - 2026-07-04
 

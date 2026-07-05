@@ -680,7 +680,7 @@ registerTool(loadSkillTool);
 
 // Denylist patterns — loaded once at boot from the seed JSON shipped
 // with the extension. The origin gate (peerd-runtime/tools/gates.js)
-// reads from this; inspect_denylist (the tool) reads from it too.
+// reads from this; inspect kind:'denylist' (the tool) reads from it too.
 // Denylist state lives in a store (background/denylist-store.js): seed + user
 // overlay + the effective list, behind methods so consumers read the LIVE value
 // (.patterns()) instead of a reassigned singleton. The seed FETCH stays here
