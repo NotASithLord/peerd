@@ -96,7 +96,7 @@ const __peerdDisplay = (value) => {
 // display here: fetch is owned by the realm seal (its own listener, so untrusted
 // code can't unseat it) and display is one-way (no reply to correlate).
 const bridges = [];
-const makeBridge = (name, { timeoutMs, shape } = {}) => {
+const makeBridge = (name, { timeoutMs, shape, timeoutMessage } = {}) => {
   const pending = new Map();
   let seq = 0;
   const call = (payload = {}) => new Promise((resolve, reject) => {
@@ -105,8 +105,12 @@ const makeBridge = (name, { timeoutMs, shape } = {}) => {
     postMessage({ type: name + '-request', rid, ...payload });
     if (timeoutMs) setTimeout(() => {
       // keep the op/method in the message — a stuck-bridge error is only
-      // actionable if it says WHICH call hung (payload.op for opfs, .method for a2a).
-      if (pending.delete(rid)) reject(new Error(name + ' ' + (payload.op || payload.method || 'call') + ' timed out'));
+      // actionable if it says WHICH call hung. A bridge whose CLIENT name differs
+      // from its wire name (the a2a bridge's client is mesh.*) passes
+      // timeoutMessage to keep its original wording; opfs default reproduces
+      // "opfs <op> timed out".
+      if (pending.delete(rid)) reject(new Error(
+        timeoutMessage ? timeoutMessage(payload) : name + ' ' + (payload.op || payload.method || 'call') + ' timed out'));
     }, timeoutMs);
   });
   // Returns true when the message was ours (routed by type), so the listener
@@ -252,7 +256,7 @@ const distributedInfo = () => distributedRelay({});
 // awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
 // ABOVE that, else the worker rejects a still-valid ask.
 ${a2a ? `
-const meshRelay = makeBridge('a2a', { timeoutMs: 130000 });
+const meshRelay = makeBridge('a2a', { timeoutMs: 130000, timeoutMessage: (p) => 'mesh.' + p.method + ' timed out' });
 const meshCall = (method, args) => meshRelay({ method, args });
 const __mesh = {
   peers:       () => meshCall('peers', {}),
