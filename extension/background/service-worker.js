@@ -246,6 +246,7 @@ import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
+import { createContextSnapshots } from './context-snapshots.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
@@ -1741,6 +1742,12 @@ const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
 // consumers run) and read by the actors/call route below.
 const scriptRuns = createScriptRunRegistry();
 
+// The context inspector's capture ring — "what did the model see" per
+// session, SW-memory only. Fed from the two seams that together cover
+// every model call (the turn driver's failover wrapper, the actor relay
+// route below); read by the debug-bundle route and the inspector view.
+const contextSnapshots = createContextSnapshots();
+
 // The heap split: the ONE offscreen agent-loop client. It runs every non-
 // orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
@@ -1765,6 +1772,7 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
   ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
   EXPOSURE_ACTOR,
+  recordModelCall: contextSnapshots.record,
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -2311,6 +2319,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  recordModelCall: contextSnapshots.record,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).

@@ -34,10 +34,14 @@
  *   for engine/API actors (no tab) and the 0-tab web state.
  * @param {string} deps.EXPOSURE_ACTOR
  * @param {() => number} [deps.now]
+ * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
+ *   inspector's capture hook — fed every delegated model call with the runMeta-derived
+ *   identity (never the worker's own claim). Optional; defaults to a no-op.
  */
 export const makeOffscreenActorClient = ({
   ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, now = Date.now,
+  recordModelCall = () => {},
 }) => {
   let seq = 0;
   /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
@@ -51,6 +55,10 @@ export const makeOffscreenActorClient = ({
   const abortedRuns = new Set();
   /** @type {Map<string, (ev: object) => void>} runId → onEvent */
   const runOnEvent = new Map();
+  /** @type {Map<string, { sessionId: string, label: string }>} runId → identity for the
+   * context inspector: the model-call route only carries runId + body args, so the
+   * session (and a human label for WHOSE call this is) is stashed at run() time. */
+  const runMeta = new Map();
   /** @type {Map<string, AbortSignal>} sessionId → the in-flight run's abort signal.
    * Phase 4: a subagent's BLOCKING tool (message_actor awaitReply) runs SW-side via the
    * relay and races the reply against the child's cancel; the child's signal is only
@@ -66,6 +74,10 @@ export const makeOffscreenActorClient = ({
     await ensureOffscreen();
     const runId = `aw-${now().toString(36)}-${++seq}`;
     if (onEvent) runOnEvent.set(runId, onEvent);
+    runMeta.set(runId, {
+      sessionId: job.actorSessionId,
+      label: job.actorType ? `actor:${job.actorType}` : `subagent d${job.depth ?? 1}`,
+    });
     const abortRun = () => {
       abortedRuns.add(runId);   // cover a model-call that hasn't reached the route yet
       for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
@@ -91,6 +103,7 @@ export const makeOffscreenActorClient = ({
       // it already fired under {once:true}); keeps nothing dangling on the turn signal.
       signal?.removeEventListener('abort', abortRun);
       runOnEvent.delete(runId);
+      runMeta.delete(runId);
       inflight.delete(runId);
       abortedRuns.delete(runId);
       if (signal && signalBySession.get(job.actorSessionId) === signal) signalBySession.delete(job.actorSessionId);
@@ -107,6 +120,12 @@ export const makeOffscreenActorClient = ({
       const ac = new AbortController();
       const set = inflight.get(key) ?? new Set();
       set.add(ac); inflight.set(key, set);
+      // The context inspector sees every DELEGATED model call here — the one
+      // relay every actor and subagent heap uses. Identity comes from the
+      // runMeta stash, never the worker's args (a worker must not be able to
+      // relabel whose context this was).
+      const meta = runMeta.get(key);
+      if (meta) recordModelCall({ ...(args ?? {}), sessionId: meta.sessionId, label: meta.label });
       /** @type {any[]} */
       const events = [];
       try {

@@ -44,6 +44,9 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
     contextWindowFor, liveContextWindow, currentAppScope,
     checkpointMgr, detectInterruptedTurn,
+    // The context inspector's capture hook (optional; a no-op default so the
+    // driver never depends on the debug surface being wired).
+    recordModelCall = () => {},
   } = deps;
 
 /**
@@ -399,6 +402,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
     const start = failoverLastGood ?? { provider: modelArgs.provider, model: modelArgs.model };
     const chain = resolveFailoverChain(start);
+    // The context inspector sees every ORCHESTRATOR model call here — the
+    // one seam every step of every main turn passes through. (Actors and
+    // subagents are captured at the SW's actor/model-call relay instead.)
+    // record() is contractually non-throwing; label with the provider the
+    // call will actually start on.
+    recordModelCall({ ...modelArgs, provider: start.provider, model: start.model, sessionId, label: 'main' });
     // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
     // #104). Thread it from settings for every candidate; non-ollama adapters
     // ignore the extra arg. (The configured host is also on the egress allowlist.)
