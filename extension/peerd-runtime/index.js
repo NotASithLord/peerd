@@ -304,3 +304,13 @@ export {
   SessionNotFoundError,
   RuntimeContextIncompleteError,
 } from './errors.js';
+
+// --- observability (the debug surface: bundle export, failure classes,
+// OTel mapping — all pure; the SW route and the side panel consume them) --
+export { classifyFailure, FAILURE_KINDS } from './observability/failure-classify.js';
+export {
+  assembleDebugBundle, childSessionIdsOf, collectFailures,
+  DEBUG_BUNDLE_FORMAT, DEBUG_BUNDLE_VERSION,
+  BUNDLE_MAX_AUDIT_ENTRIES, BUNDLE_MAX_CHILD_SESSIONS,
+} from './observability/debug-bundle.js';
+export { bundleToOtlp, traceIdFromUuid, spanIdFrom } from './observability/otel-export.js';

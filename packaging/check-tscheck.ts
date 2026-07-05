@@ -64,7 +64,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // red-team tier — real-realm seal + CSP-fence assertions).
 // 488 → 490: the actors-in-script surface adds subagent/actors-api.js (the
 // pure delegation core) and background/script-runs.js (the live-run registry).
-const COVERED_FLOOR = 490;
+// 490 → 493: the debug surface adds observability/failure-classify.js,
+// observability/debug-bundle.js, and observability/otel-export.js (the pure
+// cores of the debug-bundle export + failure classifier + OTel mapper).
+const COVERED_FLOOR = 493;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
