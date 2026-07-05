@@ -9,7 +9,7 @@
 
 // Why 20k: a long-lived install writes a handful of entries per tool
 // call, so tens of thousands ≈ weeks-to-months of history — enough for
-// the Logs view and inspect_audit_log (which cap reads at 500 anyway)
+// the Logs view and inspect kind:'audit_log' (which caps reads at 500 anyway)
 // while keeping getAll() on the Logs path comfortably fast. Defined
 // here, next to the module's other defaults (DEFAULT_AUTO_LOCK_MS), and
 // overridable per build via CHANNEL_DEFAULTS.auditLogMaxEntries.

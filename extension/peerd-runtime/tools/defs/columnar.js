@@ -1,7 +1,7 @@
 // @ts-check
 // columnar.js — lossless densification of uniform record lists.
 //
-// why: the catalog/inspect tools (actor_list, inspect_session_access,
+// why: the catalog/inspect tools (actor_list, inspect kind:'session_access',
 // app_list_files, app_search) each serialize an
 // ARRAY OF IDENTICALLY-SHAPED record objects. Pretty-printed JSON repeats
 // every key name AND its indentation once PER record — a 30-VM list prints
@@ -17,7 +17,7 @@
 // The redactor (loop/redact.js) truncates oversized results head/tail
 // (lossy); shrinking the blob here means fewer lists reach that cliff.
 //
-// Deliberately NOT wired into inspect_audit_log: its entries carry an
+// Deliberately NOT wired into inspect kind:'audit_log': its entries carry an
 // arbitrary nested `details` object and an optional field, so they're often
 // non-uniform — the guard below would silently fall back run-to-run, and an
 // audit surface should serialize predictably, not shape-shift.

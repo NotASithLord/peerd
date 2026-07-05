@@ -53,9 +53,8 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
       // memory
       'remember', 'read_memory',
-      // sovereignty / sessions introspection
-      'inspect_storage', 'inspect_audit_log', 'inspect_denylist',
-      'inspect_provider_config', 'inspect_session_access',
+      // sovereignty / sessions introspection (one kind-discriminated tool)
+      'inspect',
       // temporal grounding
       'now', 'wait_until',
     ]),

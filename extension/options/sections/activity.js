@@ -3,7 +3,7 @@
 //
 // Ported from the Context view's Activity tab (EVENT_META + detailLine
 // + the severity/free-text filters). The agent introspects the same log
-// via inspect_audit_log; this is the human's view. Read-only on purpose
+// via inspect kind:'audit_log'; this is the human's view. Read-only on purpose
 // — the audit log is append-only evidence, not a management surface.
 
 import m from '/vendor/mithril/mithril.js';

@@ -30,7 +30,7 @@ export const makeSystemRoutes = (deps) => {
     'state/get': async () => ({ ok: true, state: await buildStateSnapshot() }),
 
     // --- logs (human-facing audit log) ---
-    // The agent can already introspect this (inspect_audit_log); this route
+    // The agent can already introspect this (inspect kind:'audit_log'); this route
     // surfaces the same data to the USER in the Logs view. The audit log is
     // append-only and UUIDv7-keyed, so getAll() is chronological — we reverse
     // for newest-first and cap the payload so a long-lived install doesn't
