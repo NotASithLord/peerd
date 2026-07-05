@@ -54,7 +54,7 @@ export const sandboxCreateTool = {
     'The new instance becomes the chat\'s current of its kind and a "go there"',
     'card lands in chat. Then DELEGATE the work: message_actor(<id>, goal) —',
     'the instance\'s actor holds all its file/run tools. (For quick headless',
-    'compute with no tab and no instance, js_run is simpler.)',
+    'compute with no tab and no instance, script is simpler.)',
   ].join(' '),
   schema: {
     type: 'object',

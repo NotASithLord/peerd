@@ -30,7 +30,7 @@ export const jsNotebookTool = {
   description: [
     'Run JS in a Notebook — a VISIBLE tab the user watches (CodeMirror editor +',
     'output pane + file tree), backed by a Web Worker + OPFS. Opens/focuses that',
-    'tab. For a quick result with NO tab (headless, ephemeral), use js_run',
+    'tab. For a quick result with NO tab (headless, ephemeral), use script',
     'instead. The code is an async function body — top-level await works and',
     '`return <value>` sends the result back. ✅ parsing, transforms, numeric work,',
     'exercising a library. ❌ DOM (no document/window — use sandbox_create kind:"app") or',

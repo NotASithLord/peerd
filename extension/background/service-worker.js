@@ -226,6 +226,7 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
+  actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
@@ -244,6 +245,7 @@ import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
+import { createScriptRunRegistry } from './script-runs.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
@@ -927,6 +929,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // ctx strips this back out (it's not in its toolset, so the keyless narrowing
     // removes it).
     messageActor: (/** @type {any} */ req) => actorMessaging.messageActor(req),
+    // why: the script tool's actors surface. The tool registers its run here
+    // (with the dispatch abort signal) BEFORE launching the worker; the
+    // actors/call route derives every pending ask's awaitSignal from it, and
+    // the tool aborts + releases on the way out — one Stop unwinds the fan.
+    scriptRuns,
     // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
     // as a later synthetic turn. subagentTasks/subagentCancel back the
@@ -963,7 +970,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     jsClient,
     jsRegistry,
     jsTabTracker,
-    // js_run — a HEADLESS sibling: the same sealed worker, hosted in the
+    // script — a HEADLESS sibling: the same sealed worker, hosted in the
     // offscreen doc (no tab). Defined after ensureOffscreen below.
     jsOffscreenClient,
     // read_pdf — PDF text extraction in the offscreen doc (pdf.js needs a
@@ -1716,18 +1723,23 @@ const ensureOffscreen = async () => {
 // why gate on offscreen availability: Firefox has no chrome.offscreen, so the
 // offscreen-hosted job/pdf workers can never run there. Injecting null (not a
 // live client) makes the tools' own `if (!client) return *_unavailable` guard
-// trip — so js_run/read_pdf report a clean "not supported in this build" signal
+// trip — so script/read_pdf report a clean "not supported in this build" signal
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
 const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
 
-// The headless-JS client (the js_run tool). execHeadless ensures the offscreen
+// The headless-JS client (the script tool). execHeadless ensures the offscreen
 // doc, then dispatches a 'job/run' message to job-runner.js hosted there.
 // Defined after ensureOffscreen; buildToolContext reads it lazily at dispatch.
 const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
+
+// Live actors-enabled script runs (background/script-runs.js): Stop → abort
+// pending asks + terminate the worker. Declared here (before buildToolContext
+// consumers run) and read by the actors/call route below.
+const scriptRuns = createScriptRunRegistry();
 
 // The heap split: the ONE offscreen agent-loop client. It runs every non-
 // orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
@@ -2775,6 +2787,112 @@ const meshDispatch = makeMeshDispatch({
   publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
 });
 
+// The actors/call route — invoked by the offscreen relay for each `actors.*`
+// call an actors-enabled `script` run makes. ownerSessionId / ownerToolUseId /
+// runId are TRUSTED (job params, minted by the script tool SW-side); the
+// worker's own words buy nothing. Every delegation runs the FULL messageActor
+// gate chain (sender gate, rate caps, duplicate-intent, oneShot sandbox-only,
+// audit) — this route adds only translation, the per-ask timeout, the Stop
+// chain, and the live per-op feed the side panel renders on the script card.
+const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, seq?: number }} */ msg) => {
+  const pushOp = (/** @type {string} */ phase, /** @type {object} */ extra = {}) => {
+    try {
+      uiPorts.broadcast({
+        type: 'script/op',
+        sessionId: msg.ownerSessionId, toolUseId: msg.ownerToolUseId ?? null,
+        seq: msg.seq ?? 0, method: msg.method ?? '?', phase, ...extra,
+      });
+    } catch { /* panel closed — the trace in the result still records it */ }
+  };
+  try {
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    // v1 is the ORCHESTRATOR's surface only: a top-level chat session. An
+    // actor must never delegate (the recursion rule message_actor already
+    // enforces), and a subagent's channel is its own message_actor grant.
+    if (!owner || owner.kind === 'actor' || owner.kind === 'subagent') {
+      return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
+    }
+    const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
+    if (op === 'list') {
+      // The roster through the normal tool gates — actor_list with the owner's
+      // main ctx, so exposure/manifest rules apply exactly as a direct call.
+      const listCtx = await buildToolContext({ exposure: 'main', sessionId: msg.ownerSessionId });
+      const r = await dispatchToolCall({ id: `${msg.runId ?? 'script'}-list-${msg.seq ?? 0}`, name: 'actor_list', args: {} }, /** @type {any} */ (listCtx));
+      return r?.ok
+        ? { ok: true, value: shapeActorsResult('list', { ok: true, roster: /** @type {any} */ (r).content }) }
+        : { ok: false, error: /** @type {any} */ (r)?.error ?? 'actor_list failed' };
+    }
+    const target = /** @type {{ to: string, goal: string, timeoutMs?: number, oneShot?: boolean }} */ (args);
+    // The UI preview: a chained goal can carry actor/web-derived bytes, so
+    // collapse whitespace (no line-shaping) and cap — it renders as plain
+    // text (Mithril escapes), same posture as the sanitized actor names.
+    const goalPreview = target.goal.replace(/\s+/g, ' ').slice(0, 60);
+    pushOp('sent', { to: target.to, goalPreview });
+    // The SW-side op mirror: survives an offscreen crash, so the script tool's
+    // failure path can still show the chain of events (script-runs.js).
+    const mirror = (/** @type {Record<string, unknown>} */ opRecord) => {
+      if (typeof msg.runId === 'string') scriptRuns.recordOp(msg.runId, { seq: msg.seq ?? 0, method: msg.method, to: target.to, ...opRecord });
+    };
+    if (op === 'send') {
+      const r = await actorMessaging.messageActor({
+        to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
+        toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
+      });
+      pushOp(r.ok ? 'handed-off' : 'failed', r.ok ? {} : { error: 'refused' });
+      mirror({ ok: r.ok === true, ms: 0, ...(r.ok ? {} : { error: r.error }) });
+      return r.ok
+        ? { ok: true, value: shapeActorsResult('send', { ok: true }) }
+        : { ok: false, error: r.error ?? 'send failed' };
+    }
+    // ask — awaitReply, raced against the per-ask timeout AND the run's Stop
+    // signal (script-runs.js). Either abort cancels the underlying actor turn.
+    const askTimeoutMs = target.timeoutMs ?? ACTORS_ASK_DEFAULT_TIMEOUT_MS;
+    const runSignal = typeof msg.runId === 'string' ? scriptRuns.signalFor(msg.runId) : null;
+    const askController = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; askController.abort(); }, askTimeoutMs);
+    const onRunAbort = () => askController.abort();
+    if (runSignal) {
+      if (runSignal.aborted) askController.abort();
+      else runSignal.addEventListener('abort', onRunAbort, { once: true });
+    }
+    try {
+      const t0 = Date.now();
+      const r = await actorMessaging.messageActor({
+        to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
+        toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
+        // bareReply: the reply resolves into CODE — the fence is re-applied at
+        // the script-result boundary (the one model-facing seam), so the raw
+        // body is what plumbing composes with (no fence markup in goals).
+        awaitReply: true, bareReply: true, awaitSignal: askController.signal,
+      });
+      const ms = Date.now() - t0;
+      // The timeout / Stop-abort / system-refusal / actor-failure fork is the
+      // pure askOutcome (actors-api.js) — provable without this route.
+      const outcome = askOutcome(/** @type {any} */ (r), {
+        timedOut, aborted: !timedOut && askController.signal.aborted,
+        timeoutMs: askTimeoutMs, to: target.to,
+      });
+      if (!outcome.ok) {
+        pushOp('failed', { ms, error: timedOut ? 'timeout' : 'refused' });
+        mirror({ ok: false, ms, error: outcome.error });
+        return { ok: false, error: outcome.error };
+      }
+      pushOp('replied', { ms, ...(outcome.failed ? { failed: true } : {}) });
+      mirror({ ok: true, ms, ...(outcome.failed ? { actorFailed: true } : {}) });
+      return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: outcome.reply, failed: outcome.failed }) };
+    } finally {
+      clearTimeout(timer);
+      if (runSignal) { try { runSignal.removeEventListener?.('abort', onRunAbort); } catch { /* stub */ } }
+    }
+  } catch (e) {
+    // A throw after pushOp('sent') would otherwise leave the live-feed line
+    // pulsing 'working…' forever — settle it, then report.
+    pushOp('failed', { error: 'error' });
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
 // The a2a/call route — invoked by the offscreen relay for each mesh call the
 // a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
 // THE dweb actor before touching the mesh, translate + gate + dispatch.
@@ -3336,6 +3454,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
   // consent-gated, dispatched on the peerd-agent room).
   'a2a/call': (/** @type {any} */ msg) => a2aCallRoute(msg),
+  // actors: the script tool's delegation surface — each actors.* call an
+  // actors-enabled headless run makes relays here (owner-verified, fully
+  // re-gated through messageActor).
+  'actors/call': (/** @type {any} */ msg) => actorsCallRoute(msg),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,

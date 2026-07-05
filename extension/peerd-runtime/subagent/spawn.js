@@ -157,12 +157,18 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
   jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
   jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list'],
-  jsOffscreenClient:  ['js_run', 'a2a_run'],
+  jsOffscreenClient:  ['script', 'a2a_run'],
   appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list'],
   messageActor:    ['message_actor'],
+  // The script tool's run registry (Stop plumbing for its actors surface). A
+  // narrowed child without the script grant loses it; one granted script but
+  // not message_actor keeps the registry yet loses the messageActor closure —
+  // and script's actors mint requires BOTH, so its delegation surface composes
+  // off exactly the same grant that message_actor itself needs.
+  scriptRuns:      ['script'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
   // web actor (which has navigate), stripped from any kind whose toolset lacks it.
@@ -596,7 +602,7 @@ export const makeSpawnSubagent = (deps) => {
       // own heap, no key, no chrome.*, no egress. A tool-LESS child (phase 1) only
       // relays its model call; a tool-BEARING child (phase 4) also relays each tool
       // call to the SW, which rebuilds the child's restricted ctx from the persisted
-      // grantedTools and dispatches there (so js_run and friends run from the child's
+      // grantedTools and dispatches there (so script and friends run from the child's
       // own heap, keyless). Falls back to the in-SW loop when offscreen isn't wired
       // (Firefox), when the prompt renderer is absent, or when the offscreen run
       // HARD-fails to start (a normal completion, even error/abort, does NOT fall back

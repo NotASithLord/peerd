@@ -72,7 +72,7 @@ import './unit/red-team/sandbox-escape.test.js';
 // --- chassis: vm-tab ---
 import './unit/vm-tab/firefox-webvm-note.test.js';
 
-// --- chassis: offscreen (headless JS jobs / js_run) ---
+// --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---

@@ -40,7 +40,7 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 const SMOKE_TEXT = 'e2e-smoke-ok';
 
 // The local-first personal-data agent, end to end through the REAL stack: the
-// faked model calls js_run, the sealed worker builds an on-device index in OPFS
+// faked model calls script, the sealed worker builds an on-device index in OPFS
 // and queries it, and the agent reports the answer — every byte computed on
 // device (the realm seal makes the worker incapable of egress).
 const PDA_SCRIPT = `
@@ -56,7 +56,7 @@ const total = rows.reduce((a, r) => a + r.amount, 0);
 return { total, count: rows.length, source: 'on-device OPFS index' };
 `;
 
-// Captures the model's SECOND request body (which carries the js_run tool result
+// Captures the model's SECOND request body (which carries the script tool result
 // back to the model) so the state can prove the sealed worker REALLY computed the
 // answer — not that the faked final turn merely claims it.
 let pdaToolResultBody = '';
@@ -70,6 +70,7 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+let scriptFanState = { scripts: 0, seen: [] };
 let dwebActorState = { delegates: 0, actorCalls: 0 };
 let a2aState = { delegates: 0, actorCalls: 0 };
 // heap-split phase 1: the offscreen pure-reasoning subagent state.
@@ -181,8 +182,8 @@ export const STATES = [
   {
     name: 'personal-data', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
-      if (callIndex === 0) return { sse: sseToolCall('js_run', { code: PDA_SCRIPT }) };
-      // call 1 carries the js_run tool result back — capture it for the assertion.
+      if (callIndex === 0) return { sse: sseToolCall('script', { code: PDA_SCRIPT }) };
+      // call 1 carries the script tool result back — capture it for the assertion.
       if (callIndex === 1) pdaToolResultBody = (request && request.postData) || '';
       return { sse: sseText('You spent $50.00 across 3 orders — computed on-device, nothing left your machine.') };
     },
@@ -193,12 +194,12 @@ export const STATES = [
       let out = {};
       await waitFor(async () => { out = await probe(ctx); return out.assistantText && !out.busy; }, { budgetMs: 30_000 });
       const calls = ctx.modelCallCount();
-      rec.check('the agent ran the js_run tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
+      rec.check('the agent ran the script tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
       // the load-bearing proof: the sealed worker actually built + queried the
       // OPFS index — the computed total/count only exist in the worker's result
       // JSON, not in PDA_SCRIPT's source text or the code argument echoed back.
       // why parse, not substring-match the raw body: pdaToolResultBody is the
-      // raw request postData, where the js_run result is a JSON string NESTED in
+      // raw request postData, where the script result is a JSON string NESTED in
       // the request JSON — so its quotes are escaped (\"total\":50) and a raw
       // `"total":50` check never matches (this is why the check was red). Parse
       // the request, pull the tool-result message content (now unescaped), and
@@ -212,9 +213,9 @@ export const STATES = [
           .map((m) => (typeof m.content === 'string' ? m.content : ''))
           .find((c) => c.includes('on-device OPFS index')) || '';
       } catch { /* leave '' — the check fails with a clear detail */ }
-      rec.check('js_run REALLY computed on-device (computed total in tool result, not script source)',
+      rec.check('script REALLY computed on-device (computed total in tool result, not script source)',
         /"total"\s*:\s*50\b/.test(pdaResult) && /"count"\s*:\s*3\b/.test(pdaResult),
-        `js_run tool result: ${pdaResult.slice(0, 200)}`);
+        `script tool result: ${pdaResult.slice(0, 200)}`);
       rec.check('the on-device answer renders to the user', !!out.assistantText && /50/.test(out.assistantText), JSON.stringify(out.assistantText));
       await rec.shot('final');
     },
@@ -247,7 +248,7 @@ export const STATES = [
         return { sse: sseText('Delegated to the web actor; awaiting the page read.') };
       }
       const ot = harvestOrchTurn++;
-      if (ot === 0) return { sse: sseToolCall('js_run', { code: HARVEST_SCRIPT }) };
+      if (ot === 0) return { sse: sseToolCall('script', { code: HARVEST_SCRIPT }) };
       return { sse: sseText('You spent $35.50 across 3 orders — Coffee Mug, Notebook, Pen Set — harvested from the page and indexed on-device.') };
     },
     async run(ctx, rec) {
@@ -416,6 +417,82 @@ export const STATES = [
     },
   },
 
+  // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.ask) ----
+  // The actors-in-script surface end to end: the model writes ONE script whose
+  // code awaits actors.ask('web', …); the ask relays offscreen-worker → SW
+  // actors/call → messageActor(awaitReply) → a REAL web-actor turn, and the
+  // reply resolves back INTO the running script, which returns a value derived
+  // from it. Proves: the bridge chain, the [DELEGATIONS] trace + fencing in the
+  // tool result, and the live op feed on the script card.
+  {
+    name: 'script-fanout', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      const isActor = body.includes('<actor_agent>');
+      scriptFanState.seen.push({
+        isActor,
+        isWebActor: body.includes("You are peerd's web actor"),
+        // why GOT: (not '[DELEGATIONS]'): the prompt lore itself mentions the
+        // trace header now, so every request body contains it — the round-trip
+        // VALUE marker (built by the script FROM the actor's reply) is the
+        // discriminator that proves the reply entered the script's realm.
+        hasScriptResult: body.includes('GOT:WIDGET_PRICE_777'),
+      });
+      // WEB ACTOR turn (spawned by the script's ask): answer in plain text.
+      // why delayMs: the live-feed check below observes the PENDING script
+      // card; with an instant actor reply the pending window can close faster
+      // than a redraw + 100ms DOM poll on a slow CI runner (flaked in CI on
+      // 2026-07-05). Holding the actor's model call open guarantees the feed
+      // a real lifetime — the run is slower, never racy.
+      if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 1500 };
+      // ORCHESTRATOR sees the script result (value derived from the reply) →
+      // final answer.
+      if (body.includes('GOT:WIDGET_PRICE_777')) return { sse: sseText('SCRIPT-FAN-DONE') };
+      // ORCHESTRATOR first step: ONE script that asks the web actor and
+      // returns a value computed FROM the reply (proves the reply entered
+      // the script's realm, not just the chat).
+      if (scriptFanState.scripts === 0) {
+        scriptFanState.scripts += 1;
+        return { sse: sseToolCall('script', {
+          code: "const r = await actors.ask('web', 'price of widget X?'); return 'GOT:' + r.reply + ':' + r.failed;",
+        }) };
+      }
+      return { sse: sseText('unexpected extra orchestrator step') };
+    },
+    async run(ctx, rec) {
+      scriptFanState = { scripts: 0, seen: [] };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'script-check the widget price' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      // The live delegation feed appears on the pending script card.
+      const opsSeen = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call .script-ops .script-op')`),
+        { budgetMs: 20_000, pollMs: 100 });
+      rec.check('the live delegation feed renders on the pending script card', !!opsSeen);
+      if (opsSeen) await rec.shot('script-ops-live');
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          const results = [...document.querySelectorAll('.tool-call .tool-result')].map((r) => r.textContent || '');
+          const cardOk = !!document.querySelector('.tool-call.tool-ok .tool-name') &&
+            [...document.querySelectorAll('.tool-call .tool-name')].some((n) => n.textContent === 'script');
+          return { bubbles, busy, results, cardOk };
+        })()`) || {};
+        return (out.bubbles || []).includes('SCRIPT-FAN-DONE') && !out.busy;
+      }, { budgetMs: 45_000 });
+
+      const seen = scriptFanState.seen;
+      const actorTurns = seen.filter((s) => s.isActor && s.isWebActor);
+      const resultTurn = seen.filter((s) => !s.isActor && s.hasScriptResult);
+      rec.check('the model called script exactly once', scriptFanState.scripts === 1, `scripts=${scriptFanState.scripts}`);
+      rec.check("the script's actors.ask spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
+      rec.check("the orchestrator read a result whose value was built FROM the actor's reply", resultTurn.length >= 1, `resultTurns=${resultTurn.length}`);
+      rec.check('the final orchestrator answer landed', (out.bubbles || []).includes('SCRIPT-FAN-DONE'));
+      rec.check('the script card settled ok', out.cardOk === true);
+      await rec.shot('script-fanout-done');
+    },
+  },
   // --- functional: the actor-model delegation flow (message_actor end to end) --
   // The headline of #61: the orchestrator delegates a web read to the chat's web
   // actor via message_actor, gets a SYNC ack and ends its turn (async-everything,
@@ -701,28 +778,28 @@ export const STATES = [
   },
 
   // --- functional: a TOOL-BEARING subagent runs in its OWN offscreen heap ---
-  // Heap-split phase 4. The orchestrator spawns a sync subagent GRANTED js_run;
+  // Heap-split phase 4. The orchestrator spawns a sync subagent GRANTED script;
   // that child's loop runs in a dedicated offscreen Worker (its own heap, no key)
-  // and RELAYS its js_run call back to the SW, which rebuilds the child's restricted
-  // ctx from the persisted grantedTools and dispatches js_run in the offscreen
-  // job-runner. Proof: the child looped (two model calls: emit js_run, then answer),
+  // and RELAYS its script call back to the SW, which rebuilds the child's restricted
+  // ctx from the persisted grantedTools and dispatches script in the offscreen
+  // job-runner. Proof: the child looped (two model calls: emit script, then answer),
   // the subagent_ran_offscreen audit fired (offscreen path, not the in-SW fallback),
-  // AND a tool_executed audit for js_run is present (the relayed tool actually ran).
+  // AND a tool_executed audit for script is present (the relayed tool actually ran).
   {
     name: 'subagent-tools-offscreen', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
-      // The CHILD's model calls (ephemeral-actor prompt). First call emits js_run;
+      // The CHILD's model calls (ephemeral-actor prompt). First call emits script;
       // second call (after the tool result re-enters its heap) answers.
       if (body.includes('You are an EPHEMERAL ACTOR')) {
         subagentToolsState.childCalls += 1;
-        if (subagentToolsState.childCalls === 1) return { sse: sseToolCall('js_run', { code: 'return 6 * 7;' }) };
+        if (subagentToolsState.childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
         return { sse: sseText('CHILD-RAN-JS') };
       }
-      // ORCHESTRATOR — spawn ONE sync subagent granted js_run, then answer.
+      // ORCHESTRATOR — spawn ONE sync subagent granted script, then answer.
       if (subagentToolsState.spawned === 0) {
         subagentToolsState.spawned += 1;
-        return { sse: sseToolCall('spawn_subagent', { task: 'compute six times seven with js_run', tools: ['js_run'], sync: true }) };
+        return { sse: sseToolCall('spawn_subagent', { task: 'compute six times seven with script', tools: ['script'], sync: true }) };
       }
       return { sse: sseText('FINAL-WITH-CHILD') };
     },
@@ -744,10 +821,10 @@ export const STATES = [
       const entries = (audit && audit.entries) || [];
       const ranOffscreen = entries.some((e) => e.type === 'subagent_ran_offscreen');
       const fellBack = entries.some((e) => e.type === 'subagent_offscreen_fallback');
-      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'js_run');
-      rec.check('the tool-bearing child looped in its heap (js_run emitted, then answered) — 2 child calls', subagentToolsState.childCalls >= 2, `childCalls=${subagentToolsState.childCalls}`);
+      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
+      rec.check('the tool-bearing child looped in its heap (script emitted, then answered) — 2 child calls', subagentToolsState.childCalls >= 2, `childCalls=${subagentToolsState.childCalls}`);
       rec.check('the child ran in its OWN offscreen heap (subagent_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
-      rec.check('js_run actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
+      rec.check('script actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
       rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
       rec.check('the turn settles idle', out.busy === false);

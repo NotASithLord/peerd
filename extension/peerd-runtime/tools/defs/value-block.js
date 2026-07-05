@@ -1,6 +1,6 @@
 // @ts-check
 // tools/defs/value-block.js — the shared [VALUE] block for a JS run's tool
-// result (js_run headless + js_notebook eval).
+// result (script headless + js_notebook eval).
 //
 // Capped AT THE SOURCE, not just by the loop's blind head+tail redaction: a
 // giant returned value (the field case: a ~437k-char hand-rolled chart spec)

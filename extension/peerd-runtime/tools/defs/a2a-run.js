@@ -3,7 +3,7 @@
 //
 // The #119 lesson applied to p2p: the model talks to other agents by WRITING JS
 // against a `mesh` client, not by firing one gated tool per message. The code
-// runs in the SAME sealed headless worker as js_run (realm seal, no key, no
+// runs in the SAME sealed headless worker as script (realm seal, no key, no
 // chrome.*), with ONE extra capability — the `mesh` bridge — so a mesh call
 // leaves the sealed realm as an a2a-request the host relays to the SW a2a/call
 // route (consent + audited mesh op). dweb-only + dweb-flagged: the main agent
@@ -83,7 +83,7 @@ export const a2aRunTool = {
 
 /**
  * The run's output carries PEER-supplied bytes (replies, cards) — always fence
- * it (unlike js_run, which fences only egress runs). A mesh run is untrusted by
+ * it (unlike script, which fences only egress runs). A mesh run is untrusted by
  * construction: every value came from another agent.
  * @param {string} code @param {{ value?: unknown, consoleOutput?: {level:string,text:string}[], durationMs?: number, error?: string|null }} r
  */

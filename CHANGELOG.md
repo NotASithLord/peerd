@@ -10,6 +10,31 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+- **The orchestrator delegates from code: `script` grows an `actors` client.**
+  The same bet that gave the web actor and the mesh their code surfaces now
+  reaches the orchestrator itself: inside the `script` tool (the renamed
+  `js_run` — the generalized name models actually reach for), code can
+  `await actors.ask(to, goal)` to delegate and get the reply back as a value,
+  `actors.send(to, goal)` to hand off without waiting, and `actors.list()`
+  for the roster. Fan-out and plumbing move into one script — ask several
+  actors at once, feed one's output into the next as a variable — so
+  intermediate bytes never transit the orchestrator's context at all, which
+  is simultaneously the token win and a deepening of the isolation thesis.
+  Nothing new is trusted: every delegation runs the full message_actor gate
+  chain per call (sender gate, rate caps, duplicate-intent, the oneShot
+  sandbox rule, audit), the worker can never spoof whose behalf it acts on
+  (owner identity rides trusted job params), and a script that delegated has
+  its output fenced (actor replies are untrusted bytes).
+  **Observability is the contract, not an afterthought**: every run returns a
+  [DELEGATIONS] trace — op, target, outcome, timing, with failed-op detail
+  fenced — that survives script errors, timeouts, and Stop; the side panel
+  streams a live per-delegation feed on the script card while it runs; each
+  op lands in the audit log tagged via:script; and Stop actually unwinds the
+  whole fan (pending asks abort, their actor turns die, the worker is
+  terminated). Proven end to end by a live e2e state: one script, a real
+  web-actor round trip, the reply resolving into the running code.
+
 ## [0.2.4] - 2026-07-05
 
 ### Changed

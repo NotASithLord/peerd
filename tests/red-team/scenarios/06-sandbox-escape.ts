@@ -1,7 +1,7 @@
 // Scenario 06: malicious iframe / sandboxed code attempts a sandbox escape.
 //
 // Adversary: code the agent was induced to run inside a peerd sandbox, a
-// Notebook / headless js_run worker, or an a2a_run, tries to break out: open a
+// Notebook / headless script worker, or an a2a_run, tries to break out: open a
 // raw socket to exfiltrate, load remote code, recover the native fetch, unseal
 // the bridge, mint a fresh un-sealed realm, or traverse OPFS out of its root.
 //

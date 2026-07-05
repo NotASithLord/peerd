@@ -4,7 +4,7 @@
 //
 // Each TAB-HOSTED peerd execution kind (WebVM, Notebook, App) is a discrete
 // browser tab at chrome-extension://<id>/<kind>-tab/index.html#<id> (the
-// headless js_run worker has no tab, so it isn't tracked here). The
+// headless script worker has no tab, so it isn't tracked here). The
 // tab announces itself on load (`<kind>/tab-ready` message) and we learn
 // its tabId from the sender. We also pre-populate the map at SW startup
 // by querying for matching URLs (the SW can restart while instance tabs
