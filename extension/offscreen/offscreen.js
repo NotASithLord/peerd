@@ -332,7 +332,7 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // is unset today, so this is defense-in-depth, not an active hole.
   if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
   runJob(
-    { code: msg.code, timeoutMs: msg.timeoutMs },
+    { code: msg.code, timeoutMs: msg.timeoutMs, a2a: msg.a2a === true, ownerSessionId: msg.ownerSessionId },
     { sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }) },
   )
     .then((result) => sendResponse({ ok: true, result }))

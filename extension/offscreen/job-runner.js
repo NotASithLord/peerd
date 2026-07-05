@@ -41,7 +41,7 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, ownerSessionId?: string }} job
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean }>}
  */
@@ -55,11 +55,14 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, ownerSessionId?: string }} job
+ *   a2a: expose the `mesh` client (agent-to-agent); ownerSessionId: the dweb
+ *   actor whose identity/room the mesh ops act as — attached to every a2a/call
+ *   from TRUSTED job params, never from the worker message.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  *   sendToSW relays a worker bridge message to the SW route of that name.
  */
-const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
+const _runJob = async ({ code, timeoutMs = 30000, a2a = false, ownerSessionId }, { sendToSW }) => {
   const jobId = `job-${Date.now().toString(36)}-${++jobSeq}`;
   // Per-job EPHEMERAL OPFS subtree — peerd.self.* + relative imports work within
   // the run, then it's nuked. Durable state belongs in a Notebook, not here.
@@ -75,7 +78,7 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
 
   let built;
   try {
-    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps });
+    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a });
   } catch (e) {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -114,6 +117,14 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
         if (m.type === 'log' || m.type === 'display') return;
 
         if (m.type === 'subagent-request') {
+          // An a2a run is the dweb actor's MESH-ONLY surface. Its tool allow-set
+          // grants no delegation (no spawn_subagent), so the worker's
+          // peerd.runtime.runAgent must not re-grant it — refuse at the host, the
+          // authoritative choke point (the worker surface can't be trusted).
+          if (a2a) {
+            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'subagent spawn is disabled for a2a runs (the dweb actor does not delegate)' });
+            return;
+          }
           const a = m.args ?? {};
           try {
             const resp = await sendToSW('subagent/spawn', {
@@ -126,7 +137,32 @@ const _runJob = async ({ code, timeoutMs = 30000 }, { sendToSW }) => {
           }
           return;
         }
+        if (m.type === 'a2a-request') {
+          // Relay the mesh call to the SW a2a/call route. Refuse if the cap is
+          // off or no trusted owner — the OWNER is attached from the job params
+          // (ownerSessionId), NEVER from the worker message (which is untrusted).
+          if (!a2a || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'a2a-response', rid: m.rid, error: 'mesh capability is disabled for this run' });
+            return;
+          }
+          try {
+            const resp = await sendToSW('a2a/call', { method: m.method, args: m.args, ownerSessionId });
+            if (resp?.ok) worker.postMessage({ type: 'a2a-response', rid: m.rid, result: resp.value });
+            else worker.postMessage({ type: 'a2a-response', rid: m.rid, error: resp?.error ?? 'mesh call failed' });
+          } catch (e) {
+            worker.postMessage({ type: 'a2a-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+          }
+          return;
+        }
         if (m.type === 'fetch-request') {
+          // Same envoy posture: the dweb actor has no egress (no fetch_url in its
+          // allow-set). The a2a worker still carries the seal's bridged fetch +
+          // peerd.egress.fetch, so the host is where we deny it — the mesh is the
+          // ONLY outward edge an a2a run gets.
+          if (a2a) {
+            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)' });
+            return;
+          }
           usedEgress = true;   // the run touched the web → its output carries untrusted bytes
           try {
             const resp = await sendToSW('sw/web-fetch', { url: m.url, method: m.method, headers: m.headers, body: m.body });

@@ -218,6 +218,9 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   dweb: Object.freeze(new Set([
     'dweb_share', 'dweb_discover', 'dweb_install',
     'dweb_peers', 'dweb_block', 'dweb_discovery', 'dweb_guide',
+    // a2a_run — the code surface for agent-to-agent. In the dweb family (its
+    // worst case is still a bad message to a peer), just not dweb_-prefixed.
+    'a2a_run',
   ])),
 });
 
@@ -361,7 +364,7 @@ export const isDwebTool = (tool) => tool?.dweb === true;
 // gate holds the full registered tool (flag intact) and uses isDwebTool; the
 // exposure filters see a stripped projection and must go by name.
 /** @param {string} name @returns {boolean} */
-export const isDwebToolName = (name) => typeof name === 'string' && name.startsWith('dweb_');
+export const isDwebToolName = (name) => typeof name === 'string' && (name.startsWith('dweb_') || name === 'a2a_run');
 
 /**
  * Drop dweb tools from a descriptor list when the dweb is off. Composes after

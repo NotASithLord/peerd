@@ -228,6 +228,8 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
+  // A2A — the mesh dispatch + translation the a2a/call route runs.
+  makeMeshDispatch, meshCallToOp, shapeMeshResult,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -1185,7 +1187,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') a2aRevoke(did); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
@@ -2940,9 +2942,96 @@ const dwebInboundAllowed = (/** @type {string} */ did) => {
   return true;
 };
 
+// ── A2A: the agent-to-agent mesh dispatch (the a2a_run code surface) ─────────
+// ONE dispatch instance (state: pending asks) wired to real mesh IO on the
+// peerd-agent room. The a2a/call route (from the sealed a2a_run worker, relayed)
+// translates the mesh call, resolves per-did CONSENT for signing ops, and runs
+// it here. handleInbound (below) feeds inbound DMs in so a reply resolves a
+// pending ask. why a SW singleton: an ask sent from a worker run must still
+// resolve when the reply lands AFTER that op returned — the pending map lives here.
+const A2A_APPROVED_KEY = 'a2aApprovedDids';
+// The consent target for publishCard: it broadcasts the user's OWN card (no peer
+// did), so it can't key on a peer. A fixed sentinel gives it its own allowlist
+// entry — approve "advertise my card" once, revoke it the same way as a peer.
+const A2A_PUBLISH_CARD_KEY = 'self:publishCard';
+/** @type {Set<string>} dids (+ the publishCard sentinel) the user has cleared. */
+const a2aApprovedDids = new Set();
+Promise.resolve(sessionCache.sessionGet(A2A_APPROVED_KEY))
+  .then((v) => { if (Array.isArray(v)) for (const d of v) a2aApprovedDids.add(d); })
+  .catch(() => {});
+const a2aApprove = (/** @type {string} */ did) => {
+  a2aApprovedDids.add(did);
+  sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
+};
+// Revoke a first-contact grant (wired into dweb_block): blocking a peer must also
+// withdraw its permission to be MESSAGED, else a blocked did stays talk-approved.
+// This is the escape hatch for the grant — a peer approval is not permanent.
+const a2aRevoke = (/** @type {string} */ did) => {
+  if (!a2aApprovedDids.delete(did)) return;
+  sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
+};
+// FIRST-CONTACT consent = a revocable ALLOWLIST decision (who my agent may talk
+// to / that it may advertise me), NOT a per-action confirm. why it persists: the
+// user is shown the exact target and deliberately clears it, like adding a
+// contact; it lives in chrome.storage.session (cleared on browser restart) and is
+// revocable via dweb_block. Already-cleared → silent; else pop the confirm.
+const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message') => {
+  if (a2aApprovedDids.has(target)) return true;
+  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] });
+  const ok = answer === 'yes_once' || answer === 'yes_session';
+  if (ok) a2aApprove(target);
+  auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok } }).catch(() => {});
+  return ok;
+};
+const meshHostRoom = (/** @type {object} */ payload) =>
+  browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+const meshDispatch = makeMeshDispatch({
+  sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
+  listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
+  fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
+  publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
+});
+
+// The a2a/call route — invoked by the offscreen relay for each mesh call the
+// a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
+// THE dweb actor before touching the mesh, translate + gate + dispatch.
+const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string }} */ msg) => {
+  try {
+    if (!dwebAgentOn()) return { ok: false, error: 'a2a: the dweb agent is off' };
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'dweb') {
+      return { ok: false, error: 'a2a: not the dweb actor' };
+    }
+    const { op, args, signs } = meshCallToOp({ method: msg.method, args: msg.args });
+    // Every signing op needs a cleared CONSENT TARGET before it emits onto the
+    // mesh as the user. Per-peer ops (ask/send) key on the peer's did; publishCard
+    // has NO peer — it broadcasts the user's own card — so it keys on a fixed
+    // sentinel. Fail CLOSED: an op with signs=true and no resolvable target, or a
+    // declined prompt, is refused here (the dispatch's did-gate can't see the
+    // no-did publishCard, so enforcement must land in this route).
+    if (signs) {
+      const consentTarget = op === 'publishCard' ? A2A_PUBLISH_CARD_KEY : /** @type {{ did?: string }} */ (args).did;
+      if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
+      if (!a2aApprovedDids.has(consentTarget)) {
+        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
+        if (!approved) return { ok: false, error: `a2a: the user declined ${op} to ${consentTarget}` };
+      }
+    }
+    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did) });
+    return { ok: true, value: shapeMeshResult(msg.method ?? '', opResult) };
+  } catch (e) {
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
 const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
   if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
   const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
+  // A2A routing FIRST: an inbound a2a REPLY resolves a pending ask and is
+  // consumed (never a wake); an a2a ask/tell falls through to the fenced wake
+  // below (the actor sees a peer's request). A non-a2a DM also falls through.
+  const routed = meshDispatch.handleInbound(did, evt?.data);
+  if (routed.consumed) return;
   if (!dwebInboundAllowed(did)) {
     auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
     return;
@@ -3602,6 +3691,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
   ...(actorClient?.routes ?? {}),
+  // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
+  // consent-gated, dispatched on the peerd-agent room).
+  'a2a/call': (/** @type {any} */ msg) => a2aCallRoute(msg),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,

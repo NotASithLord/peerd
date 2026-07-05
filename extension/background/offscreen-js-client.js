@@ -14,12 +14,14 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number }} [opts]
+   * @param {{ timeoutMs?: number, a2a?: boolean, ownerSessionId?: string }} [opts]
+   *   a2a: expose the `mesh` agent-to-agent client; ownerSessionId: the dweb
+   *   actor the mesh acts as (relayed to the a2a/call route as trusted owner).
    * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean }>}
    */
-  execHeadless: async (code, { timeoutMs } = {}) => {
+  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId } = {}) => {
     await ensureOffscreen();
-    const reply = await sendMessage({ type: 'job/run', code, timeoutMs });
+    const reply = await sendMessage({ type: 'job/run', code, timeoutMs, ...(a2a ? { a2a: true, ownerSessionId } : {}) });
     if (!reply?.ok) throw new Error(reply?.error ?? 'headless job failed');
     return reply.result;
   },

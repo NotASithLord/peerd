@@ -371,6 +371,23 @@ gotchas to know going in:
   actor-reply bubble (runWhenIdle — never steals a live turn). The envoy for
   agent-to-agent over the mesh: "a peer's agent" is just an actor whose heap
   is on another machine.
+- **Agent-to-agent (A2A) over the mesh** — the dweb actor talks to other
+  agents by WRITING CODE, the #119 bet applied to p2p: `a2a_run` runs JS
+  against a `mesh` client (peers/card/ask/send/publishCard/inbox) in the SAME
+  sealed keyless worker as `js_run`, plus ONE capability — the mesh bridge —
+  and nothing else (the host denies egress + subagent-spawn for an a2a run;
+  see `offscreen/job-runner.js`). The pure translation core is
+  `subagent/a2a-api.js` (the page-api.js twin: `meshCallToOp`/
+  `shapeMeshResult`, a `MESH_METHODS` table); the ask/reply CORRELATION —
+  tag a request DM, await the matching reply bound to the target did, time
+  out — is `subagent/a2a-dispatch.js`; the SW singleton + consent live in
+  `background/service-worker.js` (`a2aCallRoute`). We RHYME with A2A's data
+  model (`peerd-distributed/agent-card.js` — Agent Card, message shape) for
+  future interop, but REJECT its HTTP+SSE transport: the mesh is the
+  transport, did:key the address, the fenced inbound wake the stream. Signing
+  ops (ask/send/publishCard) need per-target user consent, remembered and
+  revocable via `dweb_block`; peer bytes are `wrapUntrusted`-fenced by
+  construction. dweb-actor-only, preview-only (the store build prunes it).
 
 **Still ahead** (backlog — not version-pinned. Don't front-run; let each
 land with deliberate design work):
@@ -392,10 +409,12 @@ land with deliberate design work):
   hosts for unshipped adapters (store policy: never request what the
   shipped version doesn't use); `<all_urls>` already covers HTTPS API
   hosts.
-- The dweb's next reach — agent-to-agent over the mesh (one agent's
-  peer talking p2p to another's), richer dwapps, global discovery. The
-  base network + signed direct channels are in place; this is fleshing
-  out what rides them.
+- The dweb's next reach — A2A's first hop shipped (the `a2a_run` code
+  surface above); still ahead is what rides it: standing multi-turn peer
+  conversations beyond a single run, richer dwapps, and global discovery
+  (find an agent by capability across the whole mesh, not just the present
+  roster). The base network + signed direct channels + the Agent Card are in
+  place; this is fleshing out what rides them.
 
 ---
 

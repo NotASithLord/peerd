@@ -261,6 +261,25 @@ const handleRoomOp = async (msg) => {
       items: room.sync.history(msg.topic).map((/** @type {any} */ env) => ({ topic: msg.topic, from: env.from, data: env.body.data, ts: env.ts, id: env.id })),
     };
     case 'dm': { const { id, ts } = await room.direct.send(msg.to, msg.data); return { ok: true, id, ts }; }
+    // A2A Agent Card advertise/fetch over a retained '~card' topic: card-set
+    // publishes MY signed card (retained so late joiners backfill), card-get
+    // reads a peer's latest card from the retained history by its did.
+    case 'card-set': {
+      const card = { ...(msg.card && typeof msg.card === 'object' ? msg.card : {}), did: room.did };
+      room.sync.retain('~card');
+      const env = await room.sync.publish('~card', card);
+      return { ok: true, did: room.did, id: env.id };
+    }
+    case 'card-get': {
+      room.sync.retain('~card');
+      // why max-by-ts, not last-inserted: the retained store is a Map keyed by
+      // sig, so history() yields SIG-INSERTION order — a late-join backfill can
+      // append an OLDER card version after the newer one was seen live. Pick the
+      // newest by envelope ts so a re-advertised card always supersedes.
+      const mine = room.sync.history('~card').filter((/** @type {any} */ e) => e.from === msg.did);
+      const latest = mine.reduce((/** @type {any} */ best, /** @type {any} */ e) => (!best || (e.ts ?? 0) >= (best.ts ?? 0) ? e : best), null);
+      return { ok: true, card: latest ? latest.body.data : null };
+    }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': { const h = await start(); const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files }); return { ok: true, uri, hash }; }
     default: return { ok: false, error: `unknown room op: ${op}` };

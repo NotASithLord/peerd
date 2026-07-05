@@ -10,6 +10,27 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+- **Agent-to-agent over the mesh (A2A): the dweb actor talks to other
+  agents by writing code** (preview only). Following the same bet as the web
+  actor — models write a short script more fluently than they fire one gated
+  action per turn — the dweb actor drives peer conversations through a new
+  `a2a_run` tool: it writes JS against a `mesh` client (`mesh.peers()`,
+  `mesh.card(did)`, `mesh.ask(did, msg)`, `mesh.send(...)`,
+  `mesh.publishCard(...)`, `mesh.inbox()`) and returns the outcome. `ask`
+  sends a request-tagged direct message and awaits the peer's one reply; an
+  Agent Card advertises what your agent can do and is discoverable by other
+  peers. The data model rhymes with Google's A2A (Agent Card, message shape)
+  so future interop is a thin adapter, but the transport is the mesh, the
+  address is a did:key, and the reply stream is the fenced inbound wake — not
+  A2A's HTTP+SSE. The code runs in the same sealed, keyless worker as
+  `js_run` with one added capability, the mesh bridge, and nothing else: an
+  a2a run gets no egress and cannot spawn subagents. First contact to a peer
+  (and advertising your own card) needs your explicit ok, remembered per did
+  and revocable by blocking the peer; peer replies and cards are always
+  fenced as untrusted. It's a dweb-actor tool only — the orchestrator never
+  holds it, and the store build prunes the whole surface.
+
 ## [0.2.2] - 2026-07-04
 
 ### Added

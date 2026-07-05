@@ -75,4 +75,58 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(v.md).toBe(4);
     expect(v.s).toBe(60);
   });
+
+  // The a2a run is the dweb actor's MESH-ONLY surface (cynical-swarm HIGH): its
+  // tool allow-set grants no egress and no delegation, so the same sealed worker
+  // run with { a2a:true } must NOT be able to re-grant itself either via the
+  // peerd.* surface — the host refuses those relays.
+  it('an a2a run is denied egress — peerd.egress.fetch never reaches sw/web-fetch', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: 'try { await peerd.egress.fetch("https://evil.example/x"); return "REACHED"; } catch (e) { return "blocked:" + e.message; }',
+        a2a: true, ownerSessionId: 'dweb' },
+      { sendToSW: async (type, payload) => { calls.push({ type, payload }); return { ok: true, status: 200, bodyB64: btoa('x') }; } },
+    );
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
+    expect(String(r.value)).toContain('blocked');
+    expect(r.usedEgress).toBeFalsy();
+  });
+
+  it('an a2a run is denied delegation — peerd.runtime.runAgent never reaches subagent/spawn', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: 'try { await peerd.runtime.runAgent({ task: "x" }); return "REACHED"; } catch (e) { return "blocked:" + e.message; }',
+        a2a: true, ownerSessionId: 'dweb' },
+      { sendToSW: async (type, payload) => { calls.push({ type, payload }); return { ok: true, result: 'y' }; } },
+    );
+    expect(calls.some((c) => c.type === 'subagent/spawn')).toBe(false);
+    expect(String(r.value)).toContain('blocked');
+  });
+
+  it('the a2a mesh bridge relays a mesh call to the SW a2a/call route with the trusted owner', async () => {
+    /** @type {any} */
+    let seen = null;
+    const r = await runJob(
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-sess-1' },
+      { sendToSW: async (type, payload) => {
+        if (type === 'a2a/call') { seen = payload; return { ok: true, value: [{ did: 'did:key:z6MkBob' }] }; }
+        return { ok: false };
+      } },
+    );
+    expect(seen?.method).toBe('peers');
+    expect(seen?.ownerSessionId).toBe('dweb-sess-1');  // owner from trusted job params, not the worker
+    expect(r.error).toBe(null);
+    expect(/** @type {any} */ (r.value)?.[0]?.did).toBe('did:key:z6MkBob');
+  });
+
+  it('a mesh call in a NON-a2a run is refused (the bridge is capability-gated)', async () => {
+    const r = await runJob(
+      { code: 'try { await mesh.peers(); return "REACHED"; } catch (e) { return "no-mesh"; }' },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    // globalThis.mesh is only injected when a2a is set → ReferenceError → caught.
+    expect(String(r.value)).toBe('no-mesh');
+  });
 });
