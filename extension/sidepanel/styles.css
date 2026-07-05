@@ -2552,3 +2552,113 @@ button.icon:hover { background: var(--bg); }
 /* The pre-first-token beachball, sitting bare where the bubble will
    appear — same left rhythm as a bubble, none of its chrome. */
 .thinking-solo { padding: 6px 2px; }
+
+/* --- the debug surface (failure chips, debug export, context inspector) ---
+   Grayscale per the brand rule; --danger only as the failure chip's border
+   accent (the one semantic exception). */
+.failure-kind-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  padding: 0 7px;
+  margin-left: 6px;
+  white-space: nowrap;
+  /* a message container is a flex COLUMN — without this the turn-level
+     chip stretches into a full-width bar. */
+  align-self: flex-start;
+  width: fit-content;
+}
+.message .failure-kind-chip { margin: 4px 0 0; }
+
+.debug-export { position: relative; display: inline-flex; }
+.debug-export-btn {
+  /* chip-shaped like .session-sys-badge, but its OWN class: it's an action,
+     not a presence chip, and the presence-chip tests count that class. */
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  white-space: nowrap;
+  background: transparent;
+  cursor: pointer;
+}
+.debug-export-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+.debug-menu-backdrop {
+  /* click-away for the flyout: transparent, under the menu, over the page */
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+}
+.debug-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  z-index: 30;
+  min-width: 200px;
+}
+.debug-menu-item {
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+  padding: 7px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.debug-menu-item:hover { background: var(--bg); }
+
+.context-inspector {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(80vh, 640px);
+  overflow-y: auto;
+  font-size: 12px;
+}
+.ctx-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.ctx-title { font-family: var(--font-mono); font-size: 13px; }
+.ctx-subtitle { color: var(--fg-muted); font-size: 11px; }
+.ctx-close {
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.ctx-close:hover { color: var(--fg); }
+.ctx-empty { color: var(--fg-muted); line-height: 1.5; padding: 8px 0; }
+.ctx-snap { border-top: 1px solid var(--border); padding: 6px 0; }
+.ctx-snap-summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
+.ctx-snap-label { font-family: var(--font-mono); font-size: 11px; }
+.ctx-snap-meta { color: var(--fg-muted); font-size: 10px; }
+.ctx-snap-body { padding: 6px 0 2px 12px; }
+.ctx-snap-tools { color: var(--fg-muted); font-size: 11px; margin-bottom: 6px; }
+.ctx-snap-system summary { cursor: pointer; color: var(--fg-muted); font-size: 11px; }
+.ctx-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+  margin: 4px 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.ctx-msg { margin: 6px 0; }
+.ctx-msg-role { font-family: var(--font-mono); font-size: 10px; color: var(--fg-muted); }
+.ctx-msg-tool { font-size: 10px; color: var(--fg-muted); margin: 2px 0 2px 8px; }
+.ctx-msg-result { margin: 2px 0 2px 8px; }
+.ctx-msg-result.failed .ctx-msg-role { color: var(--danger); }

@@ -334,7 +334,86 @@ export const STATES = [
       rec.check('a provider error surfaces inline (error-line)', !!out.errorText, JSON.stringify(out.errorText));
       rec.check('the error names the HTTP failure honestly', /HTTP 400/.test(out.errorText || ''));
       rec.check('the failed turn comes to rest (not stuck busy)', out.busy === false);
+      // The failure-class chip: the classified neighborhood renders next to
+      // the raw error, and an injected provider HTTP failure classifies as
+      // 'provider' (the debug surface's triage contract).
+      const chip = await evalIn(ctx.page,
+        `document.querySelector('.message-assistant .failure-kind-chip')?.textContent ?? null`);
+      rec.check("the failure-class chip renders and reads 'provider'", chip === 'provider', JSON.stringify(chip));
       await rec.shot('final');
+    },
+  },
+
+  // --- functional: the debug surface (bundle export + context capture) -------
+  // Proves the chain the observability PR adds: a real turn is captured into
+  // the SW's context-snapshot ring, the session/debugBundle route assembles
+  // transcript + audit slice + snapshots + secret-free settings with honest
+  // provenance, and the chat's debug flyout renders its export actions.
+  {
+    name: 'debug-bundle', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('debug-bundle-reply') }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'say something for the bundle' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+
+      const rows = await rpc(ctx.page, { type: 'session/list' });
+      const sessionId = rows?.sessions?.[0]?.sessionId;
+      rec.check('session/list yields the live chat', !!sessionId, JSON.stringify(sessionId));
+
+      const reply = await rpc(ctx.page, { type: 'session/debugBundle', sessionId });
+      rec.check('session/debugBundle returns ok', reply?.ok === true, JSON.stringify(reply?.error));
+      const bundle = reply?.bundle ?? {};
+      rec.check('the bundle carries the format stamp + the transcript',
+        bundle.format === 'peerd-debug-bundle' && (bundle.session?.messages?.length ?? 0) >= 2,
+        `format=${bundle.format} messages=${bundle.session?.messages?.length}`);
+      rec.check('the ORCHESTRATOR model call was captured into the context ring (live capture proof)',
+        (bundle.contextSnapshots ?? []).some((s) => s.label === 'main'),
+        `snapshots=${(bundle.contextSnapshots ?? []).length}`);
+      rec.check('the bundle states its provenance (what absence means)',
+        typeof bundle.provenance?.contextSnapshots === 'string' && typeof bundle.provenance?.secrets === 'string');
+      const settingsJson = JSON.stringify(bundle.settings ?? {});
+      rec.check('the settings snapshot is secret-free (no key-shaped fields)',
+        !/apiKey|api_key|secret|passphrase/i.test(settingsJson), settingsJson.slice(0, 120));
+
+      // The chat's debug flyout: chip-button opens the two export actions.
+      await evalIn(ctx.page, `document.querySelector('.debug-export-btn')?.click()`);
+      let menu = {};
+      await waitFor(async () => {
+        menu = await evalIn(ctx.page, `(() => ({
+          open: !!document.querySelector('.debug-menu'),
+          items: [...document.querySelectorAll('.debug-menu-item')].map((b) => b.textContent),
+        }))()`) || {};
+        return menu.open === true;
+      }, { budgetMs: 5_000 });
+      rec.check('the debug flyout opens with the bundle + OTel export actions',
+        menu.open === true && (menu.items || []).length >= 2, JSON.stringify(menu.items));
+      await rec.shot('debug-menu-open');
+
+      // devMode adds the context inspector; the modal renders the live
+      // snapshot captured above (label 'main'), proving ring → route → view.
+      await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+      let inspector = {};
+      await waitFor(async () => {
+        // why click-in-loop: the 'context inspector' item only renders after
+        // the devMode state push lands — a one-shot click can race it.
+        inspector = await evalIn(ctx.page, `(() => {
+          if (!document.querySelector('.context-inspector')) {
+            if (!document.querySelector('.debug-menu')) document.querySelector('.debug-export-btn')?.click();
+            [...document.querySelectorAll('.debug-menu-item')]
+              .find((b) => b.textContent === 'context inspector')?.click();
+          }
+          return {
+            open: !!document.querySelector('.context-inspector'),
+            snaps: [...document.querySelectorAll('.ctx-snap-label')].map((el) => el.textContent),
+          };
+        })()`) || {};
+        return inspector.open === true && (inspector.snaps || []).length > 0;
+      }, { budgetMs: 8_000 });
+      rec.check("the context inspector opens on the live 'main' snapshot (devMode)",
+        inspector.open === true && (inspector.snaps || []).includes('main'), JSON.stringify(inspector.snaps));
+      await rec.shot('context-inspector');
+      await evalIn(ctx.page, `document.querySelector('.ctx-close')?.click()`);
+      await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
     },
   },
 

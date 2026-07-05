@@ -22,6 +22,10 @@ export const makeSessionRoutes = (deps) => {
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     startGoalRun, haltGoalRun, ensureSession, actorMessaging,
     subagentLifecycle,
+    // The debug surface: the pure assembler + tree walk from
+    // peerd-runtime/observability, the SW's live snapshot ring, and the
+    // settings/channel/version identity the bundle stamps.
+    settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
   } = deps;
 
   return {
@@ -285,6 +289,54 @@ export const makeSessionRoutes = (deps) => {
       const session = await sessions.get(sessionId);
       if (!session) return { ok: false, error: 'session-not-found' };
       return { ok: true, session };
+    },
+
+    // The debug bundle: one session's whole debugging story as one JSON
+    // payload (the panel does the file save). Root transcript + every
+    // descendant actor/subagent session, the audit slice for that set,
+    // cost, secret-free settings, live context snapshots, provenance.
+    // Read-only over the user's own data; the export itself is audited.
+    'session/debugBundle': async ({ sessionId } = {}) => {
+      if (vault.isLocked()) return { ok: false, error: 'locked' };
+      if (typeof sessionId !== 'string' || !sessionId) {
+        return { ok: false, error: 'sessionId-required' };
+      }
+      const session = await sessions.get(sessionId);
+      if (!session) return { ok: false, error: 'session-not-found' };
+      // why the STORE list (not the session/list route): the route hides
+      // actor/subagent rows from the chat list; the bundle wants exactly those.
+      const rows = await sessions.list();
+      const childIds = childSessionIdsOf(rows, sessionId);
+      const childSessions = (await Promise.all(childIds.map((/** @type {string} */ id) => sessions.get(id))))
+        .filter(Boolean);
+      const idSet = new Set([sessionId, ...childIds]);
+      const auditEntries = (await auditLog.list())
+        .filter((/** @type {any} */ e) => e.sessionId && idSet.has(e.sessionId));
+      const settings = settingsStore.get();
+      const bundle = assembleDebugBundle({
+        session, childSessions, auditEntries, settings,
+        contextSnapshots: contextSnapshots.snapshotsForMany([sessionId, ...childIds]),
+        channel: CHANNEL,
+        appVersion: browser.runtime.getManifest?.().version ?? 'unknown',
+        now: Date.now(),
+        limits: { auditMaxEntries: settings.auditLogMaxEntries, ...contextSnapshots.limits() },
+      });
+      auditLog.append({
+        type: 'debug_bundle_exported', sessionId,
+        details: { childSessions: childSessions.length, auditEntries: auditEntries.length },
+      }).catch(() => {});
+      return { ok: true, bundle };
+    },
+
+    // The context inspector's read: the live "what did the model see"
+    // snapshots for one session (SW-memory ring; empty after an SW restart
+    // — the inspector view says so rather than implying nothing ran).
+    'session/contextSnapshots': async ({ sessionId } = {}) => {
+      if (vault.isLocked()) return { ok: false, error: 'locked' };
+      if (typeof sessionId !== 'string' || !sessionId) {
+        return { ok: false, error: 'sessionId-required' };
+      }
+      return { ok: true, snapshots: contextSnapshots.snapshotsFor(sessionId) };
     },
 
     // --- subagents ---

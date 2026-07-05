@@ -25,7 +25,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
-import { formatBytes } from '/peerd-runtime/index.js';
+import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
 /** @typedef {import('../chat-reducer.js').SubagentSession} SubagentSession */
@@ -354,6 +354,14 @@ const AssistantMessage = {
           : message.error
             ? m('.bubble.bubble-error', m('.error-line', message.error))
             : null,
+      // Failure-class chip — the classified NEIGHBORHOOD of a failed turn
+      // (policy / provider / timeout / …), so a user triaging doesn't have
+      // to parse the raw error to know whose fault it roughly was.
+      message.error
+        ? m('span.failure-kind-chip',
+            { title: 'failure class' },
+            classifyFailure(message.error, { stopReason: message.stopReason }).kind)
+        : null,
       // Stop-reason chip — truncations and caps must never be silent.
       // max_tokens with neither text nor tools = the thinking-only
       // truncation the loop auto-continues; say so. max_steps = the
@@ -536,6 +544,13 @@ const ToolCall = {
           { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
+        // Failure-class chip on a failed card: the classified neighborhood
+        // (policy / environment / timeout / …) at a glance; the raw error
+        // stays one click away in the expanded result body.
+        status === 'failed'
+          ? m('span.failure-kind-chip', { title: 'failure class' },
+              classifyFailure(typeof toolResult?.content === 'string' ? toolResult.content : '').kind)
+          : null,
         m('.spacer'),
         status === 'pending' ? m('span.tool-pending', 'running…')
           : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')

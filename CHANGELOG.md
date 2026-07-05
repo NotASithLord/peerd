@@ -11,6 +11,35 @@ and storage formats may move until the surface stabilizes.
 ## [Unreleased]
 
 ### Added
+- **The debug surface: serious observability without a vendor.** peerd's
+  chain of events was already recorded (audit log, lineage, delegation
+  traces) but trapped across surfaces; now it comes OUT, locally, on the
+  user's say-so. Three pieces:
+  - **Debug bundle export** — a chip-sized `debug` button in the chat mode
+    row saves one JSON file per session: the full transcript INCLUDING every
+    descendant actor/subagent session (the delegation tree, walked by parent
+    links), the audit slice for that set, cost, a settings snapshot (keys
+    can't appear — they live only in the vault and attach at fetch-header
+    time), live context snapshots, a classified failure index, and a
+    provenance block that says plainly what may be missing (pruned audit,
+    evicted snapshots). Same data exports as an **OpenTelemetry trace**
+    (OTLP/JSON, delegation = span parentage, gen_ai semconv attributes) for
+    any OTel viewer the user already runs — converted in the panel from the
+    same payload, no second route, no wire, no vendor.
+  - **Failure-class chips** — every failed tool card and failed turn now
+    carries its classified failure neighborhood (policy / auth / limits /
+    provider / timeout / aborted / environment / agent / internal) as a
+    small chip next to the raw error, so triage starts at "whose fault,
+    roughly" instead of string-parsing. The same classifier annotates the
+    bundle and stamps OTel span status.
+  - **The context inspector** (dev mode) — "what did the model actually
+    see?": the service worker keeps a small in-memory ring of shaped
+    request snapshots per session (system prompt clipped, messages capped,
+    binary payloads stripped with a visible sentinel), captured at the two
+    seams that together cover every model call — the orchestrator's turn
+    driver and the actor/subagent relay route. A modal lists each call
+    (who, model, sizes, content) and is honest about the ring's lifetime:
+    it empties with the service worker, and says so.
 - **The orchestrator delegates from code: `script` grows an `actors` client.**
   The same bet that gave the web actor and the mesh their code surfaces now
   reaches the orchestrator itself: inside the `script` tool (the renamed
