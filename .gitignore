@@ -47,6 +47,9 @@ web-ext-artifacts/
 # commit it; back it up offline and mirror it into the CRX_PRIVATE_KEY
 # GitHub Actions secret.
 /artifacts/
+# The web target's staged tree — regenerated fresh from live extension/ source
+# by `bun run package:web` (packaging/package-web.ts). Never committed.
+/web-dist/
 
 # Local dev / test artifacts
 /scratch/

@@ -1,0 +1,9 @@
+# Cross-origin isolation for peerd-lite (Cloudflare Pages reads this file).
+# Matches the extension's offscreen environment, where Gemma's WebGPU/ORT
+# runtime runs cross-origin-isolated. WebGPU itself doesn't strictly require
+# it, but ORT can stall without it, and the future WebVM (CheerpX) needs it.
+# COEP=credentialless (not require-corp) so cross-origin no-CORS resources
+# (Google Fonts, the HF model weights) still load without CORP headers.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless

@@ -59,6 +59,12 @@ const main = () => {
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
+  // Web target: stage it fresh from source, then prove the tree is import-closed
+  // (nothing curated reaches pruned chassis; the browser-polyfill shim is in
+  // place). This is what makes the demo safely inherit upstream — an escape
+  // introduced upstream fails here instead of rotting demo.peerd.ai silently.
+  run('web target build (from live source)', 'bun', ['run', 'package:web']);
+  run('web import-closure boundary', 'bun', ['run', 'check:web']);
   run('bun tests', 'bun', ['test', './tests']);
   if (args.matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);
