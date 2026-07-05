@@ -10,6 +10,17 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Changed
+- **`oneShot` delegation is sandbox-only now.** `message_actor`'s oneShot mode
+  (skip the actor's summary turn, hand the raw result straight back) is
+  honored only for the agent's own engine sandboxes (webvm/notebook/app) and
+  refused loudly for every other target — the summary turn is what
+  incidentally compresses untrusted content, so a web/API/dweb reply always
+  comes back summarized. The orchestrator prompt now actually teaches the
+  shortcut ("run `pytest`" → oneShot:true) instead of leaving it buried in
+  schema fine print, where models — small local ones especially — never
+  found it.
+
 ## [0.2.3] - 2026-07-05
 
 ### Added
@@ -39,15 +50,6 @@ and storage formats may move until the surface stabilizes.
   WebRTC test.
 
 ### Changed
-- **`oneShot` delegation is sandbox-only now.** `message_actor`'s oneShot mode
-  (skip the actor's summary turn, hand the raw result straight back) is
-  honored only for the agent's own engine sandboxes (webvm/notebook/app) and
-  refused loudly for every other target — the summary turn is what
-  incidentally compresses untrusted content, so a web/API/dweb reply always
-  comes back summarized. The orchestrator prompt now actually teaches the
-  shortcut ("run `pytest`" → oneShot:true) instead of leaving it buried in
-  schema fine print, where models — small local ones especially — never
-  found it.
 - **The orchestrator's tool surface got a hard slim: 27 → 18 always-on.**
   Three moves, one rule: the main agent bootstraps and delegates, and every
   instance byte stays behind an actor heap.
@@ -69,6 +71,7 @@ and storage formats may move until the surface stabilizes.
     Every op it deferred is actor-only now, so it had nothing left to gate.
     Its "create one first" refusal for a premature call was the wrong
     message anyway; the honest answer is "that's the actor's tool".
+- **The five `inspect_*` introspection tools became one `inspect`.**
   `inspect_provider_config`, `inspect_storage`, `inspect_session_access`,
   `inspect_denylist`, and `inspect_audit_log` were five near-identical
   read-only tools; they collapse into a single `inspect({ kind })` (kinds:
