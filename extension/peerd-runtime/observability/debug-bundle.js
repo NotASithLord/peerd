@@ -167,8 +167,8 @@ export const assembleDebugBundle = ({
         + 'time; they never enter settings, session records, or captured request bodies.',
       ...(auditChain ? {
         auditChain: auditChain.ok
-          ? `hash chain verified over ${auditChain.checked} entries`
-            + (auditChain.unchained > 0 ? ` (${auditChain.unchained} pre-chain legacy entries unverifiable).` : '.')
+          ? `hash chain verified over ${auditChain.checked} entries${
+             auditChain.unchained > 0 ? ` (${auditChain.unchained} pre-chain legacy entries unverifiable).` : '.'}`
           : `hash chain FAILED verification: ${auditChain.reason ?? 'inconsistent'} — the audit slice may have been altered.`,
       } : {}),
     },
