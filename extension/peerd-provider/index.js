@@ -58,6 +58,11 @@ export {
   listOpenRouterModels,
   OPENROUTER_POPULAR,
 } from './adapters/openrouter.js';
+export {
+  openaiAdapter,
+  DEFAULT_MODEL as OPENAI_DEFAULT_MODEL,
+  OPENAI_POPULAR,
+} from './adapters/openai.js';
 export { ollamaAdapter, DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL } from './adapters/ollama.js';
 // local WebGPU runner (FEATURE-LOCAL-WEBGPU B). setLocalGenerate wires the
 // offscreen engine bridge at SW boot; LOCAL_MODEL_ID is the resident model.

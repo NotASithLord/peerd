@@ -25,6 +25,7 @@
  * @property {string} [thinking]
  * @property {boolean} [streaming]
  * @property {boolean} [synthetic]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
  * @property {unknown[]} [toolResults]
@@ -94,6 +95,7 @@
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
  * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} actors
+ * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
@@ -155,6 +157,11 @@ export const INITIAL_STATE = Object.freeze({
   // chat's turn is in flight — live-toggled by turn/streaming pulses
   // (session-guarded) and re-armed by every state push, which carries
   // the per-session truth (turns keep running in background chats).
+  // Live delegation feed for in-flight `script` runs, keyed by the script
+  // call's toolUseId: [{ seq, method, to, goalPreview, phase, ms }]. Ephemeral
+  // UI sugar — the durable record is the [DELEGATIONS] trace in the tool
+  // result — so it is never persisted and resets with the panel.
+  scriptOps: {},
   lastError: null,
   streaming: false,
   // Rate-limit retry banner: { attempt, retryAfterMs } while the provider
@@ -425,6 +432,34 @@ export const reduceChat = (state, msg) => {
       const id = /** @type {string} */ (msg.parentToolUseId);
       if (!(/** @type {any} */ (state.actors)[id])) return state;
       return putActorCard(state, id, { cost: msg.cost });
+    }
+    case 'script/op': {
+      // Upsert by seq: 'sent' creates the line; 'replied'/'failed'/'handed-off'
+      // settle the same line with outcome + timing. Guarded to the viewed
+      // session; capped so a marathon chat can't grow the map unbounded.
+      if (msg.sessionId && msg.sessionId !== state.session.sessionId) return state;
+      const tid = typeof msg.toolUseId === 'string' && msg.toolUseId ? msg.toolUseId : null;
+      if (!tid) return state;
+      const ops = /** @type {Record<string, any[]>} */ ({ ...state.scriptOps });
+      const list = [...(ops[tid] ?? [])];
+      const idx = list.findIndex((o) => o.seq === msg.seq);
+      const entry = {
+        seq: msg.seq, method: msg.method, to: msg.to ?? list[idx]?.to,
+        goalPreview: msg.goalPreview ?? list[idx]?.goalPreview,
+        phase: msg.phase, ms: msg.ms ?? null, failed: msg.failed === true || msg.error != null,
+      };
+      if (idx >= 0) list[idx] = { ...list[idx], ...entry };
+      else list.push(entry);
+      ops[tid] = list;
+      const keys = Object.keys(ops);
+      if (keys.length > 20) {
+        // Age out a SETTLED run's feed first (never a live one); fall back to
+        // the first key. toolUseIds are non-numeric strings, so object key
+        // order is insertion order — oldest first.
+        const evict = keys.find((k) => k !== tid && (ops[k] ?? []).every((o) => o.phase !== 'sent')) ?? keys.find((k) => k !== tid);
+        if (evict) delete ops[evict];
+      }
+      return { ...state, scriptOps: ops };
     }
     case 'async-tasks/update':
       return { ...state, asyncTasks: { ...state.asyncTasks,

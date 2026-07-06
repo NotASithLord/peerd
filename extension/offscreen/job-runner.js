@@ -26,11 +26,44 @@
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
-import { buildWorkerSource, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/notebook-tab/worker-source.js';
+import { ACTORS_BRIDGE_GUARD_MS } from '/peerd-runtime/index.js';
 
 let jobSeq = 0;
 
-// Cap concurrent headless workers so a loop (or many parallel js_run calls /
+// Live jobs by the SW-minted runId, so a Stop can TERMINATE the worker instead
+// of letting an abandoned script run to its wall-clock. Registered only for
+// runs that carry a runId (the actors-enabled script path mints one).
+/** @type {Map<string, { kill: () => void, owner?: string }>} */
+const liveJobs = new Map();
+// An abort that arrives BEFORE the job registers (Stop racing job startup —
+// buildWorkerSource awaits resolver IO before liveJobs.set) would otherwise be
+// lost and the worker would run to its full wall-clock. Tombstone the runId;
+// registration checks it and kills immediately.
+/** @type {Set<string>} */
+const abortedEarly = new Set();
+
+/**
+ * Terminate a live job by runId (Stop plumbing). Owner-bound when the caller
+ * supplies one: runIds are not secrets, so a first-party page must not be able
+ * to kill another session's run by guessing (defense-in-depth — no such
+ * sender exists today). No-op when already done.
+ * @param {string} runId @param {string} [owner]
+ */
+export const abortJob = (runId, owner) => {
+  const entry = liveJobs.get(runId);
+  if (!entry) { abortedEarly.add(runId); return; }
+  if (owner && entry.owner && owner !== entry.owner) return;
+  entry.kill();
+};
+
+// Delegating (actors-enabled) runs live up to ~5 minutes — 9x a compute job —
+// so they get their OWN sub-cap under MAX_CONCURRENT_JOBS: a slow fan-out can
+// never starve quick compute or the dweb actor's a2a runs of every slot.
+const MAX_ACTORS_JOBS = 2;
+let activeActorsJobs = 0;
+
+// Cap concurrent headless workers so a loop (or many parallel script calls /
 // sub-agents) can't fork-bomb the offscreen renderer. Each job is its own thread
 // + ephemeral OPFS; a handful at once is plenty. (The capability surface's own
 // rule: engine.spawn* → resource exhaustion → hard caps.)
@@ -41,28 +74,39 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string }} job
- *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical js_run
- *   surface). ownerSessionId: the actor session this job runs FOR — set by the SW
- *   (trusted), required for the page bridge; the worker can never supply it.
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
+ *   script surface); caps.page needs ownerSessionId — the actor session this
+ *   job runs FOR, set by the SW (trusted), the worker can never supply it.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, actorsTrace?: Array<object> }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `headless job rejected: ${MAX_CONCURRENT_JOBS} jobs already running` };
   }
+  const isActorsRun = job.actors === true;
+  if (isActorsRun && activeActorsJobs >= MAX_ACTORS_JOBS) {
+    return { value: undefined, consoleOutput: [], durationMs: 0, error: `headless job rejected: ${MAX_ACTORS_JOBS} delegating (actors) runs already in flight — await their results before fanning out further` };
+  }
   activeJobs++;
+  if (isActorsRun) activeActorsJobs++;
   try { return await _runJob(job, deps); }
-  finally { activeJobs--; }
+  finally { activeJobs--; if (isActorsRun) activeActorsJobs--; }
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
+ *   delegation client (the orchestrator's script surface); caps: capability
+ *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
+ *   page-bridge lane, PR #119). ownerSessionId / ownerToolUseId / runId are
+ *   attached to every relay from TRUSTED job params, never from the worker
+ *   message (the worker can't spoof who it acts as).
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  *   sendToSW relays a worker bridge message to the SW route of that name.
  */
-const _runJob = async ({ code, timeoutMs = 30000, caps, ownerSessionId }, { sendToSW }) => {
+const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, caps, ownerSessionId, ownerToolUseId, runId }, { sendToSW }) => {
   // The job's capability profile — enforced HERE (the host refuses the bridge
   // message) as well as in the generated worker surface (worker-source.js), so
   // a realm-seal escape alone cannot re-open a disabled lane.
@@ -82,12 +126,24 @@ const _runJob = async ({ code, timeoutMs = 30000, caps, ownerSessionId }, { send
 
   let built;
   try {
-    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, caps: profile });
+    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors, actorsGuardMs: ACTORS_BRIDGE_GUARD_MS, caps: profile });
   } catch (e) {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
   }
-  const { source, cache } = built;
+  const { source, cache, bodyLine } = built;
+  // Did this run reach the web? The fetch bridge below is the ONLY egress a
+  // sealed worker has, so one flag here is authoritative. script fences the
+  // run's output for the model when it's set (fetched bytes are untrusted).
+  let usedEgress = false;
+  // The DELEGATIONS trace — one entry per actors op this run made. This is the
+  // observability spine of the script surface: the orchestrator reads it back
+  // (which op, to whom, outcome, how long) even when the script itself failed
+  // mid-way, and the ops keep flowing into it right up to a termination.
+  /** @type {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }>} */
+  const actorsTrace = [];
+  let actorsSeq = 0;
+  let usedActors = false;
   const revokeCache = () => { for (const entry of cache.values()) if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl); };
 
   const blobUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
@@ -104,8 +160,20 @@ const _runJob = async ({ code, timeoutMs = 30000, caps, ownerSessionId }, { send
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
         try { worker.terminate(); } catch {}
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms` });
+        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, actorsTrace });
       }, timeoutMs);
+      // Stop plumbing: a runId-carrying job can be terminated from the SW
+      // (script tool abort). The trace survives — partial work stays visible.
+      if (runId) {
+        const kill = () => {
+          clearTimeout(timer);
+          try { worker.terminate(); } catch {}
+          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, actorsTrace });
+        };
+        liveJobs.set(runId, { kill, owner: ownerSessionId });
+        // Stop already arrived while we were still building — honor it now.
+        if (abortedEarly.delete(runId)) kill();
+      }
 
       worker.addEventListener('message', async (ev) => {
         // why any: worker postMessage payload, discriminated by m.type below.
@@ -117,8 +185,14 @@ const _runJob = async ({ code, timeoutMs = 30000, caps, ownerSessionId }, { send
         if (m.type === 'log' || m.type === 'display') return;
 
         if (m.type === 'subagent-request') {
-          if (!profile.subagent) {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'subagent capability is disabled for this job' });
+          // An a2a run is the dweb actor's MESH-ONLY surface. Its tool allow-set
+          // grants no delegation (no spawn_subagent), so the worker's
+          // peerd.runtime.runAgent must not re-grant it — refuse at the host, the
+          // authoritative choke point (the worker surface can't be trusted). The
+          // caps profile (PR #119: the page_code worker) is the second no-subagent
+          // lane, enforced the same way.
+          if (a2a || !profile.subagent) {
+            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: a2a ? 'subagent spawn is disabled for a2a runs (the dweb actor does not delegate)' : 'subagent capability is disabled for this job' });
             return;
           }
           const a = m.args ?? {};
@@ -133,11 +207,81 @@ const _runJob = async ({ code, timeoutMs = 30000, caps, ownerSessionId }, { send
           }
           return;
         }
-        if (m.type === 'fetch-request') {
-          if (!profile.egress) {
-            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: 'egress capability is disabled for this job' });
+        if (m.type === 'actors-request') {
+          // Relay a delegation call to the SW actors/call route. The owner ids
+          // ride from TRUSTED job params; the SW re-gates every op (sender gate,
+          // rate caps, oneShot sandbox-only) — the worker's word buys nothing.
+          if (!actors || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'actors-response', rid: m.rid, error: 'actors capability is disabled for this run' });
             return;
           }
+          usedActors = true;   // actor replies are untrusted content → fence the run's output
+          const seq = ++actorsSeq;
+          const goalRaw = m?.args?.goal;
+          /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }} */
+          const entry = {
+            seq,
+            method: typeof m.method === 'string' ? m.method : String(m.method),
+            ...(typeof m?.args?.to === 'string' ? { to: m.args.to } : {}),
+            ...(typeof goalRaw === 'string' ? { goal: goalRaw.slice(0, 200) } : {}),
+            // settled:false until the relay answers — a run that dies first
+            // reports this op as IN FLIGHT, never as an instant failure.
+            ok: false, ms: 0, settled: false,
+          };
+          actorsTrace.push(entry);
+          const t0 = performance.now();
+          try {
+            const resp = await sendToSW('actors/call', { method: m.method, args: m.args, ownerSessionId, ownerToolUseId, runId, seq });
+            entry.ms = Math.round(performance.now() - t0);
+            entry.settled = true;
+            if (resp?.ok) {
+              entry.ok = true;
+              // Transport ok ≠ delegation ok: an ask whose actor turn FAILED
+              // returns { failed:true } — record it so the trace can't render
+              // a failed delegation as a clean 'ok' (the model-facing record
+              // must agree with the user-facing live feed).
+              if (resp.value && resp.value.failed === true) entry.actorFailed = true;
+              worker.postMessage({ type: 'actors-response', rid: m.rid, result: resp.value });
+            } else {
+              entry.error = resp?.error ?? 'actors call failed';
+              worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
+            }
+          } catch (e) {
+            entry.ms = Math.round(performance.now() - t0);
+            entry.settled = true;
+            entry.error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+            worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
+          }
+          return;
+        }
+        if (m.type === 'a2a-request') {
+          // Relay the mesh call to the SW a2a/call route. Refuse if the cap is
+          // off or no trusted owner — the OWNER is attached from the job params
+          // (ownerSessionId), NEVER from the worker message (which is untrusted).
+          if (!a2a || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'a2a-response', rid: m.rid, error: 'mesh capability is disabled for this run' });
+            return;
+          }
+          try {
+            const resp = await sendToSW('a2a/call', { method: m.method, args: m.args, ownerSessionId });
+            if (resp?.ok) worker.postMessage({ type: 'a2a-response', rid: m.rid, result: resp.value });
+            else worker.postMessage({ type: 'a2a-response', rid: m.rid, error: resp?.error ?? 'mesh call failed' });
+          } catch (e) {
+            worker.postMessage({ type: 'a2a-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+          }
+          return;
+        }
+        if (m.type === 'fetch-request') {
+          // Same envoy posture: the dweb actor has no egress (no fetch_url in its
+          // allow-set). The a2a worker still carries the seal's bridged fetch +
+          // peerd.egress.fetch, so the host is where we deny it — the mesh is the
+          // ONLY outward edge an a2a run gets. The caps profile (PR #119: the
+          // page_code worker) is the second no-egress lane, same choke point.
+          if (a2a || !profile.egress) {
+            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: a2a ? 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)' : 'egress capability is disabled for this job' });
+            return;
+          }
+          usedEgress = true;   // the run touched the web → its output carries untrusted bytes
           try {
             const resp = await sendToSW('sw/web-fetch', { url: m.url, method: m.method, headers: m.headers, body: m.body });
             worker.postMessage({
@@ -191,18 +335,24 @@ const _runJob = async ({ code, timeoutMs = 30000, caps, ownerSessionId }, { send
         if (m.type === 'done') {
           clearTimeout(timer);
           try { worker.terminate(); } catch {}
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error: m.error ?? null });
+          // Map blob-URL stack frames back to job.js:<line> — the model reads
+          // this error; a user-code line number is actionable, a blob one isn't.
+          const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: m.durationMs, error, usedEgress, usedActors, actorsTrace });
         }
       });
 
       worker.addEventListener('error', (e) => {
         clearTimeout(timer);
         try { worker.terminate(); } catch {}
-        const detail = e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)';
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}` });
+        const detail = mapWorkerError(
+          e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
+          blobUrl, bodyLine, 'job.js');
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, actorsTrace });
       });
     });
   } finally {
+    if (runId) liveJobs.delete(runId);
     URL.revokeObjectURL(blobUrl);
     revokeCache();
     await opfs.nuke().catch(() => {});

@@ -250,7 +250,7 @@ export const createVmClient = ({
    */
   const callTab = async (vmId, message, { reboot = true } = {}) => {
     // background: agent-driven VM tabs never steal focus (DESIGN-12, 2026-06-18).
-    // vm_create already dropped a "go there" card; an auto-create here (run before
+    // sandbox_create already dropped a "go there" card; an auto-create here (run before
     // create) opens quietly too. ensureTab early-returns for a live tab.
     const reusedExisting = tracker.getTabId(vmId) != null;
     const idleMs = now() - (lastUsed.get(vmId) ?? 0);

@@ -1,5 +1,7 @@
 // @ts-check
-// vm_create — spin up a fresh WebVM instance.
+// The webvm arm of sandbox_create — spin up a fresh WebVM instance.
+// (Was the standalone vm_create tool; merged into sandbox_create({kind:'webvm'})
+// 2026-07-05 — one create tool, three kinds.)
 //
 // Creates a new VM record + spawns a browser tab that takes focus, so
 // the user immediately sees the terminal appear (DECISIONS #20). The new
@@ -8,30 +10,12 @@
 
 import { VM_TAB_GROUP_TITLE } from '/background/vm-client.js';
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const vmCreateTool = {
-  name: 'vm_create',
-  primitive: 'webvm',
-  description: [
-    'Create a fresh, isolated WebVM with its own disk and bash shell.',
-    'Returns the new vmId and name. The new VM becomes the chat\'s',
-    'current -- subsequent vm_boot calls (without an explicit `vm`',
-    'arg) route here. Use this when starting a new project that',
-    'shouldn\'t share state with the chat\'s prior VM.',
-    '',
-    'Optional: pass a name to label the VM (visible in the tab strip',
-    'and in actor_list output). Defaults to a generated name.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      name: { type: 'string', description: 'Human-friendly name (≤40 chars).' },
-    },
-  },
-  sideEffect: 'write',
-  origins: () => [],
-
-  execute: async (args, ctx) => {
+/**
+ * Create a WebVM record + its background tab; returns { id, name, kind, isCurrent }.
+ * @param {any} args @param {import('/shared/tool-types.js').ToolContext} ctx
+ * @returns {Promise<import('/shared/tool-types.js').ToolResult>}
+ */
+export const createWebVmSandbox = async (args, ctx) => {
     // why: the VM registry + tab tracker ride the opaque ctx contract
     // (not on the ToolContext typedef); narrow to the surface this tool uses.
     const vmRegistry = /** @type {{ create: (opts: { name?: string, ownerSessionId: string | null }) => Promise<{ id: string, name: string }>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
@@ -72,8 +56,10 @@ export const vmCreateTool = {
       content: JSON.stringify({
         id: record.id,
         name: record.name,
+        // why kind: the merged sandbox_create result is the durable-handle
+        // carrier — instance-handle.js reads it to label the harvested id.
+        kind: 'webvm',
         isCurrent: !!sessionId,
       }, null, 2),
     };
-  },
-};
+  };

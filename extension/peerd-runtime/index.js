@@ -99,6 +99,24 @@ export { makeAsyncSubagents } from './subagent/async-subagents.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-subagents shape, specialized).
 export { makeActorMessaging } from './subagent/actor-messaging.js';
+// A2A — the agent-to-agent code surface: the pure translation + the mesh
+// dispatch/correlation the a2a/call route runs.
+export { meshCallToOp, shapeMeshResult } from './subagent/a2a-api.js';
+export {
+  actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
+  askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
+} from './subagent/actors-api.js';
+export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
+// Standing peer conversations — the pure thread registry (convId → turns),
+// capped + TTL-evicted; the SW singleton drives inbound routing + reply consent.
+export {
+  createConversationRegistry,
+  MAX_CONVERSATIONS, MAX_TURNS_PER_CONVERSATION, CONVERSATION_TTL_MS,
+} from './subagent/conversation-registry.js';
+// PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
+// (getRecord injected) so the fail-closed trust rules are unit-tested, not just
+// exercised through the SW's inlined walk. The SW passes getRecord = sessions.get.
+export { buildAncestry } from './subagent/delegation-lineage.js';
 // DESIGN-17: the WEB actor — the disposable page-driving agent (an
 // `actorType:'web'` actor that owns one tab). Pure core: the tab→session
 // bindings, the action-log rolling-summary prompt, the self-fence.
@@ -150,15 +168,17 @@ export { GATES } from './tools/gates.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export {
   mainAgentDescriptors, isHiddenFromMain, MAIN_AGENT_HIDDEN_TOOLS,
-  filterByInstanceState, isInstanceGatedOut, instanceGateKind, INSTANCE_GATED_TOOLS,
   filterByDwebEnabled, isDwebTool,
   filterByDwebActive, isDwebSecondaryTool, DWEB_SECONDARY_TOOLS,
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
   // DESIGN-17: the actor capability tier vocabulary.
-  EXPOSURE_ACTOR, ACTOR_MUTATING_TOOLS, isActorMutatingTool,
+  EXPOSURE_ACTOR, ACTOR_ONLY_TOOLS, isActorOnlyTool,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
   actorAllowedToolsFor, isAllowedForActor,
+  // Heap-split phase 2: the per-instance pin, shared by the in-SW actor turn and
+  // the offscreen actor tool relay (one implementation on a security seam).
+  pinActorCall,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the
 // pure resolve/filter helpers, plus the /tools command's functional core.
@@ -295,3 +315,13 @@ export {
   SessionNotFoundError,
   RuntimeContextIncompleteError,
 } from './errors.js';
+
+// --- observability (the debug surface: bundle export, failure classes,
+// OTel mapping — all pure; the SW route and the side panel consume them) --
+export { classifyFailure, FAILURE_KINDS } from './observability/failure-classify.js';
+export {
+  assembleDebugBundle, childSessionIdsOf, collectFailures,
+  DEBUG_BUNDLE_FORMAT, DEBUG_BUNDLE_VERSION,
+  BUNDLE_MAX_AUDIT_ENTRIES, BUNDLE_MAX_CHILD_SESSIONS,
+} from './observability/debug-bundle.js';
+export { bundleToOtlp, traceIdFromUuid, spanIdFrom } from './observability/otel-export.js';

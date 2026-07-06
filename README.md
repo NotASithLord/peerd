@@ -1,5 +1,8 @@
 <p align="center">
+  <br>
   <img src="docs/store/assets/peerd-wordmark.svg" alt="peerd" width="240" height="48">
+  <br>
+  <br>
 </p>
 
 [![CI](https://github.com/NotASithLord/peerd/actions/workflows/package-and-release.yml/badge.svg)](https://github.com/NotASithLord/peerd/actions/workflows/package-and-release.yml)
@@ -12,12 +15,14 @@
 [![types: 100% ts-check](https://img.shields.io/badge/types-100%25%20%2F%2F%20%40ts--check-brightgreen.svg)](packaging/check-tscheck.ts)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
+<br>
+
 **peerd is the first AI agent harness native to the browser.** It's a
 Chrome/Firefox extension that runs a full agent loop *inside* the
 browser you already use, with your existing tabs and sessions.
 It reads and drives your pages, spins up sandboxed compute (JS
-Notebooks, full Linux VMs compiled to WebAssembly, personal client-side
-apps), and (on the preview channel) shares what it builds over a
+Notebooks, compiled WebAssembly tools, full Linux VMs, personal
+client-side apps), and (on the preview channel) shares what it builds over a
 peer-to-peer WebRTC network built for agent-to-agent communication. BYOK
 to the model provider of your choice. **No backend, no telemetry, no
 cloud component in the data path.**
@@ -39,15 +44,22 @@ on decades of hardened browser platform work (V8 isolates for sandboxing,
 WebCrypto for the vault, WebAuthn passkeys to unlock it, opaque-origin
 iframes, Subresource Integrity) and writes none of its own cryptographic
 or process-isolation code. The agent that holds your keys never operates
-an environment itself: each browser tab, VM, notebook, and app is driven
-by its own keyless actor sub-agent that exclusively holds that
-environment's tools. The main agent acts as an orchestrator. It delegates
-a goal to an actor and gets back a summary fenced as untrusted, so raw
-page text and command output never reach the context that holds your
-keys, and a confused or prompt-injected main agent has no tool to touch
-an environment with in the first place. Every action an actor drives is
-verified against the live page before it counts as done. (More at
-[peerd.ai](https://peerd.ai).)
+an environment itself. Each browser tab, VM, notebook, and app is driven
+by its own actor: a separate agent loop that holds no key and holds only
+that one environment's tools. On Chrome, each actor runs in its own
+worker heap, a separate block of memory, so the untrusted content it
+reads (page text, command output, file contents) stays inside that actor.
+The actor reaches the model, the network, or the page only by asking the
+service worker, which holds the key and re-checks and gates every request
+before running it. The main agent acts as an orchestrator. It delegates a
+goal to an actor and gets back a summary fenced as untrusted, so raw page
+text and command output never reach the context that holds your keys, and
+a confused or prompt-injected main agent has no tool to touch an
+environment in the first place. Every page action reports back what it
+actually changed on the live page (a navigation or a mutation summary),
+so success is judged from observed effect, not from the model's
+assumption. This isolation is the core of peerd's security model, not an
+add-on. (More at [peerd.ai](https://peerd.ai).)
 
 **Status: 0.x, experimental beta.** The initial feature buildout is
 complete and integrated, but the surface is still
@@ -221,18 +233,19 @@ one top-level module, each owning its public API through `index.js`:
 
 The brand IS the architecture: cross-module imports go through each
 module's `index.js`, never deep paths; nothing outside
-`peerd-distributed/` imports it at all. Each module's README and its
-`index.js` are the dependency graph.
+`peerd-distributed/` imports it at all. Each module's `index.js` is its
+public API and the dependency graph.
 
 ## Trust boundaries
 
 peerd's safety is *who is allowed to do what*: small boundaries
 enforced by the browser platform, not by peerd's own crypto. Two
 principles run through all of it: **the agent that holds your keys never
-touches a raw page or runs untrusted code** — the environment-operating
-tools are not even attached to it, they belong to per-environment actor
-sub-agents — and **the agent never gets the final word on correctness;
-every action is verified against the live page before it counts as done.**
+touches a raw page or runs untrusted code** (the environment-operating
+tools are not even attached to it; they belong to per-environment actor
+sub-agents), and **the agent never gets the final word on correctness:
+every page action reports what it actually changed on the live page, and
+success is judged from that observed effect.**
 
 The orchestrator delegates; an actor does the work. Each tab, VM,
 notebook, and app is owned by one actor that holds only that
@@ -245,8 +258,8 @@ asked to, because it never held the tool.
 |---|---|---|
 | **The vault** (`peerd-egress/vault`) | your API keys + secrets, decrypted only after Touch ID / passkey / passphrase unlock; idle auto-lock | leaving the device — keys go only to the provider you chose |
 | **The orchestrator** (`peerd-runtime/loop`) | the conversation, planning, delegating a goal to an actor via `message_actor` | holding any environment's tools, reading raw page bytes, or running untrusted code directly |
-| **An actor** (`peerd-runtime/subagent`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| **The disposable runner** (`peerd-runtime/runner`) | driving + reading a page keyless via do/get/check — the lineage a web actor and subagents use | holding keys or its own network; its output returns `wrapUntrusted`-fenced |
+| **A bound actor** (`peerd-runtime/subagent`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless, in its own worker heap (Chrome) | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| **A subagent** (`peerd-runtime/subagent`) | a disposable ephemeral actor the orchestrator spawns to decompose a task — keyless, in its own worker heap (Chrome), holding only a narrowed subset of the orchestrator's tools | escalating past its grant, holding keys, or reaching another agent's heap; every tool call is re-checked service-worker-side and its result returns fenced |
 | **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
 | **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
@@ -258,11 +271,10 @@ happens. Full detail in [`SECURITY.md`](SECURITY.md) and the
 
 ## Documentation
 
-The code is the spec. Read `CLAUDE.md` for orientation, the per-module
-READMEs under `extension/peerd-*/` for how each module works and its
-public API, and the code itself for the rest. `SECURITY.md` covers the
-trust boundaries; `docs/store/` holds the store-listing and compliance
-material.
+The code is the spec. Read `CLAUDE.md` for orientation, each module's
+`index.js` for its public API, and the code itself for the rest.
+`SECURITY.md` covers the trust boundaries; `docs/store/` holds the
+store-listing and compliance material.
 
 ## Repo layout
 
@@ -275,11 +287,11 @@ peerd/
 │   ├── manifest.json
 │   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
-│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless js_run worker in offscreen/.
-│   ├── peerd-runtime/        # r · green   — agent loop, tools + do/get/check runner, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, subagent, voice, clock, dom, edit
+│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless script worker in offscreen/.
+│   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + subagents, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
-│   ├── offscreen/            # chassis: SW keepalive + voice host
+│   ├── offscreen/            # chassis: the actor/subagent worker heaps, headless script runs, voice, SW keepalive
 │   ├── sidepanel/            # chassis: chat UI (Mithril)
 │   ├── vm-tab/               # chassis: WebVM tab page (CheerpX + bash + xterm)
 │   ├── notebook-tab/         # chassis: Notebook tab page (Web Worker + OPFS)
@@ -316,14 +328,14 @@ paths. ESLint enforces. Within a module, deep imports are fine.
 discrete, persistent browser tabs the user can
 see, focus, and close, grouped under "peerd" in the tab strip and
 surviving browser restarts: the WebVM, the Notebook, and the App. The
-fourth, the headless worker (`js_run`), runs the Notebook's sealed worker
+fourth, the headless worker (`script`), runs the Notebook's sealed worker
 offscreen with no tab: ephemeral, for the agent's own quick compute. The
 orchestrator picks the lightest kind that fits the task, bootstraps the
 instance, and then delegates the work to that instance's actor; the
 tool lists below are the surface an actor drives, not the main agent. One
 main-agent tool spans all of them: **`actor_list`** enumerates every
-addressable actor — WebVMs, Notebooks, Apps, open tabs, and API
-integrations — each tagged with its `type` and the handle to pass to
+addressable actor (WebVMs, Notebooks, Apps, open tabs, and API
+integrations), each tagged with its `type` and the handle to pass to
 `message_actor`, so discovery is one call instead of five.
 
 **WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB
@@ -343,14 +355,19 @@ tree, in a visible tab. ~hundreds of ms boot. `peerd.egress.fetch` is the
 worker's only network, routed through `peerd-egress` so it's honest. Each
 `js_notebook` run spawns a fresh worker, so in-memory state (`globalThis`,
 `let`/`const`) does NOT carry between runs; persist via
-`peerd.self.writeFile`/`readFile` to the OPFS file tree.
+`peerd.self.writeFile`/`readFile` to the OPFS file tree. The sealed worker
+also runs **compiled wasm32-wasi binaries** via the `peerd:wasi` builtin —
+SQLite over a user's `.sqlite` file, codecs, language runtimes — against an
+in-memory filesystem, with zero ambient capabilities (a wasm module has no
+network path even in principle; it sees only the stdin/files the call
+passes it).
 
 ```
-js_create   js_notebook   js_run   js_write_file   js_read_file   js_delete
+sandbox_create   js_notebook   script   js_write_file   js_read_file   js_delete
 ```
 
 **Headless worker** is the same sealed worker as a Notebook, but headless:
-`js_run` runs it in the offscreen document with no tab, ephemeral scratch
+`script` runs it in the offscreen document with no tab, ephemeral scratch
 discarded after. It's the agent's own quick compute and peerd's code mode
 (one script instead of a chain of tool/MCP calls), not a workspace you
 watch. A distinct kind from the Notebook, same substrate.
@@ -429,6 +446,7 @@ Thank you to the maintainers of all of these projects.
 | [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (`onnxruntime-web`) | 1.22.0 | MIT | WASM/WebGPU inference backend Moonshine runs on (`vendor/onnxruntime-web/`) |
 | [Silero VAD](https://github.com/snakers4/silero-vad) (`@ricky0123/vad-web`) | 0.0.24 | MIT | Voice-activity detection / speech endpointing for Moonshine (`vendor/vad-web/`) |
 | [hash-wasm](https://github.com/Daninet/hash-wasm) (Argon2 bundle) | 4.12.0 | MIT | Argon2id KDF deriving the vault's key-encryption key (`peerd-egress/vault/`) |
+| [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim) (`@bjorn3/browser_wasi_shim`) | 0.4.2 | MIT OR Apache-2.0 | WASI preview1 syscall layer behind the `peerd:wasi` builtin — runs wasm32-wasi binaries in the sealed worker (`notebook-tab/notebook-wasi.js`) |
 | [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) | 0.12.0 | MPL-2.0 | One promise-based `browser.*` API across Chrome and Firefox |
 | [Transformers.js](https://github.com/huggingface/transformers.js) (`@huggingface/transformers`) | 4.2.0 | Apache-2.0 | WebGPU runtime for the on-device local-inference runner (`offscreen/local-model.js`)² |
 

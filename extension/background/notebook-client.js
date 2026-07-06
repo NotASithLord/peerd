@@ -63,7 +63,7 @@ export const createJsClient = ({ registry, tracker }) => {
   /** @param {string} notebookId @param {{ type: string, [k: string]: unknown }} message */
   const callTab = async (notebookId, message) => {
     // background: agent-driven Notebook tabs never steal focus (DESIGN-12,
-    // 2026-06-18). js_create already dropped a "go there" card; an auto-create
+    // 2026-06-18). sandbox_create already dropped a "go there" card; an auto-create
     // here opens quietly too. ensureTab early-returns for a live tab.
     await tracker.ensureTab(notebookId, { active: false, groupTitle: JS_TAB_GROUP_TITLE });
     const tabId = tracker.getTabId(notebookId);

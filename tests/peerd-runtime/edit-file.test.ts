@@ -21,18 +21,18 @@ const baseCtx = (over: any = {}) => ({
 });
 
 describe('edit_file — create-first hint (progressive disclosure consistency)', () => {
-  test('app: no current app → create-first hint naming app_create', async () => {
+  test('app: no current app → create-first hint naming sandbox_create', async () => {
     const r: any = await editFileTool.execute({ path: 'index.html', edits: WHOLE_FILE }, baseCtx() as any);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('no_current_instance');
-    expect(r.error).toContain('app_create');
+    expect(r.error).toContain("sandbox_create({kind:'app'})");
   });
 
-  test('notebook: no current notebook → create-first hint naming js_create', async () => {
+  test('notebook: no current notebook → create-first hint naming sandbox_create', async () => {
     const r: any = await editFileTool.execute({ path: 'x.js', edits: WHOLE_FILE, kind: 'notebook' }, baseCtx() as any);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('no_current_instance');
-    expect(r.error).toContain('js_create');
+    expect(r.error).toContain("sandbox_create({kind:'notebook'})");
   });
 
   test('proceeds normally when a current instance exists', async () => {

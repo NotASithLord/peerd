@@ -19,12 +19,35 @@
 
 const TABLE_MAX_ROWS = 500;
 const CHART_MAX_POINTS = 300;
+const HEATMAP_MAX_CELLS = 6500;   // ~80×80 bins — a density grid, not a scatter
+const JSON_MAX_CHARS = 20000;     // fallback JSON dump cap (a 437k dump froze the pane)
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 /** @param {unknown} v */
 const formatValue = (v) => {
   try { return JSON.stringify(v); }
   catch { return String(v); }
+};
+
+// The fallback JSON dump, capped: a run once returned a ~437k-char object
+// (a hand-rolled Vega spec) and the pane rendered ALL of it. Cap what the
+// pane shows and say what was cut — the full value still exists in the run
+// result; the pane is a view, not the value.
+/** @param {HTMLElement} outputEl @param {unknown} value */
+const appendJsonBlock = (outputEl, value) => {
+  let text;
+  try { text = JSON.stringify(value, null, 2); }
+  catch { text = String(value); }
+  const over = text.length > JSON_MAX_CHARS;
+  const pre = cellEl('pre', `← ${over ? text.slice(0, JSON_MAX_CHARS) : text}`);
+  pre.className = 'nb-json';
+  outputEl.appendChild(pre);
+  if (over) {
+    const note = cellEl('div',
+      `…truncated (${text.length.toLocaleString()} chars). To render data, return chart()/table() from peerd:std — not a raw spec object.`);
+    note.className = 'nb-table-note';
+    outputEl.appendChild(note);
+  }
 };
 
 /** @param {number} n */
@@ -104,7 +127,7 @@ const fmtNum = (v) => {
 
 /**
  * @typedef {{ x: number, y: number, label: string }} ChartPoint
- * @typedef {{ type?: string, data?: unknown, x?: string|null, y?: string|null, title?: unknown }} ChartDescriptor
+ * @typedef {{ type?: string, data?: unknown, x?: string|null, y?: string|null, v?: string|null, title?: unknown }} ChartDescriptor
  */
 
 // Normalize a chart descriptor's `data` into { points: [{ x, y, label }],
@@ -142,8 +165,87 @@ const toPoints = (d) => {
   };
 };
 
+// A heatmap is a value-shaded GRID, not a point series: rows are { x, y, v }
+// with numeric x/y bin positions; each unique (x, y) becomes a cell shaded by
+// its value on a monochrome fill-opacity ramp (currentColor, so it themes for
+// free and stays inside the brand's grayscale rule).
+/** @param {ChartDescriptor} d */
+const renderHeatmap = (d) => {
+  const W = 480, H = 380, L = 48, R = 14, TOP = 16, BOT = 40;
+  const pw = W - L - R, ph = H - TOP - BOT;
+  const data = Array.isArray(d.data) ? d.data : [];
+  const wrap = document.createElement('div');
+  wrap.className = 'nb-chart';
+  if (d.title) {
+    const title = cellEl('div', String(d.title));
+    title.className = 'nb-chart-title';
+    wrap.appendChild(title);
+  }
+  const first = data.find((r) => r && typeof r === 'object' && !Array.isArray(r));
+  const keys = first ? Object.keys(first) : [];
+  const xKey = d.x ?? keys[0];
+  const yKey = d.y ?? keys[1];
+  const vKey = d.v ?? keys[2];
+  /** @type {{ x: number, y: number, v: number }[]} */
+  const cells = [];
+  for (const row of data) {
+    const x = Number(/** @type {any} */ (row)?.[xKey]);
+    const y = Number(/** @type {any} */ (row)?.[yKey]);
+    const v = Number(/** @type {any} */ (row)?.[vKey]);
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(v)) cells.push({ x, y, v });
+    if (cells.length >= HEATMAP_MAX_CELLS) break;
+  }
+  if (!cells.length) {
+    const note = cellEl('div', '(heatmap: no numeric {x, y, v} data)');
+    note.className = 'nb-table-note';
+    wrap.appendChild(note);
+    return wrap;
+  }
+  const xsU = [...new Set(cells.map((c) => c.x))].sort((a, b) => a - b);
+  const ysU = [...new Set(cells.map((c) => c.y))].sort((a, b) => a - b);
+  const xMin = xsU[0], xMax = xsU[xsU.length - 1];
+  const yMin = ysU[0], yMax = ysU[ysU.length - 1];
+  // Cell size from the bin GRID (unique positions), not the point count.
+  const cwPx = pw / Math.max(1, xsU.length);
+  const chPx = ph / Math.max(1, ysU.length);
+  /** @param {number} x */
+  const xToPx = (x) => L + (xsU.length > 1 ? ((x - xMin) / (xMax - xMin)) * (pw - cwPx) : 0);
+  /** @param {number} y */
+  const yToPx = (y) => TOP + (ysU.length > 1 ? (1 - (y - yMin) / (yMax - yMin)) * (ph - chPx) : 0);
+  const vs = cells.map((c) => c.v);
+  const vMin = Math.min(...vs), vMax = Math.max(...vs);
+  const span = vMax - vMin || 1;
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`, class: 'nb-chart-svg nb-chart-heatmap',
+    preserveAspectRatio: 'xMidYMid meet', role: 'img',
+  });
+  for (const c of cells) {
+    svg.appendChild(svgEl('rect', {
+      x: xToPx(c.x), y: yToPx(c.y), width: Math.max(1, cwPx), height: Math.max(1, chPx),
+      class: 'nb-series-fill', 'fill-opacity': (0.06 + 0.94 * ((c.v - vMin) / span)).toFixed(3),
+    }));
+  }
+  svg.appendChild(svgEl('line', { x1: L, y1: TOP, x2: L, y2: TOP + ph, class: 'nb-axis' }));
+  svg.appendChild(svgEl('line', { x1: L, y1: TOP + ph, x2: L + pw, y2: TOP + ph, class: 'nb-axis' }));
+  const TICKS = 4;
+  for (const i of seq(TICKS + 1)) {
+    const xv = xMin + (i / TICKS) * (xMax - xMin);
+    const yv = yMin + (i / TICKS) * (yMax - yMin);
+    svg.appendChild(svgText(L + (i / TICKS) * pw, TOP + ph + 14, fmtNum(xv), { class: 'nb-tick', 'text-anchor': 'middle' }));
+    svg.appendChild(svgText(L - 6, TOP + ph - (i / TICKS) * ph + 3, fmtNum(yv), { class: 'nb-tick', 'text-anchor': 'end' }));
+  }
+  wrap.appendChild(svg);
+  if (data.length > HEATMAP_MAX_CELLS) {
+    const note = cellEl('div', `…showing the first ${HEATMAP_MAX_CELLS} of ${data.length} cells`);
+    note.className = 'nb-table-note';
+    wrap.appendChild(note);
+  }
+  return wrap;
+};
+
 /** @param {ChartDescriptor} d */
 export const renderChart = (d) => {
+  if (d.type === 'heatmap') return renderHeatmap(d);
   const W = 480, H = 280, L = 48, R = 14, TOP = 16, BOT = 40;
   const pw = W - L - R, ph = H - TOP - BOT;
   const type = typeof d.type === 'string' && ['bar', 'line', 'scatter'].includes(d.type) ? d.type : 'bar';
@@ -256,9 +358,7 @@ const renderDescriptor = (outputEl, d) => {
   } else if (d.__peerd_display === 'chart') {
     outputEl.appendChild(renderChart(d));
   } else {
-    const pre = cellEl('pre', `← ${JSON.stringify(d, null, 2)}`);
-    pre.className = 'nb-json';
-    outputEl.appendChild(pre);
+    appendJsonBlock(outputEl, d);
   }
 };
 
@@ -285,9 +385,7 @@ export const renderReturnValue = (outputEl, value) => {
     return;
   }
   if (value !== null && typeof value === 'object') {
-    const pre = cellEl('pre', `← ${JSON.stringify(value, null, 2)}`);
-    pre.className = 'nb-json';
-    outputEl.appendChild(pre);
+    appendJsonBlock(outputEl, value);
     return;
   }
   const line = cellEl('span', `← ${formatValue(value)}\n`);

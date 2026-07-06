@@ -37,7 +37,16 @@
  * @property {SessionKind} kind               'chat' (default) | 'subagent' | 'actor'
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
  * @property {string} [task]                  the spawning prompt (subagents only)
+ * @property {string[]} [grantedTools]        a subagent's narrowed toolset (post-manifest
+ *   intersection), persisted at spawn so the heap-split offscreen tool-dispatch rebuilds
+ *   the child's restricted ctx from it and re-checks every relayed call — never the worker's.
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
+ * @property {boolean} [spawnedTrusted]       was the SPAWNING turn trusted (non-inbound)?
+ *   The per-hop verdict the trusted-lineage gate (subagent/delegation-lineage.js)
+ *   walks: stamped server-side at create() by spawn.js, never model-supplied.
+ *   Absent on roots (nothing spawned them — treated as trusted) and on records
+ *   written before the async-actor refactor (a PARENTED record missing it reads
+ *   as untrusted — fail-closed; see the SW's getAncestry).
  *
  * Actor binding (DESIGN-17). A `kind:'actor'` session self-describes
  * which instance it owns: `instanceId` (the WebVM/Notebook/App id it drives, or
@@ -47,7 +56,7 @@
  * the tab→session bindings store (`subagent/web-actor.js`) for `web`. These
  * are the REVERSE pointer the actor turn reads. Absent on chat/subagent.
  * @property {string} [instanceId]            the instance (engine id), the owned tabId (String), or — for a DESIGN-18 API actor — the owned ORIGIN
- * @property {'webvm' | 'notebook' | 'app' | 'web'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab OR (DESIGN-18) an API origin
+ * @property {'webvm' | 'notebook' | 'app' | 'web' | 'dweb'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab OR (DESIGN-18) an API origin; dweb = the mesh operator (global singleton)
  * @property {'tab' | 'api'} [backing]         DESIGN-18: a `web` actor's backing — 'tab' (default; absent = tab) drives a DOM at a MUTABLE origin; 'api' owns ONE FIXED origin, fetch-only, no tab ever
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from

@@ -76,6 +76,30 @@ export const DwebSection = {
           : 'Identity is vault-stored and created on first room join.',
       ]) : null,
 
+      // The dweb AGENT — the mesh-operator actor. Nested under the network
+      // toggle (no network, no agent) and OPT-IN: an agent peers can wake is a
+      // posture the user chooses. Rendering follows the dependent-toggle idiom
+      // (behavior.js failover picker).
+      dwebEnabled ? m('div', { style: 'margin-top:14px; border-top:1px solid var(--hairline, #2a2a2a); padding-top:14px;' }, [
+        m('h3', 'dweb agent'),
+        m('p', 'A dedicated, isolated agent that operates the mesh for you: it '
+          + 'holds the dweb tools (discover, share, install, block), keeps a '
+          + 'ledger of peers and publishers, and monitors messages sent to '
+          + 'your agent — surfacing only what matters. It runs keyless in its '
+          + 'own worker, can never be made to act by an inbound message, and '
+          + 'installs or shares only with your confirmation.'),
+        m('button.secondary', {
+          type: 'button',
+          onclick: async () => {
+            await send({ type: 'settings/update', patch: { dwebAgentEnabled: !state.settings?.dwebAgentEnabled } });
+            m.redraw();
+          },
+        }, state.settings?.dwebAgentEnabled ? 'Disable the dweb agent' : 'Enable the dweb agent'),
+        state.settings?.dwebAgentEnabled
+          ? m('p.hint', 'On — your agent is addressable as "dweb" in chat (message_actor) and joins the agent inbox on unlock.')
+          : m('p.hint', 'Off — the mesh tools are unavailable until enabled (they live on this agent, not the chat agent).'),
+      ]) : null,
+
       // commons — the Phase 1 north-star dwapp — now lives in the Library as
       // a pre-loaded, dweb-tagged app (not a button here). Point there.
       dwebEnabled ? m('div', { style: 'margin-top:14px; border-top:1px solid var(--hairline, #2a2a2a); padding-top:14px;' }, [
@@ -87,7 +111,7 @@ export const DwebSection = {
         m('button.secondary', { type: 'button', onclick: () => openHome('library') }, 'Open Library'),
       ]) : null,
 
-      resetRow(send, ['dwebEnabled']),
+      resetRow(send, ['dwebEnabled', 'dwebAgentEnabled']),
     ]);
   },
 };

@@ -69,6 +69,16 @@ export const DEFAULT_PRICING = Object.freeze({
   'google/gemini-2.0-flash':     Object.freeze({ input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0 }),
   'meta-llama/llama-3.3-70b-instruct': Object.freeze({ input: 0.12, output: 0.3, cacheRead: 0.12, cacheWrite: 0 }),
 
+  // ---- OpenAI (direct api.openai.com — bare ids, no vendor prefix) ----
+  // why bare ids: the direct adapter sends 'gpt-4o' etc., not 'openai/gpt-4o'
+  // (that prefix is the OpenRouter gateway's namespacing). Only the ids with
+  // confident public pricing are listed; the newest flagships resolve to
+  // "estimate unavailable" (honest) until a user sets a pricing override —
+  // the documented escape hatch for prices that move between updates.
+  'gpt-4o':      Object.freeze({ input: 2.5,  output: 10,  cacheRead: 1.25,  cacheWrite: 0 }),
+  'gpt-4o-mini': Object.freeze({ input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0 }),
+  'o4-mini':     Object.freeze({ input: 1.1,  output: 4.4, cacheRead: 0.275, cacheWrite: 0 }),
+
   // ---- Ollama (local inference — $0 by construction) ----
   // why: the CostChip prices by model id; without entries the curated
   // local models would read "unknown" instead of the truthful $0. Keys

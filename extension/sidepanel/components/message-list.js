@@ -25,7 +25,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
-import { formatBytes } from '/peerd-runtime/index.js';
+import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
 /** @typedef {import('../chat-reducer.js').SubagentSession} SubagentSession */
@@ -68,6 +68,7 @@ import { formatBytes } from '/peerd-runtime/index.js';
  * @property {Record<string, { stdout: string, stderr: string }>} [vmStreams]
  * @property {{ byToolUse?: Record<string, string>, sessions?: Record<string, SubagentSession> }} [subagents]
  * @property {Record<string, any>} [actors]
+ * @property {Record<string, any[]>} [scriptOps]
  * @property {(sessionId: string) => void} [loadSubagent]
  * @property {string} [peerName]
  * @property {number} [depth]
@@ -103,7 +104,7 @@ const MAX_NESTED_DEPTH = 5;
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, subagents, actors, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
+const renderTranscript = ({ messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
   const groups = groupMessages(messages ?? []);
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
@@ -133,14 +134,17 @@ const renderTranscript = ({ messages, vmStreams, subagents, actors, loadSubagent
   };
   groups.forEach((g) => {
     // Entering a new user turn → flush the PREVIOUS turn's notices first (now
-    // muted, pinned just above this user message).
+    // muted, pinned just above this user message). An actor-reply is NOT a
+    // turn anchor — it lands mid-conversation, inside the user's ongoing turn.
     if (g.type === 'user') { flush(curTurn, false); curTurn = g.message.id; }
     out.push(g.type === 'user'
       ? m(UserMessage, { key: g.message.id, message: g.message })
-      : m(AssistantMessage, {
-          key: g.message.id, message: g.message, toolResults: g.toolResults,
-          vmStreams, subagents, actors, loadSubagent, peerName, depth,
-        }));
+      : g.type === 'actor-reply'
+        ? m(ActorReplyMessage, { key: g.message.id, message: g.message })
+        : m(AssistantMessage, {
+            key: g.message.id, message: g.message, toolResults: g.toolResults,
+            vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth,
+          }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
   // unmatched turn (e.g. opened before the first user message) trail after.
@@ -160,9 +164,9 @@ export const MessageList = {
   onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
 
   /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, subagents, actors, loadSubagent, peerName, tabEvents, uiActions } }) =>
+  view: ({ attrs: { messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, tabEvents, uiActions } }) =>
     m('.message-list',
-      renderTranscript({ messages, vmStreams, subagents, actors, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
+      renderTranscript({ messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -198,10 +202,10 @@ const AgentTabNotice = {
  */
 /**
  * @param {ChatMessage[]} messages
- * @returns {Array<{ type: 'user', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>}
+ * @returns {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>}
  */
 const groupMessages = (messages) => {
-  /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
+  /** @type {Array<{ type: 'user', message: ChatMessage } | { type: 'actor-reply', message: ChatMessage } | { type: 'assistant', message: ChatMessage, toolResults: PairedTool[] }>} */
   const out = [];
   /** @type {Map<string, ToolResult>} */
   const resultsByToolUseId = new Map();
@@ -220,6 +224,10 @@ const groupMessages = (messages) => {
       const isToolResultOnly = (!msg.content || msg.content === '')
         && Array.isArray(msg.toolResults) && msg.toolResults.length > 0;
       if (isToolResultOnly) continue; // pair with prior assistant via map
+      // An actor's reply-wake is synthetic (machine-delivered) but it IS the
+      // news the user is waiting on — surface it as its own attributed bubble
+      // at its place in the transcript instead of burying it in the tool card.
+      if (msg.synthetic && msg.actorReply) { out.push({ type: 'actor-reply', message: msg }); continue; }
       // Synthetic continuation nudges (agent-loop truncation recovery)
       // are loop plumbing, not something the user typed — the truncated
       // assistant message's stop-reason chip tells the visible story.
@@ -268,6 +276,35 @@ const UserMessage = {
   },
 };
 
+// An actor's reply, surfaced as its OWN bubble at its place in the transcript
+// (the trickle-up: delegated work comes BACK as a visible message, not buried
+// in the message_actor card above). Attribution mirrors renderActorCard's
+// label rules; the body is the fence-stripped reply (display-only — the model
+// still receives the full fenced text). The trusted lead line duplicates the
+// attribution label, so it's dropped from the bubble.
+const ActorReplyMessage = {
+  /** @param {{ attrs: { message: ChatMessage } }} vnode */
+  view: ({ attrs: { message } }) => {
+    const reply = message.actorReply ?? /** @type {NonNullable<ChatMessage['actorReply']>} */ ({ kind: 'actor', instanceId: '' });
+    const who = reply.name ?? (reply.instanceId !== reply.kind ? reply.instanceId : '');
+    const label = (reply.kind === 'web' && /^https?:\/\//.test(String(reply.instanceId)))
+      ? `${reply.instanceId} integration`
+      : `${reply.kind} actor${who ? ` · ${who}` : ''}`;
+    const content = String(message.content ?? '');
+    // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
+    // the role label above the bubble already says who this is.
+    const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
+    // A `via:'script'` reply came from a fire-and-forget delegation inside an
+    // earlier script run — it can land minutes later, so name its origin or the
+    // bubble is unexplainable to a user who never saw the fan-out happen.
+    const via = /** @type {{ via?: string }} */ (reply).via;
+    return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
+      m('.role', [label, via === 'script' ? ' · delegated by an earlier script' : '', reply.failed ? ' · failed' : '']),
+      m('.bubble', renderText(stripUntrustedFences(body))),
+    ]);
+  },
+};
+
 const AssistantMessage = {
   /**
    * @param {{ attrs: {
@@ -275,11 +312,12 @@ const AssistantMessage = {
    *   vmStreams?: Record<string, { stdout: string, stderr: string }>,
    *   subagents?: TranscriptArgs['subagents'],
    *   actors?: Record<string, any>,
+   *   scriptOps?: Record<string, any[]>,
    *   loadSubagent?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
    * } }} vnode
    */
-  view: ({ attrs: { message, toolResults, vmStreams, subagents, actors, loadSubagent, peerName, depth } }) => {
+  view: ({ attrs: { message, toolResults, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth } }) => {
     const hasText = typeof message.content === 'string' && message.content.length > 0;
     const hasToolUses = toolResults.length > 0;
     const hasThinking = typeof message.thinking === 'string' && message.thinking.length > 0;
@@ -316,6 +354,14 @@ const AssistantMessage = {
           : message.error
             ? m('.bubble.bubble-error', m('.error-line', message.error))
             : null,
+      // Failure-class chip — the classified NEIGHBORHOOD of a failed turn
+      // (policy / provider / timeout / …), so a user triaging doesn't have
+      // to parse the raw error to know whose fault it roughly was.
+      message.error
+        ? m('span.failure-kind-chip',
+            { title: 'failure class' },
+            classifyFailure(message.error, { stopReason: message.stopReason }).kind)
+        : null,
       // Stop-reason chip — truncations and caps must never be silent.
       // max_tokens with neither text nor tools = the thinking-only
       // truncation the loop auto-continues; say so. max_steps = the
@@ -343,6 +389,7 @@ const AssistantMessage = {
               liveStream: vmStreams?.[toolUse.id] ?? null,
               subagents,
               actors,
+              scriptOps,
               loadSubagent,
               peerName,
               depth: depth ?? 0,
@@ -448,13 +495,14 @@ const ToolCall = {
    *     liveStream?: { stdout: string, stderr: string }|null,
    *     subagents?: TranscriptArgs['subagents'],
    *     actors?: Record<string, any>,
+   *     scriptOps?: Record<string, any[]>,
    *     loadSubagent?: (sessionId: string) => void,
    *     peerName?: string, depth?: number,
    *   },
    *   state: ToolCallState,
    * }} vnode
    */
-  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, actors, loadSubagent, peerName, depth }, state: ui }) => {
+  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, actors, scriptOps, loadSubagent, peerName, depth }, state: ui }) => {
     // spawn_subagent gets its own card: the expanded body is the child's
     // full transcript rendered inline (recursively), not a result blob.
     if (toolUse.name === 'spawn_subagent') {
@@ -475,6 +523,13 @@ const ToolCall = {
       : (interrupted ? 'cancelled' : 'pending');
     const showLiveStream = toolUse.name === 'vm_boot' && !toolResult
       && liveStream && (liveStream.stdout || liveStream.stderr);
+    // The live DELEGATION feed for a `script` run: one line per actors op
+    // (→ target "goal…" · state). Auto-shown while pending — the user watches
+    // the fan-out happen instead of a silent "running…" chip — and kept after
+    // completion for a beat of continuity (the durable record is the
+    // [DELEGATIONS] trace in the result body).
+    const ops = toolUse.name === 'script' ? (scriptOps?.[toolUse.id] ?? null) : null;
+    const showOps = ops && ops.length > 0 && (!toolResult || status === 'pending');
     // why: a single compact line is the resting state — a status dot,
     // the tool name, a one-line arg summary, and a duration. The §02
     // lineage (primitive + gates) and the full result move INTO the
@@ -489,6 +544,13 @@ const ToolCall = {
           { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
+        // Failure-class chip on a failed card: the classified neighborhood
+        // (policy / environment / timeout / …) at a glance; the raw error
+        // stays one click away in the expanded result body.
+        status === 'failed'
+          ? m('span.failure-kind-chip', { title: 'failure class' },
+              classifyFailure(typeof toolResult?.content === 'string' ? toolResult.content : '').kind)
+          : null,
         m('.spacer'),
         status === 'pending' ? m('span.tool-pending', 'running…')
           : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
@@ -505,6 +567,17 @@ const ToolCall = {
         liveStream.stderr
           ? m('pre.vm-stream-stderr', liveStream.stderr) : null,
       ]) : null,
+      showOps ? m('.script-ops', ops.map((/** @type {any} */ o) => m('.script-op', { key: o.seq }, [
+        m(`span.script-op-dot.dot-${o.phase === 'sent' ? 'pending' : (o.failed ? 'failed' : 'ok')}`),
+        m('span.script-op-line', [
+          `${o.method}${o.to ? ` ${o.to}` : ''}`,
+          o.goalPreview ? m('span.script-op-goal', ` "${o.goalPreview}"`) : null,
+        ]),
+        m('span.script-op-state',
+          o.phase === 'sent' ? 'working…'
+            : o.phase === 'handed-off' ? 'handed off'
+            : `${o.failed ? 'failed' : 'replied'}${typeof o.ms === 'number' ? ` · ${(o.ms / 1000).toFixed(1)}s` : ''}`),
+      ]))) : null,
       ui.expanded ? m('.tool-detail', [
         m('.tool-lineage', [
           m('.lineage-row', [
@@ -756,6 +829,7 @@ const PRIMITIVE_MODULE = Object.freeze({
   webvm:    'engine',
   notebook: 'engine',
   app:      'engine',
+  engine:   'engine',
   dweb:     'distributed',
 });
 

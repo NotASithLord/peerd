@@ -30,7 +30,6 @@
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
-import { openHome } from '/shared/open-home.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
 import {
@@ -132,7 +131,6 @@ import {
   resolveManifestAllow,
   manifestLabel,
   filterDescriptorsByManifest,
-  filterByInstanceState,
   filterByDwebEnabled,
   filterByDwebActive,
   filterByGoalActive,
@@ -227,7 +225,12 @@ import {
   makeAsyncSubagents,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
-  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR,
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
+  actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  // A2A — the mesh dispatch + translation the a2a/call route runs.
+  makeMeshDispatch, meshCallToOp, shapeMeshResult,
+  // Standing peer conversations — the pure thread registry (convId → turns).
+  createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -238,8 +241,9 @@ import {
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
   finalAssistantText,
-  // The informational "pull peerd in" reminder injected into peerd-opened web tabs.
-  pullInHintInjected,
+  // The debug surface: the bundle assembler + the delegation-tree walk the
+  // session/debugBundle route runs (pure; the SW supplies the reads).
+  assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
 import { flattenCategorisedDenylist, normalizeDenylistPattern } from '/peerd-egress/index.js';
@@ -249,9 +253,12 @@ import { createVmTabTracker } from './vm-tab-tracker.js';
 import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
+import { createScriptRunRegistry } from './script-runs.js';
+import { createContextSnapshots } from './context-snapshots.js';
+import { confirmGrantKey } from './confirm-grant-key.js';
+import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
-import { decidePullIn } from './panel-affordance.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import {
@@ -284,6 +291,11 @@ import { makeDenylistStore } from './denylist-store.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
+import { makeModelCatalog } from './model-catalog.js';
+import { makeTabAffordances } from './tab-affordances.js';
+import { makeMintOnce } from './mint-once.js';
+import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
+import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
 import { makeHooksRoutes } from './routes/hooks.js';
@@ -498,203 +510,10 @@ const maskKey = (/** @type {string} */ k) => {
   return `${s.slice(0, 7)}…${s.slice(-3)} · ${s.length} chars`;
 };
 
-// Curated model options per provider, for the per-chat model picker.
-// Conservative on purpose — only ids we're confident resolve, so the
-// picker never offers a 404. Exotic models go through the free-form
-// model field in Settings. The picker also appends whatever model the
-// user has configured in Settings if it isn't already listed here.
-const MODEL_CATALOG = Object.freeze({
-  anthropic: [
-    { model: 'claude-opus-4-8',            label: 'Claude Opus 4.8' },
-    { model: 'claude-sonnet-4-6',          label: 'Claude Sonnet 4.6' },
-    { model: 'claude-haiku-4-5-20251001',  label: 'Claude Haiku 4.5' },
-  ],
-  // The fallback set shown until the user curates their own (openrouterChatCatalog).
-  // Led by the current best open-weights tool-calling models (mid-2026), so a
-  // fresh OpenRouter user gets a strong default without curating first.
-  openrouter: [
-    { model: 'z-ai/glm-5.1',          label: 'GLM-5.1 (open · tool-calling)' },
-    { model: 'moonshotai/kimi-k2.6',  label: 'Kimi K2.6 (open)' },
-    { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
-    { model: 'openai/gpt-4o',         label: 'GPT-4o' },
-  ],
-  // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
-  'local-webgpu': [
-    { model: LOCAL_MODEL_ID, label: 'Gemma 4 E2B' },
-  ],
-});
-
-// Live model inventory cache (providers with `liveModels`, i.e. Ollama
-// /api/tags). Short TTL: chat-view mounts call models/options freely, and
-// hammering the local daemon buys nothing. A FAILED probe (daemon down)
-// is cached as null for the same TTL so the picker degrades quietly
-// instead of retry-storming localhost.
-const LIVE_MODELS_TTL_MS = 30_000;
-/** @type {Map<string, { at: number, list: Array<{model:string,label:string}> | null }>} */
-const liveModelsCache = new Map();
-const liveProviderModels = async (/** @type {string} */ name) => {
-  const hit = liveModelsCache.get(name);
-  if (hit && Date.now() - hit.at < LIVE_MODELS_TTL_MS) return hit.list;
-  let list = null;
-  // ollamaHost (issue #104) lets the live inventory fetch a remote daemon's
-  // /api/tags; non-ollama adapters ignore it.
-  try { list = await listProviderModels(name, { safeFetch, ollamaHost: settingsStore.get().ollamaHost }); }
-  catch { list = null; }
-  liveModelsCache.set(name, { at: Date.now(), list });
-  return list;
-};
-
-// OpenRouter's chat catalog = the user's CURATED selection (Settings →
-// Providers), each id mapped to a picker option. why curated and not the live
-// ~300-model list: the gateway has too many models to dump into a chat
-// dropdown. Until the user curates, fall back to the small static set we KNOW
-// resolves, so a fresh OpenRouter user still gets a working picker (no 404).
-const openrouterChatCatalog = () => {
-  const picked = Array.isArray(settingsStore.get().openrouterModels) ? settingsStore.get().openrouterModels : [];
-  const ids = picked.filter((/** @type {any} */ id) => typeof id === 'string' && id.trim()).map((/** @type {any} */ id) => id.trim());
-  if (ids.length === 0) return MODEL_CATALOG.openrouter;
-  return ids.map((/** @type {any} */ id) => ({ model: id, label: id }));
-};
-
-// Live per-model context window, for the dynamic trim trigger. A model's
-// window is effectively constant for its id, so once we learn it we keep it
-// for the LIFETIME of this service worker — no timer, no TTL. The cache is a
-// plain Map checked lazily when a turn needs the value; the MV3 SW's own
-// frequent teardown (idle reclaim wipes module state) is what eventually
-// re-fetches, so a time-based expiry would be redundant theater on top of it.
-//
-// why NON-BLOCKING: the lookup is a network round-trip and the trigger has a
-// correct static-table fallback, so blocking the turn on it would add latency
-// for no correctness gain. A cache MISS returns undefined (the turn uses the
-// table) and kicks off a one-shot background fetch; the live value refines
-// LATER turns — the mechanical-fallback-then-async-refine shape used
-// elsewhere (trim enrichment). We cache only SUCCESSES; a failed/null lookup
-// is left UNCACHED so a transient failure (locked vault, daemon briefly down)
-// is retried next turn instead of sticking.
-/** @type {Map<string, { window: number } | { fetching: true }>} */
-/** @type {Map<string, any>} */ const contextWindowCache = new Map();
-const liveContextWindow = (/** @type {string} */ provider, /** @type {string} */ model) => {
-  if (!provider || !model) return undefined;
-  const key = `${provider}::${model}`;
-  const hit = contextWindowCache.get(key);
-  if (hit && typeof hit.window === 'number') return hit.window; // learned → keep for SW lifetime
-  if (hit && hit.fetching) return undefined;                    // in-flight → don't fire a second
-  contextWindowCache.set(key, { fetching: true });
-  // ollamaHost (issue #104): the live per-model window comes from the daemon's
-  // /api/show, so a remote Ollama needs its host or it would query localhost and
-  // silently fall back to the static table; other adapters ignore it.
-  providerModelContextWindow(provider, model, { getSecret, safeFetch, ollamaHost: settingsStore.get().ollamaHost })
-    .then((w) => {
-      if (typeof w === 'number') contextWindowCache.set(key, { window: w });
-      else contextWindowCache.delete(key); // miss → drop so the next turn retries
-    })
-    .catch(() => contextWindowCache.delete(key));
-  return undefined;
-};
-
-/**
- * Build the per-chat model options + the currently-selected value
- * (`provider::model`). The side panel shows a picker above the composer when
- * there are 2+ options.
- *
- * Two modes:
- *   - FRESH chat (no sessionId, or the session doesn't exist): every
- *     key-configured provider's catalog + the Settings-configured model;
- *     `selected` follows the active provider; `sessionProvider` is null.
- *   - MID-SESSION (sessionId resolves to a session): scoped to THAT session's
- *     provider only (model-only switching — the provider is fixed once a chat
- *     starts); `selected` is the session's current model and is always present
- *     even if it's a custom id; `sessionProvider` names the locked provider.
- *
- * Keyless/live providers (Ollama): the "has a key" gate becomes "the daemon
- * answered" — its real pulled-model inventory is the catalog. OpenRouter uses
- * the curated catalog above.
- *
- * @param {{ sessionId?: string | null }} [opts]
- */
-const buildModelOptions = async ({ sessionId = null } = {}) => {
-  const sess = sessionId ? await sessions.get(sessionId).catch(() => null) : null;
-  const lockProvider = sess?.provider ?? null;
-
-  const options = [];
-  for (const p of listProviders()) {
-    // Mid-session is model-only within the session's provider.
-    if (lockProvider && p.name !== lockProvider) continue;
-    let hasKey = false;
-    if (p.keyless) {
-      hasKey = true;
-    } else {
-      try { hasKey = !!(await vault.getSecret(/** @type {string} */ (p.vaultSecretName))); }
-      catch { hasKey = false; }
-    }
-    // why: when locked to a session whose provider key was since removed we
-    // still surface that provider's models (and the current one) rather than
-    // render an empty picker; the missing-key skip applies to fresh chats only.
-    if (!hasKey && !lockProvider) continue;
-    // The local WebGPU model only appears once downloaded + resident (the
-    // offscreen engine reports `available`); otherwise selecting it would error
-    // on the first turn ("local model not loaded"). Hardware capability is gated
-    // earlier, at download time (Settings → WebGPU models).
-    if (p.name === 'local-webgpu' && !localModelState.available()) continue;
-    let catalog = (/** @type {any} */ (MODEL_CATALOG))[p.name] ?? [{ model: p.defaultModel, label: p.defaultModel }];
-    if (p.name === 'openrouter') catalog = openrouterChatCatalog();
-    if (p.liveModels) {
-      const live = await liveProviderModels(p.name);
-      if (live) catalog = live;
-      else if (!lockProvider) continue; // unreachable → offer nothing, not a guess
-    }
-    for (const c of catalog) {
-      options.push({
-        provider: p.name,
-        providerLabel: p.label,
-        model: c.model,
-        label: c.label,
-        value: `${p.name}::${c.model}`,
-      });
-    }
-    // Append the user's Settings-configured model for this provider if
-    // it's a custom id not already in the catalog.
-    if (settingsStore.get().providerName === p.name && settingsStore.get().providerModel
-        && !options.some((o) => o.value === `${p.name}::${settingsStore.get().providerModel}`)) {
-      options.push({
-        provider: p.name,
-        providerLabel: p.label,
-        model: settingsStore.get().providerModel,
-        label: `${settingsStore.get().providerModel} (custom)`,
-        value: `${p.name}::${settingsStore.get().providerModel}`,
-      });
-    }
-  }
-
-  /** @type {any} */ let selected;
-  let sessionProvider = null;
-  if (sess?.provider) {
-    sessionProvider = sess.provider;
-    selected = `${sess.provider}::${sess.model}`;
-    // Always keep the session's CURRENT model selectable, even if it's a
-    // custom id outside the catalog — otherwise the dropdown would show the
-    // wrong value as selected.
-    if (!options.some((o) => o.value === selected)) {
-      options.push({
-        provider: sess.provider,
-        providerLabel: listProviders().find((p) => p.name === sess.provider)?.label ?? sess.provider,
-        model: sess.model,
-        label: `${sess.model} (current)`,
-        value: selected,
-      });
-    }
-  } else {
-    const active = resolveActiveProvider();
-    selected = `${active.name}::${active.model}`;
-    // If the active selection isn't a usable option (e.g. its provider has
-    // no key), fall back to the first option so the picker shows something
-    // valid.
-    if (!options.some((o) => o.value === selected)) {
-      selected = options[0]?.value ?? selected;
-    }
-  }
-  return { options, selected, sessionProvider };
-};
+// The per-chat model picker's catalog assembly lives in background/model-catalog.js
+// (curated catalog, live Ollama inventory, OpenRouter curated mapping, live
+// context window, buildModelOptions). The factory is invoked further down, after
+// its collaborators (safeFetch, getSecret, sessions) are created.
 
 // The user-configured Ollama host (issue #104). Its exact origin joins the
 // allowlist so safeFetch permits a remote daemon — the loopback default is
@@ -818,6 +637,14 @@ const contacts = createContactsStore({ idb });
 // it via deps. profileState.get() ensures+caches; completeOnboarding refreshes.
 const profileState = makeProfileState({ profiles });
 
+// The per-chat model picker's catalog assembly (background/model-catalog.js).
+// localModelAvailable is a thunk because localModelState is created later.
+const { liveProviderModels, liveContextWindow, buildModelOptions } = makeModelCatalog({
+  listProviders, listProviderModels, providerModelContextWindow,
+  localModelId: LOCAL_MODEL_ID, localModelAvailable: () => localModelState.available(),
+  settingsStore, vault, sessions, resolveActiveProvider, getSecret, safeFetch,
+});
+
 // ---------------------------------------------------------------------------
 // Tool layer
 // ---------------------------------------------------------------------------
@@ -864,7 +691,7 @@ registerTool(loadSkillTool);
 
 // Denylist patterns — loaded once at boot from the seed JSON shipped
 // with the extension. The origin gate (peerd-runtime/tools/gates.js)
-// reads from this; inspect_denylist (the tool) reads from it too.
+// reads from this; inspect kind:'denylist' (the tool) reads from it too.
 // Denylist state lives in a store (background/denylist-store.js): seed + user
 // overlay + the effective list, behind methods so consumers read the LIVE value
 // (.patterns()) instead of a reassigned singleton. The seed FETCH stays here
@@ -1099,18 +926,17 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // the lineage tells the user WHICH manifest excluded the tool.
     toolAllow,
     toolManifestLabel: toolAllow ? manifestLabel(activeSession?.toolManifest) : null,
-    // why: progressive-disclosure state for the exposure gate (which is sync).
-    // ONLY the main turn gates on it; subagents / actors / direct dispatch
-    // hold full tools, so leave it null there (the gate skips the check). The
-    // main turn restamps this per step via refreshTools so an op revealed after
-    // a mid-turn create also passes the gate.
-    instanceState: exposure === 'main' ? await computeMainInstanceState(sessionId) : null,
     session: {
       sessionId: sessionId ?? null,
       // why: the spawn_subagent tool reads ctx.session.depth to compute
       // the child's depth (parent + 1) and enforce maxDepth. Defaults to
       // 0 for legacy sessions written before the field existed.
       depth: activeSession?.depth ?? 0,
+      // why: message_actor reads ctx.session.kind to pick its reply mode
+      // (PR #134): a 'subagent' sender is an EPHEMERAL call-site with no
+      // later turn to wake, so its actor reply is awaited into the tool
+      // result instead of delivered as a re-entry wake.
+      kind: activeSession?.kind ?? 'chat',
     },
     // Plan/Act permission policy input. The persona gate reads
     // permission.mode to enforce Plan's read-only block; the dispatcher
@@ -1126,6 +952,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // ctx strips this back out (it's not in its toolset, so the keyless narrowing
     // removes it).
     messageActor: (/** @type {any} */ req) => actorMessaging.messageActor(req),
+    // why: the script tool's actors surface. The tool registers its run here
+    // (with the dispatch abort signal) BEFORE launching the worker; the
+    // actors/call route derives every pending ask's awaitSignal from it, and
+    // the tool aborts + releases on the way out — one Stop unwinds the fan.
+    scriptRuns,
     // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
     // as a later synthetic turn. subagentTasks/subagentCancel back the
@@ -1162,7 +993,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     jsClient,
     jsRegistry,
     jsTabTracker,
-    // js_run — a HEADLESS sibling: the same sealed worker, hosted in the
+    // script — a HEADLESS sibling: the same sealed worker, hosted in the
     // offscreen doc (no tab). Defined after ensureOffscreen below.
     jsOffscreenClient,
     // read_pdf — PDF text extraction in the offscreen doc (pdf.js needs a
@@ -1195,7 +1026,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); } return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
@@ -1438,6 +1269,9 @@ const spawnSubagentCore = makeSpawnSubagent({
   sessions,
   runUserTurn,
   callModel: /** @type {any} */ (callModel),
+  // why the closure: contextSnapshots is declared further down the module —
+  // defer the reference to call time (the postChatNote late-dep pattern).
+  recordModelCall: (/** @type {Record<string, any>} */ call) => contextSnapshots.record(call),
   getSecret,
   safeFetch,
   appendAudit: /** @type {any} */ (auditLog.append),
@@ -1447,11 +1281,45 @@ const spawnSubagentCore = makeSpawnSubagent({
   // boot — settings load async and can change over the SW's life. This
   renderSystemPrompt: (opts) => renderSystemPrompt(opts),
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+  // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
+  // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
+  // later in this module (after the agent loop); only called at spawn time.
+  turnSlots: {
+    claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
+    stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
+  },
+  // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
+  // in-SW loop — the SAME substrate a bound actor uses (a subagent is an ephemeral
+  // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
+  // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
+  // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
+  // would see the TDZ, so we only DEREFERENCE at call time. null on Firefox / when
+  // offscreen is unavailable → the unavailable sentinel so spawn.js falls back to the
+  // in-SW loop. The key never enters the worker; the model call and every tool call
+  // relay back to SW-gated routes. Adapt the child job shape (sessionId/task/tools) to
+  // the actor run shape (actorSessionId/message/tools); the 'actor/tool-dispatch' route
+  // rebuilds the child's restricted ctx from the persisted grantedTools (never the
+  // worker's args). Tools default to [] (a pure-reasoning child that never dispatches).
+  runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
+    ? actorClient.run({
+      actorSessionId: job.sessionId, message: job.task, systemPrompt: job.systemPrompt,
+      provider: job.provider, model: job.model, depth: job.depth,
+      maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
+      tools: job.tools ?? [],
+    }, opts)
+    : Promise.resolve({ ok: false, error: 'child offscreen unavailable' }),
+  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
 // wire streaming; an explicit onEvent in `req` still wins.
 const spawnSubagent = (/** @type {any} */ req) => spawnSubagentCore({ onEvent: forwardSubagentEvent, ...req });
+// PR #134 phase 5: the live-children registry riding on the spawn orchestrator —
+// agent/stop and subagent_cancel walk it to end whole delegation subtrees.
+const subagentLifecycle = {
+  stopSubtree: (/** @type {string} */ sessionId) => spawnSubagentCore.stopSubtree(sessionId),
+  liveChildrenOf: (/** @type {string} */ sessionId) => spawnSubagentCore.liveChildrenOf(sessionId),
+};
 
 // ---------------------------------------------------------------------------
 // Async subagents (DESIGN-11) — orchestration in peerd-runtime/subagent.
@@ -1502,7 +1370,12 @@ const asyncSubagentsOrchestrator = makeAsyncSubagents({
   turnSlots: {
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
+    // PR #134: subagent_cancel aborts the child's live slot (children run
+    // under slots now), instead of only dropping the result.
+    stop: (sessionId) => turnSlots.stop(sessionId),
   },
+  // PR #134: a cancel ends the child's own descendants too.
+  stopSubtree: (sessionId) => spawnSubagentCore.stopSubtree(sessionId),
   // async-subagent wakes are NOT trusted to delegate (a parent reacting to a
   // subagent result stays attended-gated for message_actor, like today) —
   // so this reenter deliberately does not forward trusted.
@@ -1682,24 +1555,6 @@ const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker })
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
 const appTabTracker = createAppTabTracker({ announce: trackerNote(appRegistry, 'App') });
 const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
-
-// Progressive disclosure: the per-session engine-instance snapshot the main
-// agent's tool exposure keys on. { webvm, notebook, app } booleans = does THIS
-// chat have a current instance of that kind (the secondary ops default to it).
-// The create paths (vm_create/vm_boot, js_create/js_notebook, app_create/app_open)
-// set the session default, so a kind flips true the moment one is made — and the
-// main turn's per-step refresh reveals that kind's ops on the next step. Each
-// query self-heals a stale default; a failure degrades to false (fail-closed:
-// the ops stay hidden rather than wrongly exposed).
-const computeMainInstanceState = async (/** @type {string} */ sid) => {
-  if (!sid) return { webvm: false, notebook: false, app: false };
-  const [webvm, notebook, app] = await Promise.all([
-    vmRegistry.getDefaultForSession(sid).catch(() => null),
-    jsRegistry.getDefaultForSession(sid).catch(() => null),
-    appRegistry.getDefaultForSession(sid).catch(() => null),
-  ]);
-  return { webvm: !!webvm, notebook: !!notebook, app: !!app };
-};
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
 // earlier. Monotonic per session, SW-lifetime (a cold start resets it; the next
@@ -1900,17 +1755,55 @@ const ensureOffscreen = async () => {
 // why gate on offscreen availability: Firefox has no chrome.offscreen, so the
 // offscreen-hosted job/pdf workers can never run there. Injecting null (not a
 // live client) makes the tools' own `if (!client) return *_unavailable` guard
-// trip — so js_run/read_pdf report a clean "not supported in this build" signal
+// trip — so script/read_pdf report a clean "not supported in this build" signal
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
 const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
 
-// The headless-JS client (the js_run tool). execHeadless ensures the offscreen
+// The headless-JS client (the script tool). execHeadless ensures the offscreen
 // doc, then dispatches a 'job/run' message to job-runner.js hosted there.
 // Defined after ensureOffscreen; buildToolContext reads it lazily at dispatch.
 const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// Live actors-enabled script runs (background/script-runs.js): Stop → abort
+// pending asks + terminate the worker. Declared here (before buildToolContext
+// consumers run) and read by the actors/call route below.
+const scriptRuns = createScriptRunRegistry();
+
+// The context inspector's capture ring — "what did the model see" per
+// session, SW-memory only. Fed from the two seams that together cover
+// every model call (the turn driver's failover wrapper, the actor relay
+// route below); read by the debug-bundle route and the inspector view.
+const contextSnapshots = createContextSnapshots();
+
+// The heap split: the ONE offscreen agent-loop client. It runs every non-
+// orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
+// bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
+// 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
+// and dispatches there — the worker holds no
+// key, no engine clients, no chrome.*. Null when offscreen is unavailable.
+const actorClient = offscreenAvailable ? makeOffscreenActorClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+  callModel: /** @type {any} */ (callModel),
+  getSecret,
+  safeFetch,
+  sessions,
+  buildToolContext,
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  pinActorCall,
+  // Phase 4: rebuild a subagent's narrowed-general tool ctx SW-side from its persisted
+  // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.
+  restrictCtxCapabilities,
+  // Phase 3: a tab-backed web actor's currently-owned tab, read per dispatch (lazy —
+  // webActorTabBindings is defined later, called at turn time). tabFor returns the
+  // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
+  ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
+  EXPOSURE_ACTOR,
+  recordModelCall: contextSnapshots.record,
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -2019,6 +1912,15 @@ const closeSidePanel = async () => {
   }
 };
 
+// How peerd shows up in the tab strip (background/tab-affordances.js): the
+// agent-tab card, the "pull peerd in" web-tab hint, and the toolbar-icon /
+// Alt+Shift+P front door. It owns all the tab-strip state + listeners; the SW
+// calls noteAgentTab/scheduleWebTabHint/broadcastAgentTab/showWebTabHint from
+// its tool-context + port wiring, and setTabAnchor from the actor-turn start.
+const {
+  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen,
+} = makeTabAffordances({ browser, uiPorts, denylistStore, closeSidePanel });
+
 // Confirmation coordinator. The dispatcher's async confirmation step
 // calls ctx.confirm(prompt); this pushes a 'confirm/request' to the side
 // panel and resolves when the panel posts back 'confirm/answer'.
@@ -2078,15 +1980,12 @@ const confirmAction = async (prompt) => {
   if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
     return 'yes_once';
   }
-  // why scope the web-write grant by host: the prompt names a SPECIFIC host
-  // ("…send a POST request to {host}?"), so "approve for this session" must mean
-  // THIS host this session — not a blanket pass for non-GET egress to any host
-  // for the rest of the session. The prompt already carries origins:[host]; fold
-  // it into the grant key. Every other tool keys by its (already host-specific
-  // or host-agnostic-by-design) tool name.
-  const grantKey = prompt.tool === WEB_WRITE_CONFIRM_KEY
-    ? `${WEB_WRITE_CONFIRM_KEY}|${(Array.isArray(prompt.origins) && prompt.origins[0]) || ''}`
-    : prompt.tool;
+  // R5 (origin-bound grants): "approve for this session" means this tool ON
+  // this origin — the dispatcher computes prompt.origins (the pinned tab's
+  // origin for DOM tools, the target host for web writes), and the grant key
+  // folds it in. Approving `click` on site A no longer covers site B. Tools
+  // with no origin surface keep the bare tool key (confirm-grant-key.js).
+  const grantKey = confirmGrantKey(prompt);
   // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
   // strictly PER-TURN (an actor can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next
@@ -2104,8 +2003,12 @@ const confirmAction = async (prompt) => {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
   }
-  // Ephemeral: an actor's yes_session approves THIS call only (no standing grant).
-  return ephemeral && answer === 'yes_session' ? 'yes_once' : answer;
+  // Ephemeral: an actor's yes_session approves THIS call only (no standing grant),
+  // EXCEPT a2a_contact — the sanctioned exception (an explicit first-contact
+  // allowlist decision, the peer did shown to the user), whose raw answer survives
+  // so a2aResolveConsent can honor "Allow for session" vs "Allow once". Decision is
+  // the pure downgradesActorConfirm (background/a2a-consent.js), unit-tested.
+  return downgradesActorConfirm(prompt.tool, ephemeral, answer) ? 'yes_once' : answer;
 };
 
 // Per-SW "current active session" cache (background/session-state.js), behind a
@@ -2436,7 +2339,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
   skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
-  computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
+  filterByDwebActive, filterByDwebEnabled,
   filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
   filterByGoalActive, goalActiveFor: (/** @type {string} */ sid) => goalRunner?.isActive(sid) ?? false,
   dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
@@ -2444,6 +2347,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  recordModelCall: contextSnapshots.record,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -2497,15 +2401,9 @@ const ACTOR_REGISTRY_BY_PREFIX = {
 // promise collapses them to ONE mint; the entry clears when it settles. why a
 // shared map: engine ids carry a prefix and web keys are `web:<tabId>`, so they
 // never collide. @type {Map<string, Promise<string>>} */
-const mintInFlight = new Map();
-/** @param {string} key @param {() => Promise<string>} fn @returns {Promise<string>} */
-const mintOnce = (key, fn) => {
-  const existing = mintInFlight.get(key);
-  if (existing) return existing;
-  const p = (async () => { try { return await fn(); } finally { mintInFlight.delete(key); } })();
-  mintInFlight.set(key, p);
-  return p;
-};
+// Single-flight dedup for lazy actor minting (background/mint-once.js): two
+// message_actor calls racing to the same instance collapse onto ONE mint.
+const { mintOnce } = makeMintOnce();
 
 // Start the actor process on demand: lazily mint an actor session for an
 // instance (on the first message_actor). Inherits the spawning chat's RESOLVED
@@ -2553,15 +2451,22 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // session storage (ephemeral by design — on a cold miss we re-mint against the
 // live tab, whose DOM re-derives state). The address the orchestrator uses is the
 // tabId AS A STRING (the actor's instanceId).
+// A registry's chrome.storage.session persistence: the persist thunk + the
+// best-effort boot rehydrate, shared by the three actor registries below (a
+// missing/garbage stored value just starts empty). Ephemeral by design — every
+// one of these is a routing cache whose durable truth lives on the session record.
+const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
+  () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
+const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) => {
+  Promise.resolve(sessionCache.sessionGet(key))
+    .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
+    .catch(() => {});
+};
+
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
-const persistWebBindings = () => {
-  sessionCache.sessionSet(WEB_BINDINGS_KEY, webActorTabBindings.entries()).catch(() => {});
-};
-// Rehydrate on SW boot (best-effort; a missing/garbage value just starts empty).
-Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
-  .then((e) => { if (Array.isArray(e)) webActorTabBindings.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistWebBindings = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -2570,12 +2475,8 @@ Promise.resolve(sessionCache.sessionGet(WEB_BINDINGS_KEY))
 // the tab bindings — ephemeral is fine (re-mint on loss).
 const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
-const persistWebActors = () => {
-  sessionCache.sessionSet(WEB_ACTOR_KEY, webActorRegistry.entries()).catch(() => {});
-};
-Promise.resolve(sessionCache.sessionGet(WEB_ACTOR_KEY))
-  .then((e) => { if (Array.isArray(e)) webActorRegistry.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
+hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
 // PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
 // web actor makes inside its sealed worker rides here (offscreen job-runner →
@@ -2647,12 +2548,8 @@ const pageCallRoute = {
 // no unbounded growth + no cleanup hook needed) while the durable session is the truth.
 const apiActorBindings = makeApiActorBindings();
 const API_ACTOR_KEY = 'apiActorBindings';
-const persistApiActors = () => {
-  sessionCache.sessionSet(API_ACTOR_KEY, apiActorBindings.entries()).catch(() => {});
-};
-Promise.resolve(sessionCache.sessionGet(API_ACTOR_KEY))
-  .then((e) => { if (Array.isArray(e)) apiActorBindings.load(/** @type {any} */ (e)); })
-  .catch(() => {});
+const persistApiActors = persistRegistry(API_ACTOR_KEY, apiActorBindings);
+hydrateRegistry(API_ACTOR_KEY, apiActorBindings);
 
 // DESIGN-18 P2 — the API-integration discovery surface (injected as ctx.listApiIntegrations,
 // the integration rows of actor_list). The addressable set is the chat's FORMED integrations (origins it
@@ -2720,8 +2617,8 @@ const actorMailbox = {
 // inherited field is a one-site edit, not two that can silently drift.
 // why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
-/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api' }} o */
-const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb' }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web' }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -2738,19 +2635,23 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing }) => {
     kind: 'actor',
     ...(ownerChatId ? { parentSessionId: ownerChatId } : {}),
     instanceId,
-    actorType: 'web',
+    actorType,
     // DESIGN-18: 'api' marks a fetch-only origin actor (no tab); absent = tab backing.
     ...(backing ? { backing } : {}),
-    ...(ownerChat?.provider ? { provider: ownerChat.provider } : {}),
+    // why actorProviderName (not just ownerChat?.provider): a GLOBAL actor (the
+    // dweb actor) has NO owner chat — without this fallback its session carries
+    // provider: undefined and every model call dies before the wire.
+    ...(actorProviderName ? { provider: actorProviderName } : {}),
     // '' from resolveRunnerModel means "inherit the chat model" — fall back to the
-    // owner chat's model so the empty-pin semantics + the session-create default hold.
-    ...((webActorModel || ownerChat?.model) ? { model: webActorModel || ownerChat?.model } : {}),
+    // owner chat's model, then the active provider's model (the global-actor case).
+    ...((webActorModel || ownerChat?.model || resolveActiveProvider().model)
+      ? { model: webActorModel || ownerChat?.model || resolveActiveProvider().model } : {}),
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
   });
   bind(created.sessionId);
-  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: 'web', backing: backing ?? 'tab' } }).catch(() => {});
+  auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: actorType, backing: backing ?? 'tab' } }).catch(() => {});
   return created.sessionId;
 };
 
@@ -2835,6 +2736,434 @@ const mintApiActor = async (/** @type {string} */ ownerChatId, /** @type {string
   bind: (sessionId) => { apiActorBindings.bind(ownerChatId, origin, sessionId); persistApiActors(); },
 });
 
+// The DWEB ACTOR — the mesh operator: a GLOBAL singleton (one per profile, not
+// per chat), addressed by the literal handle 'dweb'. Its session is the durable
+// truth (IDB — its peer/publisher ledger is its memory); the binding here is
+// just a routing cache (chrome.storage.session), so on a binding miss we
+// RECONNECT to the durable session via findActorSession before minting — the
+// API-actor pattern, minus the per-chat scoping. Opt-in: resolvable only when
+// the network is on AND the user turned the agent on (dwebAgentEnabled).
+const DWEB_ACTOR_KEY = 'dwebActorBinding';
+let dwebActorSessionId = /** @type {string | null} */ (null);
+Promise.resolve(sessionCache.sessionGet(DWEB_ACTOR_KEY))
+  .then((v) => { if (typeof v === 'string') dwebActorSessionId = v; })
+  .catch(() => {});
+const bindDwebActor = (/** @type {string} */ sessionId) => {
+  dwebActorSessionId = sessionId;
+  sessionCache.sessionSet(DWEB_ACTOR_KEY, sessionId).catch(() => {});
+};
+const dwebAgentOn = () => DWEB_ENABLED
+  && !!settingsStore.get().dwebEnabled && !!settingsStore.get().dwebAgentEnabled;
+
+// Agent-inbox room membership. IDEMPOTENT: maybeStartBaseNetwork fires on every
+// unlock/resume, and each raw join op ref-counts the room (dweb-base ensureRoom)
+// — so without this guard repeated unlocks leak refs + presence beacons. The
+// flag resets when the base host tears down (a fresh SW re-joins cleanly).
+let dwebAgentRoomJoined = false;
+const joinDwebAgentInbox = async () => {
+  if (!dwebAgentOn() || dwebAgentRoomJoined) return;
+  const r = /** @type {any} */ (await browser.runtime.sendMessage({
+    type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+  }).catch(() => null));
+  if (r?.ok) { dwebAgentRoomJoined = true; console.log('[sw] dweb agent inbox joined'); }
+};
+const leaveDwebAgentInbox = async () => {
+  if (!dwebAgentRoomJoined) return;
+  dwebAgentRoomJoined = false;
+  await browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'leave' }).catch(() => {});
+  console.log('[sw] dweb agent inbox left');
+};
+// React to the toggle: joining/leaving the inbox when the user flips the agent
+// on/off, so a disable withdraws presence instead of lingering until SW restart.
+// Named onSettingsChanged so it wires to the settings route by shorthand (the
+// deps-wiring meta-test forbids key:value mis-wires).
+const onSettingsChanged = () => {
+  if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
+  else leaveDwebAgentInbox().catch(() => {});
+};
+// The base host tore down (master OFF) → every room closed, incl. the inbox, so
+// clear the SW-side membership flag for a clean re-join on the next start.
+const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
+const mintDwebActor = async () => {
+  // A GLOBAL actor has no owner chat to inherit a provider from, and the sync
+  // resolveActiveProvider mintWebSession falls back to returns 'anthropic'
+  // UNCONDITIONALLY (never checking key/daemon readiness) — so an Ollama-only or
+  // just-keyed-OpenRouter user who enables the agent before their first chat
+  // would get a keyless-anthropic session that fails every wake. ensureActiveProvider
+  // (async) picks + persists the first USABLE provider, exactly as a fresh chat
+  // does; after it runs, mintWebSession's sync fallback reads the good providerName.
+  await ensureActiveProvider().catch(() => {});
+  return mintWebSession({
+    instanceId: 'dweb',
+    ownerChatId: null,          // global — no parent chat; replies target the SENDER
+    actorType: 'dweb',
+    bind: bindDwebActor,
+  });
+};
+const resolveDwebActor = async () => {
+  if (!dwebAgentOn()) return null;
+  let actorSessionId = dwebActorSessionId;
+  if (actorSessionId && !(await sessions.get(actorSessionId))) actorSessionId = null;
+  if (!actorSessionId) {
+    // binding cache miss (SW/browser restart) → reconnect to the durable session
+    const durable = await sessions.findActorSession({ instanceId: 'dweb', actorType: 'dweb' });
+    if (durable) { bindDwebActor(durable); actorSessionId = durable; }
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce('dweb-actor', () => mintDwebActor());
+  return { instanceId: 'dweb', kind: 'dweb', actorSessionId };
+};
+
+// ── The dweb agent's INBOX ──────────────────────────────────────────────────
+// Inbound mesh messages for THIS browser's agent arrive on the reserved agent
+// room (a normal sub-protocol room — no new transport) and reach the SW as the
+// same dweb/base-room/event push the dwapp bridge uses; we consume only our
+// roomId. Every wake is INBOUND (synthetic && !trusted): the actor may observe,
+// use its own dweb tools (ledger, block), and report — it can never delegate.
+// why rate caps HERE (not in the actor): a cap must bind before a model call
+// spends money; the actor's loop is the thing being protected.
+const DWEB_AGENT_ROOM = 'peerd-agent';
+const DWEB_AGENT_NO_REPORT = 'NO_REPORT';
+// Inbound wake rate cap (background/dweb-inbound-rate-cap.js): 3/min per did +
+// 30/hour global, bound BEFORE any model call so a Sybil peer can't drain budget.
+const { allow: dwebInboundAllowed } = makeDwebInboundRateCap();
+
+// ── A2A: the agent-to-agent mesh dispatch (the a2a_run code surface) ─────────
+// ONE dispatch instance (state: pending asks) wired to real mesh IO on the
+// peerd-agent room. The a2a/call route (from the sealed a2a_run worker, relayed)
+// translates the mesh call, resolves per-did CONSENT for signing ops, and runs
+// it here. handleInbound (below) feeds inbound DMs in so a reply resolves a
+// pending ask. why a SW singleton: an ask sent from a worker run must still
+// resolve when the reply lands AFTER that op returned — the pending map lives here.
+const A2A_APPROVED_KEY = 'a2aApprovedDids';
+// The consent target for publishCard: it broadcasts the user's OWN card (no peer
+// did), so it can't key on a peer. A fixed sentinel gives it its own allowlist
+// entry — approve "advertise my card" once, revoke it the same way as a peer.
+const A2A_PUBLISH_CARD_KEY = 'self:publishCard';
+/** @type {Set<string>} dids (+ the publishCard sentinel) the user has cleared. */
+const a2aApprovedDids = new Set();
+Promise.resolve(sessionCache.sessionGet(A2A_APPROVED_KEY))
+  .then((v) => { if (Array.isArray(v)) for (const d of v) a2aApprovedDids.add(d); })
+  .catch(() => {});
+const a2aApprove = (/** @type {string} */ did) => {
+  a2aApprovedDids.add(did);
+  sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
+};
+// Revoke a first-contact grant (wired into dweb_block): blocking a peer must also
+// withdraw its permission to be MESSAGED, else a blocked did stays talk-approved.
+// This is the escape hatch for the grant — a peer approval is not permanent.
+const a2aRevoke = (/** @type {string} */ did) => {
+  if (!a2aApprovedDids.delete(did)) return;
+  sessionCache.sessionSet(A2A_APPROVED_KEY, [...a2aApprovedDids]).catch(() => {});
+};
+// FIRST-CONTACT consent = a revocable ALLOWLIST decision (who my agent may talk
+// to / that it may advertise me), NOT a per-action confirm. why it persists: the
+// user is shown the exact target and deliberately clears it, like adding a
+// contact; it lives in chrome.storage.session (cleared on browser restart) and is
+// revocable via dweb_block. Already-cleared → silent; else pop the confirm.
+const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message') => {
+  if (a2aApprovedDids.has(target)) return true;
+  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] });
+  // "Allow for session" adds the peer to the revocable allowlist (silent after —
+  // the intended contact-add); "Allow once" authorizes THIS call only and is NOT
+  // persisted, so a one-time click can't become a standing signing grant. The
+  // { ok, persist } split is the pure a2aConsentOutcome (background/a2a-consent.js).
+  const { ok, persist } = a2aConsentOutcome(answer);
+  if (persist) a2aApprove(target);
+  auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok, standing: persist } }).catch(() => {});
+  return ok;
+};
+const meshHostRoom = (/** @type {object} */ payload) =>
+  browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+// Standing peer conversations (conversation-registry.js): the SW-side thread
+// store, sibling to meshDispatch's pending-ask map. converse/say open + extend
+// threads; an inbound turn carrying a known convId continues one (waking the
+// actor with prior turns as context) and the actor's answer goes BACK to the
+// peer under PER-CONVERSATION reply consent.
+const conversationRegistry = createConversationRegistry();
+const meshDispatch = makeMeshDispatch({
+  sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
+  listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
+  fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
+  publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
+  conversations: conversationRegistry,
+});
+
+// Per-CONVERSATION reply consent (the owner-chosen gate for the new outbound
+// edge). Replying to a peer on a standing thread needs the user's ok ONCE per
+// thread; after that it flows for that thread's life, and dweb_block revokes it
+// (closeDid drops the thread). Mirrors a2a first-contact, keyed by convId.
+const resolveReplyConsent = async (/** @type {string} */ convId, /** @type {string} */ did, /** @type {string} */ sessionId) => {
+  if (conversationRegistry.hasReplyConsent(convId)) return true;
+  const answer = await confirmAction({ tool: 'a2a_reply', sessionId, origins: [did] });
+  const granted = answer === 'yes_once' || answer === 'yes_session';
+  // "Allow for session" grants the thread standing reply consent; "Allow once"
+  // permits THIS reply only (no registry grant), so a one-off can't become a
+  // standing back-channel.
+  if (answer === 'yes_session') conversationRegistry.grantReplyConsent(convId);
+  auditLog.append({ type: 'a2a_reply_consent', details: { did, convId, approved: granted, standing: answer === 'yes_session' } }).catch(() => {});
+  return granted;
+};
+
+// The actors/call route — invoked by the offscreen relay for each `actors.*`
+// call an actors-enabled `script` run makes. ownerSessionId / ownerToolUseId /
+// runId are TRUSTED (job params, minted by the script tool SW-side); the
+// worker's own words buy nothing. Every delegation runs the FULL messageActor
+// gate chain (sender gate, rate caps, duplicate-intent, oneShot sandbox-only,
+// audit) — this route adds only translation, the per-ask timeout, the Stop
+// chain, and the live per-op feed the side panel renders on the script card.
+const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, seq?: number }} */ msg) => {
+  const pushOp = (/** @type {string} */ phase, /** @type {object} */ extra = {}) => {
+    try {
+      uiPorts.broadcast({
+        type: 'script/op',
+        sessionId: msg.ownerSessionId, toolUseId: msg.ownerToolUseId ?? null,
+        seq: msg.seq ?? 0, method: msg.method ?? '?', phase, ...extra,
+      });
+    } catch { /* panel closed — the trace in the result still records it */ }
+  };
+  try {
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    // v1 is the ORCHESTRATOR's surface only: a top-level chat session. An
+    // actor must never delegate (the recursion rule message_actor already
+    // enforces), and a subagent's channel is its own message_actor grant.
+    if (!owner || owner.kind === 'actor' || owner.kind === 'subagent') {
+      return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
+    }
+    const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
+    if (op === 'list') {
+      // The roster through the normal tool gates — actor_list with the owner's
+      // main ctx, so exposure/manifest rules apply exactly as a direct call.
+      const listCtx = await buildToolContext({ exposure: 'main', sessionId: msg.ownerSessionId });
+      const r = await dispatchToolCall({ id: `${msg.runId ?? 'script'}-list-${msg.seq ?? 0}`, name: 'actor_list', args: {} }, /** @type {any} */ (listCtx));
+      return r?.ok
+        ? { ok: true, value: shapeActorsResult('list', { ok: true, roster: /** @type {any} */ (r).content }) }
+        : { ok: false, error: /** @type {any} */ (r)?.error ?? 'actor_list failed' };
+    }
+    const target = /** @type {{ to: string, goal: string, timeoutMs?: number, oneShot?: boolean }} */ (args);
+    // The UI preview: a chained goal can carry actor/web-derived bytes, so
+    // collapse whitespace (no line-shaping) and cap — it renders as plain
+    // text (Mithril escapes), same posture as the sanitized actor names.
+    const goalPreview = target.goal.replace(/\s+/g, ' ').slice(0, 60);
+    pushOp('sent', { to: target.to, goalPreview });
+    // The SW-side op mirror: survives an offscreen crash, so the script tool's
+    // failure path can still show the chain of events (script-runs.js).
+    const mirror = (/** @type {Record<string, unknown>} */ opRecord) => {
+      if (typeof msg.runId === 'string') scriptRuns.recordOp(msg.runId, { seq: msg.seq ?? 0, method: msg.method, to: target.to, ...opRecord });
+    };
+    if (op === 'send') {
+      const r = await actorMessaging.messageActor({
+        to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
+        toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
+      });
+      pushOp(r.ok ? 'handed-off' : 'failed', r.ok ? {} : { error: 'refused' });
+      mirror({ ok: r.ok === true, ms: 0, ...(r.ok ? {} : { error: r.error }) });
+      return r.ok
+        ? { ok: true, value: shapeActorsResult('send', { ok: true }) }
+        : { ok: false, error: r.error ?? 'send failed' };
+    }
+    // ask — awaitReply, raced against the per-ask timeout AND the run's Stop
+    // signal (script-runs.js). Either abort cancels the underlying actor turn.
+    const askTimeoutMs = target.timeoutMs ?? ACTORS_ASK_DEFAULT_TIMEOUT_MS;
+    const runSignal = typeof msg.runId === 'string' ? scriptRuns.signalFor(msg.runId) : null;
+    const askController = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; askController.abort(); }, askTimeoutMs);
+    const onRunAbort = () => askController.abort();
+    if (runSignal) {
+      if (runSignal.aborted) askController.abort();
+      else runSignal.addEventListener('abort', onRunAbort, { once: true });
+    }
+    try {
+      const t0 = Date.now();
+      const r = await actorMessaging.messageActor({
+        to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
+        toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true, via: 'script',
+        // bareReply: the reply resolves into CODE — the fence is re-applied at
+        // the script-result boundary (the one model-facing seam), so the raw
+        // body is what plumbing composes with (no fence markup in goals).
+        awaitReply: true, bareReply: true, awaitSignal: askController.signal,
+      });
+      const ms = Date.now() - t0;
+      // The timeout / Stop-abort / system-refusal / actor-failure fork is the
+      // pure askOutcome (actors-api.js) — provable without this route.
+      const outcome = askOutcome(/** @type {any} */ (r), {
+        timedOut, aborted: !timedOut && askController.signal.aborted,
+        timeoutMs: askTimeoutMs, to: target.to,
+      });
+      if (!outcome.ok) {
+        pushOp('failed', { ms, error: timedOut ? 'timeout' : 'refused' });
+        mirror({ ok: false, ms, error: outcome.error });
+        return { ok: false, error: outcome.error };
+      }
+      pushOp('replied', { ms, ...(outcome.failed ? { failed: true } : {}) });
+      mirror({ ok: true, ms, ...(outcome.failed ? { actorFailed: true } : {}) });
+      return { ok: true, value: shapeActorsResult('ask', { ok: true, reply: outcome.reply, failed: outcome.failed }) };
+    } finally {
+      clearTimeout(timer);
+      if (runSignal) { try { runSignal.removeEventListener?.('abort', onRunAbort); } catch { /* stub */ } }
+    }
+  } catch (e) {
+    // A throw after pushOp('sent') would otherwise leave the live-feed line
+    // pulsing 'working…' forever — settle it, then report.
+    pushOp('failed', { error: 'error' });
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
+// The a2a/call route — invoked by the offscreen relay for each mesh call the
+// a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
+// THE dweb actor before touching the mesh, translate + gate + dispatch.
+const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string }} */ msg) => {
+  try {
+    if (!dwebAgentOn()) return { ok: false, error: 'a2a: the dweb agent is off' };
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'dweb') {
+      return { ok: false, error: 'a2a: not the dweb actor' };
+    }
+    const { op, args, signs } = meshCallToOp({ method: msg.method, args: msg.args });
+    // Every signing op needs a cleared CONSENT TARGET before it emits onto the
+    // mesh as the user. Per-peer ops (ask/send) key on the peer's did; publishCard
+    // has NO peer — it broadcasts the user's own card — so it keys on a fixed
+    // sentinel. Fail CLOSED: an op with signs=true and no resolvable target, or a
+    // declined prompt, is refused here (the dispatch's did-gate can't see the
+    // no-did publishCard, so enforcement must land in this route).
+    if (signs) {
+      // Per-peer ops key on the peer's did; publishCard broadcasts the user's
+      // own card (no peer) so it keys on a sentinel; `say` carries only a convId,
+      // so resolve its thread's did — proactively continuing a thread is still
+      // messaging that peer and needs the same cleared target.
+      const consentTarget = op === 'publishCard'
+        ? A2A_PUBLISH_CARD_KEY
+        : op === 'say'
+          ? conversationRegistry.didFor(/** @type {{ convId?: string }} */ (args).convId ?? '')
+          : /** @type {{ did?: string }} */ (args).did;
+      if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
+      if (!a2aApprovedDids.has(consentTarget)) {
+        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
+        if (!approved) return { ok: false, error: `a2a: the user declined ${op} to ${consentTarget}` };
+      }
+    }
+    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did) });
+    return { ok: true, value: shapeMeshResult(msg.method ?? '', opResult) };
+  } catch (e) {
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
+const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
+  if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
+  const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
+  // A2A routing FIRST: an inbound a2a REPLY resolves a pending ask and is
+  // consumed (never a wake); an a2a ask/tell falls through to the fenced wake
+  // below (the actor sees a peer's request). A non-a2a DM also falls through.
+  const routed = meshDispatch.handleInbound(did, evt?.data);
+  if (routed.consumed) return;
+  if (!dwebInboundAllowed(did)) {
+    auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
+    return;
+  }
+  // Standing conversation? An inbound ask/tell carrying a convId continues a
+  // thread: adopt it (a convId is a bearer token — adopt() rejects a foreign
+  // did), record the peer's turn, and later reply BACK to the peer instead of
+  // only noting the user. deliver is the pure handleInbound output.
+  const deliver = routed.deliver;
+  // Cap the wire convId (a peer controls it; an unbounded key is a memory sink).
+  const rawConvId = typeof deliver?.convId === 'string' ? deliver.convId : null;
+  const convId = rawConvId && rawConvId.length <= 128 ? rawConvId : null;
+  // ADOPT BEFORE the gate, and only record the peer turn when the thread is
+  // OURS to extend. adopt() binds convId→did (rejecting a foreign did), so a
+  // fresh thread is owned by this sender and record() extends it; a convId
+  // owned by ANOTHER did is refused here — record() has no did check of its
+  // own, so this is where the bearer-token invariant is enforced for inbound.
+  let ownsThread = false;
+  if (convId && deliver) {
+    conversationRegistry.adopt(convId, did);
+    ownsThread = conversationRegistry.ownedBy(convId, did);
+    if (ownsThread) conversationRegistry.record(convId, 'peer', deliver.message);
+  }
+  // Reply back only on an OWNED ask thread — computed AFTER adopt so a peer's
+  // first converse turn (a fresh thread) can still be answered.
+  const canReplyToPeer = ownsThread && deliver?.kind === 'ask';
+  const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
+  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
+  (async () => {
+    const actor = await resolveDwebActor();
+    if (!actor) return;
+    const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
+    // On a standing thread, hand the actor the recent turns (fenced — they carry
+    // peer bytes) so it answers in context, and steer it to reply to the PEER.
+    // Thread context only for a thread WE own (ownsThread) — a foreign convId
+    // must not pull another peer's turns into this wake.
+    const priorTurns = ownsThread ? conversationRegistry.turnsFor(/** @type {string} */ (convId)).slice(0, -1) : [];
+    const threadContext = priorTurns.length
+      ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurns.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
+      : '';
+    const wake = canReplyToPeer
+      ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
+      : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+    turnSlots.runWhenIdle(actor.actorSessionId, () => {
+      (async () => {
+        const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
+        // HEAP ISOLATION: the inbound wake feeds LIVE untrusted peer bytes to the
+        // actor's reasoning, so it MUST run in the offscreen keyless worker like
+        // every other actor turn — never in-SW alongside the vault DK. Mirror the
+        // message_actor path: offscreen first, fall back to the in-SW driver only
+        // where offscreen is unavailable (Firefox). runActorTurnOffscreen claims
+        // the slot itself; we're already inside runWhenIdle, so no double-claim.
+        const off = await runActorTurnOffscreen({
+          actorSessionId: actor.actorSessionId, message: wake,
+          instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
+        });
+        if (!off) {
+          // INBOUND: synthetic + NOT trusted — the sender gate refuses any delegation
+          // from this turn; the tier gate holds it to the dweb toolset.
+          await runAgentTurn({ sessionId: actor.actorSessionId, userText: wake, synthetic: true, trusted: false });
+        }
+        const s = await sessions.get(actor.actorSessionId);
+        const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) })) ?? '';
+        // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
+        // here by the NO_REPORT convention — silence costs the user nothing.
+        if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+        // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
+        // by per-conversation reply consent (the owner's chosen gate for this new
+        // outbound edge). On grant, record the self turn and send the mesh reply;
+        // a decline falls through to the user note so the answer isn't lost.
+        if (canReplyToPeer) {
+          const cid = /** @type {string} */ (convId);
+          const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
+          if (consented) {
+            conversationRegistry.record(cid, 'self', note);
+            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
+            auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
+            return;
+          }
+        }
+        const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+        if (!active) return;
+        const lead = 'Your dweb agent flagged inbound mesh activity:';
+        const userText = `${lead}\n\n${wrapUntrusted({ origin: 'dweb', tool: 'message_actor', body: note })}`;
+        // runWhenIdle on the ACTIVE chat — NEVER steer-abort the user's live turn
+        // (DECISIONS #20 work-theft; the deliver() path guards the same way). The
+        // note is a fenced, untrusted-derived summary, so trusted:false — a mesh
+        // event must not hand the orchestrator delegation authority.
+        turnSlots.runWhenIdle(active, () => {
+          runAgentTurn({
+            sessionId: active, userText, synthetic: true, trusted: false,
+            actorReply: { kind: 'dweb', instanceId: 'dweb', failed: false },
+          }).catch((e) => console.warn('[sw] dweb agent trickle-up failed', e));
+        });
+      })().catch((e) => console.warn('[sw] dweb agent inbound wake failed', e));
+    });
+  })().catch(() => {});
+};
+
+browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
+  if (msg?.type === 'dweb/base-room/event' && msg.roomId === DWEB_AGENT_ROOM && msg.event === 'direct') {
+    handleDwebAgentInbound(msg.data ?? {});
+  }
+  return false;   // never claims the message — the dwapp bridge path is untouched
+});
+
 // Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
 // AUTO-FORMS on first address (the same lazy-mint shape as the web actor). Re-mints when
 // the bound session vanished (SW death cleared session storage). Owner is the SENDER chat
@@ -2895,6 +3224,103 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   if (webActorTabBindings.drop(tabId)) persistWebBindings();
 });
 
+// Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
+// offscreen Worker heap. Renders the actor prompt + descriptors SW-side (the
+// worker never assembles them), seeds the worker with the actor's prior history
+// (statefulness), forwards loop events to the card, and persists the turn back.
+// Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
+// (offscreen unavailable / never started). The worker holds no key, no engine
+// clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
+const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
+  if (!actorClient) return null;
+  const rec = await sessions.get(actorSessionId);
+  if (!rec) return null;
+  const { controller, release } = turnSlots.claim(actorSessionId);
+  try {
+    // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system
+    // override (rec.customSystemPrompt). Actors get no memory/skills block (same
+    // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
+    const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
+    const systemPrompt = await renderSystemPrompt({
+      actorType: kind, backing: rec.backing, instanceId,
+      temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+    });
+    const tools = actorDescriptors(listTools(), kind, rec.backing)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
+    const reasoning = {
+      enabled: settingsStore.get().reasoningEnabled,
+      budgetTokens: REASONING_BUDGET_TOKENS,
+      effort: REASONING_EFFORT_LEVELS.includes(settingsStore.get().reasoningEffort)
+        ? settingsStore.get().reasoningEffort : DEFAULT_SETTINGS.reasoningEffort,
+    };
+    const contextWindow = /** @type {any} */ (contextWindowFor(rec.model, {
+      overrides: settingsStore.get().contextWindowOverrides,
+      live: liveContextWindow(rec.provider, rec.model),
+    }));
+    // Minimal card display: mount on start, mirror the worker's state snapshots,
+    // settle on done. fromIndex = the actor's length BEFORE this turn.
+    const fromIndex = (rec.messages ?? []).length;
+    if (display && uiConnected()) {
+      uiPorts.broadcast({ type: 'turn/actor-start', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+    }
+    const onEvent = (display && uiConnected())
+      ? (/** @type {any} */ ev) => {
+        try {
+          if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+        } catch { /* display best-effort */ }
+      }
+      : undefined;
+    // Phase 3: the WEB/API actor self-fence provenance (the worker rebuilds
+    // ctx.fenceActorSummary from it — the SW's closure can't cross postMessage). A
+    // tab actor tags its turn-START tab url (the body-wrap is what matters; a tag
+    // that lags a mid-turn navigate is cosmetic); an API actor tags its FIXED origin.
+    let tabUrl;
+    let apiOrigin;
+    if (kind === 'web') {
+      if (rec.backing === 'api') {
+        apiOrigin = instanceId;
+      } else {
+        const ownedTab = actorTabId ?? webActorTabBindings.tabFor(actorSessionId);
+        if (ownedTab != null) tabUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
+      }
+    }
+    const r = await actorClient.run({
+      actorSessionId, message, systemPrompt,
+      provider: rec.provider, model: rec.model, depth: rec.depth,
+      // maxSteps omitted → the worker's runUserTurn uses its OWN default (parity
+      // with the in-SW path, not a hardcoded fifth of it). Seed the actor's prior
+      // history for statefulness.
+      tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
+      // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
+      oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
+    }, { signal: controller.signal, onEvent });
+    if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
+    // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
+    // tool_result), not a lossy user+finalText pair — so a long-lived actor keeps
+    // its tool-round memory across turns, matching the in-SW path.
+    const newMessages = Array.isArray(r.newMessages) ? r.newMessages : [];
+    let persistOk = true;
+    for (const m of newMessages) {
+      await sessions.appendMessage(actorSessionId, /** @type {any} */ (m)).catch(() => { persistOk = false; });
+    }
+    // Cost PARITY: price the turn's usage and surface it on the card (the reducer
+    // reads `cost`, not raw usage — the earlier `usage` field never populated).
+    if (display && uiConnected() && r.usage) {
+      try {
+        const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
+        const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
+        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost });
+      } catch { /* cost telemetry is best-effort */ }
+    }
+    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
+    if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
+    return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+  } finally {
+    release();
+  }
+};
+
 const actorMessaging = makeActorMessaging({
   resolveActor: async (/** @type {string} */ instanceId, /** @type {{ senderSessionId?: string | null }} */ opts = {}) => {
     // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
@@ -2904,6 +3330,11 @@ const actorMessaging = makeActorMessaging({
     // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
     // actor owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
     if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
+    // The DWEB ACTOR — the global mesh operator, addressed by the literal 'dweb'.
+    // Resolvable only when the network AND the agent toggle are on (opt-in daemon);
+    // otherwise the handle doesn't exist and the caller gets the standard
+    // no-instance refusal. Non-numeric + no dot + no engine prefix → unambiguous.
+    if (String(instanceId) === 'dweb') return resolveDwebActor();
     // A per-tab WEB actor is addressed by its tabId-as-string (purely numeric, no
     // engine prefix); engine ids (vm-/notebook-/app-) carry a hyphen and never
     // match, so the branch is unambiguous.
@@ -2945,7 +3376,7 @@ const actorMessaging = makeActorMessaging({
         : kind === 'notebook' ? jsTabTracker.getTabId(instanceId)
         : kind === 'app' ? appTabTracker.getTabId(instanceId)
         : null;
-      if (typeof ownedTab === 'number') tabMsgAnchor.set(ownedTab, parentToolUseId);
+      if (typeof ownedTab === 'number') setTabAnchor(ownedTab, parentToolUseId);
     }
     // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_actor
     // call (parentToolUseId present — absent on a boot redrain), pass a `display`
@@ -2961,6 +3392,16 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
+    // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
+    // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
+    // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
+    // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
+    // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
+    // fall back to the in-SW turn below (offscreen unavailable / never started).
+    if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
+      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
+      if (off) return off;
+    }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
@@ -2971,9 +3412,17 @@ const actorMessaging = makeActorMessaging({
       ? { result: fresh }
       : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   },
-  reenter: ({ userText, sessionId, synthetic, trusted }) => runAgentTurn({ userText, sessionId, synthetic, trusted }),
+  reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
+  // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. The pure
+  // walk (fail-closed rules + hop cap + cycle guard) lives in delegation-lineage
+  // so it's unit-tested; here we only inject the store read. spawnedTrusted per
+  // hop: a ROOT (no parent) is trusted by construction; a PARENTED record must
+  // carry an explicit true — records written before the field existed read as
+  // untrusted (fail-closed; those children never had delegation anyway).
+  getAncestry: (/** @type {string} */ sessionId) =>
+    buildAncestry({ sessionId, getRecord: (/** @type {string} */ id) => sessions.get(id) }),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),
@@ -3011,147 +3460,6 @@ const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = nu
   try { uiPorts.broadcast({ type: 'turn/system-note', text, ...(action ? { action } : {}) }); }
   catch { /* panel gone */ }
 };
-
-// The CURRENT AGENT TAB — the single tab the loop most recently created OR
-// interacted with (ran a command in, navigated, clicked, …). Agent tabs open in
-// the BACKGROUND now (never steal focus), so the chat shows ONE persistent,
-// sticky "go to the tab peerd is working in" card pointing here; clicking it is
-// the user gesture that focuses the tab AND opens the side panel (Chrome won't
-// let the agent/SW open the panel on its own — DESIGN-12). Updated on every
-// touch, so it always tracks where the agent IS, not just the last tab created.
-// p·cyan e·red e·amber r·green d·magenta — the home agent-tab card's Open button
-// draws a fresh one each time the card is (re)generated.
-const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
-// DESIGN-17/18 tab-card anchoring: maps an agent tab → the message_actor tool_use that
-// LAST drove it. The inline "peerd opened …" notice anchors to THAT message's turn, not
-// the wall-clock-latest user message — actor work is async, so a physical tab touch
-// (engine ensureTab / web DOM noteTab) often lands during a later turn, which would clump
-// the cards at the chat's end. Set at each actor-turn start (runActorTurn) for the actor's
-// owned tab; never cleared — overwritten only when a NEW message re-drives that tab, which
-// is exactly when the card should resurface to the newer turn. Orchestrator-opened tabs
-// (open_tab) are absent here → they keep the wall-clock anchor (correct; they're synchronous).
-/** @type {Map<number, string>} tabId → parentToolUseId */
-const tabMsgAnchor = new Map();
-/** @type {number | null} */ let agentTabId = null;
-/** @type {any} */ let agentTabInfo = null;   // the last { tabId, windowId, kind, name, label, color } noted
-/** @type {number | null} */ let activeTabId = null;    // the currently-active tab — hide the card when you're ON it
-// Broadcast the current-agent-tab pointer. `noted` is true ONLY when this fires
-// from a real agent touch (noteAgentTab) — the inline notice creates/resurfaces
-// on those; a passive refresh (tab activation, a fresh surface replay) sends
-// noted:false so clicking around tabs never bumps a notice.
-const broadcastAgentTab = (noted = false) => {
-  uiPorts.broadcast({
-    type: 'agent/tab',
-    tab: agentTabInfo ? { ...agentTabInfo, current: agentTabInfo.tabId === activeTabId, noted } : null,
-  });
-};
-const noteAgentTab = async (/** @type {number} */ tabId, /** @type {any} */ info = {}) => {
-  if (typeof tabId !== 'number') return;
-  const { kind = null, name = null, label = null, opened = true, parentToolUseId: ptuArg = null } = (typeof info === 'string' ? { label: info } : info);
-  // The message_actor turn driving this tab (see tabMsgAnchor) — caller-supplied or the
-  // last actor-turn-start mapping. Flows to the agent/tab event so the notice anchors to
-  // that message's turn instead of the wall-clock-latest user message.
-  const parentToolUseId = ptuArg ?? tabMsgAnchor.get(tabId) ?? null;
-  let windowId; let title = null;
-  try { const t = await browser.tabs.get(tabId); windowId = t.windowId; title = t.title || t.url || null; }
-  catch { return; } // tab already gone — don't point the card at a dead tab
-  agentTabId = tabId;
-  // Instance tabs carry a kind + the instance NAME (the card reads like a tab:
-  // "Notebook | my-nb"); a web tab (open_tab / DOM) just shows its page label.
-  const text = (kind && name) ? `${kind} · ${name}` : (label || title || 'a tab');
-  // why a fresh brand color each generation (owner): the home card's Open button
-  // cycles a peerd brand color (p·cyan e·red e·amber r·green d·magenta) so it
-  // stays eye-catching — the sanctioned "peers/actions are the content" accent.
-  const color = AGENT_TAB_COLORS[Math.floor(Math.random() * AGENT_TAB_COLORS.length)];
-  // `opened`: true when peerd OPENED this tab (open_tab / an engine create) — the
-  // only case that mints an inline notice; false when the web actor merely ACTED
-  // on a tab, which resurfaces an existing notice but never invents one for a tab
-  // the USER opened. `noted: true` marks this as a real agent touch (vs. a
-  // passive current-flag refresh on tab activation).
-  agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened, parentToolUseId };
-  broadcastAgentTab(true);
-};
-// Track the active tab so the card hides when you're on the agent tab, and shows
-// again when you move away.
-browser.tabs?.onActivated?.addListener(({ tabId }) => {
-  activeTabId = tabId;
-  if (agentTabInfo) broadcastAgentTab();
-});
-// Clear the card when the agent tab closes (clicking a dead tab does nothing).
-browser.tabs?.onRemoved?.addListener((tabId) => {
-  if (tabId === agentTabId) { agentTabId = null; agentTabInfo = null; broadcastAgentTab(); }
-});
-
-// "Pull peerd in" reminder on the regular web pages peerd opens. A peerd-opened
-// WEB tab gets a brief, auto-dismissing caption (top-right) that types out
-// "Press <shortcut> to pull peerd in" — engine tabs carry the real button, a
-// third-party page can't, so this points you at the shortcut/icon. INFORMATIONAL
-// ONLY (it never messages the SW back), so it crosses no boundary and needs no
-// new permission (docs/PULL-IN-PEERD-WEB-SCOPE.md). One-shot, on first load, via
-// chrome.scripting; never on a denylisted/sensitive origin; the injected script
-// itself waits until the tab is actually visible before it shows.
-// Peerd-opened web tabs (tabId → origin), tracked persistently so we can show
-// the reminder at the RIGHT moment: when the user is ACTIVELY VIEWING one with
-// the SIDEBAR CLOSED — they walked onto it, OR they closed the panel while on it.
-// The page world can't read sidebar state, so the SW gates the inject; the
-// injected script is idempotent + auto-dismissing, so re-injecting is safe.
-/** @type {Map<number, string>} */
-const peerdWebTabs = new Map();
-// The peerd toolbar icon as a data: URL, so the injected hint can show it on a
-// third-party page without a chrome-extension:// fetch (no web_accessible_
-// resources needed). Fetched + cached once; '' if it ever fails (the hint then
-// falls back to the wordmark text).
-/** @type {string | null} */ let pullInIconUrl = null;
-const getPullInIconUrl = async () => {
-  if (pullInIconUrl !== null) return pullInIconUrl;
-  try {
-    const res = await fetch(browser.runtime.getURL('icons/icon32.png'));
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    pullInIconUrl = `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}`;
-  } catch (e) {
-    console.debug('[sw] pull-in icon load failed', (/** @type {{ message?: string }} */ (e))?.message ?? e);
-    pullInIconUrl = '';
-  }
-  return pullInIconUrl;
-};
-const showWebTabHint = async (/** @type {number} */ tabId) => {
-  if (!peerdWebTabs.has(tabId)) return;
-  if (uiPorts.hasNamed('sidepanel')) return;          // sidebar open → the chat's already here
-  let tab;
-  try { tab = await browser.tabs.get(tabId); } catch { return; }
-  if (!tab || tab.status !== 'complete' || tab.active !== true) return; // only when actually being viewed
-  // Still the page peerd opened? (don't graffiti the user's own later navigation.)
-  let origin;
-  try { origin = new URL(/** @type {string} */ (tab.url)).origin; } catch { return; }
-  if (origin !== peerdWebTabs.get(tabId)) { peerdWebTabs.delete(tabId); return; }
-  let shortcut = '';
-  try {
-    const cmds = await browser.commands?.getAll?.();
-    shortcut = (cmds ?? []).find((c) => c.name === 'pull-in-peerd')?.shortcut || '';
-  } catch { /* no commands API in this build */ }
-  const iconUrl = await getPullInIconUrl();
-  try {
-    await browser.scripting.executeScript({ target: { tabId }, func: pullInHintInjected, args: [shortcut, iconUrl] });
-  } catch (e) {
-    // Pages the browser refuses to inject into (chrome:, the stores, a hard CSP)
-    // — harmless; the hint just doesn't show.
-    console.debug('[sw] pull-in hint inject skipped', (/** @type {{ message?: string }} */ (e))?.message ?? e);
-  }
-};
-const scheduleWebTabHint = (/** @type {number} */ tabId, /** @type {string} */ url) => {
-  if (typeof tabId !== 'number' || typeof url !== 'string') return;
-  let u;
-  try { u = new URL(url); } catch { return; } // not a real web URL → no hint
-  if (!u.protocol.startsWith('http')) return;
-  if (matchesDenylist(u.hostname, denylistStore.patterns())) return; // never graffiti a sensitive site
-  peerdWebTabs.set(tabId, u.origin);
-  showWebTabHint(tabId); // if the user is already viewing it with the sidebar closed
-};
-// Show when the user WALKS ONTO a peerd web tab, or it finishes loading while
-// they're on it. (Sidebar-close is handled at the port disconnect, below.)
-browser.tabs?.onActivated?.addListener(({ tabId }) => { showWebTabHint(tabId); });
-browser.tabs?.onUpdated?.addListener((tabId, changeInfo) => { if (changeInfo.status === 'complete') showWebTabHint(tabId); });
-browser.tabs?.onRemoved?.addListener((tabId) => { peerdWebTabs.delete(tabId); });
 
 // /init orchestration lives in peerd-runtime/memory/init-orchestrator.js
 // (scan → draft → confirm → persist); the SW binds the IO. The
@@ -3307,6 +3615,20 @@ const ensureSession = ensureCurrentSession;
 // belongs in a routes/ module too; if it needs mutable SW state, give that state
 // a store and inject it, rather than reaching for a module-level let.
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
+  // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
+  // (getSecret + safeFetch added in the handler; the key never left the SW), the
+  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the subagent/
+  // actor card + cost meter). Serves both reasoning subagents and bound actors; a
+  // reasoning child never exercises tool-dispatch. actorClient is defined above (after
+  // ensureOffscreen), before this dispatcher literal — safe to spread.
+  ...(actorClient?.routes ?? {}),
+  // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
+  // consent-gated, dispatched on the peerd-agent room).
+  'a2a/call': (/** @type {any} */ msg) => a2aCallRoute(msg),
+  // actors: the script tool's delegation surface — each actors.* call an
+  // actors-enabled headless run makes relays here (owner-verified, fully
+  // re-gated through messageActor).
+  'actors/call': (/** @type {any} */ msg) => actorsCallRoute(msg),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
@@ -3342,6 +3664,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     startGoalRun, haltGoalRun, ensureSession,
     // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
     actorMessaging,
+    // PR #134 phase 5: agent/stop also cascades through the live subagent
+    // subtree (children run under their own turn slots now).
+    subagentLifecycle,
+    // The debug surface: session/debugBundle + session/contextSnapshots.
+    settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
@@ -3362,6 +3689,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
     REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
     buildExport, CHANNEL, exportHooks, skillRegistry,
+    // React to the dweb-agent toggle: join/leave the inbox room so a disable
+    // withdraws mesh presence immediately (idempotent; no-op for other keys).
+    onSettingsChanged,
   }),
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
@@ -3377,6 +3707,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
     DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
+    onBaseNetworkStopped,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -3396,98 +3727,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...(/** @type {any} */ (pageCallRoute)),
 })));
 
-// ---------------------------------------------------------------------------
-// 7. Toolbar icon + "pull in peerd" shortcut → home, or pull the chat to the side
-// ---------------------------------------------------------------------------
-
-// The toolbar icon is peerd's FRONT DOOR. With no home up yet it opens the
-// full-page home — peerd should feel first-party, not a bolted-on sidebar
-// (DESIGN-12, owner 2026-06-20). Once home IS up, the icon COMPLEMENTS: it pulls
-// the chat into the window-global side panel (Chrome) / sidebar (Firefox) so the
-// chat follows you onto ANY tab — including a plain web page peerd opened, the
-// case the engine-tab "pull in peerd" button couldn't reach without breaching the
-// fail-closed SW boundary (docs/PULL-IN-PEERD-WEB-SCOPE.md). The Alt+Shift+P
-// command is the dedicated twin: it ALWAYS pulls the panel in, from anywhere.
-//
-// Hard constraint: sidePanel.open()/sidebarAction.open() must run SYNCHRONOUSLY
-// inside the click/keystroke gesture — no await before them or the activation is
-// dropped. So every decision input must be available without awaiting: the
-// window id (from the listener's tab arg) and "is home open?" (two sync signals
-// below). We cannot tabs.query() in the gesture; decidePullIn is a pure sync fn.
-
-// Sync "is home open?" — a boot-seeded set of home tab ids OR a live home port.
-// why both: the set survives an SW respawn (the home port may not have
-// reconnected in the instant the icon fires); the port covers a home tab the set
-// hasn't learned yet. A miss is benign — openHome() is focus-or-create, so the
-// worst case is the first post-respawn click focusing home instead of the panel.
-const HOME_URL = browser.runtime.getURL('home/home.html');
-/** @type {Set<number>} */
-const homeTabIds = new Set();
-const trackHomeTab = (/** @type {number} */ tabId, /** @type {string} */ url) => {
-  if (typeof url !== 'string') return;
-  if (url.startsWith(HOME_URL)) homeTabIds.add(tabId);
-  else homeTabIds.delete(tabId);
-};
-browser.tabs?.query?.({}).then((tabs) => {
-  for (const t of tabs) if (t.id != null) trackHomeTab(t.id, t.url ?? '');
-}).catch((e) => console.debug('[sw] home-tab bootstrap failed', e));
-// A second onUpdated/onRemoved pair (the DOM-ref ones live earlier) — keeping the
-// home-tab bookkeeping self-contained here reads cleaner than threading it in.
-browser.tabs?.onUpdated?.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.url != null || tab?.url != null) trackHomeTab(tabId, /** @type {string} */ (changeInfo.url ?? tab.url));
-});
-browser.tabs?.onRemoved?.addListener((tabId) => { homeTabIds.delete(tabId); });
-const isHomeOpen = () => homeTabIds.size > 0 || uiPorts.hasNamed('home');
-
-// A synchronous current-window id for sidePanel.open({ windowId }). onClicked and
-// (modern) onCommand both supply the tab, so this only backstops engines whose
-// command callback omits it. Seeded at boot, kept warm on focus changes.
-/** @type {number | null} */ let lastFocusedWindowId = null;
-browser.windows?.getLastFocused?.().then((w) => { lastFocusedWindowId = w?.id ?? lastFocusedWindowId; }).catch(() => {});
-browser.windows?.onFocusChanged?.addListener((winId) => {
-  if (winId != null && winId !== browser.windows.WINDOW_ID_NONE) lastFocusedWindowId = winId;
-});
-
-// The pull-in itself — open() runs synchronously (no await before it) to keep the
-// gesture; a failed/declined open falls back to home so the icon never dead-ends.
-const pullInPeerd = (/** @type {number} */ windowId, { fromShortcut = false } = {}) => {
-  const target = decidePullIn({
-    homeOpen: isHomeOpen(),
-    panelOpen: uiPorts.hasNamed('sidepanel'),
-    hasSidePanel: !!(/** @type {any} */ (browser)).sidePanel?.open,
-    hasSidebar: !!browser.sidebarAction?.open,
-    fromShortcut,
-  });
-  // Toggle-closed (shortcut only) — close needs no gesture, so fire and forget.
-  if (target === 'close') { closeSidePanel(); return; }
-  try {
-    if (target === 'panel' && windowId != null) {
-      const p = (/** @type {any} */ (browser)).sidePanel.open({ windowId });
-      if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidePanel.open failed', e); openHome(); });
-      return;
-    }
-    if (target === 'sidebar') {
-      const p = browser.sidebarAction.open();
-      if (p?.catch) p.catch((e) => { console.warn('[sw] sidebarAction.open failed', e); openHome(); });
-      return;
-    }
-  } catch (e) { console.warn('[sw] pull-in open threw', e); }
-  openHome();
-};
-
-browser.action?.onClicked?.addListener((tab) => {
-  pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: false });
-});
-// Alt+Shift+P (user-rebindable at the browser's extension-shortcuts page) —
-// TOGGLES the panel: pulls it in, or closes it if already open. The command
-// handler is a VALID user-gesture context on BOTH Chrome and Firefox, so it needs
-// no content-script relay — and thus no hole in the fail-closed SW boundary the
-// injected-web-page button would have required.
-browser.commands?.onCommand?.addListener((command, tab) => {
-  if (command !== 'pull-in-peerd') return;
-  pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: true });
-});
-
+// The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel
+// in) lives in background/tab-affordances.js alongside the agent-tab card and
+// web-tab hint — it owns the sync-gesture pull-in and its listeners.
 loadUserEndpoints();
 loadSettings();
 
@@ -3526,6 +3768,10 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     if (r?.ok) {
       console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
       reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+      // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
+      // inbound peer messages flow as dweb/base-room/event 'direct' events the
+      // listener consumes. Opt-in — no join, no inbox, no wakes.
+      joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
     } else console.warn('[sw] dweb base network start returned', r);
   })().catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
 }

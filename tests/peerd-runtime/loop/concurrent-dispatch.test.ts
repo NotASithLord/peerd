@@ -272,6 +272,41 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
   });
 
+  test('an abort landing DURING the final dispatch drops the tool-results message', async () => {
+    // The steer-race that bricked sessions in the field: claim() aborts the
+    // old turn and starts the new one immediately, so if the abort lands
+    // while the batch's LAST dispatch is in flight, no per-wave check ever
+    // sees it — the old loop would fall through and append its tool-results
+    // message AFTER the steering turn's messages, leaving a history whose
+    // tool_result no longer follows its tool_use (Anthropic 400s on every
+    // later call). The post-batch guard must catch it and drop the results.
+    const store = makeStore();
+    store.seed('s1');
+    const ac = new AbortController();
+    const ctx = baseCtx(store, {
+      callModel: makeToolModel([{ id: 't_w1', name: 'click' }]),
+      tools: [{ name: 'click', description: '', schema: {} }],
+      classifyToolCall: () => WRITE_VERDICT,
+      signal: ac.signal,
+      toolDispatch: async () => {
+        // The abort arrives while the ONLY (hence final) dispatch runs.
+        ac.abort();
+        await sleep(5);
+        return { ok: true, content: 'r', meta: {} };
+      },
+    });
+
+    const events = await drain(runUserTurn(ctx));
+
+    const s = await store.get('s1');
+    // No tool-results message may be appended after the abort...
+    expect(s.messages.some((m: any) => Array.isArray(m.toolResults))).toBe(false);
+    // ...and the turn ends on a deliberate abort.
+    const stops = events.filter((e: any) => e.type === 'stop');
+    expect(stops.at(-1)?.stopReason).toBe('aborted');
+    expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
+  });
+
   test('one failing sibling in a concurrent wave becomes its own error block, not a batch failure', async () => {
     const store = makeStore();
     store.seed('s1');

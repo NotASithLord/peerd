@@ -21,9 +21,12 @@ import browser from '/vendor/browser-polyfill.js';
 // why /peerd-runtime/index.js (not /voice/index.js): index.js is the
 // module's public API; the top-level barrel re-exports createBestTranscriber.
 import { createBestTranscriber, createModelStore } from '/peerd-runtime/index.js';
-// Headless JS jobs (the js_run tool / engine.runJob): a sealed Worker hosted
+// Headless JS jobs (the script tool / engine.runJob): a sealed Worker hosted
 // here, no UI. See job-runner.js for its (deliberately seal-only) security note.
-import { runJob } from './job-runner.js';
+import { runJob, abortJob } from './job-runner.js';
+// The heap split: EVERY offscreen agent loop — ephemeral reasoning subagents AND
+// bound actors (VM/Notebook/App/web) — runs in a dedicated Worker via this ONE host.
+import { runActor, abortActor } from './actor-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
@@ -314,7 +317,7 @@ const onVoiceMessage = (msg, _sender, sendResponse) => {
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onVoiceMessage));
 
-// --- headless JS jobs (js_run tool → engine.runJob) ---
+// --- headless JS jobs (script tool → engine.runJob) ---
 // Spawns the sealed Worker here and relays its egress/subagent bridges back to
 // the SW's audited routes. A separate listener so voice is untouched.
 /**
@@ -329,10 +332,16 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // is unset today, so this is defense-in-depth, not an active hole.
   if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
   runJob(
-    // caps + ownerSessionId ride from the SW's job/run message (trusted: the
-    // sender gate above). The WORKER never supplies either — job-runner attaches
-    // them from these params and ignores anything in the worker's own messages.
-    { code: msg.code, timeoutMs: msg.timeoutMs, caps: msg.caps, ownerSessionId: msg.ownerSessionId },
+    {
+      code: msg.code, timeoutMs: msg.timeoutMs,
+      a2a: msg.a2a === true, actors: msg.actors === true,
+      // caps + ownerSessionId ride from the SW's job/run message (trusted: the
+      // sender gate above). The WORKER never supplies either — job-runner
+      // attaches them from these params and ignores anything in the worker's
+      // own messages.
+      caps: msg.caps,
+      ownerSessionId: msg.ownerSessionId, ownerToolUseId: msg.ownerToolUseId, runId: msg.runId,
+    },
     { sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }) },
   )
     .then((result) => sendResponse({ ok: true, result }))
@@ -340,6 +349,50 @@ const onJobMessage = (msg, sender, sendResponse) => {
   return true;     // async sendResponse contract
 };
 browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
+
+// Stop plumbing for a runId-carrying headless job (the actors-enabled script
+// path): terminate the worker so an aborted turn doesn't leave a script
+// running to its wall-clock. Sync response — abortJob is fire-and-forget.
+/**
+ * @param {any} msg
+ * @param {import('webextension-polyfill').Runtime.MessageSender} sender
+ * @param {(response: any) => void} sendResponse
+ */
+const onJobAbort = (msg, sender, sendResponse) => {
+  if (msg?.type !== 'job/abort') return undefined;
+  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (typeof msg.runId === 'string' && msg.runId) abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
+  sendResponse({ ok: true });
+  return true;
+};
+browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
+
+// --- the heap split: every offscreen agent loop (reasoning subagents + bound actors) ---
+// Runs a reasoning (tools:[]) OR bound-actor (VM/Notebook/App/web) loop in a dedicated
+// Worker (its own heap), relaying its model call — AND, for a tool-bearing actor, every
+// tool call — back to the SW (which holds the key and pins + gates + dispatches). Same
+// first-party trust posture as onJobMessage: first-party senders only.
+/**
+ * @param {any} msg
+ * @param {import('webextension-polyfill').Runtime.MessageSender} sender
+ * @param {(response: any) => void} sendResponse
+ */
+const onActorMessage = (msg, sender, sendResponse) => {
+  if (msg?.type !== 'actor/run' && msg?.type !== 'actor/abort') return undefined;
+  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (msg.type === 'actor/abort') { abortActor(msg.runId); sendResponse({ ok: true }); return true; }
+  runActor(
+    msg.job ?? {},
+    {
+      workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+    },
+  )
+    .then((result) => sendResponse(result))
+    .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));
+  return true;
+};
+browser.runtime.onMessage.addListener(/** @type {any} */ (onActorMessage));
 
 // Local WebGPU inference (FEATURE-LOCAL-WEBGPU B). The SW's local-webgpu adapter
 // drives this: status/probe/init/teardown are request→response; generate STREAMS

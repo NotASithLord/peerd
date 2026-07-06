@@ -10,6 +10,7 @@
 // back next call.
 
 import { clamp } from '/shared/util.js';
+import { pushValueBlock } from './value-block.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
@@ -29,10 +30,10 @@ export const jsNotebookTool = {
   description: [
     'Run JS in a Notebook — a VISIBLE tab the user watches (CodeMirror editor +',
     'output pane + file tree), backed by a Web Worker + OPFS. Opens/focuses that',
-    'tab. For a quick result with NO tab (headless, ephemeral), use js_run',
+    'tab. For a quick result with NO tab (headless, ephemeral), use script',
     'instead. The code is an async function body — top-level await works and',
     '`return <value>` sends the result back. ✅ parsing, transforms, numeric work,',
-    'exercising a library. ❌ DOM (no document/window — use app_create) or',
+    'exercising a library. ❌ DOM (no document/window — use sandbox_create kind:"app") or',
     'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
     'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
     'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
@@ -126,10 +127,6 @@ const formatEvalResult = (code, r) => {
       lines.push(`  ${level === 'info' ? '' : `[${level}] `}${text}`);
     }
   }
-  if (r.value !== undefined) {
-    lines.push('[VALUE]');
-    try { lines.push(JSON.stringify(r.value, null, 2)); }
-    catch { lines.push(String(r.value)); }
-  }
+  pushValueBlock(lines, r.value);
   return lines.join('\n');
 };

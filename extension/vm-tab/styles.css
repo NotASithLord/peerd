@@ -182,6 +182,48 @@ html, body {
 /* a dead shell has no live cursor */
 .boot-card.is-failed .boot-caret { animation: none; opacity: 0; }
 
+/* ---- Firefox WebVM-unavailable notice ------------------------------- */
+/* why: on Firefox the boot stops for a platform reason, not a bug, so the
+   card carries a plain-English explanation + the two open threads to push
+   on. Monochrome to match the shell; the --fail red is the one sanctioned
+   accent (same exception the rest of the surface makes for errors). */
+.boot-firefox-note {
+  flex: 0 0 auto;
+  max-width: 62ch;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--fail) 45%, transparent);
+  border-left: 3px solid var(--fail);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fail) 7%, transparent);
+  line-height: 1.65;
+}
+.boot-firefox-note p { margin: 0 0 10px; color: var(--fg-muted); }
+.boot-firefox-note .ffx-lead {
+  margin-bottom: 8px;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 13px;
+}
+.boot-firefox-note .ffx-cta { margin-top: 12px; margin-bottom: 6px; color: var(--fg); }
+.boot-firefox-note .ffx-links {
+  margin: 0;
+  padding-left: 18px;
+  list-style: none;
+}
+.boot-firefox-note .ffx-links li { margin: 4px 0; }
+.boot-firefox-note .ffx-links li::before {
+  content: '→ ';
+  color: var(--fail);
+}
+.boot-firefox-note a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--fail) 60%, transparent);
+  text-underline-offset: 2px;
+}
+.boot-firefox-note a:hover { text-decoration-color: var(--fail); }
+
 /* ---- Terminal mount — fills the viewport ---------------------------- */
 
 #vm-terminal {

@@ -141,4 +141,39 @@ describe('notebook output-render', () => {
     expect(svg.textContent).toContain('<img src=x onerror=alert(1)>');
     expect(svg.textContent).toContain('<script>alert(2)</script>');
   });
+
+  it('heatmap renders one shaded cell per { x, y, v } bin (the density-grid case)', () => {
+    const wrap = renderChart({
+      type: 'heatmap',
+      data: [
+        { x: 0, y: 0, density: 0.1 }, { x: 1, y: 0, density: 0.9 },
+        { x: 0, y: 1, density: 0.5 }, { x: 1, y: 1, density: 0.3 },
+      ],
+      x: 'x', y: 'y', v: 'density', title: 'Density',
+    });
+    const cells = [...wrap.querySelectorAll('rect.nb-series-fill')];
+    expect(cells.length).toBe(4);
+    // shading is by v: the max-density cell is (near-)opaque, the min faint
+    const ops = cells.map((c) => Number(c.getAttribute('fill-opacity')));
+    expect(Math.max(...ops)).toBe(1);
+    expect(Math.min(...ops)).toBeLessThan(0.1);
+    expect(wrap.textContent).toContain('Density');
+    // no numeric data → a note, never a broken plot
+    expect(renderChart({ type: 'heatmap', data: [{ x: 'a' }] }).textContent).toContain('no numeric');
+  });
+
+  it('the fallback JSON dump is CAPPED (a 437k-char value must not render whole)', () => {
+    const host = document.createElement('div');
+    const big = { data: { values: Array.from({ length: 5000 }, (_, i) => ({ x: i, y: i * 2, density: 0.5 })) } };
+    renderReturnValue(host, big);
+    const pre = /** @type {HTMLElement} */ (host.querySelector('pre.nb-json'));
+    expect(!!pre).toBe(true);
+    expect((pre.textContent || '').length).toBeLessThan(21000);
+    expect(host.textContent).toContain('truncated');
+    expect(host.textContent).toContain('chart()/table()');
+    // a small object still renders in full, no truncation note
+    const small = document.createElement('div');
+    renderReturnValue(small, { a: 1 });
+    expect((small.textContent || '').includes('truncated')).toBe(false);
+  });
 });

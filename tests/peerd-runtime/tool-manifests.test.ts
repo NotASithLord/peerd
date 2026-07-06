@@ -187,13 +187,13 @@ describe('exposureGate — per-session manifest refusal at dispatch', () => {
   });
 
   test('allows manifest-included tools; null toolAllow keeps today\'s behavior', () => {
-    // js_run (a main-agent tool) exercises the manifest allow-path; the DOM tools
+    // script (a main-agent tool) exercises the manifest allow-path; the DOM tools
     // would be refused earlier by the web-actor cutover, so they can't be used here.
-    expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: new Set(['js_run']) }).allowed).toBe(true);
-    // js_run stays on the main agent (not the actor-mutating tier), so a
+    expect(eg({ name: 'script' }, {}, { exposure: 'main', toolAllow: new Set(['script']) }).allowed).toBe(true);
+    // script stays on the main agent (not the actor-mutating tier), so a
     // null/absent manifest leaves it allowed — the no-manifest status quo.
-    expect(eg({ name: 'js_run' }, {}, { exposure: 'main', toolAllow: null }).allowed).toBe(true);
-    expect(eg({ name: 'js_run' }, {}, { exposure: 'main' }).allowed).toBe(true);
+    expect(eg({ name: 'script' }, {}, { exposure: 'main', toolAllow: null }).allowed).toBe(true);
+    expect(eg({ name: 'script' }, {}, { exposure: 'main' }).allowed).toBe(true);
   });
 
   test('applies to CHILD contexts too (exposure unset) — a child never escalates past the manifest', () => {

@@ -28,8 +28,8 @@ describe('worker capability profile — the default (historical) surface', () =>
   test('a default build has NO page bridge and NO capability throw-shims', async () => {
     const { source } = await build();               // no caps → defaults
     expect(source).not.toContain('peerd.page');
-    expect(source).not.toContain("type: 'page-request'");
-    expect(source).not.toContain('page-response');
+    expect(source).not.toContain("makeBridge('page'");
+    expect(source).not.toContain('globalThis.page');
     // egress / subagent / opfs stay wired — no "not available in this worker" shims.
     expect(source).not.toContain('not available in this worker');
   });
@@ -38,11 +38,15 @@ describe('worker capability profile — the default (historical) surface', () =>
 describe('worker capability profile — the code-REPL arm (page + compute only)', () => {
   const CODE_CAPS = { page: true, egress: false, subagent: false, opfs: false };
 
-  test('page:true installs the page bridge (peerd.page + the request/response envelope)', async () => {
+  test('page:true installs the page bridge (peerd.page riding makeBridge)', async () => {
     const { source } = await build(CODE_CAPS);
     expect(source).toContain('globalThis.peerd.page');
-    expect(source).toContain("postMessage({ type: 'page-request', rid, method, args })");
-    expect(source).toContain("m.type === 'page-response'");
+    expect(source).toContain('globalThis.page = __page');
+    // The bridge rides the generalized makeBridge protocol (post-#149): the wire
+    // type is computed (name + '-request' → 'page-request' at runtime), so the
+    // shape assertion is on the bridge mint, not a literal envelope string.
+    expect(source).toContain("makeBridge('page'");
+    expect(source).toContain("pageRelay({ method, args })");
     // the five surfaced methods
     for (const m of ['goto:', 'click:', 'fill:', 'snapshot:', 'content:']) {
       expect(source).toContain(m);
@@ -66,7 +70,7 @@ describe('worker capability profile — the code-REPL arm (page + compute only)'
     // The profile strips IO capabilities, NOT computation — page.* + peerd:std is
     // the whole point (drive the tab, compute over what you read).
     const { source } = await build(CODE_CAPS);
-    expect(source).toContain('peerd');            // the surface object is still assembled
-    expect(source).toContain('page-request');     // and the only IO it has is the page bridge
+    expect(source).toContain('peerd');               // the surface object is still assembled
+    expect(source).toContain("makeBridge('page'");   // and the only IO it has is the page bridge
   });
 });

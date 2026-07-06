@@ -42,4 +42,5 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   vaultAutoLockMs: 2700000,
   auditLogMaxEntries: 20000,
   dwebEnabled: true,
+  dwebAgentEnabled: false,
 });

@@ -14,10 +14,11 @@
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
- * @property {{ sessionId?: string }} [session]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
+ * @property {{ aborted: boolean, addEventListener: Function, removeEventListener?: Function }} [abortSignal]
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -40,6 +41,8 @@ export const messageActorTool = {
     'message at a time (its mailbox): reuse the same `to` for follow-up (no',
     're-orientation); message a DIFFERENT tab/instance for independent work — separate',
     'actors run in parallel. Your ONLY path to act on a page or mutate an instance.',
+    '(When you are a SUBAGENT, the reply comes back directly in THIS tool result',
+    'instead of a later turn — use it and continue.)',
   ].join(' '),
   schema: {
     type: 'object',
@@ -54,7 +57,7 @@ export const messageActorTool = {
       },
       oneShot: {
         type: 'boolean',
-        description: 'Set true when ONE round settles it — a concrete command or read whose raw result IS the answer ("run `python3 …`", "fetch this URL\'s JSON"). The actor does the single action and hands its result straight back, skipping the extra turn it would otherwise spend re-summarizing — faster and cheaper. Leave false (default) for open-ended or multi-step work where you want the actor to do several things and report back in its own words. If the action errors, the actor recovers normally regardless.',
+        description: 'SANDBOX INSTANCES ONLY (a vm/notebook/app id — never "web", a tabId, an API origin, or "dweb"; those are refused). Set true when ONE round in your own sandbox settles it — a concrete command or read whose raw result IS the answer ("run `python3 …`", "cat the config"). The actor does the single action and hands its result straight back, skipping the extra turn it would otherwise spend re-summarizing — faster and cheaper. Leave false (default) for open-ended or multi-step work, and always for web/API/dweb targets (their replies are untrusted content and always return summarized). If the action errors, the actor recovers normally regardless.',
       },
     },
     required: ['to', 'message'],
@@ -85,6 +88,15 @@ export const messageActorTool = {
       // same thread spawn_subagent uses) keys the actor's live display stream
       // to this card, so its work renders inline like a subagent transcript.
       toolUseId: c.toolUseId,
+      // PR #134 — the subagent reply mode. An ephemeral child has no later turn
+      // for the reply-wake to re-enter (and waking its session would rebuild it
+      // on the main exposure surface), so its reply resolves INTO this tool
+      // result — still wrapUntrusted-fenced. Long-lived senders keep the wake.
+      awaitReply: c.session?.kind === 'subagent',
+      // The child's own abort signal (spawn.js threads it onto ctx). Lets the
+      // awaited reply race the child's wall-clock timeout / cancel, so a hung
+      // actor turn doesn't park the subagent past its budget (#1/#3).
+      awaitSignal: c.abortSignal,
     });
     // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
     return res.ok

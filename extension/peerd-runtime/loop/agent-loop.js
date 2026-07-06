@@ -167,6 +167,10 @@ export async function* asCompleted(promises) {
  *   from the chat UI, like the truncation-continue path). Used by the
  *   async-subagent reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
+ * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [ctx.actorReply]
+ *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
+ *   message so the chat surfaces it as its own attributed bubble (the one
+ *   synthetic turn the UI shows).
  * @param {boolean} [ctx.resume]
  *   Auto-resume mode (loop/resume-detect.js): continue a turn the SW
  *   reclaimed mid-flight. No NEW user message is appended — the persisted
@@ -194,7 +198,7 @@ export async function* runUserTurn(ctx) {
   const {
     sessionId, userText, synthetic, resume, callModel, getSecret, safeFetch,
     sessions, getSystemPrompt, appendAudit,
-    tools, refreshTools, toolDispatch, signal, reasoning,
+    tools, refreshTools, toolDispatch, signal, reasoning, actorReply,
   } = ctx;
   // why: clamp to the hard ceiling so a caller can only ever lower the
   // cap, never raise it past the infinite-loop backstop.
@@ -294,6 +298,10 @@ export async function* runUserTurn(ctx) {
       // the truncation-continue path below. The wake framing is trusted; the
       // child's result text inside it is wrapUntrusted by the caller.
       ...(synthetic ? { synthetic: true } : {}),
+      // why: an ACTOR-REPLY wake additionally carries who replied, so the
+      // chat renders it as its own attributed bubble instead of hiding it
+      // with the other synthetic plumbing turns (resume/truncation nudges).
+      ...(actorReply ? { actorReply } : {}),
       id: uuidv7(now),
       when: now(),
     };
@@ -336,11 +344,9 @@ export async function* runUserTurn(ctx) {
       return;
     }
 
-    // Progressive disclosure: recompute the advertised tools for THIS step so
-    // an instance created earlier this turn reveals its ops now. refreshTools
-    // also restamps the dispatch ctx's instanceState (SW side), keeping the
-    // exposure gate in lockstep with what the model is shown. A failure keeps
-    // the prior set — never break the turn on a tool refresh.
+    // Recompute the advertised tools for THIS step — mid-turn exposure changes
+    // (dweb engagement, a goal run starting/stopping) show on the next step.
+    // A failure keeps the prior set — never break the turn on a tool refresh.
     if (typeof refreshTools === 'function') {
       try { activeTools = await refreshTools(); }
       catch { /* keep the prior tool set */ }
@@ -865,7 +871,16 @@ export async function* runUserTurn(ctx) {
         if (abortedMidBatch) break;
       }
     }
-    if (abortedMidBatch) {
+    // why the extra wasAborted(): the per-wave checks run BEFORE each dispatch,
+    // so an abort landing DURING the batch's FINAL dispatch is seen by neither —
+    // the loop would fall through and append the tool-results message. Under a
+    // steer-live supersede that append races the NEW turn (claim() aborts and
+    // starts it immediately, without waiting for this loop to unwind), landing
+    // the results AFTER the steer's user message + assistant stub — a history
+    // whose tool_result no longer follows its tool_use, which the provider
+    // rejects on every later call (the format layer's orphan-tool_result
+    // demotion is the wire-side backstop for sessions already shaped that way).
+    if (abortedMidBatch || wasAborted()) {
       // Mirror the pre-dispatch abort guard (:683): mark a DELIBERATE stop (not a
       // resumable tools-pending interruption) and drop the partial tool_result
       // message, so the turn ends cleanly on the aborted assistant message and

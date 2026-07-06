@@ -8,11 +8,7 @@
 // auditability. /verify (V1.4 stub via system-prompt injection) walks
 // the agent through all five in order.
 
-import { inspectStorageTool }        from './inspect-storage.js';
-import { inspectAuditLogTool }       from './inspect-audit-log.js';
-import { inspectSessionAccessTool }  from './inspect-session-access.js';
-import { inspectDenylistTool }       from './inspect-denylist.js';
-import { inspectProviderConfigTool } from './inspect-provider-config.js';
+import { inspectTool }               from './inspect.js';
 import { readPageTool }              from './read-page.js';
 import { snapshotTool }              from './snapshot.js';
 import { readStateTool }             from './read-state.js';
@@ -31,16 +27,14 @@ import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
 import { vmImportTool }               from './vm-import.js';
 import { vmWriteFileTool }           from './vm-write-file.js';
-import { vmCreateTool }               from './vm-create.js';
 import { vmDeleteTool }               from './vm-delete.js';
-import { jsCreateTool }               from './js-create.js';
+import { sandboxCreateTool }          from './sandbox-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
-import { jsRunTool }                  from './js-run.js';
+import { scriptTool }                  from './script.js';
 import { pageCodeTool }               from './page-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
-import { appCreateTool }              from './app-create.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
 import { appSearchTool }              from './app-search.js';
@@ -65,14 +59,11 @@ import { dwebPeersTool }               from './dweb-peers.js';
 import { dwebBlockTool }               from './dweb-block.js';
 import { dwebDiscoveryTool }           from './dweb-discovery.js';
 import { dwebGuideTool }               from './dweb-guide.js';
+import { a2aRunTool }                  from './a2a-run.js';
 
 export {
   // inspect
-  inspectStorageTool,
-  inspectAuditLogTool,
-  inspectSessionAccessTool,
-  inspectDenylistTool,
-  inspectProviderConfigTool,
+  inspectTool,
   // DOM
   readPageTool,
   snapshotTool,
@@ -89,22 +80,21 @@ export {
   // sessions
   actorListTool,
   openTabTool,
+  // engine (the one cross-kind create; per-kind ops below)
+  sandboxCreateTool,
   // engine (WebVM)
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
-  vmCreateTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsCreateTool,
   jsNotebookTool,
-  jsRunTool,
+  scriptTool,
   pageCodeTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appCreateTool,
   appUpdateTool,
   appOpenTool,
   appSearchTool,
@@ -134,6 +124,7 @@ export {
   dwebBlockTool,
   dwebDiscoveryTool,
   dwebGuideTool,
+  a2aRunTool,
 };
 
 /**
@@ -141,12 +132,9 @@ export {
  * each tool.
  */
 export const BUILTIN_TOOLS = Object.freeze([
-  // inspect
-  inspectProviderConfigTool,
-  inspectStorageTool,
-  inspectSessionAccessTool,
-  inspectDenylistTool,
-  inspectAuditLogTool,
+  // inspect (one kind-discriminated tool: provider_config | storage |
+  // session_access | denylist | audit_log)
+  inspectTool,
   // sessions — actor_list is the single discovery surface (instances + open
   // tabs + API integrations) that collapsed vm_list/js_list/app_list/list_tabs/
   // list_integrations into one columnar result keyed by `type`.
@@ -173,21 +161,22 @@ export const BUILTIN_TOOLS = Object.freeze([
   // hidden from main; allowed ONLY for a code-surface web actor
   // (WEB_ACTOR_CODE_TOOLS in exposure.js).
   pageCodeTool,
+  // engine — sandbox_create is the one cross-kind bootstrap (it folded
+  // vm_create/js_create/app_create); the per-kind ops below are all
+  // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.
+  sandboxCreateTool,
   // engine (WebVM)
-  vmCreateTool,
   vmBootTool,
   vmImportTool,
   vmWriteFileTool,
   vmDeleteTool,
   // engine (Notebook)
-  jsCreateTool,
   jsNotebookTool,
-  jsRunTool,
+  scriptTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
   // engine (App)
-  appCreateTool,
   appUpdateTool,
   appOpenTool,
   appSearchTool,
@@ -223,4 +212,5 @@ export const BUILTIN_TOOLS = Object.freeze([
   dwebBlockTool,
   dwebDiscoveryTool,
   dwebGuideTool,
+  a2aRunTool,
 ]);

@@ -16,7 +16,7 @@ import { opfsHelpers } from '/peerd-engine/index.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
-// Write-layer cap on total app file size. Mirrors the app_create tool's
+// Write-layer cap on total app file size. Mirrors the sandbox_create app arm’s
 // MAX_TOTAL_CHARS (the tool pre-checks for a nicer error); this is the
 // backstop every create() caller hits, including the dweb install routes.
 const MAX_APP_TOTAL_CHARS = 2_000_000;
@@ -63,7 +63,7 @@ export const createAppClient = ({ registry, tracker }) => {
     const entry = entryFile || 'index.html';
     if (!(entry in fileMap)) throw new Error(`entryFile not in files: ${entry}`);
 
-    // Backstop size cap at the WRITE layer (was only in the app_create
+    // Backstop size cap at the WRITE layer (was only in the app-create
     // tool — so the dweb install routes, which call create() directly with
     // page-supplied files, were unbounded; adversarial review caught it).
     // The tool still pre-checks for a nicer error; this is the floor every

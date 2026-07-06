@@ -23,11 +23,15 @@ import { buildEntry } from '/peerd-engine/index.js';
 // on the extension origin AND the http origin the in-browser harness serves from.
 const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
+const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
 // The bare-specifier → URL map both hosts feed the resolver. Exported so a host's
-// own `compose-module` (dynamic-import) path resolves peerd:std the same way the
-// static entry import does. Don't let it drift from buildEntry's builtins below.
-export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
+// own `compose-module` (dynamic-import) path resolves the builtins the same way
+// the static entry import does. Don't let it drift from buildEntry's builtins
+// below. peerd:wasi is pure compute over caller-built capabilities (its own
+// header has the security story), so exposing it everywhere peerd:std goes adds
+// no authority to the realm.
+export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WASI_MODULE_URL };
 
 // The default capability profile — the surface every worker had before profiles
 // existed. A caller that passes nothing gets EXACTLY the historical worker.
@@ -50,11 +54,17 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  * @param {string} [opts.entryPath]   resolver entry name (default 'notebook.js')
  * @param {string} opts.notebookId    realm id surfaced as peerd.self.id
  * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
+ * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
+ * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
+ * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
  * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }} [opts.caps]
- *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface)
- * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }> }>}
+ *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
+ *   caps.page is the web actor's page bridge, PR #119)
+ * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
+ *   bodyLine: the 1-based source line the user code's first line lands on
+ *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, caps }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps }) => {
   const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
@@ -63,6 +73,7 @@ export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', n
   const source = `import ${JSON.stringify(SEAL_MODULE_URL)}; // realm seal — MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
+const PEERD_BUILTINS = ${JSON.stringify(NOTEBOOK_BUILTINS)};
 const consoleOutput = [];
 
 const stringify = (v) => {
@@ -99,20 +110,51 @@ const __peerdDisplay = (value) => {
 // with every raw network primitive hard-blocked. See notebook-neutralizers.js.
 // The host side of the bridge is the 'fetch-request' handler.
 
-// --- peerd.* OPFS proxy ---
-const pendingOpfs = new Map();
-let nextOpfsRid = 1;
-const opfsCall = (op, args) => new Promise((resolve, reject) => {
-  const rid = nextOpfsRid++;
-  pendingOpfs.set(rid, { resolve, reject });
-  postMessage({ type: 'opfs-request', rid, op, args });
-  setTimeout(() => {
-    if (pendingOpfs.has(rid)) {
-      pendingOpfs.delete(rid);
-      reject(new Error('opfs ' + op + ' timed out'));
+// --- worker↔host request/response bridges ---
+// Every capability the worker reaches on the host (OPFS, the embedded subagent,
+// base-network reads, the a2a mesh) speaks the SAME postMessage protocol: mint a
+// monotonic rid, stash the resolver, post a '<name>-request', settle when the
+// matching '<name>-response' lands. makeBridge is that protocol expressed ONCE;
+// each bridge is then one line + a thin arg-shaping wrapper. why not fetch or
+// display here: fetch is owned by the realm seal (its own listener, so untrusted
+// code can't unseat it) and display is one-way (no reply to correlate).
+const bridges = [];
+const makeBridge = (name, { timeoutMs, shape, timeoutMessage } = {}) => {
+  const pending = new Map();
+  let seq = 0;
+  const call = (payload = {}) => new Promise((resolve, reject) => {
+    const rid = (seq += 1);
+    pending.set(rid, { resolve, reject });
+    postMessage({ type: name + '-request', rid, ...payload });
+    if (timeoutMs) setTimeout(() => {
+      // keep the op/method in the message — a stuck-bridge error is only
+      // actionable if it says WHICH call hung. A bridge whose CLIENT name differs
+      // from its wire name (the a2a bridge's client is mesh.*) passes
+      // timeoutMessage to keep its original wording; opfs default reproduces
+      // "opfs <op> timed out".
+      if (pending.delete(rid)) reject(new Error(
+        timeoutMessage ? timeoutMessage(payload) : name + ' ' + (payload.op || payload.method || 'call') + ' timed out'));
+    }, timeoutMs);
+  });
+  // Returns true when the message was ours (routed by type), so the listener
+  // stops — even if the rid already settled (a late reply after a timeout).
+  const onResponse = (m) => {
+    if (m.type !== name + '-response') return false;
+    const p = pending.get(m.rid);
+    if (p) {
+      pending.delete(m.rid);
+      if (m.error) p.reject(new Error(m.error));
+      else p.resolve(shape ? shape(m.result) : m.result);
     }
-  }, 15000);
-});
+    return true;
+  };
+  bridges.push({ onResponse });
+  return call;
+};
+
+// --- peerd.* OPFS proxy ---
+const opfsRelay = makeBridge('opfs', { timeoutMs: 15000 });
+const opfsCall = (op, args) => opfsRelay({ op, args });
 // ── The peerd capability surface ────────────────────────────────────────
 // An artifact peerd builds (this Notebook today; Apps later) can call back into
 // peerd and COMPOSE it — runAgent is the seed of that. Capabilities are grouped
@@ -151,7 +193,7 @@ globalThis.peerd = {
   },
   // e · engine (amber) — execution environments. PLACEHOLDER. The sandbox
   // SPECTRUM (DECISIONS #25): runJob = headless own-code Worker (the MAIN agent
-  // reaches it via the js_run tool); runUntrusted = headless opaque-origin iframe
+  // reaches it via the script tool); runUntrusted = headless opaque-origin iframe
   // for untrusted code. The peerd.* (app-spawns-a-job) forms stay notWired until
   // per-app grant + quota exist.
   engine: {
@@ -202,6 +244,13 @@ globalThis.peerd = {
 // the fully-transformed source, we wrap it in a WORKER-realm blob URL, and
 // dynamic-import that.
 globalThis.__peerd_dynamic_import = async (opfsPath) => {
+  // A BUILTIN (peerd:std) is not an OPFS file — the compose path would miss and
+  // throw "cannot resolve". Import its real URL directly, same as the static
+  // resolver does (the literal-specifier rewrite already does this at build
+  // time; this covers the non-literal peerd.self.import(name) route).
+  if (Object.prototype.hasOwnProperty.call(PEERD_BUILTINS, opfsPath)) {
+    return import(PEERD_BUILTINS[opfsPath]);
+  }
   const source = await opfsCall('compose-module', { path: opfsPath });
   const blob = new Blob([source], { type: 'application/javascript' });
   const url = URL.createObjectURL(blob);
@@ -209,46 +258,68 @@ globalThis.__peerd_dynamic_import = async (opfsPath) => {
 };
 
 // --- peerd.runtime.runAgent (embedded agent) proxy ---
-const pendingSubagents = new Map();
-let nextSubagentRid = 1;
-const subagentCall = (args) => new Promise((resolve, reject) => {
-  const rid = nextSubagentRid++;
-  pendingSubagents.set(rid, { resolve, reject });
-  postMessage({ type: 'subagent-request', rid, args });
-});
+const subagentRelay = makeBridge('subagent');
+const subagentCall = (args) => subagentRelay({ args });
 
 // --- peerd.distributed.* (base-network read) proxy ---
 // One message type ('distributed-request') fetches the whole base-network info
 // blob; the distributed.* methods above each slice what they need. The host
 // returns { ok, running, did, peers, presence } (or { ok:false, error }); we
 // expose ok as "available" so the surface can render inert when dweb is off.
-const pendingDistributed = new Map();
-let nextDistributedRid = 1;
-const distributedInfo = () => new Promise((resolve, reject) => {
-  const rid = nextDistributedRid++;
-  pendingDistributed.set(rid, { resolve, reject });
-  postMessage({ type: 'distributed-request', rid });
+const distributedRelay = makeBridge('distributed', {
+  shape: (result) => { const r = result ?? {}; return { available: r.ok === true, ...r }; },
 });
-${profile.page ? `
-// --- peerd.page.* (web-actor page control) proxy ---
+const distributedInfo = () => distributedRelay({});
+
+// --- peerd.mesh.* (agent-to-agent) proxy — capability-gated (a2a) ---
+// The code the dweb actor writes drives peers through this client; each call
+// leaves the sealed realm as an a2a-request the host relays to the SW a2a/call
+// route (consent + gated mesh op). Signing calls (ask/send/publishCard) the SW
+// gates; a reply/timeout comes back as a2a-response. why a 130s timeout: an ask
+// awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
+// ABOVE that, else the worker rejects a still-valid ask.
+${a2a ? `
+const meshRelay = makeBridge('a2a', { timeoutMs: 130000, timeoutMessage: (p) => 'mesh.' + p.method + ' timed out' });
+const meshCall = (method, args) => meshRelay({ method, args });
+const __mesh = {
+  peers:       () => meshCall('peers', {}),
+  card:        (did) => meshCall('card', { did }),
+  ask:         (did, message, opts) => meshCall('ask', { did, message, timeoutMs: opts && opts.timeoutMs }),
+  send:        (did, message) => meshCall('send', { did, message }),
+  publishCard: (card) => meshCall('publishCard', { card }),
+  inbox:       () => meshCall('inbox', {}),
+  converse:    (did, message, opts) => meshCall('converse', { did, message, timeoutMs: opts && opts.timeoutMs }),
+  say:         (convId, message, opts) => meshCall('say', { convId, message, timeoutMs: opts && opts.timeoutMs }),
+};
+globalThis.mesh = __mesh;
+` : ''}
+
+// --- actors.* (the orchestrator's OWN actors) proxy — capability-gated ---
+// The script tool's delegation client: ask/send hand a GOAL to a local actor
+// (vm/notebook/app instance, "web", an API origin) through the SW actors/call
+// route — the full message_actor gate chain runs per call. The guard value is
+// INTERPOLATED from the timeout tower (actors-api.js): it sits above the
+// per-ask cap by construction, and the job wall-clock sits above it.
+${actors ? `
+const actorsRelay = makeBridge('actors', { timeoutMs: ${JSON.stringify(actorsGuardMs)}, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
+const actorsCall = (method, args) => actorsRelay({ method, args });
+const __actors = {
+  list: () => actorsCall('list', {}),
+  ask:  (to, goal, opts) => actorsCall('ask', { to, goal, timeoutMs: opts && opts.timeoutMs, oneShot: opts && opts.oneShot }),
+  send: (to, goal, opts) => actorsCall('send', { to, goal, oneShot: opts && opts.oneShot }),
+};
+globalThis.actors = __actors;
+` : ''}
+
+// --- page.* (web-actor page control) proxy — capability-gated (caps.page) ---
 // PR #119 code-REPL arm: each page.* call is ONE host round-trip; the host
 // relays it to the SW's 'page/call' route, which dispatches the SAME gated tool
 // the tool-call web actor uses (denylist / confirm / audit unchanged) against
 // the ONE tab this actor owns. The host attaches the owner identity itself —
 // nothing this realm sends can choose the session or the tab.
-const pendingPage = new Map();
-let nextPageRid = 1;
-const pageCall = (method, args) => new Promise((resolve, reject) => {
-  const rid = nextPageRid++;
-  pendingPage.set(rid, { resolve, reject });
-  postMessage({ type: 'page-request', rid, method, args });
-  setTimeout(() => {
-    if (pendingPage.has(rid)) {
-      pendingPage.delete(rid);
-      reject(new Error('page.' + method + ' timed out'));
-    }
-  }, 30000);
-});
+${profile.page ? `
+const pageRelay = makeBridge('page', { timeoutMs: 30000, timeoutMessage: (p) => 'page.' + p.method + ' timed out' });
+const pageCall = (method, args) => pageRelay({ method, args });
 // The Playwright-shaped API is a BARE \`page\` global (the tool description +
 // actor lore both use \`await page.goto(...)\`), mirrored on peerd.page for
 // discoverability. Exposing only peerd.page left \`page\` undefined → every
@@ -286,48 +357,18 @@ globalThis.peerd.self.listFiles = noOpfs('listFiles');
 globalThis.peerd.self.import = noOpfs('import');
 globalThis.__peerd_dynamic_import = noOpfs('import');
 `}
+// ONE listener fans every '<name>-response' out to its bridge. Each bridge's
+// onResponse claims only its own type, so registration order doesn't matter.
+// ('fetch-response' is consumed by the realm seal's own listener, not here.)
 self.addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || typeof m !== 'object') return;
-  if (m.type === 'subagent-response') {
-    const p = pendingSubagents.get(m.rid);
-    if (!p) return;
-    pendingSubagents.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else p.resolve(m.result);
-    return;
-  }
-  if (m.type === 'distributed-response') {
-    const p = pendingDistributed.get(m.rid);
-    if (!p) return;
-    pendingDistributed.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else { const r = m.result ?? {}; p.resolve({ available: r.ok === true, ...r }); }
-    return;
-  }
-  // ('fetch-response' is consumed by the realm seal's own listener.)
-  if (m.type === 'opfs-response') {
-    const p = pendingOpfs.get(m.rid);
-    if (!p) return;
-    pendingOpfs.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else p.resolve(m.result);
-    return;
-  }
-${profile.page ? `  if (m.type === 'page-response') {
-    const p = pendingPage.get(m.rid);
-    if (!p) return;
-    pendingPage.delete(m.rid);
-    if (m.error) p.reject(new Error(m.error));
-    else p.resolve(m.result);
-    return;
-  }
-` : ''}});
+  for (const b of bridges) if (b.onResponse(m)) return;
+});
 
 const __start = performance.now();
 (async () => {
-${body}
-})()
+__PEERD_BODY__})()
   .then((value) => {
     let safe;
     try { JSON.stringify(value); safe = value; }
@@ -345,5 +386,42 @@ ${body}
     });
   });
 `;
-  return { source, cache };
+  // The 1-based source line the body's FIRST line lands on. Import extraction
+  // preserves line positions (module-resolver re-inserts removed newlines), so
+  // user line L sits at source line bodyLine + L - 1 — the offset mapWorkerError
+  // needs to translate a blob-URL stack frame back to <entryPath>:<line>.
+  const markerAt = source.indexOf('__PEERD_BODY__');
+  const bodyLine = source.slice(0, markerAt).split('\n').length;
+  // why a function replacement: a string replacement interprets `$&`/`$1` in
+  // the BODY as substitution patterns and corrupts agent code containing them.
+  return { source: source.replace('__PEERD_BODY__', () => `${body}\n`), cache, bodyLine };
+};
+
+/**
+ * Map a worker error (a stack whose frames point into the entry blob URL) back
+ * to user-code coordinates: `blob:…:<L>:<C>` → `<entryPath>:<L - bodyLine + 1>:<C>`.
+ * Frames outside the body (the injected preamble) and other modules' blob URLs
+ * are left untouched. Pure — shared by the Notebook tab and the headless
+ * job runner so both surfaces report the same mapped location.
+ *
+ * @param {string | null | undefined} raw
+ * @param {string} blobUrl      the entry worker's own blob URL
+ * @param {number} bodyLine     from buildWorkerSource
+ * @param {string} [entryPath]
+ * @returns {string | null | undefined}
+ */
+export const mapWorkerError = (raw, blobUrl, bodyLine, entryPath = 'notebook.js') => {
+  if (typeof raw !== 'string' || !raw || !blobUrl) return raw;
+  const parts = raw.split(`${blobUrl}:`);
+  if (parts.length === 1) return raw;
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i += 1) {
+    const seg = parts[i];
+    const m = /^(\d+):(\d+)/.exec(seg);
+    const userLine = m ? Number(m[1]) - bodyLine + 1 : 0;
+    out += (m && userLine >= 1)
+      ? `${entryPath}:${userLine}:${m[2]}${seg.slice(m[0].length)}`
+      : `${blobUrl}:${seg}`;
+  }
+  return out;
 };

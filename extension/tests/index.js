@@ -66,7 +66,13 @@ import './unit/peerd-engine/personal-index-durability.test.js';
 import './unit/notebook-tab/notebook-seal.test.js';
 import './unit/notebook-tab/notebook-output-render.test.js';
 
-// --- chassis: offscreen (headless JS jobs / js_run) ---
+// --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
+import './unit/red-team/sandbox-escape.test.js';
+
+// --- chassis: vm-tab ---
+import './unit/vm-tab/firefox-webvm-note.test.js';
+
+// --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
@@ -90,6 +96,7 @@ import './unit/sidepanel/api-integrations.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
+import './unit/sidepanel/failure-chip.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

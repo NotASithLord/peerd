@@ -190,6 +190,13 @@ export const normalizeSettingsPatch = (patch, {
   if (dwebEnabled && typeof patch.dwebEnabled === 'boolean') {
     next.dwebEnabled = patch.dwebEnabled;
   }
+  // The dweb AGENT toggle rides the same build-flag gate; runtime consumers
+  // additionally require dwebEnabled (the agent has no meaning with the
+  // network off), but the PATCH is accepted independently so flipping the
+  // network back on restores the user's prior agent choice.
+  if (dwebEnabled && typeof patch.dwebAgentEnabled === 'boolean') {
+    next.dwebAgentEnabled = patch.dwebAgentEnabled;
+  }
   // Ollama host (issue #104). Accept ONLY a well-formed http(s) ORIGIN, stored
   // normalized (origin-only — scheme + host + port, no path/query). why strict:
   // this value is added to the egress allowlist and fetched with no key, so a

@@ -1,9 +1,11 @@
 // @ts-check
-// Tests for the five V1 introspection tools.
+// Tests for the `inspect` introspection tool (kind-discriminated).
 //
-// Each tool gets a small unit test that verifies its output shape and
-// the §02 demonstration property (e.g. inspect_provider_config does NOT
-// return the API key; inspect_storage truncates encrypted blobs).
+// The five V1 introspection tools (inspect_storage/_audit_log/_session_access/
+// _denylist/_provider_config) collapsed into ONE `inspect({ kind })` — this
+// verifies each facet's output shape and the §02 demonstration property
+// (e.g. kind:'provider_config' does NOT return the API key; kind:'storage'
+// truncates encrypted blobs), plus the dispatch itself (unknown kind → error).
 
 import { describe, it, expect } from '../../framework.js';
 // why: the individual tool defs are not part of peerd-runtime's public
@@ -12,11 +14,7 @@ import { describe, it, expect } from '../../framework.js';
 // down with it (the page sat on "Loading…" forever). Tests are exempt
 // from the public-API import rule, so reach into tools/defs directly.
 import {
-  inspectStorageTool,
-  inspectAuditLogTool,
-  inspectSessionAccessTool,
-  inspectDenylistTool,
-  inspectProviderConfigTool,
+  inspectTool,
   BUILTIN_TOOLS,
 } from '/peerd-runtime/tools/defs/index.js';
 
@@ -42,12 +40,13 @@ const baseCtx = (overrides = {}) => /** @type {ToolContext} */ (/** @type {unkno
   ...overrides,
 }));
 
-describe('inspect_storage', () => {
+/** @param {string} kind @param {Record<string, any>} args @param {ToolContext} ctx */
+const inspect = (kind, args, ctx) => inspectTool.execute({ kind, ...args }, ctx);
+
+describe('inspect kind:storage', () => {
   it('returns the kv contents as a JSON string', async () => {
-    const ctx = baseCtx({
-      kv: { list: async () => ({ 'foo': 'bar', 'baz': 42 }) },
-    });
-    const r = await inspectStorageTool.execute({}, ctx);
+    const ctx = baseCtx({ kv: { list: async () => ({ 'foo': 'bar', 'baz': 42 }) } });
+    const r = await inspect('storage', {}, ctx);
     expect(r.ok).toBe(true);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.foo).toBe('bar');
@@ -56,10 +55,8 @@ describe('inspect_storage', () => {
 
   it('truncates very long base64 strings while preserving head/tail', async () => {
     const longBlob = 'A'.repeat(500);
-    const ctx = baseCtx({
-      kv: { list: async () => ({ 'secret:k': longBlob }) },
-    });
-    const r = await inspectStorageTool.execute({}, ctx);
+    const ctx = baseCtx({ kv: { list: async () => ({ 'secret:k': longBlob }) } });
+    const r = await inspect('storage', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed['secret:k'].includes('…')).toBe(true);
     expect(parsed['secret:k'].includes('500 chars')).toBe(true);
@@ -70,18 +67,18 @@ describe('inspect_storage', () => {
     const ctx = baseCtx({
       kv: { list: async (/** @type {string} */ prefix) => { received = prefix; return {}; } },
     });
-    await inspectStorageTool.execute({ prefix: 'vault' }, ctx);
+    await inspect('storage', { prefix: 'vault' }, ctx);
     expect(received).toBe('vault');
   });
 
-  it('has primitive=sovereignty and sideEffect=read', () => {
-    expect(inspectStorageTool.primitive).toBe('inspect');
-    expect(inspectStorageTool.sideEffect).toBe('read');
-    expect(inspectStorageTool.origins({}, baseCtx())).toEqual([]);
+  it('the tool itself is primitive=inspect, sideEffect=read, no origins', () => {
+    expect(inspectTool.primitive).toBe('inspect');
+    expect(inspectTool.sideEffect).toBe('read');
+    expect(inspectTool.origins({}, baseCtx())).toEqual([]);
   });
 });
 
-describe('inspect_audit_log', () => {
+describe('inspect kind:audit_log', () => {
   it('returns recent entries newest-first', async () => {
     const entries = [
       { id: 'a', when: 100, type: 'vault_unlocked' },
@@ -89,7 +86,7 @@ describe('inspect_audit_log', () => {
       { id: 'c', when: 150, type: 'provider_added' },
     ];
     const ctx = baseCtx({ idb: { getAll: async () => entries } });
-    const r = await inspectAuditLogTool.execute({}, ctx);
+    const r = await inspect('audit_log', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.entries[0].id).toBe('b');
     expect(parsed.entries[1].id).toBe('c');
@@ -102,7 +99,7 @@ describe('inspect_audit_log', () => {
       idb: { getAll: async () =>
         Array.from({ length: 10 }, (_, i) => ({ id: `${i}`, when: i, type: 't' })) },
     });
-    const r = await inspectAuditLogTool.execute({ limit: 3 }, ctx);
+    const r = await inspect('audit_log', { limit: 3 }, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.entries.length).toBe(3);
   });
@@ -115,14 +112,14 @@ describe('inspect_audit_log', () => {
         { id: 'c', when: 3, type: 'foo' },
       ] },
     });
-    const r = await inspectAuditLogTool.execute({ types: ['foo'] }, ctx);
+    const r = await inspect('audit_log', { types: ['foo'] }, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.entries.every((/** @type {{ type: string }} */ e) => e.type === 'foo')).toBe(true);
     expect(parsed.entries.length).toBe(2);
   });
 });
 
-describe('inspect_session_access', () => {
+describe('inspect kind:session_access', () => {
   it('returns accessible tabs with origin + redacted URL', async () => {
     const ctx = baseCtx({
       tabs: { query: async () => [
@@ -130,7 +127,7 @@ describe('inspect_session_access', () => {
         { id: 2, url: 'https://news.ycombinator.com/', title: 'HN', active: false },
       ] },
     });
-    const r = await inspectSessionAccessTool.execute({}, ctx);
+    const r = await inspect('session_access', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.accessibleTabs).toBe(2);
     expect(parsed.tabs[0].origin).toBe('https://github.com');
@@ -145,23 +142,23 @@ describe('inspect_session_access', () => {
         { id: 1, url: 'https://example.com/', title: longTitle, active: true },
       ] },
     });
-    const r = await inspectSessionAccessTool.execute({}, ctx);
+    const r = await inspect('session_access', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.tabs[0].title.length <= 60).toBe(true);
   });
 
   it('reports the denylist as the only origin floor in scopeRule', async () => {
     const ctx = baseCtx();
-    const r = await inspectSessionAccessTool.execute({}, ctx);
+    const r = await inspect('session_access', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.scopeRule.toLowerCase().includes('denylist')).toBe(true);
   });
 });
 
-describe('inspect_denylist', () => {
+describe('inspect kind:denylist', () => {
   it('without a domain returns counts and examples', async () => {
     const ctx = baseCtx();
-    const r = await inspectDenylistTool.execute({}, ctx);
+    const r = await inspect('denylist', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.totalPatterns).toBe(3);
     expect(parsed.examples.length).toBe(3);
@@ -169,7 +166,7 @@ describe('inspect_denylist', () => {
 
   it('with a matching domain returns the matched pattern', async () => {
     const ctx = baseCtx();
-    const r = await inspectDenylistTool.execute({ domain: 'login.chase.com' }, ctx);
+    const r = await inspect('denylist', { domain: 'login.chase.com' }, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.matched).toBe(true);
     expect(parsed.matchedPattern).toBe('*.chase.com');
@@ -177,7 +174,7 @@ describe('inspect_denylist', () => {
 
   it('with a non-matching domain returns matched=false', async () => {
     const ctx = baseCtx();
-    const r = await inspectDenylistTool.execute({ domain: 'example.com' }, ctx);
+    const r = await inspect('denylist', { domain: 'example.com' }, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.matched).toBe(false);
     expect(parsed.matchedPattern).toBe(null);
@@ -186,16 +183,16 @@ describe('inspect_denylist', () => {
   it('does NOT match protonmail.com when only *.proton.me is denylisted', async () => {
     // Regression guard for the §15-seed-specific boundary bug.
     const ctx = baseCtx();
-    const r = await inspectDenylistTool.execute({ domain: 'protonmail.com' }, ctx);
+    const r = await inspect('denylist', { domain: 'protonmail.com' }, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.matched).toBe(false);
   });
 });
 
-describe('inspect_provider_config', () => {
+describe('inspect kind:provider_config', () => {
   it('returns provider + model + hasKey + vault state', async () => {
     const ctx = baseCtx();
-    const r = await inspectProviderConfigTool.execute({}, ctx);
+    const r = await inspect('provider_config', {}, ctx);
     const parsed = JSON.parse(okContent(r));
     expect(parsed.provider).toBe('anthropic');
     expect(parsed.model).toBe('claude-sonnet-4-6');
@@ -204,27 +201,44 @@ describe('inspect_provider_config', () => {
   });
 
   it('does NOT include the API key in its output', async () => {
-    // The §02 contract: this tool reports key presence, never the key
-    // value. Even if getSecret somehow returned a key, the tool should
-    // not surface it.
-    const ctx = baseCtx({
-      getSecret: async () => 'sk-ant-this-must-not-leak-1234',
-    });
-    const r = await inspectProviderConfigTool.execute({}, ctx);
+    // The §02 contract: this facet reports key presence, never the key
+    // value. Even if getSecret somehow returned a key, it must not surface.
+    const ctx = baseCtx({ getSecret: async () => 'sk-ant-this-must-not-leak-1234' });
+    const r = await inspect('provider_config', {}, ctx);
     expect(okContent(r).includes('sk-ant-this-must-not-leak-1234')).toBe(false);
   });
 });
 
+describe('inspect dispatch', () => {
+  it('an unknown kind returns ok:false with the valid kinds listed', async () => {
+    const r = await inspectTool.execute({ kind: 'nope' }, baseCtx());
+    expect(r.ok).toBe(false);
+    const err = /** @type {import('/shared/tool-types.js').ToolResultErr} */ (r).error;
+    expect(err.includes('provider_config')).toBe(true);
+    expect(err.includes('audit_log')).toBe(true);
+  });
+
+  it('a missing kind is rejected (kind is required)', async () => {
+    const r = await inspectTool.execute({}, baseCtx());
+    expect(r.ok).toBe(false);
+  });
+
+  it('the schema enumerates all five kinds and requires kind', () => {
+    const props = /** @type {any} */ (inspectTool.schema).properties;
+    expect(props.kind.enum.sort()).toEqual(
+      ['audit_log', 'denylist', 'provider_config', 'session_access', 'storage']);
+    expect(/** @type {any} */ (inspectTool.schema).required).toEqual(['kind']);
+  });
+});
+
 describe('BUILTIN_TOOLS registry', () => {
-  it('exports all five V1 introspection tools', () => {
-    // The registry has grown well past the introspection family; this
-    // test guards that the original five stay registered.
+  it('registers the merged inspect tool and none of the old five names', () => {
     const names = BUILTIN_TOOLS.map((t) => t.name);
-    expect(names).toContain('inspect_storage');
-    expect(names).toContain('inspect_audit_log');
-    expect(names).toContain('inspect_session_access');
-    expect(names).toContain('inspect_denylist');
-    expect(names).toContain('inspect_provider_config');
+    expect(names).toContain('inspect');
+    for (const gone of ['inspect_storage', 'inspect_audit_log', 'inspect_session_access',
+      'inspect_denylist', 'inspect_provider_config']) {
+      expect(names.indexOf(gone)).toBe(-1);
+    }
   });
 
   it('every built-in declares a primitive', () => {
@@ -241,15 +255,7 @@ describe('BUILTIN_TOOLS registry', () => {
     // shared/tool-types.js) so the dispatcher gates can reason about it.
     const valid = ['read', 'write', 'mutate_external', 'destructive'];
     for (const t of BUILTIN_TOOLS) {
-      expect(valid).toContain(t.sideEffect);
-    }
-  });
-
-  it('the five introspection tools stay read-only', () => {
-    const inspect = BUILTIN_TOOLS.filter((t) => t.name.startsWith('inspect_'));
-    expect(inspect.length).toBe(5);
-    for (const t of inspect) {
-      expect(t.sideEffect).toBe('read');
+      expect(valid.includes(/** @type {string} */ (t.sideEffect))).toBe(true);
     }
   });
 });

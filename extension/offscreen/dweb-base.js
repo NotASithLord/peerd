@@ -261,6 +261,36 @@ const handleRoomOp = async (msg) => {
       items: room.sync.history(msg.topic).map((/** @type {any} */ env) => ({ topic: msg.topic, from: env.from, data: env.body.data, ts: env.ts, id: env.id })),
     };
     case 'dm': { const { id, ts } = await room.direct.send(msg.to, msg.data); return { ok: true, id, ts }; }
+    // A2A Agent Card advertise/fetch over a retained '~card' topic: card-set
+    // publishes MY signed card (retained so late joiners backfill), card-get
+    // reads a peer's latest card from the retained history by its did.
+    case 'card-set': {
+      // Validate + clamp MY card before it hits the mesh: strips arbitrary extra
+      // fields and REJECTS an oversized one (the agent-card caps — MAX_CARD_BYTES
+      // etc.), so a retained '~card' envelope we emit can't amplify to late-joiners.
+      const client = /** @type {any} */ (await loadDweb());
+      let clean;
+      try { clean = client.validateCard(msg.card).card; }
+      catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? 'agent card rejected' }; }
+      const card = { ...clean, did: room.did };
+      room.sync.retain('~card');
+      const env = await room.sync.publish('~card', card);
+      return { ok: true, did: room.did, id: env.id };
+    }
+    case 'card-get': {
+      room.sync.retain('~card');
+      // why max-by-ts, not last-inserted: the retained store is a Map keyed by
+      // sig, so history() yields SIG-INSERTION order — a late-join backfill can
+      // append an OLDER card version after the newer one was seen live. Pick the
+      // newest by envelope ts so a re-advertised card always supersedes.
+      const mine = room.sync.history('~card').filter((/** @type {any} */ e) => e.from === msg.did);
+      const latest = mine.reduce((/** @type {any} */ best, /** @type {any} */ e) => (!best || (e.ts ?? 0) >= (best.ts ?? 0) ? e : best), null);
+      // Clamp the UNTRUSTED peer card (parsePeerCard: coerce + cap, null if it
+      // blows the ceiling) before it reaches the actor's a2a_run worker — the caps
+      // exist precisely to bound a malicious multi-MB / unbounded-fields card.
+      const client = /** @type {any} */ (await loadDweb());
+      return { ok: true, card: latest ? client.parsePeerCard(latest.body.data) : null };
+    }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': { const h = await start(); const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files }); return { ok: true, uri, hash }; }
     default: return { ok: false, error: `unknown room op: ${op}` };

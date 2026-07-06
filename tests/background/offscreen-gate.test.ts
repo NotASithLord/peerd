@@ -2,11 +2,11 @@ import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-// The Firefox js_run/read_pdf fix (#6) lives in service-worker.js, which can't
+// The Firefox script/read_pdf fix (#6) lives in service-worker.js, which can't
 // be imported under bun (no chrome/browser globals) — so, like pricing.test.ts,
 // we assert against the SOURCE TEXT. This pins the ACTUAL changed line (the
 // `offscreenAvailable ? … : null` gate), which the tool-contract test
-// js-run-unavailable.test.ts does NOT cover: that one exercises the tool's
+// script-unavailable.test.ts does NOT cover: that one exercises the tool's
 // pre-existing `if (!client)` guard (byte-identical on main), so it would pass
 // even with this SW gate reverted. Reverting the gate fails the assertions here.
 const src = readFileSync(

@@ -14,7 +14,10 @@ Tools (the peer-to-peer app store + your sovereign controls):
 - dweb_block(did) — ban (or un-ban) a peer: local, unilateral, reversible.
 - dweb_discovery(enabled) — turn receiving discovery on/off (the sovereign switch).
 
-So "build X and share it to the dwapp store" = app_create the app, then dweb_share
+(The "dweb" actor also refuses oneShot — peer-derived replies always come back
+summarized, like the web actor's.)
+
+So "build X and share it to the dwapp store" = sandbox_create({kind:'app', dwapp:true}) the app, then dweb_share
 its id. "What are my friends running?" = dweb_discover.
 
 To build a MULTIPLAYER / shared dwapp (a game friends play together, a shared

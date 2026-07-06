@@ -251,9 +251,14 @@ export default [
   },
   // system-prompt loader fetches a chrome-extension:// static asset (NOT a
   // network egress). The egress allowlist intentionally wouldn't admit our
-  // own extension origin, so safeFetch isn't the right tool here.
+  // own extension origin, so safeFetch isn't the right tool here. Same for
+  // tab-affordances (the pull-in hint reads our own bundled icon32.png via
+  // runtime.getURL) — extracted from service-worker.js, which had this off.
   {
-    files: ['extension/peerd-runtime/loop/system-prompt.js'],
+    files: [
+      'extension/peerd-runtime/loop/system-prompt.js',
+      'extension/background/tab-affordances.js',
+    ],
     rules: { 'no-restricted-globals': 'off' },
   },
   // voice/model-store loads Moonshine ONNX bytes from CDN URLs (Hugging
@@ -369,6 +374,21 @@ export default [
       'no-array-constructor': 'off',
       'no-useless-computed-key': 'off',
       'dot-notation': 'off',
+    },
+  },
+
+  // --- heap-split Worker: a WORKER-SAFE subset, not the barrel ---
+  // offscreen/actor-worker.js is the ONE dedicated Worker (its own heap) that runs
+  // the agent loop for every offscreen loop (reasoning subagents + bound actors). It
+  // must import a MINIMAL, worker-safe subset (agent-loop.js + actor-worker-core.js —
+  // both verified to touch no chrome.*/DOM at import) rather than the full
+  // /peerd-runtime barrel, which re-exports voice/tools/etc. and would drag
+  // chrome-touching modules into a context that has none, throwing at import. So the
+  // cross-module rule is relaxed for THIS file only; the dweb/tests/eval guards stay.
+  {
+    files: ['extension/offscreen/actor-worker.js'],
+    rules: {
+      'no-restricted-imports': ['error', { patterns: [DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] }],
     },
   },
 

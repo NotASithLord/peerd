@@ -129,6 +129,49 @@ html, body {
 .export-btn:active { transform: translateY(1px); }
 .export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* peerd:std cheat sheet — a ghost <details> dropdown, same monochrome family
+   as the export button. The panel is fixed under the toolbar so it overlays
+   the editor without reflowing it. */
+.std-cheat { position: relative; }
+.std-cheat > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  user-select: none;
+}
+.std-cheat > summary::-webkit-details-marker { display: none; }
+.std-cheat > summary:hover { color: var(--fg); border-color: var(--fg-muted); }
+.std-cheat[open] > summary { color: var(--fg); border-color: var(--fg-muted); }
+.std-cheat-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  width: 440px;
+  max-width: 90vw;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
+.std-cheat-import {
+  display: block;
+  color: var(--fg);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.std-cheat-panel dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+.std-cheat-panel dt { color: var(--fg-muted); text-align: right; }
+.std-cheat-panel dd { margin: 0; color: var(--fg); }
+
 .run-btn {
   background: var(--green); color: #0d1117;
   border: 0;
@@ -206,6 +249,11 @@ html, body {
 .log-line.log-error  { color: var(--fail); border-left-color: color-mix(in srgb, var(--fail) 60%, transparent); }
 .log-line.log-eval   { color: var(--green); opacity: 0.85; }
 .log-line.log-return { color: var(--ok); }
+
+/* Previous runs' output, dimmed when a new run starts: the pane is a
+   transcript, so iteration reads as a loop — old output visible for
+   comparison, the current run bright. */
+#console-output > .nb-prev { opacity: 0.4; transition: opacity 300ms ease; }
 
 /* ---- Rich return-value output (tables / JSON) ----------------------- */
 /* why: a Notebook reads as a notebook when DATA renders as data. These nodes

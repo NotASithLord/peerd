@@ -294,12 +294,12 @@ export const SIMPLE_TASKS = [
     title: 'Notebook — build + run (20th Fibonacci)',
     startUrl: null,
     // why: names the tool ("a notebook"), so the contract includes the tool
-    // trace — usedAny(js_create|js_notebook|js_run) — not just the value.
+    // trace — usedAny(sandbox_create|js_notebook|script) — not just the value.
     // fib(20)=6765 (fib(1)=fib(2)=1) isn't memorized → forces real execution.
     prompt: 'Create a JavaScript notebook that computes the 20th Fibonacci number (where fib(1)=1, fib(2)=1, fib(3)=2, …) and tell me its value.',
     timeoutMs: 160_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['js_create', 'js_notebook', 'js_run']) && includesCI(s.answer, '6765'))
+      : (usedAny(s.tools, ['sandbox_create', 'js_notebook', 'script']) && includesCI(s.answer, '6765'))
           ? ok('built a notebook; fib(20)=6765')
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 80)}"`),
   },

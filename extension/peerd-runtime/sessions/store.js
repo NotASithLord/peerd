@@ -147,14 +147,16 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   model?: string,
    *   kind?: import('./types.js').SessionKind,
    *   parentSessionId?: string,
+   *   spawnedTrusted?: boolean,
    *   task?: string,
+   *   grantedTools?: string[],
    *   depth?: number,
    *   permissionMode?: string,
    *   confirmActions?: boolean,
    *   customSystemPrompt?: string,
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
    *   instanceId?: string,
-   *   actorType?: 'webvm' | 'notebook' | 'app' | 'web',
+   *   actorType?: 'webvm' | 'notebook' | 'app' | 'web' | 'dweb',
    *   backing?: 'tab' | 'api',
    * }} [opts]
    * @returns {Promise<Session>}
@@ -164,7 +166,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     model = 'claude-sonnet-4-6',
     kind = 'chat',
     parentSessionId,
+    spawnedTrusted,
     task,
+    grantedTools,
     depth = 0,
     permissionMode,
     confirmActions,
@@ -192,7 +196,16 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
         : {}),
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
+      // Trusted-lineage hop verdict (subagent/delegation-lineage.js): stamped by
+      // spawn.js from the SPAWNING turn's inbound flag, server-side — the model
+      // never supplies it. Persisted only when explicitly passed, so roots stay
+      // absent (getAncestry treats an unparented record as trusted).
+      ...(spawnedTrusted !== undefined ? { spawnedTrusted } : {}),
       ...(task ? { task } : {}),
+      // Heap-split phase 4: a subagent's narrowed toolset, persisted so the offscreen
+      // tool-dispatch route rebuilds the child's restricted ctx from it and re-checks
+      // every relayed call (never the worker's word). Absent for non-tool children.
+      ...(Array.isArray(grantedTools) && grantedTools.length > 0 ? { grantedTools } : {}),
       // DESIGN-17: an actor self-describes the instance it owns + its kind.
       ...(instanceId ? { instanceId } : {}),
       ...(actorType ? { actorType } : {}),

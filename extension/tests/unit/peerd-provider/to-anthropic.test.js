@@ -271,20 +271,28 @@ describe('to-anthropic', () => {
     });
 
     it('user with toolResults encodes as tool_result blocks', () => {
+      // Paired with its tool_use turn — an unpaired result would (correctly)
+      // be demoted by the orphan tool_result repair, tested below.
       const out = toAnthropicMessages([{
+        role: 'assistant', content: '', id: 'a', when: 0,
+        toolUses: [
+          { id: 'toolu_X', name: 'foo', input: {} },
+          { id: 'toolu_Y', name: 'foo', input: {} },
+        ],
+      }, {
         role: 'user', content: '', id: 'u', when: 0,
         toolResults: [
           { tool_use_id: 'toolu_X', content: '{"foo":1}' },
           { tool_use_id: 'toolu_Y', content: 'failed', is_error: true },
         ],
       }]);
-      expect(out).toEqual([{
+      expect(out[1]).toEqual({
         role: 'user',
         content: [
           { type: 'tool_result', tool_use_id: 'toolu_X', content: '{"foo":1}' },
           { type: 'tool_result', tool_use_id: 'toolu_Y', content: 'failed', is_error: true },
         ],
-      }]);
+      });
     });
 
     it('does NOT collapse block-content messages with adjacent plain-text', () => {
@@ -383,6 +391,93 @@ describe('to-anthropic', () => {
       const blocks = /** @type {AnthropicBlock[]} */ (out[1].content);
       expect(blocks[0].tool_use_id).toBe('toolu_X');
       expect(out[2].role).toBe('assistant');
+    });
+  });
+
+  describe('orphan tool_result demotion', () => {
+    it('demotes a tool_result whose tool_use is not in the previous message (steer-race history)', () => {
+      // The field 400: "unexpected `tool_use_id` found in `tool_result`
+      // blocks". A steer-live supersede let the old turn append its tool
+      // results AFTER the new turn's messages, so the results no longer
+      // follow their tool_use. The wire repair must (a) demote the orphaned
+      // result to text, preserving its payload, and (b) still synthesize an
+      // error result for the assistant tool_use left unanswered.
+      const out = toAnthropicMessages([
+        {
+          role: 'assistant', content: '', id: 'a1', when: 0,
+          toolUses: [{ id: 'toolu_B', name: 'vm_boot', input: {} }],
+        },
+        userMsg('actually, do something else'),
+        {
+          role: 'user', content: '', id: 'u2', when: 0,
+          toolResults: [{ tool_use_id: 'toolu_B', content: 'boot ok' }],
+        },
+      ]);
+      // No tool_result anywhere may reference an id absent from its
+      // immediately-preceding assistant message.
+      for (let i = 0; i < out.length; i++) {
+        const content = out[i].content;
+        if (!Array.isArray(content)) continue;
+        const prev = out[i - 1];
+        const usable = new Set(
+          prev?.role === 'assistant' && Array.isArray(prev.content)
+            ? prev.content.filter((b) => b.type === 'tool_use').map((b) => b.id)
+            : []);
+        for (const b of content) {
+          if (b.type === 'tool_result') expect(usable.has(b.tool_use_id)).toBe(true);
+        }
+      }
+      // The orphaned result's payload survives as text on the last message.
+      const last = /** @type {AnthropicBlock[]} */ (out[out.length - 1].content);
+      expect(last.some((b) => b.type === 'text' && /boot ok/.test(b.text ?? ''))).toBe(true);
+      expect(last.some((b) => b.type === 'tool_result')).toBe(false);
+    });
+
+    it('keeps matched results and demotes only the stale sibling (the content.1 shape)', () => {
+      // assistant#1(tool_use B) → user text → assistant#2(tool_use A) →
+      // user(results B). The tool_use repair prepends a synthetic result
+      // for A; the REAL result B (content.1 in the field error) must be
+      // demoted, not left to 400 the request.
+      const out = toAnthropicMessages([
+        {
+          role: 'assistant', content: '', id: 'a1', when: 0,
+          toolUses: [{ id: 'toolu_B', name: 'vm_boot', input: {} }],
+        },
+        userMsg('steer'),
+        {
+          role: 'assistant', content: '', id: 'a2', when: 0,
+          toolUses: [{ id: 'toolu_A', name: 'read_page', input: {} }],
+        },
+        {
+          role: 'user', content: '', id: 'u2', when: 0,
+          toolResults: [{ tool_use_id: 'toolu_B', content: 'late result' }],
+        },
+      ]);
+      const last = /** @type {AnthropicBlock[]} */ (out[out.length - 1].content);
+      // Synthetic result for A leads; the stale B is text, and tool_results
+      // stay ahead of the demoted text (API ordering rule).
+      const results = last.filter((b) => b.type === 'tool_result');
+      expect(results.length).toBe(1);
+      expect(results[0].tool_use_id).toBe('toolu_A');
+      expect(last.indexOf(results[0])).toBe(0);
+      expect(last.some((b) => b.type === 'text' && /late result/.test(b.text ?? ''))).toBe(true);
+    });
+
+    it('hoists nested vision blocks out of a demoted tool_result', () => {
+      const out = toAnthropicMessages([
+        userMsg('hi'),
+        {
+          role: 'user', content: '', id: 'u2', when: 0,
+          toolResults: [{
+            tool_use_id: 'toolu_Z', content: 'screenshot meta',
+            images: [{ mediaType: 'image/png', data: 'AAAA' }],
+          }],
+        },
+      ]);
+      const last = /** @type {AnthropicBlock[]} */ (out[out.length - 1].content);
+      expect(last.some((b) => b.type === 'tool_result')).toBe(false);
+      expect(last.some((b) => b.type === 'image')).toBe(true);
+      expect(last.some((b) => b.type === 'text' && /screenshot meta/.test(b.text ?? ''))).toBe(true);
     });
   });
 });

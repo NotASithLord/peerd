@@ -7,11 +7,12 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { CHANNEL } from '/shared/channel-config.js';
+import { bundleToOtlp } from '/peerd-runtime/index.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 
 export const TransferSection = {
-  /** @param {{ state: any }} vnode */
+  /** @param {{ state: any, attrs: { send: Send } }} vnode */
   oninit(vnode) {
     vnode.state.exportPass = '';
     vnode.state.exportConfirm = '';
@@ -30,10 +31,55 @@ export const TransferSection = {
     vnode.state.artifactSummary = null;       // import/inspect summary
     vnode.state.artifactBusy = false;
     vnode.state.artifactMsg = null;           // { ok, text } | null
+    // Debug bundle (the debug surface's options-page entry point): a session
+    // picker over ALL chats — unlike the in-chat debug chip, this reaches any
+    // past session without opening it.
+    vnode.state.debugSessions = null;         // null = loading; [] = none
+    vnode.state.debugSessionId = '';
+    vnode.state.debugBusy = false;
+    vnode.state.debugMsg = null;              // { ok, text } | null
+    Promise.resolve(vnode.attrs.send({ type: 'session/list' })).then((reply) => {
+      vnode.state.debugSessions = reply?.ok !== false && Array.isArray(reply?.sessions) ? reply.sessions : [];
+      vnode.state.debugSessionId = vnode.state.debugSessions[0]?.sessionId ?? '';
+      m.redraw();
+    }).catch(() => { vnode.state.debugSessions = []; m.redraw(); });
   },
 
   /** @param {{ attrs: { send: Send }, state: any }} vnode */
   view: ({ attrs: { send }, state: ui }) => {
+    // The debug surface: same route + pure OTel mapper the in-chat chip uses;
+    // the options page adds only the session picker (any chat, not just the
+    // open one) and this save shell.
+    const exportDebug = async (/** @type {'json'|'otlp'} */ format) => {
+      if (ui.debugBusy || !ui.debugSessionId) return;
+      ui.debugBusy = true;
+      ui.debugMsg = null;
+      m.redraw();
+      try {
+        const reply = await send({ type: 'session/debugBundle', sessionId: ui.debugSessionId });
+        if (!reply?.ok) {
+          ui.debugMsg = {
+            ok: false,
+            text: reply?.error === 'locked' ? 'Vault is locked \u2014 unlock in the peerd panel first.' : (reply?.error ?? 'Export failed.'),
+          };
+          return;
+        }
+        const payload = format === 'otlp' ? bundleToOtlp(reply.bundle) : reply.bundle;
+        const stem = format === 'otlp' ? 'peerd-trace' : 'peerd-debug';
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${stem}-${ui.debugSessionId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        ui.debugMsg = { ok: true, text: format === 'otlp' ? 'OTel trace saved.' : 'Debug bundle saved.' };
+      } finally {
+        ui.debugBusy = false;
+        m.redraw();
+      }
+    };
+
     const doExport = async () => {
       if (ui.exportBusy) return;
       ui.exportMsg = null;
@@ -252,6 +298,36 @@ export const TransferSection = {
       // file's hashes verify AND the user clicks Apply; imports always
       // create a NEW artifact (fresh id), never overwriting one.
       m('.settings-divider'),
+      m('h3', 'Debug bundle'),
+      m('p', 'Download one chat\u2019s whole debugging story as a local JSON file: '
+        + 'the transcript (including every actor and subagent it delegated to), the '
+        + 'audit slice, cost, settings, and live context snapshots \u2014 or the same '
+        + 'data as an OpenTelemetry trace for any OTel viewer. Nothing is sent '
+        + 'anywhere; API keys cannot appear in either file.'),
+      m('.input-row', [
+        m('label', { for: 'dbgsess' }, 'Chat'),
+        ui.debugSessions === null
+          ? m('span.muted', 'loading\u2026')
+          : ui.debugSessions.length === 0
+            ? m('span.muted', 'no chats yet')
+            : m('select', {
+                id: 'dbgsess', value: ui.debugSessionId, disabled: ui.debugBusy,
+                onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui.debugSessionId = e.target.value; },
+              }, ui.debugSessions.map((/** @type {any} */ row) => m('option', { value: row.sessionId },
+                `${row.title || '(untitled)'} \u00b7 ${new Date(row.createdAt).toLocaleString()}`))),
+      ]),
+      m('.button-row', [
+        m('button', {
+          disabled: ui.debugBusy || !ui.debugSessionId,
+          onclick: () => exportDebug('json'),
+        }, 'Export debug bundle'),
+        m('button.secondary', {
+          disabled: ui.debugBusy || !ui.debugSessionId,
+          onclick: () => exportDebug('otlp'),
+        }, 'Export OTel trace'),
+      ]),
+      ui.debugMsg ? m(ui.debugMsg.ok ? 'p.ok-msg' : 'p.err-msg', ui.debugMsg.text) : null,
+
       m('h3', 'Artifacts'),
       m('p', 'Import an app, Notebook, or VM recipe from a .peerd file '
         + '(exported via the Export button in the artifact’s own tab). '

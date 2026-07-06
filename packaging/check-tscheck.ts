@@ -42,12 +42,46 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 475 → 471: the do/get/check cull removed four // @ts-check'd files (the do/
 // get/check tool defs + runner/index.js — the web actor holds the DOM tools
 // directly now). A legitimate decrease (files deleted, not directives dropped).
-// → 474: the web-actor page-API translation core (subagent/page-api.js) + the
-// page-call handler (subagent/page-call-handler.js), +2 on the post-cull set.
-// 474 → 475: the code-REPL action tool (tools/defs/page-code.js, PR #119).
-// 475 → 477: the OM2W adapter's two eval modules (eval/om2w-actions.js +
-// eval/om2w-recorder.js — the Grammar A action mapper + the trajectory recorder).
-const COVERED_FLOOR = 477;
+// 471 → 473: main added one // @ts-check'd file post-cull, and the async-actor
+// proposal adds delegation-lineage.js (the pure trusted-lineage predicate).
+// 473 → 477: heap-split phase 1 adds reasoning-worker-core.js, reasoning-worker.js,
+// reasoning-runner.js, offscreen-reasoning-client.js (all // @ts-check).
+// 477 → 481: heap-split phase 2 adds actor-worker-core.js, actor-worker.js,
+// actor-runner.js, offscreen-actor-client.js.
+// 481 → 477: heap-split UNIFICATION — the reasoning stack collapses into the actor
+// stack (a reasoning subagent is a tool-less ephemeral actor), deleting those four
+// phase-1 files; their code lives on in the (still // @ts-check'd) actor-* stack.
+// A legitimate decrease (files deleted, not directives dropped).
+// 487 → 485: the Firefox WebVM notice added vm-tab/firefox-webvm-note.js +
+// its in-browser test (+2), then the inspect_* fold deleted the five old
+// inspect tool defs and added tools/defs/inspect.js (−4) — net −2 checked
+// files, all deletions, no directive dropped.
+// 485 → 487: the sandbox_create merge — vm_create/js_create/app_create fold
+// into tools/defs/sandbox-create.js (+1; the three old files stay as its
+// // @ts-check'd per-kind handler modules) — and the review pass extracted the
+// shared tools/defs/kind-dispatch.js (+1).
+// +1: extension/tests/unit/red-team/sandbox-escape.test.js (the in-browser
+// red-team tier — real-realm seal + CSP-fence assertions).
+// 488 → 490: the actors-in-script surface adds subagent/actors-api.js (the
+// pure delegation core) and background/script-runs.js (the live-run registry).
+// 490 → 493: the debug surface adds observability/failure-classify.js,
+// observability/debug-bundle.js, and observability/otel-export.js (the pure
+// cores of the debug-bundle export + failure classifier + OTel mapper).
+// 493 → 496: the debug surface's wiring + UI add background/context-snapshots.js
+// (the capture ring), sidepanel/components/context-inspector.js, and the
+// failure-chip in-browser test.
+// 496 -> 498: the hardening pass adds peerd-egress/audit/chain.js (the R4
+// tamper-evidence hash chain) and background/confirm-grant-key.js (the R5
+// origin-bound grant key).
+// 498 → 499: standing peer conversations add subagent/conversation-registry.js
+// (the pure convId → turns thread store).
+// 499 → 500: the OpenAI provider adapter adds peerd-provider/adapters/openai.js.
+// 501 → 506: PR #119 + its OM2W eval merge in: the web-actor page-API
+// translation core (subagent/page-api.js) + the page-call handler
+// (subagent/page-call-handler.js) + the code-REPL action tool
+// (tools/defs/page-code.js) + the OM2W adapter's two eval modules
+// (eval/om2w-actions.js + eval/om2w-recorder.js).
+const COVERED_FLOOR = 506;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

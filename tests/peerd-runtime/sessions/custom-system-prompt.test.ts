@@ -121,7 +121,9 @@ describe('renderSystemPrompt — <session_instructions> augmentation', () => {
     // renderer must stay well-defined if a future caller does.
     _setTemplateForTests(TEMPLATE);
     const out = await renderSystemPrompt({ customSystemPrompt: 'be terse', taskOverride: 'do the thing' });
-    expect(out.indexOf('<session_instructions>')).toBeLessThan(out.indexOf('<subagent_task>'));
+    // The ephemeral-actor (subagent) block shares the <actor_agent> tag since the
+    // PR #134 unification; only taskOverride is set here, so it's unambiguous.
+    expect(out.indexOf('<session_instructions>')).toBeLessThan(out.indexOf('<actor_agent>'));
   });
 });
 

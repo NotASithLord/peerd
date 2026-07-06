@@ -100,7 +100,7 @@ describe('includesCI', () => {
 describe('usedAny', () => {
   test('true when the agent used any of the named tools', () => {
     expect(usedAny(['get', 'click'], ['get'])).toBe(true);
-    expect(usedAny(['js_run'], ['js_create', 'js_notebook', 'js_run'])).toBe(true);
+    expect(usedAny(['script'], ['sandbox_create', 'js_notebook', 'script'])).toBe(true);
   });
   test('false when none matched, or on non-arrays', () => {
     expect(usedAny(['click', 'type'], ['get'])).toBe(false);

@@ -37,6 +37,21 @@ import {
 import { base64ToBytes } from '/shared/util.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { PEERD_PRINTF_RE, stripChunk } from '/vm-tab/marker-strip.js';
+import { buildFirefoxWebVmNote } from '/vm-tab/firefox-webvm-note.js';
+
+// WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
+// it via the COOP/COEP manifest keys; Firefox doesn't honor them, so
+// packaging/gen-manifest.ts STRIPS them from every Firefox package — which makes
+// the shipped manifest itself the ground truth for "this build cannot isolate by
+// design". Feature-detect that (not a UA sniff): a UA-overridden Firefox or a
+// Gecko fork still gets the honest platform notice, and if Firefox one day
+// honors the keys and we ship them, an isolation failure correctly falls back to
+// the generic manifest error instead of masquerading as a platform limit.
+// (cast: COOP/COEP are Chromium-only manifest keys the polyfill's Firefox-shaped
+// WebExtensionManifest type doesn't declare — absence is exactly the signal.)
+const BUILD_CANNOT_ISOLATE = !(/** @type {Record<string, unknown>} */ (
+  /** @type {unknown} */ (browser.runtime.getManifest())
+)).cross_origin_embedder_policy;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1193,6 +1208,12 @@ const boot = async () => {
   trace(isolated && sab ? 'info' : 'warn',
     `crossOriginIsolated=${isolated} SharedArrayBuffer=${sab}`);
   if (!isolated || !sab) {
+    // why: on Firefox this is expected, not a config error — an extension page
+    // can't be cross-origin isolated (Firefox bug 1673477), so the Firefox
+    // manifest ships without the (dead) COOP/COEP keys and there's no
+    // SharedArrayBuffer for CheerpX. Show the honest platform-limitation notice
+    // + the open threads instead of the misleading "manifest must declare…".
+    if (BUILD_CANNOT_ISOLATE) { failBootFirefoxWebVM(); return; }
     failBoot('Cross-origin isolation is OFF',
       new Error('manifest must declare cross_origin_embedder_policy + cross_origin_opener_policy'));
     return;
@@ -1363,6 +1384,19 @@ const failBoot = (/** @type {string} */ stage, /** @type {any} */ err) => {
   setStage('Boot failed', `${stage}: ${err?.message ?? String(err)}`);
   DOM.bootCard.classList.add('is-failed');
   trace('error', `boot failed @ ${stage}: ${err?.message ?? String(err)}`);
+};
+
+// The Firefox WebVM-unavailable stop: not a "boot failed" error but a clear
+// "this browser can't host it yet" notice with the open bug + standards threads.
+// Idempotent — a re-run won't stack a second card.
+const failBootFirefoxWebVM = () => {
+  setStatus('WebVM unavailable', 'failed');
+  setStage('WebVM needs cross-origin isolation Firefox can’t grant yet');
+  DOM.bootCard.classList.add('is-failed');
+  trace('warn', 'WebVM unavailable on Firefox: an extension page can’t be cross-origin isolated, so there’s no SharedArrayBuffer for CheerpX. See Firefox bug 1673477 + w3c/webextensions.');
+  if (!DOM.bootCard.querySelector('.boot-firefox-note')) {
+    DOM.bootCard.appendChild(buildFirefoxWebVmNote());
+  }
 };
 
 // ---------------------------------------------------------------------------

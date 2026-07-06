@@ -1,6 +1,7 @@
 // @ts-check
-// Shared JS-style reminder, disclosed in the RESULT of js_create and
-// app_create — the moment the agent commits to writing Notebook or App code.
+// Shared JS-style reminder, disclosed in the RESULT of sandbox_create
+// (notebook/app kinds) — the moment the agent commits to writing Notebook or
+// App code.
 //
 // why it rides the create result, not the base system prompt: progressive
 // disclosure. Tasks that never spin up a Notebook or App don't pay the tokens,
@@ -20,7 +21,7 @@ export const CODE_STYLE_NOTE = [
 // server, so cross-file ES modules don't resolve and a Worker can't load by path
 // (composeApp rewrites `new Worker('worker.js')` to a blob worker). The agent
 // burned several turns hand-rolling workers before this was written down. Lives
-// HERE (with the other create-time notes) so it has ONE source: app_create
+// HERE (with the other create-time notes) so it has ONE source: the app arm
 // discloses it in its result (flag-OFF), and the App ACTOR — the agent that
 // actually writes the page files — gets it in its lore (flag-ON, system-prompt.js).
 export const APP_RUNTIME_NOTE = [
@@ -35,13 +36,13 @@ export const APP_RUNTIME_NOTE = [
   'For heavy compute, put the work in its own file and use new Worker(\'worker.js\')',
   "— it runs automatically (wired to a blob worker). Keep the worker self-contained:",
   "a blob worker can't import other app files. Or tile work across",
-  'requestAnimationFrame frames; for pure no-UI compute, js_create/js_run are simpler.',
+  'requestAnimationFrame frames; for pure no-UI compute, a Notebook/script are simpler.',
   '</app-runtime>',
 ].join('\n');
 
 // CORRECTNESS, not style: the JS footguns that yield a WRONG ANSWER (silently),
 // plus the nudge to reach for the stdlib instead of hand-rolling. Disclosed
-// where the agent writes compute JS — js_run (once per session) and js_create
+// where the agent writes compute JS — script (once per session) and the notebook arm
 // (Notebook). Deliberately general, not a recipe for any one problem; kept terse
 // for the same context-budget reason as CODE_STYLE_NOTE.
 export const JS_PITFALLS_NOTE = [

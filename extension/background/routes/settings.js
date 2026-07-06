@@ -18,6 +18,7 @@ export const makeSettingsRoutes = (deps) => {
     normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
     REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
     buildExport, CHANNEL, exportHooks, skillRegistry,
+    onSettingsChanged,
   } = deps;
 
   return {
@@ -43,6 +44,9 @@ export const makeSettingsRoutes = (deps) => {
         return { ok: false, error: 'no-known-keys-in-patch' };
       }
       await settingsStore.update(next);
+      // Optional post-persist reaction (e.g. join/leave the dweb agent inbox
+      // when its toggle flips). Fire-and-forget — never block the settings write.
+      try { onSettingsChanged?.(next); } catch { /* reaction is best-effort */ }
       pushState();
       return { ok: true, settings: { ...settingsStore.get() } };
     },

@@ -18,11 +18,21 @@
 
 import { generateIdentity, joinRoom } from '/peerd-distributed/index.js';
 import { createBaseNetwork } from '/peerd-distributed/base-network.js';
+// The PRODUCTION a2a ask/reply correlation core — driven here over the REAL mesh
+// direct channel so the live two-peer round-trip exercises the same code the
+// dweb actor's a2a_run uses (envelope tag + request/reply, the did-bound resolve).
+// why the DEEP import (not /peerd-runtime/index.js): the barrel transitively pulls
+// in browser-polyfill, which throws off an extension origin — this harness page
+// runs on plain http. a2a-dispatch.js is a pure, import-free module, so it loads
+// cleanly here. (tests/ is exempt from the no-deep-import rule.)
+import { makeMeshDispatch } from '/peerd-runtime/subagent/a2a-dispatch.js';
+import { createConversationRegistry } from '/peerd-runtime/subagent/conversation-registry.js';
 
 const params = new URLSearchParams(location.search);
 const roomId = params.get('room') ?? 'harness';
 const url = params.get('url') ?? 'ws://localhost:8799/rendezvous';
 const name = params.get('name') ?? 'peer';
+const a2aOn = params.get('a2a') === '1';   // add the live ask/reply beat on top of gossip
 
 // The gossip topic the two peers exchange a hello on — proves the application
 // layer (gossip flood + dedup) works over the live mesh, not just that a data
@@ -42,6 +52,10 @@ let base = null;
 let myDid = null;
 /** @type {any} */
 let error = null;
+// a2a live round-trip state (only when a2aOn): did we send an ask and get the
+// peer's reply back, over the real mesh, via the production correlation core?
+let askReplied = false;
+/** @type {any} */ let askReply = null;
 
 const render = () => {
   const snap = base?.snapshot?.() ?? { linkedCount: 0, presentCount: 0 };
@@ -89,6 +103,63 @@ const boot = async () => {
       render();
     }, 1000);
 
+    // The a2a live round-trip: wire the production makeMeshDispatch to THIS peer's
+    // real direct channel. Each peer auto-replies PONG to any inbound ask, and —
+    // once it sees a linked peer — sends exactly one ask and records the reply.
+    // A green run proves the envelope protocol + the did-bound reply correlation
+    // survive real WebRTC between two browser contexts, not just the unit fakes.
+    let askBeat = null;
+    if (a2aOn) {
+      // conv=1 additionally proves a STANDING conversation: converse opens a
+      // thread, the peer's reply threads a convId back, and say continues it —
+      // the convId surviving real WebRTC end to end.
+      const convOn = params.get('conv') === '1';
+      const conversations = convOn ? createConversationRegistry() : null;
+      const dispatch = makeMeshDispatch({
+        sendDm: async (/** @type {string} */ to, /** @type {any} */ env) => {
+          try { const r = await base.node.direct.send(to, env); return { ok: true, id: r?.id }; }
+          catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+        },
+        listPeers: async () => (base.snapshot().peers ?? []).map((/** @type {any} */ p) => ({ did: p.did, name: p.name })),
+        fetchCard: async () => null,
+        publishCard: async () => ({ ok: false, error: 'not in the two-peer harness' }),
+        conversations,
+      });
+      // Inbound directs → the dispatch. An inbound ask is auto-answered; when it
+      // carries a convId, the reply threads it back so the opener's thread grows.
+      base.node.direct.onMessage((/** @type {{ from: string, data: any }} */ { from, data }) => {
+        const routed = dispatch.handleInbound(from, data);
+        if (routed?.deliver?.kind === 'ask') {
+          const cid = routed.deliver.convId;
+          dispatch.reply(from, routed.deliver.reqId, `PONG:${routed.deliver.message}`, cid).catch(() => {});
+        }
+      });
+      let asked = false;
+      askBeat = setInterval(async () => {
+        if (asked) return;
+        const peer = (base.snapshot().peers ?? []).find((/** @type {any} */ p) => p.did && p.did !== myDid && p.linked);
+        if (!peer) return;
+        asked = true;
+        try {
+          if (convOn) {
+            // Open a standing conversation, then continue it — two turns on one convId.
+            const c = await dispatch.dispatch('converse', { did: peer.did, message: `HELLO-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
+            if (c?.ok && c.convId && c.reply != null && !c.timedOut) {
+              const c2 = await dispatch.dispatch('say', { convId: c.convId, message: `FOLLOWUP-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
+              if (c2?.ok && c2.reply != null && !c2.timedOut && c2.convId === c.convId) {
+                askReplied = true; askReply = `${c.reply} | ${c2.reply}`;
+              }
+            }
+          } else {
+            // 8s ask timeout keeps the round-trip well inside the harness budget.
+            const r = await dispatch.dispatch('ask', { did: peer.did, message: `PING-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
+            if (r?.ok && r.reply != null && !r.timedOut) { askReplied = true; askReply = r.reply; }
+          }
+        } catch { /* leave askReplied false — the harness fails on the timeout */ }
+        render();
+      }, 800);
+    }
+
     // why any cast: __DWEB__ is a harness-only global the CDP driver polls; it's
     // not part of the typed Window surface, so the boundary is `any` here.
     /** @type {any} */ (window).__DWEB__ = {
@@ -102,11 +173,13 @@ const boot = async () => {
           linked: snap.linkedCount,
           present: snap.presentCount,
           heard: heardFrom.size,
+          askReplied,
+          askReply,
           peers: snap.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name, linked: p.linked, path: p.path })),
           error,
         };
       },
-      stop: () => { clearInterval(beat); base.close(); room.leave(); },
+      stop: () => { clearInterval(beat); if (askBeat) clearInterval(askBeat); base.close(); room.leave(); },
     };
   } catch (e) {
     error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);

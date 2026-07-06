@@ -12,7 +12,7 @@
 const BRIDGE_GUIDE = `dwapp bridge — build a MULTIPLAYER / shared App.
 
 STEP 0 — CREATE THE APP AS A DWAPP, or there is no bridge:
-  app_create({ name, files, dwapp: true })     // dwapp:true is REQUIRED
+  sandbox_create({ kind: 'app', name, files, dwapp: true })   // dwapp:true is REQUIRED
 The dwapp:true flag is what makes the app-tab attach the bridge. WITHOUT it the
 app is an ordinary sandboxed app, window.parent never answers hello(), and you'll
 get "no dweb bridge — open this inside peerd" no matter how correct your client
@@ -62,7 +62,7 @@ full worked reference. \`from\` on every event is the signed sender did, set by 
 platform, so a peer cannot spoof another; \`data\` is opaque bytes, put whatever you
 need in it.
 
-Build the app first — app_create({ ..., dwapp: true }) + app_write_file — wired to
+Build the app first — sandbox_create({ kind:'app', ..., dwapp: true }) + the app actor's writes — wired to
 the bridge, test it, then dweb_share it so friends can install and play.`;
 
 // why: 'dweb' is the network primitive — outside the base Primitive union (the

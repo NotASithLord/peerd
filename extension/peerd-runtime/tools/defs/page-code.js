@@ -18,7 +18,7 @@
 // route re-derives the owned tab from its own bindings per call.
 
 import { clamp } from '/shared/util.js';
-import { formatRunResult } from './js-run.js';
+import { formatRunResult } from './script.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 180_000;
@@ -66,7 +66,7 @@ export const pageCodeTool = {
     }
     // why: jsOffscreenClient rides the opaque ctx contract (not on ToolContext);
     // narrow to the one method this tool calls.
-    const jsOffscreenClient = /** @type {{ execHeadless?: (code: string, opts: object) => Promise<import('./js-run.js').RunResult> } | undefined} */ (
+    const jsOffscreenClient = /** @type {{ execHeadless?: (code: string, opts: object) => Promise<import('./script.js').RunResult> } | undefined} */ (
       /** @type {any} */ (ctx).jsOffscreenClient);
     if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
       return { ok: false, error: 'page_code_unavailable' };

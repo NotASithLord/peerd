@@ -40,6 +40,20 @@
       <span class="notebook-id-chip" id="notebook-id-chip"></span>
       <span class="spacer"></span>
       <span class="run-hint" id="save-status">saved</span>
+      <details class="std-cheat" id="std-cheat">
+        <summary title="peerd:std quick reference">peerd:std ?</summary>
+        <div class="std-cheat-panel">
+          <code class="std-cheat-import">import { table, chart, mean } from 'peerd:std'</code>
+          <dl>
+            <dt>display</dt><dd>table(rows) · chart({ type: 'bar'|'line'|'scatter'|'heatmap', data, x, y, v, title })<br>RETURN the value to render it — console.log is tracing only</dd>
+            <dt>stats</dt><dd>sum · mean · median · min · max · mode · variance · stdev · quantile · round · clamp</dd>
+            <dt>rows</dt><dd>groupBy · sortBy · sumBy · meanBy · countBy · keyBy · dedupeBy</dd>
+            <dt>arrays</dt><dd>range · unique · chunk · zip · partition</dd>
+            <dt>jsonl</dt><dd>parseJsonl · toJsonl</dd>
+            <dt>exact</dt><dd>divmod · divDecimal · gcd · lcm · factorial · modpow (BigInt — no float loss)</dd>
+          </dl>
+        </div>
+      </details>
       <button class="export-btn" id="export-btn" title="Download this Notebook as a .peerd file">Export ⤓</button>
       <button class="run-btn" id="run-btn" title="Runs notebook.js (Cmd-Enter / Ctrl-Enter)">Run notebook.js ▶</button>
     </header>

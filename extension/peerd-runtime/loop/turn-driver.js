@@ -25,33 +25,17 @@ import {
 import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
-import { EXPOSURE_ACTOR, actorDescriptors, actorTargetIdField, filterActorSurface } from '../tools/exposure.js';
+import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
 
-/**
- * DESIGN-17 per-instance PIN. Before an actor's tool call dispatches, force
- * the instance-target arg to the actor's BOUND instance (overwriting any id
- * or NAME the model supplied) so an actor can only ever touch its own
- * instance — and lock edit_file to the actor's kind. The gate's pin check is
- * the defense-in-depth backstop; this is the normalization that makes it pass.
- * Mutates call.args in place (it's a per-turn call object).
- * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
- */
-const pinActorCall = (call, actorType, instanceId) => {
-  if (!instanceId) return;
-  const field = actorTargetIdField(call?.name);
-  if (field) call.args = { ...(call.args ?? {}), [field]: instanceId };
-  // edit_file is cross-kind — also lock it to the actor's own workspace kind.
-  if (call?.name === 'edit_file' && actorType) {
-    call.args = { ...(call.args ?? {}), kind: actorType === 'notebook' ? 'notebook' : 'app' };
-  }
-};
+// pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
+// relay, a security seam — one implementation, no drift).
 
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
     sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
-    computeMainInstanceState, filterByDwebActive, filterByDwebEnabled, filterByInstanceState,
+    filterByDwebActive, filterByDwebEnabled,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
     filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, maybeNudgeDebuggerGrant, getTool,
@@ -60,6 +44,9 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
     contextWindowFor, liveContextWindow, currentAppScope,
     checkpointMgr, detectInterruptedTurn,
+    // The context inspector's capture hook (optional; a no-op default so the
+    // driver never depends on the debug surface being wired).
+    recordModelCall = () => {},
   } = deps;
 
 /**
@@ -68,7 +55,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -250,8 +237,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // mid-turn changes (e.g. user adds a key while tools are firing)
   // don't surface inconsistent readings. exposure:'main' makes the
   // exposure gate refuse actor-only tools the model shouldn't reach.
-  // Built BEFORE the descriptor list so refreshMainTools (below) can restamp
-  // its instanceState each step — progressive disclosure.
   //
   // DESIGN-17: an actor turn builds an 'actor' ctx instead — the keyless,
   // kind-scoped, instance-pinned tool context (buildToolContext applies the
@@ -263,40 +248,26 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
 
-  // THIRD cut: progressive disclosure. The vm/js/app SECONDARY ops are hidden
-  // until the chat has a current instance of that kind (filterByInstanceState).
-  // Recomputed PER STEP (passed to the loop as refreshTools) so an instance
-  // created mid-turn reveals its ops on the very next model step — and the same
-  // recompute restamps toolContext.instanceState so the sync exposure gate
-  // stays in lockstep with what the model is shown. Entry + auto-creating tools
-  // (vm_create/vm_boot, js_create/js_notebook, app_create/open/search) stay
-  // always-on, so every family is bootstrappable in one call.
+  // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
+  // goal cuts below change mid-turn, so the advertised list must follow.
   const refreshMainTools = async () => {
-    const instanceState = await computeMainInstanceState(sessionId);
-    // why: build the descriptor list BEFORE mutating the shared gate state, so
-    // a throw in the build can never leave toolContext.instanceState ahead of
-    // the list the model was actually shown (the loop's catch keeps the prior
-    // activeTools — this keeps the gate in lockstep with it). Assign last.
-    // FOURTH cut: dweb tools (publish/discover/install) only when the dweb is on.
+    // THIRD cut: dweb tools (publish/discover/install) only when the dweb is on.
     // Runs BEFORE the .map (which drops the `dweb` flag) so the agent never sees
     // them on the store build (DWEB_ENABLED false) or with the setting off.
-    // FIFTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
+    // FOURTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
     // hidden until this session has CALLED a dweb tool — engagement, not the
     // always-on network's peer presence. Composes after the dweb-enabled gate.
-    // SIXTH cut: goal mode. complete_goal is registered always but revealed to
+    // FIFTH cut: goal mode. complete_goal is registered always but revealed to
     // the model ONLY while a goal run is live for this session (goalActiveFor),
     // so a normal chat never sees it. Outermost so it composes over the rest.
-    // SEVENTH cut (DESIGN-17): the actor surface. The instance-mutating tier
-    // LEAVES the main agent (it delegates via message_actor, which it keeps).
-    // Outermost so it composes over everything else.
+    // SIXTH cut (DESIGN-17): the actor surface. The actor-only instance tier
+    // (writes AND the fenced reads) LEAVES the main agent (it delegates via
+    // message_actor, which it keeps). Outermost so it composes over everything.
     const descriptors = filterActorSurface(
       filterByGoalActive(
         filterByDwebActive(
           filterByDwebEnabled(
-            filterByInstanceState(
-              filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
-              instanceState,
-            ),
+            filterDescriptorsByManifest(mainAgentDescriptors(listTools()), sessionToolAllow),
             DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
           ),
           dwebEngagedSessions.has(sessionId),
@@ -304,7 +275,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         !!goalActiveFor?.(sessionId),
       ),
     ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
-    toolContext.instanceState = instanceState;
     return descriptors;
   };
   // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
@@ -434,6 +404,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
     const start = failoverLastGood ?? { provider: modelArgs.provider, model: modelArgs.model };
     const chain = resolveFailoverChain(start);
+    // The context inspector sees every ORCHESTRATOR model call here — the
+    // one seam every step of every main turn passes through. (Actors and
+    // subagents are captured at the SW's actor/model-call relay instead.)
+    // record() is contractually non-throwing; label with the provider the
+    // call will actually start on.
+    recordModelCall({ ...modelArgs, provider: start.provider, model: start.model, sessionId, label: 'main' });
     // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
     // #104). Thread it from settings for every candidate; non-ollama adapters
     // ignore the extra arg. (The configured host is also on the egress allowlist.)
@@ -479,6 +455,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // why: a reintegration wake (DESIGN-11) rides a synthetic user turn —
       // hidden from the chat UI; the normal send path passes synthetic=false.
       synthetic,
+      // why: an actor's reply-wake carries WHO replied so the chat can render
+      // it as its own attributed bubble — `synthetic` alone also marks hidden
+      // plumbing turns (resume/truncation nudges) and can't be un-hidden.
+      ...(actorReply ? { actorReply } : {}),
       // why: auto-resume (maybeAutoResume) re-drives a turn the SW reclaimed
       // mid-flight — no new user message; the loop continues the persisted
       // history. Normal sends pass resume=false.
@@ -497,10 +477,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
       tools: toolDescriptors,
-      // why: progressive disclosure — the loop calls this each step to get the
-      // current tool list, so an instance created mid-turn reveals its ops on
-      // the next step (and restamps toolContext.instanceState for the gate). A
-      // actor uses a fixed-set refresh (no disclosure; the gate is the wall).
+      // why: the loop calls this each step to get the current tool list, so a
+      // mid-turn exposure change (dweb engagement, goal start/stop) shows on
+      // the next step. An actor uses a fixed-set refresh (the gate is the wall).
       refreshTools,
       toolDispatch,
       classifyToolCall,

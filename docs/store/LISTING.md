@@ -30,8 +30,10 @@ Give it a task in plain language (typed or spoken):
 
 The assistant reads the page you're on, clicks, types, and navigates,
 visibly, in your tabs. When a task needs real computation, it runs the
-work in a sandboxed Linux environment that exists entirely inside your
-browser tab (WebAssembly, nothing is installed on your machine).
+work in WebAssembly sandboxes that exist entirely inside your browser —
+from a quick script, to compiled tools (query a SQLite file, convert a
+format), to a full Linux environment. Nothing is installed on your
+machine.
 
 YOUR DATA STAYS YOURS
 
