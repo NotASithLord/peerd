@@ -1,9 +1,8 @@
 // @ts-check
 // Provider registry.
 //
-// In-memory table of provider adapters: Anthropic + OpenRouter (cloud,
-// BYOK) and Ollama (local, keyless). OpenAI may land later on this same
-// surface.
+// In-memory table of provider adapters: Anthropic + OpenRouter + OpenAI +
+// Z.ai GLM (cloud, BYOK) and Ollama (local, keyless).
 //
 // The registry is intentionally a tiny data structure with side-effecting
 // helpers. The shipped adapters pre-register at module load; future
@@ -12,6 +11,7 @@
 import { anthropicAdapter } from './adapters/anthropic.js';
 import { openrouterAdapter } from './adapters/openrouter.js';
 import { openaiAdapter } from './adapters/openai.js';
+import { glmAdapter } from './adapters/glm.js';
 import { ollamaAdapter } from './adapters/ollama.js';
 import { localWebgpuAdapter } from './adapters/local-webgpu.js';
 import { asWindow } from './model-window.js';
@@ -67,6 +67,9 @@ adapters.set(openrouterAdapter.name, openrouterAdapter);
 // OpenAI: direct BYOK to api.openai.com (distinct from reaching OpenAI models
 // via the OpenRouter gateway) — same reference /chat/completions wire format.
 adapters.set(openaiAdapter.name, openaiAdapter);
+// Z.ai GLM — OpenAI-compatible direct API (not via a gateway). Same BYOK
+// posture as Anthropic/OpenRouter: the user's own key, encrypted in the vault.
+adapters.set(glmAdapter.name, glmAdapter);
 adapters.set(ollamaAdapter.name, ollamaAdapter);
 // local-webgpu: the on-device runner endpoint (FEATURE-LOCAL-WEBGPU B). Keyless;
 // the call path errors cleanly until the offscreen engine is loaded + wired
