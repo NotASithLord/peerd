@@ -10,14 +10,18 @@
 // RESUMABLE (a task whose result.json already exists is skipped) because a full
 // 300 is hours of wall-clock, past any single budget.
 //
-// Then score offline with the OM2W repo:
-//   bash script/eval.sh   # MODEL=o4-mini, TRAJECTORIES_DIR=<out/run>, API_KEY=$OPENAI...
+// Then score offline (WebJudge / o4-mini) with the sibling helper — it clones
+// the pinned upstream scorer, provisions a venv, and reports the pass rate:
+//   OPENAI_API_KEY=sk-... bun scripts/cdp/om2w/score.mjs --run=<run>
 //
 // Usage:
 //   PEERD_BENCH_KEY=sk-ant-... bun scripts/cdp/run-om2w.mjs --model=claude-opus-4-8 --offset=0 --count=5
 // Flags: --provider (anthropic|openrouter), --model, --offset, --count (shard),
 //   --run=<name> (output subdir; default the dataset revision), --show-tabs,
-//   --budget-min (default 90), --task-timeout-min (default 5).
+//   --budget-min (default 90), --task-timeout-min (default 5),
+//   --recycle-every=<N> (relaunch Chrome every N tasks + after any timeout to
+//   wipe accumulated hung-actor/debugger/tab state; default 2, 0 disables),
+//   --max-consec-timeouts=<N> (bail after N timeouts across recycles; default 4).
 
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -87,33 +91,69 @@ async function main() {
     if (!todo.length) { log('nothing to do'); process.exit(0); }
   }
 
-  const ctx = await launchPeerd(modelResponder ? { modelResponder } : {});
-  try {
-    const vault = await rpc(ctx.page, { type: 'vault/initialize', passphrase: PASSPHRASE });
+  // Launch Chrome + bring peerd to a ready-to-run state (vault, provider, the
+  // eval page). Factored out so the run can RECYCLE the whole browser mid-run.
+  // why: a long-lived session accumulates un-reaped hung web-actor turns +
+  // debugger attachments + tabs (product bug — an un-timed CDP Runtime.evaluate
+  // can hang a turn forever, and the abort isn't honored mid-dispatch; tracked
+  // in NotASithLord/peerd#176). That state is SW-/Chrome-process-scoped, so only a fresh Chrome
+  // clears it. Recycling on a cadence keeps every task running against a clean
+  // browser instead of a degrading one.
+  async function bringUp() {
+    const c = await launchPeerd(modelResponder ? { modelResponder } : {});
+    const vault = await rpc(c.page, { type: 'vault/initialize', passphrase: PASSPHRASE });
     if (!vault?.ok) throw new Error(`vault/initialize failed: ${JSON.stringify(vault)}`);
-    await rpc(ctx.page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
+    await rpc(c.page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
     if (SMOKE) {
-      await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'ollama' } });
+      await rpc(c.page, { type: 'settings/update', patch: { providerName: 'ollama' } });
     } else {
-      const set = await rpc(ctx.page, { type: 'provider/setKey', provider: PROVIDER, plaintext: KEY });
+      const set = await rpc(c.page, { type: 'provider/setKey', provider: PROVIDER, plaintext: KEY });
       if (!set?.ok) throw new Error(`provider/setKey failed: ${JSON.stringify(set)}`);
       const patch = { providerName: PROVIDER };
       if (MODEL) patch.providerModel = MODEL;
-      await rpc(ctx.page, { type: 'settings/update', patch });
+      await rpc(c.page, { type: 'settings/update', patch });
     }
-    log(`provider ready: ${PROVIDER}${MODEL ? ` (${MODEL})` : ''}`);
-
-    const evalPage = await openExtPage(ctx, 'eval/runner.html');
-    if (SHOW_TABS) await evalIn(evalPage, `(() => { const c = document.getElementById('showtabs'); if (c) c.checked = true; })()`);
-    if (!await waitFor(() => evalIn(evalPage, `!!(window.__peerdEval && window.__peerdEval.ready)`), { budgetMs: 30_000 })) {
+    const page = await openExtPage(c, 'eval/runner.html');
+    if (SHOW_TABS) await evalIn(page, `(() => { const el = document.getElementById('showtabs'); if (el) el.checked = true; })()`);
+    if (!await waitFor(() => evalIn(page, `!!(window.__peerdEval && window.__peerdEval.ready)`), { budgetMs: 30_000 })) {
       throw new Error('eval/runner.html never exposed __peerdEval');
     }
+    return { ctx: c, evalPage: page };
+  }
+
+  let ctx = null;
+  let evalPage = null;
+  try {
+    ({ ctx, evalPage } = await bringUp());
+    log(`provider ready: ${PROVIDER}${MODEL ? ` (${MODEL})` : ''}`);
 
     // ONE task per __peerdEval.run() call — an OM2W task can take minutes and we
     // want each trajectory exported immediately (resumable), not held to the end.
     const started = Date.now();
     let done = 0;
-    for (const t of todo) {
+    // Recycle Chrome to WIPE the accumulated hung-actor / debugger / tab state
+    // that wedges a long-lived session: proactively every N tasks AND immediately
+    // after any timeout (a timeout may have left a hung actor behind). Resumable:
+    // exported tasks already have result.json, so we just rebuild the browser and
+    // continue with the next task in the shard. --recycle-every=0 disables it.
+    // Default 2: the wedge is empirically "2 clean tasks, then the 3rd wedges,"
+    // so recycling AFTER every 2 keeps each Chrome to 2 clean tasks and never
+    // reaches the 3rd — avoiding the 6-min timeout entirely (vs. 3, which would
+    // still eat one timeout per window). ~15 recycles over 30 tasks (~4 min).
+    const RECYCLE_EVERY = Number(flag('recycle-every', 2));
+    // Circuit breaker: if even freshly-recycled Chromes time out N in a row, the
+    // wedge has some OTHER cause — bail rather than burn the budget on a wall.
+    const MAX_CONSEC_TIMEOUTS = Number(flag('max-consec-timeouts', 4));
+    let consecTimeouts = 0;
+    let sinceRecycle = 0;
+    const recycle = async (why) => {
+      log(`  ↻ recycling Chrome (${why})`);
+      try { ctx.close(); } catch { /* */ }
+      ({ ctx, evalPage } = await bringUp());
+      sinceRecycle = 0;
+    };
+    for (let i = 0; i < todo.length; i++) {
+      const t = todo[i];
       if (Date.now() - started > RUN_BUDGET_MS) { log(`budget reached; stopping after ${done} task(s)`); break; }
       const runOpts = { om2w: true, tasks: [{ id: t.task_id, title: t.task_id, startUrl: t.website, prompt: t.task_description, timeoutMs: TASK_TIMEOUT_MS, reference_length: t.reference_length }] };
       await evalIn(evalPage, `(() => { window.__peerdEval.run(${JSON.stringify(runOpts)}); return true; })()`);
@@ -122,22 +162,36 @@ async function main() {
         if (err) throw new Error(`in-page: ${err}`);
         return evalIn(evalPage, `window.__peerdEval.lastCard`);
       }, { budgetMs: TASK_TIMEOUT_MS + 60_000, pollMs: 3_000 });
-      if (!card) { log(`  ✗ ${t.task_id}: no result within budget`); continue; }
-      const results = await evalIn(evalPage, `window.__peerdEval.lastResults`);
-      const row = (results || [])[0];
-      exportTask(t, row);
-      done++;
+      let timedOut = false;
+      if (!card) {
+        log(`  ✗ ${t.task_id}: no result within budget`);
+        timedOut = true;
+        if (++consecTimeouts >= MAX_CONSEC_TIMEOUTS) {
+          log(`\n⚠ ${consecTimeouts} consecutive timeouts even across Chrome recycles — the wedge has another cause; stopping to save budget. Timed-out tasks wrote no result.json, so a later resume retries them.`);
+          break;
+        }
+      } else {
+        consecTimeouts = 0;
+        const results = await evalIn(evalPage, `window.__peerdEval.lastResults`);
+        exportTask(t, (results || [])[0]);
+        done++;
+      }
+      sinceRecycle++;
+      const isLast = i === todo.length - 1;
+      if (!isLast && RECYCLE_EVERY > 0 && (timedOut || sinceRecycle >= RECYCLE_EVERY)) {
+        await recycle(timedOut ? 'after timeout' : `every ${RECYCLE_EVERY} tasks`);
+      }
     }
 
     log(`\nexported ${done} task(s) → ${OUT}`);
-    if (!SMOKE) log('score offline with the OM2W repo: bash script/eval.sh  (MODEL=o4-mini, TRAJECTORIES_DIR=' + OUT + ', OpenAI key)');
+    if (!SMOKE) log(`score it (WebJudge/o4-mini): OPENAI_API_KEY=sk-... bun scripts/cdp/om2w/score.mjs --run=${RUN}`);
     if (fixture) await fixture.close().catch(() => {});
     ctx.close();
     process.exit(0);
   } catch (e) {
     console.error('[om2w]', e?.message || e);
     if (fixture) await fixture.close().catch(() => {});
-    try { ctx.close(); } catch { /* */ }
+    try { ctx?.close(); } catch { /* */ }
     process.exit(1);
   }
 }
