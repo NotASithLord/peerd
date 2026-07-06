@@ -156,9 +156,12 @@ const main = async () => {
   // real direct channel); the pass gate then also requires each peer to have sent
   // an ask and received the peer's reply over real WebRTC.
   const a2a = process.env.A2A === '1';
+  // CONV=1 (implies A2A) proves a STANDING conversation: converse opens a thread,
+  // say continues it, the convId survives real WebRTC end to end.
+  const conv = process.env.CONV === '1';
   const room = `harness-${Math.random().toString(36).slice(2, 8)}`;
   const pageUrl = (who) => `http://localhost:${httpPort}/tests/dweb-twopeer.html`
-    + `?room=${room}&name=${who}&url=${encodeURIComponent(rendezvous)}${a2a ? '&a2a=1' : ''}`;
+    + `?room=${room}&name=${who}&url=${encodeURIComponent(rendezvous)}${(a2a || conv) ? '&a2a=1' : ''}${conv ? '&conv=1' : ''}`;
   const alice = await openPeer(cdpPort, pageUrl('alice'));
   const bob = await openPeer(cdpPort, pageUrl('bob'));
   console.log(`[twopeer] two contexts joining room "${room}"`);
@@ -168,14 +171,14 @@ const main = async () => {
   let a = null; let b = null;
   const deadline = Date.now() + RESULT_BUDGET_MS;
   // A2A mode additionally requires the live ask/reply round-trip on both peers.
-  const done = (r) => r && r.linked >= 1 && r.heard >= 1 && (!a2a || r.askReplied === true);
+  const done = (r) => r && r.linked >= 1 && r.heard >= 1 && ((!a2a && !conv) || r.askReplied === true);
   while (Date.now() < deadline) {
     const [ja, jb] = await Promise.all([alice.evaluate(reportExpr), bob.evaluate(reportExpr)]);
     a = ja ? JSON.parse(ja) : a;
     b = jb ? JSON.parse(jb) : b;
     if (a?.error || b?.error) break;
     if (done(a) && done(b)) {
-      const a2aNote = a2a ? ` · a2a ask/reply ✓ (alice⇐"${a.askReply}", bob⇐"${b.askReply}")` : '';
+      const a2aNote = (a2a || conv) ? ` · ${conv ? 'standing conversation' : 'a2a ask/reply'} ✓ (alice⇐"${a.askReply}", bob⇐"${b.askReply}")` : '';
       console.log(`[twopeer] ✅ PASS — alice⇄bob meshed (alice linked ${a.linked}/heard ${a.heard}, bob linked ${b.linked}/heard ${b.heard})${a2aNote}`);
       cleanup();
       process.exit(0);

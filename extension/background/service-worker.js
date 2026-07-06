@@ -229,6 +229,8 @@ import {
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
+  // Standing peer conversations — the pure thread registry (convId → turns).
+  createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
@@ -1008,7 +1010,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') a2aRevoke(did); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); } return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
@@ -2793,12 +2795,35 @@ const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string
 };
 const meshHostRoom = (/** @type {object} */ payload) =>
   browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+// Standing peer conversations (conversation-registry.js): the SW-side thread
+// store, sibling to meshDispatch's pending-ask map. converse/say open + extend
+// threads; an inbound turn carrying a known convId continues one (waking the
+// actor with prior turns as context) and the actor's answer goes BACK to the
+// peer under PER-CONVERSATION reply consent.
+const conversationRegistry = createConversationRegistry();
 const meshDispatch = makeMeshDispatch({
   sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
   listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
   fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
   publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
+  conversations: conversationRegistry,
 });
+
+// Per-CONVERSATION reply consent (the owner-chosen gate for the new outbound
+// edge). Replying to a peer on a standing thread needs the user's ok ONCE per
+// thread; after that it flows for that thread's life, and dweb_block revokes it
+// (closeDid drops the thread). Mirrors a2a first-contact, keyed by convId.
+const resolveReplyConsent = async (/** @type {string} */ convId, /** @type {string} */ did, /** @type {string} */ sessionId) => {
+  if (conversationRegistry.hasReplyConsent(convId)) return true;
+  const answer = await confirmAction({ tool: 'a2a_reply', sessionId, origins: [did] });
+  const granted = answer === 'yes_once' || answer === 'yes_session';
+  // "Allow for session" grants the thread standing reply consent; "Allow once"
+  // permits THIS reply only (no registry grant), so a one-off can't become a
+  // standing back-channel.
+  if (answer === 'yes_session') conversationRegistry.grantReplyConsent(convId);
+  auditLog.append({ type: 'a2a_reply_consent', details: { did, convId, approved: granted, standing: answer === 'yes_session' } }).catch(() => {});
+  return granted;
+};
 
 // The actors/call route — invoked by the offscreen relay for each `actors.*`
 // call an actors-enabled `script` run makes. ownerSessionId / ownerToolUseId /
@@ -2924,7 +2949,15 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
     // declined prompt, is refused here (the dispatch's did-gate can't see the
     // no-did publishCard, so enforcement must land in this route).
     if (signs) {
-      const consentTarget = op === 'publishCard' ? A2A_PUBLISH_CARD_KEY : /** @type {{ did?: string }} */ (args).did;
+      // Per-peer ops key on the peer's did; publishCard broadcasts the user's
+      // own card (no peer) so it keys on a sentinel; `say` carries only a convId,
+      // so resolve its thread's did — proactively continuing a thread is still
+      // messaging that peer and needs the same cleared target.
+      const consentTarget = op === 'publishCard'
+        ? A2A_PUBLISH_CARD_KEY
+        : op === 'say'
+          ? conversationRegistry.didFor(/** @type {{ convId?: string }} */ (args).convId ?? '')
+          : /** @type {{ did?: string }} */ (args).did;
       if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
       if (!a2aApprovedDids.has(consentTarget)) {
         const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
@@ -2950,13 +2983,29 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
     auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
     return;
   }
+  // Standing conversation? An inbound ask/tell carrying a convId continues a
+  // thread: adopt it (a convId is a bearer token — adopt() rejects a foreign
+  // did), record the peer's turn, and later reply BACK to the peer instead of
+  // only noting the user. deliver is the pure handleInbound output.
+  const deliver = routed.deliver;
+  const convId = typeof deliver?.convId === 'string' ? deliver.convId : null;
+  const canReplyToPeer = convId && deliver?.kind === 'ask' && conversationRegistry.ownedBy(convId, did) !== false;
+  if (convId && deliver) { conversationRegistry.adopt(convId, did); conversationRegistry.record(convId, 'peer', deliver.message); }
   const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
-  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length } }).catch(() => {});
+  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
   (async () => {
     const actor = await resolveDwebActor();
     if (!actor) return;
     const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
-    const wake = `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+    // On a standing thread, hand the actor the recent turns (fenced — they carry
+    // peer bytes) so it answers in context, and steer it to reply to the PEER.
+    const priorTurns = convId ? conversationRegistry.turnsFor(convId).slice(0, -1) : [];
+    const threadContext = priorTurns.length
+      ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurns.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
+      : '';
+    const wake = canReplyToPeer
+      ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
+      : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
     turnSlots.runWhenIdle(actor.actorSessionId, () => {
       (async () => {
         const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
@@ -2980,6 +3029,19 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
         // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
         // here by the NO_REPORT convention — silence costs the user nothing.
         if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+        // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
+        // by per-conversation reply consent (the owner's chosen gate for this new
+        // outbound edge). On grant, record the self turn and send the mesh reply;
+        // a decline falls through to the user note so the answer isn't lost.
+        if (canReplyToPeer) {
+          const consented = await resolveReplyConsent(convId, did, actor.actorSessionId);
+          if (consented) {
+            conversationRegistry.record(convId, 'self', note);
+            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, convId);
+            auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
+            return;
+          }
+        }
         const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
         if (!active) return;
         const lead = 'Your dweb agent flagged inbound mesh activity:';

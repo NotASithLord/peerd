@@ -73,7 +73,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 496 -> 498: the hardening pass adds peerd-egress/audit/chain.js (the R4
 // tamper-evidence hash chain) and background/confirm-grant-key.js (the R5
 // origin-bound grant key).
-const COVERED_FLOOR = 498;
+// 498 → 499: standing peer conversations add subagent/conversation-registry.js
+// (the pure convId → turns thread store).
+const COVERED_FLOOR = 499;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

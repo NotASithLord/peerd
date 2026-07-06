@@ -18,6 +18,10 @@
 //   await mesh.send(did, "…")              // fire-and-forget (needs consent)
 //   await mesh.publishCard({ name, … })    // advertise MY card (needs consent)
 //   await mesh.inbox()                     // drain DMs received during this run
+//   await mesh.converse(did, "…", {timeoutMs}) // open a STANDING conversation:
+//                                          // like ask, but returns { convId } so a
+//                                          // LATER peer message continues the thread
+//   await mesh.say(convId, "…", {timeoutMs})   // send the next turn on a convId
 
 import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
@@ -48,9 +52,12 @@ export const a2aRunTool = {
     'a request and RETURNS the peer\'s one reply (or {timedOut:true}); mesh.send(',
     'did, message) is fire-and-forget; mesh.publishCard({name, description, skills})',
     'advertises YOUR agent so peers can discover you; mesh.inbox() drains messages',
-    'received during this run. FIRST contact to a peer needs the user\'s ok (a',
-    'signing call is refused until approved). Write ONE script that does the whole',
-    'exchange and RETURN the outcome — do not fire one message per turn.',
+    'received during this run. For a STANDING conversation use mesh.converse(did,',
+    'message) — it returns { convId }; a later peer message on that thread wakes',
+    'you with the prior turns, and mesh.say(convId, message) sends the next turn.',
+    'FIRST contact to a peer needs the user\'s ok (a signing call is refused until',
+    'approved); replying to a peer on a thread needs per-conversation consent.',
+    'Write ONE script that does the whole exchange and RETURN the outcome.',
   ].join(' '),
   schema: {
     type: 'object',

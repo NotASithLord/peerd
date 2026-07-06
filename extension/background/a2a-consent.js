@@ -17,17 +17,24 @@
 //      allowed and whether the peer is PERSISTED to the allowlist. Only
 //      "yes_session" persists; "yes_once" allows this call ONLY.
 
+// The sanctioned allowlist confirms whose "Allow for session" survives the
+// actor per-turn downgrade: a2a_contact (first contact) and a2a_reply
+// (per-conversation reply consent) are both explicit, user-shown, revocable
+// grants — not steer-able per-action confirms.
+const A2A_ALLOWLIST_CONFIRMS = new Set(['a2a_contact', 'a2a_reply']);
+
 /**
  * Should the actor per-turn rule downgrade this confirm answer to a one-shot?
  * True only for an ephemeral (actor) session answering "yes_session" on a tool
- * OTHER than a2a_contact — every other actor confirm keeps the strict downgrade.
+ * OTHER than the sanctioned allowlist decisions above; every other actor
+ * confirm keeps the strict downgrade.
  * @param {string} tool
  * @param {boolean} ephemeral   is the confirming session an actor (kind:'actor')?
  * @param {string} answer       the raw confirm answer
  * @returns {boolean}
  */
 export const downgradesActorConfirm = (tool, ephemeral, answer) =>
-  ephemeral === true && tool !== 'a2a_contact' && answer === 'yes_session';
+  ephemeral === true && !A2A_ALLOWLIST_CONFIRMS.has(tool) && answer === 'yes_session';
 
 /**
  * Turn a resolved a2a_contact answer into { ok, persist }.
