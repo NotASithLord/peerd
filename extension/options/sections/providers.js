@@ -142,7 +142,7 @@ export const ProvidersSection = {
     // failing on the first chat. Both shipped key providers use stable
     // sk- prefixes; absence from this map = no prefix check (fails open).
     /** @type {Record<string, string>} */
-    const KEY_PREFIX = { anthropic: 'sk-ant-', openrouter: 'sk-or-' };
+    const KEY_PREFIX = { anthropic: 'sk-ant-', openrouter: 'sk-or-', openai: 'sk-' };
 
     // Save a key for ONE provider, independently of the others.
     /** @param {string} name */
@@ -231,6 +231,7 @@ export const ProvidersSection = {
     const providerRows = ui.providerStatus ?? [
       { name: 'anthropic',  label: 'Anthropic',  hasKey: provider.current === 'anthropic'  && provider.hasKey },
       { name: 'openrouter', label: 'OpenRouter', hasKey: provider.current === 'openrouter' && provider.hasKey },
+      { name: 'openai',     label: 'OpenAI', hasKey: provider.current === 'openai' && provider.hasKey },
       { name: 'ollama',     label: 'Ollama (local)', hasKey: true, keyless: true },
     ];
     /** @param {string} name */

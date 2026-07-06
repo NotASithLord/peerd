@@ -11,6 +11,7 @@
 
 import { anthropicAdapter } from './adapters/anthropic.js';
 import { openrouterAdapter } from './adapters/openrouter.js';
+import { openaiAdapter } from './adapters/openai.js';
 import { ollamaAdapter } from './adapters/ollama.js';
 import { localWebgpuAdapter } from './adapters/local-webgpu.js';
 import { asWindow } from './model-window.js';
@@ -63,6 +64,9 @@ const adapters = new Map();
 // Ollama is the keyless local-inference path.
 adapters.set(anthropicAdapter.name, anthropicAdapter);
 adapters.set(openrouterAdapter.name, openrouterAdapter);
+// OpenAI: direct BYOK to api.openai.com (distinct from reaching OpenAI models
+// via the OpenRouter gateway) — same reference /chat/completions wire format.
+adapters.set(openaiAdapter.name, openaiAdapter);
 adapters.set(ollamaAdapter.name, ollamaAdapter);
 // local-webgpu: the on-device runner endpoint (FEATURE-LOCAL-WEBGPU B). Keyless;
 // the call path errors cleanly until the offscreen engine is loaded + wired

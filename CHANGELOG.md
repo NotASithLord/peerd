@@ -47,6 +47,16 @@ and storage formats may move until the surface stabilizes.
   reply threads the convId back → say continues it).
 
 ### Added
+- **OpenAI provider adapter.** Direct BYOK access to OpenAI's own API
+  (`api.openai.com`), distinct from reaching OpenAI models through the
+  OpenRouter gateway — a user with an OpenAI key and no OpenRouter account
+  now gets first-class access, billed to their OpenAI account. The wire
+  format is the reference OpenAI `/chat/completions`, so it reuses the same
+  request/response formatters as the OpenRouter adapter (retry set, hard-limit
+  fast-fail, streaming). The key attaches at fetch-header time and never
+  enters the request body. Shows up in Settings → Providers with the current
+  GPT-5.x flagships seeded in the picker; the manifest already covered the
+  host via `<all_urls>` + the `https:` CSP, so nothing new is requested.
 - **The debug surface: serious observability without a vendor.** peerd's
   chain of events was already recorded (audit log, lineage, delegation
   traces) but trapped across surfaces; now it comes OUT, locally, on the
