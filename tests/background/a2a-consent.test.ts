@@ -58,3 +58,12 @@ describe('composed: the dweb actor (ephemeral) answering a2a_contact', () => {
     expect(resolve('no')).toEqual({ ok: false, persist: false });
   });
 });
+
+describe('a2a_reply — per-conversation reply consent is an allowlist grant too', () => {
+  test('an actor "yes_session" for a2a_reply is NOT downgraded (it persists per-thread)', () => {
+    expect(downgradesActorConfirm('a2a_reply', true, 'yes_session')).toBe(false);
+  });
+  test('other actor tools still strictly downgrade', () => {
+    expect(downgradesActorConfirm('click', true, 'yes_session')).toBe(true);
+  });
+})

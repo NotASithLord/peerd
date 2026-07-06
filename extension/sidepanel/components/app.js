@@ -290,7 +290,14 @@ export const ConfirmModal = {
                   'aria-label': 'Proposed memory contents' },
                 p.op === 'delete' ? '(this deletes the document)' : (p.body || '(empty)')),
             ]
-          : [
+          : prompt.tool === 'a2a_contact' || prompt.tool === 'a2a_reply'
+            ? [
+                m('p.muted', { style: 'margin:0 0 8px;' },
+                  prompt.tool === 'a2a_reply'
+                    ? 'Your dweb agent wants to REPLY to this peer over the mesh, continuing your conversation. "Allow for session" lets it keep replying on this thread (revoke by blocking the peer).'
+                    : 'Your dweb agent wants to MESSAGE this peer on the mesh for the first time. "Allow for session" adds them as an approved contact (revoke by blocking the peer).'),
+              ]
+            : [
               m('p.muted', { style: 'margin:0 0 8px;' },
                 `The agent wants to run ${kind} action.`),
               m('pre.confirm-summary', prompt.summary ?? prompt.tool),

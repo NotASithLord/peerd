@@ -15,7 +15,12 @@
 // 'reply' resolves a pending local ask (never wakes the actor); an inbound
 // 'ask'/'tell' is delivered to the actor (the fenced wake) — see handleInbound.
 
-/** @typedef {{ __a2a: 1, kind: 'ask'|'reply'|'tell', reqId: string, message: string }} A2AEnvelope */
+/**
+ * @typedef {{ __a2a: 1, kind: 'ask'|'reply'|'tell', reqId: string, message: string, convId?: string }} A2AEnvelope
+ *   `convId` (optional) threads a STANDING conversation: an ask/tell that
+ *   carries one continues an existing thread on the peer's side, and the
+ *   reply carries it back. Absent = the legacy single-shot exchange.
+ */
 
 /** @param {unknown} d @returns {d is A2AEnvelope} */
 export const isA2AEnvelope = (d) =>
@@ -34,11 +39,17 @@ export const isA2AEnvelope = (d) =>
  * @param {() => number} [deps.now]
  * @param {() => string} [deps.newReqId]
  * @param {number} [deps.defaultTimeoutMs]
+ * @param {ReturnType<typeof import('./conversation-registry.js').createConversationRegistry> | null} [deps.conversations]
+ *   The standing-conversation registry; absent → converse/say are refused.
  */
 export const makeMeshDispatch = (deps) => {
   const {
     sendDm, listPeers, fetchCard, publishCard,
     now = Date.now, newReqId, defaultTimeoutMs = 30_000,
+    // The standing-conversation registry (conversation-registry.js), injected
+    // so converse/say correlation is testable. Absent → those ops are refused
+    // (the base single-shot ask/send/tell surface still works without it).
+    conversations = null,
   } = deps;
 
   // reqId → { resolve, timer, did } for asks awaiting a reply. Lives across the
@@ -47,7 +58,7 @@ export const makeMeshDispatch = (deps) => {
   // why `did`: a reply is bound to the peer the ask was SENT to — an inbound
   // 'reply' is only honored when its authenticated mesh sender equals that did,
   // so a third peer who guesses/observes a reqId can't forge the answer.
-  /** @type {Map<string, { resolve: (v: any) => void, timer: any, did: string }>} */
+  /** @type {Map<string, { resolve: (v: any) => void, timer: any, did: string, convId?: string }>} */
   const pendingAsks = new Map();
   // Inbound a2a messages (ask/tell) received during a run, drained by inbox().
   // Bounded: a spamming peer can flood DMs, but the buffer is capped and evicts
@@ -58,6 +69,28 @@ export const makeMeshDispatch = (deps) => {
 
   let idSeq = 0;
   const mkReqId = newReqId ?? (() => `a2a-${now().toString(36)}-${(idSeq += 1).toString(36)}`);
+
+  /**
+   * Send an ask DM and await the peer's ONE matching reply (or time out). The
+   * shared core of ask/converse/say — the only difference between them is
+   * whether a convId rides along and whether the registry records the turns.
+   * @param {string} did @param {string} message @param {string} [convId] @param {number} [timeoutMs]
+   */
+  const sendAndAwait = async (did, message, convId, timeoutMs) => {
+    const reqId = mkReqId();
+    const env = /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'ask', reqId, message });
+    if (convId) env.convId = convId;
+    const sent = await sendDm(did, env);
+    if (!sent?.ok) return { ok: false, error: sent?.error ?? 'ask: could not reach the peer' };
+    const ms = typeof timeoutMs === 'number' ? timeoutMs : defaultTimeoutMs;
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingAsks.delete(reqId);
+        resolve({ ok: true, from: null, reply: null, timedOut: true });
+      }, ms);
+      pendingAsks.set(reqId, { resolve, timer, did, convId });
+    });
+  };
 
   /**
    * Run one translated op. `ctx.confirmedDids` is the set the SW has already
@@ -92,23 +125,29 @@ export const makeMeshDispatch = (deps) => {
         const r = await sendDm(args.did, { __a2a: 1, kind: 'tell', reqId: mkReqId(), message: args.message });
         return r?.ok ? { ok: true, ...(r.id ? { id: r.id } : {}) } : { ok: false, error: r?.error ?? 'send failed' };
       }
-      case 'ask': {
-        const reqId = mkReqId();
-        const sent = await sendDm(args.did, { __a2a: 1, kind: 'ask', reqId, message: args.message });
-        if (!sent?.ok) return { ok: false, error: sent?.error ?? 'ask: could not reach the peer' };
-        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : defaultTimeoutMs;
-        return await new Promise((resolve) => {
-          const timer = setTimeout(() => {
-            pendingAsks.delete(reqId);
-            resolve({ ok: true, from: null, reply: null, timedOut: true });
-          }, timeoutMs);
-          pendingAsks.set(reqId, { resolve, timer, did: args.did });
-        });
-      }
+      case 'ask':
+        // Single-shot: no convId, no registry recording — the legacy exchange.
+        return await sendAndAwait(args.did, args.message, undefined, args.timeoutMs);
       case 'inbox': {
         const drained = inboxBuffer;
         inboxBuffer = [];
         return { ok: true, messages: drained.map((m) => ({ from: m.from, message: m.message, ts: m.ts })) };
+      }
+      case 'converse': {
+        if (!conversations) return { ok: false, error: 'a2a: standing conversations are not available' };
+        const { convId } = conversations.open(args.did, args.message);
+        const r = await sendAndAwait(args.did, args.message, convId, args.timeoutMs);
+        if (r.ok && !r.timedOut && typeof r.reply === 'string') conversations.record(convId, 'peer', r.reply);
+        return { ...r, convId };
+      }
+      case 'say': {
+        if (!conversations) return { ok: false, error: 'a2a: standing conversations are not available' };
+        const did = conversations.didFor(args.convId);
+        if (!did) return { ok: false, error: `a2a: no standing conversation ${args.convId}` };
+        conversations.record(args.convId, 'self', args.message);
+        const r = await sendAndAwait(did, args.message, args.convId, args.timeoutMs);
+        if (r.ok && !r.timedOut && typeof r.reply === 'string') conversations.record(args.convId, 'peer', r.reply);
+        return { ...r, convId: args.convId };
       }
       default:
         return { ok: false, error: `a2a: unknown op ${op}` };
@@ -121,7 +160,7 @@ export const makeMeshDispatch = (deps) => {
    * 'tell' is buffered for inbox() AND returned for the actor's fenced wake.
    * A non-a2a DM is passed through untouched (returns { consumed:false }).
    * @param {string} from @param {unknown} data
-   * @returns {{ consumed: boolean, deliver?: { from: string, kind: string, reqId: string, message: string } }}
+   * @returns {{ consumed: boolean, deliver?: { from: string, kind: string, reqId: string, message: string, convId?: string } }}
    */
   const handleInbound = (from, data) => {
     if (!isA2AEnvelope(data)) return { consumed: false };
@@ -136,7 +175,7 @@ export const makeMeshDispatch = (deps) => {
       if (pending && pending.did === from) {
         clearTimeout(pending.timer);
         pendingAsks.delete(env.reqId);
-        pending.resolve({ ok: true, from, reply: String(env.message ?? '') });
+        pending.resolve({ ok: true, from, reply: String(env.message ?? ''), ...(pending.convId ? { convId: pending.convId } : {}) });
       }
       return { consumed: true };   // a reply is plumbing, never a wake
     }
@@ -144,13 +183,14 @@ export const makeMeshDispatch = (deps) => {
     const msg = { from, message: String(env.message ?? ''), ts: now(), reqId: env.reqId, kind: env.kind };
     inboxBuffer.push(msg);
     if (inboxBuffer.length > MAX_INBOX) inboxBuffer.splice(0, inboxBuffer.length - MAX_INBOX);
-    return { consumed: false, deliver: { from, kind: env.kind, reqId: env.reqId, message: msg.message } };
+    return { consumed: false, deliver: { from, kind: env.kind, reqId: env.reqId, message: msg.message, ...(env.convId ? { convId: env.convId } : {}) } };
   };
 
-  /** Send a reply back to a peer's ask (used by the inbound-wake path once the
-   * actor answers). @param {string} toDid @param {string} reqId @param {string} message */
-  const reply = (toDid, reqId, message) =>
-    sendDm(toDid, { __a2a: 1, kind: 'reply', reqId, message });
+  /** Send a reply back to a peer's ask (the inbound-wake path once the actor
+   * answers). Threads convId so the peer's side keeps the same standing thread.
+   * @param {string} toDid @param {string} reqId @param {string} message @param {string} [convId] */
+  const reply = (toDid, reqId, message, convId) =>
+    sendDm(toDid, /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'reply', reqId, message, ...(convId ? { convId } : {}) }));
 
   return { dispatch, handleInbound, reply, _pendingCount: () => pendingAsks.size };
 };

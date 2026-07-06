@@ -13,7 +13,7 @@ const DID = 'did:key:z6MkexampleAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 describe('meshCallToOp — mapping + validation', () => {
   test('the method surface is exactly the client vocabulary', () => {
-    expect([...MESH_API_METHODS].sort()).toEqual(['ask', 'card', 'inbox', 'peers', 'publishCard', 'send'].sort());
+    expect([...MESH_API_METHODS].sort()).toEqual(['ask', 'card', 'converse', 'inbox', 'peers', 'publishCard', 'say', 'send'].sort());
   });
 
   test('peers/inbox take no args', () => {
@@ -43,7 +43,7 @@ describe('meshCallToOp — mapping + validation', () => {
   });
 
   test('the signing set is exactly send/ask/publishCard', () => {
-    expect([...MESH_SIGNING_METHODS].sort()).toEqual(['ask', 'publishCard', 'send'].sort());
+    expect([...MESH_SIGNING_METHODS].sort()).toEqual(['ask', 'converse', 'publishCard', 'say', 'send'].sort());
   });
 
   test('an unknown method throws', () => {
@@ -70,3 +70,17 @@ describe('shapeMeshResult — reply shaping', () => {
     expect(shapeMeshResult('inbox', { ok: true, messages: [{ from: DID, message: 'hi', ts: 1 }] })).toEqual([{ from: DID, message: 'hi', ts: 1 }]);
   });
 });
+
+describe('converse / say — standing-conversation verbs', () => {
+  test('converse validates did + message and is a signing op', () => {
+    const out = meshCallToOp({ method: 'converse', args: { did: DID, message: 'collab?' } });
+    expect(out).toEqual({ op: 'converse', args: { did: DID, message: 'collab?' }, signs: true });
+    expect(() => meshCallToOp({ method: 'converse', args: { did: 'x', message: 'hi' } })).toThrow(MeshApiError);
+    expect(() => meshCallToOp({ method: 'converse', args: { did: DID, message: '' } })).toThrow(MeshApiError);
+  });
+  test('say validates convId + message and is a signing op', () => {
+    const out = meshCallToOp({ method: 'say', args: { convId: 'CV1', message: 'next?' } });
+    expect(out).toEqual({ op: 'say', args: { convId: 'CV1', message: 'next?' }, signs: true });
+    expect(() => meshCallToOp({ method: 'say', args: { convId: '', message: 'hi' } })).toThrow(MeshApiError);
+  });
+})

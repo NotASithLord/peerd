@@ -26,6 +26,7 @@ import { createBaseNetwork } from '/peerd-distributed/base-network.js';
 // runs on plain http. a2a-dispatch.js is a pure, import-free module, so it loads
 // cleanly here. (tests/ is exempt from the no-deep-import rule.)
 import { makeMeshDispatch } from '/peerd-runtime/subagent/a2a-dispatch.js';
+import { createConversationRegistry } from '/peerd-runtime/subagent/conversation-registry.js';
 
 const params = new URLSearchParams(location.search);
 const roomId = params.get('room') ?? 'harness';
@@ -109,6 +110,11 @@ const boot = async () => {
     // survive real WebRTC between two browser contexts, not just the unit fakes.
     let askBeat = null;
     if (a2aOn) {
+      // conv=1 additionally proves a STANDING conversation: converse opens a
+      // thread, the peer's reply threads a convId back, and say continues it —
+      // the convId surviving real WebRTC end to end.
+      const convOn = params.get('conv') === '1';
+      const conversations = convOn ? createConversationRegistry() : null;
       const dispatch = makeMeshDispatch({
         sendDm: async (/** @type {string} */ to, /** @type {any} */ env) => {
           try { const r = await base.node.direct.send(to, env); return { ok: true, id: r?.id }; }
@@ -117,12 +123,15 @@ const boot = async () => {
         listPeers: async () => (base.snapshot().peers ?? []).map((/** @type {any} */ p) => ({ did: p.did, name: p.name })),
         fetchCard: async () => null,
         publishCard: async () => ({ ok: false, error: 'not in the two-peer harness' }),
+        conversations,
       });
-      // Inbound directs → the dispatch. An inbound ask is auto-answered with PONG.
+      // Inbound directs → the dispatch. An inbound ask is auto-answered; when it
+      // carries a convId, the reply threads it back so the opener's thread grows.
       base.node.direct.onMessage((/** @type {{ from: string, data: any }} */ { from, data }) => {
         const routed = dispatch.handleInbound(from, data);
         if (routed?.deliver?.kind === 'ask') {
-          dispatch.reply(from, routed.deliver.reqId, `PONG:${routed.deliver.message}`).catch(() => {});
+          const cid = routed.deliver.convId;
+          dispatch.reply(from, routed.deliver.reqId, `PONG:${routed.deliver.message}`, cid).catch(() => {});
         }
       });
       let asked = false;
@@ -132,9 +141,20 @@ const boot = async () => {
         if (!peer) return;
         asked = true;
         try {
-          // 8s ask timeout keeps the round-trip well inside the harness budget.
-          const r = await dispatch.dispatch('ask', { did: peer.did, message: `PING-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
-          if (r?.ok && r.reply != null && !r.timedOut) { askReplied = true; askReply = r.reply; }
+          if (convOn) {
+            // Open a standing conversation, then continue it — two turns on one convId.
+            const c = await dispatch.dispatch('converse', { did: peer.did, message: `HELLO-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
+            if (c?.ok && c.convId && c.reply != null && !c.timedOut) {
+              const c2 = await dispatch.dispatch('say', { convId: c.convId, message: `FOLLOWUP-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
+              if (c2?.ok && c2.reply != null && !c2.timedOut && c2.convId === c.convId) {
+                askReplied = true; askReply = `${c.reply} | ${c2.reply}`;
+              }
+            }
+          } else {
+            // 8s ask timeout keeps the round-trip well inside the harness budget.
+            const r = await dispatch.dispatch('ask', { did: peer.did, message: `PING-${name}`, timeoutMs: 8000 }, { signs: true, allowed: () => true });
+            if (r?.ok && r.reply != null && !r.timedOut) { askReplied = true; askReply = r.reply; }
+          }
         } catch { /* leave askReplied false — the harness fails on the timeout */ }
         render();
       }, 800);

@@ -31,6 +31,22 @@ and storage formats may move until the surface stabilizes.
     apply notices.
 
 ### Added
+- **Standing peer conversations on the mesh** (preview only). The dweb
+  actor's agent-to-agent surface was single-shot: one ask, one reply, the
+  thread forgotten — and an inbound peer message only ever reported to YOU,
+  never back to the peer. Now a conversation is a THREAD: `mesh.converse(did,
+  message)` opens one and returns a `convId`; a later peer message on that
+  thread wakes the dweb actor WITH the prior turns as context; and the actor's
+  answer goes BACK to the peer. The reply-to-a-peer edge is the owner-chosen
+  gate: per-conversation reply consent (approve once per thread, revoke by
+  blocking the peer). `mesh.say(convId, message)` continues a thread from code.
+  The convId threads through the wire envelope; a convId is a bearer token, so
+  only its owning did may extend it. The thread store is capped and TTL-evicted
+  (a peer can't grow SW memory); `dweb_block` closes every thread with that
+  peer. Proven over real WebRTC by the two-peer harness (converse → the peer's
+  reply threads the convId back → say continues it).
+
+### Added
 - **The debug surface: serious observability without a vendor.** peerd's
   chain of events was already recorded (audit log, lineage, delegation
   traces) but trapped across surfaces; now it comes OUT, locally, on the

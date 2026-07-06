@@ -267,6 +267,8 @@ const __mesh = {
   send:        (did, message) => meshCall('send', { did, message }),
   publishCard: (card) => meshCall('publishCard', { card }),
   inbox:       () => meshCall('inbox', {}),
+  converse:    (did, message, opts) => meshCall('converse', { did, message, timeoutMs: opts && opts.timeoutMs }),
+  say:         (convId, message, opts) => meshCall('say', { convId, message, timeoutMs: opts && opts.timeoutMs }),
 };
 globalThis.mesh = __mesh;
 ` : ''}
