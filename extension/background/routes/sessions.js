@@ -313,8 +313,11 @@ export const makeSessionRoutes = (deps) => {
       const auditEntries = (await auditLog.list())
         .filter((/** @type {any} */ e) => e.sessionId && idSet.has(e.sessionId));
       const settings = settingsStore.get();
+      // R4: the bundle's audit slice is a checkable artifact — run the hash
+      // chain verification and stamp the result into provenance.
+      const auditChain = await (auditLog.verify?.().catch(() => null)) ?? null;
       const bundle = assembleDebugBundle({
-        session, childSessions, auditEntries, settings,
+        session, childSessions, auditEntries, settings, auditChain,
         contextSnapshots: contextSnapshots.snapshotsForMany([sessionId, ...childIds]),
         channel: CHANNEL,
         appVersion: browser.runtime.getManifest?.().version ?? 'unknown',

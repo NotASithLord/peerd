@@ -211,6 +211,22 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   if (skills.length > 0) {
     notices.push(`${skills.length} skill(s) are listed as metadata only — reinstall them from the Skills view (their sources are preserved in the export).`);
   }
+  // R6 (import is an untrusted-deserialization surface): the two payload
+  // sections that can redirect authority — provider endpoints (egress
+  // targets) and hooks (code that vetoes/permits tool calls) — are named
+  // LOUDLY in the summary the user approves, not buried in counts.
+  /** @type {string[]} */
+  const endpointUrls = (Array.isArray(payload.providerEndpoints?.endpoints) ? payload.providerEndpoints.endpoints : [])
+    .map((/** @type {any} */ e) => String(e?.url ?? '')).filter(Boolean);
+  if (endpointUrls.length > 0) {
+    notices.push(`This import adds provider endpoint(s) the agent will send API traffic to: ${endpointUrls.join(', ')} — only proceed if you recognize them.`);
+  }
+  /** @type {string[]} */
+  const hookIds = (Array.isArray(payload.hooks) ? payload.hooks : [])
+    .map((/** @type {any} */ h) => String(h?.id ?? 'unknown'));
+  if (hookIds.length > 0) {
+    notices.push(`${hookIds.length} hook(s) will be imported DISABLED and untrusted (${hookIds.join(', ')}) — review and re-enable them in Settings → Hooks.`);
+  }
   return {
     ok: true,
     summary: {
@@ -221,6 +237,8 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
       hasSecrets: payload.secrets != null,
       memoryDocs: Array.isArray(payload.memory?.docs) ? payload.memory.docs.length : 0,
       hooks: Array.isArray(payload.hooks) ? payload.hooks.length : 0,
+      hookIds,
+      endpointUrls,
       skills: skills.map((s) => s?.name ?? s?.id ?? 'unknown'),
       dwebPresent,
       dwebDropped: channel === 'store' && dwebPresent,
@@ -272,7 +290,25 @@ export const applyImport = async ({ payload, passphrase, channel, knownSettingKe
   }
 
   if (payload.providerEndpoints?.endpoints) {
-    await io.setProviderEndpoints(payload.providerEndpoints);
+    // R6: an imported endpoint becomes an egress target the agent sends
+    // API traffic (and headers) to. Only https (or local-loopback http for
+    // Ollama-style daemons) parses through; anything else is dropped and
+    // named. This blocks scheme smuggling; the https hosts themselves were
+    // shown to the user in the inspect summary they approved.
+    const accepted = [];
+    const dropped = [];
+    for (const endpoint of payload.providerEndpoints.endpoints) {
+      const url = (() => { try { return new URL(String(endpoint?.url ?? '')); } catch { return null; } })();
+      const localLoopback = url?.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+      if (url && (url.protocol === 'https:' || localLoopback)) accepted.push(endpoint);
+      else dropped.push(String(endpoint?.url ?? '(unparseable)'));
+    }
+    if (accepted.length > 0) {
+      await io.setProviderEndpoints({ ...payload.providerEndpoints, endpoints: accepted });
+    }
+    if (dropped.length > 0) {
+      summary.notices.push(`Dropped ${dropped.length} provider endpoint(s) that are not https or local loopback: ${dropped.join(', ')}.`);
+    }
   }
 
   if (payload.secrets != null) {
@@ -289,10 +325,21 @@ export const applyImport = async ({ payload, passphrase, channel, knownSettingKe
   if (payload.memory?.docs) {
     const res = await io.importMemory(payload.memory);
     imported.memoryWritten = res.written;
+    if (res.written > 0) {
+      // R6: memory is injected into future prompts as trusted context — an
+      // import that repopulates it is a poisoning vector. Import stays legal
+      // (the user approved the summary), but the consequence is stated.
+      summary.notices.push(`${res.written} memory doc(s) imported — they will inform future prompts; review them via /memory if this file wasn't authored by you.`);
+    }
   }
 
   for (const record of payload.hooks ?? []) {
-    await io.saveHook(record);
+    // R6: an imported hook is CODE (or a rule) that runs against every tool
+    // call. It arrives from a file, not from this user's editor — so it
+    // lands disabled AND untrusted (a kind:'js' hook cannot even compile
+    // without trusted:true). Enabling is an explicit per-hook decision in
+    // Settings → Hooks, where the body is visible.
+    await io.saveHook({ ...record, enabled: false, trusted: false });
     imported.hooks++;
   }
 
