@@ -5,7 +5,7 @@
 // our exporter fails HERE, not as a judge-side rejection after a paid run.
 
 import { describe, test, expect } from 'bun:test';
-import { pageActionFor, formatAction, initialNavigation, taskComplete } from '../../extension/eval/om2w-actions.js';
+import { pageActionFor, pageActionForOp, formatAction, initialNavigation, taskComplete } from '../../extension/eval/om2w-actions.js';
 import { buildResult, validateResult, shotName } from '../../scripts/cdp/om2w/result-builder.mjs';
 
 describe('om2w-actions — peerd tool calls to Grammar A', () => {
@@ -31,6 +31,19 @@ describe('om2w-actions — peerd tool calls to Grammar A', () => {
       .toBe('TYPE [#q] -> type "shoes" | FAILED');
     expect(initialNavigation('https://x.com')).toBe('page -> NAVIGATE -> Initial navigation to https://x.com');
     expect(taskComplete('Done.')).toBe('TASK_COMPLETE -> ANSWER: Done.');
+  });
+
+  test('page/op mapping (the CODE surface): goto/click/fill map, snapshot/content do NOT', () => {
+    expect(pageActionForOp('goto', { url: 'https://x.com' })?.verb).toBe('NAVIGATE');
+    expect(pageActionForOp('click', { selector: '#buy' })?.verb).toBe('CLICK');
+    expect(pageActionForOp('fill', { selector: '#q', text: 'shoes' })?.verb).toBe('TYPE');
+    // A page.* op formats IDENTICALLY to its discrete-tool twin — the judge
+    // sees one Grammar A vocabulary across both arms.
+    expect(formatAction(pageActionForOp('click', { selector: '#buy' })!, 'SUCCESS'))
+      .toBe(formatAction(pageActionFor('click', { selector: '#buy' })!, 'SUCCESS'));
+    for (const m of ['snapshot', 'content', 'unknown']) {
+      expect(pageActionForOp(m, {})).toBeNull();
+    }
   });
 
   test('long typed text is clipped so result.json stays readable', () => {

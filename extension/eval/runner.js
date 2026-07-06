@@ -128,6 +128,14 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
     // lands (post-execution state → the after-action screenshot). Also a real
     // activity signal for the settle window.
     case 'turn/tool-result': om2w?.onToolResult(msg); bumpSettle(); break;
+    // The CODE surface's real page actions: each settled page.* op inside a
+    // page_code call, announced by the SW page/call route ('page/op'). Without
+    // these a code-arm trajectory records as [navigate, answer] — no work for
+    // the judge to see.
+    case 'page/op': om2w?.onPageOp(msg); bumpSettle(); break;
+    // The OFFSCREEN actor heap's tool dispatches (actor/tool-dispatch) — the
+    // analog of turn/tool-use for actor turns, which emit no turn/* events.
+    case 'actor/op': om2w?.onActorOp(msg); bumpSettle(); break;
     case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;
     case 'turn/subagent-cost':
       if (msg.usage) {

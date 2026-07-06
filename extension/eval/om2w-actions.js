@@ -54,6 +54,28 @@ export const pageActionFor = (name, input = {}) => {
 };
 
 /**
+ * The page-action mapping for one page.* op (the CODE surface's real actions,
+ * announced by the SW page/call route as 'page/op' events). A page_code tool
+ * call is ONE opaque tool_use; its factual page actions are these inner ops —
+ * without them a code-arm trajectory records as [navigate, answer] and the
+ * judge can't see the work. goto/click/fill act; snapshot/content perceive
+ * (excluded, same rule as the tool mapping above).
+ * @param {string} method  page.* method from the page/op event
+ * @param {Record<string, any>} [args]
+ * @returns {{ verb: string, target: string, description: string } | null}
+ */
+export const pageActionForOp = (method, args = {}) => {
+  switch (method) {
+    case 'goto': return pageActionFor('navigate', { url: args.url });
+    case 'click': return pageActionFor('click', args);
+    case 'fill': return pageActionFor('type', { selector: args.selector, text: args.text });
+    default:
+      // snapshot / content — perception, not page actions.
+      return null;
+  }
+};
+
+/**
  * Format one action as a Grammar A string, reference style: navigations read
  * `page -> NAVIGATE -> <desc>`; targeted verbs read `<VERB> <target> -> <desc>`.
  * A known outcome appends ` | SUCCESS` / ` | FAILED` (must agree with the

@@ -1804,6 +1804,12 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
   EXPOSURE_ACTOR,
   recordModelCall: contextSnapshots.record,
+  // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
+  // defined below, read at call time — same pattern as ownedTabFor). why: the
+  // offscreen actor heap has no turn/tool-use broadcast (that's turn-driver's,
+  // in-SW only), so without this the eval harness's OM2W recorder — and any
+  // activity view — is blind to what an actor actually did.
+  broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -2531,7 +2537,20 @@ const pageCallRoute = {
     } else {
       tabId = decision.tabId;
     }
-    return pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+    // Announce the settled op on the UI ports — pure observability, ZERO added
+    // authority (the gated dispatch already ran; consumers see method/ok only).
+    // why: a page_code call is ONE tool_use whose real page actions happen in
+    // here — invisible to the turn/tool-use stream. The eval harness's OM2W
+    // recorder (and any UI activity view) needs each op as a discrete
+    // after-action event, or a code-surface trajectory records as
+    // [navigate, answer] and a judge can't see the work.
+    uiPorts.broadcast({
+      type: 'page/op', sessionId: ownerSessionId, tabId,
+      method: /** @type {string} */ (method), args: args ?? {}, ok: outcome?.ok === true,
+      ...(outcome?.ok === false ? { error: String(outcome.error ?? '').slice(0, 200) } : {}),
+    });
+    return outcome;
   },
 };
 
@@ -3241,11 +3260,19 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // override (rec.customSystemPrompt). Actors get no memory/skills block (same
     // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
     const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
+    // PR #119 surface parity: the OFFSCREEN actor path must thread the web
+    // actor's action surface exactly like the in-SW path — same setting-derived
+    // value buildToolContext falls back to. Without it a code-surface actor is
+    // advertised the TOOLS descriptors (no page_code) and taught the tools
+    // lore, so the whole code arm silently degrades on the offscreen heap.
+    const actorSurface = (kind === 'web' && rec.backing !== 'api')
+      ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
+      : undefined;
     const systemPrompt = await renderSystemPrompt({
-      actorType: kind, backing: rec.backing, instanceId,
+      actorType: kind, backing: rec.backing, instanceId, actorSurface,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
     });
-    const tools = actorDescriptors(listTools(), kind, rec.backing)
+    const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
     const reasoning = {

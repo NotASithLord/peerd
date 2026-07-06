@@ -37,11 +37,16 @@
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
  *   identity (never the worker's own claim). Optional; defaults to a no-op.
+ * @param {(msg: Record<string, any>) => void} [deps.broadcastOp]  announce each settled
+ *   ACTOR tool dispatch on the UI ports ('actor/op' — name/args/ok, observability only).
+ *   The offscreen heap emits no turn/tool-use, so this is how the eval harness's OM2W
+ *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
  */
 export const makeOffscreenActorClient = ({
   ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, now = Date.now,
   recordModelCall = () => {},
+  broadcastOp = (/** @type {any} */ _msg) => {},
 }) => {
   let seq = 0;
   /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
@@ -187,6 +192,17 @@ export const makeOffscreenActorClient = ({
         // ctx.activeTab; still runs so engine/edit_file calls normalize.)
         pinActorCall(call, rec.actorType, rec.instanceId);
         const result = await dispatchToolCall(call, ctx);
+        // Announce the settled dispatch — pure observability, zero authority
+        // (the gated dispatch already ran; consumers see name/args/ok only).
+        // why: an OFFSCREEN actor turn emits no turn/tool-use broadcast (that
+        // path is turn-driver's, in-SW only) — without this the eval harness's
+        // OM2W recorder can't see the actor's page actions. Best-effort.
+        try {
+          broadcastOp({
+            type: 'actor/op', sessionId: actorSessionId,
+            name: call?.name, args: call?.args ?? {}, ok: result?.ok !== false,
+          });
+        } catch { /* display-only */ }
         return { ok: true, result };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };

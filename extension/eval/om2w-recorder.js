@@ -16,7 +16,7 @@
 // IO is INJECTED (capture/tabInfo/stop) so ordering + capping are bun-testable;
 // the runner wires the real chrome.tabs capture.
 
-import { pageActionFor, formatAction, initialNavigation } from './om2w-actions.js';
+import { pageActionFor, pageActionForOp, formatAction, initialNavigation } from './om2w-actions.js';
 
 /**
  * @param {Object} deps
@@ -80,6 +80,47 @@ export const makeOm2wRecorder = ({ capture, tabInfo, stop, maxSteps = 25 }) => {
         actions.push({ action: formatAction(mapped, status), url: await tabInfo().catch(() => null), status });
         // The 25-step convention is enforced, not advisory: past the cap the
         // trajectory would not be comparable, so halt the agent.
+        if (actions.length >= maxSteps && !stopped) { stopped = true; stop(); }
+      });
+    },
+
+    /**
+     * A settled page.* op from the CODE surface (the SW page/call route's
+     * 'page/op' broadcast). Single-phase — the op arrives WITH its outcome, so
+     * it becomes a step immediately (the page state is already post-action);
+     * no pending map. Same cap enforcement as the tool path, so the two arms
+     * run the same 25-step budget.
+     * @param {{ method?: string, args?: Record<string, any>, ok?: boolean }} msg
+     */
+    onPageOp(msg) {
+      if (!active || typeof msg?.method !== 'string') return;
+      const mapped = pageActionForOp(msg.method, msg.args ?? {});
+      if (!mapped || stopped) return;
+      const status = msg.ok === true ? 'SUCCESS' : (msg.ok === false ? 'FAILED' : null);
+      enqueue(async () => {
+        if (stopped) return;
+        shots.push(await captureOrBlank());
+        actions.push({ action: formatAction(mapped, status), url: await tabInfo().catch(() => null), status });
+        if (actions.length >= maxSteps && !stopped) { stopped = true; stop(); }
+      });
+    },
+
+    /**
+     * A settled ACTOR tool dispatch (the SW actor/tool-dispatch 'actor/op'
+     * broadcast — the OFFSCREEN actor heap's analog of turn/tool-use +
+     * turn/tool-result, which only in-SW turns emit). Single-phase like
+     * onPageOp; the TOOL mapper decides page action vs read/compute.
+     * @param {{ name?: string, args?: Record<string, any>, ok?: boolean }} msg
+     */
+    onActorOp(msg) {
+      if (!active || typeof msg?.name !== 'string') return;
+      const mapped = pageActionFor(msg.name, msg.args ?? {});
+      if (!mapped || stopped) return;
+      const status = msg.ok === true ? 'SUCCESS' : (msg.ok === false ? 'FAILED' : null);
+      enqueue(async () => {
+        if (stopped) return;
+        shots.push(await captureOrBlank());
+        actions.push({ action: formatAction(mapped, status), url: await tabInfo().catch(() => null), status });
         if (actions.length >= maxSteps && !stopped) { stopped = true; stop(); }
       });
     },

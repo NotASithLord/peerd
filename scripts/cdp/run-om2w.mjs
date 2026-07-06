@@ -83,6 +83,13 @@ async function main() {
       const body = (request && request.postData) || '';
       if (body.includes('<actor_agent>')) {
         const t = actorTurn++;
+        // --actor-surface=code: the actor's ONE action tool is page_code; its
+        // inner page.* ops must surface as page/op events → recorder steps.
+        // This is the $0 proof of the code-arm trajectory path end to end.
+        if (ACTOR_SURFACE === 'code') {
+          if (t === 0) return { sse: sseToolCall('page_code', { code: `await page.goto(${JSON.stringify(`${fixture.url}/products`)}); await page.click('a[href="/contact"]'); return 'clicked';` }) };
+          return { sse: sseText('Drove the products page via page_code.') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: `${fixture.url}/products` }) };
         if (t === 1) return { sse: sseToolCall('click', { selector: 'a[href="/contact"]' }) };
         return { sse: sseText('Opened the products page and clicked Contact.') };
@@ -90,7 +97,7 @@ async function main() {
       if (!orchDelegated) { orchDelegated = true; return { sse: sseToolCall('message_actor', { to: 'web', message: 'open the products page and click a link' }) }; }
       return { sse: sseText('Done — drove the products page.') };
     };
-    log(`SMOKE — wire-fake against ${fixture.url}; no dataset, no key, no cost.`);
+    log(`SMOKE — wire-fake against ${fixture.url}${ACTOR_SURFACE ? ` (${ACTOR_SURFACE} surface)` : ''}; no dataset, no key, no cost.`);
   } else {
     const shard = ALL.slice(OFFSET, OFFSET + COUNT);
     log(`OM2W ${revision.slice(0, 8)} — tasks ${OFFSET}..${OFFSET + shard.length - 1} of ${ALL.length}, model=${MODEL || PROVIDER} → ${OUT}`);
@@ -113,7 +120,9 @@ async function main() {
     if (!vault?.ok) throw new Error(`vault/initialize failed: ${JSON.stringify(vault)}`);
     await rpc(c.page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
     if (SMOKE) {
-      await rpc(c.page, { type: 'settings/update', patch: { providerName: 'ollama' } });
+      // The surface applies to the smoke too — the code-arm smoke is the $0
+      // proof of the page/op recording path, which needs the setting live.
+      await rpc(c.page, { type: 'settings/update', patch: { providerName: 'ollama', ...(ACTOR_SURFACE ? { webActorActionSurface: ACTOR_SURFACE } : {}) } });
     } else {
       const set = await rpc(c.page, { type: 'provider/setKey', provider: PROVIDER, plaintext: KEY });
       if (!set?.ok) throw new Error(`provider/setKey failed: ${JSON.stringify(set)}`);

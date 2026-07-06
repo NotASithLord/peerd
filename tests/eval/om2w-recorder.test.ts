@@ -72,6 +72,36 @@ describe('om2w recorder', () => {
     expect(out.shots).toHaveLength(4);       // one per action + the final shot
   });
 
+  test('page/op events (the CODE surface) become steps: goto/click/fill act, snapshot/content are filtered', async () => {
+    const { rec } = harness();
+    await rec.begin('https://start.example/');
+    rec.onPageOp({ method: 'goto', args: { url: 'https://shop.example' }, ok: true });
+    rec.onPageOp({ method: 'snapshot', args: {}, ok: true });                       // perception → filtered
+    rec.onPageOp({ method: 'click', args: { selector: '#buy' }, ok: true });
+    rec.onPageOp({ method: 'fill', args: { selector: '#q', text: 'shoes' }, ok: false });
+    rec.onPageOp({ method: 'content', args: {}, ok: true });                        // perception → filtered
+    const out = await rec.finish();
+    expect(out.actions.map((a: any) => a.action)).toEqual([
+      'page -> NAVIGATE -> Initial navigation to https://start.example/',
+      'page -> NAVIGATE -> navigate to https://shop.example | SUCCESS',
+      'CLICK [#buy] -> click [#buy] | SUCCESS',
+      'TYPE [#q] -> type "shoes" | FAILED',
+    ]);
+    expect(out.shots).toHaveLength(out.actions.length + 1);
+  });
+
+  test('page/op steps count toward the SAME 25-step cap as tool steps', async () => {
+    const { rec, stops } = harness({ maxSteps: 3 });
+    await rec.begin('https://start.example/');   // step 1 of 3
+    rec.onToolUse({ toolUseId: 'a', name: 'click', input: { selector: '#x' } });
+    rec.onToolResult({ toolUseId: 'a', result: { ok: true } });   // step 2 (tool path)
+    for (let i = 0; i < 4; i++) rec.onPageOp({ method: 'click', args: { selector: `#p${i}` }, ok: true });
+    const out = await rec.finish();
+    expect(out.capped).toBe(true);
+    expect(stops()).toBe(1);
+    expect(out.actions).toHaveLength(3);         // nav + tool click + ONE page op, then capped
+  });
+
   test('shots and actions stay paired even when results interleave out of order', async () => {
     const { rec } = harness();
     await rec.begin(null);                   // no start URL → no step 0
