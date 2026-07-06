@@ -871,7 +871,16 @@ export async function* runUserTurn(ctx) {
         if (abortedMidBatch) break;
       }
     }
-    if (abortedMidBatch) {
+    // why the extra wasAborted(): the per-wave checks run BEFORE each dispatch,
+    // so an abort landing DURING the batch's FINAL dispatch is seen by neither —
+    // the loop would fall through and append the tool-results message. Under a
+    // steer-live supersede that append races the NEW turn (claim() aborts and
+    // starts it immediately, without waiting for this loop to unwind), landing
+    // the results AFTER the steer's user message + assistant stub — a history
+    // whose tool_result no longer follows its tool_use, which the provider
+    // rejects on every later call (the format layer's orphan-tool_result
+    // demotion is the wire-side backstop for sessions already shaped that way).
+    if (abortedMidBatch || wasAborted()) {
       // Mirror the pre-dispatch abort guard (:683): mark a DELIBERATE stop (not a
       // resumable tools-pending interruption) and drop the partial tool_result
       // message, so the turn ends cleanly on the aborted assistant message and
