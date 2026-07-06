@@ -189,6 +189,16 @@ const toOpenAiMessages = (system, messages) => {
  * so the model still sees the output, just not as a structural tool reply.
  * Wire-format-only — the persisted session is untouched.
  *
+ * why the demotions are BUFFERED past the reply run (the imageFollowups
+ * technique above): a stale reply can sit BEFORE a valid one in the same
+ * run (the steer race persists the superseded turn's results between the
+ * new turn's assistant message and its own results). Demoting in place
+ * would strand the surviving real reply behind a role:'user' message —
+ * itself the 400 this repair exists to prevent — and repairOrphanToolCalls
+ * would then synthesize a duplicate, contradictory reply for it. Emitting
+ * the demotions only after the run ends keeps every surviving real reply
+ * contiguous with its assistant message.
+ *
  * @param {OpenAiMessage[]} msgs
  * @returns {OpenAiMessage[]}
  */
@@ -197,17 +207,19 @@ const demoteOrphanToolResults = (msgs) => {
   const out = [];
   /** @type {Set<string>} ids still answerable in the current reply run */
   let open = new Set();
+  /** @type {OpenAiMessage[]} demotions held until the current reply run ends */
+  let demoted = [];
+  const flushDemoted = () => {
+    if (demoted.length > 0) { out.push(...demoted); demoted = []; }
+  };
   for (const m of msgs) {
-    if (m.role === 'assistant') {
-      open = new Set((Array.isArray(m.tool_calls) ? m.tool_calls : []).map((tc) => tc.id));
-      out.push(m);
-    } else if (m.role === 'tool') {
+    if (m.role === 'tool') {
       if (typeof m.tool_call_id === 'string' && open.has(m.tool_call_id)) {
         // One reply per id — a duplicate reply is itself an orphan.
         open.delete(m.tool_call_id);
         out.push(m);
       } else {
-        out.push({
+        demoted.push({
           role: 'user',
           content: `[stale tool result for ${m.tool_call_id ?? '(unknown id)'} — its tool `
             + 'call is no longer in the preceding assistant message (that turn was '
@@ -215,12 +227,17 @@ const demoteOrphanToolResults = (msgs) => {
             + `${typeof m.content === 'string' ? m.content : ''}`,
         });
       }
-    } else {
-      // Any other role ends the contiguous reply run.
-      open = new Set();
-      out.push(m);
+      continue;
     }
+    // Any other role ends the contiguous reply run: emit the held
+    // demotions first, so they land AFTER the run they were pulled from.
+    flushDemoted();
+    open = m.role === 'assistant'
+      ? new Set((Array.isArray(m.tool_calls) ? m.tool_calls : []).map((tc) => tc.id))
+      : new Set();
+    out.push(m);
   }
+  flushDemoted();
   return out;
 };
 

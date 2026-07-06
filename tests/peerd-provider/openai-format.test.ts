@@ -104,6 +104,51 @@ describe('to-openai message mapping', () => {
     expect(demoted).toBeTruthy();
   });
 
+  test('a stale reply BEFORE a valid one in the same run does not strand or duplicate the valid reply', () => {
+    // Review-swarm confirmed failure: the steer race persists the
+    // superseded turn's results BETWEEN the new turn's assistant message
+    // and its own results — wire order assistant(C), tool(stale A),
+    // tool(real C). Demoting in place stranded the real tool(C) behind a
+    // user message AND let repairOrphanToolCalls synthesize a duplicate
+    // contradictory reply for C. The demotion must buffer past the run:
+    // real replies stay contiguous, stale ones follow as user text.
+    const msgs = _toOpenAiMessagesForTests('', [
+      { role: 'user', content: 'steer', id: '1', when: 0 },
+      {
+        role: 'assistant', content: '', id: '2', when: 0,
+        toolUses: [{ id: 'call_c', name: 'read_page', input: {} }],
+      },
+      {
+        role: 'user', content: '', id: '3', when: 0,
+        toolResults: [{ tool_use_id: 'call_a', content: 'stale output' }],
+      },
+      {
+        role: 'user', content: '', id: '4', when: 0,
+        toolResults: [{ tool_use_id: 'call_c', content: 'real output' }],
+      },
+    ]) as OpenAiMsg[];
+    // Contiguity: every tool message answers the run opened by the
+    // immediately-preceding assistant; one reply per id.
+    const seen = new Map<string, number>();
+    let open = new Set<string>();
+    for (const m of msgs) {
+      if (m.role === 'assistant') open = new Set((m.tool_calls ?? []).map((tc) => tc.id));
+      else if (m.role === 'tool') {
+        expect(open.has(m.tool_call_id ?? '')).toBe(true);
+        seen.set(m.tool_call_id ?? '', (seen.get(m.tool_call_id ?? '') ?? 0) + 1);
+        open.delete(m.tool_call_id ?? '');
+      } else open = new Set();
+    }
+    // Exactly ONE reply for call_c — the REAL one, not a synthesized
+    // 'did not complete' duplicate.
+    expect(seen.get('call_c')).toBe(1);
+    const replyC = msgs.find((m) => m.role === 'tool' && m.tool_call_id === 'call_c');
+    expect(replyC?.content).toBe('real output');
+    // The stale reply survives as demoted user text after the run.
+    const demoted = msgs.findIndex((m) => m.role === 'user' && /stale output/.test(String(m.content)));
+    expect(demoted).toBeGreaterThan(msgs.indexOf(replyC!));
+  });
+
   test('toOpenAiBody emits tools + tool_choice when tools provided', () => {
     const body = toOpenAiBody({
       model: 'm', system: 'S', messages: [],
