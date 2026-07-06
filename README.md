@@ -21,8 +21,8 @@
 Chrome/Firefox extension that runs a full agent loop *inside* the
 browser you already use, with your existing tabs and sessions.
 It reads and drives your pages, spins up sandboxed compute (JS
-Notebooks, full Linux VMs compiled to WebAssembly, personal client-side
-apps), and (on the preview channel) shares what it builds over a
+Notebooks, compiled WebAssembly tools, full Linux VMs, personal
+client-side apps), and (on the preview channel) shares what it builds over a
 peer-to-peer WebRTC network built for agent-to-agent communication. BYOK
 to the model provider of your choice. **No backend, no telemetry, no
 cloud component in the data path.**
@@ -355,7 +355,12 @@ tree, in a visible tab. ~hundreds of ms boot. `peerd.egress.fetch` is the
 worker's only network, routed through `peerd-egress` so it's honest. Each
 `js_notebook` run spawns a fresh worker, so in-memory state (`globalThis`,
 `let`/`const`) does NOT carry between runs; persist via
-`peerd.self.writeFile`/`readFile` to the OPFS file tree.
+`peerd.self.writeFile`/`readFile` to the OPFS file tree. The sealed worker
+also runs **compiled wasm32-wasi binaries** via the `peerd:wasi` builtin —
+SQLite over a user's `.sqlite` file, codecs, language runtimes — against an
+in-memory filesystem, with zero ambient capabilities (a wasm module has no
+network path even in principle; it sees only the stdin/files the call
+passes it).
 
 ```
 sandbox_create   js_notebook   script   js_write_file   js_read_file   js_delete
