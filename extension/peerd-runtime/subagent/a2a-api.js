@@ -103,6 +103,36 @@ const MESH_METHODS = {
     toArgs: () => ({}),
     shape: (c) => Array.isArray(c?.messages) ? c.messages : [],
   },
+  // CONVERSE — open a STANDING conversation with a peer: like ask, but the SW
+  // mints a convId and remembers the thread, so a later peer message continues
+  // it (waking the dweb actor with the prior turns as context) and the actor's
+  // answers go back to the peer under per-conversation consent. Returns the
+  // convId to continue with. Signs.
+  converse: {
+    op: 'converse',
+    toArgs: (a) => {
+      const did = isDid(a?.did) ? a.did : (() => { throw new MeshApiError('mesh.converse(did, message): did must be a did:key'); })();
+      const message = nonEmptyString(a?.message, 'mesh.converse(did, message): message');
+      const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0 ? Math.min(a.timeoutMs, 120_000) : undefined;
+      return { did, message, ...(timeoutMs ? { timeoutMs } : {}) };
+    },
+    shape: (c) => ({ convId: c?.convId ?? null, from: c?.from ?? null, reply: c?.reply ?? null, ...(c?.timedOut ? { timedOut: true } : {}) }),
+    signs: true,
+  },
+  // SAY — continue a standing conversation opened by converse (or adopted from
+  // an inbound thread): send the next turn on an existing convId and await the
+  // peer's reply. Signs.
+  say: {
+    op: 'say',
+    toArgs: (a) => {
+      const convId = nonEmptyString(a?.convId, 'mesh.say(convId, message): convId');
+      const message = nonEmptyString(a?.message, 'mesh.say(convId, message): message');
+      const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0 ? Math.min(a.timeoutMs, 120_000) : undefined;
+      return { convId, message, ...(timeoutMs ? { timeoutMs } : {}) };
+    },
+    shape: (c) => ({ convId: c?.convId ?? null, from: c?.from ?? null, reply: c?.reply ?? null, ...(c?.timedOut ? { timedOut: true } : {}) }),
+    signs: true,
+  },
 };
 
 /** The method names — drives the worker stub + the lore. */

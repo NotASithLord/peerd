@@ -107,6 +107,12 @@ export {
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
 } from './subagent/actors-api.js';
 export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
+// Standing peer conversations — the pure thread registry (convId → turns),
+// capped + TTL-evicted; the SW singleton drives inbound routing + reply consent.
+export {
+  createConversationRegistry,
+  MAX_CONVERSATIONS, MAX_TURNS_PER_CONVERSATION, CONVERSATION_TTL_MS,
+} from './subagent/conversation-registry.js';
 // PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
 // (getRecord injected) so the fail-closed trust rules are unit-tested, not just
 // exercised through the SW's inlined walk. The SW passes getRecord = sessions.get.
