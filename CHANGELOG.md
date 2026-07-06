@@ -10,102 +10,105 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-05
+
 ### Security
 - **Three residual risks from the threat model narrowed before wider
-  exposure** (R4/R5/R6 — each documented honestly in
+  exposure** (R4/R5/R6, each documented honestly in
   docs/security/THREAT-MODEL.md):
   - **The audit log is tamper-evident now.** Every entry extends a SHA-256
-    hash chain and a head record pins the newest link, so rewritten, deleted,
+    hash chain, and a head record pins the newest link. Rewritten, deleted,
     inserted, or truncated entries fail verification. The debug bundle runs
-    the verification and stamps the result into its provenance. (Evidence,
-    not proof: in-origin code execution can still recompute the chain — that
-    boundary is stated, not hidden.)
+    the verification and stamps the result into its provenance. This is
+    evidence, not proof: in-origin code execution can still recompute the
+    chain. That boundary is stated, not hidden.
   - **Session confirm grants are origin-bound.** "Yes for this session" now
-    means this tool ON this origin — approving `click` on one site no longer
-    silently covers every site the chat visits. Generalizes the host scoping
-    web writes already had.
+    means this tool ON this origin. Approving `click` on one site no longer
+    silently covers every site the chat visits. This generalizes the host
+    scoping web writes already had.
   - **Transfer import is gated.** Imported provider endpoints must be https
-    (or local loopback) and are named in the summary the user approves;
-    imported hooks land DISABLED and untrusted until re-enabled per hook in
-    Settings; a memory import states its prompt-injection consequence in the
+    (or local loopback) and are named in the summary the user approves.
+    Imported hooks land DISABLED and untrusted until re-enabled per hook in
+    Settings. A memory import states its prompt-injection consequence in the
     apply notices.
 
 ### Added
 - **Standing peer conversations on the mesh** (preview only). The dweb
   actor's agent-to-agent surface was single-shot: one ask, one reply, the
-  thread forgotten — and an inbound peer message only ever reported to YOU,
-  never back to the peer. Now a conversation is a THREAD: `mesh.converse(did,
-  message)` opens one and returns a `convId`; a later peer message on that
-  thread wakes the dweb actor WITH the prior turns as context; and the actor's
+  thread forgotten. An inbound peer message only ever reported to YOU,
+  never back to the peer. Now a conversation is a THREAD. `mesh.converse(did,
+  message)` opens one and returns a `convId`. A later peer message on that
+  thread wakes the dweb actor WITH the prior turns as context, and the actor's
   answer goes BACK to the peer. The reply-to-a-peer edge is the owner-chosen
   gate: per-conversation reply consent (approve once per thread, revoke by
   blocking the peer). `mesh.say(convId, message)` continues a thread from code.
-  The convId threads through the wire envelope; a convId is a bearer token, so
+  The convId threads through the wire envelope. A convId is a bearer token, so
   only its owning did may extend it. The thread store is capped and TTL-evicted
-  (a peer can't grow SW memory); `dweb_block` closes every thread with that
+  (a peer can't grow SW memory). `dweb_block` closes every thread with that
   peer. Proven over real WebRTC by the two-peer harness (converse → the peer's
   reply threads the convId back → say continues it).
 
 ### Added
 - **OpenAI provider adapter.** Direct BYOK access to OpenAI's own API
   (`api.openai.com`), distinct from reaching OpenAI models through the
-  OpenRouter gateway — a user with an OpenAI key and no OpenRouter account
+  OpenRouter gateway. A user with an OpenAI key and no OpenRouter account
   now gets first-class access, billed to their OpenAI account. The wire
   format is the reference OpenAI `/chat/completions`, so it reuses the same
   request/response formatters as the OpenRouter adapter (retry set, hard-limit
   fast-fail, streaming). The key attaches at fetch-header time and never
-  enters the request body. Shows up in Settings → Providers with the current
-  GPT-5.x flagships seeded in the picker; the manifest already covered the
+  enters the request body. It shows up in Settings → Providers with the current
+  GPT-5.x flagships seeded in the picker. The manifest already covered the
   host via `<all_urls>` + the `https:` CSP, so nothing new is requested.
 - **The debug surface: serious observability without a vendor.** peerd's
   chain of events was already recorded (audit log, lineage, delegation
-  traces) but trapped across surfaces; now it comes OUT, locally, on the
+  traces) but trapped across surfaces. Now it comes OUT, locally, on the
   user's say-so. Three pieces:
-  - **Debug bundle export** — a chip-sized `debug` button in the chat mode
-    row saves one JSON file per session: the full transcript INCLUDING every
-    descendant actor/subagent session (the delegation tree, walked by parent
-    links), the audit slice for that set, cost, a settings snapshot (keys
-    can't appear — they live only in the vault and attach at fetch-header
-    time), live context snapshots, a classified failure index, and a
-    provenance block that says plainly what may be missing (pruned audit,
-    evicted snapshots). Same data exports as an **OpenTelemetry trace**
-    (OTLP/JSON, delegation = span parentage, gen_ai semconv attributes) for
-    any OTel viewer the user already runs — converted in the panel from the
-    same payload, no second route, no wire, no vendor.
-  - **Failure-class chips** — every failed tool card and failed turn now
+  - **Debug bundle export**: a chip-sized `debug` button in the chat mode
+    row saves one JSON file per session. It includes the full transcript
+    INCLUDING every descendant actor/subagent session (the delegation tree,
+    walked by parent links), the audit slice for that set, cost, a settings
+    snapshot (keys can't appear, they live only in the vault and attach at
+    fetch-header time), live context snapshots, a classified failure index,
+    and a provenance block that says plainly what may be missing (pruned
+    audit, evicted snapshots). The same data exports as an **OpenTelemetry
+    trace** (OTLP/JSON, delegation = span parentage, gen_ai semconv
+    attributes) for any OTel viewer the user already runs. It is converted in
+    the panel from the same payload, with no second route, no wire, and no
+    vendor.
+  - **Failure-class chips**: every failed tool card and failed turn now
     carries its classified failure neighborhood (policy / auth / limits /
     provider / timeout / aborted / environment / agent / internal) as a
     small chip next to the raw error, so triage starts at "whose fault,
     roughly" instead of string-parsing. The same classifier annotates the
     bundle and stamps OTel span status.
-  - **The context inspector** (dev mode) — "what did the model actually
-    see?": the service worker keeps a small in-memory ring of shaped
+  - **The context inspector** (dev mode): "what did the model actually
+    see?". The service worker keeps a small in-memory ring of shaped
     request snapshots per session (system prompt clipped, messages capped,
     binary payloads stripped with a visible sentinel), captured at the two
-    seams that together cover every model call — the orchestrator's turn
+    seams that together cover every model call: the orchestrator's turn
     driver and the actor/subagent relay route. A modal lists each call
     (who, model, sizes, content) and is honest about the ring's lifetime:
     it empties with the service worker, and says so.
 - **The orchestrator delegates from code: `script` grows an `actors` client.**
   The same bet that gave the web actor and the mesh their code surfaces now
-  reaches the orchestrator itself: inside the `script` tool (the renamed
-  `js_run` — the generalized name models actually reach for), code can
+  reaches the orchestrator itself. Inside the `script` tool (the renamed
+  `js_run`, the generalized name models actually reach for), code can
   `await actors.ask(to, goal)` to delegate and get the reply back as a value,
   `actors.send(to, goal)` to hand off without waiting, and `actors.list()`
-  for the roster. Fan-out and plumbing move into one script — ask several
-  actors at once, feed one's output into the next as a variable — so
-  intermediate bytes never transit the orchestrator's context at all, which
-  is simultaneously the token win and a deepening of the isolation thesis.
+  for the roster. Fan-out and plumbing move into one script: ask several
+  actors at once, feed one's output into the next as a variable. Intermediate
+  bytes never transit the orchestrator's context at all, which is both a token
+  win and a deepening of the isolation thesis.
   Nothing new is trusted: every delegation runs the full message_actor gate
   chain per call (sender gate, rate caps, duplicate-intent, the oneShot
   sandbox rule, audit), the worker can never spoof whose behalf it acts on
   (owner identity rides trusted job params), and a script that delegated has
   its output fenced (actor replies are untrusted bytes).
   **Observability is the contract, not an afterthought**: every run returns a
-  [DELEGATIONS] trace — op, target, outcome, timing, with failed-op detail
-  fenced — that survives script errors, timeouts, and Stop; the side panel
-  streams a live per-delegation feed on the script card while it runs; each
-  op lands in the audit log tagged via:script; and Stop actually unwinds the
+  [DELEGATIONS] trace (op, target, outcome, timing, with failed-op detail
+  fenced) that survives script errors, timeouts, and Stop. The side panel
+  streams a live per-delegation feed on the script card while it runs. Each
+  op lands in the audit log tagged via:script. Stop actually unwinds the
   whole fan (pending asks abort, their actor turns die, the worker is
   terminated). Proven end to end by a live e2e state: one script, a real
   web-actor round trip, the reply resolving into the running code.
