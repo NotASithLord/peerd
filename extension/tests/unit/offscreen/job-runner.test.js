@@ -76,6 +76,31 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(v.s).toBe(60);
   });
 
+  // peerd:wasi END TO END in the real substrate: builtin resolution in the
+  // sealed worker, the vendored shim linking, a wasm module actually executing.
+  // The module is a hand-assembled wasm32-wasi command (fd_write "hello from
+  // wasm\n" to stdout, proc_exit 0) — regenerate with tests/notebook-tab/
+  // wasi-test-module.ts buildHelloModule('hello from wasm\n').
+  it('peerd:wasi runs a wasm32-wasi module inside a headless job', async () => {
+    const helloWasmB64 = 'AGFzbQEAAAABEANgBH9/f38Bf2ABfwBgAAACRgIWd2FzaV9zbmFwc2hvdF9wcmV2aWV3MQhmZF93cml0ZQAAFndhc2lfc25hcHNob3RfcHJldmlldzEJcHJvY19leGl0AAEDAgECBQMBAAEHEwIGbWVtb3J5AgAGX3N0YXJ0AAIKIQEfAEEAQRA2AgBBBEEQNgIAQQFBAEEBQQwQABpBABABCwsWAQBBEAsQaGVsbG8gZnJvbSB3YXNtCg==';
+    const r = await runJob(
+      {
+        code: [
+          'import { runWasi } from "peerd:wasi";',
+          `const bytes = Uint8Array.from(atob("${helloWasmB64}"), (c) => c.charCodeAt(0));`,
+          'const run = await runWasi(bytes, { files: { "seed.txt": "kept" } });',
+          'return { exitCode: run.exitCode, stdout: run.stdout, seed: run.files["seed.txt"] };',
+        ].join('\n'),
+      },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(r.error).toBe(null);
+    const v = /** @type {{ exitCode: number, stdout: string, seed: string }} */ (r.value);
+    expect(v.exitCode).toBe(0);
+    expect(v.stdout).toBe('hello from wasm\n');
+    expect(v.seed).toBe('kept');   // the virtual FS round-trips through the run
+  });
+
   // The a2a run is the dweb actor's MESH-ONLY surface (cynical-swarm HIGH): its
   // tool allow-set grants no egress and no delegation, so the same sealed worker
   // run with { a2a:true } must NOT be able to re-grant itself either via the
