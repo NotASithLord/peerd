@@ -3367,6 +3367,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResume, haltGoalRun,
+    // session/reset (New chat) must stop the abandoned session's live turn AND
+    // cascade to its in-flight actors — same primitives agent/stop uses — so
+    // background web/VM/App work doesn't keep running on the orphaned session.
+    turnSlots, actorMessaging,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
