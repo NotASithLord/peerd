@@ -10,6 +10,26 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Security
+- **Three residual risks from the threat model narrowed before wider
+  exposure** (R4/R5/R6 — each documented honestly in
+  docs/security/THREAT-MODEL.md):
+  - **The audit log is tamper-evident now.** Every entry extends a SHA-256
+    hash chain and a head record pins the newest link, so rewritten, deleted,
+    inserted, or truncated entries fail verification. The debug bundle runs
+    the verification and stamps the result into its provenance. (Evidence,
+    not proof: in-origin code execution can still recompute the chain — that
+    boundary is stated, not hidden.)
+  - **Session confirm grants are origin-bound.** "Yes for this session" now
+    means this tool ON this origin — approving `click` on one site no longer
+    silently covers every site the chat visits. Generalizes the host scoping
+    web writes already had.
+  - **Transfer import is gated.** Imported provider endpoints must be https
+    (or local loopback) and are named in the summary the user approves;
+    imported hooks land DISABLED and untrusted until re-enabled per hook in
+    Settings; a memory import states its prompt-injection consequence in the
+    apply notices.
+
 ### Added
 - **The debug surface: serious observability without a vendor.** peerd's
   chain of events was already recorded (audit log, lineage, delegation

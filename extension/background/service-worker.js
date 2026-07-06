@@ -250,6 +250,7 @@ import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
+import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeUiPorts } from './ui-ports.js';
@@ -1955,15 +1956,12 @@ const confirmAction = async (prompt) => {
   if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
     return 'yes_once';
   }
-  // why scope the web-write grant by host: the prompt names a SPECIFIC host
-  // ("…send a POST request to {host}?"), so "approve for this session" must mean
-  // THIS host this session — not a blanket pass for non-GET egress to any host
-  // for the rest of the session. The prompt already carries origins:[host]; fold
-  // it into the grant key. Every other tool keys by its (already host-specific
-  // or host-agnostic-by-design) tool name.
-  const grantKey = prompt.tool === WEB_WRITE_CONFIRM_KEY
-    ? `${WEB_WRITE_CONFIRM_KEY}|${(Array.isArray(prompt.origins) && prompt.origins[0]) || ''}`
-    : prompt.tool;
+  // R5 (origin-bound grants): "approve for this session" means this tool ON
+  // this origin — the dispatcher computes prompt.origins (the pinned tab's
+  // origin for DOM tools, the target host for web writes), and the grant key
+  // folds it in. Approving `click` on site A no longer covers site B. Tools
+  // with no origin surface keep the bare tool key (confirm-grant-key.js).
+  const grantKey = confirmGrantKey(prompt);
   // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
   // strictly PER-TURN (an actor can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next

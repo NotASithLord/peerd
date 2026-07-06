@@ -113,10 +113,12 @@ export const collectFailures = (session) => {
  * @param {string} [input.appVersion]
  * @param {number} input.now
  * @param {{ auditMaxEntries?: number, snapshotsPerSession?: number }} [input.limits]  the caps in force at capture, for provenance
+ * @param {{ ok: boolean, checked: number, unchained: number, reason?: string } | null} [input.auditChain]
+ *   the audit log's hash-chain verification result (R4), when the caller ran it
  */
 export const assembleDebugBundle = ({
   session, childSessions = [], auditEntries = [], settings = {},
-  contextSnapshots = [], channel, appVersion, now, limits = {},
+  contextSnapshots = [], channel, appVersion, now, limits = {}, auditChain = null,
 }) => {
   const children = childSessions.slice(0, BUNDLE_MAX_CHILD_SESSIONS);
   const audit = auditEntries.slice(-BUNDLE_MAX_AUDIT_ENTRIES);
@@ -163,6 +165,13 @@ export const assembleDebugBundle = ({
         : 'all descendant actor/subagent sessions included.',
       secrets: 'none by construction: API keys live only in the vault and are attached at fetch-header '
         + 'time; they never enter settings, session records, or captured request bodies.',
+      ...(auditChain ? {
+        auditChain: auditChain.ok
+          ? `hash chain verified over ${auditChain.checked} entries`
+            + (auditChain.unchained > 0 ? ` (${auditChain.unchained} pre-chain legacy entries unverifiable).` : '.')
+          : `hash chain FAILED verification: ${auditChain.reason ?? 'inconsistent'} — the audit slice may have been altered.`,
+      } : {}),
     },
+    ...(auditChain ? { auditChainVerification: auditChain } : {}),
   };
 };

@@ -70,7 +70,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 493 → 496: the debug surface's wiring + UI add background/context-snapshots.js
 // (the capture ring), sidepanel/components/context-inspector.js, and the
 // failure-chip in-browser test.
-const COVERED_FLOOR = 496;
+// 496 -> 498: the hardening pass adds peerd-egress/audit/chain.js (the R4
+// tamper-evidence hash chain) and background/confirm-grant-key.js (the R5
+// origin-bound grant key).
+const COVERED_FLOOR = 498;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

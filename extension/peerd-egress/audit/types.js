@@ -70,7 +70,10 @@
  * @property {string} id                  UUIDv7 (time-sortable)
  * @property {number} when                ms since epoch
  * @property {AuditType} type
- * @property {string} [sessionId]         present for session-scoped events
+ * @property {string} [sessionId]
+ * @property {string} [chain]        R4 tamper evidence: SHA-256 over the
+ *   previous entry's chain + this entry's canonical core (audit/chain.js).
+ *   Absent only on entries written before the chain shipped.         present for session-scoped events
  * @property {Record<string, any>} [details]
  */
 

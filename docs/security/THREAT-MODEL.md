@@ -125,7 +125,7 @@ malicious separate extension, and physical device access.
 | Local files (WebVM filesystem, Notebook and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
 | Peer bundles (dwapps, data, agent cards) | Received over the mesh | Content addressing, Ed25519 signatures, size and shape caps |
 | The agent's own authority (its tools, its delegation) | The orchestrator | Exposure and actor-tier gates, the sender gate, Plan and Act mode |
-| The audit log (record of security events) | IndexedDB, extension origin | Append-only by convention (see residual risk R4, no tamper resistance) |
+| The audit log (record of security events) | IndexedDB, extension origin | Append-only, hash-chained for tamper evidence (residual risk R4: evident, not proof) |
 
 ---
 
@@ -377,19 +377,28 @@ evaluating peerd should know. Each cites where it lives in the code.
   the skill body loads into context as trusted instructions with no untrusted-content
   fence. A malicious shared skill is a direct instruction-injection vector. Installing a
   skill runs its author's prompt. (`peerd-runtime/skills/`.)
-- R4. The audit log is not tamper-resistant. It is append-only by convention in
-  IndexedDB. Any code in the extension origin can rewrite or delete entries. There is no
-  hash chain or signing. It records events for an honest system. It cannot resist an
-  attacker who already has in-origin code execution. (`peerd-egress/audit/log.js`.)
-- R5. Confirm grants are origin-blind. A session-scoped "Yes" is keyed by tool name
-  only, so approving `click` once approves it for every origin in that chat, and the
-  confirm prompt text is agent-supplied, so a misleading description could induce a
-  "yes". An origin-scoped grant store is future work. (`peerd-egress/confirm/protocol.js`.)
-- R6. Transfer import is an untrusted-deserialization surface. A shared settings or
-  session export can inject provider endpoints (redirecting egress), repopulate memory
-  (poisoning), and reinstall skills from arbitrary origins. The secret crypto and
-  unknown-key dropping are sound. The endpoint, hook, and memory injection path is not
-  otherwise gated. Import only files you trust. (`peerd-runtime/transfer/transfer.js`.)
+- R4 (narrowed). The audit log is tamper-EVIDENT, not tamper-proof. Every entry
+  extends a SHA-256 hash chain and a head record pins the newest link, so a rewritten
+  entry, a deleted middle entry, a truncated tail, or an inserted record fails
+  verification (`verify()`, surfaced in the debug bundle's provenance). What remains
+  out of reach: an attacker with in-origin code execution can recompute the whole
+  chain and the head — no in-origin scheme can prevent that without a secret the
+  origin does not hold. (`peerd-egress/audit/chain.js`, `audit/log.js`.)
+- R5 (narrowed). Confirm grants are origin-BOUND: a session-scoped "Yes" is keyed by
+  tool + the prompt's dispatcher-computed origin (the pinned tab for DOM tools, the
+  target host for web writes), so approving `click` on one site no longer covers any
+  other site; the origin line the user sees is system-derived. What remains: the
+  DESCRIPTION text is agent-supplied, so a misleading summary could still induce a
+  "yes" for the named origin. (`background/confirm-grant-key.js`,
+  `peerd-egress/confirm/protocol.js`.)
+- R6 (narrowed). Transfer import is a gated untrusted-deserialization surface.
+  Provider endpoints are validated (https or local loopback only) and named in the
+  summary the user approves; imported hooks land DISABLED and untrusted (a JS hook
+  cannot compile without an explicit re-trust in Settings); a memory import states its
+  prompt-injection consequence in the apply notices. What remains: an approved https
+  endpoint is still an egress redirection the user chose to accept, and imported
+  memory is trusted once the user proceeds. Import only files you trust.
+  (`peerd-runtime/transfer/transfer.js`.)
 - R7. A malicious co-installed extension or compromised origin is out of scope. The live
   key is reachable to any code running in the extension origin, and is mirrored into
   `chrome.storage.session` for service-worker-restart resume. The stated threat model is
@@ -416,8 +425,10 @@ evaluating peerd should know. Each cites where it lives in the code.
   `peerd-egress/fetch/safe-fetch.js`.)
 
 Candidates for future red-team scenarios, from the partially-defended surfaces above:
-R2 memory poisoning, R3 skill-body smuggling, R6 transfer-import injection, and R5
-origin-blind confirm grants.
+R2 memory poisoning and R3 skill-body smuggling. (R4 chain tampering, R5 grant
+scoping, and R6 import gating gained direct bun coverage when they were narrowed:
+tests/peerd-egress/audit-chain.test.ts, tests/background/confirm-grant-key.test.ts,
+and the R6 block in tests/peerd-runtime/transfer/transfer.test.ts.)
 
 ---
 
