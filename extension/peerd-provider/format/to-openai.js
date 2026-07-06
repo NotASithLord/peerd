@@ -175,7 +175,53 @@ const toOpenAiMessages = (system, messages) => {
       }
     }
   }
-  return repairOrphanToolCalls(out);
+  return repairOrphanToolCalls(demoteOrphanToolResults(out));
+};
+
+/**
+ * The INVERSE hazard of repairOrphanToolCalls: a role:'tool' message whose
+ * tool_call_id is not answered by the immediately-preceding assistant
+ * message's tool_calls (an interleaved message broke the contiguous reply
+ * run, or the assistant message was never persisted). OpenAI 400s on it —
+ * "messages with role 'tool' must be a response to a preceding message
+ * with 'tool_calls'" — which bricks the session, since every later call
+ * replays the same broken history. Demote each orphan to a user message
+ * so the model still sees the output, just not as a structural tool reply.
+ * Wire-format-only — the persisted session is untouched.
+ *
+ * @param {OpenAiMessage[]} msgs
+ * @returns {OpenAiMessage[]}
+ */
+const demoteOrphanToolResults = (msgs) => {
+  /** @type {OpenAiMessage[]} */
+  const out = [];
+  /** @type {Set<string>} ids still answerable in the current reply run */
+  let open = new Set();
+  for (const m of msgs) {
+    if (m.role === 'assistant') {
+      open = new Set((Array.isArray(m.tool_calls) ? m.tool_calls : []).map((tc) => tc.id));
+      out.push(m);
+    } else if (m.role === 'tool') {
+      if (typeof m.tool_call_id === 'string' && open.has(m.tool_call_id)) {
+        // One reply per id — a duplicate reply is itself an orphan.
+        open.delete(m.tool_call_id);
+        out.push(m);
+      } else {
+        out.push({
+          role: 'user',
+          content: `[stale tool result for ${m.tool_call_id ?? '(unknown id)'} — its tool `
+            + 'call is no longer in the preceding assistant message (that turn was '
+            + 'interrupted or superseded); the tool output is preserved below]\n'
+            + `${typeof m.content === 'string' ? m.content : ''}`,
+        });
+      }
+    } else {
+      // Any other role ends the contiguous reply run.
+      open = new Set();
+      out.push(m);
+    }
+  }
+  return out;
 };
 
 /**

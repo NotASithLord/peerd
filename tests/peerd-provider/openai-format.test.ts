@@ -73,6 +73,37 @@ describe('to-openai message mapping', () => {
     expect(tool.content).toContain('did not complete');
   });
 
+  test('an orphan tool message (steer-race history) is demoted to a user message', () => {
+    // assistant(tool_calls B) → user steer text → tool(B). The tool reply no
+    // longer answers the immediately-preceding assistant, so sending it as
+    // role:'tool' 400s. It must be demoted to user text (payload preserved),
+    // and the assistant's unanswered call still gets a synthesized reply.
+    const msgs = _toOpenAiMessagesForTests('', [
+      {
+        role: 'assistant', content: '', id: '1', when: 0,
+        toolUses: [{ id: 'call_b', name: 'vm_boot', input: {} }],
+      },
+      { role: 'user', content: 'actually, do something else', id: '2', when: 0 },
+      {
+        role: 'user', content: '', id: '3', when: 0,
+        toolResults: [{ tool_use_id: 'call_b', content: 'boot ok' }],
+      },
+    ]) as OpenAiMsg[];
+    // Every surviving tool message answers the contiguous run after an
+    // assistant that declared its id.
+    let open = new Set<string>();
+    for (const m of msgs) {
+      if (m.role === 'assistant') open = new Set((m.tool_calls ?? []).map((tc) => tc.id));
+      else if (m.role === 'tool') {
+        expect(open.has(m.tool_call_id ?? '')).toBe(true);
+        open.delete(m.tool_call_id ?? '');
+      } else open = new Set();
+    }
+    // The stale reply survives as user text.
+    const demoted = msgs.find((m) => m.role === 'user' && /boot ok/.test(String(m.content)));
+    expect(demoted).toBeTruthy();
+  });
+
   test('toOpenAiBody emits tools + tool_choice when tools provided', () => {
     const body = toOpenAiBody({
       model: 'm', system: 'S', messages: [],
