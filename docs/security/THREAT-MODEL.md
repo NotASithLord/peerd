@@ -380,9 +380,10 @@ evaluating peerd should know. Each cites where it lives in the code.
 - R4 (narrowed). The audit log is tamper-EVIDENT, not tamper-proof. Every entry
   extends a SHA-256 hash chain and a head record pins the newest link, so a rewritten
   entry, a deleted middle entry, a truncated tail, or an inserted record fails
-  verification (`verify()`, surfaced in the debug bundle's provenance). What remains
-  out of reach: an attacker with in-origin code execution can recompute the whole
-  chain and the head — no in-origin scheme can prevent that without a secret the
+  verification (`verify()`, surfaced in the debug bundle's provenance) — including
+  the cheaper attack of deleting the tail AND the head record together, which fails
+  closed on the surviving chained prefix. What remains out of reach: an attacker with
+  in-origin code execution can recompute the whole chain and the head — no in-origin scheme can prevent that without a secret the
   origin does not hold. (`peerd-egress/audit/chain.js`, `audit/log.js`.)
 - R5 (narrowed). Confirm grants are origin-BOUND: a session-scoped "Yes" is keyed by
   tool + the prompt's dispatcher-computed origin (the pinned tab for DOM tools, the

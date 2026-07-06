@@ -27,6 +27,7 @@
 export const CHAIN_HEAD_KEY = 'audit_chain_head';
 
 const encoder = new TextEncoder();
+const SEP = '\x1f'; // ASCII unit separator — never appears in ids/types
 
 /** @param {ArrayBuffer} buf */
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -42,7 +43,7 @@ export const canonicalCore = (entry) => [
   entry.type,
   entry.sessionId ?? '',
   entry.details === undefined ? '' : JSON.stringify(entry.details),
-].join(''); // unit separator — cannot appear in uuidv7/type, unambiguous joins
+].join(SEP); // SEP-joined so distinct field tuples can never collide into one string
 
 /**
  * chain(entry) = SHA-256(prevChain ‖ US ‖ canonicalCore(entry)) as hex.
@@ -92,17 +93,23 @@ export const verifyChain = async (entries, head = null) => {
     }
     checked++;
   }
+  // The head record is as durable as the entries (same IDB, written on
+  // every append). So once ANY chained entry exists, a head MUST exist —
+  // its absence means the tail AND the head were deleted together (the
+  // cheaper truncation the naive head-survives check missed). Fail closed.
+  // (A pre-chain-only log has chained.length === 0 and legitimately no head.)
+  if (chained.length > 0 && !head?.chain) {
+    return { ok: false, checked, unchained, reason: 'head record missing (tail truncation or head deletion)' };
+  }
   if (head?.chain && chained.length > 0) {
     const last = chained[chained.length - 1];
     if (head.id !== last.id || head.chain !== last.chain) {
       return { ok: false, checked, unchained, reason: 'head mismatch (truncated tail)', brokenAtId: last.id };
     }
   }
-  if (head?.chain && chained.length === 0 && entries.length >= 0) {
-    // A head exists but no chained entries survive: legal only if the whole
-    // retained window predates... no — the head tracks the newest entry,
-    // which is never pruned. A head with no chained entries means the tail
-    // was deleted.
+  if (head?.chain && chained.length === 0) {
+    // A head tracks the newest entry, which is never pruned — so a head with
+    // no surviving chained entries means the whole chained tail was deleted.
     return { ok: false, checked, unchained, reason: 'head present but no chained entries (tail deleted)' };
   }
   return { ok: true, checked, unchained };

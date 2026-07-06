@@ -102,6 +102,15 @@ describe('tampering is detected', () => {
     idb.rows.splice(4, 0, { id: 'id-zzzzzz', when: 999, type: 'forged' });
     expect((await log.verify()).ok).toBe(false);
   });
+
+  test('truncating the tail AND deleting the head record is STILL caught (fail-closed)', async () => {
+    const { idb, log } = await seeded();
+    idb.rows.splice(4);                 // drop the tail
+    idb.meta.clear();                   // and the head — the cheaper attack the naive check missed
+    const result = await log.verify();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('head record missing');
+  });
 });
 
 describe('legal operations still verify', () => {

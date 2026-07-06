@@ -171,10 +171,19 @@ export const createAuditLog = ({ idb, now = Date.now, makeId, maxEntries, pruneC
    * failures. Read-only.
    */
   const verify = async () => {
-    const entries = await idb.getAll(STORE);
-    let head = null;
-    try { head = await idb.get?.(META_STORE, CHAIN_HEAD_KEY) ?? null; } catch { head = null; }
-    return verifyChain(entries, head);
+    // why through the queue: reading entries then head OUTSIDE the append
+    // serialization can catch an append mid-flight (head one entry ahead of
+    // the last getAll row) → a false "truncated tail" stamped into the debug
+    // bundle. Draining the queue first gives a consistent snapshot.
+    const readSnapshot = async () => {
+      const entries = await idb.getAll(STORE);
+      let head = null;
+      try { head = await idb.get?.(META_STORE, CHAIN_HEAD_KEY) ?? null; } catch { head = null; }
+      return verifyChain(entries, head);
+    };
+    const job = writeQueue.then(readSnapshot);
+    writeQueue = job.catch(() => {});
+    return job;
   };
 
   /**
