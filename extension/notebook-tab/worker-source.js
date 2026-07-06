@@ -23,11 +23,15 @@ import { buildEntry } from '/peerd-engine/index.js';
 // on the extension origin AND the http origin the in-browser harness serves from.
 const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
+const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
 // The bare-specifier → URL map both hosts feed the resolver. Exported so a host's
-// own `compose-module` (dynamic-import) path resolves peerd:std the same way the
-// static entry import does. Don't let it drift from buildEntry's builtins below.
-export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL };
+// own `compose-module` (dynamic-import) path resolves the builtins the same way
+// the static entry import does. Don't let it drift from buildEntry's builtins
+// below. peerd:wasi is pure compute over caller-built capabilities (its own
+// header has the security story), so exposing it everywhere peerd:std goes adds
+// no authority to the realm.
+export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WASI_MODULE_URL };
 
 /**
  * Build the worker-entry source string for one run.
