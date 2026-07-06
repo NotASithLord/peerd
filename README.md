@@ -441,6 +441,7 @@ Thank you to the maintainers of all of these projects.
 | [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (`onnxruntime-web`) | 1.22.0 | MIT | WASM/WebGPU inference backend Moonshine runs on (`vendor/onnxruntime-web/`) |
 | [Silero VAD](https://github.com/snakers4/silero-vad) (`@ricky0123/vad-web`) | 0.0.24 | MIT | Voice-activity detection / speech endpointing for Moonshine (`vendor/vad-web/`) |
 | [hash-wasm](https://github.com/Daninet/hash-wasm) (Argon2 bundle) | 4.12.0 | MIT | Argon2id KDF deriving the vault's key-encryption key (`peerd-egress/vault/`) |
+| [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim) (`@bjorn3/browser_wasi_shim`) | 0.4.2 | MIT OR Apache-2.0 | WASI preview1 syscall layer behind the `peerd:wasi` builtin — runs wasm32-wasi binaries in the sealed worker (`notebook-tab/notebook-wasi.js`) |
 | [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) | 0.12.0 | MPL-2.0 | One promise-based `browser.*` API across Chrome and Firefox |
 | [Transformers.js](https://github.com/huggingface/transformers.js) (`@huggingface/transformers`) | 4.2.0 | Apache-2.0 | WebGPU runtime for the on-device local-inference runner (`offscreen/local-model.js`)² |
 
