@@ -55,6 +55,14 @@ export const makeModelCatalog = (deps) => {
       { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
       { model: 'openai/gpt-4o',         label: 'GPT-4o' },
     ],
+    // Direct OpenAI (api.openai.com). Led by the current flagship + its cheap
+    // sibling so a fresh OpenAI user gets a strong default before curating.
+    openai: [
+      { model: 'gpt-5.1',      label: 'GPT-5.1' },
+      { model: 'gpt-5.1-mini', label: 'GPT-5.1 mini (cheap)' },
+      { model: 'gpt-5',        label: 'GPT-5' },
+      { model: 'o4-mini',      label: 'o4-mini (reasoning)' },
+    ],
     // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
     'local-webgpu': [
       { model: localModelId, label: 'Gemma 4 E2B' },
