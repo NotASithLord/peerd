@@ -311,7 +311,12 @@ a run that only logs returns nothing. Each run is a FRESH worker: module-level s
 NOT carry between runs — persist across them via peerd.self.writeFile/readFile. Static
 \`import\`, \`export … from\`, and dynamic \`import('./x.js')\` of relative paths all work
 (peerd.self.import is the dynamic alias); \`import { chart, table, sum, mean, median } from
-'peerd:std'\` is the built-in stdlib. Charts: RETURN chart({ type, data, x, y }) — type is
+'peerd:std'\` is the built-in stdlib. \`import { runWasi } from 'peerd:wasi'\` runs a compiled
+wasm32-wasi BINARY over an in-memory FS — runWasi(bytes, { args, env, stdin, files }) →
+{ exitCode, stdout, stderr, files } (bytes via peerd.egress.fetch(url).bytes; the module gets
+NO network and sees ONLY the files you pass) — reach for it when the right tool is compiled
+software (SQLite files, codecs, language runtimes), not hand-rolled JS.
+Charts: RETURN chart({ type, data, x, y }) — type is
 bar | line | scatter | heatmap (heatmap: { x, y, v } bins shaded by v), the ONLY kinds that
 render; a hand-rolled Vega/Vega-Lite/plotly spec is NOT understood and dumps as raw JSON.
 Prefer edit_file (SEARCH/REPLACE) over js_write_file to change an existing file.`,
