@@ -2988,9 +2988,23 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
   // did), record the peer's turn, and later reply BACK to the peer instead of
   // only noting the user. deliver is the pure handleInbound output.
   const deliver = routed.deliver;
-  const convId = typeof deliver?.convId === 'string' ? deliver.convId : null;
-  const canReplyToPeer = convId && deliver?.kind === 'ask' && conversationRegistry.ownedBy(convId, did) !== false;
-  if (convId && deliver) { conversationRegistry.adopt(convId, did); conversationRegistry.record(convId, 'peer', deliver.message); }
+  // Cap the wire convId (a peer controls it; an unbounded key is a memory sink).
+  const rawConvId = typeof deliver?.convId === 'string' ? deliver.convId : null;
+  const convId = rawConvId && rawConvId.length <= 128 ? rawConvId : null;
+  // ADOPT BEFORE the gate, and only record the peer turn when the thread is
+  // OURS to extend. adopt() binds convId→did (rejecting a foreign did), so a
+  // fresh thread is owned by this sender and record() extends it; a convId
+  // owned by ANOTHER did is refused here — record() has no did check of its
+  // own, so this is where the bearer-token invariant is enforced for inbound.
+  let ownsThread = false;
+  if (convId && deliver) {
+    conversationRegistry.adopt(convId, did);
+    ownsThread = conversationRegistry.ownedBy(convId, did);
+    if (ownsThread) conversationRegistry.record(convId, 'peer', deliver.message);
+  }
+  // Reply back only on an OWNED ask thread — computed AFTER adopt so a peer's
+  // first converse turn (a fresh thread) can still be answered.
+  const canReplyToPeer = ownsThread && deliver?.kind === 'ask';
   const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
   auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
   (async () => {
@@ -2999,7 +3013,9 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
     const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
     // On a standing thread, hand the actor the recent turns (fenced — they carry
     // peer bytes) so it answers in context, and steer it to reply to the PEER.
-    const priorTurns = convId ? conversationRegistry.turnsFor(convId).slice(0, -1) : [];
+    // Thread context only for a thread WE own (ownsThread) — a foreign convId
+    // must not pull another peer's turns into this wake.
+    const priorTurns = ownsThread ? conversationRegistry.turnsFor(/** @type {string} */ (convId)).slice(0, -1) : [];
     const threadContext = priorTurns.length
       ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurns.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
       : '';
@@ -3034,10 +3050,11 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
         // outbound edge). On grant, record the self turn and send the mesh reply;
         // a decline falls through to the user note so the answer isn't lost.
         if (canReplyToPeer) {
-          const consented = await resolveReplyConsent(convId, did, actor.actorSessionId);
+          const cid = /** @type {string} */ (convId);
+          const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
           if (consented) {
-            conversationRegistry.record(convId, 'self', note);
-            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, convId);
+            conversationRegistry.record(cid, 'self', note);
+            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
             auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
             return;
           }

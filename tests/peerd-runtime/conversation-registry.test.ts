@@ -48,11 +48,16 @@ describe('adopt — inbound threads', () => {
   test('a convId is a bearer token: another did cannot extend or hijack the thread', () => {
     const r = reg();
     r.adopt('peer-conv-1', 'did:key:zB');
+    r.record('peer-conv-1', 'peer', 'legit turn from B');
     // an attacker who observed the convId claims it from a different did
     expect(r.adopt('peer-conv-1', 'did:key:zEVIL')).toEqual({ fresh: false });
     expect(r.ownedBy('peer-conv-1', 'did:key:zEVIL')).toBe(false);
     expect(r.ownedBy('peer-conv-1', 'did:key:zB')).toBe(true);
     expect(r.didFor('peer-conv-1')).toBe('did:key:zB'); // owner unchanged
+    // the SW gates record() on ownedBy (record has no did check of its own),
+    // so a foreign did's turn is never appended — pins the invariant the
+    // handleDwebAgentInbound guard enforces after adopt.
+    expect(r.turnsFor('peer-conv-1').map((t) => t.message)).toEqual(['legit turn from B']);
   });
 });
 
