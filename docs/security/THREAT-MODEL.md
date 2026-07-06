@@ -271,7 +271,12 @@ Code: `peerd-runtime/subagent/delegation-lineage.js` (`mayMessageActor`,
 In a Notebook or headless worker realm, every raw network channel throws, the native
 `fetch` is deleted off the prototype chain, and the bridge is pinned non-writable and
 non-configurable so in-realm sabotage cannot unseat it. No fresh un-sealed realm can
-be created, and OPFS import paths collapse `..` inside the instance root. The App runs
+be created, and OPFS import paths collapse `..` inside the instance root. A wasm32-wasi
+module run in that realm via the `peerd:wasi` builtin holds strictly less than the realm
+itself: its only imports are the vendored shim's WASI preview1 syscalls, and every
+descriptor behind them is wrapper-built (stdin bytes, size-capped output collectors, an
+in-memory file table from the call) — no network channel exists for the seal to even
+block. The App runs
 at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 `allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
