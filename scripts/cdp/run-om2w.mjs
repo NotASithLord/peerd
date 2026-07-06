@@ -21,7 +21,9 @@
 //   --budget-min (default 90), --task-timeout-min (default 5),
 //   --recycle-every=<N> (relaunch Chrome every N tasks + after any timeout to
 //   wipe accumulated hung-actor/debugger/tab state; default 2, 0 disables),
-//   --max-consec-timeouts=<N> (bail after N timeouts across recycles; default 4).
+//   --max-consec-timeouts=<N> (bail after N timeouts across recycles; default 4),
+//   --actor-surface=tools|code (web-actor A/B, #119; 'code' writes to a
+//   separate <run>-code dir so both arms can be scored side by side).
 
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -48,6 +50,12 @@ const COUNT = Number(flag('count', 5));
 const SHOW_TABS = !!flag('show-tabs', false);
 const RUN_BUDGET_MS = Number(flag('budget-min', 90)) * 60_000;
 const TASK_TIMEOUT_MS = Number(flag('task-timeout-min', 5)) * 60_000;
+// Web-actor action surface A/B (#119): 'tools' (discrete click/type/navigate) vs
+// 'code' (page_code writes JS). Unset = the extension default ('tools'). The two
+// arms write to SEPARATE output dirs (…-code) so the same shard can be run on
+// both and scored side by side.
+const ACTOR_SURFACE = flag('actor-surface', false) ? String(flag('actor-surface', '')) : '';
+if (ACTOR_SURFACE && ACTOR_SURFACE !== 'tools' && ACTOR_SURFACE !== 'code') { console.error("[om2w] --actor-surface must be 'tools' or 'code'"); process.exit(2); }
 const KEY = process.env.PEERD_BENCH_KEY || process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY || '';
 
 if (!SMOKE && !existsSync(DATA)) { console.error(`[om2w] no tasks at ${DATA} — run: HF_TOKEN=... bun scripts/cdp/om2w/fetch-tasks.mjs`); process.exit(2); }
@@ -56,7 +64,7 @@ if (!SMOKE && !KEY) { console.error('[om2w] no provider key — set PEERD_BENCH_
 const { revision, tasks: ALL } = SMOKE
   ? { revision: 'smoke000', tasks: [] }   // real tasks are synthesized after the fixture starts
   : JSON.parse(readFileSync(DATA, 'utf8'));
-const RUN = String(flag('run', revision.slice(0, 8)));
+const RUN = String(flag('run', ACTOR_SURFACE === 'code' ? `${revision.slice(0, 8)}-code` : revision.slice(0, 8)));
 const OUT = join(OUT_ROOT, RUN);
 
 main();
@@ -111,6 +119,7 @@ async function main() {
       if (!set?.ok) throw new Error(`provider/setKey failed: ${JSON.stringify(set)}`);
       const patch = { providerName: PROVIDER };
       if (MODEL) patch.providerModel = MODEL;
+      if (ACTOR_SURFACE) patch.webActorActionSurface = ACTOR_SURFACE;
       await rpc(c.page, { type: 'settings/update', patch });
     }
     const page = await openExtPage(c, 'eval/runner.html');
@@ -125,7 +134,7 @@ async function main() {
   let evalPage = null;
   try {
     ({ ctx, evalPage } = await bringUp());
-    log(`provider ready: ${PROVIDER}${MODEL ? ` (${MODEL})` : ''}`);
+    log(`provider ready: ${PROVIDER}${MODEL ? ` (${MODEL})` : ''}${ACTOR_SURFACE ? ` · actor surface: ${ACTOR_SURFACE}` : ''}`);
 
     // ONE task per __peerdEval.run() call — an OM2W task can take minutes and we
     // want each trajectory exported immediately (resumable), not held to the end.
