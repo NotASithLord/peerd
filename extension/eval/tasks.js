@@ -847,6 +847,7 @@ export const ROBUST_TASKS = [...SIMPLE_TASKS, ...ROBUST_EXTRA];
 // stable facts (wikipedia/MDN/RFC precedent: stable live pages over fixtures —
 // no fixture server on the eval path today) + one JSON API (extraction must
 // not touch JSON) + one tiny non-article page (the readerable:false fallback).
+/** @type {Task[]} */
 export const FETCH_TASKS = [
   {
     id: 'fetch-article-wiki',

@@ -76,7 +76,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 498 → 499: standing peer conversations add subagent/conversation-registry.js
 // (the pure convId → turns thread store).
 // 499 → 500: the OpenAI provider adapter adds peerd-provider/adapters/openai.js.
-const COVERED_FLOOR = 501;
+// 501 → 505: the fetch_url content pipeline adds offscreen/web-extract.js,
+// background/offscreen-web-client.js, tools/web/spill.js, and
+// tools/defs/read-web-cache.js (vendor/ is exempt from the scan).
+const COVERED_FLOOR = 505;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

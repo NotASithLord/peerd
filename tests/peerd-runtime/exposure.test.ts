@@ -281,18 +281,23 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // call_api stays OUT — the web actor's open-web read is fetch_url (sessionless),
     // not the credential-capable call_api.
     expect(isAllowedForActorType('call_api', 'web')).toBe(false);
-    // == DOM toolset + the one fetch_url addition (drift: bump if the set grows).
-    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 1);
+    // == DOM toolset + fetch_url + read_web_cache (drift: bump if the set grows).
+    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 2);
+    // read_web_cache pages a spilled fetch_url body — same tier as the fetch.
+    expect(isAllowedForActorType('read_web_cache', 'web')).toBe(true);
+    expect(isAllowedForActorType('read_web_cache', 'app')).toBe(false);
   });
 
   test('DESIGN-18: an API backing (web actor, no tab) is fetch_url-ONLY', () => {
     // fetch_url is in; the whole DOM toolset is OUT (it needs a tab the API actor
     // never has). The gate refuses a DOM tool for backing:'api' at the gate.
     expect(isAllowedForActor('fetch_url', 'web', 'api')).toBe(true);
+    // ...and its paging read side — an API actor that overflows must page too.
+    expect(isAllowedForActor('read_web_cache', 'web', 'api')).toBe(true);
     for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_pdf']) {
       expect(isAllowedForActor(n, 'web', 'api')).toBe(false);
     }
-    expect(actorAllowedToolsFor('web', 'api').size).toBe(1);   // fetch_url only
+    expect(actorAllowedToolsFor('web', 'api').size).toBe(2);   // fetch_url + read_web_cache
     // A tab backing (and an absent backing — the DESIGN-17 default) keeps the FULL set.
     expect(isAllowedForActor('click', 'web', 'tab')).toBe(true);
     expect(isAllowedForActor('click', 'web', undefined)).toBe(true);

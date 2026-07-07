@@ -19,6 +19,7 @@
 import { fetchUrl } from '../web/primitives.js';
 import { originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
+import { windowText, pagingFooter } from '../web/spill.js';
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
 
 const MAX_BODY_CHARS = 16_000;   // hard cap to avoid context-blast on huge payloads
@@ -140,29 +141,50 @@ export const fetchUrlTool = {
           }
         } catch { /* extraction failed — raw fallback */ }
       }
-      const truncated = workingBody.length > MAX_BODY_CHARS;
-      const text = truncated ? workingBody.slice(0, MAX_BODY_CHARS) : workingBody;
+      // Spill-and-page for an oversized body (Hermes-style): the FULL text is
+      // stored locally and the model sees a head+tail WINDOW plus the exact
+      // read_web_cache paging call — instead of the old silent head-only slice
+      // that lost the tail without saying so. Falls back to the old slice when
+      // the cache capability is absent (a ctx without webCache).
+      const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
+        /** @type {any} */ (ctx).webCache);
+      const win = windowText(workingBody, MAX_BODY_CHARS);
+      let text = win.window;
+      const truncated = win.windowed;
+      /** @type {string | null} */
+      let footer = null;
+      if (win.windowed && webCache?.key && webCache?.put) {
+        const cacheKey = webCache.key();
+        try {
+          await webCache.put({ key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody });
+          footer = pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+        } catch { /* spill failed — the window (with its elision marker) still ships */ }
+      } else if (win.windowed && !webCache) {
+        // No cache capability → the pre-spill behavior (head-only slice).
+        text = workingBody.slice(0, MAX_BODY_CHARS);
+      }
       let parsedJson = null;
-      if (/(json|graphql)/i.test(ct)) { try { parsedJson = JSON.parse(text); } catch { parsedJson = null; } }
+      if (/(json|graphql)/i.test(ct)) { try { parsedJson = JSON.parse(truncated ? workingBody.slice(0, MAX_BODY_CHARS) : text); } catch { parsedJson = null; } }
       // The body is open-web content the page/host controls — fence it as DATA,
-      // not instructions (the same boundary call_api / read_page enforce).
-      return {
-        ok: true,
-        content: wrapUntrusted({
-          origin: originOfUrl(res.finalUrl || args.url),
-          tool: 'fetch_url',
-          body: JSON.stringify({
-            status: res.status,
-            finalUrl: res.finalUrl,
-            contentType: ct || null,
-            format,
-            ...(title ? { title } : {}),
-            truncated,
-            body: text,
-            json: parsedJson,
-          }, null, 2),
-        }),
-      };
+      // not instructions (the same boundary call_api / read_page enforce). The
+      // paging footer is TOOL-AUTHORED (caller-computed values only, never
+      // fetched bytes) and rides OUTSIDE the fence — page content must never
+      // be able to forge or suppress it.
+      const fenced = wrapUntrusted({
+        origin: originOfUrl(res.finalUrl || args.url),
+        tool: 'fetch_url',
+        body: JSON.stringify({
+          status: res.status,
+          finalUrl: res.finalUrl,
+          contentType: ct || null,
+          format,
+          ...(title ? { title } : {}),
+          truncated,
+          body: text,
+          json: parsedJson,
+        }, null, 2),
+      });
+      return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
     } catch (e) {
       const err = /** @type {{ reason?: string, message?: string }} */ (e);
       if (err?.reason === 'redirect_blocked') {
