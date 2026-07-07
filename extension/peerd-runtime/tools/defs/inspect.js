@@ -166,16 +166,16 @@ const inspectDenylist = (args, ctx) => {
 };
 
 // ── audit_log — proves the audit trail is real ─────────────────────────────
-// why redact: a subagent (depth>0) can run tools whose FAILURE messages echo
+// why redact: an actor (depth>0) can run tools whose FAILURE messages echo
 // UNTRUSTED text (a DOM tool's `no_option_matching: "<page label>"`). inspect is
 // on the MAIN agent's surface, so returning those verbatim would let the main
 // agent re-ingest untrusted text through its own audit trail — laundering around
-// the child-context boundary. Redact the error body on subagent records; the
+// the child-context boundary. Redact the error body on actor records; the
 // metadata (tool, depth, parentage) stays.
 /** @param {AuditEntry} e @returns {AuditEntry} */
-const redactSubagentError = (e) => {
-  if (e?.details?.subagentSessionId && typeof e.details.error === 'string') {
-    return { ...e, details: { ...e.details, error: '<subagent tool error redacted — see the child card in the side panel>' } };
+const redactActorError = (e) => {
+  if (e?.details?.actorSessionId && typeof e.details.error === 'string') {
+    return { ...e, details: { ...e.details, error: '<actor tool error redacted — see the child card in the side panel>' } };
   }
   return e;
 };
@@ -196,7 +196,7 @@ const inspectAuditLog = async (args, ctx) => {
     content: JSON.stringify({
       returned: sorted.length,
       totalInStore: all.length,
-      entries: sorted.map(redactSubagentError),
+      entries: sorted.map(redactActorError),
     }, null, 2),
   };
 };

@@ -35,7 +35,7 @@
 import { uuidv7 } from '/shared/util.js';
 import { SessionNotFoundError } from '../errors.js';
 // why: the store persists ONE canonical manifest shape so every consumer
-// (descriptor filter, exposure gate, subagent inheritance, UI chips)
+// (descriptor filter, exposure gate, actor inheritance, UI chips)
 // reads the same thing. Pure module — keeps this store bun-testable.
 import { normalizeToolManifest } from '../tools/manifests.js';
 
@@ -89,8 +89,8 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     return rows.filter(Boolean).map((/** @type {any} */ row) => row.message);
   };
 
-  // why: default the subagent fields at read time rather than migrating.
-  // Sessions written before subagents landed have no kind/depth, so we
+  // why: default the actor fields at read time rather than migrating.
+  // Sessions written before spawned landed have no kind/depth, so we
   // backfill the defaults here so every consumer sees a consistent shape.
   const withKindDefaults = (/** @type {any} */ record) => {
     if (record.kind !== undefined && record.depth !== undefined) return record;
@@ -196,13 +196,13 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
         : {}),
       ...(normalizedManifest ? { toolManifest: normalizedManifest } : {}),
       ...(parentSessionId ? { parentSessionId } : {}),
-      // Trusted-lineage hop verdict (subagent/delegation-lineage.js): stamped by
+      // Trusted-lineage hop verdict (actor/delegation-lineage.js): stamped by
       // spawn.js from the SPAWNING turn's inbound flag, server-side — the model
       // never supplies it. Persisted only when explicitly passed, so roots stay
       // absent (getAncestry treats an unparented record as trusted).
       ...(spawnedTrusted !== undefined ? { spawnedTrusted } : {}),
       ...(task ? { task } : {}),
-      // Heap-split phase 4: a subagent's narrowed toolset, persisted so the offscreen
+      // Heap-split phase 4: an actor's narrowed toolset, persisted so the offscreen
       // tool-dispatch route rebuilds the child's restricted ctx from it and re-checks
       // every relayed call (never the worker's word). Absent for non-tool children.
       ...(Array.isArray(grantedTools) && grantedTools.length > 0 ? { grantedTools } : {}),

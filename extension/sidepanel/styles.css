@@ -1039,7 +1039,7 @@ button.icon:hover { background: var(--bg); }
  * map is the single source of truth in message-list.js (PRIMITIVE_MODULE);
  * these classes just paint each module its brand color:
  *   egress       → red     (inspect, web)
- *   runtime      → green   (tab, time, subagent)
+ *   runtime      → green   (tab, time, actor)
  *   engine       → amber   (webvm, notebook, app)
  *   provider     → cyan    (no V1 tool primitive — model calls aren't tools)
  *   distributed → magenta (no V1 tool primitive — the dweb is V2+)
@@ -1289,26 +1289,26 @@ button.icon:hover { background: var(--bg); }
 }
 .vm-stream-stderr { color: #ffb4a8; }
 
-/* --- Subagent card (spawn_subagent → inline child transcript) --- */
-/* subagent is a peerd-runtime orchestration primitive → runtime green. */
-.tool-subagent { border-left: 2px solid var(--mod-runtime); }
-.subagent-body {
+/* --- Actor card (actor_create → inline child transcript) --- */
+/* actor is a peerd-runtime orchestration primitive → runtime green. */
+.tool-actor { border-left: 2px solid var(--mod-runtime); }
+.actor-body {
   padding: 8px 10px 10px;
   border-top: 1px dashed var(--border);
 }
 /* The nested transcript is indented from the card edge so depth reads
-   visually. Each deeper level nests another .subagent-body inside, so the
+   visually. Each deeper level nests another .actor-body inside, so the
    indentation compounds naturally with recursion. */
-.subagent-transcript {
+.actor-transcript {
   margin-top: 4px;
   padding-left: 10px;
   border-left: 2px solid var(--border);
 }
 /* Tighten the recursive message rows so nested transcripts stay compact
    and don't read like full-width chat bubbles. */
-.subagent-transcript .message { margin: 4px 0; }
-.subagent-transcript .role { font-size: 10px; }
-.subagent-transcript .bubble { font-size: 12px; }
+.actor-transcript .message { margin: 4px 0; }
+.actor-transcript .role { font-size: 10px; }
+.actor-transcript .bubble { font-size: 12px; }
 
 /* VM-terminal CSS removed — the terminal lives in the VM tab now,
    so the side panel only needs the chip + dropdown styles below. */
@@ -1925,7 +1925,7 @@ button.icon:hover { background: var(--bg); }
 }
 .goal-bar-stop { font-size: 11px; padding: 2px 10px; }
 
-/* In-flight async-subagent status bar (DESIGN-11) — mirrors .goal-bar:
+/* In-flight async-actor status bar (DESIGN-11) — mirrors .goal-bar:
    a bordered elevated card, grayscale, the brand spinner the only color. */
 .async-task-bar {
   border: 1px solid var(--border);

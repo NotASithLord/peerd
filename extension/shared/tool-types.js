@@ -21,12 +21,12 @@
  *   webvm     — CheerpX Linux instance
  *   notebook  — Notebook (Web Worker + OPFS)
  *   app       — stored-HTML App in a sandboxed iframe
- *   subagent  — orchestration: a child session running the agent loop
+ *   actor  — orchestration: a child session running the agent loop
  *   engine    — cross-kind sandbox ops (sandbox_create spans webvm/notebook/app;
  *               its result stamps the concrete `kind` for the handle harvest)
  *   memory    — file-based AGENTS.md memory (read/confirm-gated write)
  *
- * @typedef {'inspect' | 'tab' | 'web' | 'time' | 'webvm' | 'notebook' | 'app' | 'engine' | 'subagent' | 'memory'} Primitive
+ * @typedef {'inspect' | 'tab' | 'web' | 'time' | 'webvm' | 'notebook' | 'app' | 'engine' | 'spawned' | 'memory'} Primitive
  */
 
 /**
@@ -156,11 +156,11 @@
  * @property {string} name
  * @property {string} description
  * @property {Primitive} primitive    the RESOURCE/domain this tool exercises
- *   (tab / web / webvm / notebook / app / memory / inspect / subagent). Answers
+ *   (tab / web / webvm / notebook / app / memory / inspect / actor). Answers
  *   "what does it touch?".
- * @property {'inline'|'subagent'} [dispatch]   the EXECUTION mechanism —
+ * @property {'inline'|'spawned'} [dispatch]   the EXECUTION mechanism —
  *   orthogonal to `primitive`. Absent/'inline' = runs in the dispatcher.
- *   'subagent' = carried out by a spawned child session. Lets the UI show the
+ *   'spawned' = carried out by a spawned child session. Lets the UI show the
  *   mechanism without conflating it into the primitive. Answers "how is it run?".
  * @property {Record<string, any>} schema           JSON Schema for args
  * @property {SideEffect} sideEffect

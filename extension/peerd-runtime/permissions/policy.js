@@ -74,7 +74,7 @@ export const DEFAULT_CONFIRM_ACTIONS = true;
 //
 // Tools carry a `sideEffect` (read | write | mutate_external |
 // destructive) and a `primitive` (inspect | tab | web | webvm | notebook
-// | app | subagent | time). The policy collapses the (sideEffect,
+// | app | actor | time). The policy collapses the (sideEffect,
 // primitive) pair into ONE of four action CLASSES. The confirm rule
 // itself no longer distinguishes the non-read classes (anything non-read
 // confirms when confirmActions is ON), but the taxonomy STAYS: the

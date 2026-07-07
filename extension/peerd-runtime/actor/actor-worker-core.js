@@ -2,10 +2,10 @@
 // actor-worker-core — the PURE, worker-portable core of THE offscreen agent-loop
 // substrate (the "heap split"). ONE loop, ONE relay, ONE heap-isolation story for
 // every non-orchestrator agent loop peerd runs:
-//   - an EPHEMERAL reasoning subagent — `tools:[]`, fire-once, no instance; and
+//   - an EPHEMERAL reasoning actor — `tools:[]`, fire-once, no instance; and
 //   - a BOUND actor — VM / Notebook / App / web, tool-bearing, stateful across
 //     turns (its own accumulated transcript seeds each turn).
-// Post-#137 these are ONE vocabulary (a subagent IS an ephemeral actor), so they
+// Post-#137 these are ONE vocabulary (a spawned child IS an ephemeral actor), so they
 // are ONE code path here: a reasoning child is just an actor that grants no tools
 // and so never dispatches. (The offscreen/actor-worker.js host + the SW client
 // serve both; see their headers.)
@@ -71,7 +71,7 @@ export const makeInMemorySessions = (seed) => {
     sessionId: seed.sessionId,
     provider: seed.provider ?? 'anthropic',
     model: seed.model ?? '',
-    kind: 'subagent',
+    kind: 'spawned',
     depth: seed.depth ?? 1,
     messages: /** @type {any[]} */ (Array.isArray(seed.messages) ? [...seed.messages] : []),
   });
@@ -187,7 +187,7 @@ export const makeRelayedToolDispatch = (requestTool) =>
 /**
  * Drive one agent-loop turn to completion in the worker heap — a BOUND actor turn
  * (tools + relayed dispatch + prior-history statefulness) OR an ephemeral reasoning
- * subagent (tools:[] → the relayed dispatch is never invoked). Returns the result
+ * actor (tools:[] → the relayed dispatch is never invoked). Returns the result
  * shape both spawn.js and the actor-turn code expect. Accumulates usage, captures the
  * stop reason, surfaces a text-less error (so a failed run isn't a silent blank).
  *

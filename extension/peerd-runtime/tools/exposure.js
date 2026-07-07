@@ -79,8 +79,8 @@ export const mainAgentDescriptors = (descriptors) =>
 // descriptor filters which are advisory):
 //
 //   - ACTOR_ONLY_TOOLS leave the MAIN agent. A non-actor ctx
-//     (main / subagent / review / direct) is REFUSED any of them —
-//     so a one-line `spawn_subagent({tools:['app_delete']})` can't escalate.
+//     (main / actor / review / direct) is REFUSED any of them —
+//     so a one-line `actor_create({tools:['app_delete']})` can't escalate.
 //     Originally only MUTATION was tiered and the fenced READS
 //     (app_read_file/app_list_files/js_read_file) stayed global for cheap
 //     no-actor-hop inspection; that was reversed (owner call 2026-07-05) —
@@ -94,7 +94,7 @@ export const mainAgentDescriptors = (descriptors) =>
 //     gate, not just in the descriptor list.
 //
 // The exposure marker is a free string on ctx: 'main' (main turn) / 'actor'
-// (actor turn) / unset (subagent). EXPOSURE_ACTOR is a const so a
+// (actor turn) / unset (actor). EXPOSURE_ACTOR is a const so a
 // typo can't silently widen authority at its (many) read sites; 'main' stays a
 // bare literal — it's only ever the gate's negative space, never matched by name.
 export const EXPOSURE_ACTOR = 'actor';

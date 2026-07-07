@@ -43,9 +43,9 @@ import { appReadFileTool }            from './app-read-file.js';
 import { appListFilesTool }           from './app-list-files.js';
 import { appDeleteFileTool }          from './app-delete-file.js';
 import { editFileTool }               from './edit-file.js';
-import { spawnSubagentTool }          from './spawn-subagent.js';
-import { subagentTasksTool }          from './subagent-tasks.js';
-import { subagentCancelTool }         from './subagent-cancel.js';
+import { actorCreateTool }          from './actor-create.js';
+import { actorTasksTool }          from './actor-tasks.js';
+import { actorCancelTool }         from './actor-cancel.js';
 import { messageActorTool }        from './message-actor.js';
 import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
@@ -103,10 +103,10 @@ export {
   appDeleteFileTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
-  // subagent (orchestration over sessions)
-  spawnSubagentTool,
-  subagentTasksTool,
-  subagentCancelTool,
+  // actor (orchestration over sessions)
+  actorCreateTool,
+  actorTasksTool,
+  actorCancelTool,
   messageActorTool,
   // memory (V1.5 — file-based AGENTS.md)
   rememberTool,
@@ -181,10 +181,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   appDeleteFileTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
-  // subagent (orchestration over sessions)
-  spawnSubagentTool,
-  subagentTasksTool,
-  subagentCancelTool,
+  // actor (orchestration over sessions)
+  actorCreateTool,
+  actorTasksTool,
+  actorCancelTool,
   // actor (DESIGN-17 — message the agent that owns a tab-hosted instance).
   // Registered always; the exposure gate refuses it on an actor session, so a
   // actor can't recursively message another actor.

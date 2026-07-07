@@ -3,7 +3,7 @@ import { asCompleted } from '../../../extension/peerd-runtime/loop/agent-loop.js
 
 // asCompleted is the merge primitive behind concurrent tool dispatch: it
 // yields each settled value the moment it lands (completion order), not the
-// order the promises were passed in. That's what lets N spawned subagents
+// order the promises were passed in. That's what lets N spawned spawned
 // flip their chat cards to "done" independently as each finishes.
 
 const deferred = () => {

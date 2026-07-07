@@ -30,7 +30,7 @@ export const send = (msg) => browser.runtime.sendMessage(msg);
  * Is this message/port sender first-party (THIS extension), not a web page?
  *
  * The SW dispatch surface (~80 routes incl. vault/setSecret, provider keys,
- * tool dispatch, subagent spawn) is otherwise trust-by-default. Today
+ * tool dispatch, actor spawn) is otherwise trust-by-default. Today
  * nothing untrusted can reach it — no content_scripts, no
  * externally_connectable — but that safety rests on one manifest fact. This
  * guard makes the boundary explicit so adding a content script (which would
@@ -82,7 +82,7 @@ export const makeDispatcher = (handlers) =>
   }
   // Sender provenance — fail CLOSED for anything but a first-party
   // extension context. Every route this dispatcher fans out to is
-  // privileged (vault/*, tool dispatch, subagent/spawn, sw/web-fetch, …).
+  // privileged (vault/*, tool dispatch, actor/spawn, sw/web-fetch, …).
   // The manifest currently exposes no external / content-script surface,
   // so this never rejects a real caller today; it is the single chokepoint
   // that keeps a FUTURE manifest change (a content script, an

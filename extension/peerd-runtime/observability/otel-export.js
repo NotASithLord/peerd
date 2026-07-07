@@ -5,7 +5,7 @@
 // OTLP/JSON trace document (the body of an ExportTraceServiceRequest),
 // so a session can be dropped into any OTel-speaking viewer the user
 // already runs. Span tree: one root span per session (the chat session
-// and each descendant actor/subagent session), a child span per model
+// and each descendant actor/actor session), a child span per model
 // turn, and a grandchild span per tool call. Failures carry span status
 // ERROR plus the classified `peerd.failure.kind` attribute.
 //
@@ -160,7 +160,7 @@ export const bundleToOtlp = (bundle) => {
   const rootSpanId = spanIdFrom(`session:${session.sessionId}`);
   const spans = sessionSpans(session, traceId, undefined);
   // why real parentage: the delegation TREE is the claim ("delegation =
-  // span parentage") — a grandchild (a VM actor a subagent spawned) must
+  // span parentage") — a grandchild (a VM actor that a spawned actor created) must
   // hang off its spawner, not flatten onto the chat root. Fall back to the
   // root only when the parent isn't in the bundle (clamped out).
   const included = new Set([session.sessionId, ...(bundle.childSessions ?? []).map((/** @type {Record<string, any>} */ c) => c.sessionId)]);

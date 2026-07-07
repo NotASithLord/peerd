@@ -2,7 +2,7 @@
 //
 // The main turn passes refreshTools so the loop recomputes the advertised
 // tool list each STEP (an instance created mid-turn reveals its ops on the
-// next step). When absent (subagents / runners), the static ctx.tools is used
+// next step). When absent (spawned / runners), the static ctx.tools is used
 // unchanged. These tests pin both: the loop calls refreshTools and feeds ITS
 // result to the model, and the fallback path is untouched.
 
@@ -72,7 +72,7 @@ describe('runUserTurn refreshTools (progressive disclosure)', () => {
     expect(seenTools[0]).toEqual([{ name: 'prior' }]);       // fell back to the initial set, turn completed
   });
 
-  test('without refreshTools the static tool list is used unchanged (subagents/runners)', async () => {
+  test('without refreshTools the static tool list is used unchanged (spawned/runners)', async () => {
     const store = makeStore(); store.seed('s1');
     const seenTools: any[] = [];
     await drain(runUserTurn(baseCtx(store, {

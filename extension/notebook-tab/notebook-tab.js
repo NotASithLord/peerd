@@ -213,17 +213,17 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           els.outputPane.scrollTop = els.outputPane.scrollHeight;
           return;
         }
-        if (m.type === 'subagent-request') {
+        if (m.type === 'actor-request') {
           // Forward to the SW orchestrator. The SW resolves the parent
           // (current chat session) + depth itself; we only pass the
           // task + tool subset + caps the Notebook code requested.
           const a = m.args ?? {};
-          appendLine('log-info', `[subagent] ${String(a.task ?? '').slice(0, 80)}`);
+          appendLine('log-info', `[actor] ${String(a.task ?? '').slice(0, 80)}`);
           try {
             // why any: cross-context sendMessage replies are type-erased (the SW
             // returns a JSON-shaped object the polyfill types as unknown).
             const resp = /** @type {any} */ (await browser.runtime.sendMessage({
-              type: 'subagent/spawn',
+              type: 'actor/spawn',
               task: a.task,
               tools: a.tools,
               maxSteps: a.maxSteps,
@@ -231,14 +231,14 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
               allowRecursion: a.allowRecursion,
             }));
             if (!resp?.ok) {
-              worker.postMessage({ type: 'subagent-response', rid: m.rid, error: resp?.error ?? 'subagent failed' });
+              worker.postMessage({ type: 'actor-response', rid: m.rid, error: resp?.error ?? 'actor failed' });
             } else {
               const r = resp.result;
-              appendLine('log-info', `[subagent] ← ${r?.toolCalls ?? 0} tool call(s), ${r?.durationMs ?? 0}ms`);
-              worker.postMessage({ type: 'subagent-response', rid: m.rid, result: r });
+              appendLine('log-info', `[actor] ← ${r?.toolCalls ?? 0} tool call(s), ${r?.durationMs ?? 0}ms`);
+              worker.postMessage({ type: 'actor-response', rid: m.rid, result: r });
             }
           } catch (e) {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
           }
           return;
         }

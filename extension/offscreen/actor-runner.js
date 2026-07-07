@@ -1,6 +1,6 @@
 // @ts-check
 // offscreen/actor-runner.js — hosts EVERY offscreen agent loop in dedicated Workers
-// (the heap split): ephemeral reasoning subagents AND bound actors alike (a reasoning
+// (the heap split): ephemeral spawned reasoners AND bound actors alike (a reasoning
 // child just carries no tools, so its worker never sends a tool-request). Forks one
 // Worker per turn, relays its model-call AND tool-dispatch requests to the SW (which
 // holds the key, engine clients, instance pin, and gate), forwards its loop events,

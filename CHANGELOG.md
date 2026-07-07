@@ -10,6 +10,22 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Changed
+- **"Subagent" is now "actor" everywhere.** The heap-split already made a
+  subagent an ephemeral actor on the same substrate as the bound (sandbox /
+  web / dweb) actors; the vocabulary now matches. Model-facing: the
+  `spawn_subagent` tool is **`actor_create`**, `subagent_cancel` is
+  **`actor_cancel`**, `subagent_tasks` is **`actor_tasks`** (pairs with
+  `sandbox_create` — a sandbox always has a dedicated bound actor;
+  `actor_create` alone makes an ephemeral one). Internally the
+  `peerd-runtime/subagent/` module is `peerd-runtime/actor/`, and the
+  spawned-child concept keeps a distinct name where it must not collide
+  with bound actors: session kind `'subagent'` is now **`'spawned'`**, and
+  the child transcript stream is `turn/spawned-*`. Breaking for stored
+  sessions from earlier builds (0.x posture: no migration shims) — old
+  `kind:'subagent'` records and skills/evals naming `spawn_subagent`
+  need the new names.
+
 ## [0.2.5] - 2026-07-05
 
 ### Security

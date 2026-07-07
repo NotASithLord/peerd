@@ -3,10 +3,10 @@
 //
 // The headless sibling of the Notebook tab's runEval (DECISIONS #25, "runJob"):
 // the SAME sealed worker (worker-source.js — realm seal first, peerd.* surface,
-// the fetch/opfs/subagent bridges), but hosted in the offscreen document with NO
+// the fetch/opfs/actor bridges), but hosted in the offscreen document with NO
 // UI, an EPHEMERAL OPFS scratch that is nuked when the job ends, and output
-// ACCUMULATED into the return value. Egress + subagent relay through the SAME
-// audited SW routes the tab uses (sw/web-fetch, subagent/spawn), so
+// ACCUMULATED into the return value. Egress + actor relay through the SAME
+// audited SW routes the tab uses (sw/web-fetch, actor/spawn), so
 // denylist + SSRF + audit are enforced centrally regardless of host.
 //
 // SECURITY — defense-in-depth is WEAKER here than the tab, by one layer, and
@@ -64,7 +64,7 @@ const MAX_ACTORS_JOBS = 2;
 let activeActorsJobs = 0;
 
 // Cap concurrent headless workers so a loop (or many parallel script calls /
-// sub-agents) can't fork-bomb the offscreen renderer. Each job is its own thread
+// actors) can't fork-bomb the offscreen renderer. Each job is its own thread
 // + ephemeral OPFS; a handful at once is plenty. (The capability surface's own
 // rule: engine.spawn* → resource exhaustion → hard caps.)
 const MAX_CONCURRENT_JOBS = 4;
@@ -175,24 +175,24 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
         // display() has no surface here (the agent should RETURN its result).
         if (m.type === 'log' || m.type === 'display') return;
 
-        if (m.type === 'subagent-request') {
+        if (m.type === 'actor-request') {
           // An a2a run is the dweb actor's MESH-ONLY surface. Its tool allow-set
-          // grants no delegation (no spawn_subagent), so the worker's
+          // grants no delegation (no actor_create), so the worker's
           // peerd.runtime.runAgent must not re-grant it — refuse at the host, the
           // authoritative choke point (the worker surface can't be trusted).
           if (a2a) {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'subagent spawn is disabled for a2a runs (the dweb actor does not delegate)' });
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: 'actor spawn is disabled for a2a runs (the dweb actor does not delegate)' });
             return;
           }
           const a = m.args ?? {};
           try {
-            const resp = await sendToSW('subagent/spawn', {
+            const resp = await sendToSW('actor/spawn', {
               task: a.task, tools: a.tools, maxSteps: a.maxSteps, maxDepth: a.maxDepth, allowRecursion: a.allowRecursion,
             });
-            if (!resp?.ok) worker.postMessage({ type: 'subagent-response', rid: m.rid, error: resp?.error ?? 'subagent failed' });
-            else worker.postMessage({ type: 'subagent-response', rid: m.rid, result: resp.result });
+            if (!resp?.ok) worker.postMessage({ type: 'actor-response', rid: m.rid, error: resp?.error ?? 'actor failed' });
+            else worker.postMessage({ type: 'actor-response', rid: m.rid, result: resp.result });
           } catch (e) {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
           }
           return;
         }

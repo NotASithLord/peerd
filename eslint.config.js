@@ -379,7 +379,7 @@ export default [
 
   // --- heap-split Worker: a WORKER-SAFE subset, not the barrel ---
   // offscreen/actor-worker.js is the ONE dedicated Worker (its own heap) that runs
-  // the agent loop for every offscreen loop (reasoning subagents + bound actors). It
+  // the agent loop for every offscreen loop (reasoning actors + bound actors). It
   // must import a MINIMAL, worker-safe subset (agent-loop.js + actor-worker-core.js —
   // both verified to touch no chrome.*/DOM at import) rather than the full
   // /peerd-runtime barrel, which re-exports voice/tools/etc. and would drag

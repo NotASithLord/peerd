@@ -50,7 +50,7 @@ between them.
 | Surface | What runs there | Holds the key |
 |---|---|---|
 | Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
-| Offscreen document (`offscreen/`) | Per-actor and per-subagent worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
+| Offscreen document (`offscreen/`) | Per-actor and per-actor worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`vm-tab/`, `notebook-tab/`, `app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
@@ -58,7 +58,7 @@ between them.
 The module map (`p`rovider, `e`gress, `e`ngine, `r`untime, `d`istributed) is in
 [`CLAUDE.md`](../../CLAUDE.md). Security-relevant code is concentrated in
 `peerd-egress/` (vault, egress, denylist, audit) and in the
-`peerd-runtime/subagent/` and `peerd-runtime/tools/` layers (the heap split and
+`peerd-runtime/actor/` and `peerd-runtime/tools/` layers (the heap split and
 the gate stack).
 
 ---
@@ -70,14 +70,14 @@ the gate stack).
 peerd splits "the agent" into separate roles so that no single reasoning context
 holds both untrusted input and dangerous capability. Enforcement lives in
 `peerd-runtime/tools/exposure.js`, `peerd-runtime/tools/gates.js`, and
-`peerd-runtime/subagent/`.
+`peerd-runtime/actor/`.
 
 | Actor | Trusted with | Not permitted to |
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
 | The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
 | A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| A subagent | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
+| An actor | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
 | The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
@@ -85,9 +85,9 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 
 - B1. Untrusted content and the orchestrator's heap. This is the most important
   boundary. Page text, command output, file contents, and peer bytes are read only
-  inside a keyless actor or subagent worker heap, and return to the orchestrator
+  inside a keyless actor or actor worker heap, and return to the orchestrator
   only as `wrapUntrusted`-fenced data. Enforced by the heap split
-  (`peerd-runtime/subagent/actor-worker-core.js`,
+  (`peerd-runtime/actor/actor-worker-core.js`,
   `background/offscreen-actor-client.js`).
 - B2. An agent heap and the network or the key. Model calls and tool calls leave a
   worker only through two service-worker-gated relays. The service worker adds
@@ -141,7 +141,7 @@ the agent reads, try to induce fetches, and run script in its own origin.
 Cannot: reach the vault key, run in a privileged context, or make the agent's
 authority act outside its gates.
 Defenses: the memory boundary keeps page bytes out of the orchestrator's heap (B1).
-The web actor that reads the page is keyless (`subagent/spawn.js`
+The web actor that reads the page is keyless (`actor/spawn.js`
 `restrictCtxCapabilities` strips `getSecret` and `safeFetch`). The credentialed
 egress path is an exact-origin allowlist (`safeFetch`). Open-web fetches are gated
 by the SSRF block and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced
@@ -155,9 +155,9 @@ which is untrusted external tool metadata or instructions that make the agent ac
 an attacker's behalf, maps onto peerd's real analog: the A2A and inbound-mesh surface
 (agent-cards and peer messages).
 Defenses (the analogs of MCP tool-description sanitization): the sender gate
-(`subagent/delegation-lineage.js` `mayMessageActor`) makes an inbound turn unable to
-delegate, and taints any subagent spawned from an injected turn. The A2A translation
-core (`subagent/a2a-api.js` `meshCallToOp`) rejects unknown methods and malformed
+(`actor/delegation-lineage.js` `mayMessageActor`) makes an inbound turn unable to
+delegate, and taints any actor spawned from an injected turn. The A2A translation
+core (`actor/a2a-api.js` `meshCallToOp`) rejects unknown methods and malformed
 args. Signing ops require per-target consent (`meshMethodSigns`).
 Proven by: scenario 05.
 
@@ -239,12 +239,12 @@ Code: `peerd-egress/denylist/denylist.js`, `fetch/web-fetch.js`,
 
 <a id="inv-3"></a>
 ### INV-3. The heap that reads a page holds no secret and returns only fenced data
-The web, actor, and subagent worker heap has `getSecret` and `safeFetch`
+The web, actor, and actor worker heap has `getSecret` and `safeFetch`
 unconditionally stripped (`restrictCtxCapabilities`), cannot pass a function or key
 across the model-call boundary (`makeRelayedCallModel` drops every function), and its
 untrusted summary re-enters the orchestrator wrapped as data (`makeActorSummaryFence`
 and `wrapUntrusted`) with a delimiter the content cannot forge (`neutralizeFence`).
-Code: `peerd-runtime/subagent/spawn.js`, `peerd-runtime/subagent/actor-worker-core.js`,
+Code: `peerd-runtime/actor/spawn.js`, `peerd-runtime/actor/actor-worker-core.js`,
 `tools/prompt-wrap.js`. Red-team: scenario 03.
 
 <a id="inv-4"></a>
@@ -259,12 +259,12 @@ Code: `peerd-distributed/content/manifest.js`, `identity/keypair.js`,
 
 <a id="inv-5"></a>
 ### INV-5. An untrusted party cannot hijack the agent's authority
-An inbound (peer-originated) turn can never make the agent delegate, and a subagent
+An inbound (peer-originated) turn can never make the agent delegate, and an actor
 spawned by an inbound or injected turn is tainted for its whole subtree. Forged,
 severed, foreign-rooted, and cyclic lineages fail closed. A poisoned mesh op (bad
 method or args) is rejected, and signing as the user requires per-target consent.
-Code: `peerd-runtime/subagent/delegation-lineage.js` (`mayMessageActor`,
-`buildAncestry`), `subagent/a2a-api.js`. Red-team: scenario 05.
+Code: `peerd-runtime/actor/delegation-lineage.js` (`mayMessageActor`,
+`buildAncestry`), `actor/a2a-api.js`. Red-team: scenario 05.
 
 <a id="inv-6"></a>
 ### INV-6. Sandboxed code is confined to an audited bridge
@@ -304,7 +304,7 @@ scenario 07.
 For a corpus of injection payloads, the authority each one seeks is denied by a real
 mechanism: exfil is denied by the keyless heap and the allowlist, navigation to a
 sensitive site by the denylist, SSRF by the private-network guard, a low-level DOM tool
-on the main turn by the exposure gate, an actor-only tool via a subagent by the tier
+on the main turn by the exposure gate, an actor-only tool via an actor by the tier
 gate, a cross-instance call by the instance pin, a write in Plan mode by Plan and Act
 mode, and a fence break-out by `neutralizeFence`. This is the difference from a
 single-context agent (a "browser-use"-style agent) that runs the model, the tools, the

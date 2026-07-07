@@ -26,7 +26,7 @@ describe('sidepanel.failure-kind chip', () => {
     const { root, unmount } = mount([
       {
         role: 'assistant', id: 'a1', content: '',
-        // why generic tool names: message_actor/spawn_subagent take the
+        // why generic tool names: message_actor/actor_create take the
         // dedicated actor-card render path, not the generic ToolCall header
         // this chip lives in.
         toolUses: [

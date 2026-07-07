@@ -10,7 +10,7 @@ import {
   makeApiActorBindings,
   fenceApiActorSummary,
   API_ACTOR_SUMMARY_PROMPT,
-} from '../../extension/peerd-runtime/subagent/web-actor.js';
+} from '../../extension/peerd-runtime/actor/web-actor.js';
 import { stripUntrustedFences } from '../../extension/shared/util.js';
 
 describe('normalizeApiOrigin — the canonical owned-origin (addressing + lock anchor)', () => {

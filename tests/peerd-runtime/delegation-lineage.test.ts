@@ -1,11 +1,11 @@
 import { describe, test, expect } from 'bun:test';
-import { mayMessageActor, messageProvenance, buildAncestry, ASYNC_SUBAGENT_ACTORS } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
+import { mayMessageActor, messageProvenance, buildAncestry, ASYNC_ACTOR_ACTORS } from '../../extension/peerd-runtime/actor/delegation-lineage.js';
 
-// The PURE trust decision for the "subagents as async actors" refactor: may a
+// The PURE trust decision for the "spawned as async actors" refactor: may a
 // sender session message an actor? It replaces the sender gate's `=== active`
 // identity check with a trusted-LINEAGE check. These tests pin the security
 // invariants the refactor rests on — above all that an inbound (injected) turn
-// cannot launder message_actor access through a subagent it spawns.
+// cannot launder message_actor access through an actor it spawns.
 
 const ACTIVE = 'chat-active';
 
@@ -33,7 +33,7 @@ describe('mayMessageActor — the foreground chat (today\'s only accepted sender
 });
 
 describe('mayMessageActor — trusted-lineage descendants (the new capability)', () => {
-  test('a subagent spawned by the active chat on a trusted turn is admitted', () => {
+  test('an actor spawned by the active chat on a trusted turn is admitted', () => {
     const sender = 'sub-1';
     const ancestry = [hop(sender, ACTIVE, true)];
     expect(mayMessageActor({ inbound: false, senderSessionId: sender, activeSessionId: ACTIVE, ancestry })).toBe(true);
@@ -46,9 +46,9 @@ describe('mayMessageActor — trusted-lineage descendants (the new capability)',
 });
 
 describe('mayMessageActor — the laundering hole is closed', () => {
-  test('a subagent spawned by an INBOUND turn is refused (cannot launder access)', () => {
+  test('an actor spawned by an INBOUND turn is refused (cannot launder access)', () => {
     // THE THREAT: an injected turn on the active chat is refused message_actor
-    // directly, but calls spawn_subagent; the child runs non-inbound turns. Its
+    // directly, but calls actor_create; the child runs non-inbound turns. Its
     // spawn edge is marked untrusted, so it is refused despite rooting at active.
     const ancestry = [hop('sub-inj', ACTIVE, false)];
     expect(mayMessageActor({ inbound: false, senderSessionId: 'sub-inj', activeSessionId: ACTIVE, ancestry })).toBe(false);
@@ -85,7 +85,7 @@ describe('messageProvenance — the parent reference the choke-point actor arbit
       .toEqual({ senderSessionId: ACTIVE, rootSessionId: ACTIVE, lineagePath: [ACTIVE] });
   });
 
-  test('a subagent resolves to its root chat with a root->sender path', () => {
+  test('an actor resolves to its root chat with a root->sender path', () => {
     const ancestry = [hop('sub-1', ACTIVE, true)];
     expect(messageProvenance({ senderSessionId: 'sub-1', ancestry }))
       .toEqual({ senderSessionId: 'sub-1', rootSessionId: ACTIVE, lineagePath: [ACTIVE, 'sub-1'] });
@@ -97,7 +97,7 @@ describe('messageProvenance — the parent reference the choke-point actor arbit
       .toEqual({ senderSessionId: 'sub-2', rootSessionId: ACTIVE, lineagePath: [ACTIVE, 'sub-1', 'sub-2'] });
   });
 
-  test('two subagents under one chat share a rootSessionId (so the actor can group + be fair)', () => {
+  test('two spawned under one chat share a rootSessionId (so the actor can group + be fair)', () => {
     const a = messageProvenance({ senderSessionId: 'sub-a', ancestry: [hop('sub-a', ACTIVE, true)] });
     const b = messageProvenance({ senderSessionId: 'sub-b', ancestry: [hop('sub-b', ACTIVE, true)] });
     expect(a.rootSessionId).toBe(b.rootSessionId);
@@ -206,7 +206,7 @@ describe('buildAncestry — the fail-closed store walk feeding the gate', () => 
 });
 
 describe('the refactor ships behind a flag, now ON', () => {
-  test('ASYNC_SUBAGENT_ACTORS is on — the sender gate routes through mayMessageActor', () => {
-    expect(ASYNC_SUBAGENT_ACTORS).toBe(true);
+  test('ASYNC_ACTOR_ACTORS is on — the sender gate routes through mayMessageActor', () => {
+    expect(ASYNC_ACTOR_ACTORS).toBe(true);
   });
 });

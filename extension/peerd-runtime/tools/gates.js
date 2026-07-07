@@ -115,7 +115,7 @@ const personaGate = (tool, _args, ctx) => {
  * tier has no opinion (the gate continues). The rules:
  *   (1) non-actor ctx → the instance-OPERATION set (writes AND the fenced
  *       reads) is refused (it's actor-only); a
- *       `spawn_subagent({tools:['app_delete']})` can't escalate.
+ *       `actor_create({tools:['app_delete']})` can't escalate.
  *   (2) actor ctx → POSITIVELY constrained to its own kind's toolset (a
  *       hallucinated/injected non-env tool fails closed here, not just in the
  *       descriptor list — the keyless, narrow trust model).
@@ -181,7 +181,7 @@ export const actorTierGate = (tool, args, ctx) => {
  * model's tool list, but that's advisory — a prompt-injected model can
  * still EMIT a hidden tool name. This gate makes the boundary real: a
  * context marked `exposure: 'main'` (set only on the main turn) is refused
- * any hidden tool. Actors and subagents leave `exposure` unset — the actor
+ * any hidden tool. Actors and spawned leave `exposure` unset — the actor
  * legitimately holds these tools, narrowed by its kind's allow-list (spawn.js).
  *
  * SECOND check: the per-session tool manifest (tools/manifests.js).
@@ -205,7 +205,7 @@ export const exposureGate = (tool, args, ctx) => {
   }
   // DESIGN-17: the actor capability tier (see tools/exposure.js). The WALL
   // behind the advisory descriptor filters — enforced for every dispatch path so a
-  // `spawn_subagent({tools:['app_delete']})` can't escalate. Pure. null = no
+  // `actor_create({tools:['app_delete']})` can't escalate. Pure. null = no
   // actor-tier opinion.
   const actor = actorTierGate(tool, args, ctx);
   if (actor) return actor;

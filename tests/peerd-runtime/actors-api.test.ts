@@ -10,7 +10,7 @@ import {
   ACTORS_API_METHODS, ACTORS_ASK_MAX_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
   ACTORS_JOB_DEFAULT_TIMEOUT_MS, ACTORS_JOB_MAX_TIMEOUT_MS, ActorsApiError,
   renderTraceLines, traceGoalLines, traceErrorDetails,
-} from '../../extension/peerd-runtime/subagent/actors-api.js';
+} from '../../extension/peerd-runtime/actor/actors-api.js';
 
 describe('the method table', () => {
   test('exposes exactly list / ask / send — delegation only, no raw tools', () => {

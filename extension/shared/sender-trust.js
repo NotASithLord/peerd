@@ -3,7 +3,7 @@
 //
 // why: makeDispatcher (shared/messaging.js) fans ONE
 // browser.runtime.onMessage surface out to the SW's ~80 privileged routes
-// (vault/*, tool dispatch, subagent/spawn, sw/web-fetch, provider config,
+// (vault/*, tool dispatch, actor/spawn, sw/web-fetch, provider config,
 // …). Today the only thing keeping a web page off that surface is the
 // MANIFEST: it declares no `externally_connectable` and no content
 // scripts, so onMessage only ever fires for first-party extension

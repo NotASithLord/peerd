@@ -7,7 +7,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   createConversationRegistry,
   MAX_CONVERSATIONS, MAX_TURNS_PER_CONVERSATION, CONVERSATION_TTL_MS,
-} from '../../extension/peerd-runtime/subagent/conversation-registry.js';
+} from '../../extension/peerd-runtime/actor/conversation-registry.js';
 
 let clock = 0;
 const reg = (over = {}) => {

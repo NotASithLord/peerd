@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { makeActorMessaging } from '../../extension/peerd-runtime/subagent/actor-messaging.js';
+import { makeActorMessaging } from '../../extension/peerd-runtime/actor/actor-messaging.js';
 
 // A flush for the fire-and-forget runWhenIdle → runActorTurn → deliver chain.
 const tick = () => new Promise((r) => setTimeout(r, 0));

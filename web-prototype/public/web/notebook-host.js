@@ -4,7 +4,7 @@
 // the SAME sealed worker (notebook-tab/worker-source.js, vendored unmodified)
 // and serves its postMessage bridges — but in a plain web page instead of an
 // extension tab. The substrate is real; only the host differs. Extension-only
-// bridges (subagent → SW orchestrator, fetch → SW webFetch, dweb info) are
+// bridges (actor → SW orchestrator, fetch → SW webFetch, dweb info) are
 // stubbed for this slice; OPFS is real (the standard navigator.storage API).
 //
 // Contract (see docs/specs/PEERD-WEB-SURFACE.md): user code is baked into the
@@ -99,8 +99,8 @@ export async function runNotebook(code, { outputEl, logEl, notebookId, timeoutMs
         log('log-warn', '[egress] peerd.egress.fetch blocked — network lands in a later slice');
         return;
       }
-      if (m.type === 'subagent-request') {
-        worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'peerd.runtime.runAgent lands in the agent slice' });
+      if (m.type === 'actor-request') {
+        worker.postMessage({ type: 'actor-response', rid: m.rid, error: 'peerd.runtime.runAgent lands in the agent slice' });
         return;
       }
       if (m.type === 'distributed-request') {

@@ -90,7 +90,7 @@ describe('toAnthropicBody — output ceiling + effort', () => {
     expect(body.max_tokens).toBe(64000);
   });
 
-  test('explicit maxTokens still wins (the subagent output cap path)', () => {
+  test('explicit maxTokens still wins (the actor output cap path)', () => {
     const body = toAnthropicBody({
       model: 'claude-opus-4-8', system: 's', messages: [userMsg('hi')], maxTokens: 2000,
     });

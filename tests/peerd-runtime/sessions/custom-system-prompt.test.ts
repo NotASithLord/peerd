@@ -3,8 +3,8 @@
 //     ("unset" is the ABSENT key, never an empty string);
 //   - renderSystemPrompt: the <session_instructions> block AUGMENTS the
 //     base prompt, never replaces it;
-//   - subagent spawn: the parent's instructions are deliberately NOT
-//     inherited (a subagent gets only its own task framing).
+//   - actor spawn: the parent's instructions are deliberately NOT
+//     inherited (an actor gets only its own task framing).
 
 import { describe, test, expect } from 'bun:test';
 import { createSessionStore } from '../../../extension/peerd-runtime/sessions/store.js';
@@ -12,7 +12,7 @@ import {
   renderSystemPrompt,
   _setTemplateForTests,
 } from '../../../extension/peerd-runtime/loop/system-prompt.js';
-import { makeSpawnSubagent } from '../../../extension/peerd-runtime/subagent/spawn.js';
+import { makeSpawnActor } from '../../../extension/peerd-runtime/actor/spawn.js';
 import type { Session } from '../../../extension/peerd-runtime/sessions/types.js';
 import type { LoopEvent } from '../../../extension/peerd-runtime/loop/agent-loop.js';
 
@@ -116,12 +116,12 @@ describe('renderSystemPrompt — <session_instructions> augmentation', () => {
     expect(blank.includes('session_instructions')).toBe(false);
   });
 
-  test('coexists with a subagent taskOverride (instructions first, task after)', async () => {
-    // Production never passes both (subagents do not inherit), but the
+  test('coexists with an actor taskOverride (instructions first, task after)', async () => {
+    // Production never passes both (spawned do not inherit), but the
     // renderer must stay well-defined if a future caller does.
     _setTemplateForTests(TEMPLATE);
     const out = await renderSystemPrompt({ customSystemPrompt: 'be terse', taskOverride: 'do the thing' });
-    // The ephemeral-actor (subagent) block shares the <actor_agent> tag since the
+    // The ephemeral-actor (actor) block shares the <actor_agent> tag since the
     // PR #134 unification; only taskOverride is set here, so it's unambiguous.
     expect(out.indexOf('<session_instructions>')).toBeLessThan(out.indexOf('<actor_agent>'));
   });
@@ -156,7 +156,7 @@ describe('renderSystemPrompt — ephemeral <active_tab> reorientation', () => {
   });
 });
 
-describe('subagent spawn — customSystemPrompt is NOT inherited', () => {
+describe('actor spawn — customSystemPrompt is NOT inherited', () => {
   // Tiny loop stand-in: render the prompt (so the spy fires), finish.
   async function* loop(ctx: any): AsyncGenerator<LoopEvent> {
     await ctx.getSystemPrompt();
@@ -171,7 +171,7 @@ describe('subagent spawn — customSystemPrompt is NOT inherited', () => {
     const parent = await store.create({ customSystemPrompt: 'parent-only secret style guide' });
 
     const renderCalls: any[] = [];
-    const spawn = makeSpawnSubagent({
+    const spawn = makeSpawnActor({
       sessions: store,
       runUserTurn: loop,
       callModel: async function* () { yield { type: 'message-stop', stopReason: 'end_turn' }; },

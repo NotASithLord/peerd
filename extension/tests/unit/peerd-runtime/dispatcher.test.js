@@ -281,16 +281,16 @@ describe('gate composition order', () => {
   // DESIGN-17: the actor capability tier, end-to-end through the dispatcher.
   // The full-chain analog of the actorTierGate unit proof (tests/peerd-runtime/
   // exposure.test.ts). The actor model is unconditional, so this proves a
-  // subagent can't escalate into the mutating tier, while message_actor (the
+  // actor can't escalate into the mutating tier, while message_actor (the
   // non-mutating delegation channel) passes the exposure gate on the main agent.
-  it('actor tier: a subagent can not escalate into the mutating tier', async () => {
+  it('actor tier: an actor can not escalate into the mutating tier', async () => {
     clearTools();
     registerTool(makeTool({ name: 'app_delete', sideEffect: 'destructive' }));
     registerTool(makeTool({ name: 'message_actor', sideEffect: 'write' }));
     // act + confirm-off so persona/confirmation don't pre-empt the exposure gate.
     const permission = { mode: 'act', confirmActions: false };
 
-    // A subagent (exposure unset) trying the mutating tier by name is refused.
+    // An actor (exposure unset) trying the mutating tier by name is refused.
     const sub = recorderCtx({ permission }).ctx;
     const rDelete = await dispatchToolCall({ id: 'a', name: 'app_delete', args: { appId: 'app-x' } }, sub);
     expect(rDelete.ok).toBe(false);

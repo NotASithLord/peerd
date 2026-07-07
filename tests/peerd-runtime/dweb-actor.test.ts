@@ -15,7 +15,7 @@ describe('dweb actor — the positive allow-set', () => {
     // the envoy posture: no egress, no DOM, no engine mutation, no delegation.
     // a2a_run runs code but in the sealed keyless worker with ONLY the mesh
     // bridge — no fetch_url/script authority (those stay off the dweb actor).
-    for (const name of ['fetch_url', 'navigate', 'click', 'app_create', 'app_write_file', 'script', 'message_actor', 'spawn_subagent', 'edit_file']) {
+    for (const name of ['fetch_url', 'navigate', 'click', 'app_create', 'app_write_file', 'script', 'message_actor', 'actor_create', 'edit_file']) {
       expect(isAllowedForActor(name, 'dweb')).toBe(false);
     }
   });
@@ -51,7 +51,7 @@ describe('dweb tools are actor-only, unconditionally', () => {
   test('mainAgentDescriptors drops dweb tools BY NAME (the projected list has no dweb flag)', () => {
     // REGRESSION (cynical-swarm): getToolDescriptors projects to {name,description,
     // schema} — the `dweb:true` flag is stripped — so a flag-based drop would be a
-    // no-op on the real subagent-grantable list. Pin the flagless (name-only) shape.
+    // no-op on the real actor-grantable list. Pin the flagless (name-only) shape.
     const projected = [{ name: 'dweb_discover' }, { name: 'dweb_share' }, { name: 'remember' }];
     expect(mainAgentDescriptors(projected).map((t) => t.name)).toEqual(['remember']);
     // and the flagged shape (registry order) drops too
@@ -69,10 +69,10 @@ describe('dweb tools are actor-only, unconditionally', () => {
   });
 });
 
-// cynical-swarm regression: the subagent grantable universe must not leak dweb
+// cynical-swarm regression: the actor grantable universe must not leak dweb
 // tools even though its descriptor source strips the dweb flag.
 import { filterActorSurface } from '../../extension/peerd-runtime/tools/exposure.js';
-describe('subagent grantable universe excludes dweb tools (flag-stripped list)', () => {
+describe('actor grantable universe excludes dweb tools (flag-stripped list)', () => {
   test('filterActorSurface(mainAgentDescriptors(projected)) holds no dweb tool', () => {
     const projected = [
       { name: 'dweb_install' }, { name: 'dweb_share' }, { name: 'dweb_block' },
