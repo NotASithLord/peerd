@@ -10,6 +10,8 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-06
+
 ### Fixed
 - **A web actor could be wrongly refused a read of its own tab.** The
   dispatcher gate that pins a web actor to the one tab it owns compared an
@@ -33,23 +35,23 @@ and storage formats may move until the surface stabilizes.
   and says why the bare host fails, so search works on the first try.
 - **A oneShot delegation whose CODE crashed now gets its recovery turn.**
   The oneShot contract always said "an errored round falls through to the
-  normal loop" — but the clean-round test only saw tool-LEVEL errors, and a
+  normal loop", but the clean-round test only saw tool-LEVEL errors, and a
   notebook eval whose code threw (a CompileError, a bad import) returns
   ok:true with the `[ERROR]` text as its content. So the crash
   short-circuited straight back to the orchestrator as the raw reply and
   the actor never debugged its own sandbox (field transcript: a notebook
   actor bounced the same CompileError back twice). `js_notebook` now marks
   such results `evalError` and the one-shot latch disarms on it, exactly
-  like a tool failure — the actor recovers and iterates, as promised. A
+  like a tool failure: the actor recovers and iterates, as promised. A
   headless CI test also now pins `peerd:wasi` + `demoModule()` as
   importable and runnable from a `script` job (a field session reported
   the import unreachable; current source proves green, so a stale install
-  is the likely culprit — reload the extension).
+  is the likely culprit, reload the extension).
 
 ### Added
 - **`peerd:wasi` ships a self-test module.** `demoModule()` (exported next
   to `runWasi`) returns a tiny (187-byte) known-good wasm32-wasi hello
-  module, embedded in the extension — so the agent can smoke-test
+  module, embedded in the extension, so the agent can smoke-test
   `runWasi(demoModule())` inside the sealed worker with no network and no
   toolchain, instead of hunting the web for a working binary (a live
   session burned itself on exactly that hunt). The blob is hand-assembled,
@@ -61,22 +63,22 @@ and storage formats may move until the surface stabilizes.
 ### Fixed
 - **`resp.bytes()` works in sandboxed code now.** The sealed-realm fetch
   bridge (Notebook / script / a2a runs) listed `bytes` on its response but
-  as a raw data property, so `resp.bytes()` — the platform `Response.bytes()`
-  shape every model reaches for — threw "not a function". It's a method
+  as a raw data property, so `resp.bytes()` (the platform `Response.bytes()`
+  shape every model reaches for) threw "not a function". It's a method
   returning `Promise<Uint8Array>` now, matching the platform. Found in the
   field: an agent burned several turns rediscovering `arrayBuffer()` while
   smoke-testing `runWasi`.
 - **The web actor no longer talks itself out of rendering.** Field
   transcript: asked for live sports schedules, the web actor tried fetches,
   declared itself "fetch-only", claimed it lacked an open-tab tool, and
-  bounced the task back to the user — while the render path was fully wired
+  bounced the task back to the user, while the render path was fully wired
   (`navigate` lazily opens + adopts its tab in the 0-tab state). The
   machinery was right; the words were wrong. Three model-facing fixes:
   `navigate`'s description now states it OPENS the tab when the actor owns
   none (it read "navigate the target tab", implying one must exist); the web
   actor's lore states it can ALWAYS render and must never report itself
   fetch-only; the shared actor rules forbid addressing the user ("would you
-  like me to…" has no one to answer it — do the work or report what
+  like me to…" has no one to answer it, do the work or report what
   blocked). And the orchestrator's `message_actor` teaching now says: never
   narrate unobserved actor progress, and re-send with the capability
   restated when an actor wrongly claims its kind can't do something.
@@ -87,13 +89,13 @@ and storage formats may move until the surface stabilizes.
   web / dweb) actors; the vocabulary now matches. Model-facing: the
   `spawn_subagent` tool is **`actor_create`**, `subagent_cancel` is
   **`actor_cancel`**, `subagent_tasks` is **`actor_tasks`** (pairs with
-  `sandbox_create` — a sandbox always has a dedicated bound actor;
+  `sandbox_create`: a sandbox always has a dedicated bound actor;
   `actor_create` alone makes an ephemeral one). Internally the
   `peerd-runtime/subagent/` module is `peerd-runtime/actor/`, and the
   spawned-child concept keeps a distinct name where it must not collide
   with bound actors: session kind `'subagent'` is now **`'spawned'`**, and
   the child transcript stream is `turn/spawned-*`. Breaking for stored
-  sessions from earlier builds (0.x posture: no migration shims) — old
+  sessions from earlier builds (0.x posture: no migration shims): old
   `kind:'subagent'` records and skills/evals naming `spawn_subagent`
   need the new names.
 
