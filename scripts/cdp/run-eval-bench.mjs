@@ -173,13 +173,17 @@ async function main() {
 function printCard(card) {
   log('=== SCORECARD ===');
   log(`passRate ${card.passRate}% (${card.passed}/${card.total})  ·  avg ${card.avgSteps} steps  ·  MAIN ${card.avgFreshTokens} fresh + ${card.avgCacheReadTokens} cache  ·  $${card.avgCostUsd}/task  ·  ${(card.avgDurationMs / 1000).toFixed(1)}s`);
+  // The ACTOR's spend — where delegated web work (fetch_url bodies, page reads)
+  // actually lands. THE number a content-pipeline change moves; the MAIN
+  // buckets above barely see it.
+  log(`ACTOR ${card.avgRunnerTokens} tok/task ($${card.avgRunnerCostUsd}/task)`);
   if (card.failures?.length) log(`failures (${card.failures.length}): ${card.failures.map((f) => f.id).join(', ')}`);
 }
 
 function printDelta(d) {
   log('=== Δ vs baseline ===');
   const s = (n) => (n >= 0 ? `+${n}` : `${n}`);
-  log(`passRate ${s(d.passRateDelta)}%  ·  fresh ${s(d.freshTokensDelta)} tok  ·  $/task ${s(d.costUsdDelta)}  ·  steps ${s(d.stepsDelta)}`);
+  log(`passRate ${s(d.passRateDelta)}%  ·  fresh ${s(d.freshTokensDelta)} tok  ·  ACTOR ${s(d.runnerTokensDelta)} tok  ·  $/task ${s(d.costUsdDelta)}  ·  steps ${s(d.stepsDelta)}`);
   if (d.regressions.length) log(`⚠ REGRESSIONS (${d.regressions.length}): ${d.regressions.join(', ')}`);
   else log(`✓ no regressions${d.fixes.length ? `  ·  fixed: ${d.fixes.join(', ')}` : ''}`);
 }

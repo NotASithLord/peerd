@@ -255,6 +255,7 @@ import { createContextSnapshots } from './context-snapshots.js';
 import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
+import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
@@ -564,6 +565,32 @@ const getSecret = (/** @type {string} */ name) => vault.getSecret(name);
 // { ok:false, error }.
 // ---------------------------------------------------------------------------
 const VM_HTTP_CACHE_STORE = 'vm_http_cache';
+
+// fetch_url's spill-and-page store (idb v11). Keys are time-prefixed so IDB's
+// sorted key order IS chronological order — eviction is then delUpTo on the
+// cutoff key (the vm_http_cache posture: fetched public bytes, best-effort,
+// safe to clear). Bounded so unbounded page-spills can't grow the profile.
+const WEB_EXTRACT_CACHE_STORE = 'web_extract_cache';
+const WEB_EXTRACT_CACHE_MAX_ENTRIES = 40;
+let webCacheSeq = 0;
+const webCache = {
+  /** Mint a new time-ordered cache key. */
+  key: () => `wc-${Date.now().toString(36)}-${(webCacheSeq += 1).toString(36)}`,
+  /** @param {{ key: string, url?: string, format?: string, text: string, storedAt?: number }} record */
+  put: async (record) => {
+    await idb.put(WEB_EXTRACT_CACHE_STORE, { storedAt: Date.now(), ...record });
+    // Best-effort eviction: keys sort chronologically (time-prefixed), so
+    // dropping everything up to the (count-MAX)th key keeps the newest MAX.
+    try {
+      const keys = /** @type {string[]} */ (await idb.getAllKeys(WEB_EXTRACT_CACHE_STORE));
+      if (keys.length > WEB_EXTRACT_CACHE_MAX_ENTRIES) {
+        await idb.delUpTo(WEB_EXTRACT_CACHE_STORE, keys[keys.length - WEB_EXTRACT_CACHE_MAX_ENTRIES - 1]);
+      }
+    } catch { /* eviction is hygiene, never a failure */ }
+  },
+  /** @param {string} key */
+  get: (key) => idb.get(WEB_EXTRACT_CACHE_STORE, key),
+};
 
 // The bridge fetch is now an IO-injected factory (vm-net/vm-http-fetch.js) so
 // its security-critical logic — the anti-exfil write gate, host-bound git-auth
@@ -983,6 +1010,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // read_pdf — PDF text extraction in the offscreen doc (pdf.js needs a
     // Worker the SW can't host). Defined after ensureOffscreen below.
     pdfOffscreenClient,
+    // fetch_url's clean-content extraction — HTML -> markdown in the offscreen
+    // doc (Readability needs a DOM Document the SW can't build). Defined after
+    // ensureOffscreen below. NOT in spawn.js CAPABILITY_CONSUMERS (like
+    // pdfOffscreenClient), so it survives the web actor's capability strip.
+    webOffscreenClient,
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
@@ -1076,6 +1108,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // any future tool that legitimately needs to hit a provider.
     safeFetch,
     webFetch,
+    // fetch_url's spill-and-page store: oversized fetched text spills here and
+    // read_web_cache pages it back. Stripped to exactly those two tools by
+    // spawn.js CAPABILITY_CONSUMERS.webCache.
+    webCache,
     // why: web tools open background tabs unconditionally (never-steal-
     // focus policy, 2026-06-12); settings ride along for other consumers.
     settings: { ...settingsStore.get() },
@@ -1787,6 +1823,16 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
 const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// The HTML -> markdown extraction client (fetch_url's clean-content path).
+// Readability/Turndown need a DOM Document only the offscreen doc can build
+// ('web/extract' in offscreen/web-extract.js). null where offscreen is
+// unavailable (Firefox) - fetch_url then degrades to today's raw-text
+// behavior (the read_pdf precedent for capability-absent contexts).
+const webOffscreenClient = offscreenAvailable ? makeOffscreenWebClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
@@ -3231,7 +3277,10 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
         const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
-        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost });
+        // usage rides along RAW: costOf returns only { cost: USD } — consumers
+        // that account TOKENS (the eval runner's ACTOR bucket) need the fields
+        // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
+        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
       } catch { /* cost telemetry is best-effort */ }
     }
     auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});

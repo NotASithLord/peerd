@@ -836,10 +836,75 @@ const ROBUST_EXTRA = [
 // strict superset (every simple result is in there too).
 export const ROBUST_TASKS = [...SIMPLE_TASKS, ...ROBUST_EXTRA];
 
+// --- the fetch suite: fetch_url-shaped tasks -------------------------------
+// Measures the CONTENT PIPELINE (tokens-per-fetch), not navigation skill: each
+// task names one URL and asks for a fact IN that page, so the web actor's
+// background-first lore reliably takes the fetch_url path (no tab). The
+// interesting number is the scorecard's avgRunnerTokens (the actor's spend —
+// where the fetched bytes land), compared before/after a content-pipeline
+// change (e.g. HTML→markdown extraction) on the SAME tasks; the checks only
+// guard that quality didn't drop. Targets are long-lived public pages with
+// stable facts (wikipedia/MDN/RFC precedent: stable live pages over fixtures —
+// no fixture server on the eval path today) + one JSON API (extraction must
+// not touch JSON) + one tiny non-article page (the readerable:false fallback).
+/** @type {Task[]} */
+export const FETCH_TASKS = [
+  {
+    id: 'fetch-article-wiki',
+    title: 'fetch a wikipedia article for a fact',
+    prompt: 'From https://en.wikipedia.org/wiki/Ada_Lovelace find the year Ada Lovelace was born and reply with just the year.',
+    timeoutMs: 120_000,
+    check: (s) => s.error ? no(`errored: ${s.error}`)
+      : includesCI(s.answer, '1815') ? ok('found 1815')
+        : no(`expected 1815 in the answer, got "${(s.answer || '').slice(0, 120)}"`),
+  },
+  {
+    id: 'fetch-article-mdn',
+    title: 'fetch an MDN reference page for a default',
+    prompt: 'From https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/flat what is the default depth argument of Array.prototype.flat()? Reply with the number.',
+    timeoutMs: 120_000,
+    check: (s) => s.error ? no(`errored: ${s.error}`)
+      : /\b1\b/.test(s.answer || '') ? ok('found depth 1')
+        : no(`expected depth 1 in the answer, got "${(s.answer || '').slice(0, 120)}"`),
+  },
+  {
+    id: 'fetch-article-rfc',
+    title: 'fetch a large RFC for a fact',
+    // why this target: rfc-editor's HTML for RFC 9110 is ~800k chars — it
+    // exercises the truncation/overflow path on top of extraction.
+    prompt: 'From https://www.rfc-editor.org/rfc/rfc9110.html which RFC number does RFC 9110 obsolete for HTTP semantics? Reply with the RFC number.',
+    timeoutMs: 120_000,
+    check: (s) => s.error ? no(`errored: ${s.error}`)
+      : includesCI(s.answer, '7231') ? ok('found 7231')
+        : no(`expected 7231 in the answer, got "${(s.answer || '').slice(0, 120)}"`),
+  },
+  {
+    id: 'fetch-json-api',
+    title: 'fetch a JSON endpoint (extraction must not touch JSON)',
+    prompt: 'Fetch https://httpbin.org/json and reply with the author of the slideshow in the response.',
+    timeoutMs: 120_000,
+    check: (s) => s.error ? no(`errored: ${s.error}`)
+      : includesCI(s.answer, 'Yours Truly') ? ok('found the author')
+        : no(`expected "Yours Truly" in the answer, got "${(s.answer || '').slice(0, 120)}"`),
+  },
+  {
+    id: 'fetch-nonarticle-fallback',
+    title: 'fetch a tiny non-article page (raw fallback)',
+    // why: example.com is far below any readability threshold — the extraction
+    // pre-check must fall back to raw text and the fact still comes through.
+    prompt: 'Fetch https://example.com/ and reply with what the page says the domain is for.',
+    timeoutMs: 120_000,
+    check: (s) => s.error ? no(`errored: ${s.error}`)
+      : (includesCI(s.answer, 'illustrative') || includesCI(s.answer, 'example') || includesCI(s.answer, 'documentation')) ? ok('described the page')
+        : no(`expected the illustrative-examples description, got "${(s.answer || '').slice(0, 120)}"`),
+  },
+];
+
 // The suite registry the eval UI picks from.
 export const SUITES = Object.freeze({
   simple: { id: 'simple', label: 'Simple', tasks: SIMPLE_TASKS },
   robust: { id: 'robust', label: 'Robust', tasks: ROBUST_TASKS },
+  fetch: { id: 'fetch', label: 'Fetch (content pipeline)', tasks: FETCH_TASKS },
 });
 
 // Back-compat: existing importers (runner.js) use TASKS — keep it the simple set.
