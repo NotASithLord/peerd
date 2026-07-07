@@ -1,0 +1,46 @@
+turndown — vendored
+===================
+Upstream:   https://github.com/mixmark-io/turndown
+Package:    https://www.npmjs.com/package/turndown
+Version:    7.2.4
+Source URL: https://registry.npmjs.org/turndown/-/turndown-7.2.4.tgz
+Tarball SHA-256: 05f61bc3f0aeca5e5cd7f1b5492e26b9040bb00708cd41fb1b0f7b216e296fa0
+Reviewed:   2026-07-07
+License:    MIT (see LICENSE in the upstream package; the build ships no in-file header)
+
+Why vendored
+------------
+The HTML→Markdown half of fetch_url's clean-content extraction
+(offscreen/web-extract.js): Readability isolates the article HTML, Turndown
+converts it to markdown — the dense representation the model actually
+reads. Runs only in the offscreen document.
+
+Files committed
+---------------
+  turndown.browser.es.js — the BROWSER ES-module build, VERBATIM (zero
+                           imports, `export { TurndownService as default }`).
+
+Why exactly this build: the package ships six builds; lib/turndown.es.js
+(the node ESM build) statically imports '@mixmark-io/domino' — a bare
+specifier that 404s in a browser with no build step. The .browser.* builds
+inline a native-DOMParser probe instead (canParseHTMLNatively) and carry no
+imports. NOTE: that probe reads root.DOMParser AT IMPORT TIME — import this
+module only in a DOM context (the offscreen document), never the SW.
+
+Modification
+------------
+None — committed byte-identical to lib/turndown.browser.es.js.
+
+SHA-256 (as committed == upstream)
+----------------------------------
+  turndown.browser.es.js  3bcd2dd53d6eb3f7a8ed2363404c8869d92cfcaae7a76dca2d556e7ec4cb1f42
+
+Subresource Integrity (SHA-384, as committed)
+---------------------------------------------
+  turndown.browser.es.js  sha384-joNqBZlR4vEHMm33ui4gI1esOUAwdIUwHYHuHRUOgViyAkfVW+gsZVcxt5vEBYN/
+
+Update procedure
+----------------
+1. curl -sL -o t.tgz https://registry.npmjs.org/turndown/-/turndown-<ver>.tgz
+2. shasum -a 256 t.tgz — record the tarball hash above.
+3. tar xzf t.tgz; copy package/lib/turndown.browser.es.js verbatim; recompute hashes.

@@ -255,6 +255,7 @@ import { createContextSnapshots } from './context-snapshots.js';
 import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
+import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
@@ -983,6 +984,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // read_pdf — PDF text extraction in the offscreen doc (pdf.js needs a
     // Worker the SW can't host). Defined after ensureOffscreen below.
     pdfOffscreenClient,
+    // fetch_url's clean-content extraction — HTML -> markdown in the offscreen
+    // doc (Readability needs a DOM Document the SW can't build). Defined after
+    // ensureOffscreen below. NOT in spawn.js CAPABILITY_CONSUMERS (like
+    // pdfOffscreenClient), so it survives the web actor's capability strip.
+    webOffscreenClient,
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
@@ -1787,6 +1793,16 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
 const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// The HTML -> markdown extraction client (fetch_url's clean-content path).
+// Readability/Turndown need a DOM Document only the offscreen doc can build
+// ('web/extract' in offscreen/web-extract.js). null where offscreen is
+// unavailable (Firefox) - fetch_url then degrades to today's raw-text
+// behavior (the read_pdf precedent for capability-absent contexts).
+const webOffscreenClient = offscreenAvailable ? makeOffscreenWebClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
