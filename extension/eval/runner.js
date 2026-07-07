@@ -19,7 +19,7 @@ import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null }} Turn
+ * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, lastActivityAt: number, runnerUsd: number }} Turn
  */
 
 // The runner's own $ for a task — 'local' is FREE, a cloud runner is priced from
@@ -79,17 +79,48 @@ let turn = fresh();
 // scorecard stays honest (main is low, the actor's spend appears — not "free").
 // The bucket keeps the `runner` name for continuity with the runnerModel A/B.
 /** @returns {Turn} */
-function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null }; }
+function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, lastActivityAt: 0, runnerUsd: 0 }; }
 
 // 'eval' (not 'sidepanel') so an open home page doesn't think the side panel
 // popped out — joins uiPorts for turn/* all the same. See service-worker onConnect.
+// A task is "done" only when the WHOLE flow has gone quiet — not on the first
+// idle. why: peerd's web work is an ASYNC actor round-trip (the orchestrator
+// delegates via message_actor, its turn ends on the ack, the web actor drives
+// the page in its OWN session, then its reply wakes the orchestrator to report).
+// The old "resolve on the first streaming:false" scored that intermediate ack —
+// so a delegated task's answer was "I've asked the web actor…", never the real
+// result (and the REAL answer then bled into the NEXT task's window). Instead we
+// watch for a QUIET-SETTLE window: any activity event resets the timer, and we
+// only score after SETTLE_MS of total silence across the orchestrator AND its
+// actor. Bounded by the task's timeoutMs (runTask races this against a sleep).
+// why 15s: a delegated task has real inter-event gaps — the ack-idle before the
+// actor spins up, and a snapshot-heavy actor step whose model call is slow. At
+// 8s a snapshot-heavy task settled EARLY, mid-flight. 15s clears the largest
+// observed gap; a stuck turn still bails on the task's own timeoutMs, and
+// durationMs is measured to LAST ACTIVITY so the idle wait doesn't inflate it.
+const SETTLE_MS = 15_000;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let settleTimer = null;
+// Reset the settle countdown on activity; when it elapses with no new event,
+// the delegated round-trip is finished → resolve the task's done promise.
+const bumpSettle = () => {
+  if (!turn.started || !turn.resolveDone) return;   // no active task / not begun
+  turn.lastActivityAt = Date.now();                 // for the work-time duration metric
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    if (turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
+  }, SETTLE_MS);
+};
+
 const port = browser.runtime.connect({ name: 'eval' });
 port.onMessage.addListener((/** @type {any} */ msg) => {
   switch (msg?.type) {
-    case 'turn/state': turn.session = msg.session; turn.started = true; break;
-    case 'turn/delta': turn.started = true; break;
-    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); break;
-    case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } break;
+    case 'turn/state': turn.session = msg.session; turn.started = true; bumpSettle(); break;
+    case 'turn/delta': turn.started = true; bumpSettle(); break;
+    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); bumpSettle(); break;
+    case 'turn/tool-result': bumpSettle(); break;
+    case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;
     case 'turn/spawned-cost':
       if (msg.usage) {
         turn.runner.inputTokens += msg.usage.inputTokens || 0;
@@ -97,12 +128,31 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
         turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
         turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
       }
+      bumpSettle();
       break;
-    case 'turn/error': turn.error = msg.error; break;
-    case 'turn/streaming':
-      if (msg.streaming) turn.started = true;
-      else if (turn.started && turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
+    // The OFFSCREEN actor heap's spend (heap-split actors broadcast
+    // turn/actor-cost, not turn/spawned-cost) — same ACTOR bucket, so the
+    // scorecard's avgRunnerTokens keeps seeing delegated web work. Tokens ride
+    // in msg.usage (msg.cost is costOf's { cost: USD } only); the priced USD is
+    // accumulated too so the row can report the actor's ACTUAL spend.
+    case 'turn/actor-cost':
+      if (msg.usage) {
+        turn.runner.inputTokens += msg.usage.inputTokens || 0;
+        turn.runner.outputTokens += msg.usage.outputTokens || 0;
+        turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
+        turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
+      }
+      if (typeof msg.cost?.cost === 'number') turn.runnerUsd += msg.cost.cost;
+      bumpSettle();
       break;
+    // Actor lifecycle events are ACTIVITY — they must hold the settle window
+    // open while the delegated work runs.
+    case 'turn/actor-start': case 'turn/actor-state': case 'turn/actor-done': bumpSettle(); break;
+    case 'turn/error': turn.error = msg.error; bumpSettle(); break;
+    // streaming:true = the orchestrator (or a wake) is producing output → keep
+    // waiting. streaming:false = it went idle → START the settle countdown (a
+    // later actor reply-wake will bump it again and push the finish back).
+    case 'turn/streaming': turn.started = true; bumpSettle(); break;
     // Local-model download progress (broadcast by the SW while Gemma loads).
     case 'local-model/progress': handleDlProgress(msg.progress || {}); break;
     default: break;
@@ -253,6 +303,9 @@ function finalAnswer(session) {
 
 /** @param {any} task @param {string} [runnerCfg] */
 async function runTask(task, runnerCfg) {
+  // Kill any settle timer left pending from the previous task before we swap in
+  // a fresh turn — otherwise its late fire could resolve THIS task's donePromise.
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
   turn = fresh();
   log(`\n▶ ${task.id} — ${task.title}`);
   await browser.runtime.sendMessage({ type: 'session/reset' });
@@ -273,9 +326,15 @@ async function runTask(task, runnerCfg) {
     return { id: task.id, pass: false, detail, error: reply?.error, steps: 0, tokens: 0, ...ZERO_COST, durationMs: 0, tools: [] };
   }
   await Promise.race([donePromise, sleep(task.timeoutMs ?? 90_000)]);
-  const durationMs = Date.now() - start;
+  // Work time = start → last activity, EXCLUDING the quiet-settle idle wait (and
+  // any post-work idle) so the duration metric reflects real work, not the fixed
+  // settle window we add on top. Falls back to now for a silent turn.
+  const durationMs = (turn.lastActivityAt || Date.now()) - start;
   const timedOut = !!turn.resolveDone;
   turn.resolveDone = null;
+  // Stop the settle timer either way: on the timeout path it's still pending, and
+  // a late fire must never bleed into the next task's donePromise.
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
   if (timedOut) log('  ⏱ timed out (still scoring end state)');
 
   await settleSubject();
@@ -296,7 +355,10 @@ async function runTask(task, runnerCfg) {
   // whole function (TDZ), breaking `turn = fresh()` at the top of runTask.
   const freshTok = cost.inputTokens + cost.outputTokens; // full-price input+output (MAIN context)
   const runnerTokens = turn.runner.inputTokens + turn.runner.outputTokens + turn.runner.cacheReadTokens + turn.runner.cacheWriteTokens;
-  const runnerCostUsd = priceRunnerUsd(runnerCfg, turn.runner);
+  // Prefer the ACTUAL accumulated actor spend (turn/actor-cost, priced by the
+  // SW from the actor's real model) over re-pricing by runnerCfg — cfg-based
+  // pricing exists for the runner-model A/B and reads 'local' (=$0) otherwise.
+  const runnerCostUsd = turn.runnerUsd > 0 ? turn.runnerUsd : priceRunnerUsd(runnerCfg, turn.runner);
   log(`  ${res.pass ? '✓ PASS' : '✗ FAIL'} — ${res.detail}  [${state.steps} steps · main ${freshTok} fresh + ${cost.cacheReadTokens} cache · runner ${runnerTokens} tok ($${runnerCostUsd.toFixed(4)}) · main $${cost.costUsd.toFixed(4)} · ${(durationMs / 1000).toFixed(1)}s]`);
   // why: per-task observability. The scorecard's failure rows only carry
   // id/detail/error — not WHICH tools ran or what the agent concluded. For a
