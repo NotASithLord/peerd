@@ -83,6 +83,11 @@
  *   persists the bytes (send-once-then-strip, like attachments). content carries
  *   the bytes-free metadata.
  * @property {ToolMeta} [meta]         populated by the dispatcher, not by tools
+ * @property {boolean} [evalError]     the tool ran fine but the CODE it evaluated
+ *   errored (a notebook eval's in-band [ERROR]). ok stays true — the error text
+ *   is the legitimate result — but the one-shot latch reads this to give the
+ *   actor its promised recovery turn instead of short-circuiting a crash back
+ *   as the raw reply (the oneShot contract: "an errored round falls through").
  */
 
 /**

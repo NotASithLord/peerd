@@ -101,6 +101,27 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(v.seed).toBe('kept');   // the virtual FS round-trips through the run
   });
 
+  // The runtime self-test fixture, headless: demoModule() must be importable
+  // and runnable from a headless job through the SAME builtin resolver chain
+  // the live agent uses — pins "peerd:wasi is reachable from script" as a CI
+  // fact (a field session reported it unreachable; this is the regression net).
+  it('peerd:wasi demoModule() self-test runs green inside a headless job', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'import { runWasi, demoModule } from "peerd:wasi";',
+          'const run = await runWasi(demoModule());',
+          'return { exitCode: run.exitCode, stdout: run.stdout };',
+        ].join('\n'),
+      },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(r.error).toBe(null);
+    const v = /** @type {{ exitCode: number, stdout: string }} */ (r.value);
+    expect(v.exitCode).toBe(0);
+    expect(v.stdout).toBe('hello from wasi\n');
+  });
+
   // The a2a run is the dweb actor's MESH-ONLY surface (cynical-swarm HIGH): its
   // tool allow-set grants no egress and no delegation, so the same sealed worker
   // run with { a2a:true } must NOT be able to re-grant itself either via the

@@ -822,6 +822,10 @@ export async function* runUserTurn(ctx) {
 
     /** @type {ToolResultBlock[]} */
     const toolResults = [];
+    // One-shot honesty: a tool can succeed while the CODE it evaluated crashed
+    // (a notebook eval's ok:true + in-band [ERROR] — the evalError marker).
+    // Such a round must NOT short-circuit as "clean"; track it per round.
+    let roundHadEvalError = false;
     // partitionToolBatch groups CONSECUTIVE safe calls into concurrent
     // waves and leaves everything else as single sequential waves, in the
     // model's emitted order — a safe call is never hoisted past an unsafe
@@ -849,6 +853,7 @@ export async function* runUserTurn(ctx) {
         const blocksById = new Map();
         for await (const { tu, dispatchResult, block } of asCompleted(wave.calls.map(dispatchOne))) {
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           blocksById.set(tu.id, block);
         }
         // Persist in the model's emitted order for stable transcripts
@@ -866,6 +871,7 @@ export async function* runUserTurn(ctx) {
           };
           const { dispatchResult, block } = await dispatchOne(tu);
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           toolResults.push(block);
         }
         if (abortedMidBatch) break;
@@ -921,7 +927,7 @@ export async function* runUserTurn(ctx) {
     // FAILED, one round did NOT suffice — disarm one-shot (below) so the model gets
     // its normal recover/explain turns for the REST of this turn. The first CLEAN
     // round short-circuits; multi-step work simply never sets the flag.
-    if (oneShotArmed && toolResults.length > 0 && !toolResults.some((b) => b.is_error)) {
+    if (oneShotArmed && toolResults.length > 0 && !toolResults.some((b) => b.is_error) && !roundHadEvalError) {
       const toolOut = toolResults
         .map((b) => (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)))
         .join('\n').trim();
