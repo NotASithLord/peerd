@@ -3,7 +3,7 @@
 // parent session's persisted tally (the tracker must see these calls).
 
 import { describe, test, expect } from 'bun:test';
-import { makeCheapCall } from '../../extension/peerd-runtime/subagent/cheap-call.js';
+import { makeCheapCall } from '../../extension/peerd-runtime/actor/cheap-call.js';
 
 const makeSessions = (record: any) => {
   const costWrites: any[] = [];
@@ -26,7 +26,7 @@ describe('makeCheapCall', () => {
     const sessions = makeSessions(record);
     const spawns: any[] = [];
     const call = makeCheapCall({
-      spawnSubagent: async (req: any) => {
+      spawnActor: async (req: any) => {
         spawns.push(req);
         return { result: 'the answer', sessionId: 'child-1', usage };
       },
@@ -54,8 +54,8 @@ describe('makeCheapCall', () => {
     const audits: any[] = [];
     let spawned = false;
     const call = makeCheapCall({
-      // sessionId completes the spawnSubagent return contract (never called here)
-      spawnSubagent: async () => { spawned = true; return { result: 'x', sessionId: null }; },
+      // sessionId completes the spawnActor return contract (never called here)
+      spawnActor: async () => { spawned = true; return { result: 'x', sessionId: null }; },
       sessions: sessions as any,
       costOf: () => ({ cost: 0 }),
       getSpendLimitUsd: () => 5,
@@ -71,7 +71,7 @@ describe('makeCheapCall', () => {
   test('no limit set (0) → never blocked by the preflight', async () => {
     const record = { sessionId: 's1', cost: { cost: 999, turns: 1 } };
     const call = makeCheapCall({
-      spawnSubagent: async () => ({ result: 'ok', sessionId: null, usage }),
+      spawnActor: async () => ({ result: 'ok', sessionId: null, usage }),
       sessions: makeSessions(record) as any,
       costOf: () => ({ cost: 0.01 }),
       getSpendLimitUsd: () => 0,
@@ -81,7 +81,7 @@ describe('makeCheapCall', () => {
 
   test('missing session → skipped, never a spawn', async () => {
     const call = makeCheapCall({
-      spawnSubagent: async () => { throw new Error('no'); },
+      spawnActor: async () => { throw new Error('no'); },
       sessions: makeSessions(null) as any,
       costOf: () => ({ cost: 0 }),
     });
@@ -93,7 +93,7 @@ describe('makeCheapCall', () => {
     const record = { sessionId: 's1', cost: { cost: 0, turns: 0 } };
     const sessions = makeSessions(record);
     const call = makeCheapCall({
-      spawnSubagent: async () => ({ result: 'subagent refused: max depth', sessionId: null, refused: true }),
+      spawnActor: async () => ({ result: 'actor refused: max depth', sessionId: null, refused: true }),
       sessions: sessions as any,
       costOf: () => ({ cost: 0 }),
     });
@@ -107,7 +107,7 @@ describe('makeCheapCall', () => {
     const record = { sessionId: 's1', model: 'm', cost: { cost: 0.5, turns: 1 } };
     const sessions = makeSessions(record);
     const call = makeCheapCall({
-      spawnSubagent: async () => ({ result: 'fine', sessionId: null, usage }),
+      spawnActor: async () => ({ result: 'fine', sessionId: null, usage }),
       sessions: sessions as any,
       costOf: () => { throw new Error('no rate card'); },
     });

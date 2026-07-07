@@ -81,7 +81,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
     expect(ctxOpts.activeTabId).toBeUndefined();
   });
 
-  test('an ENGINE actor gets no tab; refuses a non-actor/non-subagent session', async () => {
+  test('an ENGINE actor gets no tab; refuses a non-actor/non-actor session', async () => {
     let ctxOpts: any = null;
     const client = makeOffscreenActorClient(baseDeps({
       sessions: { get: async (id: string) => (id === 'engine' ? { kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' } : { kind: 'chat' }) },
@@ -93,13 +93,13 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
     expect(ctxOpts.activeTabId).toBeUndefined();     // engine acts on its instance, not a tab
     const refused = await client.routes['actor/tool-dispatch']({ actorSessionId: 'chatSession', call: { name: 'x', args: {} } });
     expect(refused.ok).toBe(false);
-    expect(refused.error).toContain('not an actor or subagent session');
+    expect(refused.error).toContain('not an actor or actor session');
   });
 });
 
-describe("routes['actor/tool-dispatch'] — SUBAGENT (phase 4): narrowed-general ctx from grantedTools", () => {
+describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ctx from grantedTools", () => {
   const subDeps = (over: any = {}) => baseDeps({
-    sessions: { get: async () => ({ kind: 'subagent', parentSessionId: 'p1', depth: 1, grantedTools: ['script', 'read_memory'] }) },
+    sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script', 'read_memory'] }) },
     restrictCtxCapabilities: (ctx: any, allowed: Set<string>) => ({ ...ctx, _restrictedTo: [...allowed] }),
     buildToolContext: async (o: any) => ({ built: o, audit: async () => {} }),
     dispatchToolCall: async (call: any, ctx: any) => ({ ok: true, ran: call.name, restrictedTo: ctx._restrictedTo }),
@@ -118,13 +118,13 @@ describe("routes['actor/tool-dispatch'] — SUBAGENT (phase 4): narrowed-general
   test('an UNGRANTED tool the worker asks for is REFUSED before any dispatch (never trust the worker)', async () => {
     let dispatched = false;
     const client = makeOffscreenActorClient(subDeps({ dispatchToolCall: async () => { dispatched = true; return { ok: true }; } }));
-    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'spawn_subagent', args: {} } });
+    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'actor_create', args: {} } });
     expect(out.ok).toBe(false);
-    expect(out.error).toContain('tool_not_available_to_subagent');
+    expect(out.error).toContain('tool_not_available_to_actor');
     expect(dispatched).toBe(false);
   });
 
-  test('a subagent tool-dispatch needs restrictCtxCapabilities wired (fails closed without it)', async () => {
+  test('an actor tool-dispatch needs restrictCtxCapabilities wired (fails closed without it)', async () => {
     const client = makeOffscreenActorClient(subDeps({ restrictCtxCapabilities: undefined }));
     const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'script', args: {} } });
     expect(out.ok).toBe(false);

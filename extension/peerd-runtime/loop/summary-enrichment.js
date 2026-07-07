@@ -41,14 +41,14 @@ import {
  */
 
 // Output cap for the summarisation call — a few structured lists, not
-// an essay. Rides spawnSubagent's maxOutputTokens guardrail.
+// an essay. Rides spawnActor's maxOutputTokens guardrail.
 export const ENRICHMENT_MAX_OUTPUT_TOKENS = 600;
 
 /**
  * @param {Object} deps
  * @param {(req: { sessionId: string, task: string, maxOutputTokens?: number, label?: string }) =>
  *   Promise<{ ok: boolean, text?: string, skipped?: boolean, reason?: string }>} deps.cheapCall
- *   The shared cheap-call helper (subagent/cheap-call.js): clean-context
+ *   The shared cheap-call helper (actor/cheap-call.js): clean-context
  *   tools:[] spawn with the spend-limit preflight + cost fold built in.
  * @param {{ get: Function, setTrimSummary: Function }} deps.sessions
  * @param {(entry: object) => Promise<unknown>} [deps.appendAudit]

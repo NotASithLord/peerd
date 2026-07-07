@@ -9,8 +9,8 @@
 //
 // Absent = everything exposed — exactly today's behavior, so existing
 // sessions are untouched. A manifest only ever NARROWS: it intersects
-// with the main-agent hidden-tool rule (exposure.js) and with subagent
-// tool narrowing (subagent/spawn.js); it can never re-expose a tool one
+// with the main-agent hidden-tool rule (exposure.js) and with actor
+// tool narrowing (actor/spawn.js); it can never re-expose a tool one
 // of those layers removed.
 //
 // Enforced at BOTH layers, same pattern as the main-hidden tool split:

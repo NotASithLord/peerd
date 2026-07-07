@@ -64,7 +64,7 @@ describe('tool exposure (main-agent cutover)', () => {
   });
 
   test('keeps tab management + non-browser tools visible to the main agent', () => {
-    for (const name of ['actor_list', 'open_tab', 'message_actor', 'spawn_subagent', 'vm_boot', 'remember']) {
+    for (const name of ['actor_list', 'open_tab', 'message_actor', 'actor_create', 'vm_boot', 'remember']) {
       expect(isHiddenFromMain(name)).toBe(false);
     }
   });
@@ -82,7 +82,7 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
     expect(r.reason).toContain('actor-only');
   });
 
-  test('allows a hidden tool for the actor / subagent (exposure unset)', () => {
+  test('allows a hidden tool for the actor / actor (exposure unset)', () => {
     expect(eg({ name: 'page_exec' }, {}, {}).allowed).toBe(true);
     expect(eg({ name: 'snapshot' }, {}, { exposure: null }).allowed).toBe(true);
   });
@@ -179,10 +179,10 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
 });
 
 describe('DESIGN-17 actor tier — the gate (the wall)', () => {
-  test('a NON-actor (subagent/main/direct) is refused the mutating tier', () => {
-    // THE PROOF: a `spawn_subagent({tools:['app_delete']})` child has exposure
+  test('a NON-actor (actor/main/direct) is refused the mutating tier', () => {
+    // THE PROOF: a `actor_create({tools:['app_delete']})` child has exposure
     // unset → refused at the gate even though the tool name is in its subset.
-    for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'subagent' }]) {
+    for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'spawned' }]) {
       const r = rt({ name: 'app_delete' }, {}, ctx);
       expect(r?.allowed).toBe(false);
       expect(r?.reason).toContain('actor-only');
@@ -208,7 +208,7 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
     expect(rt({ name: 'app_update' }, {}, appCtx)).toBeNull();          // allowed
     expect(rt({ name: 'vm_boot' }, {}, appCtx)?.allowed).toBe(false);   // foreign kind
     expect(rt({ name: 'call_api' }, {}, appCtx)?.allowed).toBe(false);  // non-env
-    expect(rt({ name: 'spawn_subagent' }, {}, appCtx)?.allowed).toBe(false);
+    expect(rt({ name: 'actor_create' }, {}, appCtx)?.allowed).toBe(false);
   });
 
   test('the per-instance pin refuses a sibling id, allows the bound id / no id', () => {
@@ -306,7 +306,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // notably page_eval/page_exec (code-exec) are NOT in the web toolset — the
     // exclusion that IS the web actor's boundary, enforced at the gate.
     for (const n of ['app_update', 'vm_boot', 'js_notebook', 'edit_file',
-      'call_api', 'spawn_subagent', 'page_eval', 'page_exec', 'message_actor']) {
+      'call_api', 'actor_create', 'page_eval', 'page_exec', 'message_actor']) {
       expect(rt({ name: n }, {}, web())?.allowed).toBe(false);
     }
   });
@@ -317,7 +317,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // exposure axis), NOT by the mutating tier — so the tier has no opinion.
     for (const n of ['click', 'type', 'navigate']) {
       expect(isActorOnlyTool(n)).toBe(false);
-      expect(rt({ name: n }, {}, {})).toBeNull();                   // subagent (exposure unset)
+      expect(rt({ name: n }, {}, {})).toBeNull();                   // actor (exposure unset)
       expect(rt({ name: n }, {}, { exposure: 'main' })).toBeNull(); // tier no-opinion (exposure hides it)
     }
   });

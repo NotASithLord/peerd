@@ -59,7 +59,7 @@ Understanding the boundaries helps you scope a report:
   the network, or the page only by asking the service worker, which holds
   the key and re-checks every request. Untrusted content (page text,
   command output, file contents) stays inside that heap and returns to the
-  orchestrator only as a `wrapUntrusted`-fenced summary. Subagents run the
+  orchestrator only as a `wrapUntrusted`-fenced summary. Actors run the
   same way — keyless, in their own heap, with a narrowed toolset. This is
   the core prompt-injection / "lethal trifecta" defense: a memory boundary,
   not a prompt one. (Firefox lacks the offscreen API, so there the actor

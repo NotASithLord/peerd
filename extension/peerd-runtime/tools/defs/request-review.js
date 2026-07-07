@@ -44,7 +44,7 @@ const MAX_RESULT_CHARS = 64 * 1024;
 /** @type {import('/shared/tool-types.js').Tool} */
 export const requestReviewTool = {
   name: 'request_review',
-  primitive: 'subagent',
+  primitive: 'spawned',
   description: [
     'Spawn a clean-context reviewer to critique a diff and return a',
     'STRUCTURED summary (verdict, severity, issues with suggested fixes).',

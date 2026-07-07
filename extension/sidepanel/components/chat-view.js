@@ -137,8 +137,8 @@ export const ChatView = {
       // otherwise.
       m(GoalBar, { goal: state.goalRuns?.[state.session?.sessionId ?? ''], send }),
 
-      // In-flight async subagents (DESIGN-11). Pinned + self-hiding: the agent
-      // can fire background subagents whose results land later as wake turns,
+      // In-flight async spawned (DESIGN-11). Pinned + self-hiding: the agent
+      // can fire background spawned whose results land later as wake turns,
       // so this shows what's still cooking. Keyed to the ACTIVE session —
       // background chats run their own; the panel mirrors only the viewed one.
       m(AsyncTasksBar, { tasks: state.asyncTasks?.[state.session?.sessionId ?? ''] ?? [] }),
@@ -152,8 +152,8 @@ export const ChatView = {
             // The AI peer's display name (default profile, set during
             // onboarding) — labels assistant rows, and ONLY there.
             peerName: state.profile?.peerName,
-            // subagent nested-transcript wiring (docs/SUBAGENTS.md)
-            subagents: state.subagents,
+            // actor nested-transcript wiring (docs/ACTORS.md)
+            spawned: state.spawned,
             // DESIGN-17 P1: actor display cards (glass pane) — keyed by the
             // message_actor tool_use id; rendered inline under that card.
             actors: state.actors,
@@ -161,7 +161,7 @@ export const ChatView = {
             // script call's toolUseId) — the chain-of-events line the user
             // watches while a script fans work out to actors.
             scriptOps: state.scriptOps,
-            loadSubagent: uiActions?.loadSubagent,
+            loadActor: uiActions?.loadActor,
             // "peerd opened a tab" notices render INLINE in the transcript at the
             // turn they happened (and fade into the backlog as the chat continues)
             // — not a bright sticky footer. Filtered to this session.

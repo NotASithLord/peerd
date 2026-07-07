@@ -87,36 +87,36 @@ export {
 // halt once. All IO injected; the SW's streaming switch stays two lines.
 export { makeTurnCostTracker } from './cost/turn-tracker.js';
 
-// --- subagents (orchestration over sessions; see docs/SUBAGENTS.md) ------
+// --- spawned (orchestration over sessions; see docs/ACTORS.md) ------
 export {
-  makeSpawnSubagent, narrowTools, finalAssistantText,
+  makeSpawnActor, narrowTools, finalAssistantText,
   restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
-} from './subagent/spawn.js';
-// DESIGN-11: async (non-blocking) subagents — spawn returns a handle, the
+} from './actor/spawn.js';
+// DESIGN-11: async (non-blocking) spawned — spawn returns a handle, the
 // result re-enters the parent as a synthetic wake turn. Testable orchestrator.
-export { makeAsyncSubagents } from './subagent/async-subagents.js';
+export { makeAsyncActors } from './actor/async-actors.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
-// instance's actor — the async-subagents shape, specialized).
-export { makeActorMessaging } from './subagent/actor-messaging.js';
+// instance's actor — the async-actors shape, specialized).
+export { makeActorMessaging } from './actor/actor-messaging.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
-export { meshCallToOp, shapeMeshResult } from './subagent/a2a-api.js';
+export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
-} from './subagent/actors-api.js';
-export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
+} from './actor/actors-api.js';
+export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Standing peer conversations — the pure thread registry (convId → turns),
 // capped + TTL-evicted; the SW singleton drives inbound routing + reply consent.
 export {
   createConversationRegistry,
   MAX_CONVERSATIONS, MAX_TURNS_PER_CONVERSATION, CONVERSATION_TTL_MS,
-} from './subagent/conversation-registry.js';
+} from './actor/conversation-registry.js';
 // PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
 // (getRecord injected) so the fail-closed trust rules are unit-tested, not just
 // exercised through the SW's inlined walk. The SW passes getRecord = sessions.get.
-export { buildAncestry } from './subagent/delegation-lineage.js';
+export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-17: the WEB actor — the disposable page-driving agent (an
 // `actorType:'web'` actor that owns one tab). Pure core: the tab→session
 // bindings, the action-log rolling-summary prompt, the self-fence.
@@ -125,13 +125,13 @@ export { buildAncestry } from './subagent/delegation-lineage.js';
 export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
-} from './subagent/web-actor.js';
+} from './actor/web-actor.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
 export {
   makeCheapCall, CHEAP_CALL_MAX_STEPS, CHEAP_CALL_MAX_OUTPUT_TOKENS,
-} from './subagent/cheap-call.js';
+} from './actor/cheap-call.js';
 
 // --- edit (SEARCH/REPLACE diff editing + checkpoint/undo) ---------------
 export {

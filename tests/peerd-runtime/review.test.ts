@@ -30,7 +30,7 @@ const DESCRIPTORS = [
   { name: 'page_exec', sideEffect: 'write' },
   { name: 'app_write_file', sideEffect: 'write' },
   { name: 'submit_form', sideEffect: 'mutate_external' },
-  { name: 'spawn_subagent', sideEffect: 'write' },
+  { name: 'actor_create', sideEffect: 'write' },
   { name: 'request_review', sideEffect: 'read' }, // read-classified, but self-denied
 ];
 
@@ -48,7 +48,7 @@ describe('readOnlyToolNames', () => {
       if (d.sideEffect !== 'read') expect(names.has(d.name)).toBe(false);
     }
     // explicit: none of the dangerous tools leak in
-    for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'spawn_subagent']) {
+    for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create']) {
       expect(names.has(w)).toBe(false);
     }
   });
@@ -64,7 +64,7 @@ describe('isReadOnlyTool (call-time defense in depth)', () => {
     expect(isReadOnlyTool('read_page', DESCRIPTORS)).toBe(true);
     expect(isReadOnlyTool('click', DESCRIPTORS)).toBe(false);
     expect(isReadOnlyTool('submit_form', DESCRIPTORS)).toBe(false);
-    expect(isReadOnlyTool('spawn_subagent', DESCRIPTORS)).toBe(false);
+    expect(isReadOnlyTool('actor_create', DESCRIPTORS)).toBe(false);
     expect(isReadOnlyTool('hallucinated_tool', DESCRIPTORS)).toBe(false); // fail closed
   });
 });
@@ -220,7 +220,7 @@ describe('renderDiffForReview + buildReviewTask', () => {
 
 // ---- orchestrator end-to-end (mocked reviewer run) ------------------------
 
-// A mock spawnSubagent capturing what the orchestrator hands the reviewer.
+// A mock spawnActor capturing what the orchestrator hands the reviewer.
 const makeMockSpawn = (result: string) => {
   const calls: any[] = [];
   const spawn = async (req: any) => {
@@ -241,7 +241,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
     const { spawn, calls } = makeMockSpawn(reviewerJson);
     const audits: any[] = [];
     const requestReview = makeRequestReview({
-      spawnSubagent: spawn,
+      spawnActor: spawn,
       getToolDescriptors: () => DESCRIPTORS,
       appendAudit: async (e: any) => { audits.push(e); },
     });
@@ -256,7 +256,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
     const granted = new Set(calls[0].tools);
     expect([...granted].sort()).toEqual(['app_read_file', 'inspect_storage', 'query_dom', 'read_page']);
     // ASSERT: no write/mutate/orchestration tool exposed
-    for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'spawn_subagent', 'request_review']) {
+    for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create', 'request_review']) {
       expect(granted.has(w)).toBe(false);
     }
     // recursion explicitly disabled
@@ -276,7 +276,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
 
   test('passes the rendered diff (untrusted-wrapped) as the reviewer task', async () => {
     const { spawn, calls } = makeMockSpawn(reviewerJson);
-    const requestReview = makeRequestReview({ spawnSubagent: spawn, getToolDescriptors: () => DESCRIPTORS });
+    const requestReview = makeRequestReview({ spawnActor: spawn, getToolDescriptors: () => DESCRIPTORS });
     await requestReview({ parentSessionId: 'p-1', before: { 'a.js': 'old' }, after: { 'a.js': 'new' }, focus: 'security' });
     expect(calls[0].task).toContain('<diff>');
     expect(calls[0].task).toContain('MODIFIED: a.js');
@@ -288,7 +288,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
   test('intersects the read-only set with a feature-03 permissions adapter', async () => {
     const { spawn, calls } = makeMockSpawn(reviewerJson);
     const requestReview = makeRequestReview({
-      spawnSubagent: spawn,
+      spawnActor: spawn,
       getToolDescriptors: () => DESCRIPTORS,
       // feature 03 says only read_page is permitted in this mode
       permissions: { readOnlyTools: () => ['read_page'] },
@@ -300,7 +300,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
   test('uses the feature-02 checkpoints adapter when no explicit diff', async () => {
     const { spawn, calls } = makeMockSpawn(reviewerJson);
     const requestReview = makeRequestReview({
-      spawnSubagent: spawn,
+      spawnActor: spawn,
       getToolDescriptors: () => DESCRIPTORS,
       checkpoints: { diffSince: async (ref?: string) => ({ ref, files: [{ path: 'svc.js', status: 'modified', before: 'a', after: 'b' }] }) },
     });
@@ -311,7 +311,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
 
   test('empty changeset short-circuits to approve without spawning', async () => {
     const { spawn, calls } = makeMockSpawn(reviewerJson);
-    const requestReview = makeRequestReview({ spawnSubagent: spawn, getToolDescriptors: () => DESCRIPTORS });
+    const requestReview = makeRequestReview({ spawnActor: spawn, getToolDescriptors: () => DESCRIPTORS });
     const out = await requestReview({ parentSessionId: 'p-1', before: { 'a.js': 'same' }, after: { 'a.js': 'same' } });
     expect(calls.length).toBe(0); // no reviewer spawned
     expect(out.ok).toBe(true);
@@ -320,15 +320,15 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
 
   test('no diff source at all → error, not a crash', async () => {
     const { spawn } = makeMockSpawn(reviewerJson);
-    const requestReview = makeRequestReview({ spawnSubagent: spawn, getToolDescriptors: () => DESCRIPTORS });
+    const requestReview = makeRequestReview({ spawnActor: spawn, getToolDescriptors: () => DESCRIPTORS });
     const out = await requestReview({ parentSessionId: 'p-1' });
     expect(out.ok).toBe(false);
     expect(out.error).toBe('no_diff_source');
   });
 
   test('a refused spawn surfaces as an error result', async () => {
-    const spawn = async () => ({ result: 'subagent refused: max depth', sessionId: null, toolCalls: 0, durationMs: 0, refused: true as const });
-    const requestReview = makeRequestReview({ spawnSubagent: spawn, getToolDescriptors: () => DESCRIPTORS });
+    const spawn = async () => ({ result: 'actor refused: max depth', sessionId: null, toolCalls: 0, durationMs: 0, refused: true as const });
+    const requestReview = makeRequestReview({ spawnActor: spawn, getToolDescriptors: () => DESCRIPTORS });
     const out = await requestReview({ parentSessionId: 'p-1', before: { 'a.js': '1' }, after: { 'a.js': '2' } });
     expect(out.ok).toBe(false);
     expect(out.error).toContain('refused');
@@ -336,7 +336,7 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
 
   test('a malformed reviewer run still returns a structured (fallback) summary', async () => {
     const { spawn } = makeMockSpawn('the model rambled without JSON');
-    const requestReview = makeRequestReview({ spawnSubagent: spawn, getToolDescriptors: () => DESCRIPTORS });
+    const requestReview = makeRequestReview({ spawnActor: spawn, getToolDescriptors: () => DESCRIPTORS });
     const out = await requestReview({ parentSessionId: 'p-1', before: { 'a.js': '1' }, after: { 'a.js': '2' } });
     expect(out.ok).toBe(false);
     expect(out.parseError).toBe('no_json_block');

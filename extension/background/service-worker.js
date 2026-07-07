@@ -118,7 +118,7 @@ import {
   // file attachments — agent/send validates + shapes through the pure
   // core (fail closed) before the turn starts.
   prepareUserAttachments,
-  makeSpawnSubagent,
+  makeSpawnActor,
   makeRequestReview,
   createRefRegistry,
   SessionNotFoundError,
@@ -218,11 +218,11 @@ import {
   // voice: the settings normalizers — the SW validates voiceVariant +
   // voiceEngine on settings/update (coerce unknowns).
   normalizeVariant, normalizeEngine,
-  // DESIGN-11: wrap an async-subagent's model-authored result (possibly
+  // DESIGN-11: wrap an async-actor's model-authored result (possibly
   // page-derived) as UNTRUSTED before it re-enters the parent's context.
   wrapUntrusted,
-  // DESIGN-11: the async-subagent orchestrator (testable; the SW injects its IO).
-  makeAsyncSubagents,
+  // DESIGN-11: the async-actor orchestrator (testable; the SW injects its IO).
+  makeAsyncActors,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
@@ -785,9 +785,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, subagents) routes through here, so all are covered.
+  // dispatch, spawned actors) routes through here, so all are covered.
   await denylistReady;
-  // why: the override lets the subagent orchestrator build a context
+  // why: the override lets the actor orchestrator build a context
   // bound to a CHILD session id instead of the chat's current one. With
   // no override this is identical to the original behaviour (the active
   // chat session). When overridden, depth comes from the target session
@@ -802,7 +802,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // Per-session tool manifest → the exposure gate's dispatch-time check.
   // Resolved from the session RECORD (main chat, or a child that inherited
   // the manifest at spawn), so every dispatch path that builds a context
-  // here — main turn, direct dispatch, subagents — enforces it.
+  // here — main turn, direct dispatch, spawned actors — enforces it.
   // null = no manifest = everything stays exposed.
   const toolAllow = resolveManifestAllow(activeSession?.toolManifest);
   // why: key presence is per-PROVIDER. A session created on OpenRouter
@@ -870,7 +870,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name.
-    // Subagents leave it unset. DESIGN-17: an actor turn sets 'actor' — the
+    // Actors leave it unset. DESIGN-17: an actor turn sets 'actor' — the
     // kind-scoped, instance-pinned tier (the web actor holds the DOM tools;
     // the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
@@ -912,12 +912,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     toolManifestLabel: toolAllow ? manifestLabel(activeSession?.toolManifest) : null,
     session: {
       sessionId: sessionId ?? null,
-      // why: the spawn_subagent tool reads ctx.session.depth to compute
+      // why: the actor_create tool reads ctx.session.depth to compute
       // the child's depth (parent + 1) and enforce maxDepth. Defaults to
       // 0 for legacy sessions written before the field existed.
       depth: activeSession?.depth ?? 0,
       // why: message_actor reads ctx.session.kind to pick its reply mode
-      // (PR #134): a 'subagent' sender is an EPHEMERAL call-site with no
+      // (PR #134): a 'spawned' sender is an EPHEMERAL call-site with no
       // later turn to wake, so its actor reply is awaited into the tool
       // result instead of delivered as a re-entry wake.
       kind: activeSession?.kind ?? 'chat',
@@ -928,10 +928,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // action confirms. { mode: 'plan'|'act', confirmActions: boolean }.
     permission,
     activeTab,
-    // why: the bound subagent orchestrator. The spawn_subagent tool calls
-    // ctx.spawnSubagent(...) to decompose a task into a child session
-    // that runs the same loop. Wired below; see makeSpawnSubagent.
-    spawnSubagent,
+    // why: the bound actor orchestrator. The actor_create tool calls
+    // ctx.spawnActor(...) to decompose a task into a child session
+    // that runs the same loop. Wired below; see makeSpawnActor.
+    spawnActor,
     // DESIGN-17: the message_actor orchestrator (wired below). An actor's own
     // ctx strips this back out (it's not in its toolset, so the keyless narrowing
     // removes it).
@@ -941,13 +941,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // actors/call route derives every pending ask's awaitSignal from it, and
     // the tool aborts + releases on the way out — one Stop unwinds the fan.
     scriptRuns,
-    // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
+    // why: DESIGN-11 async spawned actors. spawnActorAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
-    // as a later synthetic turn. subagentTasks/subagentCancel back the
-    // subagent_tasks (peek) and subagent_cancel tools, scoped to THIS session.
-    spawnSubagentAsync,
-    subagentTasks: () => subagentTasksSnapshot(sessionId),
-    subagentCancel: (/** @type {string} */ taskId) => subagentCancel(sessionId, taskId),
+    // as a later synthetic turn. actorTasks/actorCancel back the
+    // actor_tasks (peek) and actor_cancel tools, scoped to THIS session.
+    spawnActorAsync,
+    actorTasks: () => actorTasksSnapshot(sessionId),
+    actorCancel: (/** @type {string} */ taskId) => actorCancel(sessionId, taskId),
     // why: the request_review tool calls ctx.requestReview(...) to spawn a
     // clean-context READ-ONLY reviewer over a diff and get a structured
     // summary back. Bound below; see makeRequestReview. Feature 08.
@@ -1059,7 +1059,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // (the 0-tab fetch state) calls this from navigate to lazily OPEN + ADOPT its one
     // tab, bound to THIS actor's session. Injected ONLY for the web kind; the
     // capability strip drops it from any actor whose toolset lacks navigate, and
-    // it's absent on the main/subagent ctx (actorType unset). adoptWebTab
+    // it's absent on the main/actor ctx (actorType unset). adoptWebTab
     // is defined later in the file — referenced lazily here (called at turn time),
     // the same late-bound pattern as noteAgentTab.
     // DESIGN-18: an API actor (backing:'api') never renders — no tab, ever — so it
@@ -1121,11 +1121,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   };
   // DESIGN-17: an ACTOR gets a KEYLESS, kind-narrowed tool context — a keyless,
   // narrow trust model. restrictCtxCapabilities strips every capability closure
-  // (getSecret, safeFetch, webFetch, spawnSubagent, memory, messageActor, …)
+  // (getSecret, safeFetch, webFetch, spawnActor, memory, messageActor, …)
   // that none of the actor's OWN kind tools need, so a confused/injected tool
   // has no path to secrets/egress/spawn. The loop still gets the provider key
   // via the turn driver's injected getSecret (off this ctx), exactly like a
-  // subagent. Non-actor ctx is unchanged.
+  // actor. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
     // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
     // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
@@ -1186,64 +1186,64 @@ const originOfTabUrl = (/** @type {string} */ url) => {
 };
 
 // ---------------------------------------------------------------------------
-// Subagent orchestrator — one orchestrator, two surfaces.
+// Actor orchestrator — one orchestrator, two surfaces.
 // ---------------------------------------------------------------------------
 //
-// makeSpawnSubagent (peerd-runtime/subagent) stays pure with everything
+// makeSpawnActor (peerd-runtime/actor) stays pure with everything
 // injected; the SW binds the real loop/model/dispatcher/store/prompt/
-// audit. Both the spawn_subagent tool (via ctx.spawnSubagent) and the
-// subagent/spawn route (Notebook peerd.runtime.runAgent) call the same bound fn,
+// audit. Both the actor_create tool (via ctx.spawnActor) and the
+// actor/spawn route (Notebook peerd.runtime.runAgent) call the same bound fn,
 // so they share audit, gates, trust inheritance, and caps. The bound fn
 // also defaults a live-event forwarder that streams the child's turn to
 // the side panel's nested transcript, keyed by the child session id.
 
-const forwardSubagentEvent = (/** @type {any} */ ev) => {
+const forwardActorEvent = (/** @type {any} */ ev) => {
   if (!uiConnected()) return;
   const post = (/** @type {any} */ msg) => {
     try { uiPorts.broadcast(msg); }
-    catch (e) { console.warn('[sw] subagent forward failed', e); }
+    catch (e) { console.warn('[sw] actor forward failed', e); }
   };
-  // why: distinct turn/subagent-* types (not the parent's turn/*) so the
+  // why: distinct turn/spawned-* types (not the parent's turn/*) so the
   // side panel routes them into the per-child nested store instead of
   // clobbering the active chat's transcript.
   switch (ev.type) {
-    case 'subagent-start':
-      post({ type: 'turn/subagent-start', parentToolUseId: ev.parentToolUseId, parentSessionId: ev.parentSessionId, sessionId: ev.sessionId, depth: ev.depth, task: ev.task });
+    case 'actor-start':
+      post({ type: 'turn/spawned-start', parentToolUseId: ev.parentToolUseId, parentSessionId: ev.parentSessionId, sessionId: ev.sessionId, depth: ev.depth, task: ev.task });
       break;
-    case 'subagent-stop':
-      post({ type: 'turn/subagent-done', parentToolUseId: ev.parentToolUseId, sessionId: ev.sessionId, depth: ev.depth });
+    case 'actor-stop':
+      post({ type: 'turn/spawned-done', parentToolUseId: ev.parentToolUseId, sessionId: ev.sessionId, depth: ev.depth });
       break;
     case 'state':
-      post({ type: 'turn/subagent-state', session: ev.session });
+      post({ type: 'turn/spawned-state', session: ev.session });
       break;
     case 'delta':
-      post({ type: 'turn/subagent-delta', sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
+      post({ type: 'turn/spawned-delta', sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
       break;
     case 'tool-use':
-      post({ type: 'turn/subagent-tool-use', sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
+      post({ type: 'turn/spawned-tool-use', sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
       break;
     case 'tool-result':
-      post({ type: 'turn/subagent-tool-result', sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
+      post({ type: 'turn/spawned-tool-result', sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
       break;
     case 'stop':
-      post({ type: 'turn/subagent-stop', sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
+      post({ type: 'turn/spawned-stop', sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
       break;
     case 'error':
-      post({ type: 'turn/subagent-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
+      post({ type: 'turn/spawned-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
       break;
     case 'usage':
-      // why: subagent/actor spend is SEPARATE from the main turn tally (the
+      // why: actor/actor spend is SEPARATE from the main turn tally (the
       // main usage handler only folds its own session). Forward it so the eval
       // harness — and any future offload-cost meter — can attribute the
       // delegated work honestly instead of it looking free.
-      post({ type: 'turn/subagent-cost', sessionId: ev.sessionId, usage: ev.usage });
+      post({ type: 'turn/spawned-cost', sessionId: ev.sessionId, usage: ev.usage });
       break;
     default:
       break;
   }
 };
 
-const spawnSubagentCore = makeSpawnSubagent({
+const spawnActorCore = makeSpawnActor({
   sessions,
   runUserTurn,
   callModel: /** @type {any} */ (callModel),
@@ -1267,7 +1267,7 @@ const spawnSubagentCore = makeSpawnSubagent({
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
   // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
-  // in-SW loop — the SAME substrate a bound actor uses (a subagent is an ephemeral
+  // in-SW loop — the SAME substrate a bound actor uses (an actor is an ephemeral
   // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
   // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
   // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
@@ -1291,43 +1291,43 @@ const spawnSubagentCore = makeSpawnSubagent({
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
 // wire streaming; an explicit onEvent in `req` still wins.
-const spawnSubagent = (/** @type {any} */ req) => spawnSubagentCore({ onEvent: forwardSubagentEvent, ...req });
+const spawnActor = (/** @type {any} */ req) => spawnActorCore({ onEvent: forwardActorEvent, ...req });
 // PR #134 phase 5: the live-children registry riding on the spawn orchestrator —
-// agent/stop and subagent_cancel walk it to end whole delegation subtrees.
-const subagentLifecycle = {
-  stopSubtree: (/** @type {string} */ sessionId) => spawnSubagentCore.stopSubtree(sessionId),
-  liveChildrenOf: (/** @type {string} */ sessionId) => spawnSubagentCore.liveChildrenOf(sessionId),
+// agent/stop and actor_cancel walk it to end whole delegation subtrees.
+const actorLifecycle = {
+  stopSubtree: (/** @type {string} */ sessionId) => spawnActorCore.stopSubtree(sessionId),
+  liveChildrenOf: (/** @type {string} */ sessionId) => spawnActorCore.liveChildrenOf(sessionId),
 };
 
 // ---------------------------------------------------------------------------
-// Async subagents (DESIGN-11) — orchestration in peerd-runtime/subagent.
+// Async spawned actors (DESIGN-11) — orchestration in peerd-runtime/actor.
 // ---------------------------------------------------------------------------
 //
 // The spawn -> settle -> drain -> re-enter logic lives in a TESTABLE module
-// (makeAsyncSubagents, peerd-runtime/subagent/async-subagents.js); the SW only
-// injects its IO. spawn_subagent's async path returns a handle immediately and
+// (makeAsyncActors, peerd-runtime/actor/async-actors.js); the SW only
+// injects its IO. actor_create's async path returns a handle immediately and
 // the child's result re-enters the parent as a synthetic wake turn via
 // turnSlots.runWhenIdle (never aborts a live turn — DECISIONS #20). A per-chat
 // LIFETIME cap stops a re-spawn runaway (the live force-quit bug; reproduced in
-// tests/peerd-runtime/subagent/async-subagents.test.js).
+// tests/peerd-runtime/actor/async-actors.test.js).
 
 // Generic, content-free desktop notification (DECISIONS #20): title only —
 // NEVER the result text or any watched content.
-const notifyAsyncSubagent = (/** @type {number} */ count) => {
+const notifyAsyncActor = (/** @type {number} */ count) => {
   try {
     browser.notifications?.create?.({
       type: 'basic',
       iconUrl: browser.runtime.getURL('icons/icon128.png'),
-      title: count > 1 ? `${count} subagents finished` : 'A subagent finished',
+      title: count > 1 ? `${count} actors finished` : 'An actor finished',
       message: 'Open peerd to see the result.',
     });
-  } catch (e) { console.warn('[sw] async-subagent notify failed', e); }
+  } catch (e) { console.warn('[sw] async-actor notify failed', e); }
 };
 
 // Push the live async-task snapshot to the side panel (DESIGN-11 status bar).
 // why a snapshot push (not per-event): the orchestrator owns the task list;
 // the panel just mirrors it, keyed by parent session so it renders only the
-// active chat's in-flight tasks. References asyncSubagentsOrchestrator (defined
+// active chat's in-flight tasks. References asyncActorsOrchestrator (defined
 // just below) lazily — only ever called at a status transition, long after boot.
 const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
   if (!uiConnected()) return;
@@ -1335,54 +1335,54 @@ const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
     uiPorts.broadcast({
       type: 'async-tasks/update',
       parentSessionId,
-      tasks: asyncSubagentsOrchestrator.subagentTasks(parentSessionId),
+      tasks: asyncActorsOrchestrator.actorTasks(parentSessionId),
     });
   } catch (e) { console.warn('[sw] async-tasks push failed', e); }
 };
 
-const asyncSubagentsOrchestrator = makeAsyncSubagents({
-  spawnSubagent: (req) => spawnSubagent(req),
+const asyncActorsOrchestrator = makeAsyncActors({
+  spawnActor: (req) => spawnActor(req),
   // why lazy (arrows): turnSlots + runAgentTurn are defined LATER in this module
   // (after the agent loop). The orchestrator only calls these at wake time (long
   // after boot), so deferring the references avoids a TDZ at module load.
   turnSlots: {
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
-    // PR #134: subagent_cancel aborts the child's live slot (children run
+    // PR #134: actor_cancel aborts the child's live slot (children run
     // under slots now), instead of only dropping the result.
     stop: (sessionId) => turnSlots.stop(sessionId),
   },
   // PR #134: a cancel ends the child's own descendants too.
-  stopSubtree: (sessionId) => spawnSubagentCore.stopSubtree(sessionId),
-  // async-subagent wakes are NOT trusted to delegate (a parent reacting to a
-  // subagent result stays attended-gated for message_actor, like today) —
+  stopSubtree: (sessionId) => spawnActorCore.stopSubtree(sessionId),
+  // async-actor wakes are NOT trusted to delegate (a parent reacting to a
+  // actor result stays attended-gated for message_actor, like today) —
   // so this reenter deliberately does not forward trusted.
   reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
-  forwardEvent: forwardSubagentEvent,
-  notify: notifyAsyncSubagent,
+  forwardEvent: forwardActorEvent,
+  notify: notifyAsyncActor,
   // Mirror the live task list to the side-panel status bar on every status
   // transition (spawn / settle / cancel / deliver) so the bar never goes stale.
   onTasksChanged: (parentSessionId) => pushAsyncTasks(parentSessionId),
   // Only the runaway guard (REFUSED) logs now — a rare, worth-seeing event.
-  log: (msg, data) => console.warn('[async-subagent]', msg, data),
+  log: (msg, data) => console.warn('[async-actor]', msg, data),
 });
-const { spawnSubagentAsync } = asyncSubagentsOrchestrator;
-// ctx aliases — the subagent_tasks / subagent_cancel tools call these scoped to
+const { spawnActorAsync } = asyncActorsOrchestrator;
+// ctx aliases — the actor_tasks / actor_cancel tools call these scoped to
 // their own session.
-const subagentTasksSnapshot = (/** @type {string} */ parentSessionId) => asyncSubagentsOrchestrator.subagentTasks(parentSessionId);
-const subagentCancel = (/** @type {string} */ parentSessionId, /** @type {string} */ taskId) => asyncSubagentsOrchestrator.subagentCancel(parentSessionId, taskId);
+const actorTasksSnapshot = (/** @type {string} */ parentSessionId) => asyncActorsOrchestrator.actorTasks(parentSessionId);
+const actorCancel = (/** @type {string} */ parentSessionId, /** @type {string} */ taskId) => asyncActorsOrchestrator.actorCancel(parentSessionId, taskId);
 
 // On vault unlock, re-drain any async children that finished while locked.
-vault.subscribe(() => { if (!vault.isLocked()) asyncSubagentsOrchestrator.onVaultUnlock(); });
+vault.subscribe(() => { if (!vault.isLocked()) asyncActorsOrchestrator.onVaultUnlock(); });
 
 // ---------------------------------------------------------------------------
 // Clean-context review orchestrator (feature 08).
 // ---------------------------------------------------------------------------
 //
-// makeRequestReview reuses the SAME bound spawnSubagent above — the reviewer
+// makeRequestReview reuses the SAME bound spawnActor above — the reviewer
 // is a spawned child with a clean session and a READ-ONLY tool subset. We
 // inject the full descriptor set WITH sideEffect (the read-only filter's
 // input), the audit log, the feature-02 checkpoint adapter (the `since`
@@ -1391,8 +1391,8 @@ vault.subscribe(() => { if (!vault.isLocked()) asyncSubagentsOrchestrator.onVaul
 // intersected with the local filter). Explicit diff / before+after
 // snapshots still take priority over the checkpoint path.
 const requestReview = makeRequestReview({
-  spawnSubagent,
-  // why: read-only filtering needs the sideEffect field; the subagent's
+  spawnActor,
+  // why: read-only filtering needs the sideEffect field; the actor's
   // getToolDescriptors omits it, so review gets its own descriptor fn.
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, sideEffect: t.sideEffect })),
   appendAudit: /** @type {any} */ (auditLog.append),
@@ -1423,13 +1423,13 @@ const requestReview = makeRequestReview({
 // Auto-memory + trim-summary enrichment (cheap clean-context calls)
 // ---------------------------------------------------------------------------
 //
-// Both features share ONE call shape: a tools:[] subagent spawn (clean
+// Both features share ONE call shape: a tools:[] actor spawn (clean
 // context, output cap) with the spend-limit preflight and the cost fold
 // into the parent session's tally built into makeCheapCall — so the
 // cost tracker and the user's spendLimitUsd see this background work.
 
 const cheapCall = makeCheapCall({
-  spawnSubagent,
+  spawnActor,
   sessions,
   // why read settings at call time: pricing overrides can change over
   // the SW's life; snapshotting at boot would price stale.
@@ -1758,7 +1758,7 @@ const scriptRuns = createScriptRunRegistry();
 const contextSnapshots = createContextSnapshots();
 
 // The heap split: the ONE offscreen agent-loop client. It runs every non-
-// orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
+// orchestrator loop — an ephemeral reasoning actor (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
 // 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
 // and dispatches there — the worker holds no
@@ -1773,7 +1773,7 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   buildToolContext,
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   pinActorCall,
-  // Phase 4: rebuild a subagent's narrowed-general tool ctx SW-side from its persisted
+  // Phase 4: rebuild an actor's narrowed-general tool ctx SW-side from its persisted
   // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.
   restrictCtxCapabilities,
   // Phase 3: a tab-backed web actor's currently-owned tab, read per dispatch (lazy —
@@ -2359,7 +2359,7 @@ goalRunner = makeGoalRunner({
 // 5b2. DESIGN-17 — actor tab agents: the message_actor orchestrator
 // ---------------------------------------------------------------------------
 // An actor is a per-instance agent that OWNS one tab-hosted instance and
-// exclusively holds its tools. The orchestrator (the async-subagents shape,
+// exclusively holds its tools. The orchestrator (the async-actors shape,
 // specialized) is the mailbox to it; the SW supplies the IO — resolve + lazy-
 // mint the actor across the three registries, drive ONE actor turn (the
 // SAME runAgentTurn wrapper, kind-aware), and re-enter the sender with the reply.
@@ -2386,7 +2386,7 @@ const { mintOnce } = makeMintOnce();
 // Start the actor process on demand: lazily mint an actor session for an
 // instance (on the first message_actor). Inherits the spawning chat's RESOLVED
 // Plan/Act posture — resolved + stored EXPLICITLY so it can't silently widen to the
-// global default (the subagent guardrail-3 precedent). Binds BOTH directions:
+// global default (the actor guardrail-3 precedent). Binds BOTH directions:
 // actorSessionId on the registry record (the REGISTERED NAME — the stable
 // instance id → live session pointer resolveActor reads, like a Registry entry),
 // and the actor session as the instance's session-default so id-less tools
@@ -2406,7 +2406,7 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     // The actor inherits the owner chat's tool MANIFEST as an authority bound
-    // (the subagent precedent, spawn.js): a /tools-narrowed chat can't widen its
+    // (the actor precedent, spawn.js): a /tools-narrowed chat can't widen its
     // reach by delegating to an actor. A browse-only chat's actor is held to
     // browse-only's read DOM tools — the gate refuses click/type for it. null /
     // absent = no manifest = the actor keeps its full kind toolset.
@@ -2846,8 +2846,8 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
     const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
     // v1 is the ORCHESTRATOR's surface only: a top-level chat session. An
     // actor must never delegate (the recursion rule message_actor already
-    // enforces), and a subagent's channel is its own message_actor grant.
-    if (!owner || owner.kind === 'actor' || owner.kind === 'subagent') {
+    // enforces), and an actor's channel is its own message_actor grant.
+    if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
       return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
     }
     const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
@@ -3302,7 +3302,7 @@ const actorMessaging = makeActorMessaging({
     // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_actor
     // call (parentToolUseId present — absent on a boot redrain), pass a `display`
     // descriptor so the turn driver re-emits the actor's stream as turn/actor-*
-    // events keyed to that card. The orchestrator renders it inline (the subagent
+    // events keyed to that card. The orchestrator renders it inline (the actor
     // live-view, for an actor). Cheap: rendering only — the model-memory the
     // orchestrator keeps is still just the fenced reply (deliver()).
     const display = parentToolUseId
@@ -3538,8 +3538,8 @@ const ensureSession = ensureCurrentSession;
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
-  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the subagent/
-  // actor card + cost meter). Serves both reasoning subagents and bound actors; a
+  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/
+  // actor card + cost meter). Serves both spawned reasoners and bound actors; a
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
   ...(actorClient?.routes ?? {}),
@@ -3578,16 +3578,16 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
     applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit,
-    handleSystemCommand, handleToolsCommand, postChatNote, spawnSubagent, requestReview, appClient,
+    handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
     startGoalRun, haltGoalRun, ensureSession,
     // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
     actorMessaging,
-    // PR #134 phase 5: agent/stop also cascades through the live subagent
+    // PR #134 phase 5: agent/stop also cascades through the live actor
     // subtree (children run under their own turn slots now).
-    subagentLifecycle,
+    actorLifecycle,
     // The debug surface: session/debugBundle + session/contextSnapshots.
     settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
   }),

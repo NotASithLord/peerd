@@ -3,7 +3,7 @@
 // first-contact signing gate, and inbound routing are provable without a mesh.
 
 import { describe, test, expect } from 'bun:test';
-import { makeMeshDispatch, isA2AEnvelope } from '../../extension/peerd-runtime/subagent/a2a-dispatch.js';
+import { makeMeshDispatch, isA2AEnvelope } from '../../extension/peerd-runtime/actor/a2a-dispatch.js';
 
 const DID = 'did:key:z6MkBob';
 const tick = () => new Promise((r) => setTimeout(r, 0));

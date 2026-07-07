@@ -243,7 +243,7 @@ enforced by the browser platform, not by peerd's own crypto. Two
 principles run through all of it: **the agent that holds your keys never
 touches a raw page or runs untrusted code** (the environment-operating
 tools are not even attached to it; they belong to per-environment actor
-sub-agents), and **the agent never gets the final word on correctness:
+actors), and **the agent never gets the final word on correctness:
 every page action reports what it actually changed on the live page, and
 success is judged from that observed effect.**
 
@@ -258,8 +258,8 @@ asked to, because it never held the tool.
 |---|---|---|
 | **The vault** (`peerd-egress/vault`) | your API keys + secrets, decrypted only after Touch ID / passkey / passphrase unlock; idle auto-lock | leaving the device — keys go only to the provider you chose |
 | **The orchestrator** (`peerd-runtime/loop`) | the conversation, planning, delegating a goal to an actor via `message_actor` | holding any environment's tools, reading raw page bytes, or running untrusted code directly |
-| **A bound actor** (`peerd-runtime/subagent`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless, in its own worker heap (Chrome) | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| **A subagent** (`peerd-runtime/subagent`) | a disposable ephemeral actor the orchestrator spawns to decompose a task — keyless, in its own worker heap (Chrome), holding only a narrowed subset of the orchestrator's tools | escalating past its grant, holding keys, or reaching another agent's heap; every tool call is re-checked service-worker-side and its result returns fenced |
+| **A bound actor** (`peerd-runtime/actor`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless, in its own worker heap (Chrome) | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| **A actor** (`peerd-runtime/actor`) | a disposable ephemeral actor the orchestrator spawns to decompose a task — keyless, in its own worker heap (Chrome), holding only a narrowed subset of the orchestrator's tools | escalating past its grant, holding keys, or reaching another agent's heap; every tool call is re-checked service-worker-side and its result returns fenced |
 | **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
 | **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
@@ -288,10 +288,10 @@ peerd/
 │   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
 │   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless script worker in offscreen/.
-│   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + subagents, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
+│   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + actors, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
-│   ├── offscreen/            # chassis: the actor/subagent worker heaps, headless script runs, voice, SW keepalive
+│   ├── offscreen/            # chassis: the actor/actor worker heaps, headless script runs, voice, SW keepalive
 │   ├── sidepanel/            # chassis: chat UI (Mithril)
 │   ├── vm-tab/               # chassis: WebVM tab page (CheerpX + bash + xterm)
 │   ├── notebook-tab/         # chassis: Notebook tab page (Web Worker + OPFS)

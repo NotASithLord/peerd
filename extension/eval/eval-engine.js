@@ -81,7 +81,7 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
       case 'turn/delta': turn.started = true; break;
       case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); break;
       case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } break;
-      case 'turn/subagent-cost':
+      case 'turn/spawned-cost':
         if (msg.usage) {
           turn.runner.inputTokens += msg.usage.inputTokens || 0;
           turn.runner.outputTokens += msg.usage.outputTokens || 0;

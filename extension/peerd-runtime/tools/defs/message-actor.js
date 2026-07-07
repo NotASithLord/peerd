@@ -6,7 +6,7 @@
 // longer mutates an instance by id; it messages the instance's actor, which
 // does the work in its own focused context and replies on a later turn. Thin
 // wrapper — the mailbox / sender-gate / runaway-guard / correlation all live in
-// subagent/actor-messaging.js (bound + injected as ctx.messageActor by the
+// actor/actor-messaging.js (bound + injected as ctx.messageActor by the
 // SW). The exposure gate refuses this tool on an actor session, so an actor
 // can't recursively message another actor.
 
@@ -24,7 +24,7 @@
 /** @type {import('/shared/tool-types.js').Tool} */
 export const messageActorTool = {
   name: 'message_actor',
-  primitive: 'subagent',
+  primitive: 'spawned',
   description: [
     'Delegate a GOAL to an ACTOR. For WEB WORK, address `to:"web"` and delegate',
     'INTENT ("get the cheapest in-stock price for X") — the web actor is the single',
@@ -41,7 +41,7 @@ export const messageActorTool = {
     'message at a time (its mailbox): reuse the same `to` for follow-up (no',
     're-orientation); message a DIFFERENT tab/instance for independent work — separate',
     'actors run in parallel. Your ONLY path to act on a page or mutate an instance.',
-    '(When you are a SUBAGENT, the reply comes back directly in THIS tool result',
+    '(When you are a ACTOR, the reply comes back directly in THIS tool result',
     'instead of a later turn — use it and continue.)',
   ].join(' '),
   schema: {
@@ -85,17 +85,17 @@ export const messageActorTool = {
       // a goal continuation or an actor reply-wake is trusted → not inbound.
       inbound: c.inbound === true,
       // DESIGN-17 P1 glass pane: THIS tool call's id (SW-injected into ctx, the
-      // same thread spawn_subagent uses) keys the actor's live display stream
-      // to this card, so its work renders inline like a subagent transcript.
+      // same thread actor_create uses) keys the actor's live display stream
+      // to this card, so its work renders inline like an actor transcript.
       toolUseId: c.toolUseId,
-      // PR #134 — the subagent reply mode. An ephemeral child has no later turn
+      // PR #134 — the actor reply mode. An ephemeral child has no later turn
       // for the reply-wake to re-enter (and waking its session would rebuild it
       // on the main exposure surface), so its reply resolves INTO this tool
       // result — still wrapUntrusted-fenced. Long-lived senders keep the wake.
-      awaitReply: c.session?.kind === 'subagent',
+      awaitReply: c.session?.kind === 'spawned',
       // The child's own abort signal (spawn.js threads it onto ctx). Lets the
       // awaited reply race the child's wall-clock timeout / cancel, so a hung
-      // actor turn doesn't park the subagent past its budget (#1/#3).
+      // actor turn doesn't park the actor past its budget (#1/#3).
       awaitSignal: c.abortSignal,
     });
     // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.

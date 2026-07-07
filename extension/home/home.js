@@ -21,7 +21,7 @@ import { NetworkSection } from './network-section.js';
 import { DiscoverSection } from './discover-section.js';
 import { ContactsSection } from './contacts-section.js';
 // EvalSection (the Lab) is LAZY-loaded — see loadEvalSection below.
-import { INITIAL_STATE, reduceChat, putSubagentSession } from '../sidepanel/chat-reducer.js';
+import { INITIAL_STATE, reduceChat, putSpawnedSession } from '../sidepanel/chat-reducer.js';
 import { ChatView } from '../sidepanel/components/chat-view.js';
 import { ConfirmModal, NoticeBar } from '../sidepanel/components/app.js';
 import { VaultGate } from '../sidepanel/components/vault-gate.js';
@@ -156,20 +156,20 @@ const send = (msg) => browser.runtime.sendMessage(msg);
 
 // ---- chat-component uiActions (the subset home needs; no voice) -----------
 /** @type {Set<string>} */
-const subagentFetchInFlight = new Set();
+const actorFetchInFlight = new Set();
 /** @param {string} sessionId */
-const loadSubagent = (sessionId) => {
+const loadActor = (sessionId) => {
   if (!sessionId) return;
-  if (currentState.subagents.sessions[sessionId]?.messages?.length) return;
-  if (subagentFetchInFlight.has(sessionId)) return;
-  subagentFetchInFlight.add(sessionId);
+  if (currentState.spawned.sessions[sessionId]?.messages?.length) return;
+  if (actorFetchInFlight.has(sessionId)) return;
+  actorFetchInFlight.add(sessionId);
   send({ type: 'session/get', sessionId }).then((/** @type {any} */ resp) => {
-    subagentFetchInFlight.delete(sessionId);
+    actorFetchInFlight.delete(sessionId);
     if (resp?.ok && resp.session) {
-      currentState = putSubagentSession(currentState, resp.session);
+      currentState = putSpawnedSession(currentState, resp.session);
       m.redraw();
     }
-  }).catch(() => { subagentFetchInFlight.delete(sessionId); });
+  }).catch(() => { actorFetchInFlight.delete(sessionId); });
 };
 /**
  * @param {string} id
@@ -223,7 +223,7 @@ const openAgentTab = (tabId, windowId) => {
   // why no dismiss: the agent-tab card PERSISTS after click — it tracks the live
   // agent tab so you can jump back any time; it clears itself when the tab closes.
 };
-const uiActions = { loadSubagent, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
 
 // Cache this tab's own window id at boot so "Pop to side" can pass a REAL
 // windowId synchronously inside the click gesture — sidePanel.open() rejects

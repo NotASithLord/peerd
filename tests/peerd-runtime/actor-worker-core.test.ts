@@ -1,7 +1,7 @@
 // Heap-split phase 2 — the pure core of an offscreen BOUND-actor loop: the
 // relayed tool dispatch (the new piece vs phase 1) and the actor loop-driver.
 import { describe, test, expect } from 'bun:test';
-import { makeRelayedToolDispatch, runActorLoop, makeInMemorySessions, makeActorSummaryFence } from '../../extension/peerd-runtime/subagent/actor-worker-core.js';
+import { makeRelayedToolDispatch, runActorLoop, makeInMemorySessions, makeActorSummaryFence } from '../../extension/peerd-runtime/actor/actor-worker-core.js';
 
 describe('makeRelayedToolDispatch', () => {
   test('delegates the call across the boundary and returns the SW ToolResult', async () => {
@@ -92,7 +92,7 @@ describe('runActorLoop', () => {
     expect(out.error).toBe('vm-wedged');
   });
 
-  // The unification: a REASONING subagent is a tool-less actor. runActorLoop with
+  // The unification: a REASONING actor is a tool-less actor. runActorLoop with
   // tools:[] and a loop that never dispatches drives it exactly like the old
   // runReasoningLoop — the relayed toolDispatch is simply never invoked.
   test('drives a tool-less REASONING loop (tools:[], no dispatch)', async () => {

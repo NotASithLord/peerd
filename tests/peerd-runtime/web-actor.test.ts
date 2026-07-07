@@ -4,7 +4,7 @@ import {
   WEB_ACTOR_SUMMARY_PROMPT,
   makeWebActorTabBindings,
   makeWebActorRegistry,
-} from '../../extension/peerd-runtime/subagent/web-actor.js';
+} from '../../extension/peerd-runtime/actor/web-actor.js';
 import { stripUntrustedFences } from '../../extension/shared/util.js';
 
 describe('fenceWebActorSummary — self-fence the actor\'s own memory', () => {

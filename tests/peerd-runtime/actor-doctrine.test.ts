@@ -1,6 +1,6 @@
 // Doctrine guard: peerd.runtime.runAgent is for an agent embedded in an
 // artifact the agent BUILDS FOR THE USER — never an orchestration shortcut for
-// the model's own work (that's the spawn_subagent tool; docs/SUBAGENTS.md). The
+// the model's own work (that's the actor_create tool; docs/ACTORS.md). The
 // tool descriptions are the model's nudges, so they must not invite the
 // forbidden "fan out via a sandbox" pattern. These assertions pin that.
 
@@ -13,8 +13,8 @@ describe('runAgent doctrine in tool descriptions', () => {
     // headless script is the agent's OWN compute, never a user-facing artifact —
     // runAgent has no doctrine-legitimate use there, so it must not be nudged.
     expect(scriptTool.description).not.toContain('runAgent');
-    // and own-work delegation is pointed at the spawn_subagent tool instead.
-    expect(scriptTool.description).toContain('spawn_subagent');
+    // and own-work delegation is pointed at the actor_create tool instead.
+    expect(scriptTool.description).toContain('actor_create');
   });
 
   test('js_create scopes runAgent to user-facing artifacts, not orchestration', () => {
@@ -24,10 +24,10 @@ describe('runAgent doctrine in tool descriptions', () => {
       new URL('../../extension/peerd-runtime/tools/defs/js-create.js', import.meta.url),
       'utf8',
     );
-    // where it mentions runAgent, the user-facing scoping + the spawn_subagent
+    // where it mentions runAgent, the user-facing scoping + the actor_create
     // redirect must travel with it.
     expect(src).toContain('runAgent');
     expect(src).toContain('BUILD FOR THE USER');
-    expect(src).toContain('spawn_subagent');
+    expect(src).toContain('actor_create');
   });
 });

@@ -1,13 +1,13 @@
-// PR #134 — subagents as async actors: the lifecycle (turn slots, abort,
+// PR #134 — spawned as async actors: the lifecycle (turn slots, abort,
 // wall-clock timeout, transitive Stop), the trusted-lineage sender gate wiring,
-// root-keyed budgets, mechanical dedupe, the subagent awaitReply mode, and the
+// root-keyed budgets, mechanical dedupe, the actor awaitReply mode, and the
 // redrain reroute. Complements delegation-lineage.test.ts (the pure predicate)
 // and actor-messaging.test.ts / spawn.test.ts (the pre-#134 behaviors, which
 // must all still hold).
 import { describe, test, expect } from 'bun:test';
-import { makeSpawnSubagent, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from '../../extension/peerd-runtime/subagent/spawn.js';
-import { makeActorMessaging } from '../../extension/peerd-runtime/subagent/actor-messaging.js';
-import { buildAncestry } from '../../extension/peerd-runtime/subagent/delegation-lineage.js';
+import { makeSpawnActor, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS } from '../../extension/peerd-runtime/actor/spawn.js';
+import { makeActorMessaging } from '../../extension/peerd-runtime/actor/actor-messaging.js';
+import { buildAncestry } from '../../extension/peerd-runtime/actor/delegation-lineage.js';
 import { makeTurnSlots } from '../../extension/peerd-runtime/loop/turn-slots.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -90,7 +90,7 @@ describe('spawn lifecycle — spawnedTrusted stamping (phase 3, fail-closed)', (
   const stampFor = async (parentInbound: boolean | undefined) => {
     const store = makeStore();
     const parent = await store.create({});
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop()) as any);
+    const spawn = makeSpawnActor(spawnDeps(store, makeFastLoop()) as any);
     await spawn({ task: 't', tools: [], parentSessionId: parent.sessionId, ...(parentInbound === undefined ? {} : { parentInbound }) });
     // createOpts[0] is the parent; [1] the child.
     return store.createOpts[1].spawnedTrusted;
@@ -111,7 +111,7 @@ describe('spawn lifecycle — abort + registry (phases 1 & 5)', () => {
     const store = makeStore();
     const parent = await store.create({});
     const turnSlots = makeTurnSlots();
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeAbortableLoop(), { turnSlots }) as any);
+    const spawn = makeSpawnActor(spawnDeps(store, makeAbortableLoop(), { turnSlots }) as any);
     const running = spawn({ task: 'long job', tools: [], parentSessionId: parent.sessionId });
     await tick();
     const [childId] = spawn.liveChildrenOf(parent.sessionId);
@@ -129,7 +129,7 @@ describe('spawn lifecycle — abort + registry (phases 1 & 5)', () => {
     const store = makeStore();
     const root = await store.create({});
     const turnSlots = makeTurnSlots();
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeAbortableLoop(), { turnSlots }) as any);
+    const spawn = makeSpawnActor(spawnDeps(store, makeAbortableLoop(), { turnSlots }) as any);
     const child = spawn({ task: 'c1', tools: [], parentSessionId: root.sessionId });
     await tick();
     const [childId] = spawn.liveChildrenOf(root.sessionId);
@@ -153,7 +153,7 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
     const parent = await store.create({});
     const timers: Array<{ fn: () => void; ms: number }> = [];
     const cleared: unknown[] = [];
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeAbortableLoop(), {
+    const spawn = makeSpawnActor(spawnDeps(store, makeAbortableLoop(), {
       turnSlots: makeTurnSlots(),
       setTimer: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length; },
       clearTimer: (h: unknown) => { cleared.push(h); },
@@ -173,7 +173,7 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
     const store = makeStore();
     const parent = await store.create({});
     const budgets: number[] = [];
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop(), {
+    const spawn = makeSpawnActor(spawnDeps(store, makeFastLoop(), {
       setTimer: (_fn: () => void, ms: number) => { budgets.push(ms); return 1; },
       clearTimer: () => {},
     }) as any);
@@ -187,7 +187,7 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
     const store = makeStore();
     const parent = await store.create({});
     const cleared: unknown[] = [];
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop('all good'), {
+    const spawn = makeSpawnActor(spawnDeps(store, makeFastLoop('all good'), {
       setTimer: () => 42,
       clearTimer: (h: unknown) => { cleared.push(h); },
     }) as any);
@@ -205,7 +205,7 @@ describe('spawn lifecycle — wall-clock timeout (phase 2)', () => {
     const store = makeStore();
     const parent = await store.create({});
     let timerCb: (() => void) | null = null;
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop('complete'), {
+    const spawn = makeSpawnActor(spawnDeps(store, makeFastLoop('complete'), {
       setTimer: (fn: () => void) => { timerCb = fn; return 1; },
       clearTimer: () => {},
     }) as any);
@@ -221,7 +221,7 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
   const withOffscreen = (store: any, offscreen: any, extra: any = {}) => {
     // A distinctively-texted in-SW loop so we can tell which path ran.
     const inSwLoop = makeFastLoop('IN-SW answer');
-    return makeSpawnSubagent(spawnDeps(store, inSwLoop, {
+    return makeSpawnActor(spawnDeps(store, inSwLoop, {
       runChildOffscreen: offscreen,
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
       ...extra,
@@ -242,7 +242,7 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
     expect(offscreenJob.provider).toBe('anthropic');
     expect(offscreenJob.model).toBe('parent-model');
     // the child transcript was reconstructed SW-side (finalAssistantText reads it)
-    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
     expect(child.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'OFFSCREEN answer' });
   });
 
@@ -259,11 +259,11 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
     expect(out.result).toBe('did it');                       // ran offscreen, not the in-SW loop
     expect(offscreenJob.tools.map((t: any) => t.name)).toContain('a');   // descriptors relayed to the worker
     // the granted set is persisted on the child record for the SW-side dispatch to re-check
-    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
     expect(child.grantedTools).toContain('a');
   });
 
-  test('SECURITY: a subagent CANNOT be granted actor-only tools (foreground-tab escalation is closed)', async () => {
+  test('SECURITY: an actor CANNOT be granted actor-only tools (foreground-tab escalation is closed)', async () => {
     // DESIGN-17: read_page/page_exec/click/navigate/fetch_url are MAIN_AGENT_HIDDEN
     // (actor-only), and edit_file is actor-mutating. narrowTools filters from the
     // MAIN-AGENT surface, so requesting them yields a child that holds NONE of them —
@@ -271,7 +271,7 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
     const store = makeStore();
     const parent = await store.create({});
     let offscreenJob: any = null;
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop('IN-SW answer'), {
+    const spawn = makeSpawnActor(spawnDeps(store, makeFastLoop('IN-SW answer'), {
       runChildOffscreen: async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'ok', stopReason: 'end_turn', toolCalls: 0 }; },
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
       // a registry that DOES include the actor-only tools (the real listTools surface)
@@ -279,7 +279,7 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
         .map((name) => ({ name, description: name, schema: {} })),
     }) as any);
     await spawn({ task: 'read the current page', tools: ['read_page', 'page_exec', 'edit_file', 'script'], parentSessionId: parent.sessionId });
-    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
     const granted = child.grantedTools ?? [];
     // the actor-only DOM/page + mutating tools were dropped; only the legit one survives
     expect(granted).toContain('script');
@@ -303,7 +303,7 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
     const parent = await store.create({});
     let inSwRan = false;
     const inSwLoop = async function* (ctx: any) { inSwRan = true; await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'IN-SW answer' }); yield { type: 'stop', stopReason: 'end_turn' }; };
-    const spawn = makeSpawnSubagent(spawnDeps(store, inSwLoop, {
+    const spawn = makeSpawnActor(spawnDeps(store, inSwLoop, {
       runChildOffscreen: async () => ({ ok: false, started: true, error: 'provider-http-500', finalText: '' }),
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
     }) as any);
@@ -352,7 +352,7 @@ const trustedChild: Hop[] = [
 const ancestryOf = (hops: Hop[]) => async (_sessionId: string) => hops;
 
 describe('message_actor — the trusted-lineage sender gate (phase 3)', () => {
-  test('ACCEPTS a trusted-lineage subagent (non-active sender with a clean chain)', async () => {
+  test('ACCEPTS a trusted-lineage actor (non-active sender with a clean chain)', async () => {
     const { messageActor, turnsRun } = gateHarness({ getAncestry: ancestryOf(trustedChild) });
     const r = await messageActor({ to: 'app-1', message: 'do it', senderSessionId: 'sub-1', inbound: false });
     expect(r.ok).toBe(true);
@@ -391,7 +391,7 @@ describe('message_actor — the stamp→walk→gate contract, end to end (no moc
   const wire = async (parentInbound: boolean | undefined) => {
     const store = makeStore();
     const root = await store.create({});                       // s-1 — the active chat
-    const spawn = makeSpawnSubagent(spawnDeps(store, makeFastLoop()) as any);
+    const spawn = makeSpawnActor(spawnDeps(store, makeFastLoop()) as any);
     const child = await spawn({
       task: 'go', tools: [], parentSessionId: root.sessionId,
       ...(parentInbound === undefined ? {} : { parentInbound }),
@@ -424,7 +424,7 @@ describe('message_actor — the stamp→walk→gate contract, end to end (no moc
 });
 
 describe('message_actor — root-keyed budgets (phase 4)', () => {
-  test('a subagent\'s sends draw from its ROOT\'s rate budget (one bound per delegation tree)', async () => {
+  test('an actor\'s sends draw from its ROOT\'s rate budget (one bound per delegation tree)', async () => {
     const { messageActor } = gateHarness({
       getAncestry: ancestryOf(trustedChild),
       caps: { rateCap: 2 },
@@ -434,13 +434,13 @@ describe('message_actor — root-keyed budgets (phase 4)', () => {
     await tick();
     expect((await messageActor({ to: 'app-1', message: 'b', senderSessionId: 'chat-1' })).ok).toBe(true);
     await tick();
-    // …exhaust the budget for the subagent too — it shares the root's window.
+    // …exhaust the budget for the actor too — it shares the root's window.
     const r = await messageActor({ to: 'app-1', message: 'c', senderSessionId: 'sub-1', inbound: false });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('delegation tree');
   });
 
-  test('stopActorsFor(root chat) covers an actor turn a SUBAGENT started', async () => {
+  test('stopActorsFor(root chat) covers an actor turn a ACTOR started', async () => {
     // Hold the actor turn in the queue so it stays in flight.
     const queued: Array<() => void> = [];
     const { messageActor, stopActorsFor } = gateHarness({
@@ -450,7 +450,7 @@ describe('message_actor — root-keyed budgets (phase 4)', () => {
     // Fire-and-forget: awaitReply resolves only after the queued turn runs.
     const pending = messageActor({ to: 'app-1', message: 'go', senderSessionId: 'sub-1', inbound: false, awaitReply: true });
     await tick();
-    // The user hits Stop on the CHAT — the root — and the subagent's in-flight
+    // The user hits Stop on the CHAT — the root — and the actor's in-flight
     // actor session is returned for the slot-abort cascade.
     expect(stopActorsFor('chat-1')).toEqual(['res-1']);
     queued.forEach((fn) => fn()); // drain: the stopped-generation path settles the await
@@ -531,9 +531,9 @@ describe('message_actor — mechanical dedupe (phase 7)', () => {
     expect(turnsRun.length).toBe(2);
   });
 
-  test('#8 — two sibling subagents\' independent web actors do NOT alias-collapse under the shared root', async () => {
+  test('#8 — two sibling spawned\' independent web actors do NOT alias-collapse under the shared root', async () => {
     // The web actor is SENDER-scoped: resolveWebActor keys by ownerChatId =
-    // senderSessionId, so each subagent gets its OWN actorSession — yet all share
+    // senderSessionId, so each actor gets its OWN actorSession — yet all share
     // the constant instanceId 'web'. Keying dedupe on instanceId would collapse
     // two siblings' independent web actors into one entry under their shared root,
     // wrongly refusing the second (which has no channel to observe the first's
@@ -554,7 +554,7 @@ describe('message_actor — mechanical dedupe (phase 7)', () => {
     const r2 = await messageActor({ to: 'web', message: 'get BTC price', senderSessionId: 'sub-2', inbound: false });
     expect(r1.ok).toBe(true);
     expect(r2.ok).toBe(true);                 // the fix: S2's own web actor is NOT alias-collapsed
-    // Control: the SAME subagent re-sending the SAME intent to ITS web actor IS still deduped.
+    // Control: the SAME actor re-sending the SAME intent to ITS web actor IS still deduped.
     const dup = await messageActor({ to: 'web', message: 'get BTC price', senderSessionId: 'sub-1', inbound: false });
     expect(dup.ok).toBe(false);
     expect(dup.error).toContain('identical request');
@@ -564,7 +564,7 @@ describe('message_actor — mechanical dedupe (phase 7)', () => {
   });
 });
 
-describe('message_actor — the subagent awaitReply mode', () => {
+describe('message_actor — the actor awaitReply mode', () => {
   test('resolves the fenced reply INTO the tool result (no reentry wake)', async () => {
     const { messageActor, reentries } = gateHarness({ getAncestry: ancestryOf(trustedChild) });
     const r = await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'sub-1', inbound: false, awaitReply: true });
@@ -574,7 +574,7 @@ describe('message_actor — the subagent awaitReply mode', () => {
     await tick();
     expect(reentries.length).toBe(0); // the child is never woken
   });
-  test('an aborted subagent unblocks even if the actor turn never settles (#1/#3)', async () => {
+  test('an aborted actor unblocks even if the actor turn never settles (#1/#3)', async () => {
     // The actor turn is held in the queue (never run), so onReply never fires.
     // The child's abort signal must still unwind the await. The QUEUED delivery
     // is marked cancelled — it skips when the slot drains — and the slot is NOT
@@ -753,7 +753,7 @@ describe('message_actor — envelope provenance + redrain reroute (phase 7)', ()
     expect(appended[0].senderSessionId).toBe('sub-1');
   });
 
-  test('a redrained reply whose sender was an ephemeral subagent is rerouted to the ROOT', async () => {
+  test('a redrained reply whose sender was an ephemeral actor is rerouted to the ROOT', async () => {
     const audits: any[] = [];
     const { redrain, reentries } = gateHarness({
       appendAudit: async (e: any) => { audits.push(e); },

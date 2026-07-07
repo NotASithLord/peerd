@@ -95,12 +95,12 @@ const loadDwebBlock = async () => {
  *   it's absent on home / non-web tabs. Framed as untrusted context, never an
  *   instruction. Omit / no url → nothing appended.
  * @param {string} [ctx.taskOverride]
- *   When present, the prompt is for an EPHEMERAL ACTOR (a subagent): the
+ *   When present, the prompt is for an EPHEMERAL ACTOR (an actor): the
  *   ephemeralActorBlock is appended — an <actor_agent> block (shared with a
  *   bound actor since the PR #134 unification) framing the session as a
  *   one-shot job whose final assistant message IS the value returned to the
  *   parent, and which MAY itself message_actor. The base prompt (tools,
- *   defenses) still applies. See docs/SUBAGENTS.md.
+ *   defenses) still applies. See docs/ACTORS.md.
  * @param {string} [ctx.actorType]
  *   DESIGN-17: when present ('webvm'|'notebook'|'app'|'web'), the prompt is for
  *   an ACTOR — a type-specific tuned block is appended that frames the agent as
@@ -155,7 +155,7 @@ export const renderSystemPrompt = async (ctx) => {
     out += activeTabBlock(ctx.activeTab);
   }
   // The appended ACTOR PROMPT — one family, two kinds (both <actor_agent>):
-  //   - EPHEMERAL actor (a subagent): taskOverride set, owns no instance,
+  //   - EPHEMERAL actor (an actor): taskOverride set, owns no instance,
   //     fire-once, may itself message_actor. See ephemeralActorBlock.
   //   - BOUND actor: actorType set, owns ONE instance/tab/origin. See actorBlock.
   // They are mutually exclusive (spawn.js sets taskOverride; the turn driver sets
@@ -210,8 +210,8 @@ const sessionInstructionsBlock = (text) => [
   '</session_instructions>',
 ].join('\n');
 
-// The EPHEMERAL ACTOR prompt — a subagent's tuned block. Since the async-actor
-// unification (PR #134) a subagent IS an actor: same lifecycle (abortable turn
+// The EPHEMERAL ACTOR prompt — an actor's tuned block. Since the async-actor
+// unification (PR #134) an actor IS an actor: same lifecycle (abortable turn
 // slot, wall-clock timeout, may itself message_actor), differing only in that it
 // owns no persistent instance and isn't re-addressable — it runs once and hands
 // a result back. So it shares the <actor_agent> framing with a bound actor, as
@@ -225,7 +225,7 @@ const ephemeralActorBlock = (task) => [
   '',
   '',
   '<actor_agent>',
-  'You are an EPHEMERAL ACTOR — a subagent spawned by another agent to do ONE',
+  'You are an EPHEMERAL ACTOR — an actor spawned by another agent to do ONE',
   'focused task and return a result. Unlike a bound actor you own no persistent',
   "instance and can't be re-addressed: do the task, return, done.",
   '',
@@ -468,7 +468,7 @@ export const actorBlock = (actorType, backing, instanceId) => {
     '(1) Act ONLY on your own instance — your tools are already pinned to it. A tool',
     '    description may mention a "current"/"default" instance, auto-creating one, or',
     '    "another" — IGNORE that wording: there is exactly one (yours), its id injected.',
-    "(2) Your ONLY tools are this environment's. Any browser / web / subagent / memory /",
+    "(2) Your ONLY tools are this environment's. Any browser / web / actor / memory /",
     "    message_actor tools named above are the ORCHESTRATOR's, not yours — ignore them.",
     '(3) No human is in this conversation and no follow-up turn from you: do the work,',
     '    then make your FINAL message a complete, self-contained report — it is the reply',

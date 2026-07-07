@@ -85,7 +85,7 @@ const engineRows = async (src, sessionId) => {
 /** @type {import('/shared/tool-types.js').Tool} */
 export const actorListTool = {
   name: 'actor_list',
-  primitive: 'subagent',
+  primitive: 'spawned',
   description: [
     'Enumerate EVERY actor you can address with message_actor, in one call.',
     'Returns a row per actor with: type (webvm | notebook | app | tab |',

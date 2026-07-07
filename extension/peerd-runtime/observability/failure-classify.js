@@ -47,7 +47,7 @@ const RULES = [
   // why gate_blocked/hook_blocked (not 'tool_blocked'): these are the
   // dispatcher's ACTUAL refusal prefixes in tool results (dispatcher.js);
   // tool_blocked is only the audit event's type and never reaches a card.
-  { kind: 'policy', test: /^message_actor:|^subagent refused\b|^gate_blocked:|^hook_blocked:/i },
+  { kind: 'policy', test: /^message_actor:|^actor refused\b|^gate_blocked:|^hook_blocked:/i },
   { kind: 'policy', test: /\begress denied\b|\bdenylist\b|\bblocked by (policy|the allowlist|plan mode)\b|EgressDeniedError|NotebookEgressBlocked|\bUser declined\b|\bdeclined by (the )?user\b/i },
   { kind: 'auth', test: /\bvault is locked\b|VaultLockedError|\bunlock the vault\b/i },
   // why the 40[13] is anchored to the provider shape: bare "HTTP 403" also

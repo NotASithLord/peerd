@@ -82,7 +82,7 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
       expect(names).toContain(keep);
     }
     // the DOM tools go to the actor; execution/edit/spawn dropped by the preset.
-    for (const drop of ['snapshot', 'click', 'type', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'spawn_subagent', 'request_review', 'load_skill']) {
+    for (const drop of ['snapshot', 'click', 'type', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'actor_create', 'request_review', 'load_skill']) {
       expect(names.indexOf(drop)).toBe(-1);
     }
   });

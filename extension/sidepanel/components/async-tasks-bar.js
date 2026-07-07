@@ -1,6 +1,6 @@
 // @ts-check
-// In-flight async-subagent status bar (DESIGN-11). When the agent kicks off
-// async subagents (spawn_subagent), their work runs in the SW and lands later
+// In-flight async-actor status bar (DESIGN-11). When the agent kicks off
+// async spawned (actor_create), their work runs in the SW and lands later
 // as a synthetic wake turn — so without a surface the user has no idea anything
 // is cooking. The SW pushes the orchestrator's per-parent task snapshot
 // (async-tasks/update); this pins a calm, self-hiding bar at the top of the
@@ -23,7 +23,7 @@ import m from '/vendor/mithril/mithril.js';
 const ACTIVE = new Set(['running', 'done']);
 
 /**
- * One in-flight async-subagent task snapshot pushed by the orchestrator.
+ * One in-flight async-actor task snapshot pushed by the orchestrator.
  * @typedef {Object} AsyncTask
  * @property {string} taskId
  * @property {string} status      running | done | delivered | cancelled
@@ -45,7 +45,7 @@ export const AsyncTasksBar = {
       ]),
       m('.async-task-rows', live.map((t) =>
         m('.async-task-row', { key: t.taskId }, [
-          m('span.async-task-name', { title: t.task }, t.task || '(subagent)'),
+          m('span.async-task-name', { title: t.task }, t.task || '(actor)'),
           // The live output tail is a sense-of-progress signal; fall back to a
           // plain status word before any output lands.
           t.lastOutput

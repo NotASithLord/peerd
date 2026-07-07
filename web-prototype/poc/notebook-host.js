@@ -12,11 +12,11 @@
 //   2. The fetch bridge is an IN-PAGE fetch (denylist-gated by the caller's
 //      fetchImpl), NOT the extension SW's sw/web-fetch route — a page has no SW
 //      to relay to. This is the one network seam the spec calls out.
-//   3. No subagent relay. Subagents are the extension's surface (they drive the
+//   3. No actor relay. Actors are the extension's surface (they drive the
 //      user's tabs); an origin-confined page declines them — which is the funnel.
 //
 // The worker message protocol mirrored here is exactly job-runner.js's:
-// log / display / subagent-request / fetch-request / opfs-request / done.
+// log / display / actor-request / fetch-request / opfs-request / done.
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
 import { buildWorkerSource, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
@@ -97,9 +97,9 @@ export const createNotebookHost = ({ notebookId = 'web-notebook', onLog, onDispl
           if (m.type === 'log') { onLog?.(m); return; }
           if (m.type === 'display') { onDisplay?.(m); return; }
 
-          // (3) origin-confined: no subagents in the page.
-          if (m.type === 'subagent-request') {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'subagents are an extension capability (origin-confined page declines them)' });
+          // (3) origin-confined: no actors in the page.
+          if (m.type === 'actor-request') {
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: 'actors are an extension capability (origin-confined page declines them)' });
             return;
           }
 

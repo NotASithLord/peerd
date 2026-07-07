@@ -7,7 +7,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   meshCallToOp, shapeMeshResult, meshMethodSigns,
   MESH_API_METHODS, MESH_SIGNING_METHODS, MeshApiError,
-} from '../../extension/peerd-runtime/subagent/a2a-api.js';
+} from '../../extension/peerd-runtime/actor/a2a-api.js';
 
 const DID = 'did:key:z6MkexampleAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 

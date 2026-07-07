@@ -73,7 +73,7 @@ describe('makeTurnSlots', () => {
     expect(slots.stop('missing')).toBe(false);
   });
 
-  // runWhenIdle — the async-subagent reintegration hook (DESIGN-11): wake
+  // runWhenIdle — the async-actor reintegration hook (DESIGN-11): wake
   // the parent without aborting its live turn. A wake is contracted to
   // start a turn (claim the slot), so wakes serialise via release.
   test('runWhenIdle runs immediately when the session is idle', () => {

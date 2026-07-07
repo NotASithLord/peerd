@@ -1,8 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
 
-// session/agent/composer/subagent routes — moved verbatim. Pin the slash-command
-// short-circuits in agent/send, the vault gates, subagent list-filtering, and
+// session/agent/composer/actor routes — moved verbatim. Pin the slash-command
+// short-circuits in agent/send, the vault gates, actor list-filtering, and
 // the no-active-session guards.
 
 const baseDeps = (over: any = {}) => {
@@ -15,7 +15,7 @@ const baseDeps = (over: any = {}) => {
       sessions: {
         list: async () => [
           { sessionId: 'a', messages: [{ when: 1 }], createdAt: 0, provider: 'p', model: 'm', toolManifest: null },
-          { sessionId: 'sub', kind: 'subagent', messages: [], createdAt: 0 },
+          { sessionId: 'sub', kind: 'spawned', messages: [], createdAt: 0 },
         ],
         get: async (id: string) => (id === 'a' ? { sessionId: 'a', depth: 2, messages: [] } : null),
       },
@@ -34,7 +34,7 @@ const baseDeps = (over: any = {}) => {
       handleSystemCommand: async (a: string) => { calls.system.push(a); },
       handleToolsCommand: async (a: string) => { calls.tools.push(a); },
       postChatNote: () => {},
-      spawnSubagent: async (req: any) => ({ ran: req.task, depth: req.parentDepth }),
+      spawnActor: async (req: any) => ({ ran: req.task, depth: req.parentDepth }),
       requestReview: async (req: any) => ({ reviewed: true, depth: req.parentDepth }),
       appClient: { listFiles: async () => ['a.js', { path: 'b.js' }] },
       browser: { tabs: { query: async () => [
@@ -126,7 +126,7 @@ describe('session read routes', () => {
     await makeSessionRoutes(deps)['agent/stop']();
     expect(stopped).toEqual(['a']);
   });
-  test('session/list filters out subagents', async () => {
+  test('session/list filters out spawned', async () => {
     const { deps } = baseDeps();
     const res = await makeSessionRoutes(deps)['session/list']();
     expect(res.sessions.map((s: any) => s.sessionId)).toEqual(['a']);
@@ -160,18 +160,18 @@ describe('session read routes', () => {
   });
 });
 
-describe('subagent + review spawn', () => {
-  test('subagent/spawn requires a task', async () => {
+describe('actor + review spawn', () => {
+  test('actor/spawn requires a task', async () => {
     const { deps } = baseDeps();
-    expect(await makeSessionRoutes(deps)['subagent/spawn']({ task: '  ' })).toEqual({ ok: false, error: 'task-required' });
+    expect(await makeSessionRoutes(deps)['actor/spawn']({ task: '  ' })).toEqual({ ok: false, error: 'task-required' });
   });
-  test('subagent/spawn inherits parent depth', async () => {
+  test('actor/spawn inherits parent depth', async () => {
     const { deps } = baseDeps();
-    expect(await makeSessionRoutes(deps)['subagent/spawn']({ task: 'go' })).toEqual({ ok: true, result: { ran: 'go', depth: 2 } });
+    expect(await makeSessionRoutes(deps)['actor/spawn']({ task: 'go' })).toEqual({ ok: true, result: { ran: 'go', depth: 2 } });
   });
-  test('subagent/spawn no active session', async () => {
+  test('actor/spawn no active session', async () => {
     const { deps } = baseDeps({ sessionCache: { sessionGet: async () => null } });
-    expect(await makeSessionRoutes(deps)['subagent/spawn']({ task: 'go' })).toEqual({ ok: false, error: 'no-active-session' });
+    expect(await makeSessionRoutes(deps)['actor/spawn']({ task: 'go' })).toEqual({ ok: false, error: 'no-active-session' });
   });
   test('review/run passes parent depth through', async () => {
     const { deps } = baseDeps();

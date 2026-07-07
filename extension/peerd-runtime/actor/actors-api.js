@@ -12,7 +12,7 @@
 //
 // What script code gets ON PURPOSE and what it doesn't:
 //   • list / ask / send — DELEGATION only. The script can ask an actor to do
-//     work and await the reply; it can never name a raw tool, spawn a subagent,
+//     work and await the reply; it can never name a raw tool, spawn an actor,
 //     or reach another capability through this bridge (the job host denies
 //     everything undeclared, same posture as a2a).
 //   • ask/send address SANDBOX + WEB actors alike — authority is unchanged

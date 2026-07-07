@@ -1,9 +1,9 @@
 // @ts-check
-// Subagent orchestrator (docs/SUBAGENTS.md).
+// Actor orchestrator (docs/ACTORS.md).
 //
-// A subagent is NOT a fourth engine kind — it's an orchestration
+// An actor is NOT a fourth engine kind — it's an orchestration
 // primitive. "Who is reasoning about the next step?" is the agent loop,
-// the *r* letter. So a subagent is just a session with parentage that
+// the *r* letter. So an actor is just a session with parentage that
 // runs the SAME runUserTurn loop the top-level chat does. This file
 // sets up the call args (a fresh child session, a narrowed tool subset,
 // a task-focused system prompt, an output cap) and invokes the existing
@@ -11,8 +11,8 @@
 //
 // Two surfaces call in here through one orchestrator (same audit, same
 // gates, same permission inheritance):
-//   - the `spawn_subagent` tool        (the model decomposing a task)
-//   - the `subagent/spawn` SW route    (Notebook code via peerd.runtime.runAgent)
+//   - the `actor_create` tool        (the model decomposing a task)
+//   - the `actor/spawn` SW route    (Notebook code via peerd.runtime.runAgent)
 //
 // Functional-core/imperative-shell as everywhere else: every IO surface
 // (the loop, the model, the dispatcher, the session store, the prompt
@@ -26,10 +26,10 @@
 // manifest into the allow-set the narrowing intersects.
 import { confirmActionsFromRecord } from '../permissions/policy.js';
 import { resolveManifestAllow } from '../tools/manifests.js';
-// The MAIN-AGENT tool surface: a subagent is a CHILD of the main agent and must hold
+// The MAIN-AGENT tool surface: an actor is a CHILD of the main agent and must hold
 // no more than it could. mainAgentDescriptors drops MAIN_AGENT_HIDDEN_TOOLS (the
 // actor-only DOM/page/fetch tools — read_page, page_exec, click, navigate, fetch_url,
-// …) so a subagent cannot reach the user's foreground tab (DESIGN-17: web/DOM work
+// …) so an actor cannot reach the user's foreground tab (DESIGN-17: web/DOM work
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
 // fenced reads, already gate-refused for a non-actor). Both are pure.
@@ -38,15 +38,15 @@ import { mainAgentDescriptors, filterActorSurface } from '../tools/exposure.js';
 /** @typedef {import('../sessions/types.js').Session} Session */
 /** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
 
-// Guardrail defaults (docs/SUBAGENTS.md §guardrails). Callers may lower
+// Guardrail defaults (docs/ACTORS.md §guardrails). Callers may lower
 // them per spawn; they can't be raised past the loop's own MAX_STEPS
 // backstop (runUserTurn clamps maxSteps itself).
 export const DEFAULT_MAX_DEPTH = 5;
 export const DEFAULT_MAX_STEPS = 20;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
-// Wall-clock ceiling for a child's WHOLE run (subagents-as-async-actors,
-// PR #134 phase 2). Before this, a subagent had only step/depth caps — a
+// Wall-clock ceiling for a child's WHOLE run (spawned-as-async-actors,
+// PR #134 phase 2). Before this, an actor had only step/depth caps — a
 // single hung tool call or provider stall could park it forever, with no
 // abort path (no signal was threaded) and nothing to wake the parent. The
 // timer aborts the child's turn-slot controller, so the loop unwinds
@@ -58,9 +58,9 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 export const MAX_TIMEOUT_MS = 30 * 60_000;
 
 /**
- * Compute the tool subset a subagent may use.
+ * Compute the tool subset an actor may use.
  *
- * Rules, in order (docs/SUBAGENTS.md §tool-narrowing):
+ * Rules, in order (docs/ACTORS.md §tool-narrowing):
  *   - explicit `tools: [...]` → exactly those names (intersected with
  *     what's actually registered). An empty array means NO tools.
  *   - otherwise → inherit the parent's full set.
@@ -69,9 +69,9 @@ export const MAX_TIMEOUT_MS = 30 * 60_000;
  *     an authority BOUND on the whole session tree: a child's effective
  *     set can be narrower than its parent's, never wider. null = no
  *     manifest = no extra cut.
- *   - either way → strip `spawn_subagent` unless `allowRecursion`. This
+ *   - either way → strip `actor_create` unless `allowRecursion`. This
  *     is the recursion guard; it always applies, even to an explicit
- *     list, so a subagent can't out-clever its way into spawning.
+ *     list, so an actor can't out-clever its way into spawning.
  *
  * Pure — exported for direct unit testing.
  *
@@ -91,7 +91,7 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
     subset = subset.filter((t) => allow.has(t.name));
   }
   if (!allowRecursion) {
-    subset = subset.filter((t) => t.name !== 'spawn_subagent');
+    subset = subset.filter((t) => t.name !== 'actor_create');
   }
   return subset;
 };
@@ -129,10 +129,10 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect'],
   idb:                ['inspect'],
-  spawnSubagent:      ['spawn_subagent'],
-  spawnSubagentAsync: ['spawn_subagent'],
-  subagentTasks:      ['subagent_tasks'],
-  subagentCancel:     ['subagent_cancel'],
+  spawnActor:      ['actor_create'],
+  spawnActorAsync: ['actor_create'],
+  actorTasks:      ['actor_tasks'],
+  actorCancel:     ['actor_cancel'],
   requestReview:      ['request_review'],
   // sandbox_create's app arm reads ctx.dweb to decide whether to build a
   // dwapp, so it keeps the dweb closure alongside the dweb_* tools.
@@ -142,7 +142,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // ctx — the SW-side clients + registries + tab trackers that the
   // vm_*/js_*/app_*/edit_file tools reach through. Listing them here strips them
   // from any narrowed child whose granted tools don't read them — the keyless tool
-  // ctx the actor relies on, and the confused-deputy close for plain subagents.
+  // ctx the actor relies on, and the confused-deputy close for plain spawned.
   // The reader lists are EXHAUSTIVE (an omitted reader silently loses its closure
   // and the tool returns `*_not_available`, never a crash — covered by tests).
   // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
@@ -194,7 +194,7 @@ export const restrictCtxCapabilities = (ctx, allowedNames) => {
 };
 
 /**
- * Pull the subagent's "result" — the final assistant text — out of a
+ * Pull the actor's "result" — the final assistant text — out of a
  * completed session. The last assistant message with text content is
  * the answer; tool-only assistant turns before it are intermediate.
  *
@@ -213,10 +213,10 @@ export const finalAssistantText = (session) => {
 };
 
 /**
- * Build a subagent orchestrator bound to its IO dependencies. The SW
- * calls this once at boot and injects the bound `spawnSubagent` into the
- * tool context (so the `spawn_subagent` tool reaches it) and exposes it
- * on the `subagent/spawn` route (so the Notebook reaches it).
+ * Build an actor orchestrator bound to its IO dependencies. The SW
+ * calls this once at boot and injects the bound `spawnActor` into the
+ * tool context (so the `actor_create` tool reaches it) and exposes it
+ * on the `actor/spawn` route (so the Notebook reaches it).
  *
  * @param {Object} deps
  * @param {ReturnType<typeof import('../sessions/store.js').createSessionStore>} deps.sessions
@@ -238,7 +238,7 @@ export const finalAssistantText = (session) => {
  * @param {{ claim: (sessionId: string) => { controller: AbortController, release: () => void }, stop: (sessionId: string) => boolean }} [deps.turnSlots]
  *   The per-session turn-slot system (loop/turn-slots.js). PR #134 phase 1: a
  *   child runs UNDER a slot so it is abortable — Stop, the wall-clock timeout,
- *   and subagentCancel all reach it via the slot's controller. The default is a
+ *   and actorCancel all reach it via the slot's controller. The default is a
  *   standalone stub (a fresh controller per spawn, stop() a no-op) so orchestrators
  *   that never stop children (tests, cheap-call harnesses) need no wiring.
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]
@@ -257,7 +257,7 @@ export const finalAssistantText = (session) => {
  *   Render the child's system prompt SW-side for the offscreen path (the worker
  *   never assembles it). Required alongside runChildOffscreen.
  */
-export const makeSpawnSubagent = (deps) => {
+export const makeSpawnActor = (deps) => {
   const {
     sessions, runUserTurn, callModel, getSecret, safeFetch,
     appendAudit, buildToolContext, dispatchToolCall,
@@ -284,7 +284,7 @@ export const makeSpawnSubagent = (deps) => {
 
   // Live-children registry (phase 5, multi-hop Stop): parent → the child
   // sessions whose loops are CURRENTLY running under this orchestrator.
-  // In-memory, in-session only — same durability posture as async-subagents'
+  // In-memory, in-session only — same durability posture as async-actors'
   // task map (a child lost to SW death is reported interrupted, never resumed).
   /** @type {Map<string, Set<string>>} */
   const liveChildren = new Map();
@@ -333,13 +333,13 @@ export const makeSpawnSubagent = (deps) => {
    * @param {number} [req.maxSteps]                step cap (default 20)
    * @param {number} [req.maxOutputTokens]         per-call output cap (default 4096)
    * @param {number} [req.maxDepth]                depth ceiling (default 5)
-   * @param {boolean} [req.allowRecursion]         keep spawn_subagent in the subset
+   * @param {boolean} [req.allowRecursion]         keep actor_create in the subset
    * @param {string} req.parentSessionId           who is spawning this
    * @param {number} [req.parentDepth]             spawner's depth (child = +1)
    * @param {boolean} [req.parentInbound]          was the SPAWNING turn inbound
    *   (untrusted-origin)? Stamped onto the child as `spawnedTrusted` — the
    *   per-hop verdict the trusted-lineage gate walks (delegation-lineage.js).
-   *   FAIL-CLOSED: only an explicit `false` (the spawn_subagent tool passes
+   *   FAIL-CLOSED: only an explicit `false` (the actor_create tool passes
    *   ctx.inbound) yields a trusted hop; undefined (the Notebook route, review,
    *   cheap-call, any legacy caller) taints the child — those children never
    *   had delegation, so nothing regresses.
@@ -354,7 +354,7 @@ export const makeSpawnSubagent = (deps) => {
    *   ephemeral child needs (a mid-run SW death orphans the await anyway).
    * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, exceeded?: true, refused?: true, timedOut?: true, stopped?: true }>}
    */
-  const spawnSubagent = async (req) => {
+  const spawnActor = async (req) => {
     const {
       task,
       tools,
@@ -373,7 +373,7 @@ export const makeSpawnSubagent = (deps) => {
     } = req;
 
     if (typeof task !== 'string' || task.trim().length === 0) {
-      return { result: 'subagent refused: empty task', sessionId: null, toolCalls: 0, durationMs: 0, depth: parentDepth + 1, refused: true };
+      return { result: 'actor refused: empty task', sessionId: null, toolCalls: 0, durationMs: 0, depth: parentDepth + 1, refused: true };
     }
 
     const depth = parentDepth + 1;
@@ -384,11 +384,11 @@ export const makeSpawnSubagent = (deps) => {
     // self-spawning regardless of allowRecursion.
     if (depth > maxDepth) {
       appendAudit({
-        type: 'subagent_refused',
+        type: 'actor_refused',
         details: { reason: 'max_depth', depth, maxDepth, parentSessionId },
       }).catch(() => {});
       return {
-        result: `subagent refused: max depth ${maxDepth} exceeded (would be depth ${depth})`,
+        result: `actor refused: max depth ${maxDepth} exceeded (would be depth ${depth})`,
         sessionId: null,
         toolCalls: 0,
         durationMs: 0,
@@ -399,9 +399,9 @@ export const makeSpawnSubagent = (deps) => {
     }
 
     // ---- Inherit permissions + provider from the parent -------------------
-    // Guardrail 3: the subagent runs under the parent's Plan/Act
+    // Guardrail 3: the actor runs under the parent's Plan/Act
     // permission through the same six gates. It never escalates.
-    // Provider/model inherit too (model overridable) so the subagent
+    // Provider/model inherit too (model overridable) so the actor
     // uses the same key + endpoint.
     const parent = await sessions.get(parentSessionId);
     const provider = parent?.provider ?? 'anthropic';
@@ -422,11 +422,11 @@ export const makeSpawnSubagent = (deps) => {
     // this persisted set at dispatch time and NEVER trusts the worker's call.
     const parentAllow = resolveManifestAllow(parent?.toolManifest);
     // SECURITY (DESIGN-17): narrow from the MAIN-AGENT surface, not the full registry.
-    // Without this, a subagent could be granted the actor-only DOM/page tools (read_page,
-    // page_exec, click, navigate, fetch_url, …) — which NO gate refuses for a subagent
+    // Without this, an actor could be granted the actor-only DOM/page tools (read_page,
+    // page_exec, click, navigate, fetch_url, …) — which NO gate refuses for an actor
     // (exposure!=='main', not actor-mutating) — and drive/read the user's FOREGROUND tab,
     // authority the spawning agent itself lacks. Filtering the grantable universe here is
-    // the fix: a subagent holds ⊆ what the main agent holds, delegating web/DOM work to
+    // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to
     // the web actor via message_actor like the main agent does.
     const grantable = filterActorSurface(mainAgentDescriptors(getToolDescriptors()));
     const subset = narrowTools(grantable, { tools, allowRecursion, allow: parentAllow });
@@ -436,7 +436,7 @@ export const makeSpawnSubagent = (deps) => {
     }));
 
     const child = await sessions.create({
-      kind: 'subagent',
+      kind: 'spawned',
       parentSessionId,
       depth,
       task,
@@ -462,7 +462,7 @@ export const makeSpawnSubagent = (deps) => {
       ...(parent?.toolManifest !== undefined ? { toolManifest: parent.toolManifest } : {}),
       // Heap-split phase 4: the child's GRANTED toolset (post-narrowing), persisted
       // so the SW-side offscreen tool-dispatch route rebuilds the child's restricted
-      // ctx from THIS list and re-checks every relayed call against it — the subagent
+      // ctx from THIS list and re-checks every relayed call against it — the actor
       // analog of the actor instance-pin. The worker's call args are never trusted.
       grantedTools: [...allowedNames],
       // PR #134 phase 3 — the trusted-lineage hop verdict, stamped SERVER-SIDE
@@ -475,17 +475,17 @@ export const makeSpawnSubagent = (deps) => {
       spawnedTrusted: parentInbound === false,
     });
 
-    // why: tag EVERY audit entry this subagent produces with its
+    // why: tag EVERY audit entry this actor produces with its
     // parentage + depth so the trail is reconstructable from any level
     // (guardrail 4). Both the loop's own audits and the dispatcher's
     // per-tool audits flow through this wrapped fn.
     /** @param {{ type: string, sessionId?: string, details?: object }} entry */
     const taggedAudit = (entry) => appendAudit({
       ...entry,
-      details: { ...(entry.details ?? {}), parentSessionId, subagentSessionId: child.sessionId, depth },
+      details: { ...(entry.details ?? {}), parentSessionId, actorSessionId: child.sessionId, depth },
     });
 
-    taggedAudit({ type: 'subagent_spawned', details: { task: task.slice(0, 200), maxSteps, maxDepth } }).catch(() => {});
+    taggedAudit({ type: 'actor_spawned', details: { task: task.slice(0, 200), maxSteps, maxDepth } }).catch(() => {});
 
     // PR #134 phases 1+2 — claim the child's turn slot and arm the wall-clock
     // timer NOW, immediately after the session exists, BEFORE the tool-context
@@ -508,8 +508,8 @@ export const makeSpawnSubagent = (deps) => {
     const timer = setTimer(() => {
       timerFired = true;
       appendAudit({
-        type: 'subagent_timeout',
-        details: { parentSessionId, subagentSessionId: child.sessionId, depth, budgetMs },
+        type: 'actor_timeout',
+        details: { parentSessionId, actorSessionId: child.sessionId, depth, budgetMs },
       }).catch(() => {});
       // why turnSlots.stop AND controller.abort: stop() fires the slot's onAbort
       // hook (confirmCoordinator.declineSession) so a child parked on a confirm
@@ -520,7 +520,7 @@ export const makeSpawnSubagent = (deps) => {
       turnSlots.stop(child.sessionId);
       controller.abort();
     }, budgetMs);
-    // Reclaim the child on ITS OWN abort too (#1/#3): a subagent blocked in an
+    // Reclaim the child on ITS OWN abort too (#1/#3): an actor blocked in an
     // awaitReply message_actor call is suspended in tool dispatch — the loop
     // only checks the signal at wave boundaries, so aborting the controller
     // doesn't unwind that await by itself. message_actor reads this signal off
@@ -533,7 +533,7 @@ export const makeSpawnSubagent = (deps) => {
     // here — including the awaited buildToolContext — would be wasted work AND would
     // couple the offscreen run to a ctx build it never uses (a transient vault/settings
     // read that throws here would fail an offscreen child before it even starts). A
-    // tools:[] subagent is pure reasoning and never stands one up at all.
+    // tools:[] actor is pure reasoning and never stands one up at all.
     /** @returns {Promise<((call: import('/shared/tool-types.js').ToolCall) => Promise<import('/shared/tool-types.js').ToolResult>) | undefined>} */
     const buildInSwToolDispatch = async () => {
       if (subsetDescriptors.length === 0) return undefined;
@@ -555,7 +555,7 @@ export const makeSpawnSubagent = (deps) => {
         if (!allowedNames.has(call.name)) {
           return Promise.resolve({
             ok: false,
-            error: `tool_not_available_to_subagent: ${call.name}`,
+            error: `tool_not_available_to_actor: ${call.name}`,
             meta: { toolName: call.name, primitive: 'unknown', gates: [], durationMs: 0 },
           });
         }
@@ -567,7 +567,7 @@ export const makeSpawnSubagent = (deps) => {
     };
 
     // why no customSystemPrompt here: the parent session's /system
-    // instructions are deliberately NOT inherited — a subagent gets its
+    // instructions are deliberately NOT inherited — an actor gets its
     // own task framing (taskOverride) and nothing else. The instructions
     // are user preferences for the parent CONVERSATION; leaking them
     // would distort the child's one-shot task and silently widen the
@@ -581,13 +581,13 @@ export const makeSpawnSubagent = (deps) => {
     // offscreen path's calls are captured at the actor/model-call relay.
     /** @param {object} modelArgs */
     const cappedCallModel = (modelArgs) => {
-      recordModelCall({ ...modelArgs, sessionId: child.sessionId, label: `subagent d${depth} (in-SW)` });
+      recordModelCall({ ...modelArgs, sessionId: child.sessionId, label: `actor d${depth} (in-SW)` });
       return callModel({ ...modelArgs, maxTokens: maxOutputTokens });
     };
 
     // why: the child's model usage is yielded as 'usage' events but is NOT
     // folded into the parent/main turn tally (the main SW only accumulates its
-    // OWN session's usage). That means subagent spend is naturally SEPARATE from
+    // OWN session's usage). That means actor spend is naturally SEPARATE from
     // main-agent spend (the main context stays clean). We sum it here so the
     // child's token cost is at least VISIBLE to the caller (eval telemetry /
     // success criterion 5), without polluting main. These counters are read
@@ -600,7 +600,7 @@ export const makeSpawnSubagent = (deps) => {
     // MED-3: the slot is CLAIMED, the child REGISTERED, and the wall-clock timer
     // ARMED above — three resources the finally below is the sole releaser of.
     // So the try must open HERE, before anything else that can throw. In
-    // particular the subagent-start emit calls an external onEvent forwarder;
+    // particular the actor-start emit calls an external onEvent forwarder;
     // when that threw (it sat outside the try before), the timer, slot, and
     // registration all leaked — a stuck slot blocks the session forever and the
     // orphan timer later aborts a REUSED controller. Everything downstream of the
@@ -609,7 +609,7 @@ export const makeSpawnSubagent = (deps) => {
       start = now();
       // Announce the child up-front so the side panel can map the parent's
       // tool card → this session id and render live, before any loop event.
-      onEvent?.({ type: 'subagent-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
+      onEvent?.({ type: 'actor-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
       // Heap split: EVERY child runs its loop in a dedicated offscreen Worker — its
       // own heap, no key, no chrome.*, no egress. A tool-LESS child (phase 1) only
       // relays its model call; a tool-BEARING child (phase 4) also relays each tool
@@ -659,12 +659,12 @@ export const makeSpawnSubagent = (deps) => {
             usage.cacheWriteTokens += r.usage.cacheWriteTokens || 0;
           }
           taggedAudit(r.ok
-            ? { type: 'subagent_ran_offscreen', details: { heapSplit: true } }
-            : { type: 'subagent_offscreen_error', details: { heapSplit: true, error: r.error ?? 'unknown', aborted: r.aborted === true } }).catch(() => {});
+            ? { type: 'actor_ran_offscreen', details: { heapSplit: true } }
+            : { type: 'actor_offscreen_error', details: { heapSplit: true, error: r.error ?? 'unknown', aborted: r.aborted === true } }).catch(() => {});
         } else {
           // Never started → defensive fallback to the in-SW loop, so a reasoning
           // child never just dies on infra it couldn't even reach.
-          taggedAudit({ type: 'subagent_offscreen_fallback', details: { error: r?.error ?? 'unknown' } }).catch(() => {});
+          taggedAudit({ type: 'actor_offscreen_fallback', details: { error: r?.error ?? 'unknown' } }).catch(() => {});
         }
       }
       if (!ranOffscreen) {
@@ -685,7 +685,7 @@ export const makeSpawnSubagent = (deps) => {
           maxSteps,
           persistDeltas,
           now,
-          // Phase 1: the child is abortable — Stop cascades, subagentCancel, and
+          // Phase 1: the child is abortable — Stop cascades, actorCancel, and
           // the wall-clock timer all fire this controller.
           signal: controller.signal,
         })) {
@@ -706,13 +706,13 @@ export const makeSpawnSubagent = (deps) => {
       // Release AFTER unregistering, so a Stop racing this settle can't abort a
       // slot the registry no longer owns up to.
       release();
-      onEvent?.({ type: 'subagent-stop', parentToolUseId, sessionId: child.sessionId, depth });
+      onEvent?.({ type: 'actor-stop', parentToolUseId, sessionId: child.sessionId, depth });
     }
 
     const durationMs = now() - start;
     const final = await sessions.get(child.sessionId);
     const result = finalAssistantText(final);
-    // Guardrail 5 (step cap): a max_steps stop means the subagent ran out
+    // Guardrail 5 (step cap): a max_steps stop means the actor ran out
     // of room before finishing. Surface it so the caller (and the model)
     // knows the result may be partial.
     const exceeded = lastStopReason === 'max_steps';
@@ -728,7 +728,7 @@ export const makeSpawnSubagent = (deps) => {
     const stopped = aborted && !timerFired;
 
     taggedAudit({
-      type: 'subagent_completed',
+      type: 'actor_completed',
       details: { toolCalls, durationMs, exceeded, timedOut, stopped, resultChars: result.length },
     }).catch(() => {});
 
@@ -746,7 +746,7 @@ export const makeSpawnSubagent = (deps) => {
   };
 
   // The registry accessors ride ON the spawn function (not a wrapper object) so
-  // the ~25 existing construction sites — `const spawn = makeSpawnSubagent(d)` —
+  // the ~25 existing construction sites — `const spawn = makeSpawnActor(d)` —
   // keep working unchanged; the SW picks the extras off the same value.
-  return Object.assign(spawnSubagent, { liveChildrenOf, stopSubtree });
+  return Object.assign(spawnActor, { liveChildrenOf, stopSubtree });
 };

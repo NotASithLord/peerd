@@ -4,7 +4,7 @@
 // You don't mutate an instance; you message its ACTOR — a GenServer-style OTP
 // process (started on demand, addressed by a registered name, the resolved actor
 // session its live PID) that exclusively holds that environment's tools. This
-// orchestrator is the direct analog of async-subagents (subagent/async-subagents.js):
+// orchestrator is the direct analog of async-actors (actor/async-actors.js):
 // a MAILBOX over turnSlots processed one message at a time (never interrupts an
 // in-flight turn), a SW-captured correlation (the sender is closed over, not trusted
 // from the actor), a wrapUntrusted-fenced reply that re-enters the sender as a
@@ -24,7 +24,7 @@
 // every pending message on boot (mirrors goalRunner.resume). The default no-op
 // mailbox keeps the pure-heap behavior in tests.
 //
-// Posture (PR #134 — subagents as async actors): a message is accepted when the
+// Posture (PR #134 — spawned as async actors): a message is accepted when the
 // turn is NOT `inbound` AND the sender passes the TRUSTED-LINEAGE gate
 // (delegation-lineage.js mayMessageActor): the active foreground chat, or a
 // descendant of it reached entirely through trusted spawn edges (spawn.js
@@ -33,7 +33,7 @@
 // synthetic + trusted: `inbound = synthetic && !trusted`. So a real user turn,
 // an explicit first-party continuation (a goal turn, or the orchestrator
 // reacting to an actor's reply — both set trusted:true), and a trusted-lineage
-// subagent MAY delegate; an untrusted/external synthetic turn (future peer
+// actor MAY delegate; an untrusted/external synthetic turn (future peer
 // messages / scheduled tasks — never trusted) is refused. Fail-CLOSED: a
 // missing/unwalkable ancestry admits only the foreground chat itself.
 //
@@ -42,20 +42,20 @@
 // cycle shares ONE budget (phase 4) and a user Stop on the chat cascades to
 // actor turns its descendants started (phase 5). Envelopes (durable mailbox
 // entries) carry the provenance so a boot redrain can arbitrate: a reply whose
-// awaiting sender was an EPHEMERAL subagent (dead after restart) is rerouted
+// awaiting sender was an EPHEMERAL actor (dead after restart) is rerouted
 // to the root instead of waking a headless child (phase 7).
 //
 // Reply modes: the ORCHESTRATOR (and any long-lived chat session) gets the
-// async wake — deliver() re-enters it on a later turn. A SUBAGENT sender sets
+// async wake — deliver() re-enters it on a later turn. A ACTOR sender sets
 // `awaitReply`: it is a fire-once call-site with no later turn, so its reply
 // resolves INTO the message_actor tool result (still wrapUntrusted-fenced).
-// why not wake a subagent like a chat: the reenter path runs sessions under
+// why not wake an actor like a chat: the reenter path runs sessions under
 // the SW's main turn driver — waking a finished child would both run an
 // orphan turn nobody consumes AND rebuild its context on the MAIN exposure
 // surface, escalating past the child's narrowed toolset.
 
 import { escapeAttr } from '/shared/util.js';
-import { ASYNC_SUBAGENT_ACTORS, mayMessageActor, messageProvenance } from './delegation-lineage.js';
+import { ASYNC_ACTOR_ACTORS, mayMessageActor, messageProvenance } from './delegation-lineage.js';
 
 /**
  * @param {Object} deps
@@ -117,7 +117,7 @@ export const makeActorMessaging = (deps) => {
   // lineage), not the raw sender. One budget bounds a whole delegation graph
   // (a parent↔child↔actor cycle can't multiply its caps by fanning out), and
   // stopActorsFor(chatId) — the user's Stop, which only knows the CHAT id —
-  // reaches actor turns that a descendant subagent started. For a plain chat
+  // reaches actor turns that a descendant actor started. For a plain chat
   // sender, root === sender, so the pre-#134 behavior is unchanged.
   /** @type {Map<string, number>} rootSessionId → actor messages currently in flight */
   const inFlight = new Map();
@@ -193,7 +193,7 @@ export const makeActorMessaging = (deps) => {
     return actorsFor(root);
   };
 
-  // Cancellation scoped to ONE delivery (by correlationId) — what a subagent's
+  // Cancellation scoped to ONE delivery (by correlationId) — what an actor's
   // awaitReply abort uses (#1/#3). why not the root Stop generation: a gen bump
   // is ROOT-wide, so one child's timeout/cancel would gen-skip a SIBLING's
   // distinct queued turn under the same root (and turnSlots.stop unconditionally
@@ -205,8 +205,8 @@ export const makeActorMessaging = (deps) => {
   /** @type {Map<string, string>} actorSessionId → correlationId of the turn NOW running on it */
   const runningOnActor = new Map();
 
-  // Stop the ONE actor turn a subagent's awaitReply was waiting on, when that
-  // subagent aborts. A still-QUEUED delivery is marked cancelled (it skips when
+  // Stop the ONE actor turn an actor's awaitReply was waiting on, when that
+  // actor aborts. A still-QUEUED delivery is marked cancelled (it skips when
   // the slot frees); a RUNNING one is slot-aborted ONLY when the running turn is
   // this delivery's own (runningOnActor match) — a sibling's turn on the same
   // shared actor is never collateral. turnSlots.stop is optional (the pure-heap
@@ -227,7 +227,7 @@ export const makeActorMessaging = (deps) => {
 
   // Build the ONE reply text shape (trusted lead + fenced body) both reply
   // modes share: deliver() re-enters a long-lived sender with it; the
-  // awaitReply path (a subagent's call) resolves it into the tool result.
+  // awaitReply path (an actor's call) resolves it into the tool result.
   /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] */
   const replyText = (instanceId, kind, name, body, failed = false) => {
     const wrapped = wrapUntrusted({
@@ -296,7 +296,7 @@ export const makeActorMessaging = (deps) => {
   // durable entry) stays identical on both paths. parentToolUseId (absent on a
   // redrain — the orchestrator card is gone) keys the actor's display stream.
   //
-  // Reply routing: `onReply` (the awaitReply path — a subagent's call) receives
+  // Reply routing: `onReply` (the awaitReply path — an actor's call) receives
   // the composed reply text and its failed flag INSTEAD of the deliver() wake;
   // the caller resolves it into the tool result. Every settle path — success,
   // thrown turn, Stop-skip — routes through exactly one of onReply/deliver, so
@@ -337,7 +337,7 @@ export const makeActorMessaging = (deps) => {
     // plumbing noise (a reply fed into the next actor's goal would embed it) —
     // the fence is re-applied at the script-RESULT boundary, the one place the
     // bytes meet a model (script.js usedActors fencing). Model-facing resolves
-    // (a subagent's awaitReply) keep the formatted text.
+    // (an actor's awaitReply) keep the formatted text.
     /** @param {string} body @param {boolean} failed */
     const settle = (body, failed) => {
       if (onReply) { onReply(bare ? body : replyText(instanceId, kind, name, body, failed), failed); return; }
@@ -350,7 +350,7 @@ export const makeActorMessaging = (deps) => {
     turnSlots.runWhenIdle(actorSessionId, () => {
       // Stopped after we queued → don't start the turn. Two cancel signals land
       // here: the user's tree-wide Stop (the root's generation advanced) and the
-      // awaiting subagent's own abort (THIS delivery marked cancelled — never a
+      // awaiting actor's own abort (THIS delivery marked cancelled — never a
       // sibling's). A woken sender would re-start unwanted post-Stop activity,
       // so the wake path stays silent — but an AWAITING caller (onReply) must
       // still resolve, or its tool call would hang past the Stop/abort that was
@@ -389,10 +389,10 @@ export const makeActorMessaging = (deps) => {
 
   /**
    * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
-   *   awaitReply — the SUBAGENT reply mode (PR #134): resolve the fenced reply
+   *   awaitReply — the ACTOR reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
-   *   message_actor tool for a `kind:'subagent'` sender.
-   *   awaitSignal — the awaiting subagent's AbortSignal (its wall-clock timeout
+   *   message_actor tool for a `kind:'spawned'` sender.
+   *   awaitSignal — the awaiting actor's AbortSignal (its wall-clock timeout
    *   / cancel). Only meaningful with awaitReply: the await races the reply
    *   against it so an aborted child unblocks instead of parking on a hung actor.
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
@@ -423,16 +423,16 @@ export const makeActorMessaging = (deps) => {
     const active = await getActiveSessionId();
     /** @type {Array<import('./delegation-lineage.js').LineageHop>} */
     let ancestry = [];
-    if (ASYNC_SUBAGENT_ACTORS && senderSessionId && senderSessionId !== active) {
+    if (ASYNC_ACTOR_ACTORS && senderSessionId && senderSessionId !== active) {
       try { ancestry = await getAncestry(senderSessionId); }
       catch (e) { log('getAncestry failed (fail-closed)', e); ancestry = []; }
     }
-    const senderAllowed = ASYNC_SUBAGENT_ACTORS
+    const senderAllowed = ASYNC_ACTOR_ACTORS
       ? mayMessageActor({ inbound: inbound === true, senderSessionId, activeSessionId: active, ancestry })
       : (inbound !== true && !!senderSessionId && senderSessionId === active);
     if (!senderAllowed) {
       log('REFUSED', { reason: 'sender_gate', senderSessionId, inbound });
-      return { ok: false, error: 'message_actor: only the active foreground chat, its first-party autonomous continuation (a goal turn, or reacting to an actor reply), or a trusted-lineage subagent it spawned may message an actor; untrusted/background senders are blocked' };
+      return { ok: false, error: 'message_actor: only the active foreground chat, its first-party autonomous continuation (a goal turn, or reacting to an actor reply), or a trusted-lineage actor it spawned may message an actor; untrusted/background senders are blocked' };
     }
 
     // The gate refused every falsy sender above; bind the narrowed string once
@@ -490,7 +490,7 @@ export const makeActorMessaging = (deps) => {
     // actor's instanceId is the CONSTANT literal 'web' for EVERY sender's own
     // private, sender-scoped web actor (resolveWebActor keys by ownerChatId =
     // senderSessionId). Keying on 'web' would alias-collapse two sibling
-    // subagents' INDEPENDENT web actors into one dedupe entry under the shared
+    // spawned' INDEPENDENT web actors into one dedupe entry under the shared
     // root — wrongly refusing the second, which has no channel to observe the
     // first's reply (#8). actorSessionId is the canonical serialization target:
     // the SAME for two aliases of one actor ('web' vs its tabId both resolve to
@@ -499,9 +499,9 @@ export const makeActorMessaging = (deps) => {
     if ((inFlightIntents.get(rootSessionId)?.get(intentK) ?? 0) > 0) {
       log('REFUSED', { reason: 'duplicate_intent', senderSessionId, rootSessionId, to: instanceId });
       // why this wording: the in-flight twin may have been sent by a DIFFERENT
-      // session in this delegation tree (a sibling subagent, or the parent),
+      // session in this delegation tree (a sibling actor, or the parent),
       // and its reply routes to THAT sender — never to this one. Telling this
-      // caller to "await its reply" would be unactionable (a subagent has no
+      // caller to "await its reply" would be unactionable (an actor has no
       // channel to observe another's reply). So the honest guidance is: this
       // work is already happening elsewhere in the tree — don't re-send; report
       // that and proceed / synthesize from what you have.
@@ -529,24 +529,24 @@ export const makeActorMessaging = (deps) => {
     // same mode (a dropped flag would just fall back to a full summarize turn — safe,
     // but inconsistent). Older entries without the field redrain as full turns.
     // The provenance rides the envelope (phase 7) so a redrain can arbitrate —
-    // notably rerouting a reply whose awaiting sender was an ephemeral subagent.
+    // notably rerouting a reply whose awaiting sender was an ephemeral actor.
     await Promise.resolve(mailbox.append({
       id: correlationId, senderSessionId: sender, to: instanceId, message, createdAt: nowMs,
       provenance: { rootSessionId, lineagePath: provenance.lineagePath },
       ...(oneShot === true ? { oneShot: true } : {}),
     })).catch(() => {});
 
-    // PR #134 — the SUBAGENT reply mode. An ephemeral child has no later turn
+    // PR #134 — the ACTOR reply mode. An ephemeral child has no later turn
     // to wake (and waking its session would re-run it on the wrong exposure
     // surface — see the module header), so its reply resolves INTO this call.
     // The actor turn still queues/serializes on the actor's own slot exactly
     // like the async path; only the completion routing differs.
     if (awaitReply === true) {
       const settled = await new Promise((resolve) => {
-        // Race the actor reply against the CALLING SUBAGENT's abort signal.
-        // why: the subagent is suspended here in tool dispatch, and its loop
+        // Race the actor reply against the CALLING ACTOR's abort signal.
+        // why: the actor is suspended here in tool dispatch, and its loop
         // only observes the signal at wave boundaries — so its wall-clock
-        // timeout / subagent_cancel (which fire this signal) cannot unwind this
+        // timeout / actor_cancel (which fire this signal) cannot unwind this
         // await on their own. Without the race, a hung/queued actor turn parks
         // the child, its slot, and its parent's await indefinitely — the exact
         // "parked forever" failure the timeout exists to prevent. On abort we
@@ -560,7 +560,7 @@ export const makeActorMessaging = (deps) => {
         // after a reply already settled. Ungated, that stale abort would mark a
         // settled correlation cancelled (a set entry nothing would ever clean).
         // Gated, the stale abort returns at once. We also detach the listener on
-        // settle so a subagent making many awaitReply calls doesn't pile no-op
+        // settle so an actor making many awaitReply calls doesn't pile no-op
         // listeners on one signal. runEngineDelivery is ALWAYS called so its
         // trackActor/clear bookkeeping stays symmetric even on abort (its onReply
         // just no-ops by then).
@@ -636,7 +636,7 @@ export const makeActorMessaging = (deps) => {
       // Phase 7 (envelope arbitration) — a redrained reply must reach a session
       // that can actually receive a wake. When the envelope's provenance says
       // the sender was NOT its own lineage root, the sender was an EPHEMERAL
-      // subagent awaiting the reply in a tool call; that await died with the SW,
+      // actor awaiting the reply in a tool call; that await died with the SW,
       // and waking the child's session would run an orphan turn on the wrong
       // exposure surface. Reroute to the ROOT — the chat that ultimately asked —
       // which handles it like any other fenced actor note. Entries without

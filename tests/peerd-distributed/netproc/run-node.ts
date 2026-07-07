@@ -1,7 +1,7 @@
 // tests/peerd-distributed/netproc/run-node.ts — ONE peerd node in its own
 // process. Connects to the relay, forms authenticated mesh links to every other
 // node (real HELLO over relay-backed Channels), then self-tests ALL the
-// functionality and prints PASS/FAIL. Run 5 of these (one per subagent) against
+// functionality and prints PASS/FAIL. Run 5 of these (one per actor) against
 // one relay and they form a real 5-node network.
 //   bun .../run-node.ts <relayUrl> <label> <quorum>
 //

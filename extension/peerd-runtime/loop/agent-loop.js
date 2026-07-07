@@ -71,14 +71,14 @@ const REQUIRED_CTX = [
 ];
 
 // Tools safe to dispatch CONCURRENTLY by NAME, independent of permission
-// classification. spawn_subagent orchestrates a child session that owns
+// classification. actor_create orchestrates a child session that owns
 // its own gate pipeline + session and shares no external mutable state with
 // its siblings, so N spawns in one turn can run in parallel instead of
 // one-at-a-time. Everything else earns concurrency only via the injected
 // permission classifier (ctx.classifyToolCall → READ class), preserving
 // peerd's single-writer posture for DOM / VM / file side effects (two
 // clicks or two file edits must not interleave).
-const CONCURRENT_TOOLS = new Set(['spawn_subagent']);
+const CONCURRENT_TOOLS = new Set(['actor_create']);
 
 // Yield settled values in completion order. Each input promise MUST resolve
 // (the dispatcher below never rejects), so there is no rejection branch —
@@ -123,7 +123,7 @@ export async function* asCompleted(promises) {
  *   Optional. Called at the START of each step to recompute the advertised
  *   tools (progressive disclosure — an instance created this turn reveals its
  *   ops on the next step). When absent, ctx.tools is used unchanged for the
- *   whole turn (subagents / runners). A throw keeps the prior set.
+ *   whole turn (spawned / runners). A throw keeps the prior set.
  * @param {(call: { id: string, name: string, args: object }) => Promise<ToolResult>} [ctx.toolDispatch]
  *   Pre-bound dispatch fn. Required if tools are provided.
  * @param {(name: string) => (import('../permissions/policy.js').PermissionVerdict | null)} [ctx.classifyToolCall]
@@ -131,8 +131,8 @@ export async function* asCompleted(promises) {
  *   returns the SAME decideAction verdict the dispatcher will enforce
  *   (action class + confirm), or null for unknown tools. READ-class,
  *   non-confirming calls may run concurrently; everything else stays
- *   serial. Omitted (subagent/runner loops today) → only the by-name
- *   CONCURRENT_TOOLS set (spawn_subagent) is treated as safe.
+ *   serial. Omitted (actor/runner loops today) → only the by-name
+ *   CONCURRENT_TOOLS set (actor_create) is treated as safe.
  * @param {{ enabled?: boolean, budgetTokens?: number, effort?: 'low'|'medium'|'high'|'xhigh'|'max' }} [ctx.reasoning]
  *   Extended-thinking control, passed straight to the provider. When
  *   enabled, reasoning streams as `reasoning` loop events and signed
@@ -142,9 +142,9 @@ export async function* asCompleted(promises) {
  *   the first stream chunk after abort, persists whatever was streamed,
  *   and yields a clean stop event with stopReason='aborted'.
  * @param {number} [ctx.maxSteps]
- *   Per-turn step cap. Defaults to MAX_STEPS. Subagents pass a smaller
+ *   Per-turn step cap. Defaults to MAX_STEPS. Actors pass a smaller
  *   value (default 20) so a runaway child can't burn the parent's whole
- *   budget — see docs/SUBAGENTS.md. Hitting it yields the same clean
+ *   budget — see docs/ACTORS.md. Hitting it yields the same clean
  *   stopReason='max_steps' the default cap does.
  * @param {(req: { sessionId: string, state: object, newlyDropped: object[] }) => void} [ctx.enrichTrimSummary]
  *   Optional seam for model-quality trim-summary enrichment. Called
@@ -165,7 +165,7 @@ export async function* asCompleted(promises) {
  * @param {boolean} [ctx.synthetic]
  *   Mark the appended user message `synthetic` (API-sanctioned but hidden
  *   from the chat UI, like the truncation-continue path). Used by the
- *   async-subagent reintegration wake (DESIGN-11): the child's result
+ *   async-actor reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
  * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [ctx.actorReply]
  *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
@@ -220,7 +220,7 @@ export async function* runUserTurn(ctx) {
   // why: the main turn passes refreshTools to recompute the advertised tool
   // list each step (progressive disclosure — an instance created this turn
   // reveals its ops on the next step). Without it, activeTools stays the
-  // initial set (subagents / runners use a fixed narrowed toolset).
+  // initial set (spawned / runners use a fixed narrowed toolset).
   let activeTools = tools;
 
   // 1. Persist the user's message and emit state.
@@ -293,7 +293,7 @@ export async function* runUserTurn(ctx) {
       role: 'user',
       content: userText,
       ...(liveAttachments ? { attachments: stripAttachments(liveAttachments) } : {}),
-      // why: an async-subagent reintegration wake (DESIGN-11) rides a
+      // why: an async-actor reintegration wake (DESIGN-11) rides a
       // synthetic user turn — API-sanctioned, hidden from the chat UI like
       // the truncation-continue path below. The wake framing is trusted; the
       // child's result text inside it is wrapUntrusted by the caller.
@@ -679,7 +679,7 @@ export async function* runUserTurn(ctx) {
     // why: push the FINALIZED assistant message (now carrying its tool_use
     // blocks) to the side panel BEFORE dispatch. Tool cards render only
     // from state snapshots; without this the next snapshot isn't emitted
-    // until AFTER the dispatch block, so N parallel subagent cards stayed
+    // until AFTER the dispatch block, so N parallel actor cards stayed
     // invisible for the whole run (and their live transcripts had no card
     // to stream into). Now the cards appear pending the instant dispatch
     // starts and fill in live.
@@ -803,12 +803,12 @@ export async function* runUserTurn(ctx) {
     // EXISTING permission classification doing double duty as the scheduler:
     //   - READ class → safe (reads share no mutable state, and decideAction
     //     never confirms a read, so no modal can race another).
-    //   - confirm:true → NEVER safe, even for spawn_subagent — a turn must
+    //   - confirm:true → NEVER safe, even for actor_create — a turn must
     //     not stack two confirmation modals (serialize confirms).
-    //   - otherwise only the by-name CONCURRENT_TOOLS set (spawn_subagent)
+    //   - otherwise only the by-name CONCURRENT_TOOLS set (actor_create)
     //     qualifies; every write stays strictly serial in emitted order.
-    // Without a classifier (subagent/runner loops) we keep the original
-    // spawn_subagent-only behavior.
+    // Without a classifier (actor/runner loops) we keep the original
+    // actor_create-only behavior.
     const classify = typeof ctx.classifyToolCall === 'function' ? ctx.classifyToolCall : null;
     /** @param {ToolUseBlock} tu */
     const isConcurrencySafe = (tu) => {
