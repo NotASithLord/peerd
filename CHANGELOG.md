@@ -10,6 +10,15 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Fixed
+- **`resp.bytes()` works in sandboxed code now.** The sealed-realm fetch
+  bridge (Notebook / script / a2a runs) listed `bytes` on its response but
+  as a raw data property, so `resp.bytes()` — the platform `Response.bytes()`
+  shape every model reaches for — threw "not a function". It's a method
+  returning `Promise<Uint8Array>` now, matching the platform. Found in the
+  field: an agent burned several turns rediscovering `arrayBuffer()` while
+  smoke-testing `runWasi`.
+
 ### Changed
 - **"Subagent" is now "actor" everywhere.** The heap-split already made a
   subagent an ephemeral actor on the same substrate as the bound (sandbox /
