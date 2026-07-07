@@ -347,10 +347,12 @@ JS-rendered DOM → render: navigate opens your tab, drive it; then you may fetc
 SAME site's endpoints WITH the session instead of re-scraping. Try fetch first when the
 data looks API-reachable; render if it's gated, needs auth, or comes back empty
 (fetch_url returns served html/json, not what JS builds).
-To SEARCH, go BACKGROUND-FIRST: fetch_url https://duckduckgo.com/html/?q=… — a JS-free
-results page, so it needs NO tab (sessionless, invisible, fast) — and read the result
-links/snippets from the served HTML. Open a tab (navigate) only when the fetched results
-come back empty/blocked or the task needs the rendered engine (news/images tabs, a
+To SEARCH, go BACKGROUND-FIRST: fetch_url https://html.duckduckgo.com/html/?q=… — a
+JS-free results page, so it needs NO tab (sessionless, invisible, fast) — and read the
+result links/snippets from the served HTML. Use the html. subdomain exactly: the bare
+duckduckgo.com/html/ path 302-redirects (fetch_url does not follow redirects), which
+wastes a turn for no reason. Open a tab (navigate) only when the fetched results come
+back empty/blocked or the task needs the rendered engine (news/images tabs, a
 JS-gated engine). There is no search tool; this fetch IS the search.
 
 YOUR TAB — you own 0-OR-1 tab. You start with NONE (fetch needs no tab); calling navigate
