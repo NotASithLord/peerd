@@ -25,10 +25,12 @@ export const readWebCacheTool = {
   name: 'read_web_cache',
   primitive: 'web',
   description: [
-    'Read a slice of a spilled fetch_url body. When a fetch overflows its budget the',
-    'full text is stored locally and the result names the cache key — page through it',
-    'here with { key, offset, limit }. Offsets are character positions into the stored',
-    'text; the result reports what remains after the slice.',
+    'Read a slice of a spilled fetch_url / read_page body. When a read overflows its',
+    'budget the full text is stored locally and the result names the cache key — page',
+    'through it here with { key, offset, limit }. Offsets are character positions into',
+    'the stored text; the result reports what remains after the slice. Page',
+    'DELIBERATELY: the head+tail window you already saw usually carries the answer —',
+    'one or two targeted slices should settle it. Do not walk the whole document.',
   ].join(' '),
   schema: {
     type: 'object',
