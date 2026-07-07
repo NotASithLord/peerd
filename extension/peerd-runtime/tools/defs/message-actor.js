@@ -41,7 +41,7 @@ export const messageActorTool = {
     'message at a time (its mailbox): reuse the same `to` for follow-up (no',
     're-orientation); message a DIFFERENT tab/instance for independent work — separate',
     'actors run in parallel. Your ONLY path to act on a page or mutate an instance.',
-    '(When you are a ACTOR, the reply comes back directly in THIS tool result',
+    '(When you are an EPHEMERAL actor, the reply comes back directly in THIS tool result',
     'instead of a later turn — use it and continue.)',
   ].join(' '),
   schema: {

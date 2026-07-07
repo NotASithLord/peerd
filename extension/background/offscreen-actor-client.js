@@ -147,7 +147,7 @@ export const makeOffscreenActorClient = ({
         const rec = actorSessionId ? await sessions.get(actorSessionId) : null;
         if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
 
-        // Phase 4 — a ACTOR is a tool-bearing EPHEMERAL actor. Its toolset is the
+        // Phase 4 — a spawned child is a tool-bearing EPHEMERAL actor. Its toolset is the
         // NARROWED-GENERAL set persisted at spawn (rec.grantedTools), not an instance
         // pin. Rebuild its restricted ctx SW-side EXACTLY as the in-SW spawn path does
         // (buildToolContext → audit-tag → abortSignal → restrictCtxCapabilities over the
