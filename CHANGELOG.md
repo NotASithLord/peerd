@@ -11,6 +11,14 @@ and storage formats may move until the surface stabilizes.
 ## [Unreleased]
 
 ### Fixed
+- **The search shortcut in the web actor's own prompt pointed at a URL that
+  always redirects.** The prompt told the actor to search with
+  `fetch_url https://duckduckgo.com/html/?q=...`, but that path 302s to
+  `html.duckduckgo.com`, and `fetch_url` does not follow redirects (by
+  design: see `docs/security/THREAT-MODEL.md` INV-7). Every search burned a
+  turn on a guaranteed redirect error before the actor retried correctly.
+  The prompt now names the right host (`html.duckduckgo.com/html/?q=...`)
+  and says why the bare host fails, so search works on the first try.
 - **A oneShot delegation whose CODE crashed now gets its recovery turn.**
   The oneShot contract always said "an errored round falls through to the
   normal loop" — but the clean-round test only saw tool-LEVEL errors, and a
