@@ -54,6 +54,27 @@ const toBytes = (v) => {
   throw new TypeError(`expected string, Uint8Array, or ArrayBuffer, got ${typeof v}`);
 };
 
+// A known-good wasm32-wasi command module, embedded so runWasi is
+// SELF-TESTABLE from inside the sealed worker: `runWasi(demoModule())` →
+// { exitCode: 0, stdout: "hello from wasi\n" } with no network, no toolchain,
+// no hunting the web for a binary (a live agent burned a whole session on
+// exactly that hunt). Hand-assembled — fd_write the message to stdout, then
+// proc_exit 0 — and regenerable from source:
+// tests/notebook-tab/wasi-test-module.ts buildHelloModule('hello from wasi\n')
+// (the bun suite pins these bytes against that builder, so blob and source
+// cannot drift).
+const DEMO_MODULE_B64 =
+  'AGFzbQEAAAABEANgBH9/f38Bf2ABfwBgAAACRgIWd2FzaV9zbmFwc2hvdF9wcmV2aWV3MQhmZF93cml0ZQ'
+  + 'AAFndhc2lfc25hcHNob3RfcHJldmlldzEJcHJvY19leGl0AAEDAgECBQMBAAEHEwIGbWVtb3J5AgAGX3N0'
+  + 'YXJ0AAIKIQEfAEEAQRA2AgBBBEEQNgIAQQFBAEEBQQwQABpBABABCwsWAQBBEAsQaGVsbG8gZnJvbSB3YXNpCg==';
+
+/**
+ * A tiny (187-byte) known-good WASI command module for smoke-testing runWasi.
+ * `await runWasi(demoModule())` prints "hello from wasi\n" and exits 0.
+ * @returns {Uint8Array}
+ */
+export const demoModule = () => Uint8Array.from(atob(DEMO_MODULE_B64), (c) => c.charCodeAt(0));
+
 /**
  * Build the in-memory Inode tree the module sees, from flat caller paths
  * ('data/input.txt' → nested Directories). Pure; exported for tests.

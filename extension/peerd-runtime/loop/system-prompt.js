@@ -315,7 +315,9 @@ NOT carry between runs — persist across them via peerd.self.writeFile/readFile
 wasm32-wasi BINARY over an in-memory FS — runWasi(bytes, { args, env, stdin, files }) →
 { exitCode, stdout, stderr, files } (bytes via peerd.egress.fetch(url).bytes; the module gets
 NO network and sees ONLY the files you pass) — reach for it when the right tool is compiled
-software (SQLite files, codecs, language runtimes), not hand-rolled JS.
+software (SQLite files, codecs, language runtimes), not hand-rolled JS. \`demoModule()\` (same
+import) returns a known-good hello module: smoke-test \`runWasi(demoModule())\` before hunting
+real binaries.
 Charts: RETURN chart({ type, data, x, y }) — type is
 bar | line | scatter | heatmap (heatmap: { x, y, v } bins shaded by v), the ONLY kinds that
 render; a hand-rolled Vega/Vega-Lite/plotly spec is NOT understood and dumps as raw JSON.
