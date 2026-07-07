@@ -158,16 +158,31 @@ export const actorTierGate = (tool, args, ctx) => {
   // DESIGN-17 web actor — the tab pin. The DOM tools resolve their tab from an
   // explicit numeric `args.tabId` (or the bound tab if absent), so the pin is on
   // tabId, not an instance-id string. An explicit tabId that isn't the owned tab
-  // is refused; absent → the bound tab (fine). actorInstanceId = owned tabId
-  // as a string. (Runs before resolveTargetTab, so it sees only the explicit arg
-  // — the in-execute denylist re-check in resolveTargetTab is the second wall.)
+  // is refused; absent → the bound tab (fine). (Runs before resolveTargetTab, so
+  // it sees only the explicit arg — the in-execute denylist re-check in
+  // resolveTargetTab is the second wall.)
+  //
+  // ctx.activeTab.id is the owned tab, NOT ctx.actorInstanceId. Since the
+  // per-chat web actor became addressable by the fixed name 'web'
+  // (message_actor("web", …)), actorInstanceId is that constant literal —
+  // stable across re-navigation — not the tab id (only an API actor's
+  // instanceId is still a real identifier, its fixed origin, and API actors
+  // are excluded above). buildToolContext resolves ctx.activeTab from the
+  // actor's actually-owned tab for exactly this comparison. Comparing against
+  // actorInstanceId here used to be correct (an earlier design where a web
+  // actor's instanceId WAS its tab id) but silently became a false-positive
+  // refusal for every own-tab call once that changed: 'web' !== any numeric
+  // tab id, always. Confirmed live (a `read_page` on its own tab refused with
+  // "pinned to tab web"). Not a security gap either way — resolveTargetTab
+  // independently fails closed on a missing ctx.activeTab — just wrongly
+  // blocked the legitimate case.
   if (ctx.actorType === 'web' && ctx.backing !== 'api') {
     const tab = actorWebTabTarget(args);
-    // String() BOTH sides (M6): actorInstanceId SHOULD be the tabId as a
-    // string, but coercing defensively means a numeric mint can't lock the
-    // actor out of its own tab ('42' !== 42).
-    if (tab !== undefined && String(tab) !== String(ctx.actorInstanceId)) {
-      return { allowed: false, reason: `web actor is pinned to tab ${ctx.actorInstanceId ?? '?'}; refusing ${tool.name} targeting tab ${tab}` };
+    const ownedTab = ctx.activeTab?.id;
+    // String() BOTH sides: ownedTab is a number, tab is a number, but coercing
+    // defensively means neither side's type can silently defeat the check.
+    if (tab !== undefined && String(tab) !== String(ownedTab)) {
+      return { allowed: false, reason: `web actor is pinned to tab ${ownedTab ?? 'none yet'}; refusing ${tool.name} targeting tab ${tab}` };
     }
   }
   return null;

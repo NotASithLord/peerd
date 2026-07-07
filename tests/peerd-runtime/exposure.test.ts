@@ -245,8 +245,18 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
 });
 
 describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () => {
+  // Production shape (buildToolContext, service-worker.js): the per-chat web
+  // actor's actorInstanceId is the FIXED literal 'web' (its message_actor
+  // address — stable across re-navigation), never a tab id. The actor's
+  // actually-owned tab lives at ctx.activeTab.id, resolved separately. A
+  // prior version of this fixture encoded the tab id INTO actorInstanceId
+  // ('42') — which matched an earlier design but not the real ctx shape after
+  // the singleton-actor-address change, and silently stopped exercising the
+  // real bug: gates.js compared against actorInstanceId ('web' in
+  // production), so every own-tab call was refused. Fixed in gates.js; this
+  // fixture now matches what buildToolContext actually produces.
   const web = (over: object = {}) =>
-    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: '42', ...over });
+    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web', activeTab: { id: 42, url: 'https://example.test/', origin: 'https://example.test' }, ...over });
 
   test('WEB_ACTOR_DOM_TOOLS is the DOM read/mutate set (no code-exec)', () => {
     // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
@@ -328,6 +338,26 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(rt({ name: 'click' }, { tabId: 99 }, web())?.allowed).toBe(false); // sibling tab
     expect(rt({ name: 'click' }, { tabId: 42 }, web())).toBeNull();           // own tab
     expect(rt({ name: 'click' }, {}, web())).toBeNull();                      // default → bound
+  });
+
+  // Regression: gates.js used to compare the explicit tabId against
+  // ctx.actorInstanceId. In production that's the fixed literal 'web' (the
+  // singleton actor's message_actor address), never a tab id, so EVERY
+  // own-tab call was refused — confirmed live: a read_page on the actor's own
+  // tab was refused with "pinned to tab web". The check must key off
+  // ctx.activeTab.id (the actor's real owned tab), independent of whatever
+  // string actorInstanceId happens to hold.
+  test('the tab pin keys off ctx.activeTab.id, not actorInstanceId', () => {
+    const ctx = { exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web', activeTab: { id: 1006003486, url: 'https://example.test/', origin: 'https://example.test' } };
+    // Exactly the reported failure: same numeric tab as the owned one, named explicitly.
+    expect(rt({ name: 'read_page' }, { tabId: 1006003486 }, ctx)).toBeNull();
+    // The security guarantee is untouched: a DIFFERENT explicit tab is still refused.
+    const refused = rt({ name: 'read_page' }, { tabId: 999 }, ctx);
+    expect(refused?.allowed).toBe(false);
+    expect(refused?.reason).toContain('1006003486');
+    // No owned tab yet (0-tab state) — an explicit tabId still fails closed.
+    const noTab = rt({ name: 'read_page' }, { tabId: 1 }, { exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web' });
+    expect(noTab?.allowed).toBe(false);
   });
 
   test('actorDescriptors filters a web actor to its DOM toolset', () => {

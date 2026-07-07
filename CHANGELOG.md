@@ -11,6 +11,18 @@ and storage formats may move until the surface stabilizes.
 ## [Unreleased]
 
 ### Fixed
+- **A web actor could be wrongly refused a read of its own tab.** The
+  dispatcher gate that pins a web actor to the one tab it owns compared an
+  explicit `tabId` argument against `actorInstanceId`. That field is the
+  fixed literal `'web'`, the actor's stable `message_actor` address, not a
+  tab id (only an API actor's instanceId is still a real identifier, its
+  origin). So the comparison could never match, and any DOM tool call that
+  named its own tab explicitly (`read_page`, `click`, and so on) was refused
+  with a confusing "pinned to tab web" error, even though it was the actor's
+  own tab. The gate now compares against the actor's actually-owned tab
+  instead. This was a false-positive refusal, not a security gap: the
+  independent execute-time resolver already only ever targeted the owned
+  tab or failed closed.
 - **The search shortcut in the web actor's own prompt pointed at a URL that
   always redirects.** The prompt told the actor to search with
   `fetch_url https://duckduckgo.com/html/?q=...`, but that path 302s to
