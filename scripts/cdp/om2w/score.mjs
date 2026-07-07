@@ -216,11 +216,21 @@ function patchUtilsPy() {
 function patchBackoffPatience() {
   const p = join(REPO, 'src', 'utils.py');
   let src = readFileSync(p, 'utf8');
-  if (src.includes('# peerd-patched-backoff')) return;
+  // v2: also GIVE UP instantly on insufficient_quota — that's the account out
+  // of credit, not a rate window; retrying it for 600s is pure spin. (The v1
+  // marker gets upgraded in place.)
+  if (src.includes('# peerd-patched-backoff-v2')) return;
+  if (src.includes('# peerd-patched-backoff')) {
+    src = src.replace('# peerd-patched-backoff:', '# peerd-patched-backoff-v2:')
+      .replace('        max_tries=12, max_time=600,', "        max_tries=12, max_time=600,\n        giveup=lambda e: 'insufficient_quota' in str(e),");
+    writeFileSync(p, src);
+    log('patched utils.py (backoff v2: give up instantly on insufficient_quota)');
+    return;
+  }
   const from = '        max_tries=3,';
   if (!src.includes(from)) fail(`could not patch utils.py backoff — max_tries anchor missing. Upstream at ${PIN.slice(0, 8)} changed? Remove ${REPO} and re-run.`);
-  writeFileSync(p, `# peerd-patched-backoff: ride out TPM windows instead of dying.\n${src.replace(from, '        max_tries=12, max_time=600,')}`);
-  log('patched utils.py (backoff: max_tries=12, max_time=600s — TPM windows are waited out)');
+  writeFileSync(p, `# peerd-patched-backoff-v2: ride out TPM windows; give up on insufficient_quota.\n${src.replace(from, "        max_tries=12, max_time=600,\n        giveup=lambda e: 'insufficient_quota' in str(e),")}`);
+  log('patched utils.py (backoff: TPM waited out, insufficient_quota gives up instantly)');
 }
 
 function ensureVenv() {
