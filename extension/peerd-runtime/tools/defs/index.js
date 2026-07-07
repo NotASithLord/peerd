@@ -32,6 +32,7 @@ import { vmDeleteTool }               from './vm-delete.js';
 import { sandboxCreateTool }          from './sandbox-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { scriptTool }                  from './script.js';
+import { pageCodeTool }               from './page-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
@@ -90,6 +91,7 @@ export {
   // engine (Notebook)
   jsNotebookTool,
   scriptTool,
+  pageCodeTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
@@ -156,6 +158,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
+  // the web actor's CODE-REPL action surface (PR #119 A/B arm) — registered +
+  // hidden from main; allowed ONLY for a code-surface web actor
+  // (WEB_ACTOR_CODE_TOOLS in exposure.js).
+  pageCodeTool,
   // fetch_url's spill-and-page read side — same exposure (web actor only; the
   // cache holds fetched page content).
   readWebCacheTool,

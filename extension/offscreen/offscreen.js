@@ -339,6 +339,11 @@ const onJobMessage = (msg, sender, sendResponse) => {
     {
       code: msg.code, timeoutMs: msg.timeoutMs,
       a2a: msg.a2a === true, actors: msg.actors === true,
+      // caps + ownerSessionId ride from the SW's job/run message (trusted: the
+      // sender gate above). The WORKER never supplies either — job-runner
+      // attaches them from these params and ignores anything in the worker's
+      // own messages.
+      caps: msg.caps,
       ownerSessionId: msg.ownerSessionId, ownerToolUseId: msg.ownerToolUseId, runId: msg.runId,
     },
     { sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }) },

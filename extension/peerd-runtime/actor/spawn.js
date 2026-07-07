@@ -158,7 +158,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
   jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
   jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list'],
-  jsOffscreenClient:  ['script', 'a2a_run'],
+  jsOffscreenClient:  ['script', 'a2a_run', 'page_code'],
   appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],

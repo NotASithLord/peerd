@@ -78,6 +78,12 @@ export const normalizeSettingsPatch = (patch, {
       && reasoningEffortLevels.includes(patch.reasoningEffort)) {
     next.reasoningEffort = patch.reasoningEffort;
   }
+  // PR #119: the web actor's action surface — 'tools' (discrete tool calls) or
+  // 'code' (the Playwright-in-a-REPL A/B arm). Only these two; anything else is
+  // ignored (defaults win → 'tools').
+  if (patch.webActorActionSurface === 'tools' || patch.webActorActionSurface === 'code') {
+    next.webActorActionSurface = patch.webActorActionSurface;
+  }
   if (typeof patch.providerName === 'string'
       && knownProviderNames.includes(patch.providerName)) {
     next.providerName = patch.providerName;

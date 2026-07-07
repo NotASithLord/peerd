@@ -115,4 +115,11 @@ describe('webFetch — redirects fail closed', () => {
     try { await webFetch('http://example.com/'); } catch (e: any) { reason = e?.reason; }
     expect(reason).toBe('redirect_blocked');
   });
+
+  test('the private-network denial carries reason=private_network (so fetch_url can steer to render)', async () => {
+    const { webFetch } = setup();
+    let reason: string | null = null;
+    try { await webFetch('http://127.0.0.1:8080/p'); } catch (e: any) { reason = e?.reason; }
+    expect(reason).toBe('private_network');
+  });
 });

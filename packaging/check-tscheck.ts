@@ -76,10 +76,17 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 498 → 499: standing peer conversations add subagent/conversation-registry.js
 // (the pure convId → turns thread store).
 // 499 → 500: the OpenAI provider adapter adds peerd-provider/adapters/openai.js.
+// 501 → 506: PR #119 + its OM2W eval merge in: the web-actor page-API
+// translation core (subagent/page-api.js) + the page-call handler
+// (subagent/page-call-handler.js) + the code-REPL action tool
+// (tools/defs/page-code.js) + the OM2W adapter's two eval modules
+// (eval/om2w-actions.js + eval/om2w-recorder.js).
 // 501 → 505: the fetch_url content pipeline adds offscreen/web-extract.js,
 // background/offscreen-web-client.js, tools/web/spill.js, and
 // tools/defs/read-web-cache.js (vendor/ is exempt from the scan).
-const COVERED_FLOOR = 505;
+// 505/506 → 510: the #119 (page bridge + OM2W eval) and #187 (fetch content
+// pipeline) file sets merge — both ledgers above are kept; the union floor.
+const COVERED_FLOOR = 510;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

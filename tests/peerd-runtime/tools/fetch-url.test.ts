@@ -122,6 +122,19 @@ describe('fetch_url — sessionless secure fetch', () => {
     if (r.ok) throw new Error('expected failure');
     expect(r.error).toMatch(/redirect/i);
   });
+
+  test('a private/loopback SSRF block steers to RENDER, not "unreachable"', async () => {
+    // The web-actor fetch-vs-read fix: the actor was misreading this SSRF refusal
+    // as "the site is unreachable" and giving up on a page it could just open.
+    const { ctx } = recordingCtx({
+      webFetch: async () => { const e: any = new Error('Egress denied'); e.reason = 'private_network'; throw e; },
+    });
+    const r = await fetchUrlTool.execute({ url: 'http://127.0.0.1:8080/p' }, ctx);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected failure');
+    expect(r.error).toMatch(/navigate|render/i);      // steers to the render path
+    expect(r.error).toMatch(/private|loopback/i);      // names why the direct fetch was blocked
+  });
 });
 
 // --- the content pipeline: HTML→markdown extraction + spill-and-page ---------

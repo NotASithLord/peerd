@@ -33,6 +33,19 @@ const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 // no authority to the realm.
 export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WASI_MODULE_URL };
 
+// The default capability profile — the surface every worker had before profiles
+// existed. A caller that passes nothing gets EXACTLY the historical worker.
+// why a profile at all: the web actor's code-REPL arm (PR #119) runs
+// MODEL-AUTHORED page-driving code in this same sealed worker, and its actor
+// deliberately holds NO egress / subagent / opfs (an actor that ingests
+// untrusted page text must not also wield those — the exclusion IS the
+// boundary, exposure.js). The profile is enforced TWICE: here (the surface is
+// absent / throws inside the realm) and in the HOST relay (job-runner.js
+// refuses the bridge message), so a seal escape alone doesn't re-open a lane.
+export const DEFAULT_WORKER_CAPS = Object.freeze({
+  page: false, egress: true, subagent: true, opfs: true,
+});
+
 /**
  * Build the worker-entry source string for one run.
  *
@@ -44,11 +57,15 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WA
  * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
+ * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }} [opts.caps]
+ *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
+ *   caps.page is the web actor's page bridge, PR #119)
  * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000 }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps }) => {
+  const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
     builtins: NOTEBOOK_BUILTINS,
@@ -294,6 +311,52 @@ const __actors = {
 globalThis.actors = __actors;
 ` : ''}
 
+// --- page.* (web-actor page control) proxy — capability-gated (caps.page) ---
+// PR #119 code-REPL arm: each page.* call is ONE host round-trip; the host
+// relays it to the SW's 'page/call' route, which dispatches the SAME gated tool
+// the tool-call web actor uses (denylist / confirm / audit unchanged) against
+// the ONE tab this actor owns. The host attaches the owner identity itself —
+// nothing this realm sends can choose the session or the tab.
+${profile.page ? `
+const pageRelay = makeBridge('page', { timeoutMs: 30000, timeoutMessage: (p) => 'page.' + p.method + ' timed out' });
+const pageCall = (method, args) => pageRelay({ method, args });
+// The Playwright-shaped API is a BARE \`page\` global (the tool description +
+// actor lore both use \`await page.goto(...)\`), mirrored on peerd.page for
+// discoverability. Exposing only peerd.page left \`page\` undefined → every
+// script ReferenceError'd before its first action.
+const __page = {
+  goto:     (url) => pageCall('goto', { url }),
+  click:    (selector, opts) => pageCall('click', (opts && typeof opts.nth === 'number') ? { selector, nth: opts.nth } : { selector }),
+  fill:     (selector, text) => pageCall('fill', { selector, text }),
+  snapshot: () => pageCall('snapshot', {}),
+  content:  () => pageCall('content', {}),
+};
+globalThis.page = __page;
+globalThis.peerd.page = __page;
+` : ''}${profile.egress ? '' : `
+// Capability profile: NO egress. peerd.egress.fetch throws in-realm; the host
+// relay refuses any 'fetch-request' this realm still emits (global fetch is the
+// seal's bridge and cannot be removed here) — two walls, same refusal.
+globalThis.peerd.egress.fetch = () => {
+  throw new Error('peerd.egress.fetch is not available in this worker (no-egress capability profile).');
+};
+`}${profile.subagent ? '' : `
+// Capability profile: NO subagents.
+globalThis.peerd.runtime.runAgent = () => {
+  throw new Error('peerd.runtime.runAgent is not available in this worker (no-subagent capability profile).');
+};
+`}${profile.opfs ? '' : `
+// Capability profile: NO OPFS. Files and dynamic imports are off; the host
+// relay refuses any 'opfs-request' as the second wall.
+const noOpfs = (name) => () => {
+  throw new Error('peerd.self.' + name + ' is not available in this worker (no-opfs capability profile).');
+};
+globalThis.peerd.self.readFile = noOpfs('readFile');
+globalThis.peerd.self.writeFile = noOpfs('writeFile');
+globalThis.peerd.self.listFiles = noOpfs('listFiles');
+globalThis.peerd.self.import = noOpfs('import');
+globalThis.__peerd_dynamic_import = noOpfs('import');
+`}
 // ONE listener fans every '<name>-response' out to its bridge. Each bridge's
 // onResponse claims only its own type, so registration order doesn't matter.
 // ('fetch-response' is consumed by the realm seal's own listener, not here.)

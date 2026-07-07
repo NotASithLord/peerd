@@ -25,6 +25,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   devMode: false,
   reasoningEnabled: true,
   reasoningEffort: "medium",
+  webActorActionSurface: "tools",
   providerName: "",
   providerModel: "",
   ollamaHost: "http://localhost:11434",

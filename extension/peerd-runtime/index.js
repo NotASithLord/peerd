@@ -126,6 +126,11 @@ export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
 } from './actor/web-actor.js';
+// PR #119: the host-side handler for the web actor's code-REPL arm — turns a
+// page.<method> RPC (made inside the sealed worker) into the SAME gated tool
+// dispatch the tool-call web actor uses, pinned to the actor's owned tab.
+// resolvePageTab is the pure "adopt the first tab on page.goto" decision.
+export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.

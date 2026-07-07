@@ -175,7 +175,10 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     // Ollama go through safeFetch/the allowlist, NOT here — so no carve-out.)
     if (isPrivateOrLocalHost(u.hostname)) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'private_network' } }).catch(() => {});
-      throw new EgressDeniedError(u.origin);
+      // Tag the reason so fetch_url can tell the model this is an SSRF block on a
+      // private/loopback host — NOT "the site is unreachable" — and steer it to
+      // RENDER the page instead of giving up (the web-actor fetch-vs-read fix).
+      throw new EgressDeniedError(u.origin, 'private_network');
     }
     // u.hostname (not u.host): the denylist matches bare hostnames; u.host
     // carries :port. (The matcher also normalizes defensively — see denylist.js.)

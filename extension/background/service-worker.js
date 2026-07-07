@@ -234,6 +234,9 @@ import {
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  // PR #119: the code-REPL arm's host-side page-call handler + the pure
+  // adopt-first-tab-on-goto decision.
+  makePageCallHandler, resolvePageTab,
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
@@ -807,7 +810,7 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
@@ -893,6 +896,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   } catch (e) {
     console.warn('[sw] active tab query failed', e);
   }
+  // PR #119: resolve the tab web actor's ACTION surface ONCE. An explicit arg
+  // wins (the page/call route forces 'tools' for its inner mapped dispatch);
+  // otherwise it's the live setting. Used BOTH to stamp ctx.actorSurface (gate +
+  // descriptors) AND the capability strip below — the turn driver doesn't pass
+  // actorSurface, so the strip can't read the raw param; it must use THIS.
+  const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
+    ? (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'))
+    : undefined;
   const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
@@ -917,6 +928,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // DESIGN-18: a web actor's backing (the gate reads it to refuse DOM tools for an
     // API actor, which has no tab). Absent = tab backing (the DESIGN-17 default).
     ...(actorBacking ? { backing: actorBacking } : {}),
+    // PR #119: a TAB web actor's ACTION surface — 'tools' (discrete DOM tools) or
+    // 'code' (page_code REPL). An explicit arg wins (the page/call route forces
+    // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
+    // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
+    ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -1169,7 +1185,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // NOT in CAPABILITY_CONSUMERS (shared with the web actor's DOM tools), so they survive
     // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
     // tool (isAllowedForActor → fetch_url only), not on this strip.
-    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking)));
+    // PR #119: pass actorSurface — a CODE-surface web actor's allow-set is
+    // { page_code }, so WITHOUT the surface the strip computed the TOOLS
+    // allow-set (no page_code) and dropped jsOffscreenClient (page_code's
+    // execution client) — page_code then returned 'page_code_unavailable' on
+    // every call, silently breaking the whole code arm. The gate + descriptors
+    // were already surface-aware; this strip is the one place that wasn't.
+    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking, effectiveActorSurface)));
     // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
     // the user's session ONLY for a request same-origin to the ORIGIN it owns (where it's
     // already in that session — no escalation, and it never holds a credential: the
@@ -1818,6 +1840,12 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
   EXPOSURE_ACTOR,
   recordModelCall: contextSnapshots.record,
+  // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
+  // defined below, read at call time — same pattern as ownedTabFor). why: the
+  // offscreen actor heap has no turn/tool-use broadcast (that's turn-driver's,
+  // in-SW only), so without this the eval harness's OM2W recorder — and any
+  // activity view — is blind to what an actor actually did.
+  broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -2501,6 +2529,76 @@ const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
 hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
+
+// PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
+// web actor makes inside its sealed worker rides here (offscreen job-runner →
+// 'page/call'). SECURITY, the whole point of doing this SW-side:
+//   • The OWNER is the sessionId the offscreen relay attached from the trusted
+//     job params — never anything the worker put in its own message.
+//   • That session must be a tab-backed WEB actor; anything else (a bare js_run
+//     job, an engine actor, a stale id) is refused — the page capability is not
+//     a general worker power.
+//   • The tab is resolved AUTHORITATIVELY from webActorTabBindings.tabFor(owner):
+//     the owner can't name a tab, so it can only ever act on the ONE tab it owns
+//     (fail closed if it owns none).
+// Then makePageCallHandler translates → builds a normal tab web-actor ctx (NO
+// code surface, so the mapped navigate/click/type are allowed) → dispatches
+// through the FULL gate stack (denylist / confirm / audit), so this route adds
+// zero authority over the tool-call actor.
+const pageCallHandler = makePageCallHandler({
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  buildActorContext: ({ sessionId, tabId }) => buildToolContext({
+    sessionId, activeTabId: tabId,
+    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
+    // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
+    // surface is 'code' (that's how it got here), but navigate/click/type must be
+    // ALLOWED for the page.* translation — else the setting would refuse them.
+    actorSurface: 'tools',
+  }),
+});
+const pageCallRoute = {
+  /** @param {{ method?: string, args?: object, ownerSessionId?: string }} msg */
+  'page/call': async ({ method, ownerSessionId, args } = {}) => {
+    if (vault.isLocked()) return { ok: false, error: 'locked' };
+    if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'page_call_no_owner' };
+    // The owner MUST be a live tab-backed web actor — the page surface is not a
+    // general worker capability. (findActorSession/get by id; reject otherwise.)
+    const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
+      return { ok: false, error: 'page_call_not_web_actor' };
+    }
+    // Authoritative tab: the ONE this actor owns (never a worker-supplied id).
+    // A fresh code actor owns none — and unlike the tool-call actor it has no
+    // direct `navigate` to lazily open one, so page.goto() IS its adopt path:
+    // open + bind its first tab here (the SAME adoptWebTab navigate uses), then
+    // dispatch pinned to it. Every other page.* with no tab is refused with an
+    // actionable "open a page first" message. See resolvePageTab.
+    const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
+    if (decision.action === 'refuse') return { ok: false, error: decision.error };
+    let tabId;
+    if (decision.action === 'adopt') {
+      const adopted = await adoptWebTab(ownerSessionId).catch(() => null);
+      if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
+      tabId = adopted.tabId;
+    } else {
+      tabId = decision.tabId;
+    }
+    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+    // Announce the settled op on the UI ports — pure observability, ZERO added
+    // authority (the gated dispatch already ran; consumers see method/ok only).
+    // why: a page_code call is ONE tool_use whose real page actions happen in
+    // here — invisible to the turn/tool-use stream. The eval harness's OM2W
+    // recorder (and any UI activity view) needs each op as a discrete
+    // after-action event, or a code-surface trajectory records as
+    // [navigate, answer] and a judge can't see the work.
+    uiPorts.broadcast({
+      type: 'page/op', sessionId: ownerSessionId, tabId,
+      method: /** @type {string} */ (method), args: args ?? {}, ok: outcome?.ok === true,
+      ...(outcome?.ok === false ? { error: String(outcome.error ?? '').slice(0, 200) } : {}),
+    });
+    return outcome;
+  },
+};
 
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
@@ -3208,11 +3306,19 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // override (rec.customSystemPrompt). Actors get no memory/skills block (same
     // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
     const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
+    // PR #119 surface parity: the OFFSCREEN actor path must thread the web
+    // actor's action surface exactly like the in-SW path — same setting-derived
+    // value buildToolContext falls back to. Without it a code-surface actor is
+    // advertised the TOOLS descriptors (no page_code) and taught the tools
+    // lore, so the whole code arm silently degrades on the offscreen heap.
+    const actorSurface = (kind === 'web' && rec.backing !== 'api')
+      ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
+      : undefined;
     const systemPrompt = await renderSystemPrompt({
-      actorType: kind, backing: rec.backing, instanceId,
+      actorType: kind, backing: rec.backing, instanceId, actorSurface,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
     });
-    const tools = actorDescriptors(listTools(), kind, rec.backing)
+    const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
     const reasoning = {
@@ -3667,6 +3773,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResume, haltGoalRun,
+    // session/reset (New chat) must stop the abandoned session's live turn AND
+    // cascade to its in-flight actors — same primitives agent/stop uses — so
+    // background web/VM/App work doesn't keep running on the orphaned session.
+    turnSlots, actorMessaging,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
@@ -3686,6 +3796,11 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // Stored under origin:<origin>, decrypted only in withApiCredentials at request
   // time, never shown to the agent. `list` returns origins + header NAME only.
   ...(/** @type {any} */ (originCredentialRoutes)),
+
+  // --- PR #119 code-REPL arm: the web actor's page.<method> bridge route ---
+  // A sealed-worker page.* call → the SAME gated dispatch the tool-call actor
+  // uses, pinned to the actor's owned tab (owner + tab resolved trusted-side).
+  ...(/** @type {any} */ (pageCallRoute)),
 })));
 
 // The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel
