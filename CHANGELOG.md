@@ -18,6 +18,20 @@ and storage formats may move until the surface stabilizes.
   returning `Promise<Uint8Array>` now, matching the platform. Found in the
   field: an agent burned several turns rediscovering `arrayBuffer()` while
   smoke-testing `runWasi`.
+- **The web actor no longer talks itself out of rendering.** Field
+  transcript: asked for live sports schedules, the web actor tried fetches,
+  declared itself "fetch-only", claimed it lacked an open-tab tool, and
+  bounced the task back to the user — while the render path was fully wired
+  (`navigate` lazily opens + adopts its tab in the 0-tab state). The
+  machinery was right; the words were wrong. Three model-facing fixes:
+  `navigate`'s description now states it OPENS the tab when the actor owns
+  none (it read "navigate the target tab", implying one must exist); the web
+  actor's lore states it can ALWAYS render and must never report itself
+  fetch-only; the shared actor rules forbid addressing the user ("would you
+  like me to…" has no one to answer it — do the work or report what
+  blocked). And the orchestrator's `message_actor` teaching now says: never
+  narrate unobserved actor progress, and re-send with the capability
+  restated when an actor wrongly claims its kind can't do something.
 
 ### Changed
 - **"Subagent" is now "actor" everywhere.** The heap-split already made a

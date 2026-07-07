@@ -51,9 +51,12 @@ export const navigateTool = {
   name: 'navigate',
   primitive: 'tab',
   description: [
-    'Navigate the target tab to an http(s) URL. Waits up to 30s for the',
-    'page to finish loading. Returns the final URL (may differ from the',
-    'requested URL after redirects).',
+    'Navigate the target tab to an http(s) URL. OPENS the tab if you do not',
+    'own one yet (the web actor starts tabless: navigate is how you go from',
+    'fetch-only to a rendered page — there is no separate open-tab tool and',
+    'you never need one). Waits up to 30s for the page to finish loading.',
+    'Returns the final URL (may differ from the requested URL after',
+    'redirects).',
   ].join(' '),
   schema: {
     type: 'object',
