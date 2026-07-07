@@ -264,14 +264,24 @@ function exportTask(task, row) {
   // to sort into step order. A blank shot (capture failed at a load boundary) is
   // written as a 1x1 placeholder so every step still resolves to a file — the
   // recorder never drops the ACTION for a failed screenshot.
-  const PLACEHOLDER = Buffer.from('/9j/4AAQSkZJRgABAQEAAAAAAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
+  // PLACEHOLDER is a PIL-validated 1x1 white JPEG (631B, proper FFD9 tail). The
+  // previous hand-minified one was TRUNCATED — PIL raised "image file is
+  // truncated" and the judge WORKER DIED on it, silently unscoring every task
+  // behind it in that worker's queue.
+  const PLACEHOLDER = Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q==', 'base64');
+  // A capture that arrives TRUNCATED (mid-navigation teardown) is as fatal to
+  // the judge as a blank — validate the JPEG framing (FFD8 … FFD9) and fall
+  // back to the placeholder rather than poison the scoring run.
+  const validJpeg = (/** @type {Buffer} */ b) => b.length >= 4
+    && b[0] === 0xFF && b[1] === 0xD8 && b[b.length - 2] === 0xFF && b[b.length - 1] === 0xD9;
   let blanks = 0;
   rec.shots.forEach((dataUrl, i) => {
     const b64 = String(dataUrl || '').replace(/^data:image\/\w+;base64,/, '');
-    const bytes = b64 ? Buffer.from(b64, 'base64') : (blanks++, PLACEHOLDER);
+    const raw = b64 ? Buffer.from(b64, 'base64') : null;
+    const bytes = (raw && validJpeg(raw)) ? raw : (blanks++, PLACEHOLDER);
     writeFileSync(join(traj, shotName(i, 'jpg')), bytes);
   });
-  if (blanks) log(`  ⚠ ${task.task_id}: ${blanks} screenshot(s) fell back to placeholder (capture failed at a load boundary)`);
+  if (blanks) log(`  ⚠ ${task.task_id}: ${blanks} screenshot(s) fell back to placeholder (capture failed or truncated at a load boundary)`);
   writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2));
   log(`  ✓ ${task.task_id}: ${result.action_history.length} step(s), ${rec.shots.length} shot(s)${rec.capped ? ' [capped]' : ''}${errs.length ? ' [schema warns]' : ''}`);
 }

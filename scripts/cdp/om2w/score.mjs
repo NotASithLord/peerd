@@ -135,6 +135,7 @@ function ensureScorer() {
   }
   patchRunPy();
   patchUtilsPy();
+  patchBackoffPatience();
   return ensureVenv();
 }
 
@@ -204,6 +205,22 @@ function patchUtilsPy() {
   if (!src.includes(from)) fail(`could not patch utils.py — generate() anchor missing. Upstream at ${PIN.slice(0, 8)} changed? Remove ${REPO} and re-run.`);
   writeFileSync(p, `# peerd-patched: o-series judge uses max_completion_tokens + no temperature.\n${src.replace(from, to)}`);
   log('patched utils.py (o-series judge: max_completion_tokens, no temperature)');
+}
+
+// Screenshot-heavy trajectories (a code-arm task averages ~17 shots, each a
+// judge_image call) saturate the org's tokens-per-minute limit; upstream's
+// backoff gives up after 3 tries in a few seconds and the WORKER DIES, leaving
+// a third of the run unscored. TPM windows clear in ≲60s — waiting is always
+// correct — so raise the patience: many tries under a hard 10-minute ceiling.
+// Separate marker so it also applies to a clone the older patch already touched.
+function patchBackoffPatience() {
+  const p = join(REPO, 'src', 'utils.py');
+  let src = readFileSync(p, 'utf8');
+  if (src.includes('# peerd-patched-backoff')) return;
+  const from = '        max_tries=3,';
+  if (!src.includes(from)) fail(`could not patch utils.py backoff — max_tries anchor missing. Upstream at ${PIN.slice(0, 8)} changed? Remove ${REPO} and re-run.`);
+  writeFileSync(p, `# peerd-patched-backoff: ride out TPM windows instead of dying.\n${src.replace(from, '        max_tries=12, max_time=600,')}`);
+  log('patched utils.py (backoff: max_tries=12, max_time=600s — TPM windows are waited out)');
 }
 
 function ensureVenv() {
