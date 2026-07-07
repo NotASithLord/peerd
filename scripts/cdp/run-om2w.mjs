@@ -139,10 +139,20 @@ async function main() {
     return { ctx: c, evalPage: page };
   }
 
+  // A dead CDP connection (SW hung / Chrome half-up after a recycle) makes any
+  // rpc/evalIn await FOREVER — the harness's conn.send has no timeout, and one
+  // such hang stranded a run overnight at "side panel mounted". Bound every
+  // driver await; on a deadline the caller tears Chrome down and retries.
+  const withDeadline = (promise, ms, label) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)),
+  ]);
+  const BRINGUP_DEADLINE_MS = 120_000;
+
   let ctx = null;
   let evalPage = null;
   try {
-    ({ ctx, evalPage } = await bringUp());
+    ({ ctx, evalPage } = await withDeadline(bringUp(), BRINGUP_DEADLINE_MS, 'bringUp'));
     log(`provider ready: ${PROVIDER}${MODEL ? ` (${MODEL})` : ''}${ACTOR_SURFACE ? ` · actor surface: ${ACTOR_SURFACE}` : ''}`);
 
     // ONE task per __peerdEval.run() call — an OM2W task can take minutes and we
@@ -167,19 +177,39 @@ async function main() {
     const recycle = async (why) => {
       log(`  ↻ recycling Chrome (${why})`);
       try { ctx.close(); } catch { /* */ }
-      ({ ctx, evalPage } = await bringUp());
+      try {
+        ({ ctx, evalPage } = await withDeadline(bringUp(), BRINGUP_DEADLINE_MS, 'recycle bringUp'));
+      } catch (e) {
+        // One retry with another fresh Chrome — a flaky launch shouldn't strand
+        // a resumable run. A second failure propagates (main's catch exits 1;
+        // exported tasks are safe, a re-run resumes).
+        log(`  ⚠ recycle failed (${/** @type {{ message?: string }} */ (e)?.message ?? e}); retrying once with a fresh Chrome`);
+        try { ctx.close(); } catch { /* */ }
+        ({ ctx, evalPage } = await withDeadline(bringUp(), BRINGUP_DEADLINE_MS, 'recycle bringUp (retry)'));
+      }
       sinceRecycle = 0;
     };
     for (let i = 0; i < todo.length; i++) {
       const t = todo[i];
       if (Date.now() - started > RUN_BUDGET_MS) { log(`budget reached; stopping after ${done} task(s)`); break; }
       const runOpts = { om2w: true, tasks: [{ id: t.task_id, title: t.task_id, startUrl: t.website, prompt: t.task_description, timeoutMs: TASK_TIMEOUT_MS, reference_length: t.reference_length }] };
-      await evalIn(evalPage, `(() => { window.__peerdEval.run(${JSON.stringify(runOpts)}); return true; })()`);
-      const card = await waitFor(async () => {
-        const err = await evalIn(evalPage, `window.__peerdEval.lastError`);
-        if (err) throw new Error(`in-page: ${err}`);
-        return evalIn(evalPage, `window.__peerdEval.lastCard`);
-      }, { budgetMs: TASK_TIMEOUT_MS + 60_000, pollMs: 3_000 });
+      // Harness faults (dead eval page, in-page error, hung CDP send) are
+      // per-task failures, NOT run-enders: treat like a timeout so the recycle
+      // + circuit-breaker machinery handles them and the shard stays resumable.
+      let card = null;
+      try {
+        await withDeadline(
+          evalIn(evalPage, `(() => { window.__peerdEval.run(${JSON.stringify(runOpts)}); return true; })()`),
+          30_000, 'task launch');
+        card = await withDeadline(waitFor(async () => {
+          const err = await evalIn(evalPage, `window.__peerdEval.lastError`);
+          if (err) throw new Error(`in-page: ${err}`);
+          return evalIn(evalPage, `window.__peerdEval.lastCard`);
+        }, { budgetMs: TASK_TIMEOUT_MS + 60_000, pollMs: 3_000 }), TASK_TIMEOUT_MS + 90_000, 'task wait');
+      } catch (e) {
+        log(`  ⚠ ${t.task_id}: harness fault (${/** @type {{ message?: string }} */ (e)?.message ?? e}) — treating as a timeout`);
+        card = null;
+      }
       let timedOut = false;
       if (!card) {
         log(`  ✗ ${t.task_id}: no result within budget`);
@@ -190,7 +220,7 @@ async function main() {
         }
       } else {
         consecTimeouts = 0;
-        const results = await evalIn(evalPage, `window.__peerdEval.lastResults`);
+        const results = await withDeadline(evalIn(evalPage, `window.__peerdEval.lastResults`), 30_000, 'results read').catch(() => null);
         exportTask(t, (results || [])[0]);
         done++;
       }
