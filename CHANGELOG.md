@@ -10,6 +10,18 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Added
+- **`peerd:wasi` ships a self-test module.** `demoModule()` (exported next
+  to `runWasi`) returns a tiny (187-byte) known-good wasm32-wasi hello
+  module, embedded in the extension — so the agent can smoke-test
+  `runWasi(demoModule())` inside the sealed worker with no network and no
+  toolchain, instead of hunting the web for a working binary (a live
+  session burned itself on exactly that hunt). The blob is hand-assembled,
+  regenerable from `tests/notebook-tab/wasi-test-module.ts`, and the bun
+  suite pins the embedded bytes against that builder so blob and source
+  cannot drift. Taught in the `script` / `js_create` lore and the code-mode
+  prompt.
+
 ### Fixed
 - **`resp.bytes()` works in sandboxed code now.** The sealed-realm fetch
   bridge (Notebook / script / a2a runs) listed `bytes` on its response but

@@ -74,7 +74,9 @@ export const scriptTool = {
     'an in-memory FS — import { runWasi } from \'peerd:wasi\'; await',
     'runWasi(bytes, { args, env, stdin, files }) → { exitCode, stdout, stderr,',
     'files } (bytes from peerd.egress.fetch(url).bytes; the module gets NO',
-    'network and sees ONLY the files you pass). Returns the value, console',
+    'network and sees ONLY the files you pass; demoModule() from the same',
+    'import is a known-good module — smoke-test runWasi(demoModule()) before',
+    'hunting real binaries). Returns the value, console',
     'output, any error, and a [DELEGATIONS] trace of every actors op.',
   ].join(' '),
   schema: {
