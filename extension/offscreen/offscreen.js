@@ -30,6 +30,10 @@ import { runActor, abortActor } from './actor-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
+// HTML -> markdown extraction (fetch_url's clean-content path): Readability +
+// Turndown need a DOM Document, which the SW can't build. Self-registers a
+// 'web/extract' message handler.
+import './web-extract.js';
 import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
 import { isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;

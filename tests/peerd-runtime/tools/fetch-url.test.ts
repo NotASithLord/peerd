@@ -136,3 +136,129 @@ describe('fetch_url — sessionless secure fetch', () => {
     expect(r.error).toMatch(/private|loopback/i);      // names why the direct fetch was blocked
   });
 });
+
+// --- the content pipeline: HTML→markdown extraction + spill-and-page ---------
+// The extraction is FAIL-OPEN (a non-article page, a missing client, or an
+// extraction error all keep the raw behavior); the spill turns the old silent
+// head-only slice into a windowed body + a trusted paging footer OUTSIDE the
+// fence.
+
+const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8' };
+const htmlCtx = (over: any = {}) => recordingCtx({
+  webFetch: async () => mockResponse({ body: '<html><body><p>raw page</p></body></html>', headers: HTML_HEADERS, url: 'https://site.example/a' }),
+  ...over,
+}).ctx;
+
+describe('fetch_url — markdown extraction (fail-open)', () => {
+  test('an HTML response routes through the extraction client and comes back as markdown', async () => {
+    const ctx = htmlCtx({
+      webOffscreenClient: {
+        extractMarkdown: async ({ html, url }: any) => {
+          expect(html).toContain('raw page');
+          expect(url).toBe('https://site.example/a');
+          return { readerable: true, markdown: '# Title\n\nclean body', title: 'Title', htmlTruncated: false };
+        },
+      },
+    });
+    const r = await fetchUrlTool.execute({ url: 'https://site.example/a' }, ctx);
+    if (!r.ok) throw new Error('expected ok');
+    const body = unwrap(r.content!);
+    expect(body.format).toBe('markdown');
+    expect(body.title).toBe('Title');
+    expect(body.body).toContain('clean body');
+  });
+
+  test('raw:true bypasses extraction entirely', async () => {
+    let called = false;
+    const ctx = htmlCtx({ webOffscreenClient: { extractMarkdown: async () => { called = true; return { readerable: true, markdown: 'x' }; } } });
+    const r = await fetchUrlTool.execute({ url: 'https://site.example/a', raw: true }, ctx);
+    if (!r.ok) throw new Error('expected ok');
+    expect(called).toBe(false);
+    expect(unwrap(r.content!).format).toBe('raw');
+  });
+
+  test('a non-readerable page and an extraction error both fall back to raw', async () => {
+    for (const client of [
+      { extractMarkdown: async () => ({ readerable: false, htmlTruncated: false }) },
+      { extractMarkdown: async () => { throw new Error('boom'); } },
+    ]) {
+      const r = await fetchUrlTool.execute({ url: 'https://site.example/a' }, htmlCtx({ webOffscreenClient: client }));
+      if (!r.ok) throw new Error('expected ok');
+      const body = unwrap(r.content!);
+      expect(body.format).toBe('raw');
+      expect(body.body).toContain('raw page');
+    }
+  });
+
+  test('a missing client (Firefox: no offscreen doc) keeps the raw behavior', async () => {
+    const r = await fetchUrlTool.execute({ url: 'https://site.example/a' }, htmlCtx());
+    if (!r.ok) throw new Error('expected ok');
+    expect(unwrap(r.content!).format).toBe('raw');
+  });
+
+  test('non-HTML content types never touch the extraction client', async () => {
+    let called = false;
+    const { ctx } = recordingCtx({
+      webFetch: async () => mockResponse({ body: '{"a":1}', headers: { 'content-type': 'application/json' }, url: 'https://api.example/x' }),
+      webOffscreenClient: { extractMarkdown: async () => { called = true; return { readerable: true, markdown: 'x' }; } },
+    });
+    const r = await fetchUrlTool.execute({ url: 'https://api.example/x' }, ctx);
+    if (!r.ok) throw new Error('expected ok');
+    expect(called).toBe(false);
+    expect(unwrap(r.content!).json).toEqual({ a: 1 });
+  });
+});
+
+describe('fetch_url — spill-and-page for an oversized body', () => {
+  const BIG = 'H'.repeat(15_000) + 'M'.repeat(30_000) + 'T'.repeat(15_000);   // 60k chars
+
+  test('spills the full text, shows head+tail, and appends the paging footer OUTSIDE the fence', async () => {
+    const stored: any[] = [];
+    const { ctx } = recordingCtx({
+      webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/big' }),
+      webCache: { key: () => 'wc-test-1', put: async (rec: any) => { stored.push(rec); } },
+    });
+    const r = await fetchUrlTool.execute({ url: 'https://site.example/big' }, ctx);
+    if (!r.ok) throw new Error('expected ok');
+    // The FULL text was spilled.
+    expect(stored).toHaveLength(1);
+    expect(stored[0].key).toBe('wc-test-1');
+    expect(stored[0].text.length).toBe(60_000);
+    // The fenced body is the head+tail window with the elision marker.
+    const afterFence = r.content!.split('</untrusted_web_content>')[1];
+    expect(afterFence).toContain('read_web_cache');
+    expect(afterFence).toContain('"key": "wc-test-1"');
+    // unwrap() anchors the close tag at $ — with a footer after the fence,
+    // parse the fenced JSON by splitting at the tags instead.
+    const body = JSON.parse(r.content!.split(/<untrusted_web_content [^>]*>\n/)[1].split('\n</untrusted_web_content>')[0]);
+    expect(body.truncated).toBe(true);
+    expect(body.body).toContain('characters elided');
+    expect(body.body.startsWith('H'.repeat(100))).toBe(true);
+    expect(body.body.endsWith('T'.repeat(100))).toBe(true);
+  });
+
+  test('no webCache capability → the pre-spill head-only slice, no footer', async () => {
+    const { ctx } = recordingCtx({
+      webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/big' }),
+    });
+    const r = await fetchUrlTool.execute({ url: 'https://site.example/big' }, ctx);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.content).not.toContain('read_web_cache');
+    const body = unwrap(r.content!);
+    expect(body.truncated).toBe(true);
+    expect(body.body.length).toBe(16_000);
+    expect(body.body.endsWith('M'.repeat(100))).toBe(true);   // head-only: ends mid-middle
+  });
+
+  test('a small body is untouched: no spill, no footer, truncated:false', async () => {
+    const stored: any[] = [];
+    const { ctx } = recordingCtx({
+      webCache: { key: () => 'wc-x', put: async (rec: any) => { stored.push(rec); } },
+    });
+    const r = await fetchUrlTool.execute({ url: 'https://x.com/' }, ctx);
+    if (!r.ok) throw new Error('expected ok');
+    expect(stored).toHaveLength(0);
+    expect(r.content).not.toContain('[paging]');
+    expect(unwrap(r.content!).truncated).toBe(false);
+  });
+});

@@ -22,6 +22,7 @@ import { typeTool }                  from './type.js';
 import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { fetchUrlTool }              from './fetch-url.js';
+import { readWebCacheTool }          from './read-web-cache.js';
 import { actorListTool }             from './actor-list.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
@@ -161,6 +162,9 @@ export const BUILTIN_TOOLS = Object.freeze([
   // hidden from main; allowed ONLY for a code-surface web actor
   // (WEB_ACTOR_CODE_TOOLS in exposure.js).
   pageCodeTool,
+  // fetch_url's spill-and-page read side — same exposure (web actor only; the
+  // cache holds fetched page content).
+  readWebCacheTool,
   // engine — sandbox_create is the one cross-kind bootstrap (it folded
   // vm_create/js_create/app_create); the per-kind ops below are all
   // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.

@@ -19,6 +19,7 @@
 import { fetchUrl } from '../web/primitives.js';
 import { originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
+import { windowText, pagingFooter } from '../web/spill.js';
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
 
 const MAX_BODY_CHARS = 16_000;   // hard cap to avoid context-blast on huge payloads
@@ -53,7 +54,8 @@ export const fetchUrlTool = {
     'client-side, drive a tab instead — but once you HAVE rendered a site, fetch_url',
     "carries its session, so hit that SAME origin's endpoints here instead of",
     're-scraping. Rides the denylist + SSRF + audit egress chain; does NOT follow',
-    'redirects. Returns status, final URL, body + parsed JSON (capped 16k).',
+    'redirects. Returns status, final URL, body + parsed JSON (capped 16k). HTML',
+    'is extracted to clean markdown by default (raw:true for the full HTML).',
   ].join(' '),
   schema: {
     type: 'object',
@@ -61,6 +63,7 @@ export const fetchUrlTool = {
     properties: {
       url: { type: 'string', description: 'Absolute URL (must include an http(s) scheme).' },
       method: { type: 'string', enum: ['GET', 'POST'], description: 'HTTP method. Default GET.' },
+      raw: { type: 'boolean', description: 'HTML responses are extracted to clean markdown by default (boilerplate stripped). Pass true to get the raw HTML instead — e.g. when you need markup, attributes, or embedded script/JSON the extraction would drop.' },
       headers: {
         type: 'object',
         description: 'Request headers. Tool-supplied Cookie / Authorization are always stripped (you cannot inject a credential). Content-Type is set automatically for JSON bodies.',
@@ -114,28 +117,74 @@ export const fetchUrlTool = {
         { method, headers, body: /** @type {string | undefined} */ (body) },
         ctx,
       );
-      const truncated = res.body.length > MAX_BODY_CHARS;
-      const text = truncated ? res.body.slice(0, MAX_BODY_CHARS) : res.body;
-      let parsedJson = null;
       const ct = res.headers['content-type'] ?? '';
-      if (/(json|graphql)/i.test(ct)) { try { parsedJson = JSON.parse(text); } catch { parsedJson = null; } }
+      // HTML → clean markdown (the default; raw:true opts out). Boilerplate is
+      // most of a page's bytes, and the JSON envelope below escapes every
+      // quote in it — raw HTML routinely burns the whole 16k budget on nav and
+      // script tags. Readability+Turndown (offscreen — the SW has no DOMParser)
+      // return the readable core instead. FAIL-OPEN by design: a non-article
+      // page (readerable:false), a missing client (Firefox — no offscreen
+      // doc), or an extraction error all fall back to today's raw behavior —
+      // extraction is an optimization, never a gate on the fetch.
+      let workingBody = res.body;
+      let format = 'raw';
+      let title = null;
+      const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | null | undefined} */ (
+        /** @type {any} */ (ctx).webOffscreenClient);
+      if (args.raw !== true && /text\/html|application\/xhtml/i.test(ct) && webClient?.extractMarkdown) {
+        try {
+          const ex = await webClient.extractMarkdown({ html: res.body, url: res.finalUrl || args.url });
+          if (ex.readerable && typeof ex.markdown === 'string' && ex.markdown.trim()) {
+            workingBody = ex.markdown;
+            format = 'markdown';
+            title = ex.title ?? null;
+          }
+        } catch { /* extraction failed — raw fallback */ }
+      }
+      // Spill-and-page for an oversized body (Hermes-style): the FULL text is
+      // stored locally and the model sees a head+tail WINDOW plus the exact
+      // read_web_cache paging call — instead of the old silent head-only slice
+      // that lost the tail without saying so. Falls back to the old slice when
+      // the cache capability is absent (a ctx without webCache).
+      const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
+        /** @type {any} */ (ctx).webCache);
+      const win = windowText(workingBody, MAX_BODY_CHARS);
+      let text = win.window;
+      const truncated = win.windowed;
+      /** @type {string | null} */
+      let footer = null;
+      if (win.windowed && webCache?.key && webCache?.put) {
+        const cacheKey = webCache.key();
+        try {
+          await webCache.put({ key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody });
+          footer = pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+        } catch { /* spill failed — the window (with its elision marker) still ships */ }
+      } else if (win.windowed && !webCache) {
+        // No cache capability → the pre-spill behavior (head-only slice).
+        text = workingBody.slice(0, MAX_BODY_CHARS);
+      }
+      let parsedJson = null;
+      if (/(json|graphql)/i.test(ct)) { try { parsedJson = JSON.parse(truncated ? workingBody.slice(0, MAX_BODY_CHARS) : text); } catch { parsedJson = null; } }
       // The body is open-web content the page/host controls — fence it as DATA,
-      // not instructions (the same boundary call_api / read_page enforce).
-      return {
-        ok: true,
-        content: wrapUntrusted({
-          origin: originOfUrl(res.finalUrl || args.url),
-          tool: 'fetch_url',
-          body: JSON.stringify({
-            status: res.status,
-            finalUrl: res.finalUrl,
-            contentType: ct || null,
-            truncated,
-            body: text,
-            json: parsedJson,
-          }, null, 2),
-        }),
-      };
+      // not instructions (the same boundary call_api / read_page enforce). The
+      // paging footer is TOOL-AUTHORED (caller-computed values only, never
+      // fetched bytes) and rides OUTSIDE the fence — page content must never
+      // be able to forge or suppress it.
+      const fenced = wrapUntrusted({
+        origin: originOfUrl(res.finalUrl || args.url),
+        tool: 'fetch_url',
+        body: JSON.stringify({
+          status: res.status,
+          finalUrl: res.finalUrl,
+          contentType: ct || null,
+          format,
+          ...(title ? { title } : {}),
+          truncated,
+          body: text,
+          json: parsedJson,
+        }, null, 2),
+      });
+      return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
     } catch (e) {
       const err = /** @type {{ reason?: string, message?: string }} */ (e);
       if (err?.reason === 'redirect_blocked') {

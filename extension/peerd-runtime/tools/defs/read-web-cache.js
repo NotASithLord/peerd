@@ -1,0 +1,76 @@
+// @ts-check
+// read_web_cache — page through a spilled fetch_url body.
+//
+// When fetch_url's text overflows its budget, the FULL text is spilled to the
+// local web_extract_cache store and the model sees a head+tail window plus a
+// footer naming this tool (tools/web/spill.js). This is the read side: an
+// offset/limit slice of that stored text. Web-actor-only, same exposure as
+// fetch_url itself — the cache holds fetched page content, which is the web
+// actor's tier (the main agent delegates via message_actor).
+//
+// The slice is STILL untrusted page content — it goes back out wrapped in the
+// same fence fetch_url uses; only the tool-authored paging status rides
+// outside it.
+
+import { wrapUntrusted } from '../prompt-wrap.js';
+import { originOfUrl } from './dom-helpers.js';
+import { pageSlice } from '../web/spill.js';
+
+// Same per-call ceiling as fetch_url's body budget — one page of cache reads
+// like one fetch.
+const MAX_SLICE_CHARS = 16_000;
+
+/** @type {import('/shared/tool-types.js').Tool} */
+export const readWebCacheTool = {
+  name: 'read_web_cache',
+  primitive: 'web',
+  description: [
+    'Read a slice of a spilled fetch_url body. When a fetch overflows its budget the',
+    'full text is stored locally and the result names the cache key — page through it',
+    'here with { key, offset, limit }. Offsets are character positions into the stored',
+    'text; the result reports what remains after the slice.',
+  ].join(' '),
+  schema: {
+    type: 'object',
+    required: ['key'],
+    properties: {
+      key: { type: 'string', description: 'The cache key from the fetch_url paging note.' },
+      offset: { type: 'number', description: 'Start character offset. Default 0.' },
+      limit: { type: 'number', description: `Max characters to return (capped at ${MAX_SLICE_CHARS}). Default the cap.` },
+    },
+  },
+  sideEffect: 'read',
+  // The cache is local — no network origin is touched by a page read.
+  origins: () => [],
+  execute: async (args, ctx) => {
+    if (typeof args?.key !== 'string' || !args.key) return { ok: false, error: 'key_required' };
+    const webCache = /** @type {{ get?: (key: string) => Promise<{ key: string, url?: string, format?: string, text: string } | undefined> } | undefined} */ (
+      /** @type {any} */ (ctx).webCache);
+    if (!webCache?.get) return { ok: false, error: 'web_cache_unavailable' };
+    const rec = await webCache.get(args.key).catch(() => undefined);
+    if (!rec || typeof rec.text !== 'string') {
+      return { ok: false, error: `no_such_key: ${args.key} — the cache entry may have been evicted; re-fetch the URL.` };
+    }
+    const limit = Math.min(typeof args.limit === 'number' && args.limit > 0 ? args.limit : MAX_SLICE_CHARS, MAX_SLICE_CHARS);
+    const page = pageSlice(rec.text, typeof args.offset === 'number' ? args.offset : 0, limit);
+    // The slice is fetched page content — fenced exactly like the fetch that
+    // produced it. The paging status is tool-authored → outside the fence.
+    const fenced = wrapUntrusted({
+      origin: originOfUrl(rec.url ?? '') ?? 'cache',
+      tool: 'read_web_cache',
+      body: JSON.stringify({
+        key: rec.key,
+        url: rec.url ?? null,
+        format: rec.format ?? 'raw',
+        offset: page.offset,
+        end: page.end,
+        total: page.total,
+        body: page.slice,
+      }, null, 2),
+    });
+    const status = page.remaining > 0
+      ? `[paging] chars ${page.offset}–${page.end} of ${page.total}; ${page.remaining} remain — next: { "key": "${rec.key}", "offset": ${page.end} }.`
+      : `[paging] chars ${page.offset}–${page.end} of ${page.total}; end of stored text.`;
+    return { ok: true, content: `${fenced}\n${status}` };
+  },
+};
