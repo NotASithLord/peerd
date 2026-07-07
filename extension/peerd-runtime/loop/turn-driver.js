@@ -61,7 +61,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // Lazy session create — bind the chat to whatever provider/model the user
   // has configured (no provider is assumed on a fresh install; see
   // ensureActiveProvider below). targetSessionId
-  // re-enters a SPECIFIC parent session for an async-subagent reintegration
+  // re-enters a SPECIFIC parent session for an async-actor reintegration
   // (DESIGN-11) WITHOUT touching currentSessionId — never switch the user's
   // active view (DECISIONS #20). The lazy-create path below only runs for a
   // genuinely fresh active chat (no target, no current).
@@ -115,7 +115,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
   // message_actor (display set; absent on a boot redrain), re-emit its stream as
   // a turn/actor-* family keyed to that tool_use card — the orchestrator renders
-  // the actor's work inline (the subagent live-view, for an actor). The plain
+  // the actor's work inline (the actor live-view, for an actor). The plain
   // turn/* below are dropped anyway (an actor session is never the viewed chat);
   // these carry the card correlation. fromIndex is the actor session length
   // BEFORE this turn appends its message, so the card shows just THIS exchange —
@@ -406,7 +406,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     const chain = resolveFailoverChain(start);
     // The context inspector sees every ORCHESTRATOR model call here — the
     // one seam every step of every main turn passes through. (Actors and
-    // subagents are captured at the SW's actor/model-call relay instead.)
+    // spawned are captured at the SW's actor/model-call relay instead.)
     // record() is contractually non-throwing; label with the provider the
     // call will actually start on.
     recordModelCall({ ...modelArgs, provider: start.provider, model: start.model, sessionId, label: 'main' });

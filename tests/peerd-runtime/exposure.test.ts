@@ -64,7 +64,7 @@ describe('tool exposure (main-agent cutover)', () => {
   });
 
   test('keeps tab management + non-browser tools visible to the main agent', () => {
-    for (const name of ['actor_list', 'open_tab', 'message_actor', 'spawn_subagent', 'vm_boot', 'remember']) {
+    for (const name of ['actor_list', 'open_tab', 'message_actor', 'actor_create', 'vm_boot', 'remember']) {
       expect(isHiddenFromMain(name)).toBe(false);
     }
   });
@@ -82,7 +82,7 @@ describe('exposureGate — enforcement at dispatch (not just the descriptor list
     expect(r.reason).toContain('actor-only');
   });
 
-  test('allows a hidden tool for the actor / subagent (exposure unset)', () => {
+  test('allows a hidden tool for the actor / actor (exposure unset)', () => {
     expect(eg({ name: 'page_exec' }, {}, {}).allowed).toBe(true);
     expect(eg({ name: 'snapshot' }, {}, { exposure: null }).allowed).toBe(true);
   });
@@ -179,10 +179,10 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
 });
 
 describe('DESIGN-17 actor tier — the gate (the wall)', () => {
-  test('a NON-actor (subagent/main/direct) is refused the mutating tier', () => {
-    // THE PROOF: a `spawn_subagent({tools:['app_delete']})` child has exposure
+  test('a NON-actor (actor/main/direct) is refused the mutating tier', () => {
+    // THE PROOF: a `actor_create({tools:['app_delete']})` child has exposure
     // unset → refused at the gate even though the tool name is in its subset.
-    for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'subagent' }]) {
+    for (const ctx of [{}, { exposure: 'main' }, { exposure: null }, { exposure: 'spawned' }]) {
       const r = rt({ name: 'app_delete' }, {}, ctx);
       expect(r?.allowed).toBe(false);
       expect(r?.reason).toContain('actor-only');
@@ -208,7 +208,7 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
     expect(rt({ name: 'app_update' }, {}, appCtx)).toBeNull();          // allowed
     expect(rt({ name: 'vm_boot' }, {}, appCtx)?.allowed).toBe(false);   // foreign kind
     expect(rt({ name: 'call_api' }, {}, appCtx)?.allowed).toBe(false);  // non-env
-    expect(rt({ name: 'spawn_subagent' }, {}, appCtx)?.allowed).toBe(false);
+    expect(rt({ name: 'actor_create' }, {}, appCtx)?.allowed).toBe(false);
   });
 
   test('the per-instance pin refuses a sibling id, allows the bound id / no id', () => {
@@ -245,8 +245,18 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
 });
 
 describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () => {
+  // Production shape (buildToolContext, service-worker.js): the per-chat web
+  // actor's actorInstanceId is the FIXED literal 'web' (its message_actor
+  // address — stable across re-navigation), never a tab id. The actor's
+  // actually-owned tab lives at ctx.activeTab.id, resolved separately. A
+  // prior version of this fixture encoded the tab id INTO actorInstanceId
+  // ('42') — which matched an earlier design but not the real ctx shape after
+  // the singleton-actor-address change, and silently stopped exercising the
+  // real bug: gates.js compared against actorInstanceId ('web' in
+  // production), so every own-tab call was refused. Fixed in gates.js; this
+  // fixture now matches what buildToolContext actually produces.
   const web = (over: object = {}) =>
-    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: '42', ...over });
+    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web', activeTab: { id: 42, url: 'https://example.test/', origin: 'https://example.test' }, ...over });
 
   test('WEB_ACTOR_DOM_TOOLS is the DOM read/mutate set (no code-exec)', () => {
     // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
@@ -306,7 +316,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // notably page_eval/page_exec (code-exec) are NOT in the web toolset — the
     // exclusion that IS the web actor's boundary, enforced at the gate.
     for (const n of ['app_update', 'vm_boot', 'js_notebook', 'edit_file',
-      'call_api', 'spawn_subagent', 'page_eval', 'page_exec', 'message_actor']) {
+      'call_api', 'actor_create', 'page_eval', 'page_exec', 'message_actor']) {
       expect(rt({ name: n }, {}, web())?.allowed).toBe(false);
     }
   });
@@ -317,7 +327,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // exposure axis), NOT by the mutating tier — so the tier has no opinion.
     for (const n of ['click', 'type', 'navigate']) {
       expect(isActorOnlyTool(n)).toBe(false);
-      expect(rt({ name: n }, {}, {})).toBeNull();                   // subagent (exposure unset)
+      expect(rt({ name: n }, {}, {})).toBeNull();                   // actor (exposure unset)
       expect(rt({ name: n }, {}, { exposure: 'main' })).toBeNull(); // tier no-opinion (exposure hides it)
     }
   });
@@ -328,6 +338,26 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(rt({ name: 'click' }, { tabId: 99 }, web())?.allowed).toBe(false); // sibling tab
     expect(rt({ name: 'click' }, { tabId: 42 }, web())).toBeNull();           // own tab
     expect(rt({ name: 'click' }, {}, web())).toBeNull();                      // default → bound
+  });
+
+  // Regression: gates.js used to compare the explicit tabId against
+  // ctx.actorInstanceId. In production that's the fixed literal 'web' (the
+  // singleton actor's message_actor address), never a tab id, so EVERY
+  // own-tab call was refused — confirmed live: a read_page on the actor's own
+  // tab was refused with "pinned to tab web". The check must key off
+  // ctx.activeTab.id (the actor's real owned tab), independent of whatever
+  // string actorInstanceId happens to hold.
+  test('the tab pin keys off ctx.activeTab.id, not actorInstanceId', () => {
+    const ctx = { exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web', activeTab: { id: 1006003486, url: 'https://example.test/', origin: 'https://example.test' } };
+    // Exactly the reported failure: same numeric tab as the owned one, named explicitly.
+    expect(rt({ name: 'read_page' }, { tabId: 1006003486 }, ctx)).toBeNull();
+    // The security guarantee is untouched: a DIFFERENT explicit tab is still refused.
+    const refused = rt({ name: 'read_page' }, { tabId: 999 }, ctx);
+    expect(refused?.allowed).toBe(false);
+    expect(refused?.reason).toContain('1006003486');
+    // No owned tab yet (0-tab state) — an explicit tabId still fails closed.
+    const noTab = rt({ name: 'read_page' }, { tabId: 1 }, { exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web' });
+    expect(noTab?.allowed).toBe(false);
   });
 
   test('actorDescriptors filters a web actor to its DOM toolset', () => {

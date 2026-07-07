@@ -15,7 +15,7 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
   const cases: Array<[string, ReturnType<typeof classifyFailure>['kind']]> = [
     // [error text as produced, expected kind]
     ["message_actor: 4 actor messages already in flight for this turn", 'policy'],
-    ['subagent refused: max depth 2 exceeded (requested depth 3)', 'policy'],
+    ['actor refused: max depth 2 exceeded (requested depth 3)', 'policy'],
     // the dispatcher's REAL refusal prefixes (dispatcher.js) — the review
     // found the first draft matched only invented strings here
     ['gate_blocked:plan-act:plan mode is read-only; blocks page_mutation actions', 'policy'],
@@ -79,7 +79,7 @@ describe('childSessionIdsOf — the delegation tree walk', () => {
       { sessionId: 'root' },
       { sessionId: 'web-1', parentSessionId: 'root' },
       { sessionId: 'sub-1', parentSessionId: 'root' },
-      { sessionId: 'vm-1', parentSessionId: 'sub-1' },     // grandchild via subagent
+      { sessionId: 'vm-1', parentSessionId: 'sub-1' },     // grandchild via actor
       { sessionId: 'other', parentSessionId: 'elsewhere' }, // unrelated
       { sessionId: 'loop', parentSessionId: 'loop' },       // corrupt self-cycle
     ];
@@ -194,13 +194,13 @@ describe('bundleToOtlp — the span tree', () => {
   });
 
   test('a GRANDCHILD hangs off its real spawner, not flattened onto the chat root', () => {
-    const sub = { sessionId: 'sub-1', kind: 'subagent', parentSessionId: SESSION.sessionId, messages: [] };
+    const sub = { sessionId: 'sub-1', kind: 'spawned', parentSessionId: SESSION.sessionId, messages: [] };
     const vm = { sessionId: 'vm-1', kind: 'actor', actorType: 'webvm', parentSessionId: 'sub-1', messages: [] };
     const orphan = { sessionId: 'or-1', kind: 'actor', actorType: 'app', parentSessionId: 'clamped-away', messages: [] };
     const b = assembleDebugBundle({ session: SESSION, childSessions: [sub, vm, orphan], now: 0 });
     const tree = bundleToOtlp(b).resourceSpans[0].scopeSpans[0].spans;
     const root = tree.find((s: any) => s.name === 'peerd.session chat') as any;
-    const subRoot = tree.find((s: any) => s.name === 'peerd.session subagent') as any;
+    const subRoot = tree.find((s: any) => s.name === 'peerd.session spawned') as any;
     const vmRoot = tree.find((s: any) => s.name === 'peerd.session actor:webvm') as any;
     const orphanRoot = tree.find((s: any) => s.name === 'peerd.session actor:app') as any;
     expect(subRoot.parentSpanId).toBe(root.spanId);

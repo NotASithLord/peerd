@@ -85,12 +85,12 @@ export const makeSessionMutationRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       const session = await sessions.get(sessionId);
       if (!session) return { ok: false, error: 'session-not-found' };
-      // DESIGN-17 / subagents: only real CHATS are switchable. An actor/subagent
+      // DESIGN-17 / spawned sessions: only real CHATS are switchable. An actor/actor
       // is reached by message / through its parent, never made the active chat —
       // already hidden from session/list, this is the matching guard so a crafted
       // id can't park currentSessionId on a non-chat session.
       const switchKind = session.kind ?? 'chat';
-      if (switchKind === 'actor' || switchKind === 'subagent') {
+      if (switchKind === 'actor' || switchKind === 'spawned') {
         return { ok: false, error: 'not-a-chat' };
       }
       const previousId = await sessionCache.sessionGet('currentSessionId');

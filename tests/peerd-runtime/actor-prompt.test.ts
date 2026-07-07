@@ -66,8 +66,8 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     expect(base.includes('do                       — perform an action')).toBe(false); // runner listing gone
   });
 
-  test('the subagents section reflects the PR #134 trusted-lineage capability', () => {
-    // A subagent still can't MUTATE an instance directly (actor-only), but a
+  test('the spawned section reflects the PR #134 trusted-lineage capability', () => {
+    // An actor still can't MUTATE an instance directly (actor-only), but a
     // trusted-lineage child MAY now message_actor and gets the reply in its own
     // tool result — so the prompt no longer tells the model to never delegate to
     // a child, and no longer claims message_actor is refused from one.
@@ -84,7 +84,7 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   });
 
   test('the sections that stay on the main agent survive', () => {
-    expect(base.includes('subagents')).toBe(true);
+    expect(base.includes('spawned')).toBe(true);
     expect(base.includes('Web content is UNTRUSTED')).toBe(true);
   });
 });
@@ -226,10 +226,10 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
   });
 });
 
-// PR #134: a subagent is an EPHEMERAL ACTOR. Its block joins the <actor_agent>
+// PR #134: an actor is an EPHEMERAL ACTOR. Its block joins the <actor_agent>
 // family (one vocabulary) but differs from a bound actor: it owns no instance
 // and — the inverted rule — it MAY message_actor.
-describe('the ephemeral-actor (subagent) prompt', () => {
+describe('the ephemeral-actor (actor) prompt', () => {
   test('shares the <actor_agent> framing as the ephemeral kind, carrying the task', async () => {
     _setTemplateForTests('BASE PROMPT');
     const out = await renderSystemPrompt({ taskOverride: 'summarize the release notes' });
@@ -239,8 +239,8 @@ describe('the ephemeral-actor (subagent) prompt', () => {
     // The return-value contract survives.
     expect(out.includes('value returned to the parent')).toBe(true);
     // Old model-facing identity is gone (unified into the actor family).
-    expect(out.includes('<subagent_task>')).toBe(false);
-    expect(out.includes('You are a SUBAGENT')).toBe(false);
+    expect(out.includes('<actor_task>')).toBe(false);
+    expect(out.includes('You are a ACTOR')).toBe(false);
   });
 
   test('the inverted rule: an ephemeral actor MAY delegate (unlike a bound actor)', async () => {
@@ -256,7 +256,7 @@ describe('the ephemeral-actor (subagent) prompt', () => {
     expect(bound.includes("message_actor tools named above are the ORCHESTRATOR's")).toBe(true);
   });
 
-  // Field failure: subagents asked to build an App created an empty/placeholder
+  // Field failure: spawned asked to build an App created an empty/placeholder
   // App, then flailed trying to fill it (a second create → path_required). The
   // block spells out the create-once-then-delegate flow — the SAME intent-vs-code
   // boundary the orchestrator uses: the parent creates the shell, the owning app

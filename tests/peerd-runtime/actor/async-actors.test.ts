@@ -1,8 +1,8 @@
 import { describe, test, expect } from 'bun:test';
-import { makeAsyncSubagents } from '../../../extension/peerd-runtime/subagent/async-subagents.js';
+import { makeAsyncActors } from '../../../extension/peerd-runtime/actor/async-actors.js';
 import { makeTurnSlots } from '../../../extension/peerd-runtime/loop/turn-slots.js';
 
-// DESIGN-11 async subagents — the orchestration extracted from the SW so the
+// DESIGN-11 async spawned — the orchestration extracted from the SW so the
 // spawn → settle → drain → re-enter flow is testable. The load-bearing test is
 // the RUNAWAY: a wake turn that re-spawns must be bounded (the live bug forced a
 // browser force-quit). The rest pin the contract: reintegration as a synthetic
@@ -11,7 +11,7 @@ import { makeTurnSlots } from '../../../extension/peerd-runtime/loop/turn-slots.
 const flush = () => new Promise((r) => setTimeout(r, 5));
 
 const baseDeps = (over = {}) => ({
-  spawnSubagent: async (req: any) => ({ result: `R:${req.task}`, sessionId: 'child' }),
+  spawnActor: async (req: any) => ({ result: `R:${req.task}`, sessionId: 'child' }),
   turnSlots: makeTurnSlots(),
   reenter: async (_o: any) => {},
   getActiveSessionId: async () => 'parent',
@@ -22,15 +22,15 @@ const baseDeps = (over = {}) => ({
   ...over,
 });
 
-describe('makeAsyncSubagents', () => {
+describe('makeAsyncActors', () => {
   test('spawn returns a handle immediately, result re-enters as a synthetic wake', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncSubagents(baseDeps({
-      spawnSubagent: async () => ({ result: 'BROMANTANE FACTS', sessionId: 'c1' }),
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({ result: 'BROMANTANE FACTS', sessionId: 'c1' }),
       reenter: async (o: any) => { reenters.push(o); },
     }));
 
-    const handle = await as.spawnSubagentAsync({ task: 'research bromantane', parentSessionId: 'parent' });
+    const handle = await as.spawnActorAsync({ task: 'research bromantane', parentSessionId: 'parent' });
     expect(handle.ok).toBe(true);
     expect(handle.taskId).toBe('as-1');
     expect(handle.content).toContain('Do NOT wait'); // the anti-poll instruction baked into the handle
@@ -48,11 +48,11 @@ describe('makeAsyncSubagents', () => {
   // just stopped, so a reintegration wake would restart it seconds after Stop.
   test('a Stop-aborted child does not wake the parent (dropped like a cancel)', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncSubagents(baseDeps({
-      spawnSubagent: async () => ({ result: 'partial', sessionId: 'c1', stopped: true }),
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({ result: 'partial', sessionId: 'c1', stopped: true }),
       reenter: async (o: any) => { reenters.push(o); },
     }));
-    await as.spawnSubagentAsync({ task: 'long', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'long', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(0); // no synthetic wake after a user Stop
   });
@@ -61,11 +61,11 @@ describe('makeAsyncSubagents', () => {
   // wants the partial, so a timed-out child DOES reintegrate.
   test('a timed-out child still wakes the parent with its partial', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncSubagents(baseDeps({
-      spawnSubagent: async () => ({ result: 'partial', sessionId: 'c1', timedOut: true }),
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({ result: 'partial', sessionId: 'c1', timedOut: true }),
       reenter: async (o: any) => { reenters.push(o); },
     }));
-    await as.spawnSubagentAsync({ task: 'slow', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'slow', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(1);
     expect(reenters[0].userText).toContain('wall-clock timeout');
@@ -75,11 +75,11 @@ describe('makeAsyncSubagents', () => {
   // never goes stale. Spawn makes the task appear; settle flips it done.
   test('onTasksChanged fires on spawn and on settle (feeds the live status bar)', async () => {
     const calls: string[] = [];
-    const as = makeAsyncSubagents(baseDeps({
-      spawnSubagent: async () => ({ result: 'ok', sessionId: 'c1' }),
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({ result: 'ok', sessionId: 'c1' }),
       onTasksChanged: (sid: string) => { calls.push(sid); },
     }));
-    await as.spawnSubagentAsync({ task: 'T', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'T', parentSessionId: 'parent' });
     await flush();
     // Pushes for the active parent only, and more than once: spawn (task
     // appears) plus the settle/deliver transitions (status changes). Exact
@@ -94,22 +94,22 @@ describe('makeAsyncSubagents', () => {
   test('a re-spawning wake turn is bounded by the rate cap (runaway guard)', async () => {
     let childRuns = 0;
     let as: any;
-    as = makeAsyncSubagents(baseDeps({
+    as = makeAsyncActors(baseDeps({
       caps: { rateCap: 5, rateWindowMs: 60_000, outstanding: 4 },
       // child "fails" fast (the live case: interrupted/empty) so the model retries
-      spawnSubagent: async () => { childRuns += 1; return { result: 'failed', interrupted: true }; },
+      spawnActor: async () => { childRuns += 1; return { result: 'failed', interrupted: true }; },
       // the model reacting to the wake by RE-SPAWNING — the loop engine
-      reenter: async ({ sessionId }: any) => { await as.spawnSubagentAsync({ task: 'retry', parentSessionId: sessionId }); },
+      reenter: async ({ sessionId }: any) => { await as.spawnActorAsync({ task: 'retry', parentSessionId: sessionId }); },
     }));
 
-    await as.spawnSubagentAsync({ task: 'start', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'start', parentSessionId: 'parent' });
     await flush(); await flush(); await flush();
 
     expect(childRuns).toBeGreaterThan(1);          // it DID loop (bug reproduced)
     expect(childRuns).toBeLessThanOrEqual(5);       // …but the cap bounded it (no runaway)
 
     // past the cap, the spawn is refused with a STOP instruction (not a silent fail)
-    const refused = await as.spawnSubagentAsync({ task: 'one more', parentSessionId: 'parent' });
+    const refused = await as.spawnActorAsync({ task: 'one more', parentSessionId: 'parent' });
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain('loop_guard');
     expect(refused.error).toContain('STOP');
@@ -117,29 +117,29 @@ describe('makeAsyncSubagents', () => {
 
   test('outstanding cap refuses a 5th concurrent child (separate from the rate cap)', async () => {
     // children never settle → they stay "running" and fill the outstanding cap
-    const as = makeAsyncSubagents(baseDeps({
+    const as = makeAsyncActors(baseDeps({
       caps: { outstanding: 4, rateCap: 100 },
-      spawnSubagent: () => new Promise(() => {}), // never resolves
+      spawnActor: () => new Promise(() => {}), // never resolves
     }));
     for (let i = 0; i < 4; i++) {
-      expect((await as.spawnSubagentAsync({ task: `t${i}`, parentSessionId: 'parent' })).ok).toBe(true);
+      expect((await as.spawnActorAsync({ task: `t${i}`, parentSessionId: 'parent' })).ok).toBe(true);
     }
-    const fifth = await as.spawnSubagentAsync({ task: 't4', parentSessionId: 'parent' });
+    const fifth = await as.spawnActorAsync({ task: 't4', parentSessionId: 'parent' });
     expect(fifth.ok).toBe(false);
-    expect(fifth.error).toContain('async_subagent_cap');
+    expect(fifth.error).toContain('async_actor_cap');
   });
 
   test('coalesces multiple finished children into ONE wake; re-drain is a no-op (idempotent)', async () => {
     const reenters: any[] = [];
     const slots = makeTurnSlots();
     const live = slots.claim('parent'); // a parent turn is in flight → wakes queue
-    const as = makeAsyncSubagents(baseDeps({
+    const as = makeAsyncActors(baseDeps({
       turnSlots: slots,
       reenter: async (o: any) => { reenters.push(o); },
     }));
 
-    await as.spawnSubagentAsync({ task: 'A', parentSessionId: 'parent' });
-    await as.spawnSubagentAsync({ task: 'B', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(0);   // nothing fires while the parent turn is busy
 
@@ -159,13 +159,13 @@ describe('makeAsyncSubagents', () => {
     const reenters: any[] = [];
     let locked = true;
     let notified = 0;
-    const as = makeAsyncSubagents(baseDeps({
+    const as = makeAsyncActors(baseDeps({
       isVaultLocked: () => locked,
       reenter: async (o: any) => { reenters.push(o); },
       notify: () => { notified += 1; },
     }));
 
-    await as.spawnSubagentAsync({ task: 'X', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'X', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(0);   // locked → no model turn
     expect(notified).toBeGreaterThan(0); // …but the user is notified
@@ -179,14 +179,14 @@ describe('makeAsyncSubagents', () => {
 
   test('cancel drops the result (no wake) and frees the slot', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncSubagents(baseDeps({
-      spawnSubagent: () => new Promise(() => {}), // never settles on its own
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: () => new Promise(() => {}), // never settles on its own
       reenter: async (o: any) => { reenters.push(o); },
     }));
-    const h = await as.spawnSubagentAsync({ task: 'cancel me', parentSessionId: 'parent' });
-    const c = as.subagentCancel('parent', h.taskId);
+    const h = await as.spawnActorAsync({ task: 'cancel me', parentSessionId: 'parent' });
+    const c = as.actorCancel('parent', h.taskId);
     expect(c.ok).toBe(true);
-    expect(as.subagentTasks('parent')[0].status).toBe('cancelled');
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
     await flush();
     expect(reenters).toHaveLength(0);
   });

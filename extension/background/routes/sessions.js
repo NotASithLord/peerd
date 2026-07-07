@@ -1,7 +1,7 @@
 // @ts-check
 // background/routes/sessions.js — agent send/stop, session read routes
 // (list/get), the composer palette sources (commands/list, composer/files,
-// composer/tabs), and the subagent/review spawn entry points.
+// composer/tabs), and the actor/review spawn entry points.
 //
 // The mutating session routes — session/{setModel,switch,reset,archive} +
 // permission/set — live in routes/session-mutations.js (they go through the
@@ -18,10 +18,10 @@ export const makeSessionRoutes = (deps) => {
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel,
     buildToolContext, applyComposer, commandSources, prepareUserAttachments,
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
-    postChatNote, spawnSubagent, requestReview, appClient,
+    postChatNote, spawnActor, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     startGoalRun, haltGoalRun, ensureSession, actorMessaging,
-    subagentLifecycle,
+    actorLifecycle,
     // The debug surface: the pure assembler + tree walk from
     // peerd-runtime/observability, the SW's live snapshot ring, and the
     // settings/channel/version identity the bundle stamps.
@@ -62,7 +62,7 @@ export const makeSessionRoutes = (deps) => {
           }
         }
       }
-      // PR #134 phase 5 — cascade the Stop through the SUBAGENT subtree too.
+      // PR #134 phase 5 — cascade the Stop through the ACTOR subtree too.
       // Children run under their own turn slots now (spawn.js claims one per
       // child), so the line above never reached them; without this, spawned
       // work — including grandchildren, since one Stop must end the whole
@@ -70,9 +70,9 @@ export const makeSessionRoutes = (deps) => {
       // walks the live-children registry transitively and aborts each slot.
       // (Actor turns those children had in flight are already covered: the
       // actor bookkeeping is keyed by the lineage ROOT, i.e. this chat.)
-      if (sessionId && subagentLifecycle?.stopSubtree) {
-        for (const childSessionId of subagentLifecycle.stopSubtree(/** @type {any} */ (sessionId))) {
-          auditLog.append({ type: 'subagent_stopped', details: { childSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
+      if (sessionId && actorLifecycle?.stopSubtree) {
+        for (const childSessionId of actorLifecycle.stopSubtree(/** @type {any} */ (sessionId))) {
+          auditLog.append({ type: 'actor_stopped', details: { childSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
         }
       }
       return { ok: true };
@@ -249,14 +249,14 @@ export const makeSessionRoutes = (deps) => {
       const all = await sessions.list();
       return {
         ok: true,
-        // why: subagent sessions are inspectable through their parent's
+        // why: actor sessions are inspectable through their parent's
         // transcript, not the chat list — filter them out of /chats so
         // decomposition work doesn't clutter the user's conversations.
-        // See docs/SUBAGENTS.md. DESIGN-17: actor sessions are reached only
+        // See docs/ACTORS.md. DESIGN-17: actor sessions are reached only
         // by message (via their instance), never as a chat — keep them out too.
         sessions: all.filter((/** @type {any} */ s) => {
           const kind = s.kind ?? 'chat';
-          return kind !== 'subagent' && kind !== 'actor';
+          return kind !== 'spawned' && kind !== 'actor';
         }).map((/** @type {any} */ s) => ({
           sessionId: s.sessionId,
           title: s.title ?? null,
@@ -277,10 +277,10 @@ export const makeSessionRoutes = (deps) => {
       };
     },
 
-    // Fetch any single session by id — including subagents (which are
+    // Fetch any single session by id — including spawned actors (which are
     // hidden from session/list). The side panel calls this lazily when the
-    // user expands a spawn_subagent tool card to render the child's
-    // transcript inline. See docs/SUBAGENTS.md + message-list.js.
+    // user expands an actor_create tool card to render the child's
+    // transcript inline. See docs/ACTORS.md + message-list.js.
     'session/get': async ({ sessionId }) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       if (typeof sessionId !== 'string' || !sessionId) {
@@ -293,7 +293,7 @@ export const makeSessionRoutes = (deps) => {
 
     // The debug bundle: one session's whole debugging story as one JSON
     // payload (the panel does the file save). Root transcript + every
-    // descendant actor/subagent session, the audit slice for that set,
+    // descendant actor/actor session, the audit slice for that set,
     // cost, secret-free settings, live context snapshots, provenance.
     // Read-only over the user's own data; the export itself is audited.
     'session/debugBundle': async ({ sessionId } = {}) => {
@@ -304,7 +304,7 @@ export const makeSessionRoutes = (deps) => {
       const session = await sessions.get(sessionId);
       if (!session) return { ok: false, error: 'session-not-found' };
       // why the STORE list (not the session/list route): the route hides
-      // actor/subagent rows from the chat list; the bundle wants exactly those.
+      // actor/actor rows from the chat list; the bundle wants exactly those.
       const rows = await sessions.list();
       const childIds = childSessionIdsOf(rows, sessionId);
       const childSessions = (await Promise.all(childIds.map((/** @type {string} */ id) => sessions.get(id))))
@@ -342,18 +342,18 @@ export const makeSessionRoutes = (deps) => {
       return { ok: true, snapshots: contextSnapshots.snapshotsFor(sessionId) };
     },
 
-    // --- subagents ---
+    // --- spawned actors ---
     //
     // The peerd.runtime.runAgent shim (an App/Notebook the agent built embedding its
     // own agent) posts here. Notebook tabs are extension-origin pages, so
     // runtime.onMessage reaches us directly — the caller is already
     // authenticated as our own extension. The parent is whichever chat
-    // session is current; the subagent inherits its depth (+1), permission
+    // session is current; the actor inherits its depth (+1), permission
     // mode, and provider key through the orchestrator. If an artifact makes
     // several calls, each creates its own child session and runs
     // independently. (The model's OWN parallel work goes through the
-    // spawn_subagent tool, not this path.)
-    'subagent/spawn': async ({ task, tools, maxSteps, maxDepth, allowRecursion }) => {
+    // actor_create tool, not this path.)
+    'actor/spawn': async ({ task, tools, maxSteps, maxDepth, allowRecursion }) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       if (typeof task !== 'string' || !task.trim()) {
         return { ok: false, error: 'task-required' };
@@ -361,7 +361,7 @@ export const makeSessionRoutes = (deps) => {
       const parentSessionId = await sessionCache.sessionGet('currentSessionId');
       if (!parentSessionId) return { ok: false, error: 'no-active-session' };
       const parent = await sessions.get(parentSessionId);
-      const out = await spawnSubagent({
+      const out = await spawnActor({
         task,
         tools: Array.isArray(tools) ? tools : undefined,
         maxSteps: Number.isFinite(maxSteps) ? maxSteps : undefined,

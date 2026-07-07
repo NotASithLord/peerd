@@ -233,13 +233,13 @@ exists today:
    DOM/page tools are actor-only, never on the main agent — the
    orchestrator delegates plain-language goals to per-environment
    actors (web / webvm / notebook / app) via `message_actor`
-   (`subagent/actor-messaging.js`; `actor_list` enumerates every
+   (`actor/actor-messaging.js`; `actor_list` enumerates every
    addressable handle), and replies re-enter it fenced on a later
-   turn — it never blocks. The web actor (`subagent/web-actor.js`) is
+   turn — it never blocks. The web actor (`actor/web-actor.js`) is
    the single entry point for web work: it picks between a sessionless,
    denylist-gated `fetch_url` and opening + driving a tab. Dweb tools
    are invisible where `DWEB_ENABLED` is false. Plus sessions, clock
-   (temporal grounding), subagent orchestrator, voice (Moonshine WASM
+   (temporal grounding), actor orchestrator, voice (Moonshine WASM
    + Web Speech fallback).
 6. **Wire it together** in `background/service-worker.js` — message
    routing, dependency injection, lifecycle wiring. The SW is wiring
@@ -288,23 +288,23 @@ gotchas to know going in:
   true` on Trusted-Types pages (Gmail/Notion/Slack), and `page_keys`'
   trusted (`isTrusted`) input. Pool lives in
   `background/debugger-pool.js`.
-- Subagents — depth-bounded recursion, tool
+- Spawned actors — depth-bounded recursion, tool
   narrowing, output cap. Real implementation at
-  `peerd-runtime/subagent/spawn.js` — not a stub. Since the async-actor
+  `peerd-runtime/actor/spawn.js` — not a stub. Since the async-actor
   unification (PR #134): a child runs under its own turn slot with an
-  abort signal and a wall-clock timeout (Stop and `subagent_cancel`
+  abort signal and a wall-clock timeout (Stop and `actor_cancel`
   actually end its work, transitively down the subtree), and a
-  trusted-lineage subagent may `message_actor` — the sender gate walks
-  server-stamped `spawnedTrusted` hops (`subagent/delegation-lineage.js`;
+  trusted-lineage actor may `message_actor` — the sender gate walks
+  server-stamped `spawnedTrusted` hops (`actor/delegation-lineage.js`;
   an inbound spawn taints its whole subtree), delegation budgets are
-  keyed by the lineage root, and a subagent's actor reply resolves into
+  keyed by the lineage root, and an actor's actor reply resolves into
   its tool result (an ephemeral child has no later turn to wake).
 - The heap split — EVERY non-orchestrator agent loop runs in its OWN
-  dedicated offscreen Worker heap (`peerd-runtime/subagent/actor-worker-core.js`
+  dedicated offscreen Worker heap (`peerd-runtime/actor/actor-worker-core.js`
   drives it; `offscreen/actor-worker.js` + `actor-runner.js` +
   `background/offscreen-actor-client.js` host + relay it). One substrate,
   two shapes: a BOUND actor (web/webvm/notebook/app, instance-pinned) and an
-  EPHEMERAL actor (a subagent — tool-less = pure reasoning, tool-bearing =
+  EPHEMERAL actor (spawned — tool-less = pure reasoning, tool-bearing =
   a narrowed-general toolset). The worker holds NO key, NO `chrome.*`, NO
   engine clients; its only outward edges are two SW-gated relays — the model
   call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
@@ -340,7 +340,7 @@ gotchas to know going in:
   permits pure URL loads only, never clicks (enforced in `gates.js`).
 - The feature buildout — memory, edit + checkpoints, Plan/Act,
   composer (slash commands + @-refs), goal mode (autonomous loop), cost
-  telemetry, skills, review subagent, and hooks — all integrated.
+  telemetry, skills, review actor, and hooks — all integrated.
   (do/get/check was CULLED: the web actor drives pages directly, so one
   delegation reaches the page instead of two.) Per-feature
   detail lives in the code under `peerd-runtime/`.
@@ -379,12 +379,12 @@ gotchas to know going in:
   agents by WRITING CODE, the #119 bet applied to p2p: `a2a_run` runs JS
   against a `mesh` client (peers/card/ask/send/publishCard/inbox) in the SAME
   sealed keyless worker as `script`, plus ONE capability — the mesh bridge —
-  and nothing else (the host denies egress + subagent-spawn for an a2a run;
+  and nothing else (the host denies egress + actor-spawn for an a2a run;
   see `offscreen/job-runner.js`). The pure translation core is
-  `subagent/a2a-api.js` (the page-api.js twin: `meshCallToOp`/
+  `actor/a2a-api.js` (the page-api.js twin: `meshCallToOp`/
   `shapeMeshResult`, a `MESH_METHODS` table); the ask/reply CORRELATION —
   tag a request DM, await the matching reply bound to the target did, time
-  out — is `subagent/a2a-dispatch.js`; the SW singleton + consent live in
+  out — is `actor/a2a-dispatch.js`; the SW singleton + consent live in
   `background/service-worker.js` (`a2aCallRoute`). We RHYME with A2A's data
   model (`peerd-distributed/agent-card.js` — Agent Card, message shape) for
   future interop, but REJECT its HTTP+SSE transport: the mesh is the

@@ -2,11 +2,11 @@
 // Cheap one-shot model calls — the shared helper behind auto-memory
 // extraction and trim-summary enrichment.
 //
-// Reuses the EXISTING subagent machinery (spawn.js) the same way the
+// Reuses the EXISTING actor machinery (spawn.js) the same way the
 // review orchestrator does: a `tools: []` spawn is a fresh child
 // session whose only input is the task — clean context for free, no
 // dispatcher/tool plumbing stood up at all, and an output cap riding
-// spawnSubagent's maxOutputTokens guardrail. We do not build a second
+// spawnActor's maxOutputTokens guardrail. We do not build a second
 // model-call path.
 //
 // What this adds on top of a bare spawn:
@@ -19,7 +19,7 @@
 //     the cost tracker / CostChip / the next turn's hard-limit check
 //     all see these calls. Background spend is never invisible.
 //
-// All IO injected (spawnSubagent, sessions, costOf) — bun-testable.
+// All IO injected (spawnActor, sessions, costOf) — bun-testable.
 
 import { normalizeTally, addUsage, limitExceeded } from '../cost/accumulator.js';
 
@@ -30,8 +30,8 @@ export const CHEAP_CALL_MAX_OUTPUT_TOKENS = 700;
 
 /**
  * @param {Object} deps
- * @param {(req: object) => Promise<{ result: string, sessionId: string|null, usage?: TokenUsage, refused?: true, durationMs?: number }>} deps.spawnSubagent
- *   The bound spawn from makeSpawnSubagent (SW passes its own bound fn).
+ * @param {(req: object) => Promise<{ result: string, sessionId: string|null, usage?: TokenUsage, refused?: true, durationMs?: number }>} deps.spawnActor
+ *   The bound spawn from makeSpawnActor (SW passes its own bound fn).
  * @param {{ get: Function, setCost: Function }} deps.sessions
  * @param {(model: string|undefined, usage: TokenUsage) => { cost: number }} deps.costOf
  *   Pricing fn (peerd-provider's local table), pre-bound to the user's
@@ -40,7 +40,7 @@ export const CHEAP_CALL_MAX_OUTPUT_TOKENS = 700;
  * @param {(entry: object) => Promise<unknown>} [deps.appendAudit]
  */
 export const makeCheapCall = ({
-  spawnSubagent,
+  spawnActor,
   sessions,
   costOf,
   getSpendLimitUsd = () => 0,
@@ -77,7 +77,7 @@ export const makeCheapCall = ({
       return { ok: false, skipped: true, reason: 'spend-limit' };
     }
 
-    const out = await spawnSubagent({
+    const out = await spawnActor({
       task,
       // why tools:[]: pure reasoning — spawn.js skips the dispatcher and
       // tool-context plumbing entirely for an empty subset, which is
@@ -89,7 +89,7 @@ export const makeCheapCall = ({
       parentDepth: session.depth ?? 0,
       // why persistDeltas:false + a no-op onEvent: this child is
       // ephemeral background work — no side-panel card to stream into
-      // (the SW's default forwarder would post orphan subagent events),
+      // (the SW's default forwarder would post orphan actor events),
       // and per-delta IDB rewrites buy nothing for a one-shot answer.
       persistDeltas: false,
       onEvent: () => {},

@@ -10,7 +10,7 @@ import {
   shapePageResult,
   PAGE_API_METHODS,
   PageApiError,
-} from '../../extension/peerd-runtime/subagent/page-api.js';
+} from '../../extension/peerd-runtime/actor/page-api.js';
 
 describe('pageCallToToolCall — page.* maps to the gated tool', () => {
   test('goto -> navigate', () => {

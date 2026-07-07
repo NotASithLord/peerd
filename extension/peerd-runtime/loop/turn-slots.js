@@ -16,7 +16,7 @@
 //     panel's Stop button must never reach across conversations.
 //   - runWhenIdle(sessionId, fn): run fn the moment the session has no
 //     live turn — NOW if idle, else after the current turn RELEASES.
-//     why: an async subagent finishing must re-enter its parent as a new
+//     why: an async actor finishing must re-enter its parent as a new
 //     turn (DESIGN-11), but the parent may be mid-turn (the user is
 //     chatting with it). claim() would steer-abort that live turn — a
 //     focus/work theft (DECISIONS #20). runWhenIdle waits for the slot

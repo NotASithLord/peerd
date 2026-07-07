@@ -1,7 +1,7 @@
 // @ts-check
 // offscreen job-runner — the headless sealed-Worker substrate behind script.
 // Exercised against a REAL worker; `sendToSW` is stubbed to stand in for the
-// SW's audited routes (sw/web-fetch, subagent/spawn). Pins the load-bearing
+// SW's audited routes (sw/web-fetch, actor/spawn). Pins the load-bearing
 // behavior: code returns its value, console accumulates, peerd.egress.fetch
 // relays through the SAME route the tab uses (with method/body), and errors
 // surface.
@@ -19,7 +19,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.error).toBe(null);
     expect(r.value).toBe(42);
     expect(r.consoleOutput.some((c) => c.text === 'hi')).toBe(true);
-    expect(calls.length).toBe(0);  // pure compute → no fetch/subagent relays
+    expect(calls.length).toBe(0);  // pure compute → no fetch/actor relays
   });
 
   it('relays peerd.egress.fetch through the SAME audited route (sw/web-fetch), with method/body', async () => {
@@ -101,6 +101,27 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(v.seed).toBe('kept');   // the virtual FS round-trips through the run
   });
 
+  // The runtime self-test fixture, headless: demoModule() must be importable
+  // and runnable from a headless job through the SAME builtin resolver chain
+  // the live agent uses — pins "peerd:wasi is reachable from script" as a CI
+  // fact (a field session reported it unreachable; this is the regression net).
+  it('peerd:wasi demoModule() self-test runs green inside a headless job', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'import { runWasi, demoModule } from "peerd:wasi";',
+          'const run = await runWasi(demoModule());',
+          'return { exitCode: run.exitCode, stdout: run.stdout };',
+        ].join('\n'),
+      },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(r.error).toBe(null);
+    const v = /** @type {{ exitCode: number, stdout: string }} */ (r.value);
+    expect(v.exitCode).toBe(0);
+    expect(v.stdout).toBe('hello from wasi\n');
+  });
+
   // The a2a run is the dweb actor's MESH-ONLY surface (cynical-swarm HIGH): its
   // tool allow-set grants no egress and no delegation, so the same sealed worker
   // run with { a2a:true } must NOT be able to re-grant itself either via the
@@ -118,7 +139,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.usedEgress).toBeFalsy();
   });
 
-  it('an a2a run is denied delegation — peerd.runtime.runAgent never reaches subagent/spawn', async () => {
+  it('an a2a run is denied delegation — peerd.runtime.runAgent never reaches actor/spawn', async () => {
     /** @type {{ type: string, payload: any }[]} */
     const calls = [];
     const r = await runJob(
@@ -126,7 +147,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
         a2a: true, ownerSessionId: 'dweb' },
       { sendToSW: async (type, payload) => { calls.push({ type, payload }); return { ok: true, result: 'y' }; } },
     );
-    expect(calls.some((c) => c.type === 'subagent/spawn')).toBe(false);
+    expect(calls.some((c) => c.type === 'actor/spawn')).toBe(false);
     expect(String(r.value)).toContain('blocked');
   });
 

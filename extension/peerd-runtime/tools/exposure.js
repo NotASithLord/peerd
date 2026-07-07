@@ -82,8 +82,8 @@ export const mainAgentDescriptors = (descriptors) =>
 // descriptor filters which are advisory):
 //
 //   - ACTOR_ONLY_TOOLS leave the MAIN agent. A non-actor ctx
-//     (main / subagent / review / direct) is REFUSED any of them —
-//     so a one-line `spawn_subagent({tools:['app_delete']})` can't escalate.
+//     (main / actor / review / direct) is REFUSED any of them —
+//     so a one-line `actor_create({tools:['app_delete']})` can't escalate.
 //     Originally only MUTATION was tiered and the fenced READS
 //     (app_read_file/app_list_files/js_read_file) stayed global for cheap
 //     no-actor-hop inspection; that was reversed (owner call 2026-07-05) —
@@ -97,7 +97,7 @@ export const mainAgentDescriptors = (descriptors) =>
 //     gate, not just in the descriptor list.
 //
 // The exposure marker is a free string on ctx: 'main' (main turn) / 'actor'
-// (actor turn) / unset (subagent). EXPOSURE_ACTOR is a const so a
+// (actor turn) / unset (actor). EXPOSURE_ACTOR is a const so a
 // typo can't silently widen authority at its (many) read sites; 'main' stays a
 // bare literal — it's only ever the gate's negative space, never matched by name.
 export const EXPOSURE_ACTOR = 'actor';
@@ -285,11 +285,14 @@ export const actorTargetId = (name, args) => {
 // DESIGN-17 web actor — the tab pin. A web actor owns ONE tab; the DOM
 // tools resolve their target via `resolveTargetTab`, which honors an explicit
 // numeric `args.tabId`. So the pin is on tabId (a number), not an instance-id
-// string — `actorTargetId` (string-only) can't express it. The web actor's
-// `actorInstanceId` is its owned tabId AS A STRING. The GATE runs before
-// `resolveTargetTab` (async) and can only see the explicit arg, so this checks
-// the EXPLICIT `args.tabId`: absent → defaults to the bound tab (fine); present
-// and ≠ the owned tab → refused.
+// string — `actorTargetId` (string-only) can't express it. The GATE (gates.js
+// actorTierGate) compares this against ctx.activeTab.id, the actor's owned
+// tab — NOT ctx.actorInstanceId, which is the fixed literal 'web' for the
+// per-chat singleton actor (its message_actor address, stable across
+// re-navigation, not a tab id). The GATE runs before `resolveTargetTab`
+// (async) and can only see the explicit arg, so this checks the EXPLICIT
+// `args.tabId`: absent → defaults to the bound tab (fine); present and ≠ the
+// owned tab → refused.
 /**
  * The explicit numeric `tabId` a DOM-tool call names, or undefined. Pure.
  * @param {Record<string, any> | null | undefined} args

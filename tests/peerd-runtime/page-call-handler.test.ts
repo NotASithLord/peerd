@@ -6,7 +6,7 @@
 // the worker's awaited page.* call would see it.
 
 import { describe, test, expect, mock } from 'bun:test';
-import { makePageCallHandler, resolvePageTab } from '../../extension/peerd-runtime/subagent/page-call-handler.js';
+import { makePageCallHandler, resolvePageTab } from '../../extension/peerd-runtime/actor/page-call-handler.js';
 
 describe('resolvePageTab — first-tab adoption for the code actor', () => {
   test('an owned tab dispatches straight to it', () => {

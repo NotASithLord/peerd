@@ -477,7 +477,7 @@ export const usesAdaptiveThinking = (model) => {
 // a single tool_use — observed in the field as a "silent timeout".
 // 64000 is the platform-recommended streaming default and within every
 // current model's streamed output cap. Explicit maxTokens (e.g. the
-// subagent output cap) still wins.
+// actor output cap) still wins.
 export const toAnthropicBody = ({ model, system, messages, tools, maxTokens = 64000, reasoning }) => {
   const thinkingEnabled = !!reasoning?.enabled;
   const wireMessages = toAnthropicMessages(messages, thinkingEnabled);

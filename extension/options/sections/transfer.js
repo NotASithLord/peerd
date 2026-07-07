@@ -300,7 +300,7 @@ export const TransferSection = {
       m('.settings-divider'),
       m('h3', 'Debug bundle'),
       m('p', 'Download one chat\u2019s whole debugging story as a local JSON file: '
-        + 'the transcript (including every actor and subagent it delegated to), the '
+        + 'the transcript (including every actor and actor it delegated to), the '
         + 'audit slice, cost, settings, and live context snapshots \u2014 or the same '
         + 'data as an OpenTelemetry trace for any OTel viewer. Nothing is sent '
         + 'anywhere; API keys cannot appear in either file.'),

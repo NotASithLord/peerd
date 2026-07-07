@@ -149,6 +149,34 @@ describe('notebook-tab realm seal (real worker realm)', () => {
     } finally { worker.terminate(); }
   });
 
+  it('bytes() is a platform-shaped method — binary reads work like Response.bytes()', async () => {
+    const worker = spawnFixture('seal-probe-worker.js');
+    try {
+      await nextMessage(worker, 'fixture-ready');
+      // \x00asm\x01\x00\x00\x00 — a wasm magic header, the binary-fetch case
+      // straight from the field: a model calls resp.bytes() (the platform
+      // Response shape) to feed WebAssembly.validate.
+      const wasmHeader = String.fromCharCode(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00);
+      worker.addEventListener('message', (ev) => {
+        const m = ev.data;
+        if (!m || m.type !== 'fetch-request') return;
+        worker.postMessage({
+          type: 'fetch-response', rid: m.rid,
+          ok: true, status: 200, bodyB64: btoa(wasmHeader),
+        });
+      });
+      const reply = nextMessage(worker, 'binary-result');
+      worker.postMessage({ type: 'binary-fetch', url: 'https://example.test/module.wasm' });
+      const result = await reply;
+      expect(result.fetch.error).toBe(undefined);
+      expect(result.fetch.bytesIsFunction).toBe(true);
+      expect(result.fetch.isUint8).toBe(true);
+      expect(result.fetch.byteLength).toBe(8);
+      expect(result.fetch.first).toBe(0x00);
+      expect(result.fetch.sameAsArrayBuffer).toBe(true);
+    } finally { worker.terminate(); }
+  });
+
   it('seals BEFORE a statically-imported module body runs (the old prologue gap)', async () => {
     const worker = spawnFixture('seal-order-entry.js');
     try {

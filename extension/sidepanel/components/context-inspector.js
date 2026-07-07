@@ -3,7 +3,7 @@
 //
 // A modal over the chat rendering the SW's live per-session snapshot
 // ring: one entry per model call (orchestrator turns AND delegated
-// actor/subagent calls), each showing the shaped request — clipped
+// actor/actor calls), each showing the shaped request — clipped
 // system prompt, message roster, tool names, params. This is the
 // debugging view for the two hardest bug classes peerd has: compaction
 // surprises ("why did it forget?") and fence regressions ("what

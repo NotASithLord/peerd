@@ -6,7 +6,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  runWasi, buildFileTree, readFileTree, WasiRunError,
+  runWasi, buildFileTree, readFileTree, WasiRunError, demoModule,
 } from '../../extension/notebook-tab/notebook-wasi.js';
 import {
   buildHelloModule, buildEchoModule, buildFloodModule,
@@ -113,5 +113,18 @@ describe('buildFileTree / readFileTree', () => {
 
   test('empty path segments are rejected', () => {
     expect(() => buildFileTree({ '': 'nope' })).toThrow(TypeError);
+  });
+});
+
+describe('demoModule — the embedded self-test fixture', () => {
+  test('the embedded blob IS buildHelloModule("hello from wasi\\n") — blob and source cannot drift', () => {
+    expect([...demoModule()]).toEqual([...buildHelloModule('hello from wasi\n')]);
+  });
+
+  test('runWasi(demoModule()) runs green: the agent-facing smoke test works', async () => {
+    const result = await runWasi(demoModule());
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('hello from wasi\n');
+    expect(result.stderr).toBe('');
   });
 });

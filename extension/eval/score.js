@@ -64,7 +64,7 @@ export const aggregate = (results) => {
     // main context in the actor — so main fresh/cache should be low and this is
     // where the a11y work lives. Tracking it keeps the scorecard honest (the
     // offload isn't free, it's relocated). Field name stays `runnerTokens` for
-    // continuity with the emitted subagent-cost events + the runnerModel A/B.
+    // continuity with the emitted actor-cost events + the runnerModel A/B.
     avgRunnerTokens: avg(results, 'runnerTokens'),
     avgCostUsd: avg(results, 'costUsd', 5),                         // MAIN-loop $ (the chat model orchestrating) from the local pricing table
     // The RUNNER's own $ — the model under A/B test. $0 for a local/on-device

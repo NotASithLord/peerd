@@ -74,7 +74,7 @@ let turn = fresh();
 // cacheReadTokens, cacheWriteTokens, cost (USD) }. We keep the whole thing so
 // the scorecard can split cheap cache-reads from full-price fresh tokens and
 // report actual $/task, instead of collapsing it all into one number.
-// runner: tokens spent by the web actor (+ any subagents) THIS turn — separate
+// runner: tokens spent by the web actor (+ any spawned actors) THIS turn — separate
 // from `cost` (the main session's spend). Page mechanics live off the main
 // context in the actor; this is where that offloaded spend shows up so the
 // scorecard stays honest (main is low, the actor's spend appears — not "free").
@@ -137,7 +137,7 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
     // analog of turn/tool-use for actor turns, which emit no turn/* events.
     case 'actor/op': om2w?.onActorOp(msg); bumpSettle(); break;
     case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;
-    case 'turn/subagent-cost':
+    case 'turn/spawned-cost':
       if (msg.usage) {
         turn.runner.inputTokens += msg.usage.inputTokens || 0;
         turn.runner.outputTokens += msg.usage.outputTokens || 0;

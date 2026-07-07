@@ -1,15 +1,16 @@
 // @ts-check
-// delegation-lineage — the PURE trust decision for the "subagents as async
+// delegation-lineage — the PURE trust decision for the "spawned as async
 // actors" refactor (PR #134, WIRED — the sender gate in actor-messaging.js
 // routes through mayMessageActor and stamps messageProvenance on envelopes).
 //
-// PROBLEM. Today a subagent and a message_actor actor are two different async
-// lifecycles. The one that matters here: a subagent CANNOT message an actor, so
-// a subagent can't drive a tab / VM / notebook the way the orchestrator can.
+// PROBLEM. Today a spawned actor and a bound (message_actor) actor are two
+// different async lifecycles. The one that matters here: a spawned actor
+// CANNOT message a bound actor, so it can't drive a tab / VM / notebook the
+// way the orchestrator can.
 // What blocks it is the sender gate's IDENTITY check
-// (subagent/actor-messaging.js — `senderSessionId !== active` refuses), which
+// (actor/actor-messaging.js — `senderSessionId !== active` refuses), which
 // uses "are you the foreground chat" as a stand-in for "are you trusted." A
-// subagent runs under a child session id that is never `currentSessionId`, so it
+// spawned actor runs under a child session id that is never `currentSessionId`, so it
 // is refused even though it is a first-party descendant of the active chat.
 //
 // THE FIX (this file is its crux). Replace the `=== active` identity check with
@@ -19,7 +20,7 @@
 //   1. the inbound wall — `inbound === true` still refuses. `inbound` is the
 //      turn's untrusted-origin flag (synthetic && !trusted, service-worker.js).
 //      It is what keeps an injected/synthetic re-entry from delegating, and it is
-//      ALSO what keeps an async-subagent's RESULT-wake from delegating (that wake
+//      ALSO what keeps an async-actor's RESULT-wake from delegating (that wake
 //      re-enters the parent trusted:false → inbound:true), preserving the explicit
 //      "a parent reacting to a child result is not trusted to delegate" decision.
 //      So the RESULT edge needs no handling here: the inbound wall already covers it.
@@ -29,7 +30,7 @@
 //
 // THE HOLE THIS CLOSES (why lineage alone is not enough). An INBOUND turn on the
 // active chat is refused message_actor directly — but it can still call
-// spawn_subagent, and the child it spawns runs non-inbound turns. Without care,
+// actor_create, and the child it spawns runs non-inbound turns. Without care,
 // that child would be a "descendant of the active chat" and could message actors
 // on the injected turn's behalf — laundering delegation around the inbound wall.
 // So a spawn edge is trusted ONLY when the spawning turn was itself trusted
@@ -44,12 +45,12 @@
 // session store, then asks this function yes/no. This function reads values only.
 
 // Feature flag for the refactor — ON: the sender gate (actor-messaging.js)
-// routes through mayMessageActor(), subagents run under abortable,
+// routes through mayMessageActor(), spawned run under abortable,
 // timeout-bounded turn slots (spawn.js), and envelopes carry provenance.
 // Kept (not deleted) so the gate can revert to the strict `=== active`
 // identity check with a one-line flip if a field problem surfaces; OFF
 // restores the pre-#134 sender gate, everything else stands.
-export const ASYNC_SUBAGENT_ACTORS = true;
+export const ASYNC_ACTOR_ACTORS = true;
 
 /**
  * One hop of a sender's ancestry: a session record reduced to the fields the
@@ -116,7 +117,7 @@ export const mayMessageActor = ({ inbound, senderSessionId, activeSessionId, anc
 // An actor is a serialized CHOKE POINT: one tab (or one origin), one mailbox,
 // one turn at a time. While only the foreground chat messages it, "who sent
 // this" is trivial. Once actors are SHARED — a web actor on a tab that several
-// orchestrators or subagents all message — the actor (and the mailbox in front
+// orchestrators or spawned all message — the actor (and the mailbox in front
 // of it) must arbitrate: coalesce an accidental duplicate, order competing
 // requests, cancel one a newer message supersedes, or keep unrelated senders
 // fair. To make that call it needs each message's PROVENANCE: who sent it, and

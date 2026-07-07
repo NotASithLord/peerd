@@ -4,7 +4,7 @@
 //
 // A config is a PAIR of models, because that's what actually runs a task:
 //   • the MAIN model — the chat agent that plans + orchestrates
-//   • the WEB ACTOR model — the sub-agent that reads/acts on pages
+//   • the WEB ACTOR model — the actor that reads/acts on pages
 // Both are configurable per side, so you can compare e.g. "cloud main + cloud
 // web actor" vs "fully on-device (local main + local web actor)" — and the cost
 // is honest: a fully-local config reads $0 total.

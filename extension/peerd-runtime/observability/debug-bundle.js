@@ -2,7 +2,7 @@
 // observability/debug-bundle.js — the debug-bundle assembler.
 //
 // One session's whole debugging story in one local JSON file: the full
-// transcript (root session + every child actor/subagent session it
+// transcript (root session + every child actor/actor session it
 // spawned), the audit slice for those sessions, cost, the secret-free
 // settings snapshot, any live context snapshots, and a provenance block
 // that says honestly what may be missing (pruned audit, evicted
@@ -33,7 +33,7 @@ export const BUNDLE_MAX_CHILD_SESSIONS = 40;
 
 /**
  * Walk the parent links to collect every descendant session of the root
- * (actors + subagents, transitively). Pure: operates on the already-read
+ * (actors + spawned, transitively). Pure: operates on the already-read
  * session rows, returns ids in stable creation order.
  * @param {Array<{ sessionId: string, parentSessionId?: string, createdAt?: number }>} allSessions
  * @param {string} rootId
@@ -105,7 +105,7 @@ export const collectFailures = (session) => {
  * Assemble the bundle. Everything is passed in; nothing is read here.
  * @param {object} input
  * @param {Record<string, any>} input.session          the full assembled root session (with messages)
- * @param {Array<Record<string, any>>} [input.childSessions]  full assembled child sessions (actors/subagents)
+ * @param {Array<Record<string, any>>} [input.childSessions]  full assembled child sessions (actors/spawned)
  * @param {Array<Record<string, any>>} [input.auditEntries]   the audit slice, already filtered to these sessions
  * @param {Record<string, any>} [input.settings]       the merged secret-free settings snapshot
  * @param {Array<Record<string, any>>} [input.contextSnapshots]  live model-request snapshots for these sessions
@@ -162,7 +162,7 @@ export const assembleDebugBundle = ({
         + 'not an error.',
       childSessions: childSessions.length > BUNDLE_MAX_CHILD_SESSIONS
         ? `clamped: ${childSessions.length} descendants existed, first ${BUNDLE_MAX_CHILD_SESSIONS} included.`
-        : 'all descendant actor/subagent sessions included.',
+        : 'all descendant actor/actor sessions included.',
       secrets: 'none by construction: API keys live only in the vault and are attached at fetch-header '
         + 'time; they never enter settings, session records, or captured request bodies.',
       ...(auditChain ? {

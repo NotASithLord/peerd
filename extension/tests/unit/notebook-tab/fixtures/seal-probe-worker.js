@@ -21,6 +21,8 @@ import '/notebook-tab/realm-seal.js';
  * @property {Record<string, string>} headers
  * @property {() => Promise<string>} text
  * @property {() => Promise<unknown>} json
+ * @property {() => Promise<ArrayBuffer>} arrayBuffer
+ * @property {() => Promise<Uint8Array>} bytes
  */
 
 /**
@@ -129,6 +131,30 @@ self.addEventListener('message', async (ev) => {
     } catch (e) {
       const err = /** @type {{ message?: string }} */ (e);
       postMessage({ type: 'sabotage-result', ...result, fetch: { error: String(err?.message ?? e) } });
+    }
+    return;
+  }
+  if (m.type === 'binary-fetch') {
+    // The binary read path: bytes() must be a platform-shaped METHOD
+    // (Promise<Uint8Array>) and agree with arrayBuffer().
+    try {
+      const resp = await bridgeFetch(m.url);
+      const u8 = await resp.bytes();
+      const ab = await resp.arrayBuffer();
+      postMessage({
+        type: 'binary-result',
+        fetch: {
+          ok: resp.ok,
+          bytesIsFunction: typeof resp.bytes === 'function',
+          isUint8: u8 instanceof Uint8Array,
+          byteLength: u8.byteLength,
+          first: u8[0],
+          sameAsArrayBuffer: ab.byteLength === u8.byteLength,
+        },
+      });
+    } catch (e) {
+      const err = /** @type {{ message?: string }} */ (e);
+      postMessage({ type: 'binary-result', fetch: { error: String(err?.message ?? e) } });
     }
     return;
   }

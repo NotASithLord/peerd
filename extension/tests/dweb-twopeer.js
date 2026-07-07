@@ -25,8 +25,8 @@ import { createBaseNetwork } from '/peerd-distributed/base-network.js';
 // in browser-polyfill, which throws off an extension origin — this harness page
 // runs on plain http. a2a-dispatch.js is a pure, import-free module, so it loads
 // cleanly here. (tests/ is exempt from the no-deep-import rule.)
-import { makeMeshDispatch } from '/peerd-runtime/subagent/a2a-dispatch.js';
-import { createConversationRegistry } from '/peerd-runtime/subagent/conversation-registry.js';
+import { makeMeshDispatch } from '/peerd-runtime/actor/a2a-dispatch.js';
+import { createConversationRegistry } from '/peerd-runtime/actor/conversation-registry.js';
 
 const params = new URLSearchParams(location.search);
 const roomId = params.get('room') ?? 'harness';

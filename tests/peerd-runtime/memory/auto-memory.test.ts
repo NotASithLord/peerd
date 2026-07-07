@@ -53,9 +53,9 @@ describe('shouldExtract', () => {
     expect(d.stats!.userTurns).toBe(AUTO_MEMORY_MIN_USER_TURNS);
   });
 
-  test('decision matrix: missing / subagent / thin sessions are skipped', () => {
+  test('decision matrix: missing / actor / thin sessions are skipped', () => {
     expect(shouldExtract({ session: null }).reason).toBe('no-session');
-    expect(shouldExtract({ session: chatSession(9, { kind: 'subagent' }) }).reason).toBe('not-a-chat');
+    expect(shouldExtract({ session: chatSession(9, { kind: 'spawned' }) }).reason).toBe('not-a-chat');
     expect(shouldExtract({ session: chatSession(AUTO_MEMORY_MIN_USER_TURNS - 1) }).reason).toBe('too-few-turns');
     // Enough turns but trivial content.
     const thin = {

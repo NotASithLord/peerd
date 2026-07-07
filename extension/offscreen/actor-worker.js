@@ -1,13 +1,13 @@
 // @ts-check
 // offscreen/actor-worker.js — the ONE Worker that runs any non-orchestrator agent
-// loop in its own heap (the heap split): an ephemeral reasoning subagent (tools:[],
+// loop in its own heap (the heap split): an ephemeral reasoning actor (tools:[],
 // so the tool-relay below never fires) OR a bound actor (VM / Notebook / App / web,
 // tool-bearing). Imperative shell over actor-worker-core. Relays BOTH the model call
 // AND every tool call to the SW (which holds the key, the engine clients, the
 // instance pin, and the gate); the untrusted instance/page output stays in this
 // heap. Module worker → strict.
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
-import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/subagent/actor-worker-core.js';
+import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
 
 let seq = 0;
 let runId = '';

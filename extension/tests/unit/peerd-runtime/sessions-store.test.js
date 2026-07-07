@@ -45,31 +45,31 @@ describe('session store', () => {
     expect(session.model).toBe('claude-sonnet-4-6');
     expect(session.messages).toEqual([]);
     expect(session.createdAt).toBe(1000);
-    // Subagent fields default to a top-level chat (docs/SUBAGENTS.md).
+    // Actor fields default to a top-level chat (docs/ACTORS.md).
     expect(session.kind).toBe('chat');
     expect(session.depth).toBe(0);
     expect(session.parentSessionId).toBe(undefined);
     expect(session.task).toBe(undefined);
   });
 
-  describe('subagent parentage', () => {
-    it('persists kind/parentSessionId/task/depth when creating a subagent', async () => {
+  describe('actor parentage', () => {
+    it('persists kind/parentSessionId/task/depth when creating an actor', async () => {
       const s = fresh();
       const child = await s.create({
-        kind: 'subagent', parentSessionId: 'parent-1', task: 'do a thing', depth: 2,
+        kind: 'spawned', parentSessionId: 'parent-1', task: 'do a thing', depth: 2,
       });
-      expect(child.kind).toBe('subagent');
+      expect(child.kind).toBe('spawned');
       expect(child.parentSessionId).toBe('parent-1');
       expect(child.task).toBe('do a thing');
       expect(child.depth).toBe(2);
       const reread = present(await s.get(child.sessionId));
-      expect(reread.kind).toBe('subagent');
+      expect(reread.kind).toBe('spawned');
       expect(reread.parentSessionId).toBe('parent-1');
       expect(reread.depth).toBe(2);
     });
 
-    it('defaults kind/depth on read for pre-subagent records', async () => {
-      // Simulate a session written before subagents landed: no kind/depth.
+    it('defaults kind/depth on read for pre-actor records', async () => {
+      // Simulate a session written before spawned landed: no kind/depth.
       const idb = makeMockIdb();
       const s = createSessionStore({ idb, now: () => 1000, makeId: () => 'legacy-1' });
       await idb.put('sessions', {
@@ -106,7 +106,7 @@ describe('session store', () => {
 
       const cleared = await s.setCustomSystemPrompt(session.sessionId, null);
       // why absent (not ''): every consumer — prompt render, UI badge,
-      // subagent non-inheritance — shares one "unset" shape.
+      // actor non-inheritance — shares one "unset" shape.
       expect('customSystemPrompt' in cleared).toBe(false);
       const reread = present(await s.get(session.sessionId));
       expect('customSystemPrompt' in reread).toBe(false);

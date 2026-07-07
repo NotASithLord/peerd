@@ -1,12 +1,12 @@
 // The heap split — the pure, worker-portable PRIMITIVES shared by every offscreen
-// agent loop (reasoning subagents + bound actors): the in-memory session shim, the
+// agent loop (spawned reasoners + bound actors): the in-memory session shim, the
 // relayed callModel (key/egress/signal stripped, maxTokens injected), and
 // finalAssistantText. The loop-driver itself (runActorLoop) is covered in
 // actor-worker-core.test.ts.
 import { describe, test, expect } from 'bun:test';
 import {
   finalAssistantText, makeInMemorySessions, makeRelayedCallModel,
-} from '../../extension/peerd-runtime/subagent/actor-worker-core.js';
+} from '../../extension/peerd-runtime/actor/actor-worker-core.js';
 
 describe('makeInMemorySessions', () => {
   test('seeds the child record and supports the loop surface', async () => {

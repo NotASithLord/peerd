@@ -3,7 +3,7 @@
 //
 // SECURITY-CRITICAL + host-agnostic. This is the ONE place the worker realm is
 // assembled: the realm seal as the FIRST import, the peerd.* capability surface,
-// the postMessage bridges (fetch / opfs / subagent / display), and the entry
+// the postMessage bridges (fetch / opfs / actor / display), and the entry
 // IIFE. BOTH hosts use it — the visible Notebook tab (notebook-tab.js) and the
 // headless offscreen job runner (offscreen/job-runner.js) — so the seal +
 // surface can never diverge between them. Co-located with realm-seal.js +
@@ -111,7 +111,7 @@ const __peerdDisplay = (value) => {
 // The host side of the bridge is the 'fetch-request' handler.
 
 // --- worker↔host request/response bridges ---
-// Every capability the worker reaches on the host (OPFS, the embedded subagent,
+// Every capability the worker reaches on the host (OPFS, the embedded actor,
 // base-network reads, the a2a mesh) speaks the SAME postMessage protocol: mint a
 // monotonic rid, stash the resolver, post a '<name>-request', settle when the
 // matching '<name>-response' lands. makeBridge is that protocol expressed ONCE;
@@ -205,7 +205,7 @@ globalThis.peerd = {
   },
   // r · runtime (green) — the agent itself. WIRED: runAgent.
   runtime: {
-    runAgent:     (args) => subagentCall(args ?? {}),
+    runAgent:     (args) => actorCall(args ?? {}),
     notifyParent: notWired('runtime.notifyParent'),
     memory:       notWired('runtime.memory'),
   },
@@ -258,8 +258,8 @@ globalThis.__peerd_dynamic_import = async (opfsPath) => {
 };
 
 // --- peerd.runtime.runAgent (embedded agent) proxy ---
-const subagentRelay = makeBridge('subagent');
-const subagentCall = (args) => subagentRelay({ args });
+const actorRelay = makeBridge('actor');
+const actorCall = (args) => actorRelay({ args });
 
 // --- peerd.distributed.* (base-network read) proxy ---
 // One message type ('distributed-request') fetches the whole base-network info

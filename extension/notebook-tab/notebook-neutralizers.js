@@ -152,7 +152,11 @@ export function applyRealmSeal(global) {
       text: async () => new TextDecoder().decode(bytes),
       json: async () => JSON.parse(new TextDecoder().decode(bytes)),
       arrayBuffer: async () => bytes.buffer,
-      bytes,
+      // why a method: the platform's Response.bytes() is a function returning
+      // Promise<Uint8Array>, and that's the shape a model reaches for. As a
+      // data property it LISTS in Object.keys but `resp.bytes()` throws
+      // "not a function" — observed burning several live agent turns.
+      bytes: async () => bytes,
     });
   });
   seal(global, 'fetch', bridgedFetch);

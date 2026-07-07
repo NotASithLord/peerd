@@ -51,14 +51,14 @@ describe('message_actor — case 6: strict boolean coercions', () => {
     expect(missing.seen.req.inbound).toBe(false);
   });
 
-  test('awaitReply is true ONLY for a subagent session (PR #134 reply mode)', async () => {
-    const sub = recordingCtx({ session: { sessionId: 's', kind: 'subagent' } });
+  test('awaitReply is true ONLY for an actor session (PR #134 reply mode)', async () => {
+    const sub = recordingCtx({ session: { sessionId: 's', kind: 'spawned' } });
     await messageActorTool.execute({ to: 'web', message: 'hi' }, sub.ctx);
     expect(sub.seen.req.awaitReply).toBe(true);
 
     const main = recordingCtx({ session: { sessionId: 's', kind: 'main' } });
     await messageActorTool.execute({ to: 'web', message: 'hi' }, main.ctx);
-    expect(main.seen.req.awaitReply).toBe(false); // 'main' !== 'subagent'
+    expect(main.seen.req.awaitReply).toBe(false); // 'main' !== 'spawned'
   });
 });
 
@@ -66,7 +66,7 @@ describe('message_actor — case 7: pass-through of args + ctx fields', () => {
   test('forwards to/message from args and session/toolUseId/abortSignal from ctx', async () => {
     const abortSignal = { aborted: false, addEventListener() {} };
     const { ctx, seen } = recordingCtx({
-      session: { sessionId: 'sess-1', kind: 'subagent' },
+      session: { sessionId: 'sess-1', kind: 'spawned' },
       toolUseId: 'tu-1',
       abortSignal,
     });

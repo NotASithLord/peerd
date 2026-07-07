@@ -3,7 +3,7 @@
 //     preset that grants message_actor — the actor inherits the manifest);
 //   - normalize/resolve/label/filter semantics, fail-closed throughout;
 //   - exposureGate's dispatch-time refusal via ctx.toolAllow;
-//   - subagent narrowing: a child's effective set intersects the parent
+//   - actor narrowing: a child's effective set intersects the parent
 //     session's manifest and the manifest INHERITS into the child record;
 //   - session store: create/setToolManifest persistence ("unset" is the
 //     ABSENT key, same contract as customSystemPrompt);
@@ -20,7 +20,7 @@ import {
 import { makeToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
 import { exposureGate as exposureGateRaw } from '../../extension/peerd-runtime/tools/gates.js';
 import { mainAgentDescriptors } from '../../extension/peerd-runtime/tools/exposure.js';
-import { narrowTools, makeSpawnSubagent } from '../../extension/peerd-runtime/subagent/spawn.js';
+import { narrowTools, makeSpawnActor } from '../../extension/peerd-runtime/actor/spawn.js';
 import { WEB_ACTOR_DOM_TOOLS } from '../../extension/peerd-runtime/tools/exposure.js';
 import { createSessionStore } from '../../extension/peerd-runtime/sessions/store.js';
 // why: real JSDoc contracts from source — LoopEvent shapes the mock loop's
@@ -72,7 +72,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
       const allow = new Set(p.allow);
       for (const name of [
         'vm_boot', 'vm_create', 'vm_delete', 'js_notebook', 'js_create',
-        'app_create', 'app_update', 'edit_file', 'spawn_subagent',
+        'app_create', 'app_update', 'edit_file', 'actor_create',
         'page_eval', 'page_exec', 'request_review', 'load_skill',
       ]) {
         expect(allow.has(name)).toBe(false);
@@ -217,10 +217,10 @@ describe('exposureGate — per-session manifest refusal at dispatch', () => {
   });
 });
 
-// ---- subagent narrowing intersection ----------------------------------------
+// ---- actor narrowing intersection ----------------------------------------
 
 describe('narrowTools — manifest intersection', () => {
-  const all = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'spawn_subagent' }];
+  const all = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'actor_create' }];
 
   test('intersects the inherited set with the parent manifest allow', () => {
     expect(narrowTools(all, { allow: new Set(['b', 'c']) }).map((t) => t.name)).toEqual(['b', 'c']);
@@ -230,7 +230,7 @@ describe('narrowTools — manifest intersection', () => {
     expect(narrowTools(all, { tools: ['a', 'b'], allow: new Set(['b']) }).map((t) => t.name)).toEqual(['b']);
   });
 
-  test('allowRecursion cannot resurrect spawn_subagent when the manifest excludes it', () => {
+  test('allowRecursion cannot resurrect actor_create when the manifest excludes it', () => {
     expect(narrowTools(all, { allowRecursion: true, allow: new Set(['a']) }).map((t) => t.name)).toEqual(['a']);
   });
 
@@ -239,7 +239,7 @@ describe('narrowTools — manifest intersection', () => {
   });
 });
 
-describe('makeSpawnSubagent — the parent manifest caps and follows the child', () => {
+describe('makeSpawnActor — the parent manifest caps and follows the child', () => {
   // Mini store mirroring createSessionStore's create/get surface,
   // INCLUDING toolManifest passthrough.
   const makeMiniStore = () => {
@@ -309,7 +309,7 @@ describe('makeSpawnSubagent — the parent manifest caps and follows the child',
     const store = makeMiniStore();
     const parent = await store.create({ toolManifest: { allow: ['b'] } });
     const { deps, seenTools, dispatched } = harness(store);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId, tools: ['b', 'c'] });
 
@@ -326,7 +326,7 @@ describe('makeSpawnSubagent — the parent manifest caps and follows the child',
     const store = makeMiniStore();
     const parent = await store.create({});
     const { deps, seenTools } = harness(store);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
 
