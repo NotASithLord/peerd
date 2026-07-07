@@ -10,6 +10,22 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Fixed
+- **A oneShot delegation whose CODE crashed now gets its recovery turn.**
+  The oneShot contract always said "an errored round falls through to the
+  normal loop" — but the clean-round test only saw tool-LEVEL errors, and a
+  notebook eval whose code threw (a CompileError, a bad import) returns
+  ok:true with the `[ERROR]` text as its content. So the crash
+  short-circuited straight back to the orchestrator as the raw reply and
+  the actor never debugged its own sandbox (field transcript: a notebook
+  actor bounced the same CompileError back twice). `js_notebook` now marks
+  such results `evalError` and the one-shot latch disarms on it, exactly
+  like a tool failure — the actor recovers and iterates, as promised. A
+  headless CI test also now pins `peerd:wasi` + `demoModule()` as
+  importable and runnable from a `script` job (a field session reported
+  the import unreachable; current source proves green, so a stale install
+  is the likely culprit — reload the extension).
+
 ### Added
 - **`peerd:wasi` ships a self-test module.** `demoModule()` (exported next
   to `runWasi`) returns a tiny (187-byte) known-good wasm32-wasi hello

@@ -102,7 +102,10 @@ export const jsNotebookTool = {
         sessionId: ctx.session?.sessionId,
         notebookId: targetNotebookId,
       });
-      return { ok: true, content: formatEvalResult(args.code, result) };
+      // evalError: the eval infrastructure succeeded but the CODE crashed —
+      // ok:true (the [ERROR] text IS the result) with the marker the one-shot
+      // latch reads, so an actor delegation gets its recovery turn.
+      return { ok: true, content: formatEvalResult(args.code, result), ...(result.error ? { evalError: true } : {}) };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       return { ok: false, error: `js_notebook_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
