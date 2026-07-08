@@ -126,7 +126,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   getSecret:          [],
   safeFetch:          [],
   webFetch:           ['vm_import', 'fetch_url'],
-  webCache:           ['fetch_url', 'read_web_cache'],
+  webCache:           ['fetch_url', 'read_web_cache', 'read_page'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect'],
   idb:                ['inspect'],

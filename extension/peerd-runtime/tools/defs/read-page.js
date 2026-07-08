@@ -14,18 +14,24 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { windowText, pagingFooter } from '../web/spill.js';
+
+// Content mode shares fetch_url's body budget — one read costs like one fetch.
+const CONTENT_BODY_CHARS = 16_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readPageTool = {
   name: 'read_page',
   primitive: 'tab',
   description: [
-    'Read the DOM of a tab. Returns title, URL, visible body text',
+    'Read the DOM of a tab. Default mode returns title, URL, visible body text',
     '(truncated to ~4000 chars), and a list of interactable elements',
     '(inputs, buttons, links) with CSS selectors you can pass to click()',
-    'and type(). By default reads the active tab. The text cap is',
-    'conservative — if you need to see more, call read_page again after',
-    'scrolling or navigating to a more focused page.',
+    "and type(). mode:'content' instead extracts the page's READABLE CORE as",
+    'markdown (boilerplate stripped, capped 16k, with paging for the overflow) —',
+    'far denser for articles/docs/reference pages you are READING rather than',
+    'operating; it returns no interactables, so use the default when you need',
+    'to act on the page. By default reads the active tab.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -33,6 +39,11 @@ export const readPageTool = {
       tabId: {
         type: 'integer',
         description: 'Optional tab id; defaults to the active tab.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['snapshot', 'content'],
+        description: "snapshot (default): text + interactables for OPERATING the page. content: the readable core as markdown for READING it.",
       },
     },
   },
@@ -46,6 +57,54 @@ export const readPageTool = {
     // why: ToolContext types `scripting` as the opaque chrome.scripting slot;
     // narrow it to the typed API surface for the executeScript call.
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
+
+    // mode:'content' — the RENDERED page's readable core as markdown. Grabs the
+    // live DOM's outerHTML (post-JS, unlike fetch_url which sees served bytes)
+    // and routes it through the SAME offscreen Readability+Turndown extractor
+    // and the SAME spill-and-page machinery fetch_url uses. FAIL-OPEN: a
+    // non-readerable page, a missing extractor (Firefox), or an extraction
+    // error all fall through to the default snapshot below — content mode is
+    // an optimization, never a gate on reading the page.
+    if (args?.mode === 'content') {
+      const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | undefined} */ (
+        /** @type {any} */ (ctx).webOffscreenClient);
+      if (webClient?.extractMarkdown) {
+        try {
+          const grabbed = (await scripting.executeScript({ target: { tabId: tab.id }, func: readOuterHtmlInjected }))[0]?.result;
+          if (grabbed?.html) {
+            const ex = await webClient.extractMarkdown({ html: grabbed.html, url: grabbed.url || tab.url });
+            if (ex.readerable && typeof ex.markdown === 'string' && ex.markdown.trim()) {
+              const origin = originOfUrl(grabbed.url || tab.url);
+              const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
+                /** @type {any} */ (ctx).webCache);
+              const win = windowText(ex.markdown, CONTENT_BODY_CHARS);
+              let text = win.window;
+              /** @type {string | null} */
+              let footer = null;
+              if (win.windowed && webCache?.key && webCache?.put) {
+                const cacheKey = webCache.key();
+                try {
+                  await webCache.put({ key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: ex.markdown });
+                  footer = pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+                } catch { /* spill failed — the window (with its elision marker) still ships */ }
+              } else if (win.windowed && !webCache) {
+                text = ex.markdown.slice(0, CONTENT_BODY_CHARS);
+              }
+              const fenced = wrapUntrusted({
+                origin, tool: 'read_page',
+                body: JSON.stringify({
+                  mode: 'content', url: grabbed.url || tab.url,
+                  ...(ex.title ? { title: ex.title } : {}),
+                  format: 'markdown', truncated: win.windowed, body: text,
+                }, null, 2),
+              });
+              return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
+            }
+          }
+        } catch { /* fail-open to the snapshot below */ }
+      }
+    }
+
     let scriptResult;
     try {
       const results = await scripting.executeScript({
@@ -115,8 +174,25 @@ const formatPageBody = (snap) => {
 };
 
 // ───────────────────────────────────────────────────────────────────────
-// Injected function — runs in the page world. Self-contained.
+// Injected functions — run in the page world. Self-contained.
 // ───────────────────────────────────────────────────────────────────────
+// content mode's grabber: the rendered DOM, serialized. Capped so a pathological
+// page doesn't blow the executeScript result channel (the offscreen extractor
+// caps again).
+function readOuterHtmlInjected() {
+  // why: serialized by chrome.scripting.executeScript and re-evaluated in the
+  // page's classic-script world; the calling module's strict mode doesn't
+  // carry across. Opt in here (same note as readPageInjected below).
+  'use strict';
+  const MAX = 2_000_000;
+  const html = document.documentElement ? document.documentElement.outerHTML : '';
+  return {
+    html: html.length > MAX ? html.slice(0, MAX) : html,
+    url: location.href,
+    title: document.title || '',
+  };
+}
+
 function readPageInjected() {
   // why: serialized by chrome.scripting.executeScript and re-evaluated
   // in the page's classic-script world; the calling module's strict
