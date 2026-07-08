@@ -8,6 +8,7 @@
 import { describe, test, expect } from 'bun:test';
 import { callAnthropic } from '../../extension/peerd-provider/adapters/anthropic.js';
 import { callOpenRouter } from '../../extension/peerd-provider/adapters/openrouter.js';
+import { callGlm } from '../../extension/peerd-provider/adapters/glm.js';
 import { ProviderUsageLimitError } from '../../extension/peerd-provider/errors.js';
 
 const stubResponse = (status: number, bodyText = '', headers: Record<string, string> = {}) => ({
@@ -78,5 +79,40 @@ describe('callOpenRouter — hard usage/credit limit', () => {
     expect(calls).toBe(1);
     expect(thrown).toBeInstanceOf(ProviderUsageLimitError);
     expect(thrown.status).toBe(402);
+  });
+});
+
+describe('callGlm — hard usage/credit limit', () => {
+  // Z.ai signals an out-of-credit account as error 1113 on HTTP 429 (not 402):
+  // "Insufficient balance or no resource package. Please recharge." Without the
+  // 'insufficient balance' / 'recharge' needles this classified as a transient
+  // 429 → 3 pointless retries → a misleading generic error with no failover.
+  test('a 429 "insufficient balance … recharge" body fails fast (no retries)', async () => {
+    let calls = 0;
+    const safeFetch = async () => {
+      calls++;
+      return stubResponse(429, '{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}');
+    };
+    let thrown: any;
+    try { await drain(callGlm(baseArgs(safeFetch) as any)); }
+    catch (e) { thrown = e; }
+    expect(calls).toBe(1);                       // NOT retried
+    expect(thrown).toBeInstanceOf(ProviderUsageLimitError);
+    expect(thrown.detail).toContain('recharge');
+  });
+
+  test('a transient 429 (no billing needle) still retries (regression guard)', async () => {
+    let calls = 0;
+    const safeFetch = async () => {
+      calls++;
+      if (calls === 1) return stubResponse(429, '{"error":{"message":"rate limit exceeded"}}', { 'retry-after': '0' });
+      const body = new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(new TextEncoder().encode('data: [DONE]\n\n')); c.close(); },
+      });
+      return { ok: true, status: 200, headers: new Headers(), body, text: async () => '' };
+    };
+    const events = await drain(callGlm(baseArgs(safeFetch) as any));
+    expect(calls).toBe(2);
+    expect(events[0].type).toBe('rate-limit-pause');
   });
 });

@@ -129,8 +129,10 @@ Preview package install paths (Firefox is the smoother of the two):
 peerd has **no build step**: you load the `extension/` folder straight
 into Chrome as it is on disk. You need a Chromium-based browser (Chrome,
 Edge, Brave, Arc, …) and a model to talk to: a key from
-[Anthropic](https://console.anthropic.com/) and/or
-[OpenRouter](https://openrouter.ai/keys), or a local
+[Anthropic](https://console.anthropic.com/),
+[OpenRouter](https://openrouter.ai/keys),
+[OpenAI](https://platform.openai.com/api-keys), or
+[Z.ai](https://z.ai/) (GLM) — or a local
 [Ollama](https://ollama.com/) (keyless, no bill, nothing leaves your
 machine). BYOK: any key lives encrypted in a local vault and is only
 ever sent to that provider.
@@ -164,8 +166,9 @@ to your model provider.
 **4. Add your API key(s)**
 
 Open **Settings** (gear icon) → **API keys**. Paste a key for
-**Anthropic** (`sk-ant-…`) and/or **OpenRouter** (`sk-or-…`). You can set
-both at once, each stored independently. Choose a default under
+**Anthropic** (`sk-ant-…`), **OpenRouter** (`sk-or-…`), **OpenAI**
+(`sk-…`), or **Z.ai** (GLM) — set as many as you like, each stored
+independently. Choose a default under
 *Default model for new chats*, and switch the model per chat from the
 picker above the message box.
 
@@ -225,7 +228,7 @@ one top-level module, each owning its public API through `index.js`:
 
 | | Module | Role |
 |---|---|---|
-| **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — Anthropic, OpenRouter, Ollama (streaming, caching, cost, retries) |
+| **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — Anthropic, OpenRouter, OpenAI, Z.ai GLM, Ollama (streaming, caching, cost, retries) |
 | **`e`** · red | [`peerd-egress`](extension/peerd-egress/) | Security — the vault, the egress chokepoint, the denylist, the audit log |
 | **`e`** · amber | [`peerd-engine`](extension/peerd-engine/) | Sandboxes — WebVMs, Notebooks, Apps, and the headless worker |
 | **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/) | The orchestrator — agent loop, tools, the `message_actor` delegation channel, actors, sessions, memory, skills, review, goal mode, voice |
@@ -285,7 +288,7 @@ detail). Each colored letter maps to a top-level module:
 peerd/
 ├── extension/                # the extension itself — load this dir unpacked
 │   ├── manifest.json
-│   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
+│   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM, Ollama)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
 │   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless script worker in offscreen/.
 │   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + actors, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit

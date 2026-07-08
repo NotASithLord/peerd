@@ -15,13 +15,19 @@
 // Deliberately NARROW — 'rate limit' / 'per-minute' / 'overloaded' are
 // EXCLUDED so a genuine transient 429 still rides the retry path. Anthropic's
 // monthly-spend stop ("…would exceed your monthly spend limit") and
-// OpenRouter's insufficient-credits 402 both land here.
+// OpenRouter's insufficient-credits 402 both land here. Z.ai signals an
+// out-of-credit account as error 1113 "Insufficient balance or no resource
+// package. Please recharge." on HTTP 429 (NOT 402), so 'insufficient balance'
+// and 'recharge' are needed or a spent GLM account gets 3 pointless retries
+// then a misleading generic 429 with no failover.
 const HARD_LIMIT_NEEDLES = Object.freeze([
   'credit balance',
   'out of credit',
   'insufficient credit',
+  'insufficient balance',
   'insufficient_quota',
   'insufficient funds',
+  'recharge',
   'billing',
   'payment required',
   'spending limit',

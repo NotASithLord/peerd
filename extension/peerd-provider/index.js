@@ -7,8 +7,9 @@
 // and never imports adapter modules directly — that keeps runtime
 // agnostic to which providers exist.
 //
-// Shipped: Anthropic + OpenRouter (cloud) and Ollama (local, keyless).
-// Later: OpenAI adapter, local WebGPU inference.
+// Shipped (cloud, BYOK): Anthropic, OpenRouter, OpenAI, Z.ai GLM.
+// Local (keyless): Ollama, plus the WebGPU on-device runner (gated on the
+// resident engine). The registry is the source of truth — see registry.js.
 
 export {
   callModel,
