@@ -64,6 +64,8 @@ export {
   OPENAI_POPULAR,
 } from './adapters/openai.js';
 export { ollamaAdapter, DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL } from './adapters/ollama.js';
+// Z.ai GLM — OpenAI-compatible direct endpoint (api.z.ai/api/paas/v4).
+export { glmAdapter, DEFAULT_MODEL as GLM_DEFAULT_MODEL } from './adapters/glm.js';
 // local WebGPU runner (FEATURE-LOCAL-WEBGPU B). setLocalGenerate wires the
 // offscreen engine bridge at SW boot; LOCAL_MODEL_ID is the resident model.
 export {
