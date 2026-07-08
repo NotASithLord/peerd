@@ -12,7 +12,6 @@ Closes #
 ## Checklist
 
 - [ ] `bun run preflight` passes (tests, typecheck, lint, in-browser, dweb-boundary, no manifest drift)
-- [ ] Commits are signed off — `git commit -s` (we use the DCO)
 - [ ] Only original or permissively-licensed code — **no GPL / AGPL / copyleft**
 - [ ] Tests added or updated (or N/A)
 - [ ] No hand-edited generated files (`manifest.json`, `shared/channel-config.js`)
