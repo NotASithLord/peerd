@@ -27,12 +27,15 @@ purpose-built hosted agents report ~88%. A 30-task subset carries roughly ±8pp 
 honest positioning is not "we beat everyone" — it's *the first extension-native number on
 this benchmark, with the failure taxonomy that says exactly where the next points are*:
 
-| Failure mode (of 22 fails) | Count | Meaning |
+| Failure mode (22 fails; categories overlap) | Count | Meaning |
 |---|---|---|
 | Hit the 25-step cap mid-task | 6 | step-inefficiency, not capability |
 | Near-cap thrash (20–25 steps) | 3 | same |
 | Incomplete final action | 9 | found the info, skipped add-to-cart / a filter |
 | Wrong/other | 7 | genuine misses |
+
+Categories are **non-exclusive** — a task that ran to the cap *and* skipped its final action
+is counted under both, so the column sums above the 22 fails rather than partitioning them.
 
 Budget exhaustion dominates. **Efficiency is the lever**, which drove both experiments below.
 
@@ -47,10 +50,13 @@ identically:
 
 | | tool-call | code-REPL |
 |---|---|---|
-| Pass rate | **26.7%** (8/30) | 20.7% (6/29) |
+| Pass rate | **26.7%** (8/30) | 20.7% (6/29)† |
 | Median steps/task | 11 | 14 |
 | 25-step-cap deaths | 6 | 8 |
 | Tasks won that the other arm lost | 2 | **0** |
+
+† One code-arm run did not complete scoring (harness hang, see §4), so 29 of the 30 tasks
+were scored in that arm; the tool-call arm scored all 30.
 
 **Verdict: the code arm loses on live sites.** Long blind scripts drift when pages change
 under them; the write-code-then-look loop costs more round-trips than it saves. The code

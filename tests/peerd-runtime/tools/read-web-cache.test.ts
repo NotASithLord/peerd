@@ -54,7 +54,9 @@ describe('read_web_cache', () => {
     expect((await readWebCacheTool.execute({}, ctxWith({}) as any)).ok).toBe(false);
     const gone = await readWebCacheTool.execute({ key: 'wc-gone' }, ctxWith({}) as any);
     expect(gone.ok).toBe(false);
-    if (!gone.ok) expect(gone.error).toContain('re-fetch');
+    // the recovery hint is source-aware now (a read_page spill must NOT be told
+    // to fetch_url the rendered page it came from) — it says "re-run the read".
+    if (!gone.ok) expect(gone.error).toContain('re-run the read');
     const noCap = await readWebCacheTool.execute({ key: 'wc-1' }, {} as any);
     expect(noCap.ok).toBe(false);
     if (!noCap.ok) expect(noCap.error).toBe('web_cache_unavailable');

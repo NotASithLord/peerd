@@ -96,6 +96,10 @@ export const readPageTool = {
                   mode: 'content', url: grabbed.url || tab.url,
                   ...(ex.title ? { title: ex.title } : {}),
                   format: 'markdown', truncated: win.windowed, body: text,
+                  // the RAW DOM was clipped at 2MB before extraction — the
+                  // readable core may be missing its tail (distinct from
+                  // `truncated`, which only means the markdown was windowed).
+                  ...(grabbed.htmlTruncated ? { htmlTruncated: true } : {}),
                 }, null, 2),
               });
               return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
@@ -185,9 +189,14 @@ function readOuterHtmlInjected() {
   // carry across. Opt in here (same note as readPageInjected below).
   'use strict';
   const MAX = 2_000_000;
-  const html = document.documentElement ? document.documentElement.outerHTML : '';
+  const raw = document.documentElement ? document.documentElement.outerHTML : '';
+  const clipped = raw.length > MAX;
   return {
-    html: html.length > MAX ? html.slice(0, MAX) : html,
+    html: clipped ? raw.slice(0, MAX) : raw,
+    // why: flag the clip so the caller never reports a complete read when the
+    // raw DOM's tail was dropped here — before the extractor ever saw it, so no
+    // downstream truncation signal would otherwise fire.
+    htmlTruncated: clipped,
     url: location.href,
     title: document.title || '',
   };

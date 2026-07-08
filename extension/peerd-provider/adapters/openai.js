@@ -105,7 +105,7 @@ export async function* callOpenAi(args) {
       if (!res.body) {
         throw new ProviderError('openai', 'response has no body (streaming requires it)');
       }
-      yield* fromOpenAiStream(res.body);
+      yield* fromOpenAiStream(res.body, { provider: 'openai' });
       return;
     }
     // Non-2xx: read the body ONCE (drains the socket for reuse), then classify
