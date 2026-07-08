@@ -86,7 +86,45 @@ truncated head and failed. Paging spends more tokens to be correct, which is whe
 +40pp pass rate comes from. Known rough edge: one task showed a paging loop (flagged for
 tuning; BM25 query-relevant excerpting is the planned next step).
 
-## 4. What the benchmarks fixed on the way
+## 4. The full 300: peerd's first complete benchmark run
+
+With the content pipeline merged, we ran the entire benchmark — all 300 tasks, one pass,
+Opus 4.8, judged by WebJudge/o4-mini (July 8, 2026):
+
+**peerd: 93/300 = 31.0%.**
+
+| Slice | Score | Note |
+|---|---|---|
+| Tasks 1–99 | 30.3% | |
+| Tasks 100–199 | 39.6% | |
+| Tasks 200–299 | 23.0% | the hardest stretch |
+| **Full 300** | **31.0%** | median 13 steps/task; 66 tasks (22%) hit the 25-step cap |
+
+Two honest notes. First, the 30-task calibration slice used during development scored
+46.7% on the same build — iterating against a slice inflates it; the full run is the real
+number, which is why we ran it. Second, 31.0% sits *below* browser-use's independently
+verified ~40% — the calibration-slice win did not fully generalize. The engineering value
+is that we know exactly where the 207 failures live:
+
+| Failure bucket (of 207) | Count | The lever |
+|---|---|---|
+| Hit the 25-step cap | 58 | step efficiency: query-relevant excerpting |
+| Completed browsing, skipped the final required action | 53 | prompt-level: "the task is the action, not the information" |
+| Found the answer, never stated it | 14 | prompt-level: report discipline |
+| Bot-blocked (403s, captchas) | 14 | partly a headless-harness artifact; real users run real Chrome |
+| Wrong info / other | 68 | genuine capability misses |
+
+Roughly a third of all failures are *finish-and-report* failures — prompt-addressable,
+not architecture — and another quarter are step-budget deaths with a known next fix.
+That is a mapped path to 40%+ on fresh tasks, not a hope.
+
+Positioning: purpose-built hosted agents score 72–94% (Fara-27B 72, Webwright 86.7 at a
+100-step budget, GPT-5.4 92.8, Yutori n1.5 94.5). peerd is not in that category and does
+not claim to be: it is, to our knowledge, the first **browser-extension** agent — local,
+BYOK, no backend, store-installable — to publish any number on this benchmark at all.
+31.0% is the honest floor of that category, with the full per-task evidence public.
+
+## 5. What the benchmarks fixed on the way
 
 Running honest benchmarks against a real extension surfaced real product bugs, all fixed:
 
