@@ -24,6 +24,26 @@ describe('buildActorGraph', () => {
     expect(by('app-9').isActor).toBe(false);                                                // plain app
   });
 
+  test('a plain app merely TAGGED "actor" is not a false-positive dwapp actor', () => {
+    const g = buildActorGraph({
+      actors: [
+        // detail is a comma-joined tag list; the middot marker "actor ·" can't occur.
+        { type: 'app', handle: 'app-1', name: 'tagged', detail: 'actor, tooling' },
+        // the real dwapp-actor marker (middot).
+        { type: 'app', handle: 'app-2', name: 'Parser', detail: 'actor · parses HTML' },
+      ],
+    });
+    expect(g.nodes.find((n) => n.id === 'app-1')!.isActor).toBe(false);
+    expect(g.nodes.find((n) => n.id === 'app-2')!.isActor).toBe(true);
+  });
+
+  test('an explicit isActor flag wins over the detail sniff', () => {
+    const g = buildActorGraph({
+      actors: [{ type: 'app', handle: 'app-1', name: 'x', detail: 'anything', isActor: true }],
+    });
+    expect(g.nodes.find((n) => n.id === 'app-1')!.isActor).toBe(true);
+  });
+
   test('mesh peers are REMOTE nodes bridged onto the same graph', () => {
     const g = buildActorGraph({ peers: [{ did: 'did:key:zABC123456', label: 'peer-alpha' }] });
     const peer = g.nodes.find((n) => n.kind === 'peer')!;

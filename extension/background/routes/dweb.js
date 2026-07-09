@@ -100,6 +100,7 @@ export const makeDwebRoutes = (deps) => {
       try {
         const rec = await appRegistry.get(appId);
         if (!rec) return { ok: false, error: 'app-not-found' };
+        const prevActor = rec.actor;   // capture BEFORE the rewrite (for re-mint detection)
         const opfs = appClient.opfsForApp(appId);
         // Clear the old file set, then write the new one.
         for (const f of await opfs.list()) {
@@ -107,10 +108,15 @@ export const makeDwebRoutes = (deps) => {
           try { await opfs.delete(path); } catch { /* best-effort */ }
         }
         for (const [path, content] of Object.entries(files || {})) await opfs.write(path, content);
-        const updated = await appRegistry.update(appId, {
+        await appRegistry.update(appId, {
           ...(typeof entryFile === 'string' ? { entryFile } : {}),
           ...(dweb && typeof dweb === 'object' ? { dweb } : {}),
         });
+        // A peer version bump may change or REMOVE peerd.actor.json — re-derive the
+        // actor identity and unbind a live actor if it changed, exactly like a local
+        // edit (adversarial review #1: this route previously skipped that, leaving a
+        // stale/phantom dwapp actor after an update).
+        const updated = await appClient.reconcileActor(appId, prevActor).then(() => appRegistry.get(appId));
         appTabTracker.reloadTab(appId).catch(() => {});
         await auditLog.append({
           type: 'dweb_app_updated',

@@ -88,7 +88,10 @@ export const dwebInstallTool = {
       content: JSON.stringify({
         installed: true,
         appId: r.app?.id ?? r.appId ?? null,
-        name: r.app?.name ?? r.name ?? null,
+        // The app NAME defaults to the peer's manifest.name when the caller didn't
+        // rename — peer-controlled, so sanitize it like the actor fields (JSON escapes
+        // quotes/newlines but NOT < > or backticks; escapeAttr neutralizes those).
+        name: safeField(r.app?.name ?? r.name) || null,
         ...(actor ? {
           actor: { name: safeField(actor.name), description: safeField(actor.description) },
           note: 'This peer app declared an ACTOR (peerd.actor.json): it is now message_actor-able and runs peer-authored lore. Tell the user it was installed as an agent persona before relying on it.',

@@ -40,16 +40,20 @@ const safeTitle = (title) => escapeAttr(truncate((title || '').replace(/\s+/g, '
 // traded dwapp's manifest is author-controlled), and this list is a TRUSTED,
 // non-fenced tool result — so EVERY field is run through safeTitle (escapeAttr +
 // whitespace-collapse + clamp), same as a page-controlled tab title.
+// why the " · " marker (middot, not comma): a plain app's detail is its tags
+// joined with ", ", so "actor · …" is a signal a tag list can NEVER produce —
+// the actor-graph model keys off exactly this prefix to flag a dwapp actor
+// without a false positive from an app that happens to be tagged "actor".
 /** @param {any} a @returns {string} */
 const actorDetail = (a) => {
-  const parts = ['actor'];
+  const rest = [];
   const desc = safeTitle(a?.description);
-  if (desc) parts.push(desc);
+  if (desc) rest.push(desc);
   const skills = Array.isArray(a?.skills)
     ? a.skills.map((/** @type {any} */ s) => s?.name).filter(Boolean).slice(0, 4).join(', ')
     : '';
-  if (skills) parts.push(`skills: ${safeTitle(skills)}`);
-  return parts.join(' · ');
+  if (skills) rest.push(`skills: ${safeTitle(skills)}`);
+  return `actor · ${rest.length ? rest.join(' · ') : 'specialized'}`;
 };
 
 /**

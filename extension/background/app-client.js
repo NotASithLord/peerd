@@ -219,6 +219,20 @@ export const createAppClient = ({ registry, tracker }) => {
     return id;
   };
 
+  // Re-derive the actor manifest from the app's CURRENT files and reconcile the
+  // registry + any live actor — for callers that mutate an app's file set OUTSIDE
+  // create/update/writeFile/deleteFile (the dweb peer-version-update route), so the
+  // actor reconciliation stays in ONE place instead of being re-forgotten per route
+  // (adversarial review #1). Pass the manifest as it was BEFORE the mutation so a
+  // real change unbinds the live actor for a fresh re-mint.
+  /** @param {string} appId @param {object | null | undefined} prevActor @returns {Promise<object | null>} */
+  const reconcileActor = async (appId, prevActor) => {
+    const nextActor = await readActorManifest(appId);
+    await registry.update(appId, /** @type {any} */ ({ actor: nextActor }));
+    if (manifestChanged(prevActor, nextActor)) await registry.clearActorSession(appId).catch(() => {});
+    return nextActor;
+  };
+
   /** @param {string} appId */
   const deleteApp = async (appId) => {
     const rec = await registry.get(appId);
@@ -279,6 +293,7 @@ export const createAppClient = ({ registry, tracker }) => {
     writeFile, readFile, listFiles, deleteFile,
     open,
     delete: deleteApp,
+    reconcileActor,
     search,
     opfsForApp,
   };
