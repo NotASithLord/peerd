@@ -22,6 +22,11 @@
 //     --base-url=https://router.huggingface.co/v1 --model=Qwen/Qwen2.5-VL-72B-Instruct --api-key=hf_...
 //   # direct OpenAI, if you have a key:
 //   OPENAI_API_KEY=sk-... bun scripts/cdp/om2w/score.mjs --run=6aa56e07
+//   # internal-iteration judge on Anthropic's OpenAI-compat endpoint (NOT
+//   # leaderboard-comparable — o4-mini is the official judge; use this to RANK
+//   # arms cheaply, then confirm winners on o4-mini):
+//   bun scripts/cdp/om2w/score.mjs --run=6aa56e07 \
+//     --base-url=https://api.anthropic.com/v1 --model=claude-haiku-4-5 --api-key=sk-ant-...
 // Flags: --run (out subdir; default the dataset revision, matching run-om2w),
 //   --model (default o4-mini), --base-url (OpenAI-compatible gateway; else
 //   $OPENAI_BASE_URL), --workers (default 4), --threshold (default 3),
@@ -136,6 +141,9 @@ function ensureScorer() {
   patchRunPy();
   patchUtilsPy();
   patchBackoffPatience();
+  patchClaudeJudgeBudget();
+  patchClientTimeout();
+  patchImageMediaType();
   return ensureVenv();
 }
 
@@ -231,6 +239,79 @@ function patchBackoffPatience() {
   if (!src.includes(from)) fail(`could not patch utils.py backoff — max_tries anchor missing. Upstream at ${PIN.slice(0, 8)} changed? Remove ${REPO} and re-run.`);
   writeFileSync(p, `# peerd-patched-backoff-v2: ride out TPM windows; give up on insufficient_quota.\n${src.replace(from, "        max_tries=12, max_time=600,\n        giveup=lambda e: 'insufficient_quota' in str(e),")}`);
   log('patched utils.py (backoff: TPM waited out, insufficient_quota gives up instantly)');
+}
+
+// Upstream bug: encode_image ALWAYS re-encodes to JPEG (utils.py `save(...,
+// format="JPEG")`), but the final aggregate judge call in the Online-Mind2Web
+// method declares the data-URI as image/png (the per-image call correctly says
+// jpeg). OpenAI sniffs the real format and tolerates the mismatch; strict
+// validators (Anthropic's OpenAI-compat endpoint) reject it with a 400
+// "specified image/png but the image appears to be image/jpeg" — which the
+// backoff then retries 12× before the worker dies, silently unscoring every
+// task whose final call carries a screenshot. Fix the declared type to match
+// the actual bytes. Scoped to the method we run. Idempotent via the literal.
+function patchImageMediaType() {
+  const p = join(REPO, 'src', 'methods', 'webjudge_online_mind2web.py');
+  const src = readFileSync(p, 'utf8');
+  const from = "'image_url': {\"url\": f\"data:image/png;base64,{jpg_base64_str}\", \"detail\": \"high\"}";
+  if (!src.includes(from)) {
+    if (src.includes('data:image/jpeg;base64,{jpg_base64_str}", "detail": "high"}')) return;  // already jpeg
+    fail(`could not patch image media type — png anchor missing in webjudge_online_mind2web.py. Remove ${REPO} and re-run.`);
+  }
+  const to = "'image_url': {\"url\": f\"data:image/jpeg;base64,{jpg_base64_str}\", \"detail\": \"high\"}";
+  writeFileSync(p, src.replace(from, to));
+  log('patched webjudge_online_mind2web.py (final judge call: image/png -> image/jpeg, strict-validator safe)');
+}
+
+// The upstream OpenaiEngine builds its client with NO request timeout, so the
+// SDK's 600s default applies. WebJudge fires one judge_image call PER screenshot
+// concurrently (asyncio.gather over a 26-step trajectory = 26 simultaneous
+// requests), which trips rate limits; a rate-limited-then-stalled connection
+// then blocks the full 600s before the backoff can see it as a retryable error,
+// and a whole task's gather hangs on its slowest call. Give the client a bounded
+// per-request timeout so a stall becomes a fast APITimeoutError the backoff
+// rides out, instead of a 10-minute freeze. Idempotent via its own marker.
+function patchClientTimeout() {
+  const p = join(REPO, 'src', 'utils.py');
+  const src = readFileSync(p, 'utf8');
+  if (src.includes('# peerd-patched-timeout')) return;
+  const from = '        self.client = OpenAI(\n'
+    + '                        api_key=api_key,\n'
+    + '                    )';
+  const to = '        self.client = OpenAI(\n'
+    + '                        api_key=api_key,\n'
+    + '                        timeout=90,  # peerd-patched-timeout: stall -> fast retry, not 600s hang\n'
+    + '                        max_retries=0,  # backoff decorator owns retries\n'
+    + '                    )';
+  if (!src.includes(from)) fail(`could not patch utils.py client timeout — OpenAI() anchor missing. Remove ${REPO} and re-run.`);
+  writeFileSync(p, src.replace(from, to));
+  log('patched utils.py (client timeout=90, backoff owns retries)');
+}
+
+// Claude judges (via the Anthropic OpenAI-compat endpoint, --base-url
+// https://api.anthropic.com/v1 + an sk-ant-… --api-key) take the non-reasoning
+// branch of the utils.py patch, which keeps upstream's max_tokens=512 — and a
+// verdict line truncated at 512 tokens is scored as FAILURE, silently deflating
+// the number (the same trap the o-series patch fixes). Give claude-* judges a
+// raised cap; temperature 0 passes through the compat layer fine. Idempotent
+// via its own marker; the anchor is the patched utils.py's else-branch.
+function patchClaudeJudgeBudget() {
+  const p = join(REPO, 'src', 'utils.py');
+  const src = readFileSync(p, 'utf8');
+  if (src.includes('# peerd-patched-claude-judge')) return;
+  const from = '        else:\n'
+    + '            _params["max_tokens"] = max_new_tokens\n'
+    + '            _params["temperature"] = temperature';
+  const to = '        elif _base.startswith("claude"):\n'
+    + '            # peerd-patched-claude-judge: verdict truncation at 512 scores as failure\n'
+    + '            _params["max_tokens"] = max(max_new_tokens, 4096)\n'
+    + '            _params["temperature"] = temperature\n'
+    + '        else:\n'
+    + '            _params["max_tokens"] = max_new_tokens\n'
+    + '            _params["temperature"] = temperature';
+  if (!src.includes(from)) fail(`could not patch utils.py for claude judges — else-branch anchor missing. Remove ${REPO} and re-run.`);
+  writeFileSync(p, src.replace(from, to));
+  log('patched utils.py (claude-* judge: raised max_tokens)');
 }
 
 function ensureVenv() {
