@@ -13,6 +13,7 @@
 // don't touch it.
 
 import { opfsHelpers } from '/peerd-engine/index.js';
+import { actorManifestFromFiles, ACTOR_MANIFEST_FILE } from '/peerd-runtime/index.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
@@ -23,6 +24,18 @@ const MAX_APP_TOTAL_CHARS = 2_000_000;
 
 /** @param {string} appId */
 const opfsForApp = (appId) => opfsHelpers(['peerd-apps', appId]);
+
+// Re-derive the dwapp ACTOR MANIFEST from an app's OPFS bundle (its
+// peerd.actor.json), validated. Returns the manifest or null (absent/unusable →
+// a plain app). Called after any file mutation so editing/removing the manifest
+// file flips the app's actor identity. Never throws.
+/** @param {string} appId @returns {Promise<object | null>} */
+const readActorManifest = async (appId) => {
+  let raw;
+  try { raw = await opfsForApp(appId).read(ACTOR_MANIFEST_FILE); }
+  catch { return null; }   // file absent / unreadable → not (or no longer) an actor
+  return actorManifestFromFiles({ [ACTOR_MANIFEST_FILE]: raw });
+};
 
 /**
  * @param {Object} deps
@@ -81,6 +94,11 @@ export const createAppClient = ({ registry, tracker }) => {
       entryFile: entry,
       ownerSessionId: sessionId ?? null,
       dweb,
+      // A dwapp declares its actor personality in peerd.actor.json among its
+      // files. Derived + validated here (in memory — no extra OPFS read) so a
+      // locally-built app AND a dweb-installed one both become actors uniformly.
+      // A peer's untrusted manifest is coerce-and-clamped by the parser.
+      actor: actorManifestFromFiles(fileMap),
     });
 
     const opfs = opfsForApp(record.id);
@@ -118,6 +136,12 @@ export const createAppClient = ({ registry, tracker }) => {
     if (typeof name === 'string') patch.name = name.trim().slice(0, 80);
     if (Array.isArray(tags)) patch.tags = tags;
     if (typeof entryFile === 'string') patch.entryFile = entryFile;
+    // Re-derive the actor manifest only when this update actually wrote files —
+    // a pure metadata edit (rename/tag) must not clear a valid manifest.
+    if (typeof html === 'string' || (typeof path === 'string' && typeof content === 'string')) {
+      // null (manifest removed) is a valid clear signal the registry handles.
+      patch.actor = /** @type {any} */ (await readActorManifest(id));
+    }
     const updated = await registry.update(id, patch);
 
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
@@ -130,7 +154,9 @@ export const createAppClient = ({ registry, tracker }) => {
   const writeFile = async ({ appId, path, content, sessionId }) => {
     const id = await resolveId({ sessionId, appId });
     await opfsForApp(id).write(path, content);
-    await registry.update(id, {});                    // bump updatedAt
+    // Bump updatedAt AND re-derive the actor manifest — writing peerd.actor.json
+    // (or editing it) is exactly how an app becomes/updates its actor identity.
+    await registry.update(id, /** @type {any} */ ({ actor: await readActorManifest(id) }));
     tracker.reloadTab(id).catch(() => {});
   };
 
@@ -152,7 +178,8 @@ export const createAppClient = ({ registry, tracker }) => {
     const rec = await registry.get(id);
     if (path === rec?.entryFile) throw new Error(`refusing to delete entry file: ${path}`);
     await opfsForApp(id).delete(path);
-    await registry.update(id, {});
+    // Deleting peerd.actor.json drops the actor identity; re-derive to reflect it.
+    await registry.update(id, /** @type {any} */ ({ actor: await readActorManifest(id) }));
     tracker.reloadTab(id).catch(() => {});
   };
 

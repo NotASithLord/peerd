@@ -47,7 +47,15 @@ const STORAGE_KEY = 'apps.v1';
  *   thumbnail: string | null,
  *   dweb?: AppDwebMeta,
  *   shared?: boolean,
+ *   actor?: object,
  * }} AppRecord
+ *
+ * `actor` is the parsed, validated dwapp ACTOR MANIFEST (peerd-runtime's
+ * app-actor-manifest.js) when the app's bundle carries a `peerd.actor.json` —
+ * the declaration that makes this app a SPECIALIZED bound actor (lore + a
+ * narrowing tool request). Stored opaque here (the catalog persists metadata; it
+ * does not import the runtime validator — engine sits below runtime). Set/cleared
+ * by app-client whenever the app's files change; absent → a plain app.
  */
 
 /** @param {unknown} tags */
@@ -85,6 +93,10 @@ export const createAppRegistry = (deps) => {
       // seed. Its presence is what unlocks the app-tab dweb bridge. Set at
       // create, immutable after (like source) — so it is NOT in applyPatch.
       ...(opts.dweb && typeof opts.dweb === 'object' ? { dweb: opts.dweb } : {}),
+      // The dwapp actor manifest, if this app's bundle declared one at create
+      // (app-client derives + validates it from peerd.actor.json). Unlike `dweb`
+      // it IS mutable (patchable below) — editing the manifest file re-derives it.
+      ...(opts.actor && typeof opts.actor === 'object' ? { actor: opts.actor } : {}),
     }),
     applyPatch: (next, patch) => {
       if (typeof patch.name === 'string') next.name = patch.name;
@@ -107,6 +119,15 @@ export const createAppRegistry = (deps) => {
       // The slot is otherwise set at create (a self-authored dwapp / an install);
       // this is the one post-create amendment path, mirroring `shared`.
       if (patch.dweb && typeof patch.dweb === 'object') next.dweb = { ...(next.dweb || {}), ...patch.dweb };
+      // Actor manifest: REPLACE (not merge) — it's re-derived wholesale from the
+      // app's files on every mutation. An explicit null/absent means "no longer a
+      // dwapp actor" (the manifest file was removed), so we drop it. why 'actor'
+      // in patch (not a truthiness check): only touch it when the caller passed it,
+      // so a plain metadata patch (name/tags) never clears a valid manifest.
+      if ('actor' in patch) {
+        if (patch.actor && typeof patch.actor === 'object') next.actor = patch.actor;
+        else delete next.actor;
+      }
       // why the cap: the catalog promises "metadata only, stays light" —
       // a fat data-URI thumbnail would ride every apps/list response.
       // Same bounding discipline as name.slice(80) / truncTags.

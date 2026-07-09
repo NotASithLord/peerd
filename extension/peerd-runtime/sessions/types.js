@@ -58,6 +58,7 @@
  * @property {string} [instanceId]            the instance (engine id), the owned tabId (String), or — for a DESIGN-18 API actor — the owned ORIGIN
  * @property {'webvm' | 'notebook' | 'app' | 'web' | 'dweb'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab OR (DESIGN-18) an API origin; dweb = the mesh operator (global singleton)
  * @property {'tab' | 'api'} [backing]         DESIGN-18: a `web` actor's backing — 'tab' (default; absent = tab) drives a DOM at a MUTABLE origin; 'api' owns ONE FIXED origin, fetch-only, no tab ever
+ * @property {string} [actorLore]             a dwapp actor's SPECIALIZED lore (snapshot at mint from the app's peerd.actor.json). When present, actorBlock renders it instead of the kind's generic (app-builder) lore — what makes an installed dwapp a specialized capability.
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

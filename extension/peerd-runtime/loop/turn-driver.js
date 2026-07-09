@@ -208,7 +208,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // an API actor's lore name the ONE origin it owns.
       // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
       // buildToolContext from the setting — the prompt teaches page.* for 'code'.
-      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface } : {}),
+      // actorLore: a dwapp actor's specialized lore (snapshot at mint) — actorBlock
+      // renders it in place of the generic app-builder lore. Absent → unchanged.
+      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface, actorLore: turnSession.actorLore } : {}),
     });
   };
 

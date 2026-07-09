@@ -226,6 +226,7 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
+  dwappActorPersonality,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
@@ -2470,6 +2471,22 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
   const activeId = await sessionCache.sessionGet('currentSessionId');
   const ownerChat = activeId ? await sessions.get(/** @type {string} */ (activeId)) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
+  // dwapp ACTOR: an installed/built App carrying a peerd.actor.json manifest
+  // (record.actor) becomes a SPECIALIZED app actor. Derive its personality —
+  // lore + a NARROWED toolset (intersection with the app-kind ceiling, so a
+  // peer-authored manifest can only restrict, never escalate). The narrowed set
+  // rides the actor's toolManifest (the existing authority bound the offscreen
+  // dispatch already enforces), intersected with any inherited owner-chat manifest
+  // so a /tools-narrowed chat stays narrowed. Snapshot at mint (re-mint refreshes).
+  const dwapp = (entry.kind === 'app' && record?.actor)
+    ? dwappActorPersonality(record.actor, actorAllowedToolsFor('app'))
+    : null;
+  let dwappToolManifest;
+  if (dwapp) {
+    const inherited = ownerChat?.toolManifest ? new Set(resolveManifestAllow(ownerChat.toolManifest)) : null;
+    const allow = inherited ? dwapp.tools.filter((/** @type {string} */ t) => inherited.has(t)) : dwapp.tools;
+    dwappToolManifest = { allow };
+  }
   const created = await sessions.create({
     kind: 'actor',
     ...(activeId ? { parentSessionId: /** @type {string} */ (activeId) } : {}),
@@ -2484,7 +2501,13 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
     // reach by delegating to an actor. A browse-only chat's actor is held to
     // browse-only's read DOM tools — the gate refuses click/type for it. null /
     // absent = no manifest = the actor keeps its full kind toolset.
-    ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+    // A dwapp actor's narrowed set OVERRIDES the plain inherited manifest (it was
+    // already intersected with it above); otherwise inherit the owner chat's.
+    ...(dwappToolManifest ? { toolManifest: dwappToolManifest }
+      : (ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {})),
+    // The dwapp's specialized lore — actorBlock renders it instead of the generic
+    // app-builder lore, turning this app actor into its declared capability.
+    ...(dwapp ? { actorLore: dwapp.systemPrompt } : {}),
   });
   // Order matters for crash-safety: bind the session-default FIRST, then the
   // forward pointer LAST. resolveActor re-mints whenever the forward pointer
@@ -3317,8 +3340,19 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     const systemPrompt = await renderSystemPrompt({
       actorType: kind, backing: rec.backing, instanceId, actorSurface,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+      // A dwapp actor's specialized lore (snapshot at mint) — actorBlock renders it
+      // instead of the generic app-builder lore.
+      actorLore: rec.actorLore,
     });
-    const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
+    // A dwapp actor is ADVERTISED only its narrowed set (rec.toolManifest), so the
+    // model isn't shown app-builder tools it will be refused at dispatch (the
+    // offscreen tool-dispatch gate already enforces the same manifest). Non-dwapp
+    // actors keep the full kind list (unchanged).
+    const baseActorDescriptors = actorDescriptors(listTools(), kind, rec.backing, actorSurface);
+    const shownActorDescriptors = rec.actorLore
+      ? filterDescriptorsByManifest(baseActorDescriptors, resolveManifestAllow(rec.toolManifest))
+      : baseActorDescriptors;
+    const tools = shownActorDescriptors
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
     const reasoning = {

@@ -63,4 +63,33 @@ describe('createAppRegistry', () => {
     expect(snap.currentId).toBe(a.id);
     expect(snap.apps).toHaveLength(2);
   });
+
+  // The dwapp ACTOR MANIFEST slot — stored at create, replaced/cleared on patch.
+  const manifest = { name: 'Parser', lore: 'parse things', skills: [], tools: ['fetch_url'] };
+
+  test('actor manifest is stored at create and absent by default', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const plain = await reg.create({ name: 'plain' });
+    expect(plain.actor).toBeUndefined();
+    const dwapp = await reg.create({ name: 'dwapp', actor: manifest });
+    expect(dwapp.actor).toEqual(manifest);
+  });
+
+  test('a metadata-only patch must NOT clear a valid manifest', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const rec = await reg.create({ name: 'dwapp', actor: manifest });
+    const renamed = await reg.update(rec.id, { name: 'renamed' });
+    expect(renamed?.name).toBe('renamed');
+    expect(renamed?.actor).toEqual(manifest);        // preserved
+  });
+
+  test('patching actor replaces it; null clears it', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const rec = await reg.create({ name: 'dwapp', actor: manifest });
+    const next = { name: 'Parser2', lore: 'v2', skills: [], tools: [] };
+    const updated = await reg.update(rec.id, { actor: next });
+    expect(updated?.actor).toEqual(next);            // replaced wholesale
+    const cleared = await reg.update(rec.id, { actor: null } as any);   // null = manifest file removed
+    expect(cleared?.actor).toBeUndefined();          // manifest file removed → plain app
+  });
 });

@@ -158,6 +158,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   instanceId?: string,
    *   actorType?: 'webvm' | 'notebook' | 'app' | 'web' | 'dweb',
    *   backing?: 'tab' | 'api',
+   *   actorLore?: string,
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -177,6 +178,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     instanceId,
     actorType,
     backing,
+    actorLore,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -209,6 +211,11 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // DESIGN-17: an actor self-describes the instance it owns + its kind.
       ...(instanceId ? { instanceId } : {}),
       ...(actorType ? { actorType } : {}),
+      // A dwapp actor's SPECIALIZED lore (peerd-runtime/actor/app-actor.js), snapshot
+      // at mint from the app's peerd.actor.json manifest. When present, actorBlock
+      // renders it instead of the kind's generic (app-builder) lore — this is what
+      // makes an installed dwapp a specialized capability, not just an app editor.
+      ...(typeof actorLore === 'string' && actorLore.trim().length > 0 ? { actorLore } : {}),
       // DESIGN-18: a web actor's backing — 'api' (fetch-only origin actor) vs the
       // default tab backing. MUST be persisted: every backing-aware branch (gate,
       // egress, prompt, no-tab) reads turnSession.backing, so dropping it here silently

@@ -99,6 +99,15 @@ export { makeAsyncActors } from './actor/async-actors.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-actors shape, specialized).
 export { makeActorMessaging } from './actor/actor-messaging.js';
+// The dwapp ACTOR MANIFEST — the declaration (carried in a dwapp's file bundle
+// as peerd.actor.json) that turns a plain app into a SPECIALIZED bound actor:
+// lore + skills + a narrowing tool request. Pure validate/normalize; consumed at
+// app create/install (app-client) and at mint (dwappActorPersonality).
+export {
+  actorManifestFromFiles, parseActorManifest, validateActorManifest, normalizeActorManifest,
+  ACTOR_MANIFEST_FILE, ActorManifestRejectedError,
+} from './actor/app-actor-manifest.js';
+export { dwappActorPersonality } from './actor/app-actor.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
