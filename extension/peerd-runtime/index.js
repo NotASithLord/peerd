@@ -108,6 +108,10 @@ export {
   ACTOR_MANIFEST_FILE, ActorManifestRejectedError,
 } from './actor/app-actor-manifest.js';
 export { dwappActorPersonality } from './actor/app-actor.js';
+// The ACTOR GRAPH model — pure assembler that shapes the actor catalog (actor_list)
+// + lineage/live edges + mesh peers into nodes+edges for a radial visualization
+// (local actors + remote agents as one picture). Rendered by the side panel / web shell.
+export { buildActorGraph, actorKindColor } from './actor/actor-graph.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';

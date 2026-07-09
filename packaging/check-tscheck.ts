@@ -88,7 +88,8 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // pipeline) file sets merge — both ledgers above are kept; the union floor.
 // 510 → 511: the Z.ai GLM provider adapter (peerd-provider/adapters/glm.js).
 // 511 → 513: the dwapp actor manifest + personality (peerd-runtime/actor/app-actor-manifest.js, app-actor.js).
-const COVERED_FLOOR = 513;
+// 513 → 514: the actor graph model (peerd-runtime/actor/actor-graph.js).
+const COVERED_FLOOR = 514;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
