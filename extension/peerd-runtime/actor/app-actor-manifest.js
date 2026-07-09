@@ -6,9 +6,10 @@
 // turns a generic `app` actor (peerd's built-in app-BUILDER) into a SPECIALIZED
 // capability is this manifest — carried IN the app's file bundle as
 // `peerd.actor.json`, so it is covered by the same content hash a shared dwapp is
-// signed under. This lives in peerd-runtime (not peerd-distributed): an app can
-// declare an actor whether or not it ever touches the dweb, so the concept is
-// core, and core code must not import the dweb module (the boundary rule).
+// signed under. This lives in peerd-runtime (a CORE module, not the dweb one):
+// an app can declare an actor whether or not it ever touches the dweb, so the
+// concept is core, and core code must not import the dweb module (the boundary
+// rule — and the store build prunes that module entirely).
 //
 // The manifest declares the actor's PERSONALITY, not new authority:
 //   - lore        the system prompt / specialized instructions its mini agent-loop runs under
