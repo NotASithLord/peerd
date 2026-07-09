@@ -83,8 +83,8 @@ describe('dwapp actor-manifest', () => {
   });
 });
 
-describe('dwappActorPersonality — the authority-narrowing invariant', () => {
-  const APP_KIND = ['app_update', 'app_write_file', 'app_read_file', 'edit_file'];
+describe('dwappActorPersonality — the authority model (default-zero, no self-mutation)', () => {
+  const APP_KIND = ['app_update', 'app_write_file', 'app_read_file', 'app_list_files', 'app_delete', 'edit_file'];
 
   test('null manifest → null (caller mints the generic app-builder unchanged)', () => {
     expect(dwappActorPersonality(null, APP_KIND)).toBeNull();
@@ -97,29 +97,37 @@ describe('dwappActorPersonality — the authority-narrowing invariant', () => {
     expect(p.systemPrompt).toContain('return clean JSON');               // the author's lore
   });
 
-  test('a manifest can only NARROW the app-kind set, never broaden it', () => {
-    // The malicious case: the manifest requests powerful tools it was never granted.
-    const manifest = normalizeActorManifest({
-      name: 'evil', lore: 'do bad things',
-      tools: ['page_exec', 'dweb_share', 'app_write_file', 'spawn', 'fetch_url'],
-    });
-    const p = dwappActorPersonality(manifest, APP_KIND)!;
-    // Only the ONE requested tool that is in the app-kind ceiling survives.
-    expect(p.tools).toEqual(['app_write_file']);
-    expect(p.tools).not.toContain('page_exec');
-    expect(p.tools).not.toContain('dweb_share');
-    expect(p.tools).not.toContain('fetch_url');
+  test('DEFAULT-ZERO: no tool request → NO peerd tools (pure reasoning), not the builder set', () => {
+    const p = dwappActorPersonality(normalizeActorManifest({ name: 'x', lore: 'y' }), APP_KIND)!;
+    expect(p.tools).toEqual([]);
   });
 
-  test('an empty tool request defaults to the app-kind set (back-compatible)', () => {
-    const manifest = normalizeActorManifest({ name: 'x', lore: 'y' });   // no tools
+  test('NO SELF-MUTATION: a manifest can never get write/delete/authoring tools', () => {
+    const manifest = normalizeActorManifest({
+      name: 'evil', lore: 'do bad things',
+      tools: ['page_exec', 'dweb_share', 'app_write_file', 'app_delete', 'edit_file', 'app_read_file', 'fetch_url'],
+    });
     const p = dwappActorPersonality(manifest, APP_KIND)!;
-    expect(new Set(p.tools)).toEqual(new Set(APP_KIND));
+    // Only the read-only app tool survives; every mutation/authoring + out-of-ceiling tool is dropped.
+    expect(p.tools).toEqual(['app_read_file']);
+    for (const banned of ['page_exec', 'dweb_share', 'app_write_file', 'app_delete', 'edit_file', 'fetch_url']) {
+      expect(p.tools).not.toContain(banned);
+    }
+    // dropped requests are reported (so callers can surface a loud failure).
+    expect(p.droppedTools).toContain('fetch_url');
+    expect(p.droppedTools).toContain('app_write_file');
+    expect(p.droppedTools).not.toContain('app_read_file');
+  });
+
+  test('read-only app tools ARE requestable (opt-in)', () => {
+    const p = dwappActorPersonality(normalizeActorManifest({ name: 'x', lore: 'y', tools: ['app_read_file', 'app_list_files'] }), APP_KIND)!;
+    expect(new Set(p.tools)).toEqual(new Set(['app_read_file', 'app_list_files']));
+    expect(p.droppedTools).toEqual([]);
   });
 
   test('accepts a Set or an array as the ceiling', () => {
-    const manifest = normalizeActorManifest({ name: 'x', lore: 'y', tools: ['app_update', 'nope'] });
-    expect(dwappActorPersonality(manifest, new Set(APP_KIND))!.tools).toEqual(['app_update']);
-    expect(dwappActorPersonality(manifest, APP_KIND)!.tools).toEqual(['app_update']);
+    const manifest = normalizeActorManifest({ name: 'x', lore: 'y', tools: ['app_read_file', 'nope'] });
+    expect(dwappActorPersonality(manifest, new Set(APP_KIND))!.tools).toEqual(['app_read_file']);
+    expect(dwappActorPersonality(manifest, APP_KIND)!.tools).toEqual(['app_read_file']);
   });
 });

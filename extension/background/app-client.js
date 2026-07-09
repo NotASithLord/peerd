@@ -37,6 +37,11 @@ const readActorManifest = async (appId) => {
   return actorManifestFromFiles({ [ACTOR_MANIFEST_FILE]: raw });
 };
 
+// Did the actor manifest actually change across a file mutation? (Order-stable
+// enough: both sides come from the same validator.) Drives the re-mint below.
+/** @param {object | null | undefined} a @param {object | null | undefined} b */
+const manifestChanged = (a, b) => JSON.stringify(a ?? null) !== JSON.stringify(b ?? null);
+
 /**
  * @param {Object} deps
  * @param {ReturnType<typeof import('/peerd-engine/index.js').createAppRegistry>} deps.registry
@@ -144,6 +149,11 @@ export const createAppClient = ({ registry, tracker }) => {
     }
     const updated = await registry.update(id, patch);
 
+    // If the actor manifest CHANGED, unbind any live actor so the next
+    // message_actor re-mints with the fresh personality (it is snapshot at mint).
+    if ('actor' in patch && manifestChanged(rec.actor, /** @type {any} */ (patch.actor))) {
+      await registry.clearActorSession(id).catch(() => {});
+    }
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
     tracker.reloadTab(id).catch(() => {});
     return updated;
@@ -153,10 +163,14 @@ export const createAppClient = ({ registry, tracker }) => {
    * @param {{ appId?: string, path: string, content: string, sessionId?: string }} args */
   const writeFile = async ({ appId, path, content, sessionId }) => {
     const id = await resolveId({ sessionId, appId });
+    const prevActor = (await registry.get(id))?.actor;
     await opfsForApp(id).write(path, content);
     // Bump updatedAt AND re-derive the actor manifest — writing peerd.actor.json
     // (or editing it) is exactly how an app becomes/updates its actor identity.
-    await registry.update(id, /** @type {any} */ ({ actor: await readActorManifest(id) }));
+    const nextActor = await readActorManifest(id);
+    await registry.update(id, /** @type {any} */ ({ actor: nextActor }));
+    // A manifest change unbinds the live actor → next message_actor re-mints fresh.
+    if (manifestChanged(prevActor, nextActor)) await registry.clearActorSession(id).catch(() => {});
     tracker.reloadTab(id).catch(() => {});
   };
 
@@ -179,7 +193,9 @@ export const createAppClient = ({ registry, tracker }) => {
     if (path === rec?.entryFile) throw new Error(`refusing to delete entry file: ${path}`);
     await opfsForApp(id).delete(path);
     // Deleting peerd.actor.json drops the actor identity; re-derive to reflect it.
-    await registry.update(id, /** @type {any} */ ({ actor: await readActorManifest(id) }));
+    const nextActor = await readActorManifest(id);
+    await registry.update(id, /** @type {any} */ ({ actor: nextActor }));
+    if (manifestChanged(rec?.actor, nextActor)) await registry.clearActorSession(id).catch(() => {});
     tracker.reloadTab(id).catch(() => {});
   };
 

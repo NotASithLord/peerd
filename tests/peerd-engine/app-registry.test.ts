@@ -92,4 +92,16 @@ describe('createAppRegistry', () => {
     const cleared = await reg.update(rec.id, { actor: null } as any);   // null = manifest file removed
     expect(cleared?.actor).toBeUndefined();          // manifest file removed → plain app
   });
+
+  test('clearActorSession unbinds a live actor (re-mint on manifest change) and archives it', async () => {
+    const archived: string[] = [];
+    const reg = createAppRegistry({ storage: createStorageStub(), onActorArchive: (s: string) => archived.push(s) });
+    const rec = await reg.create({ name: 'dwapp', actor: manifest });
+    expect(await reg.clearActorSession(rec.id)).toBe(false);   // nothing bound yet → no-op
+    await reg.setActorSession(rec.id, 'actor-sess-1');
+    expect(await reg.getActorSession(rec.id)).toBe('actor-sess-1');
+    expect(await reg.clearActorSession(rec.id)).toBe(true);    // cleared
+    expect(await reg.getActorSession(rec.id)).toBeNull();      // next message_actor re-mints
+    expect(archived).toEqual(['actor-sess-1']);                // orphan archived, not leaked
+  });
 });

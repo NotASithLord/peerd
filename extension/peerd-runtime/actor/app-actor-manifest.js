@@ -15,12 +15,16 @@
 //   - lore        the system prompt / specialized instructions its mini agent-loop runs under
 //   - skills[]    advertised capabilities (Agent Card vocabulary — rhymes with the dweb
 //                 agent-card so a dwapp's skills can later surface on the mesh for discovery)
-//   - tools[]     a REQUEST for peerd tools, honored only as an INTERSECTION with the
-//                 app-kind allow-list at mint time — a manifest can NARROW authority,
-//                 never broaden it. A dwapp's genuine new capability comes from its own
-//                 sandboxed deterministic code (exposed tools, a later slice) + lore, not
-//                 from borrowed peerd authority. So an untrusted, peer-authored manifest
-//                 can declare whatever it likes and still gains nothing it wasn't allowed.
+//   - tools[]     a REQUEST for peerd tools, honored only against a TIGHT ceiling at
+//                 mint time (app-actor.js dwappActorPersonality): a dwapp actor may
+//                 request ONLY the READ-ONLY app tools and gets NOTHING by default. It can
+//                 NEVER get network/DOM/dweb/spawn tools, nor the app-BUILDER write/delete
+//                 tools — a "parser that fetches" is NOT expressible; a dwapp is a
+//                 specialized REASONER over the inputs the orchestrator hands it (and, a
+//                 later slice, its own sandboxed code), not an autonomous agent with
+//                 borrowed authority. An untrusted, peer-authored manifest thus gains
+//                 nothing it wasn't allowed; requests outside the ceiling are dropped and
+//                 surfaced as droppedTools so the failure is legible, never silent.
 //
 // Pure — validate/normalize only. Coerce-and-clamp on the untrusted (peer) path so a
 // hostile bundle degrades to a safe manifest instead of throwing deep in install.

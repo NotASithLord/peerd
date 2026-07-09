@@ -277,6 +277,27 @@ export const createRegistry = (config, { storage, onActorArchive }) => {
   };
 
   /**
+   * Unbind the instance's actor session (drop the forward pointer) so the NEXT
+   * message_actor re-mints fresh — used when the instance's actor PERSONALITY
+   * changed (a dwapp's peerd.actor.json was edited), since the personality is
+   * snapshot at mint. The orphaned session is archived via onActorArchive (same
+   * as delete) so it doesn't leak. No-op when unbound. Returns true if it cleared.
+   *
+   * @param {string} id @returns {Promise<boolean>}
+   */
+  const clearActorSession = async (id) => {
+    await load();
+    const cur = /** @type {{ actorSessionId?: string } | undefined} */ (collection()[id]);
+    const orphaned = cur?.actorSessionId;
+    if (!cur || !orphaned) return false;
+    const { actorSessionId: _drop, ...rest } = /** @type {any} */ (cur);
+    collection()[id] = rest;
+    await persist();
+    if (onActorArchive) { try { onActorArchive(orphaned); } catch { /* never block on archive */ } }
+    return true;
+  };
+
+  /**
    * Bulk view for the side panel + agent tools. Includes which record is
    * the current default for the given session so the UI can flag
    * "current" without a second lookup.
@@ -303,6 +324,7 @@ export const createRegistry = (config, { storage, onActorArchive }) => {
     setDefaultForSession,
     setActorSession,
     getActorSession,
+    clearActorSession,
     snapshot,
   };
 };

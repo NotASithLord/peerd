@@ -12,9 +12,17 @@
 // force-confirm slots (ctx.permission, ctx.confirm) are SW-injected; the
 // dweb-side confirm prompt is a richer shape than the base ToolContext's confirm,
 // so ctx is narrowed at the use site.
+import { escapeAttr } from '/shared/util.js';
+
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ConfirmAnswer} ConfirmAnswer */
+
+// A traded dwapp's manifest is UNTRUSTED, author-controlled content; surfacing its
+// name/description in this TRUSTED tool result means sanitizing them (escapeAttr +
+// whitespace-collapse + clamp), the same neutralization actor_list applies.
+/** @param {unknown} s @returns {string} */
+const safeField = (s) => escapeAttr((typeof s === 'string' ? s : '').replace(/\s+/g, ' ').trim().slice(0, 160));
 /** @typedef {import('/shared/tool-types.js').ToolResult | { ok: false, error: string, content?: string }} DwebToolResult */
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'dweb', execute: (args: any, ctx: ToolContext) => Promise<DwebToolResult> }} DwebTool */
 
@@ -25,7 +33,7 @@
  * @typedef {{
  *   permission?: { confirmActions?: boolean },
  *   confirm?: (p: { tool: string, kind: string, origins: string[], summary: string, sessionId: string | null }) => Promise<ConfirmAnswer>,
- *   dweb?: { install: (o: { uri: string, name?: string }) => Promise<{ ok?: boolean, error?: string, app?: { id?: string, name?: string }, appId?: string, name?: string }> } | null,
+ *   dweb?: { install: (o: { uri: string, name?: string }) => Promise<{ ok?: boolean, error?: string, app?: { id?: string, name?: string, actor?: { name?: string, description?: string } }, appId?: string, name?: string }> } | null,
  * }} DwebInstallCtx
  */
 
@@ -70,9 +78,22 @@ export const dwebInstallTool = {
     }
     const r = await dctx.dweb.install({ uri, name: args?.name });
     if (!r?.ok) return { ok: false, error: r?.error ?? 'install_failed' };
+    // DISCLOSE the actor nature (adversarial review #3/#4): a dwapp that declares
+    // peerd.actor.json becomes a SPECIALIZED ACTOR the orchestrator can invoke,
+    // running PEER-AUTHORED lore. Surface it (sanitized) so the agent tells the
+    // user rather than silently gaining an auto-invocable persona.
+    const actor = r.app?.actor && typeof r.app.actor === 'object' ? r.app.actor : null;
     return {
       ok: true,
-      content: JSON.stringify({ installed: true, appId: r.app?.id ?? r.appId ?? null, name: r.app?.name ?? r.name ?? null }, null, 2),
+      content: JSON.stringify({
+        installed: true,
+        appId: r.app?.id ?? r.appId ?? null,
+        name: r.app?.name ?? r.name ?? null,
+        ...(actor ? {
+          actor: { name: safeField(actor.name), description: safeField(actor.description) },
+          note: 'This peer app declared an ACTOR (peerd.actor.json): it is now message_actor-able and runs peer-authored lore. Tell the user it was installed as an agent persona before relying on it.',
+        } : {}),
+      }, null, 2),
     };
   },
 };

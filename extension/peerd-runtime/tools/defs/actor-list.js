@@ -35,6 +35,23 @@ const truncate = (s, n) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 /** @param {string | undefined} title @returns {string} */
 const safeTitle = (title) => escapeAttr(truncate((title || '').replace(/\s+/g, ' ').trim(), 60));
 
+// A dwapp actor's specialty line for the `detail` column — its description +
+// skills, so the orchestrator can route to it. record.actor is UNTRUSTED (a
+// traded dwapp's manifest is author-controlled), and this list is a TRUSTED,
+// non-fenced tool result — so EVERY field is run through safeTitle (escapeAttr +
+// whitespace-collapse + clamp), same as a page-controlled tab title.
+/** @param {any} a @returns {string} */
+const actorDetail = (a) => {
+  const parts = ['actor'];
+  const desc = safeTitle(a?.description);
+  if (desc) parts.push(desc);
+  const skills = Array.isArray(a?.skills)
+    ? a.skills.map((/** @type {any} */ s) => s?.name).filter(Boolean).slice(0, 4).join(', ')
+    : '';
+  if (skills) parts.push(`skills: ${safeTitle(skills)}`);
+  return parts.join(' · ');
+};
+
 /**
  * One addressable actor, in the uniform shape every row shares.
  * @typedef {Object} ActorRow
@@ -43,7 +60,7 @@ const safeTitle = (title) => escapeAttr(truncate((title || '').replace(/\s+/g, '
  * @property {string} name            human label
  * @property {boolean} live           warm right now (instance has a tab / tab open / integration worked this chat)
  * @property {boolean} current        this chat's default of its type (instance default / active tab)
- * @property {string} detail          compact type-specific note (tab origin, integration keyed-ness, app tags, pinned)
+ * @property {string} detail          compact type-specific note (tab origin, integration keyed-ness, app tags, pinned, or a dwapp actor's specialty — its detail begins "actor · …")
  */
 
 /**
@@ -67,19 +84,27 @@ const engineRows = async (src, sessionId) => {
   const snap = await src.registry.snapshot({ sessionId });
   const currentId = /** @type {Record<string, any>} */ (snap)[src.currentKey];
   const records = /** @type {Array<Record<string, any>>} */ (snap[src.listKey] ?? []);
-  return records.map((r) => ({
-    type: src.type,
-    handle: r.id,
-    name: r.name ?? r.id,
-    live: src.tracker?.getTabId(r.id) != null,
-    current: r.id === currentId,
-    // detail: the one extra signal worth a column for this kind — tags for an
-    // App, a pinned marker for VMs/Notebooks (otherwise empty so the column
-    // stays cheap).
-    detail: src.type === 'app'
-      ? (Array.isArray(r.tags) ? r.tags.join(', ') : '')
-      : (r.pinned ? 'pinned' : ''),
-  }));
+  return records.map((r) => {
+    // A dwapp actor: an App whose bundle declared a peerd.actor.json (app-client
+    // stores it as record.actor). Surface its specialty so delegation isn't blind.
+    const dwapp = src.type === 'app' && r.actor && typeof r.actor === 'object' ? r.actor : null;
+    return {
+      type: src.type,
+      // Names are user/peer-controlled → sanitize like a tab title (untrusted in
+      // this trusted, non-fenced result). A dwapp actor prefers its manifest name.
+      handle: r.id,
+      name: safeTitle((dwapp && typeof dwapp.name === 'string' && dwapp.name) || r.name || r.id),
+      live: src.tracker?.getTabId(r.id) != null,
+      current: r.id === currentId,
+      // detail: a dwapp actor's specialty (description + skills); else the one
+      // extra signal worth a column — tags for an App, a pinned marker otherwise.
+      detail: dwapp
+        ? actorDetail(dwapp)
+        : src.type === 'app'
+          ? (Array.isArray(r.tags) ? safeTitle(r.tags.join(', ')) : '')
+          : (r.pinned ? 'pinned' : ''),
+    };
+  });
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -92,9 +117,11 @@ export const actorListTool = {
     'integration), handle (pass it as message_actor `to`), name, live (has a',
     'warm tab / open page right now), current (this chat\'s default of that',
     'type — what an instance op defaults to), and detail (a tab\'s origin, an',
-    'integration\'s keyed-ness, an app\'s tags). Use it to decide whether to',
-    'reuse an existing instance/tab or spawn fresh, and to find the handle to',
-    'message. (The general "web" actor is always addressable as to:"web" and',
+    'integration\'s keyed-ness, an app\'s tags). An app whose detail begins "actor ·"',
+    'is a SPECIALIZED dwapp actor — the rest of its detail names the capability it',
+    'provides; prefer message_actor-ing it over doing that work yourself. Use this list to decide',
+    'whether to reuse an existing instance/tab or spawn fresh, and to find the',
+    'handle to message. (The general "web" actor is always addressable as to:"web" and',
     'is not listed here; likewise the mesh operator, when enabled, is always',
     'addressable as to:"dweb". App full-text search is app_search.)',
   ].join(' '),
