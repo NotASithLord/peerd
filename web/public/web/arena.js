@@ -21,6 +21,7 @@ import { canonicalize } from '/shared/bundle/canonical.js';
 import { utf8, toHex, fromHex } from '/shared/bundle/bytes.js';
 import { createMatchDriver } from '/peerd-runtime/game/match-driver.js';
 import { isGameMessage } from '/peerd-runtime/game/match-reducer.js';
+import { resultSigningBytes } from '/peerd-runtime/game/match-log.js';
 import { runNotebook } from '/web/notebook-host.js';
 
 const GAMES_TOPIC = 'peerd/demo/arena/games/v1';
@@ -53,8 +54,12 @@ export async function createArena({ mesh }) {
   /** live + finished match snapshots by matchId (driver events), newest last */
   const matchOrder = [];
   const matchViews = new Map();
-  /** leaderboard: did → { w, l, d } — co-signed, sig-verified results only */
-  const scores = new Map();
+  /** leaderboards, ONE PER GAME: rulesHash → (did → { w, l, d }). why scoped:
+   * co-signing proves both players agreed to a result under THOSE rules — a
+   * rigged game's rules happily co-sign its author's wins, so merging games
+   * into one board would let any peer-authored game poison the standings of
+   * every other. A game can only ever poison its own board. */
+  const boardsByHash = new Map();
   const seenResults = new Set();
   const serveBuckets = new Map();
   /** pending installs: dwapp_id → { resolve, reject, timer, from } */
@@ -141,15 +146,22 @@ export async function createArena({ mesh }) {
     }
   };
 
+  // First write wins per matchId (a co-signed result is immutable; replays and
+  // duplicates are dropped). Only games in OUR store tally — an unknown
+  // rulesHash has no board to land on.
   const tallyResult = (resultString) => {
     let r;
     try { r = JSON.parse(resultString); } catch { return; }
+    if (typeof r.rulesHash !== 'string' || !r.rulesHash) return;
+    if (![...games.values()].some((g) => g.hash === r.rulesHash)) return;
     if (seenResults.has(r.matchId)) return;
     seenResults.add(r.matchId);
+    let board = boardsByHash.get(r.rulesHash);
+    if (!board) { board = new Map(); boardsByHash.set(r.rulesHash, board); }
     const bump = (did, k) => {
-      const s = scores.get(did) ?? { w: 0, l: 0, d: 0 };
+      const s = board.get(did) ?? { w: 0, l: 0, d: 0 };
       s[k] += 1;
-      scores.set(did, s);
+      board.set(did, s);
     };
     if (r.outcome?.kind === 'win' && r.outcome.winner) {
       bump(r.outcome.winner, 'w');
@@ -192,11 +204,12 @@ export async function createArena({ mesh }) {
     if (!entry || typeof entry.result !== 'string' || !entry.sigs) return;
     let r;
     try { r = JSON.parse(entry.result); } catch { return; }
-    // both PLAYERS' signatures, over these exact bytes — else it's just a claim
+    // both PLAYERS' signatures, over the context-wrapped result bytes (the
+    // framework's domain separation) — else it's just a claim
     for (const did of [r.challenger, r.acceptor]) {
       const sig = entry.sigs?.[did];
       if (typeof sig !== 'string') return;
-      if (!(await verifySignature(did, fromHex(sig), utf8(entry.result)).catch(() => false))) return;
+      if (!(await verifySignature(did, fromHex(sig), utf8(resultSigningBytes(entry.result))).catch(() => false))) return;
     }
     tallyResult(entry.result);
   });
@@ -323,8 +336,17 @@ export async function createArena({ mesh }) {
       hash: g.hash, installed: !!g.files, mine: g.publisher === selfDid, holders: g.holders.size,
     })),
     matches: () => matchOrder.map((id) => matchViews.get(id)).filter(Boolean),
-    scores: () => [...scores.entries()].map(([did, s]) => ({ did, ...s }))
-      .sort((a, b) => (b.w - a.w) || (a.l - b.l)),
+    // One board per game (rules-hash scoped — see boardsByHash). Ordered like
+    // the store list; only games with at least one tallied result appear.
+    boards: () => [...games.values()]
+      .filter((g) => boardsByHash.has(g.hash))
+      .map((g) => ({
+        rulesHash: g.hash,
+        name: g.name,
+        rows: [...(boardsByHash.get(g.hash) ?? new Map()).entries()]
+          .map(([did, s]) => ({ did, ...s }))
+          .sort((a, b) => (b.w - a.w) || (a.l - b.l)),
+      })),
     setAutoAccept: (on) => { autoAccept = !!on; emitChange(); },
     autoAccept: () => autoAccept,
     onChange: (cb) => { changeCbs.add(cb); return () => changeCbs.delete(cb); },
@@ -420,11 +442,13 @@ export function mountArenaUI(panel, { arena, roster }) {
   };
 
   const renderBoard = () => {
-    const rows = arena.scores();
-    slot('board').innerHTML = rows.length === 0
+    const boards = arena.boards();
+    slot('board').innerHTML = boards.length === 0
       ? '<span class="hint">no verified results yet</span>'
-      : `<table class="nb-table"><tr><th>agent</th><th>w</th><th>l</th><th>d</th></tr>${rows.map((r) => `
-          <tr><td>${r.did === arena.selfDid ? 'you' : esc(shortDid(r.did))}</td><td>${r.w}</td><td>${r.l}</td><td>${r.d}</td></tr>`).join('')}</table>`;
+      : boards.map((b) => `
+        <div class="hint">${esc(b.name)} · ${esc(b.rulesHash.slice(0, 10))}…</div>
+        <table class="nb-table"><tr><th>agent</th><th>w</th><th>l</th><th>d</th></tr>${b.rows.map((r) => `
+          <tr><td>${r.did === arena.selfDid ? 'you' : esc(shortDid(r.did))}</td><td>${r.w}</td><td>${r.l}</td><td>${r.d}</td></tr>`).join('')}</table>`).join('');
   };
 
   const renderAll = () => { renderGames(); renderRoster(); renderMatches(); renderBoard(); };

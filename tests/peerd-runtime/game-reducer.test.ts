@@ -86,6 +86,37 @@ describe('match reducer — cheating and violations', () => {
     s = applyMessage(s, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'same' }) });
     s = applyMessage(s, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'same' }) });
     expect(s.outcome).toMatchObject({ kind: 'win', winner: A, reason: 'mirrored-seed-commit' });
+
+    // the ANSWER mirror (replaying the opponent's reveal = solving by theft)
+    let t = fresh();
+    t = applyMessage(t, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
+    t = applyMessage(t, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'ca' }) });
+    t = applyMessage(t, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'cb' }) });
+    t = applyMessage(t, { from: A, at: 1300, msg: msg('seed_reveal', { nonce: 'na', salt: 'sa' }), revealOk: true });
+    t = applyMessage(t, { from: B, at: 1310, msg: msg('seed_reveal', { nonce: 'nb', salt: 'sb' }), revealOk: true });
+    t = applyMessage(t, { from: A, at: 2000, msg: msg('answer_commit', { commit: 'same-answer' }) });
+    t = applyMessage(t, { from: B, at: 2100, msg: msg('answer_commit', { commit: 'same-answer' }) });
+    expect(t.outcome).toMatchObject({ kind: 'win', winner: A, reason: 'mirrored-answer-commit' });
+  });
+
+  test('oversized fields are malformed, never stored (amplification cap)', () => {
+    let s = fresh();
+    s = applyMessage(s, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
+    const next = applyMessage(s, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'x'.repeat(200) }) });
+    expect(next.seed.commits[A]).toBeUndefined();
+    expect(next.violations.at(-1)).toMatchObject({ from: A, code: 'malformed-seed-commit' });
+
+    let u = fresh();
+    u = applyMessage(u, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
+    u = applyMessage(u, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'ca' }) });
+    u = applyMessage(u, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'cb' }) });
+    u = applyMessage(u, { from: A, at: 1300, msg: msg('seed_reveal', { nonce: 'na', salt: 'sa' }), revealOk: true });
+    u = applyMessage(u, { from: B, at: 1310, msg: msg('seed_reveal', { nonce: 'nb', salt: 'sb' }), revealOk: true });
+    u = applyMessage(u, { from: A, at: 2000, msg: msg('answer_commit', { commit: 'aa' }) });
+    u = applyMessage(u, { from: B, at: 2100, msg: msg('answer_commit', { commit: 'ab' }) });
+    const big = applyMessage(u, { from: A, at: 2200, msg: msg('answer_reveal', { answer: 'y'.repeat(5000), salt: 'x', sawPeerCommitFirst: false }), revealOk: true });
+    expect(big.answers.reveals[A]).toBeUndefined();
+    expect(big.violations.at(-1)).toMatchObject({ from: A, code: 'malformed-answer-reveal' });
   });
 
   test('revealing a seed nonce before both commits is a violation, not a transition', () => {

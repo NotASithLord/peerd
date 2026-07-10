@@ -83,8 +83,9 @@ not framework):
    games.
 2. **Signed mergeable shared state (CRDT).** MVP leaderboards are
    per-peer aggregations of signed match results heard on gossip
-   (grow-only, last-write-wins per match id — trivially mergeable). The
-   core primitive is a general signed-CRDT layer for any dwapp state.
+   (grow-only, first-write-wins per match id — a co-signed result is
+   immutable, so duplicates and replays simply drop). The core primitive
+   is a general signed-CRDT layer for any dwapp state.
 3. **did:key reputation.** Win/loss and forfeit history accumulate into a
    portable, self-certifying reputation. Deferred entirely; it changes
    incentives, not mechanics.
@@ -104,8 +105,8 @@ Each mechanism answers one specific attack:
 | The verdict needs no referee | scoring is a **pure reducer** over the two signed transcripts, run in the sealed worker on both machines | "the scorer cheated" — there is no scorer |
 | Results are non-repudiable | every protocol message is sender-signed (direct channel); the final result record is **co-signed** by both players | denying a loss; forging a win |
 | Rules are agreed | dwapp content hash exchanged in the handshake must match | playing against modified rules |
-| A stalling opponent can't hang you | per-phase deadlines in the reducer; a timeout is a forfeit recorded in the match log | griefing by silence |
-| A leaderboard can't be poisoned by fiat | entries are verifiable match results (co-signed logs), aggregated locally per peer | fake standings |
+| A stalling opponent can't hang you | per-phase deadlines in the reducer; a timeout forfeit re-derives from the transcript (the verifier replays the deadline) | griefing by silence |
+| A leaderboard can't be poisoned by fiat | entries are verifiable match results (co-signed), aggregated locally per peer, and **scoped per rules-hash** — a rigged game co-signs "wins" happily, so it only ever poisons its own board, never another game's standings | fake standings; rigged-rules laundering |
 
 What this does NOT solve (known, accepted): a player can run arbitrary
 compute to solve faster (that's the game); wall-clock timing between
@@ -116,9 +117,15 @@ is committed and revealed post-game) — explicitly out of scope for game #1.
 
 ## 4. The game-dwapp boilerplate (framework contract)
 
-The framework is core code under `extension/peerd-runtime/game/`,
-following the house pattern (functional core, injected IO — see the files
-themselves for the live surface):
+The framework splits across the dependency graph like everything else in
+peerd: the **protocol pieces** (commit–reveal, reducer, log, driver) are
+core code under `extension/peerd-runtime/game/`; the **host wiring** —
+matchmaking over presence, the leaderboard plane, the arena UI — lives with
+the host (today `web/public/web/arena.js`; the extension's dweb actor is
+the later host). Both layers are "the game framework" in §2's sense — a
+new game reuses all of it — but only the protocol pieces are
+host-agnostic. House pattern throughout (functional core, injected IO —
+the files themselves are the live surface):
 
 - **commit–reveal** — pure helpers: commit a value with a salt, verify a
   reveal against a commit, combine nonce reveals into a match seed.
@@ -132,23 +139,25 @@ themselves for the live surface):
   reducer + the rules module and must re-derive the same outcome. Anyone
   holding the log and the game dwapp can audit a match.
 - **match driver** — the imperative shell (the `makeMeshDispatch` twin):
-  injected `send`/`onMessage`/`sign`/`hash`/`now`/`runSealed`, drives a
-  live match, emits UI events. No `chrome.*`, no dweb imports — the host
-  (web shell today, the extension's dweb actor later) wires the mesh in.
+  every IO surface injected (the wire send, the rules runner, the solver,
+  the result signer/verifier, the accept policy, the clock and timers — the
+  live parameter list lives in `match-driver.js`), drives a live match,
+  emits UI events. No `chrome.*`, no dweb imports — the host (web shell
+  today, the extension's dweb actor later) wires the mesh in.
 
 A **rules module** is what a game author writes (and what ships inside the
-game dwapp as content-addressed code, executed only in the sealed worker):
-
-```js
-export const rules = {
-  meta: { id, name, version, description },
-  derive(seedHex, content) -> challenge      // deterministic: joint seed → the puzzle/scenario
-  check(challenge, answer) -> { correct, score }   // pure verdict
-}
-```
-
-`content` is the game's data pack (the puzzles). Both functions must be
-deterministic and side-effect-free — the reducer treats them as math.
+game dwapp as content-addressed code, executed only in the sealed worker).
+The contract of record is the header of the reference module
+(`web/public/web/games/puzzle-race.js`); its shape: a plain script — no
+imports, no exports, no host access — whose last binding is `const rules`,
+with `rules.meta` (id / name / version / description),
+`rules.derive(seedHex)` (deterministic: joint seed → the puzzle, which is
+the game's content), `rules.check(seedHex, answer)` (a pure verdict that
+*re-derives* from the seed — that re-derivation is what lets any verifier
+audit with nothing but the seed and the answer), and `rules.solve(challenge)`
+(a *reference* solver — content like everything else; a competitor may bring
+a better one). `derive`/`check` must be deterministic and side-effect-free —
+the reducer treats them as math; `solve` may randomize (that's the race).
 
 ## 5. Game #1: the puzzle race
 

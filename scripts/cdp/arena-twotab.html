@@ -49,7 +49,7 @@
         matchId: m.matchId, phase: m.phase, coSigned: m.coSigned,
         outcome: m.outcome, resultString: m.resultString ?? null,
       }));
-      state.scores = arena.scores();
+      state.scores = arena.boards();
     };
     arena.onChange(refresh);
     state.ready = true;

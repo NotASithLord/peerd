@@ -121,7 +121,7 @@ export {
   createMatch, applyMessage, applySeed, applyVerdict, applyTimeout, finalizeUnsigned,
   decideOutcome, owingPlayers, phaseDuration, isGameMessage, DEFAULT_DEADLINES,
 } from './game/match-reducer.js';
-export { canonicalResult, verifyMatchLog } from './game/match-log.js';
+export { canonicalResult, verifyMatchLog, resultSigningBytes, RESULT_SIGN_CONTEXT } from './game/match-log.js';
 export { createMatchDriver, GameProtocolError } from './game/match-driver.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.

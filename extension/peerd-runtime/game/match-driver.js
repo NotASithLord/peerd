@@ -16,16 +16,21 @@
 
 import { createMatch, applyMessage, applySeed, applyVerdict, applyTimeout, finalizeUnsigned, isGameMessage, phaseDuration } from './match-reducer.js';
 import { makeCommit, verifyReveal, combineSeed, randomHex } from './commit-reveal.js';
-import { canonicalResult } from './match-log.js';
+import { canonicalResult, resultSigningBytes } from './match-log.js';
 
 export class GameProtocolError extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'GameProtocolError'; }
 }
 
-// Live matches a driver will track at once (finished ones stay for log export,
-// so this also bounds memory across a session; a flood beyond it is dropped).
-const MAX_LIVE_MATCHES = 64;
+// Table caps. Finished matches stay for log export until the table fills, then
+// the OLDEST finished ones are evicted — so the table is bounded WITHOUT a
+// challenge flood permanently locking out new matches. ACTIVE matches are
+// capped much lower: each active match can hold a running solver (a whole
+// sealed worker in the demo host), so 64 concurrent ones is a CPU DoS, not a
+// game.
+const MAX_TRACKED_MATCHES = 64;
+const MAX_ACTIVE_MATCHES = 8;
 
 /**
  * @param {{
@@ -74,6 +79,21 @@ export const createMatchDriver = ({
   /** @type {Map<string, MatchRec>} */
   const matches = new Map();
 
+  const activeCount = () => [...matches.values()].filter((r) => r.state.phase !== 'done').length;
+
+  // Evict oldest finished matches until there's room (Map preserves insertion
+  // order). Returns whether a new record may be admitted.
+  const admitNewMatch = () => {
+    for (const [id, r] of matches) {
+      if (matches.size < MAX_TRACKED_MATCHES) break;
+      if (r.state.phase === 'done') {
+        if (r.timer != null) { cancel(r.timer); r.timer = null; }
+        matches.delete(id);
+      }
+    }
+    return matches.size < MAX_TRACKED_MATCHES && activeCount() < MAX_ACTIVE_MATCHES;
+  };
+
   /** @param {import('./match-reducer.js').MatchState} state @param {string} peer @returns {MatchRec} */
   const newRec = (state, peer) => {
     /** @type {any} */ let resolveDone;
@@ -115,6 +135,9 @@ export const createMatchDriver = ({
   const armTimer = (rec) => {
     if (rec.timer != null) { cancel(rec.timer); rec.timer = null; }
     if (rec.state.phase === 'done') return;
+    // why +25ms: fire just PAST the deadline so applyTimeout's `at >= phaseAt +
+    // duration` test is decisively true (timer clamping/rounding otherwise
+    // lands a hair early and the reducer no-ops, leaving the phase hung).
     const dueIn = Math.max(0, rec.state.phaseAt + phaseDuration(rec.state) - now()) + 25;
     rec.timer = schedule(() => {
       rec.timer = null;
@@ -199,7 +222,7 @@ export const createMatchDriver = ({
       rec.resultString = canonicalResult(rec.state);
       if (signResult && verifyResultSig) {
         try {
-          const sig = await signResult(rec.resultString);
+          const sig = await signResult(resultSigningBytes(rec.resultString));
           await sendOwn(rec, { type: 'result_sig', sig });
         } catch { rec.state = finalizeUnsigned(rec.state, now()); }
         // A counter-signature that raced ahead of our scoring was buffered —
@@ -208,7 +231,7 @@ export const createMatchDriver = ({
         for (const [did, sig] of Object.entries(rec.pendingSigs)) {
           delete rec.pendingSigs[did];
           if (rec.state.phase !== 'signing') break;
-          if (await verifyResultSig(did, sig, rec.resultString).catch(() => false)) {
+          if (await verifyResultSig(did, sig, resultSigningBytes(rec.resultString)).catch(() => false)) {
             const msg = { __game: 1, matchId: rec.state.matchId, type: 'result_sig', sig };
             rec.log.push({ dir: 'in', from: did, at: now(), msg });
             rec.state = applyMessage(rec.state, { from: did, at: now(), msg });
@@ -252,7 +275,7 @@ export const createMatchDriver = ({
         return;
       }
       const ok = !!verifyResultSig
-        && await verifyResultSig(from, String(msg.sig ?? ''), rec.resultString).catch(() => false);
+        && await verifyResultSig(from, String(msg.sig ?? ''), resultSigningBytes(rec.resultString)).catch(() => false);
       if (!ok) return; // invalid counter-signature: never applied
     }
     rec.log.push({ dir: 'in', from, at, msg });
@@ -270,6 +293,7 @@ export const createMatchDriver = ({
     async challenge(peerDid, { gameId, rulesHash, deadlines }) {
       if (!peerDid || peerDid === selfDid) throw new GameProtocolError('challenge: need a peer did');
       if (!gameId || !rulesHash) throw new GameProtocolError('challenge: gameId and rulesHash are required');
+      if (!admitNewMatch()) throw new GameProtocolError('challenge: too many live matches');
       const matchId = `m-${now().toString(36)}-${randomHex(4)}`;
       const state = createMatch({ matchId, gameId, rulesHash, challenger: selfDid, acceptor: peerDid, deadlines, at: now() });
       const rec = newRec(state, peerDid);
@@ -299,9 +323,9 @@ export const createMatchDriver = ({
         return { consumed: true };
       }
       if (msg.type !== 'challenge') return { consumed: true }; // stray message for an unknown match: drop
-      // Bound the live-match table: a challenge flood past the cap is dropped
-      // outright (no decline reply — replying to a flood is amplification).
-      if (matches.size >= MAX_LIVE_MATCHES) return { consumed: true };
+      // Bound the table: a challenge flood past the caps is dropped outright
+      // (no decline reply — replying to a flood is amplification).
+      if (!admitNewMatch()) return { consumed: true };
       // A fresh inbound challenge: fail-closed acceptPolicy decides.
       const state = createMatch({
         matchId: msg.matchId, gameId: String(msg.gameId ?? ''), rulesHash: String(msg.rulesHash ?? ''),

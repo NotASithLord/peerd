@@ -17,9 +17,6 @@
 // Phases:  proposed → seeding → solving → revealing → scoring → signing → done
 // Any phase can short-circuit to done via decline / resign / timeout / cheat.
 
-/** Wire tag — a game message is `{ __game: 1, matchId, type, ... }`. */
-export const GAME_WIRE_TAG = '__game';
-
 /** @param {unknown} d @returns {d is { __game: 1, matchId: string, type: string } & Record<string, any>} */
 export const isGameMessage = (d) =>
   !!d && typeof d === 'object'
@@ -40,6 +37,14 @@ export const DEFAULT_DEADLINES = Object.freeze({
 
 const ACTIVE_PHASES = new Set(['proposed', 'seeding', 'solving', 'revealing', 'scoring', 'signing']);
 const MAX_VIOLATIONS = 32;
+// Field ceilings — a commit/nonce/salt is a hex digest (64 chars for sha-256),
+// an answer is game data. why: without a cap a hostile peer's multi-MB "answer"
+// is stored in state, embedded in the canonical result, and re-fed to the rules
+// runner on every check — cheap amplification the protocol never needs.
+const MAX_DIGEST_CHARS = 128;
+export const MAX_ANSWER_CHARS = 4096;
+/** @param {unknown} v @param {number} max */
+const shortString = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
 
 /**
  * @typedef {{ kind: 'win'|'draw'|'declined'|'aborted', winner?: string, reason: string }} Outcome
@@ -124,8 +129,9 @@ export const applyMessage = (s, { from, at, msg, revealOk }) => {
 
   switch (msg.type) {
     case 'challenge':
-      // The state was CREATED from the challenge; seeing it (log replay, or the
-      // wire echo) is a no-op when consistent, a violation otherwise.
+      // The state was CREATED from the challenge, which is what binds gameId /
+      // rulesHash / deadlines — a re-heard challenge (log replay, wire echo) is
+      // a no-op in `proposed` regardless of its body, and stray anywhere else.
       return (s.phase === 'proposed' && from === s.players.challenger) ? s : violate(s, at, from, 'stray-challenge');
 
     case 'decline':
@@ -147,7 +153,7 @@ export const applyMessage = (s, { from, at, msg, revealOk }) => {
     case 'seed_commit': {
       if (s.phase !== 'seeding') return violate(s, at, from, 'stray-seed-commit');
       if (s.seed.commits[from]) return violate(s, at, from, 'duplicate-seed-commit');
-      if (typeof msg.commit !== 'string' || !msg.commit) return violate(s, at, from, 'malformed-seed-commit');
+      if (!shortString(msg.commit, MAX_DIGEST_CHARS)) return violate(s, at, from, 'malformed-seed-commit');
       // why the mirror check: echoing the opponent's commit lets a peer replay
       // their reveal too — and know the seed BEFORE sending its own reveal (a
       // solving head start). An honest collision is 2^-256; forfeit the echoer.
@@ -161,7 +167,7 @@ export const applyMessage = (s, { from, at, msg, revealOk }) => {
       // a nonce before the opponent committed lets the opponent steer the seed.
       if (!bothPlayers(s).every((p) => s.seed.commits[p])) return violate(s, at, from, 'seed-reveal-before-commits');
       if (s.seed.reveals[from]) return violate(s, at, from, 'duplicate-seed-reveal');
-      if (typeof msg.nonce !== 'string' || typeof msg.salt !== 'string') return violate(s, at, from, 'malformed-seed-reveal');
+      if (!shortString(msg.nonce, MAX_DIGEST_CHARS) || !shortString(msg.salt, MAX_DIGEST_CHARS)) return violate(s, at, from, 'malformed-seed-reveal');
       if (revealOk !== true) return forfeitTo(s, from, 'seed-reveal-mismatch', at);
       const reveals = { ...s.seed.reveals, [from]: { nonce: msg.nonce, salt: msg.salt } };
       const both = bothPlayers(s).every((p) => reveals[p]);
@@ -171,7 +177,7 @@ export const applyMessage = (s, { from, at, msg, revealOk }) => {
     case 'answer_commit': {
       if (s.phase !== 'solving') return violate(s, at, from, 'stray-answer-commit');
       if (s.answers.commits[from]) return violate(s, at, from, 'duplicate-answer-commit');
-      if (typeof msg.commit !== 'string' || !msg.commit) return violate(s, at, from, 'malformed-answer-commit');
+      if (!shortString(msg.commit, MAX_DIGEST_CHARS)) return violate(s, at, from, 'malformed-answer-commit');
       // Mirroring an answer commit = replaying the opponent's reveal later —
       // "solving" by theft. Same forfeit as the seed mirror.
       if (msg.commit === s.answers.commits[opponentOf(s, from)]?.commit) return forfeitTo(s, from, 'mirrored-answer-commit', at);
@@ -183,7 +189,7 @@ export const applyMessage = (s, { from, at, msg, revealOk }) => {
     case 'answer_reveal': {
       if (s.phase !== 'revealing') return violate(s, at, from, 'stray-answer-reveal');
       if (s.answers.reveals[from]) return violate(s, at, from, 'duplicate-answer-reveal');
-      if (typeof msg.answer !== 'string' || typeof msg.salt !== 'string') return violate(s, at, from, 'malformed-answer-reveal');
+      if (!shortString(msg.answer, MAX_ANSWER_CHARS) || !shortString(msg.salt, MAX_DIGEST_CHARS)) return violate(s, at, from, 'malformed-answer-reveal');
       if (revealOk !== true) return forfeitTo(s, from, 'answer-reveal-mismatch', at);
       const reveals = { ...s.answers.reveals, [from]: { answer: msg.answer, salt: msg.salt, sawPeerCommitFirst: !!msg.sawPeerCommitFirst } };
       const both = bothPlayers(s).every((p) => reveals[p]);
@@ -193,7 +199,7 @@ export const applyMessage = (s, { from, at, msg, revealOk }) => {
     case 'result_sig': {
       if (s.phase !== 'signing') return violate(s, at, from, 'stray-result-sig');
       if (s.sigs[from]) return violate(s, at, from, 'duplicate-result-sig');
-      if (typeof msg.sig !== 'string' || !msg.sig) return violate(s, at, from, 'malformed-result-sig');
+      if (!shortString(msg.sig, 2 * MAX_DIGEST_CHARS)) return violate(s, at, from, 'malformed-result-sig');
       // why the shell verifies the signature BEFORE applying: signature checking
       // is async crypto; an invalid sig is simply never applied (and logged as a
       // violation by the driver), so a stored sig is a verified one.

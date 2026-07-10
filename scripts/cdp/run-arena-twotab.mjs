@@ -184,7 +184,9 @@ const main = async () => {
       const coSigned = mh.coSigned && mg.coSigned;
       const played = ['win', 'draw'].includes(mh.outcome?.kind);
       const installed = g.games?.some((x) => !x.mine && x.installed);
-      const tallied = (h.scores?.length ?? 0) >= 2 && (g.scores?.length ?? 0) >= 2;
+      // per-game boards: the played game's board must have both players on it
+      const boardRows = (r) => r.scores?.[0]?.rows?.length ?? 0;
+      const tallied = boardRows(h) >= 2 && boardRows(g) >= 2;
       if (agreed && coSigned && played && installed && tallied) {
         console.log(`[arena] ✅ PASS — ${mh.matchId}: ${mh.outcome.kind}${mh.outcome.winner ? ` (winner ${mh.outcome.winner.slice(-8)})` : ''} (${mh.outcome.reason})`
           + ' · guest installed the shared dwapp (hash-verified) · result co-signed on both sides · leaderboards tallied');
@@ -193,7 +195,8 @@ const main = async () => {
       }
       console.error('[arena] ✗ FAIL — match finished but the pass conditions do not hold:',
         JSON.stringify({ agreed, coSigned, played, installed, tallied, hostOutcome: mh.outcome, guestOutcome: mg.outcome }));
-      break;
+      cleanup();
+      process.exit(1);
     }
     await sleep(POLL_INTERVAL_MS);
   }

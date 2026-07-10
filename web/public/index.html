@@ -355,7 +355,9 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   function closeTab(id){
     if(id==='home'||id==='peers') return;
     const order=[...reg.keys()], idx=order.indexOf(id);
-    reg.delete(id); tabBtn(id)?.remove(); panelEl(id)?.remove();
+    const p=panelEl(id);
+    try{ p?._dispose?.(); }catch{ /* a UI disposer must never block the close */ }
+    reg.delete(id); tabBtn(id)?.remove(); p?.remove();
     if(active===id) activate(order[idx-1]||order[idx+1]||'home');
   }
 
@@ -507,7 +509,14 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   }
   function answerPeer(msg){
     answerChain = answerChain.then(async ()=>{
-      if(!gemmaReady || !agentMesh) return;
+      if(!agentMesh) return;
+      // Mesh joined but no model loaded (e.g. arena-only tab): answer with a
+      // canned line instead of going silent — the asking peer would otherwise
+      // burn its full ask timeout against us.
+      if(!gemmaReady){
+        try { await agentMesh.reply(msg.from, msg.reqId, 'This peerd-lite tab has no local model loaded right now (mesh + arena only) — it can still play puzzle races.'); } catch(e){ /* peer gone */ }
+        return;
+      }
       const tag = '…'+msg.from.slice(-6);
       say('bot', `<span class="dim">peer ${tag} asks:</span> ${String(msg.message).replace(/</g,'&lt;')}`);
       const responder = makeAgent({ generate: generateGemma, runTool:()=>'', tools:[],
@@ -538,7 +547,11 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   function wireArena(panel){
     const mount = panel.querySelector('.arena-mount');
     ensureArena().then((a)=>{
-      mountArenaUI(mount, { arena: a, roster: ()=> (agentMesh ? agentMesh.discover() : []) });
+      // keep the disposer: closing the tab must unhook this UI from the
+      // page-singleton arena core (else its onChange callbacks + roster
+      // interval keep re-rendering a detached tree, and reopening stacks
+      // duplicates). closeTab invokes panel._dispose.
+      panel._dispose = mountArenaUI(mount, { arena: a, roster: ()=> (agentMesh ? agentMesh.discover() : []) });
     }).catch((e)=>{ mount.innerHTML = `<span class="soon-note">couldn’t join the mesh: ${(e?.message||e).toString().replace(/</g,'&lt;')}</span>`; });
   }
 
