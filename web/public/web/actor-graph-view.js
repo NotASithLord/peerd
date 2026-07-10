@@ -37,14 +37,14 @@ export function renderActorGraph(el, input) {
     const a = (i / list.length) * 2 * Math.PI - Math.PI / 2 + phase;
     pos.set(n.id, [cx + r * Math.cos(a), cy + r * Math.sin(a)]);
   });
-  place(locals, 52, 0);
+  place(locals, 36, 0);
   place(remotes, 98, Math.PI / 3);
 
   // THE DWEB BOUNDARY (owner direction): a magenta bubble encloses YOUR peerd
   // — self + every local actor, each in its own module color — and magenta
   // dots live only OUTSIDE it (real p2p peers). Edges crossing the bubble ARE
   // the wire. Radius: past the local ring + its labels, short of the remotes.
-  const BUBBLE_R = 74;
+  const BUBBLE_R = 56;
   const bubble = `<circle class="ag-bubble" cx="${cx}" cy="${cy}" r="${BUBBLE_R}"/>`
     + `<text class="pn-label ag-bubble-label" x="${cx + BUBBLE_R * 0.72}" y="${(cy - BUBBLE_R * 0.72).toFixed(1)}">d</text>`;
 

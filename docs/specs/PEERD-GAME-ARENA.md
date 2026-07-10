@@ -110,10 +110,14 @@ Each mechanism answers one specific attack:
 
 What this does NOT solve (known, accepted): a player can run arbitrary
 compute to solve faster (that's the game); wall-clock timing between
-mutually-distrusting machines is only *bounded*, not exact (ties resolve
-by rule, see §5); and hidden-state games (mafia/imposter) need mental-poker
-crypto or a committed ephemeral narrator (a dwapp-actor GM whose transcript
-is committed and revealed post-game) — explicitly out of scope for game #1.
+mutually-distrusting machines is only *bounded*, not exact — which is why
+game #1's verdict is decided by an **objective score recomputed from the
+revealed answer** (§5), never by timing claims (the framework keeps a
+commit-order tie-break as a generic fallback, but a game that relies on it
+inherits its honesty bound: an order lie can downgrade a loss to a draw);
+and hidden-state games (mafia/imposter) need mental-poker crypto or a
+committed ephemeral narrator (a dwapp-actor GM whose transcript is
+committed and revealed post-game) — explicitly out of scope for game #1.
 
 ## 4. The game-dwapp boilerplate (framework contract)
 
@@ -159,27 +163,35 @@ audit with nothing but the seed and the answer), and `rules.solve(challenge)`
 a better one). `derive`/`check` must be deterministic and side-effect-free —
 the reducer treats them as math; `solve` may randomize (that's the race).
 
-## 5. Game #1: the puzzle race
+## 5. Game #1: the puzzle race (v2: the mining race)
 
-Two agents, one deterministically-derived computational puzzle, first
-correct answer wins. Chosen first because it has **no hidden state** —
-every trustless invariant in §3 covers it with zero new crypto.
+Two agents, one joint seed, a **fixed solve window**: whoever holds the
+best answer when the window closes wins. Chosen first because it has **no
+hidden state** — every trustless invariant in §3 covers it with zero new
+crypto.
 
-- **Puzzles are content**: a pack of pure generator functions inside the
-  one puzzle-race dwapp (arithmetic/sequence/code puzzles that a sealed
-  worker can solve by running code and a reducer can check exactly). The
-  joint seed picks the generator and its parameters.
+- **The objective is IN the answer** (the v2 fairness fix): the puzzle is
+  "minimize `fnv1a32(tag:n)`" — the score is recomputed from the revealed
+  answer by any verifier, so the winner is decided by pure math, not by
+  anyone's claim. v1 was "first correct commit," which leaned on each
+  side's self-reported arrival order (honesty-bounded: a liar could
+  downgrade a loss to a draw). v2 removes timing from the verdict
+  entirely: search harder in the window → lower hash → higher objective
+  score; committing early just means you searched less. Exact score ties
+  are ~2⁻³². The framework's commit-order tie-break survives as a generic
+  fallback for future games, but game #1 no longer touches it.
+- **Puzzles are content**: the generator + objective live inside the one
+  puzzle-race dwapp; new puzzle kinds are a content update (a new bundle
+  hash), never a new dwapp.
 - **Two ladders, later**: solvers (win races) and creators (author puzzle
   packs others race on). MVP ships the solver loop; creator submissions
   ride the same dwapp-share path and are a content update, not new
   machinery.
-- **Solving is the competitor's business**: the local model can reason, or
-  the agent writes JS and runs it sealed — the demo's auto-solver does the
-  latter, which is also the honest story ("agents race by writing code").
-- **Timing/fairness (MVP rule)**: correctness dominates; among correct
-  answers, the earlier *commit* wins, judged by commit order as recorded in
-  **both** logs. If the two logs disagree on order (clock skew, races), the
-  match is a draw — the reducer never guesses.
+- **Solving is the competitor's business**: the demo's auto-player runs
+  the dwapp's reference solver as sealed-worker bursts (best-so-far shown
+  live — the opponent's stays sealed until reveal, which is commit-reveal
+  giving the UI an honest dramatic beat for free); a model or a stronger
+  hand-written solver just replaces the burst loop.
 
 ## 6. MVP scope (the web demo slice)
 

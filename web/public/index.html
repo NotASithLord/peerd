@@ -170,6 +170,14 @@
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
   .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
   .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:9px;margin:5px 0 3px}
+  .arena-race{font-size:11.5px;color:var(--paper);background:rgba(255,255,255,0.03);border:1px solid var(--line2);border-left:2px solid var(--amber);border-radius:8px;padding:7px 10px;margin-top:7px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+  .arena-race b{color:var(--white)}
+  .arena-best{color:var(--muted)}
+  .arena-sealed{color:var(--faint);letter-spacing:1px}
+  .arena-verdict.won,.arena-verdict.lost{animation:verdict-in .5s ease}
+  @keyframes verdict-in{0%{opacity:0;transform:translateY(4px) scale(.98)}60%{transform:none}100%{opacity:1}}
+  .ag-graph .pn-edge:not(.pn-edge--faint){stroke-dasharray:5 4;animation:ag-wire 1.1s linear infinite}
+  @keyframes ag-wire{to{stroke-dashoffset:-9}}
   .ag-bubble{fill:rgba(217,70,239,0.045);stroke:var(--magenta);stroke-opacity:.5;stroke-width:1.2}
   .ag-bubble-label{fill:var(--magenta);fill-opacity:.6;font-size:10px;font-weight:700}
   .ag-graph{display:block;width:100%;max-width:560px;height:auto;margin:0 auto}

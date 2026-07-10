@@ -32,9 +32,12 @@ const RULES_SOURCE_URL = '/web/games/puzzle-race.js';
 const MAX_BUNDLE_BYTES = 256 * 1024;   // a game bundle rides one DM at demo size
 const MAX_GAMES = 64;
 const SERVE_PER_MIN = 4;               // bundle serves per requesting did
-// Demo pacing: the pow race needs a real solve window; everything else default.
-const DEMO_DEADLINES = { solving: 90_000 };
-const SOLVE_RUN_TIMEOUT_MS = 60_000;   // sealed-worker cap for one solve run
+// Demo pacing: a FIXED mining window — long enough to feel the race build,
+// short enough to stay snappy; everything else default.
+const DEMO_DEADLINES = { solving: 20_000 };
+const MINE_BURST_MS = 1_100;           // one sealed-worker search burst
+const MINE_COMMIT_MARGIN_MS = 3_500;   // stop mining this long before the deadline
+const SOLVE_RUN_TIMEOUT_MS = 10_000;   // sealed-worker cap for one burst run
 
 const bundleHash = (files) => sha256hex(utf8(canonicalize(files)));
 const shortDid = (did) => `…${String(did).slice(-6)}`;
@@ -55,6 +58,9 @@ export async function createArena({ mesh }) {
   /** live + finished match snapshots by matchId — a Map is insertion-ordered,
    *  so first-seen order IS the display order */
   const matchViews = new Map();
+  /** OUR live mining progress per match (best answer/score/hash/tries) — the
+   *  UI's live race readout; the opponent's stays sealed until reveal. */
+  const mining = new Map();
   /** leaderboards, ONE PER GAME: rulesHash → (did → { w, l, d }). why scoped:
    * co-signing proves both players agreed to a result under THOSE rules — a
    * rigged game's rules happily co-sign its author's wins, so merging games
@@ -101,14 +107,31 @@ export async function createArena({ mesh }) {
         return runRules(g.files['rules.js'], 'check', [seed, answer]);
       },
     },
-    // The demo's auto-player: the dwapp's reference solver, in the sealed
-    // worker. A competitor with a better solver (or a model) just brings it.
+    // The demo's auto-player: the dwapp's reference solver, run as SHORT
+    // sealed-worker bursts in a loop until just before the commit deadline —
+    // the best answer so far surfaces live (mining map → UI) while the
+    // opponent's stays sealed until reveal. A competitor with a better solver
+    // (or a model) just brings it; the rules only judge the final answer.
     solve: async (challenge, info) => {
       const g = installedByHash(info.rulesHash);
       if (!g) throw new Error('rules not installed');
-      const answer = await runRules(g.files['rules.js'], 'solve', [challenge], SOLVE_RUN_TIMEOUT_MS);
-      if (typeof answer !== 'string' || !answer) throw new Error('solver found no answer');
-      return { answer };
+      let best = null;
+      while (Date.now() < info.deadlineAt - MINE_COMMIT_MARGIN_MS) {
+        const burst = await runRules(
+          g.files['rules.js'], 'solve',
+          [challenge, MINE_BURST_MS, best?.answer ?? null],
+          SOLVE_RUN_TIMEOUT_MS,
+        ).catch(() => null);
+        if (burst && typeof burst.answer === 'string'
+            && (!best || (burst.score ?? 0) > (best.score ?? 0))) {
+          best = { ...burst, tries: (best?.tries ?? 0) + (burst.tries ?? 0) };
+        } else if (burst && best) {
+          best.tries += burst.tries ?? 0;
+        }
+        if (best) { mining.set(info.matchId, { ...best, at: Date.now() }); emitChange(); }
+      }
+      if (!best) throw new Error('solver found no answer');
+      return { answer: best.answer };
     },
     signResult: async (result) => toHex(await identity.sign(utf8(result))),
     verifyResultSig: (did, sigHex, result) => verifySignature(did, fromHex(sigHex), utf8(result)),
@@ -126,7 +149,7 @@ export async function createArena({ mesh }) {
     onEvent: (evt) => {
       matchViews.set(evt.matchId, evt.state);
       if (evt.type === 'challenge-received') activity(`challenge from ${shortDid(evt.state.players.challenger)}`);
-      if (evt.type === 'done') onMatchDone(evt.state);
+      if (evt.type === 'done') { mining.delete(evt.matchId); onMatchDone(evt.state); }
       emitChange();
     },
   });
@@ -334,6 +357,7 @@ export async function createArena({ mesh }) {
       hash: g.hash, installed: !!g.files, mine: g.publisher === selfDid, holders: g.holders.size,
     })),
     matches: () => [...matchViews.values()],
+    mining: (matchId) => mining.get(matchId) ?? null,
     // One board per game (rules-hash scoped — see boardsByHash). Ordered like
     // the store list; only games with at least one tallied result appear.
     boards: () => [...games.values()]
@@ -362,11 +386,11 @@ const PHASES = ['proposed', 'seeding', 'solving', 'revealing', 'scoring', 'signi
 // Protocol reasons → human verdicts (fallback: the raw reason).
 const REASON_LABELS = {
   'committed-first': 'first correct commit',
-  correctness: 'the only correct answer',
-  score: 'higher score',
+  correctness: 'the only valid answer',
+  score: 'found the lower hash',
   simultaneous: 'dead heat — both committed at once',
   'order-disputed': 'commit order disputed',
-  'neither-correct': 'neither solved it',
+  'neither-correct': 'neither found a valid answer',
   resigned: 'resignation',
 };
 const reasonLabel = (r) => REASON_LABELS[r] ?? (String(r).endsWith('-timeout') ? 'deadline passed' : r);
@@ -445,10 +469,22 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
       // peer-derived content: escaped and clamped, never trusted markup.
       const prompt = m.challenge?.prompt
         ? `<div class="hint arena-prompt">◇ ${esc(clamp(m.challenge.prompt, 220))}</div>` : '';
-      const reveals = m.answers?.reveals ?? {};
-      const answers = m.outcome && Object.keys(reveals).length
-        ? `<div class="hint">${[arena.selfDid, opp].filter((d) => reveals[d]).map((d) =>
-          `${d === arena.selfDid ? 'you' : esc(shortDid(d))}: ${esc(clamp(reveals[d].answer, 60))}`).join(' · ')}</div>` : '';
+      // THE LIVE RACE: our best hash improving in real time; the opponent's is
+      // sealed until reveal (that's not a UI choice — it's the commit-reveal).
+      const hexOf = (score) => `0x${(4294967296 - score).toString(16).padStart(8, '0')}`;
+      let race = '';
+      if (m.phase === 'solving') {
+        const left = Math.max(0, Math.ceil((m.phaseAt + (m.deadlines?.solving ?? 0) - Date.now()) / 1000));
+        const mine = arena.mining(m.matchId);
+        race = `<div class="arena-race">⛏ mining · <b>${left}s</b> left
+          <span class="arena-best">${mine ? `your best: <b>${hexOf(mine.score)}</b> · ${Number(mine.tries).toLocaleString()} tries` : 'searching…'}</span>
+          <span class="arena-sealed">opponent: ▓▓▓▓▓▓ sealed</span></div>`;
+      } else if (m.phase === 'revealing' || m.phase === 'scoring' || m.phase === 'signing') {
+        race = `<div class="arena-race">⛏ window closed — revealing committed answers…</div>`;
+      }
+      const v = m.verdicts ?? {};
+      const showdown = m.outcome && v[arena.selfDid] && v[opp]
+        ? `<div class="hint">you: <b>${hexOf(v[arena.selfDid].score)}</b> · ${esc(shortDid(opp))}: <b>${hexOf(v[opp].score)}</b> — lower hash wins</div>` : '';
       const o = m.outcome;
       const verdict = !o ? '' : o.kind === 'win'
         ? `<div class="arena-verdict ${o.winner === arena.selfDid ? 'won' : 'lost'}">${o.winner === arena.selfDid ? '● you win' : '● you lose'} — ${esc(reasonLabel(o.reason))}${m.coSigned ? ' · co-signed ✓' : ''}</div>`
@@ -458,7 +494,8 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
           <div class="hint">vs ${esc(shortDid(opp))} · ${esc(m.gameId)} · ${esc(m.matchId)}</div>
           ${prompt}
           <div class="arena-pills">${pills}</div>
-          ${answers}
+          ${race}
+          ${showdown}
           ${verdict}
         </div>`;
     }).join('');
@@ -506,7 +543,13 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
   const offChange = arena.onChange(renderAll);
   const offActivity = arena.onActivity(log);
   renderAll();
-  const rosterTimer = setInterval(() => { renderRoster(); renderGraph(); }, 3000);   // presence has no single change hook here
+  // 1s ticker: the live-race countdown needs it; roster/graph only every 3rd
+  // tick (presence has no single change hook here).
+  let tick = 0;
+  const rosterTimer = setInterval(() => {
+    renderMatches();
+    if (++tick % 3 === 0) { renderRoster(); renderGraph(); }
+  }, 1000);
 
   panel.addEventListener('click', async (e) => {
     const t = e.target.closest('[data-act],[data-install],[data-challenge]');
