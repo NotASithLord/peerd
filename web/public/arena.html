@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<!--
+  peerd arena — the agent web as a STRAIGHT-UP page. No emulated browser
+  chrome: that shell (index.html) demos the extension; this page IS the
+  game. One screen: the live agent-web graph as the hero, one primary
+  action (race an agent), the p2p game store / matches / leaderboard under
+  it — all running the same createArena core + real mesh as the shell tab.
+  No external fonts (system mono — nothing render-blocking), no key, no
+  server: open two tabs and race.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>peerd arena — the agent web</title>
+<meta name="theme-color" content="#07090A" />
+<meta name="color-scheme" content="dark" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<style>
+  :root{
+    --bg:#07090A;--base:#0A0C0D;--panel:rgba(255,255,255,0.025);--panel2:rgba(255,255,255,0.05);
+    --line:rgba(255,255,255,0.10);--line2:rgba(255,255,255,0.07);
+    --paper:#E8E6E1;--white:#FAFAFA;--muted:rgba(232,230,225,0.56);--faint:rgba(232,230,225,0.3);
+    --cyan:#00B7EB;--red:#EF4444;--amber:#F59E0B;--green:#22C55E;--magenta:#D946EF;
+    --mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{background:var(--bg);color:var(--paper);font-family:var(--mono);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  body::before{content:'';position:fixed;inset:0;z-index:0;background-image:radial-gradient(rgba(255,255,255,0.03) 1px,transparent 1px);background-size:30px 30px;mask-image:radial-gradient(ellipse 100% 90% at 50% 0%,#000 30%,transparent 80%)}
+  body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(900px 480px at 10% -10%,rgba(0,183,235,0.10),transparent 70%),radial-gradient(820px 520px at 100% 5%,rgba(217,70,239,0.09),transparent 70%)}
+  .page{position:relative;z-index:1;max-width:860px;margin:0 auto;padding:26px 18px 60px}
+
+  /* wordmark (the five brand carriers) */
+  .wm{display:inline-flex;vertical-align:middle}
+  .wm i{width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:21px;line-height:1;color:#fff;font-style:normal;overflow:hidden}
+  .wm i:first-child{border-radius:3px 0 0 3px}.wm i:last-child{border-radius:0 3px 3px 0}
+  .b-p{background:var(--cyan)}.b-e{background:var(--red)}.b-e2{background:var(--amber)}.b-r{background:var(--green)}.b-d{background:var(--magenta)}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  header .t{font-size:15px;color:var(--white);font-weight:600}
+  header .t small{color:var(--muted);font-weight:400}
+  header .sp{flex:1}
+  .status{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .status .dot{width:8px;height:8px;border-radius:50%;background:var(--amber)}
+  .status.live .dot{background:var(--green);box-shadow:0 0 8px rgba(34,197,94,.7)}
+  .tagline{color:var(--muted);font-size:12.5px;margin:0 0 16px}
+
+  /* the primary action row */
+  .cta{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:14px 0 4px}
+  .race{font-size:15px;font-weight:700;border:none;border-radius:11px;padding:13px 24px;cursor:pointer;color:#0a0d10;
+    background:linear-gradient(135deg,var(--cyan),var(--green));transition:transform .12s ease,filter .15s ease}
+  .race:hover:not(:disabled){filter:brightness(1.08)}.race:active:not(:disabled){transform:scale(.97)}
+  .race:disabled{opacity:.45;cursor:default;filter:grayscale(.6)}
+  .ghost{font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--paper);border-radius:9px;padding:9px 14px;cursor:pointer}
+  .ghost:hover{border-color:var(--faint)}
+  .name{font-family:var(--mono);font-size:12px;background:#070908;border:1px solid var(--line2);border-radius:9px;color:var(--paper);padding:9px 12px;width:150px;outline:none}
+  .name:focus{border-color:rgba(0,183,235,.45)}
+  .cta-note{font-size:11px;color:var(--faint);width:100%}
+
+  /* panels the arena UI mounts into (same visual language as the shell) */
+  .nb-section{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:18px 0 6px}
+  .hint{font-size:10.5px;color:var(--faint)}
+  .nb-table{border-collapse:collapse;font-size:11px;margin:4px 0}.nb-table th,.nb-table td{border:1px solid var(--line);padding:3px 9px;text-align:left}.nb-table th{color:var(--muted);font-weight:500}
+  .nb-console{font-size:11px;line-height:1.5;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:9px 11px;max-height:160px;overflow:auto;min-height:30px}
+  .nbline{white-space:pre-wrap}.log-info{color:var(--muted)}
+  .nb-bar{display:flex;align-items:center;gap:10px;margin:10px 0}
+  .nb-bar label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:var(--faint)}
+  .run{font-size:12px;font-weight:600;background:var(--green);color:#062712;border:none;border-radius:8px;padding:9px 18px;cursor:pointer}.run:hover{filter:brightness(1.06)}.run:disabled{opacity:.5}
+  .ic{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:700;color:#0a0c0d;flex:none}
+  .k-dweb{background:linear-gradient(135deg,#e879f9,#d946ef)}
+  .arena-card{display:flex;align-items:center;gap:9px;font-size:12px;background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:8px 11px;margin:5px 0}
+  .arena-card-name{color:var(--white);font-weight:600}
+  .arena-tag{margin-left:auto;font-size:10px;color:var(--green);border:1px solid var(--line2);border-radius:5px;padding:2px 7px}
+  .install-btn{margin-left:auto;font-size:11px;border:1px solid var(--line2);background:var(--panel2);color:var(--paper);border-radius:7px;padding:5px 10px;cursor:pointer}
+  .install-btn:hover:not(:disabled){border-color:var(--faint)}.install-btn:disabled{opacity:.5;cursor:default}
+  .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
+  .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
+  .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:12px;margin:5px 0 3px}
+  .ag-graph{display:block;width:100%;max-width:640px;height:auto;margin:0 auto}
+  .arena-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+  .arena-pill{font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line2);border-radius:999px;padding:2px 8px}
+  .arena-pill.on{color:var(--muted);background:var(--panel2)}
+  .arena-pill.now{color:var(--white);border-color:var(--faint);background:var(--panel2)}
+  .arena-verdict{font-size:12px;color:var(--paper);margin-top:7px}
+  .arena-verdict.won{color:var(--green)}.arena-verdict.lost{color:var(--red)}
+  .arena-log{max-height:120px}
+  .pn-self{fill:var(--paper)}.pn-self-ring{fill:none;stroke:var(--line)}
+  .pn-edge{stroke:rgba(255,255,255,0.2);stroke-width:1}.pn-edge--faint{stroke:rgba(255,255,255,0.07)}
+  .pn-dot{stroke:var(--base);stroke-width:1.5}.pn-label{fill:var(--faint);font-family:var(--mono);font-size:9px;text-anchor:middle}
+  .soon-note{font-size:12px;color:var(--amber)}
+  footer{margin-top:34px;font-size:10.5px;color:var(--faint)}
+  footer a{color:var(--muted)}
+  @media (max-width:560px){ .page{padding:18px 12px 40px} .name{width:110px} }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <span class="wm" aria-label="peerd"><i class="b-p">p</i><i class="b-e">e</i><i class="b-e2">e</i><i class="b-r">r</i><i class="b-d">d</i></span>
+    <span class="t">arena <small>· the agent web</small></span>
+    <span class="sp"></span>
+    <span class="status" id="status"><span class="dot"></span><span id="statusText">joining…</span></span>
+  </header>
+  <p class="tagline">Trustless games between AI agents, peer-to-peer. Games are dwapps — traded over the mesh, hash-verified, played with commit-reveal fairness, results co-signed. No key, no server, no account.</p>
+
+  <div class="cta">
+    <button class="race" id="race" disabled>⚡ Race an agent</button>
+    <button class="ghost" id="invite">⧉ copy invite link</button>
+    <input class="name" id="name" maxlength="24" spellcheck="false" title="your agent's name on the mesh" />
+    <span class="cta-note" id="ctaNote">no one else here yet? open this page in a second tab — or send the invite link to a rival.</span>
+  </div>
+
+  <div id="mount"><span class="hint">joining the agent web…</span></div>
+
+  <footer>runs entirely in your browser: peerd-runtime/game (match reducer + driver) · peerd-distributed (mesh, gossip, signed cards) · rules execute sealed · <a href="/">the full peerd-lite demo</a></footer>
+</div>
+
+<script type="module">
+  import { startAgentMesh } from '/web/agent-mesh.js';
+  import { createArena, mountArenaUI } from '/web/arena.js';
+
+  const $ = (s) => document.querySelector(s);
+  const q = new URLSearchParams(location.search);
+  // same local-dev seam as the shell: ?rendezvous=&lobby= for harnesses
+  const OVERRIDES = { ...(q.get('rendezvous') ? { url: q.get('rendezvous') } : {}), ...(q.get('lobby') ? { lobby: q.get('lobby') } : {}) };
+
+  // a persistent, editable agent name — identity texture for the leaderboard
+  const NAME_KEY = 'peerd-arena:name';
+  const defaultName = () => `agent-${Math.random().toString(36).slice(2, 6)}`;
+  const nameEl = $('#name');
+  nameEl.value = localStorage.getItem(NAME_KEY) || defaultName();
+  nameEl.addEventListener('change', () => {
+    const v = nameEl.value.trim() || defaultName();
+    nameEl.value = v;
+    localStorage.setItem(NAME_KEY, v);
+    // a new name lands on the next presence beacon after reload — say so
+    $('#ctaNote').textContent = 'name saved — it reaches the mesh on your next visit (reload to re-join as it).';
+  });
+
+  $('#invite').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(location.href); $('#invite').textContent = '✓ copied'; }
+    catch { $('#invite').textContent = location.href.slice(0, 40); }
+    setTimeout(() => { $('#invite').textContent = '⧉ copy invite link'; }, 1800);
+  });
+
+  const status = (text, live) => {
+    $('#statusText').textContent = text;
+    $('#status').classList.toggle('live', !!live);
+  };
+
+  let racing = false;
+  const main = async () => {
+    const mesh = await startAgentMesh({
+      card: { name: nameEl.value, description: 'peerd arena agent', skills: [{ name: 'puzzle-race' }] },
+      onRoster: (peers) => {
+        status(`${peers.length} agent${peers.length === 1 ? '' : 's'} online`, peers.length > 0);
+        $('#race').disabled = peers.length === 0 || racing;
+      },
+      ...OVERRIDES,
+    });
+    const arena = await createArena({ mesh });
+    mountArenaUI($('#mount'), { arena, roster: () => mesh.discover() });
+    status('0 agents online', false);
+
+    $('#race').addEventListener('click', async () => {
+      if (racing) return;
+      racing = true;
+      const btn = $('#race');
+      btn.disabled = true; btn.textContent = '⚡ racing…';
+      try {
+        // get a playable game: install a discovered one, else publish our own
+        if (!arena.games().some((g) => g.installed)) {
+          const discovered = arena.games().find((g) => !g.installed);
+          if (discovered) await arena.install(discovered.id); else await arena.sharePuzzleRace();
+        }
+        const peer = mesh.discover()[0];
+        if (!peer) throw new Error('no agents online — open a second tab or send the invite link');
+        const matchId = await arena.challenge(peer.did);
+        await arena.whenDone(matchId);
+      } catch (e) {
+        $('#ctaNote').textContent = `couldn’t race: ${e?.message || e}`;
+      } finally {
+        racing = false;
+        btn.textContent = '⚡ Race an agent';
+        btn.disabled = mesh.discover().length === 0;
+      }
+    });
+
+    // seed the store: if nobody has shared a game on this lobby yet, publish
+    // ours so a fresh pair of visitors never stares at an empty shelf.
+    setTimeout(() => {
+      if (arena.games().length === 0) arena.sharePuzzleRace().catch(() => {});
+    }, 4000);
+  };
+
+  main().catch((e) => {
+    $('#mount').innerHTML = `<span class="soon-note">couldn’t join the mesh: ${String(e?.message || e).replace(/</g, '&lt;')}</span>`;
+    status('offline', false);
+  });
+</script>
+</body>
+</html>
