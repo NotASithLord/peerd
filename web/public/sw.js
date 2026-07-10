@@ -85,14 +85,17 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   if (req.headers.has('range')) return;
 
-  // navigations: THIS build's precached document ('/', the canonical copy —
-  // '/index.html' is a redirect on static hosts and is never cached), network
-  // as first-visit/miss fallback. Freshness = the update cycle, not racing
-  // the network per load.
+  // navigations: THIS build's precached copy of the REQUESTED document — the
+  // site is multi-page now (/ + /arena.html), so matching '/' for every
+  // navigation (the single-page original) served the shell for every path.
+  // '/' stays the canonical root key ('/index.html' is a redirect on static
+  // hosts and is never cached); network is the first-visit/miss fallback.
+  // Freshness = the update cycle, not racing the network per load.
   if (req.mode === 'navigate') {
+    const doc = url.pathname.endsWith('/index.html') ? '/' : url.pathname;
     e.respondWith(
       caches.open(CACHE_SHELL)
-        .then((c) => c.match('/'))
+        .then((c) => c.match(doc))
         .then((hit) => hit || fetch(req).then((res) => putCache(CACHE_SHELL, req, res)))
     );
     return;
