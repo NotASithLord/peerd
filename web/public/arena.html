@@ -76,6 +76,13 @@
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
   .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
   .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:12px;margin:5px 0 3px}
+  .dwapp-overlay{position:fixed;inset:0;z-index:60;background:rgba(4,5,6,.78);display:grid;place-items:center;padding:16px}
+  .dwapp-frame{width:min(94vw,520px);height:min(84vh,620px);background:var(--base);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  .dwapp-frame header{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line2);font-size:12px}
+  .dwapp-frame header b{color:var(--white)}
+  .dwapp-frame header .hint{flex:1}
+  .dwapp-close{margin-left:auto;background:transparent;border:1px solid var(--line2);color:var(--muted);border-radius:6px;width:24px;height:24px;cursor:pointer;flex:none}
+  .dwapp-frame iframe{flex:1;border:0;background:#0a0c0d}
   .arena-race{font-size:11.5px;color:var(--paper);background:rgba(255,255,255,0.03);border:1px solid var(--line2);border-left:2px solid var(--amber);border-radius:8px;padding:7px 10px;margin-top:7px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
   .arena-race b{color:var(--white)}
   .arena-best{color:var(--muted)}
@@ -128,6 +135,7 @@
 <script type="module">
   import { startAgentMesh } from '/web/agent-mesh.js';
   import { createArena, mountArenaUI } from '/web/arena.js';
+  import { openDwapp, fetchPadTemplate, bakePixelPad } from '/web/dwapp-host.js';
 
   const $ = (s) => document.querySelector(s);
   const q = new URLSearchParams(location.search);
@@ -169,7 +177,30 @@
       ...OVERRIDES,
     });
     const arena = await createArena({ mesh });
-    mountArenaUI($('#mount'), { arena, roster: () => mesh.discover() });
+
+    // ---- the dwapp layer: run, create, remix — all p2p ----
+    // A pad export (from make OR from remixing someone's installed pad)
+    // becomes YOUR OWN dwapp on the shelf: same slug, your signature, your
+    // dwapp id — provenance stays visible ("by you" vs "by …did").
+    let closeOverlay = null;
+    const shareArt = async (art) => {
+      const files = bakePixelPad(await fetchPadTemplate(), { title: `${nameEl.value}'s pixels`, art });
+      await arena.shareDwapp({ slug: 'pixel-pad', name: `${nameEl.value}'s pixels`, description: 'a drawing, traded as a dwapp — install it, remix it, reshare it', files });
+      closeOverlay?.();
+    };
+    const openBundle = (id) => {
+      const b = arena.bundle(id);
+      if (!b) return;
+      closeOverlay = openDwapp({ files: b.files, title: b.name, onPadExport: shareArt });
+    };
+    const makePad = async () => {
+      closeOverlay = openDwapp({
+        files: { 'index.html': await fetchPadTemplate() },
+        title: 'make a pixel pad', onPadExport: shareArt,
+      });
+    };
+
+    mountArenaUI($('#mount'), { arena, roster: () => mesh.discover(), openBundle, makePad });
     status('0 agents online', false);
 
     $('#race').addEventListener('click', async () => {
@@ -196,10 +227,24 @@
       }
     });
 
-    // seed the store: if nobody has shared a game on this lobby yet, publish
-    // ours so a fresh pair of visitors never stares at an empty shelf.
-    setTimeout(() => {
-      if (arena.games().length === 0) arena.sharePuzzleRace().catch(() => {});
+    // seed the shelf PER ITEM: whatever this lobby is still missing after
+    // the join settles — the game if no one has shared it, and a sample
+    // pixel pad (the brand 'p', drawn in pixels) if no pad is around — so a
+    // fresh pair of visitors sees a real shelf: an app to install/open/remix
+    // and a game to race.
+    setTimeout(async () => {
+      try {
+        if (!arena.games().some((g) => /puzzle race/i.test(g.name))) await arena.sharePuzzleRace();
+        if (!arena.games().some((g) => /pixel/i.test(g.name))) {
+          const art = new Array(256).fill(0);
+          const px = (x, y) => { art[y * 16 + x] = 1; };
+          for (let y = 3; y <= 12; y++) px(4, y);
+          for (let x = 5; x <= 9; x++) { px(x, 3); px(x, 8); }
+          for (let y = 4; y <= 7; y++) px(10, y);
+          const files = bakePixelPad(await fetchPadTemplate(), { title: 'peerd pixels', art });
+          await arena.shareDwapp({ slug: 'pixel-pad', name: 'peerd pixels', description: 'a drawing, traded as a dwapp — install it, remix it, reshare it', files });
+        }
+      } catch { /* another tab seeded first — fine */ }
     }, 4000);
   };
 

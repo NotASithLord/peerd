@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!--
+  pixel-pad — the TEMPLATE dwapp for the demo's create/remix/trade loop.
+  A single self-contained file: a 16x16 pixel pad in the five brand colors.
+  Baked placeholders (__TITLE__ / __ART__) are substituted by bakePixelPad
+  (web/dwapp-host.js) when a visitor shares their drawing: the art SHIPS IN
+  THE BUNDLE, so whoever installs it sees exactly what the creator drew —
+  and can remix it and share their own. Runs only in the sandboxed
+  opaque-origin iframe (no network by CSP); the ONLY outward channel is a
+  postMessage to the host when the creator hits share.
+-->
+<html lang="en">
+<head><meta charset="UTF-8" /><title>pixel pad</title>
+<style>
+  :root{--bg:#0A0C0D;--line:rgba(255,255,255,.1);--paper:#E8E6E1;--faint:rgba(232,230,225,.35);
+    --cyan:#00B7EB;--red:#EF4444;--amber:#F59E0B;--green:#22C55E;--magenta:#D946EF}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--paper);font-family:ui-monospace,Menlo,Consolas,monospace;
+    display:flex;flex-direction:column;align-items:center;gap:10px;padding:14px;box-sizing:border-box}
+  h1{font-size:13px;margin:2px 0 0;font-weight:600}
+  .sub{font-size:10px;color:var(--faint);margin:0}
+  #grid{display:grid;grid-template-columns:repeat(16,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);width:min(78vw,340px);aspect-ratio:1;touch-action:none}
+  #grid i{background:#101315;display:block;cursor:crosshair}
+  .bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:center}
+  .sw{width:22px;height:22px;border-radius:5px;border:2px solid transparent;cursor:pointer}
+  .sw.on{border-color:var(--paper)}
+  button{font:inherit;font-size:11px;background:var(--green);color:#062712;border:none;
+    border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:700}
+  button.alt{background:transparent;color:var(--faint);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<h1 id="title">pixel pad</h1>
+<p class="sub">draw in the brand palette — then share it onto the mesh as YOUR dwapp</p>
+<div id="grid"></div>
+<div class="bar" id="pal"></div>
+<div class="bar">
+  <button id="share">◈ share this onto the mesh</button>
+  <button id="clear" class="alt">clear</button>
+</div>
+<script>
+  'use strict';
+  var TITLE = "__TITLE__";
+  var BAKED = /*__ART__*/null;
+
+  var COLORS = ['', '#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
+  var N = 16;
+  var art = new Array(N * N).fill(0);
+  if (Array.isArray(BAKED) && BAKED.length === N * N) {
+    art = BAKED.map(function (v) { return (v >= 0 && v < COLORS.length) ? Math.floor(v) : 0; });
+  }
+  if (TITLE && TITLE.indexOf('__') !== 0) document.getElementById('title').textContent = TITLE;
+
+  var grid = document.getElementById('grid');
+  var cells = [];
+  var paint = 5;
+  var down = false;
+  for (var i = 0; i < N * N; i++) {
+    var c = document.createElement('i');
+    grid.appendChild(c);
+    cells.push(c);
+  }
+  function render() {
+    for (var j = 0; j < cells.length; j++) cells[j].style.background = COLORS[art[j]] || '#101315';
+  }
+  function put(idx) { art[idx] = paint; render(); }
+  grid.addEventListener('pointerdown', function (e) { down = true; var k = cells.indexOf(e.target); if (k >= 0) put(k); });
+  grid.addEventListener('pointerover', function (e) { if (!down) return; var k = cells.indexOf(e.target); if (k >= 0) put(k); });
+  window.addEventListener('pointerup', function () { down = false; });
+
+  var pal = document.getElementById('pal');
+  COLORS.forEach(function (col, idx) {
+    var b = document.createElement('span');
+    b.className = 'sw' + (idx === paint ? ' on' : '');
+    b.style.background = col || '#101315';
+    b.title = idx === 0 ? 'erase' : '';
+    b.addEventListener('click', function () {
+      paint = idx;
+      pal.querySelectorAll('.sw').forEach(function (s) { s.classList.remove('on'); });
+      b.classList.add('on');
+    });
+    pal.appendChild(b);
+  });
+
+  document.getElementById('clear').addEventListener('click', function () { art.fill(0); render(); });
+  // the one outward channel: hand the drawing to the host page, which bakes
+  // it into a fresh bundle and shares it as the visitor's own dwapp.
+  document.getElementById('share').addEventListener('click', function () {
+    parent.postMessage({ __peerdPad: 1, art: art.slice() }, '*');
+  });
+  render();
+</script>
+</body>
+</html>

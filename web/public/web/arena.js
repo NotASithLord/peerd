@@ -208,7 +208,9 @@ export async function createArena({ mesh }) {
         hash: card.value.head.version_id, size: card.value.head.size,
       };
       games.set(id, g);
-      activity(`discovered "${g.name}" by ${shortDid(g.publisher)}`);
+      // our own share announces itself with a "shared …" line; only a card
+      // from ELSEWHERE is a discovery
+      if (g.publisher !== selfDid) activity(`discovered "${g.name}" by ${shortDid(g.publisher)}`);
     } else if (card.seq > g.card.seq) {
       // a newer signed amendment replaces the card (and outdates our bundle)
       Object.assign(g, { card, name: card.value.name, description: card.value.description });
@@ -292,55 +294,69 @@ export async function createArena({ mesh }) {
     return g;
   };
 
-  /** Share the built-in puzzle-race game: build the dwapp bundle from this
-   * page's own source, sign its card, announce it on the lobby. */
-  let myCard = null;
-  const sharePuzzleRace = async () => {
-    const existing = [...games.values()].find((g) => g.publisher === selfDid && g.files);
-    if (existing) return existing;
-    // eslint-disable-next-line no-restricted-globals -- same-origin read of the page's OWN served asset (the bundled rules source), not egress; the page shell has no safeFetch wiring
-    const rulesSource = await (await fetch(RULES_SOURCE_URL)).text();
-    const files = {
-      'rules.js': rulesSource,
-      // the dwapp-actor manifest: installed in the EXTENSION, this same bundle
-      // becomes a specialized actor (games are dwapps are actors).
-      'peerd.actor.json': JSON.stringify({
-        name: 'Puzzle Race',
-        description: 'A trustless head-to-head puzzle race between agents over the mesh.',
-        skills: [{ name: 'puzzle-race', description: 'derive, solve, and verify seed-derived race puzzles' }],
-        tools: [],
-      }, null, 2),
-    };
+  /** Share ANY dwapp bundle onto the lobby: sign its card, register it as
+   * ours, announce. THE general trade primitive — games are one kind of
+   * bundle on the same shelf. Sharing the same slug again with new files is
+   * a signed AMENDMENT (seq bumps; peers see the new version). */
+  const myCards = [];
+  const shareDwapp = async ({ slug, name, description = '', files }) => {
     const hash = await bundleHash(files);
     const card = await buildMeta({
-      slug: 'puzzle-race',
-      name: 'Puzzle Race',
-      description: 'Two agents, one seed-derived puzzle, first correct commit wins — commit-reveal fair, co-signed, replayable.',
+      slug, name, description,
       seq: Date.now(),
       head: { version_id: hash, content_addr: formatPeerdUri({ did: selfDid, hash }), size: canonicalize(files).length },
     }, identity);
     const g = await upsertCard(card, selfDid);
-    if (!g) throw new Error('could not register the shared game');
+    if (!g) throw new Error('could not register the shared dwapp');
     g.files = files;
-    myCard = card;
+    myCards.push(card);
     await gossip.publish(GAMES_TOPIC, { card });
-    activity(`shared "Puzzle Race" on the lobby (${hash.slice(0, 12)}…)`);
+    activity(`shared "${name}" on the lobby (${hash.slice(0, 12)}…)`);
     emitChange();
     return g;
   };
 
-  // Late joiners never heard our announce — re-beacon our card when a peer
+  /** The built-in game, built from this page's own served source. */
+  const sharePuzzleRace = async () => {
+    const existing = [...games.values()].find((g) => g.publisher === selfDid && g.files?.['rules.js']);
+    if (existing) return existing;
+    // eslint-disable-next-line no-restricted-globals -- same-origin read of the page's OWN served asset (the bundled rules source), not egress; the page shell has no safeFetch wiring
+    const rulesSource = await (await fetch(RULES_SOURCE_URL)).text();
+    return await shareDwapp({
+      slug: 'puzzle-race',
+      name: 'Puzzle Race',
+      description: 'Two agents, one seed, a fixed window: lowest hash wins — commit-reveal fair, co-signed, replayable.',
+      files: {
+        'rules.js': rulesSource,
+        // the dwapp-actor manifest: installed in the EXTENSION, this same bundle
+        // becomes a specialized actor (games are dwapps are actors).
+        'peerd.actor.json': JSON.stringify({
+          name: 'Puzzle Race',
+          description: 'A trustless head-to-head mining race between agents over the mesh.',
+          skills: [{ name: 'puzzle-race', description: 'derive, solve, and verify seed-derived race puzzles' }],
+          tools: [],
+        }, null, 2),
+      },
+    });
+  };
+
+  // Late joiners never heard our announces — re-beacon our cards when a peer
   // joins (throttled; gossip publish is cheap in the small demo lobby).
   let lastReannounce = 0;
   presence.onJoin(() => {
-    if (!myCard || Date.now() - lastReannounce < 10_000) return;
+    if (myCards.length === 0 || Date.now() - lastReannounce < 10_000) return;
     lastReannounce = Date.now();
-    gossip.publish(GAMES_TOPIC, { card: myCard }).catch(() => {});
+    for (const card of myCards) gossip.publish(GAMES_TOPIC, { card }).catch(() => {});
   });
 
-  /** Challenge a peer to the first installed game. @param {string} peerDid */
+  // A bundle's KIND, from what's in it: rules.js = a playable game; an
+  // index.html = a runnable app; else opaque data. Only knowable once the
+  // bytes are local — an un-installed card is just a card.
+  const kindOf = (files) => (files?.['rules.js'] ? 'game' : files?.['index.html'] ? 'app' : files ? 'data' : null);
+
+  /** Challenge a peer to the first installed GAME. @param {string} peerDid */
   const challenge = async (peerDid) => {
-    const g = [...games.values()].find((x) => x.files);
+    const g = [...games.values()].find((x) => kindOf(x.files) === 'game');
     if (!g) throw new Error('no installed game to play — share or install one first');
     activity(`challenging ${shortDid(peerDid)} to "${g.name}"…`);
     return await driver.challenge(peerDid, { gameId: g.card.salt, rulesHash: g.hash, deadlines: DEMO_DEADLINES });
@@ -348,14 +364,20 @@ export async function createArena({ mesh }) {
 
   return {
     selfDid,
+    shareDwapp,
     sharePuzzleRace,
     install,
     challenge,
     whenDone: (matchId) => driver.whenDone(matchId),
     games: () => [...games.values()].map((g) => ({
       id: g.id, name: g.name, description: g.description, publisher: g.publisher,
-      hash: g.hash, installed: !!g.files, mine: g.publisher === selfDid, holders: g.holders.size,
+      hash: g.hash, installed: !!g.files, kind: kindOf(g.files), mine: g.publisher === selfDid, holders: g.holders.size,
     })),
+    /** The installed bundle (for the host to open/run). @param {string} id */
+    bundle: (id) => {
+      const g = games.get(id);
+      return g?.files ? { name: g.name, files: g.files, kind: kindOf(g.files) } : null;
+    },
     matches: () => [...matchViews.values()],
     mining: (matchId) => mining.get(matchId) ?? null,
     // One board per game (rules-hash scoped — see boardsByHash). Ordered like
@@ -398,14 +420,15 @@ const reasonLabel = (r) => REASON_LABELS[r] ?? (String(r).endsWith('-timeout') ?
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const clamp = (s, n) => { const t = String(s ?? ''); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 
-export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
+export function mountArenaUI(panel, { arena, roster, localActors = () => [], openBundle = null, makePad = null }) {
   panel.innerHTML = `
     <div class="arena">
       <div class="nb-section">the agent web <span class="hint">— you · your actors · agents on the mesh</span></div>
       <div class="arena-graph" data-slot="graph"></div>
-      <div class="nb-section">games on the mesh <span class="hint">— dwapps: shared, discovered, installed p2p</span></div>
-      <div class="arena-games" data-slot="games"><span class="hint">none discovered yet — share one, or open peerd-lite in a second tab and share from there</span></div>
+      <div class="nb-section">the dwapp shelf <span class="hint">— the p2p app store: created, shared, installed peer-to-peer</span></div>
+      <div class="arena-games" data-slot="games"><span class="hint">nothing on the shelf yet — make or share something, or open this page in a second tab</span></div>
       <div class="nb-bar">
+        ${makePad ? '<button class="run" data-act="make">✎ Make a pixel pad</button>' : ''}
         <button class="run" data-act="share">◈ Share Puzzle Race</button>
         <label class="hint"><input type="checkbox" data-act="auto" checked> auto-accept challenges</label>
       </div>
@@ -431,16 +454,19 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
     el.scrollTop = el.scrollHeight;
   };
 
+  const KIND_BADGE = { game: '⛏ game', app: '◇ app', data: '· data' };
   const renderGames = () => {
     const gs = arena.games();
     slot('games').innerHTML = gs.length === 0
-      ? '<span class="hint">none discovered yet — share one, or open peerd-lite in a second tab and share from there</span>'
+      ? '<span class="hint">nothing on the shelf yet — make or share something, or open this page in a second tab</span>'
       : gs.map((g) => `
         <div class="arena-card">
           <span class="ic k-dweb">◈</span>
           <span class="arena-card-name">${esc(g.name)}</span>
-          <span class="hint">by ${g.mine ? 'you' : esc(shortDid(g.publisher))} · ${esc(g.hash.slice(0, 10))}…</span>
-          ${g.installed ? '<span class="arena-tag">installed</span>' : `<button class="install-btn" data-install="${esc(g.id)}">⬇ install</button>`}
+          <span class="hint">${g.kind ? `${KIND_BADGE[g.kind] ?? g.kind} · ` : ''}by ${g.mine ? 'you' : esc(shortDid(g.publisher))} · ${esc(g.hash.slice(0, 10))}…</span>
+          ${g.installed
+    ? `${g.kind === 'app' && openBundle ? `<button class="install-btn" data-open="${esc(g.id)}">▶ open</button>` : ''}<span class="arena-tag">installed</span>`
+    : `<button class="install-btn" data-install="${esc(g.id)}">⬇ install</button>`}
         </div>`).join('');
   };
 
@@ -552,12 +578,14 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
   }, 1000);
 
   panel.addEventListener('click', async (e) => {
-    const t = e.target.closest('[data-act],[data-install],[data-challenge]');
+    const t = e.target.closest('[data-act],[data-install],[data-challenge],[data-open]');
     if (!t) return;
     try {
       if (t.dataset.act === 'share') { t.disabled = true; await arena.sharePuzzleRace(); t.textContent = '◈ shared'; }
+      else if (t.dataset.act === 'make' && makePad) { await makePad(); }
       else if (t.dataset.act === 'auto') arena.setAutoAccept(t.checked);
       else if (t.dataset.install) { t.disabled = true; await arena.install(t.dataset.install); }
+      else if (t.dataset.open && openBundle) { openBundle(t.dataset.open); }
       else if (t.dataset.challenge) { t.disabled = true; await arena.challenge(t.dataset.challenge); t.disabled = false; }
     } catch (err) {
       log(`error: ${err?.message || err}`);

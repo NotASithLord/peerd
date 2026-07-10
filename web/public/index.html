@@ -170,6 +170,13 @@
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
   .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
   .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:9px;margin:5px 0 3px}
+  .dwapp-overlay{position:fixed;inset:0;z-index:60;background:rgba(4,5,6,.78);display:grid;place-items:center;padding:16px}
+  .dwapp-frame{width:min(94vw,520px);height:min(84vh,620px);background:var(--base);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.6)}
+  .dwapp-frame header{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line2);font-size:12px}
+  .dwapp-frame header b{color:var(--white)}
+  .dwapp-frame header .hint{flex:1}
+  .dwapp-close{margin-left:auto;background:transparent;border:1px solid var(--line2);color:var(--muted);border-radius:6px;width:24px;height:24px;cursor:pointer;flex:none}
+  .dwapp-frame iframe{flex:1;border:0;background:#0a0c0d}
   .arena-race{font-size:11.5px;color:var(--paper);background:rgba(255,255,255,0.03);border:1px solid var(--line2);border-left:2px solid var(--amber);border-radius:8px;padding:7px 10px;margin-top:7px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
   .arena-race b{color:var(--white)}
   .arena-best{color:var(--muted)}
@@ -280,6 +287,7 @@
   import { makeAgent, looksGarbled } from '/web/agent.js';
   import { startAgentMesh } from '/web/agent-mesh.js';   // full-participant agent peer (a2a over the demo lobby)
   import { createArena, mountArenaUI } from '/web/arena.js';   // trustless p2p games (dwapps) on the same mesh
+  import { openDwapp, fetchPadTemplate, bakePixelPad } from '/web/dwapp-host.js';   // run/create/remix dwapps in-page
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
 
@@ -563,12 +571,21 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
       // page-singleton arena core (else its onChange callbacks + roster
       // interval keep re-rendering a detached tree, and reopening stacks
       // duplicates). closeTab invokes panel._dispose.
+      // pad exports (make/remix) become this tab's OWN shared dwapp
+      let closeOverlay=null;
+      const shareArt = async (art)=>{
+        const files = bakePixelPad(await fetchPadTemplate(), { title:'peerd-lite pixels', art });
+        await a.shareDwapp({ slug:'pixel-pad', name:'peerd-lite pixels', description:'a drawing, traded as a dwapp — install it, remix it, reshare it', files });
+        closeOverlay?.();
+      };
       panel._dispose = mountArenaUI(mount, {
         arena: a,
         roster: ()=> (agentMesh ? agentMesh.discover() : []),
         // this page's other live actors, for the agent-web graph: open
         // notebook tabs (each is a real sealed-worker instance)
         localActors: ()=> [...reg].filter(([,v])=>v.kind==='notebook').map(([id])=>({ type:'notebook', handle:id, name:id, live:true })),
+        openBundle: (id)=>{ const b=a.bundle(id); if(b) closeOverlay = openDwapp({ files:b.files, title:b.name, onPadExport: shareArt }); },
+        makePad: async ()=>{ closeOverlay = openDwapp({ files:{ 'index.html': await fetchPadTemplate() }, title:'make a pixel pad', onPadExport: shareArt }); },
       });
     }).catch((e)=>{ mount.innerHTML = `<span class="soon-note">couldn’t join the mesh: ${(e?.message||e).toString().replace(/</g,'&lt;')}</span>`; });
   }
