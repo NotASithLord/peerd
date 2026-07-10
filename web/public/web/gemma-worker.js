@@ -15,9 +15,10 @@
 // first real prompt.
 
 const GIB = 2 ** 30;
-const DEFAULT_CFG = { id: 'onnx-community/gemma-4-E2B-it-ONNX', label: 'Gemma 3n E2B', modelClass: 'Gemma4ForCausalLM', dtype: 'q4f16', minBindingGiB: 1.8, foldSystemIntoUser: true };
 
-let tx = null, tokenizer = null, model = null, ready = false, loading = false, modelCfg = DEFAULT_CFG;
+// The host (gemma.js initGemma) always merges its DEFAULT_CFG before posting —
+// the cfg that arrives here is complete and authoritative.
+let tx = null, tokenizer = null, model = null, ready = false, loading = false, modelCfg = null;
 const post = (msg) => self.postMessage(msg);
 
 const loadTransformers = async () => {
@@ -56,7 +57,7 @@ const load = async (cfg) => {
   if (ready) { post({ type: 'ready' }); return; }
   if (loading) return;
   loading = true;
-  modelCfg = { ...DEFAULT_CFG, ...(cfg || {}) };
+  modelCfg = cfg;
   const { id, modelClass, dtype, minBindingGiB } = modelCfg;
   try {
     post({ type: 'phase', phase: 'probing WebGPU' });

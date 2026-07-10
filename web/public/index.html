@@ -118,7 +118,6 @@
   .gemma-spin{width:14px;height:14px;flex:none;margin-top:1px;border-radius:50%;background:conic-gradient(from 0deg,var(--cyan),var(--magenta),var(--amber),var(--green),var(--red),var(--cyan));-webkit-mask:radial-gradient(closest-side,transparent 56%,#000 58%);mask:radial-gradient(closest-side,transparent 56%,#000 58%);animation:gspin .85s linear infinite}
   @keyframes gspin{to{transform:rotate(360deg)}}
   .gemma-msg{flex:1;min-width:0;font-family:var(--mono);font-size:10.5px;color:var(--muted);line-height:1.5}
-  .gemma-pct{font-family:var(--mono);font-size:10.5px;color:inherit}
   .gemma-dots::after{content:'';animation:gdots 1.3s steps(1,end) infinite}
   @keyframes gdots{0%{content:''}25%{content:'.'}50%{content:'..'}75%,100%{content:'...'}}
   .precoded-h{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:4px 0 2px}
@@ -169,6 +168,7 @@
   .install-btn{margin-left:auto;font-family:var(--mono);font-size:11px;border:1px solid var(--line2);background:var(--panel2);color:var(--paper);border-radius:7px;padding:5px 10px;cursor:pointer}
   .install-btn:hover:not(:disabled){border-color:var(--faint)}.install-btn:disabled{opacity:.5;cursor:default}
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
+  .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
   .arena-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
   .arena-pill{font-family:var(--mono);font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line2);border-radius:999px;padding:2px 8px}
   .arena-pill.on{color:var(--muted);background:var(--panel2)}

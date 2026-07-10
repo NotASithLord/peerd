@@ -11,39 +11,18 @@
 // ORT WebGPU session-create deadlocks during compile on the page main thread
 // (external-data + multithreaded WASM; worst on Apple Silicon/Metal), exactly as
 // the official transformers.js demo avoids by using a worker. This file is the
-// thin host: it keeps the same exported API (initGemma/generateGemma/...) and
-// proxies progress + token streams across postMessage so callers don't change.
+// thin host: initGemma / generateGemma / teardownGemma, proxying progress +
+// token streams across postMessage.
 
 // Default config (Gemma 3n E2B) when initGemma is called without one — keeps the
 // exported API back-compatible. index.html passes a capability-picked config.
 const DEFAULT_CFG = { id: 'onnx-community/gemma-4-E2B-it-ONNX', label: 'Gemma 3n E2B', modelClass: 'Gemma4ForCausalLM', dtype: 'q4f16', minBindingGiB: 1.8, foldSystemIntoUser: true };
-const DOWNLOADED_KEY = (id) => `peerd-lite:downloaded:${  id}`;
 
 let worker = null, ready = false, loadingPromise = null, loadedCfg = null;
 let progressCb = () => {};
 let loadResolve = null, loadReject = null;
 let genSeq = 0;
 const genHandlers = new Map(); // id → { onToken, resolve, reject }
-
-const markDownloaded = (id) => { try { if (id) localStorage.setItem(DOWNLOADED_KEY(id), '1'); } catch {} };
-
-// Lightweight, main-thread-safe WebGPU preflight (just requestAdapter — no session
-// create, so it never hangs). The page-load capability check uses the extension's
-// richer probe; this stays for API compatibility.
-export const probeWebgpu = async () => {
-  if (!navigator.gpu) return { ok: false, reason: 'WebGPU is unavailable in this browser.' };
-  let adapter;
-  try { adapter = await navigator.gpu.requestAdapter(); } catch { adapter = null; }
-  if (!adapter) return { ok: false, reason: 'No WebGPU adapter (GPU blocked or unavailable).' };
-  if (!adapter.features.has('shader-f16')) return { ok: false, reason: 'GPU lacks shader-f16 (needed for q4f16).' };
-  return { ok: true };
-};
-
-export const gemmaStatus = async () => {
-  let downloaded = false;
-  try { downloaded = !!loadedCfg && localStorage.getItem(DOWNLOADED_KEY(loadedCfg.id)) === '1'; } catch {}
-  return { available: ready, downloaded, loading: !!loadingPromise, model: loadedCfg?.id ?? null, label: loadedCfg?.label ?? null };
-};
 
 const ensureWorker = () => {
   if (worker) return worker;
@@ -54,7 +33,7 @@ const ensureWorker = () => {
       case 'phase': try { progressCb({ status: 'phase', phase: m.phase }); } catch {} break;
       case 'progress': try { progressCb(m.p); } catch {} break;
       case 'ready':
-        ready = true; markDownloaded(loadedCfg?.id);
+        ready = true;
         loadResolve?.({ available: true }); loadResolve = loadReject = null;
         break;
       case 'error':

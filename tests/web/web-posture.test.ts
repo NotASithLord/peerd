@@ -13,6 +13,7 @@ import { EXTENSION_DIR, TEMPLATES_DIR, STORE_LOADER_TEMPLATE } from '../../packa
 import {
   WEB_INCLUDE_DIRS, WEB_PRUNE_WITHIN, WEB_SWAPS, WEB_STUB_PATHS,
 } from '../../packaging/web-target.ts';
+import { verifyStubValues } from '../../packaging/package-web.ts';
 
 describe('web channel flavor', () => {
   const src = genChannelConfigSource('web');
@@ -63,24 +64,10 @@ describe('web swaps + stubs', () => {
   });
 
   test('stub templates match the real /background/ constants (value drift gate)', () => {
-    // The stubs exist so curated tool defs can import two cosmetic title
-    // constants without dragging extension chassis into the page. If upstream
-    // changes a value (or renames the export), the web copy must not silently
-    // diverge — same check package-web.ts enforces at build time.
-    const exportRe = /^export const (\w+) = (.+?);/gm;
-    for (const rel of WEB_STUB_PATHS) {
-      const template = readFileSync(join(TEMPLATES_DIR, WEB_SWAPS[rel]), 'utf8');
-      const real = readFileSync(join(EXTENSION_DIR, rel), 'utf8');
-      exportRe.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      let constants = 0;
-      while ((m = exportRe.exec(template))) {
-        constants++;
-        const realMatch = real.match(new RegExp(`export const ${m[1]} = (.+?);`));
-        expect(realMatch?.[1]).toBe(m[2]);
-      }
-      expect(constants).toBeGreaterThan(0);
-    }
+    // One authoritative mechanism, two trigger points: package-web.ts runs
+    // this at build time; this test runs the SAME check pre-build so drift
+    // fails fast in `bun test` too. Throws on any diverged value.
+    expect(() => verifyStubValues()).not.toThrow();
   });
 
   test('stubbed paths are all declared as swaps', () => {

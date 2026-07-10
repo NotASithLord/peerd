@@ -1,10 +1,10 @@
 # peerd web surface ("peerd-lite") — design spec
 
-> Status: **proposed.** A design for running peerd's sandboxes, agent loop,
-> and dweb inside a regular web page (peerd.ai), derived from the existing
-> extension codebase rather than forked. Grounded in a seam audit of
-> `origin/main` (see "Portability map" below); LOC/effort figures are
-> estimates.
+> Status: **shipped (first slices).** The `web` packaging target exists —
+> `packaging/web-target.ts` is the curation source of truth, built by
+> `packaging/package-web.ts` and gated by `check-web-boundary.ts`; the shell
+> lives in `web/public/`. This document is the design rationale behind it;
+> the code is the spec of record for what's staged, swapped, and pruned.
 
 ---
 
@@ -226,22 +226,3 @@ The risk is drift into a fork. Guardrails:
   (hand-wire it in peerd-site): violates "derive from core" and puts logic in
   the site repo. Rejected; the `web` target keeps logic in peerd.
 
----
-
-## Appendix: precise coupling points (replace vs. reuse)
-
-**Must replace (host-specific):**
-- `background/service-worker.js` dep assembly → web wiring shell
-- `kv` (chrome.storage.local) → IndexedDB; `session-cache` → in-memory Map
-- `vm-client.js` / `notebook-client.js` / `app-client.js` tab-RPC → iframe/worker postMessage managers
-- `routes/*` `chrome.runtime.onMessage` dispatch → in-page message bus
-- `debugger-pool.js`, `chrome.scripting`, `dom/*`, `do`/`get`/`check` → **not ported**
-- `offscreen/*` (chrome.offscreen) → page-spawned workers/iframes
-
-**Reuse verbatim:**
-- `peerd-runtime/loop/*` (agent loop + turn driver)
-- `peerd-egress/vault/*`, `peerd-egress/fetch/*`
-- `peerd-provider/*`
-- `peerd-runtime/tools/exposure.js`, `gates.js`, `manifests.js`
-- `notebook-tab/worker-source.js`, `app-tab/runner.html`, `peerd-engine/app-compose.js`
-- `peerd-egress/storage/idb.js`

@@ -73,7 +73,7 @@ const stageDir = (dir: string): void => {
 // Every `export const NAME = <literal>` in a stub template must match the real
 // extension file — otherwise the web tree silently diverges from upstream (the
 // exact drift the stubs were criticized for). Throws with the fix.
-const verifyStubValues = (): void => {
+export const verifyStubValues = (): void => {
   const exportRe = /^export const (\w+) = (.+?);/gm;
   for (const rel of WEB_STUB_PATHS) {
     const template = readFileSync(join(TEMPLATES_DIR, WEB_SWAPS[rel]), 'utf8');

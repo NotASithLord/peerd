@@ -101,8 +101,11 @@ export const createMatchDriver = ({
     return { state, peer, log: [], secrets: {}, pendingSigs: {}, sent: {}, challengeObj: null, resultString: null, chain: Promise.resolve(), timer: null, finished: false, done, resolveDone };
   };
 
+  // why challenge rides the snapshot: the derived puzzle is what makes a live
+  // match LEGIBLE to a watching human (and it's already public to both sides
+  // the moment the seed lands) — without it a UI can only show phase names.
   /** @param {MatchRec} rec */
-  const snapshot = (rec) => structuredClone({ ...rec.state, resultString: rec.resultString });
+  const snapshot = (rec) => structuredClone({ ...rec.state, resultString: rec.resultString, challenge: rec.challengeObj });
 
   /** @param {MatchRec} rec @param {string} type */
   const emit = (rec, type) => { try { onEvent({ type, matchId: rec.state.matchId, state: snapshot(rec) }); } catch { /* a UI listener must never break the match */ } };
@@ -346,17 +349,6 @@ export const createMatchDriver = ({
         await advance(rec);
       });
       return { consumed: true };
-    },
-
-    /** Resign an active match. @param {string} matchId */
-    async resign(matchId) {
-      const rec = matches.get(matchId);
-      if (!rec) throw new GameProtocolError(`resign: unknown match ${matchId}`);
-      await enqueue(rec, async () => {
-        if (rec.state.phase === 'done' || rec.state.phase === 'proposed') return;
-        await sendOwn(rec, { type: 'resign' });
-        await advance(rec);
-      });
     },
 
     /** @param {string} matchId */

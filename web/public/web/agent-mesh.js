@@ -37,7 +37,6 @@ const RENDEZVOUS = 'wss://bootstrap.peerd.ai/rendezvous';   // introductions onl
  * }} cfg
  * @returns {Promise<{ myDid: string, discover: () => Array<{did:string,card:object|null}>,
  *   ask: (did: string, message: string, timeoutMs?: number) => Promise<any>,
- *   tell: (did: string, message: string) => Promise<any>,
  *   reply: (toDid: string, reqId: string, message: string) => Promise<any>,
  *   stop: () => void }>}
  */
@@ -109,7 +108,6 @@ export async function startAgentMesh({ card, onInbound = () => {}, onRoster = ()
     myDid: identity.did,
     discover,
     ask: (did, message, timeoutMs) => dispatch.dispatch('ask', { did, message, timeoutMs }, signed),
-    tell: (did, message) => dispatch.dispatch('send', { did, message }, signed),
     reply: (toDid, reqId, message) => dispatch.reply(toDid, reqId, message),
     // The room's raw seams, for other protocols riding the SAME peer identity
     // and links — the game arena (web/arena.js) registers its own

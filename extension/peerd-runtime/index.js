@@ -110,19 +110,16 @@ export {
 export { dwappActorPersonality } from './actor/app-actor.js';
 // The ACTOR GRAPH model — pure assembler that shapes the actor catalog (actor_list)
 // + lineage/live edges + mesh peers into nodes+edges for a radial visualization
-// (local actors + remote agents as one picture). Rendered by the side panel / web shell.
+// (local actors + remote agents as one picture). The renderer + SW edge
+// collection are the next slice; the model ships first so it lands reviewed.
 export { buildActorGraph, actorKindColor } from './actor/actor-graph.js';
 // The GAME framework — trustless agent-vs-agent matches over the mesh
-// (docs/specs/PEERD-GAME-ARENA.md): commit-reveal fairness, the pure match
-// reducer both players run, the auditable co-signed match log, and the
-// IO-injected driver that plays a live match (the makeMeshDispatch twin).
-export { makeCommit, verifyReveal, combineSeed, randomHex } from './game/commit-reveal.js';
-export {
-  createMatch, applyMessage, applySeed, applyVerdict, applyTimeout, finalizeUnsigned,
-  decideOutcome, owingPlayers, phaseDuration, isGameMessage, DEFAULT_DEADLINES,
-} from './game/match-reducer.js';
-export { canonicalResult, verifyMatchLog, resultSigningBytes, RESULT_SIGN_CONTEXT } from './game/match-log.js';
+// (docs/specs/PEERD-GAME-ARENA.md). Only the two HOST entry points are module-
+// public: play a live match, audit a finished one. The commit-reveal / reducer
+// / log internals stay module-private — the driver and verifier ARE the API a
+// host wires (the web shell deep-imports by its own relaxed-lint design).
 export { createMatchDriver, GameProtocolError } from './game/match-driver.js';
+export { verifyMatchLog } from './game/match-log.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';

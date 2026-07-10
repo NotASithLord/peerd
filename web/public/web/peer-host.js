@@ -84,10 +84,10 @@ const makeGraph = (mount, selfLabel) => {
 
 const buildRoster = (room, presence, selfDid) => {
   const byDid = new Map();
-  for (const l of room.mesh.peers()) byDid.set(l.did, { did: l.did, linked: true, path: l.info?.path ?? null, kind: null });
+  for (const l of room.mesh.peers()) byDid.set(l.did, { did: l.did, linked: true, kind: null });
   for (const p of presence.list()) {
     if (p.did === selfDid) continue;
-    const e = byDid.get(p.did) ?? { did: p.did, linked: false, path: null, kind: null };
+    const e = byDid.get(p.did) ?? { did: p.did, linked: false, kind: null };
     e.kind = p.meta?.kind ?? e.kind;
     byDid.set(p.did, e);
   }

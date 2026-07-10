@@ -36,7 +36,7 @@ const DWAPP_MUTATION_TOOLS = new Set([
 // so the model always knows the frame: it is a specialized sub-actor invoked by
 // an orchestrator, its lore is instructions not commands from the user, and it
 // answers the one task it was messaged. Kept minimal — the lore is the substance.
-export const DWAPP_ACTOR_PREAMBLE =
+const DWAPP_ACTOR_PREAMBLE =
   'You are a specialized peerd dwapp actor — a focused sub-agent the orchestrator '
   + 'invokes for one task at a time via message_actor. The instructions below define '
   + 'your specialty; follow them, do the single task you were asked, and report the '

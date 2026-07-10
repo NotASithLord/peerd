@@ -18,6 +18,7 @@ import { verifyMeta, buildMeta, metaDwappId } from '/peerd-distributed/apps/meta
 import { verifySignature } from '/peerd-distributed/identity/keypair.js';
 import { formatPeerdUri } from '/peerd-distributed/content/uri.js';
 import { canonicalize } from '/shared/bundle/canonical.js';
+import { sha256hex } from '/shared/bundle/chunk.js';
 import { utf8, toHex, fromHex } from '/shared/bundle/bytes.js';
 import { createMatchDriver } from '/peerd-runtime/game/match-driver.js';
 import { isGameMessage } from '/peerd-runtime/game/match-reducer.js';
@@ -34,8 +35,7 @@ const SERVE_PER_MIN = 4;               // bundle serves per requesting did
 const DEMO_DEADLINES = { solving: 90_000 };
 const SOLVE_RUN_TIMEOUT_MS = 60_000;   // sealed-worker cap for one solve run
 
-const sha256Hex = async (text) => toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(text))));
-const bundleHash = (files) => sha256Hex(canonicalize(files));
+const bundleHash = (files) => sha256hex(utf8(canonicalize(files)));
 const shortDid = (did) => `…${String(did).slice(-6)}`;
 
 /**
@@ -62,7 +62,7 @@ export async function createArena({ mesh }) {
   const boardsByHash = new Map();
   const seenResults = new Set();
   const serveBuckets = new Map();
-  /** pending installs: dwapp_id → { resolve, reject, timer, from } */
+  /** pending installs: dwapp_id → { resolve, timer, from } */
   const pendingFetch = new Map();
 
   let autoAccept = true;
@@ -253,7 +253,7 @@ export async function createArena({ mesh }) {
     if (pendingFetch.has(id)) throw new Error('install already in flight');
     const files = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => { pendingFetch.delete(id); reject(new Error('bundle fetch timed out')); }, 15_000);
-      pendingFetch.set(id, { resolve, reject, timer, from: holder });
+      pendingFetch.set(id, { resolve, timer, from: holder });
       direct.send(holder, { __gamestore: 1, type: 'fetch', id }).catch((e) => {
         clearTimeout(timer); pendingFetch.delete(id); reject(e);
       });
@@ -314,11 +314,9 @@ export async function createArena({ mesh }) {
     gossip.publish(GAMES_TOPIC, { card: myCard }).catch(() => {});
   });
 
-  /** Challenge a peer to an installed game (default: any installed one). */
-  const challenge = async (peerDid, gameId = null) => {
-    const g = gameId
-      ? [...games.values()].find((x) => x.files && (x.id === gameId || x.card.salt === gameId))
-      : [...games.values()].find((x) => x.files);
+  /** Challenge a peer to the first installed game. @param {string} peerDid */
+  const challenge = async (peerDid) => {
+    const g = [...games.values()].find((x) => x.files);
     if (!g) throw new Error('no installed game to play — share or install one first');
     activity(`challenging ${shortDid(peerDid)} to "${g.name}"…`);
     return await driver.challenge(peerDid, { gameId: g.card.salt, rulesHash: g.hash, deadlines: DEMO_DEADLINES });
@@ -360,7 +358,20 @@ export async function createArena({ mesh }) {
 
 const PHASES = ['proposed', 'seeding', 'solving', 'revealing', 'scoring', 'signing', 'done'];
 
+// Protocol reasons → human verdicts (fallback: the raw reason).
+const REASON_LABELS = {
+  'committed-first': 'first correct commit',
+  correctness: 'the only correct answer',
+  score: 'higher score',
+  simultaneous: 'dead heat — both committed at once',
+  'order-disputed': 'commit order disputed',
+  'neither-correct': 'neither solved it',
+  resigned: 'resignation',
+};
+const reasonLabel = (r) => REASON_LABELS[r] ?? (String(r).endsWith('-timeout') ? 'deadline passed' : r);
+
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const clamp = (s, n) => { const t = String(s ?? ''); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 
 export function mountArenaUI(panel, { arena, roster }) {
   panel.innerHTML = `
@@ -427,14 +438,24 @@ export function mountArenaUI(panel, { arena, roster }) {
       const opp = meIdx === 'challenger' ? m.players.acceptor : m.players.challenger;
       const phaseIdx = PHASES.indexOf(m.phase);
       const pills = PHASES.map((p, i) => `<span class="arena-pill${i < phaseIdx ? ' on' : ''}${i === phaseIdx ? ' now' : ''}">${p}</span>`).join('');
+      // The puzzle itself — the thing being raced. Rules output is
+      // peer-derived content: escaped and clamped, never trusted markup.
+      const prompt = m.challenge?.prompt
+        ? `<div class="hint arena-prompt">◇ ${esc(clamp(m.challenge.prompt, 220))}</div>` : '';
+      const reveals = m.answers?.reveals ?? {};
+      const answers = m.outcome && Object.keys(reveals).length
+        ? `<div class="hint">${[arena.selfDid, opp].filter((d) => reveals[d]).map((d) =>
+          `${d === arena.selfDid ? 'you' : esc(shortDid(d))}: ${esc(clamp(reveals[d].answer, 60))}`).join(' · ')}</div>` : '';
       const o = m.outcome;
       const verdict = !o ? '' : o.kind === 'win'
-        ? `<div class="arena-verdict ${o.winner === arena.selfDid ? 'won' : 'lost'}">${o.winner === arena.selfDid ? '● you win' : '● you lose'} — ${esc(o.reason)}${m.coSigned ? ' · co-signed ✓' : ''}</div>`
-        : `<div class="arena-verdict">● ${esc(o.kind)} — ${esc(o.reason)}${m.coSigned ? ' · co-signed ✓' : ''}</div>`;
+        ? `<div class="arena-verdict ${o.winner === arena.selfDid ? 'won' : 'lost'}">${o.winner === arena.selfDid ? '● you win' : '● you lose'} — ${esc(reasonLabel(o.reason))}${m.coSigned ? ' · co-signed ✓' : ''}</div>`
+        : `<div class="arena-verdict">● ${esc(o.kind)} — ${esc(reasonLabel(o.reason))}${m.coSigned ? ' · co-signed ✓' : ''}</div>`;
       return `
         <div class="arena-match">
           <div class="hint">vs ${esc(shortDid(opp))} · ${esc(m.gameId)} · ${esc(m.matchId)}</div>
+          ${prompt}
           <div class="arena-pills">${pills}</div>
+          ${answers}
           ${verdict}
         </div>`;
     }).join('');

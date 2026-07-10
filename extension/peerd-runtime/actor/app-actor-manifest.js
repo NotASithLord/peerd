@@ -30,14 +30,14 @@
 // hostile bundle degrades to a safe manifest instead of throwing deep in install.
 
 // Caps — mirror the dweb agent-card so the two capability descriptors stay legible together.
-export const MAX_ACTOR_NAME = 64;
-export const MAX_ACTOR_DESC = 512;
+const MAX_ACTOR_NAME = 64;
+const MAX_ACTOR_DESC = 512;
 export const MAX_ACTOR_LORE = 8192;        // the system prompt — bigger than a card field, still bounded
 export const MAX_ACTOR_SKILLS = 16;
-export const MAX_SKILL_FIELD = 128;
+const MAX_SKILL_FIELD = 128;
 export const MAX_ACTOR_TOOLS = 32;
-export const MAX_TOOL_NAME = 64;
-export const MAX_MANIFEST_BYTES = 16_384;  // whole-manifest ceiling (bundle-side, not the 4 KB card cap)
+const MAX_TOOL_NAME = 64;
+const MAX_MANIFEST_BYTES = 16_384;  // whole-manifest ceiling (bundle-side, not the 4 KB card cap)
 
 export class ActorManifestRejectedError extends Error {
   /** @param {string} reason */
