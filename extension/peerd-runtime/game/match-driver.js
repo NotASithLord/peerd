@@ -14,7 +14,7 @@
 // timers all land asynchronously; serializing them through one promise chain
 // per match means the reducer never sees interleaved half-applied updates.
 
-import { createMatch, applyMessage, applySeed, applyVerdict, applyTimeout, finalizeUnsigned, isGameMessage, phaseDuration } from './match-reducer.js';
+import { createMatch, applyMessage, applySeed, applyVerdict, applyTimeout, finalizeUnsigned, isGameMessage, phaseDuration, MAX_ANSWER_CHARS } from './match-reducer.js';
 import { makeCommit, verifyReveal, combineSeed, randomHex } from './commit-reveal.js';
 import { canonicalResult, resultSigningBytes } from './match-log.js';
 
@@ -182,7 +182,10 @@ export const createMatchDriver = ({
           emit(rec, 'update');
           answer = (await solve(rec.challengeObj, { ...info, deadlineAt }))?.answer;
         } catch { /* an unsolved puzzle just runs out the clock (solve-timeout forfeit) */ }
-        if (typeof answer !== 'string' || !answer) return;
+        // An oversize answer would pass our commit but fail BOTH reducers at
+        // reveal (reveal-timeout forfeit against us) — refuse it up front and
+        // let the clock decide, same as an unsolved puzzle.
+        if (typeof answer !== 'string' || !answer || answer.length > MAX_ANSWER_CHARS) return;
         enqueue(rec, async () => {
           if (rec.state.phase !== 'solving' || rec.sent.answerCommit) return;
           rec.sent.answerCommit = true;

@@ -16,15 +16,21 @@ const fresh = (over: Record<string, unknown> = {}) =>
 
 const msg = (type: string, body: Record<string, unknown> = {}) => ({ __game: 1 as const, matchId: 'm-1', type, ...body });
 
-// Drive a match to the scoring phase with both answers revealed.
-const toScoring = () => {
+// Drive a fresh match through accept + the whole seeding phase (both commits,
+// both reveals, seed applied) — the boilerplate every later-phase test needs.
+const toSolving = () => {
   let s = fresh();
   s = applyMessage(s, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
   s = applyMessage(s, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'ca' }) });
   s = applyMessage(s, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'cb' }) });
   s = applyMessage(s, { from: A, at: 1300, msg: msg('seed_reveal', { nonce: 'na', salt: 'sa' }), revealOk: true });
   s = applyMessage(s, { from: B, at: 1310, msg: msg('seed_reveal', { nonce: 'nb', salt: 'sb' }), revealOk: true });
-  s = applySeed(s, 'seed-hex');
+  return applySeed(s, 'seed-hex');
+};
+
+// …and further, to the scoring phase with both answers revealed.
+const toScoring = () => {
+  let s = toSolving();
   s = applyMessage(s, { from: A, at: 2000, msg: msg('answer_commit', { commit: 'aa' }) });
   s = applyMessage(s, { from: B, at: 2100, msg: msg('answer_commit', { commit: 'ab' }) });
   s = applyMessage(s, { from: A, at: 2200, msg: msg('answer_reveal', { answer: '42', salt: 'x', sawPeerCommitFirst: false }), revealOk: true });
@@ -88,12 +94,7 @@ describe('match reducer — cheating and violations', () => {
     expect(s.outcome).toMatchObject({ kind: 'win', winner: A, reason: 'mirrored-seed-commit' });
 
     // the ANSWER mirror (replaying the opponent's reveal = solving by theft)
-    let t = fresh();
-    t = applyMessage(t, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
-    t = applyMessage(t, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'ca' }) });
-    t = applyMessage(t, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'cb' }) });
-    t = applyMessage(t, { from: A, at: 1300, msg: msg('seed_reveal', { nonce: 'na', salt: 'sa' }), revealOk: true });
-    t = applyMessage(t, { from: B, at: 1310, msg: msg('seed_reveal', { nonce: 'nb', salt: 'sb' }), revealOk: true });
+    let t = toSolving();
     t = applyMessage(t, { from: A, at: 2000, msg: msg('answer_commit', { commit: 'same-answer' }) });
     t = applyMessage(t, { from: B, at: 2100, msg: msg('answer_commit', { commit: 'same-answer' }) });
     expect(t.outcome).toMatchObject({ kind: 'win', winner: A, reason: 'mirrored-answer-commit' });
@@ -106,12 +107,7 @@ describe('match reducer — cheating and violations', () => {
     expect(next.seed.commits[A]).toBeUndefined();
     expect(next.violations.at(-1)).toMatchObject({ from: A, code: 'malformed-seed-commit' });
 
-    let u = fresh();
-    u = applyMessage(u, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
-    u = applyMessage(u, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'ca' }) });
-    u = applyMessage(u, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'cb' }) });
-    u = applyMessage(u, { from: A, at: 1300, msg: msg('seed_reveal', { nonce: 'na', salt: 'sa' }), revealOk: true });
-    u = applyMessage(u, { from: B, at: 1310, msg: msg('seed_reveal', { nonce: 'nb', salt: 'sb' }), revealOk: true });
+    let u = toSolving();
     u = applyMessage(u, { from: A, at: 2000, msg: msg('answer_commit', { commit: 'aa' }) });
     u = applyMessage(u, { from: B, at: 2100, msg: msg('answer_commit', { commit: 'ab' }) });
     const big = applyMessage(u, { from: A, at: 2200, msg: msg('answer_reveal', { answer: 'y'.repeat(5000), salt: 'x', sawPeerCommitFirst: false }), revealOk: true });
@@ -144,13 +140,8 @@ describe('match reducer — cheating and violations', () => {
 
 describe('match reducer — deadlines', () => {
   test('one player owing at the deadline forfeits; both owing aborts', () => {
-    let s = fresh();
-    s = applyMessage(s, { from: B, at: 1100, msg: msg('accept', { rulesHash: 'rh-1' }) });
-    s = applyMessage(s, { from: A, at: 1200, msg: msg('seed_commit', { commit: 'ca' }) });
-    s = applyMessage(s, { from: B, at: 1210, msg: msg('seed_commit', { commit: 'cb' }) });
-    s = applyMessage(s, { from: A, at: 1300, msg: msg('seed_reveal', { nonce: 'na', salt: 'sa' }), revealOk: true });
-    s = applyMessage(s, { from: B, at: 1310, msg: msg('seed_reveal', { nonce: 'nb', salt: 'sb' }), revealOk: true });
     // solving: A commits, B never does → B forfeits at the solve deadline
+    let s = toSolving();
     s = applyMessage(s, { from: A, at: 2000, msg: msg('answer_commit', { commit: 'aa' }) });
     expect(owingPlayers(s)).toEqual([B]);
     const afterDeadline = applyTimeout(s, 1310 + DEFAULT_DEADLINES.solving + 1);

@@ -51,8 +51,8 @@ export async function createArena({ mesh }) {
   /** games by dwapp_id: { id, card, name, description, publisher, hash, size,
    *  holders:Set<did>, files|null (null = not installed) } */
   const games = new Map();
-  /** live + finished match snapshots by matchId (driver events), newest last */
-  const matchOrder = [];
+  /** live + finished match snapshots by matchId — a Map is insertion-ordered,
+   *  so first-seen order IS the display order */
   const matchViews = new Map();
   /** leaderboards, ONE PER GAME: rulesHash → (did → { w, l, d }). why scoped:
    * co-signing proves both players agreed to a result under THOSE rules — a
@@ -123,7 +123,6 @@ export async function createArena({ mesh }) {
       catch { activity(`declined ${shortDid(from)}: could not install ${card.name}`); return false; }
     },
     onEvent: (evt) => {
-      if (!matchViews.has(evt.matchId)) matchOrder.push(evt.matchId);
       matchViews.set(evt.matchId, evt.state);
       if (evt.type === 'challenge-received') activity(`challenge from ${shortDid(evt.state.players.challenger)}`);
       if (evt.type === 'done') onMatchDone(evt.state);
@@ -335,7 +334,7 @@ export async function createArena({ mesh }) {
       id: g.id, name: g.name, description: g.description, publisher: g.publisher,
       hash: g.hash, installed: !!g.files, mine: g.publisher === selfDid, holders: g.holders.size,
     })),
-    matches: () => matchOrder.map((id) => matchViews.get(id)).filter(Boolean),
+    matches: () => [...matchViews.values()],
     // One board per game (rules-hash scoped — see boardsByHash). Ordered like
     // the store list; only games with at least one tallied result appear.
     boards: () => [...games.values()]
