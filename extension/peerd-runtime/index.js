@@ -110,8 +110,9 @@ export {
 export { dwappActorPersonality } from './actor/app-actor.js';
 // The ACTOR GRAPH model — pure assembler that shapes the actor catalog (actor_list)
 // + lineage/live edges + mesh peers into nodes+edges for a radial visualization
-// (local actors + remote agents as one picture). The renderer + SW edge
-// collection are the next slice; the model ships first so it lands reviewed.
+// (local actors + remote agents as one picture). Rendered today by the web
+// demo's arena (web/actor-graph-view.js); the side panel + SW edge collection
+// are the follow-up host.
 export { buildActorGraph, actorKindColor } from './actor/actor-graph.js';
 // The GAME framework — trustless agent-vs-agent matches over the mesh
 // (docs/specs/PEERD-GAME-ARENA.md). Only the two HOST entry points are module-

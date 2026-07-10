@@ -169,6 +169,8 @@
   .install-btn:hover:not(:disabled){border-color:var(--faint)}.install-btn:disabled{opacity:.5;cursor:default}
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
   .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
+  .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:9px;margin:5px 0 3px}
+  .ag-graph{display:block;width:100%;max-width:560px;height:auto;margin:0 auto}
   .arena-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
   .arena-pill{font-family:var(--mono);font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line2);border-radius:999px;padding:2px 8px}
   .arena-pill.on{color:var(--muted);background:var(--panel2)}
@@ -551,7 +553,13 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
       // page-singleton arena core (else its onChange callbacks + roster
       // interval keep re-rendering a detached tree, and reopening stacks
       // duplicates). closeTab invokes panel._dispose.
-      panel._dispose = mountArenaUI(mount, { arena: a, roster: ()=> (agentMesh ? agentMesh.discover() : []) });
+      panel._dispose = mountArenaUI(mount, {
+        arena: a,
+        roster: ()=> (agentMesh ? agentMesh.discover() : []),
+        // this page's other live actors, for the agent-web graph: open
+        // notebook tabs (each is a real sealed-worker instance)
+        localActors: ()=> [...reg].filter(([,v])=>v.kind==='notebook').map(([id])=>({ type:'notebook', handle:id, name:id, live:true })),
+      });
     }).catch((e)=>{ mount.innerHTML = `<span class="soon-note">couldn’t join the mesh: ${(e?.message||e).toString().replace(/</g,'&lt;')}</span>`; });
   }
 

@@ -24,6 +24,7 @@ import { createMatchDriver } from '/peerd-runtime/game/match-driver.js';
 import { isGameMessage } from '/peerd-runtime/game/match-reducer.js';
 import { resultSigningBytes } from '/peerd-runtime/game/match-log.js';
 import { runNotebook } from '/web/notebook-host.js';
+import { renderActorGraph } from '/web/actor-graph-view.js';
 
 const GAMES_TOPIC = 'peerd/demo/arena/games/v1';
 const RESULTS_TOPIC = 'peerd/demo/arena/results/v1';
@@ -373,9 +374,11 @@ const reasonLabel = (r) => REASON_LABELS[r] ?? (String(r).endsWith('-timeout') ?
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const clamp = (s, n) => { const t = String(s ?? ''); return t.length <= n ? t : `${t.slice(0, n - 1)}…`; };
 
-export function mountArenaUI(panel, { arena, roster }) {
+export function mountArenaUI(panel, { arena, roster, localActors = () => [] }) {
   panel.innerHTML = `
     <div class="arena">
+      <div class="nb-section">the agent web <span class="hint">— you · your actors · agents on the mesh</span></div>
+      <div class="arena-graph" data-slot="graph"></div>
       <div class="nb-section">games on the mesh <span class="hint">— dwapps: shared, discovered, installed p2p</span></div>
       <div class="arena-games" data-slot="games"><span class="hint">none discovered yet — share one, or open peerd-lite in a second tab and share from there</span></div>
       <div class="nb-bar">
@@ -471,11 +474,39 @@ export function mountArenaUI(panel, { arena, roster }) {
           <tr><td>${r.did === arena.selfDid ? 'you' : esc(shortDid(r.did))}</td><td>${r.w}</td><td>${r.l}</td><td>${r.d}</td></tr>`).join('')}</table>`).join('');
   };
 
-  const renderAll = () => { renderGames(); renderRoster(); renderMatches(); renderBoard(); };
+  // The agent web, from what the arena already knows: installed game dwapps
+  // are ACTOR nodes; live matches light the edge to the opponent and to the
+  // game being played; a peer that holds a game gets a faint serving edge.
+  const renderGraph = () => {
+    const games = arena.games();
+    const peers = roster();
+    const matches = arena.matches();
+    const live = matches.filter((m) => m.phase !== 'done');
+    const activeHashes = new Set(live.map((m) => m.rulesHash));
+    const opponentOf = (m) => (m.players.challenger === arena.selfDid ? m.players.acceptor : m.players.challenger);
+    renderActorGraph(slot('graph'), {
+      selfLabel: 'you',
+      actors: [
+        ...localActors(),
+        ...games.filter((g) => g.installed).map((g) => ({ type: 'app', handle: g.id, name: g.name, live: true, isActor: true })),
+      ],
+      edges: [
+        ...localActors().map((a) => ({ to: String(a.handle), live: !!a.live })),
+        ...games.filter((g) => g.installed).map((g) => ({ to: g.id, live: activeHashes.has(g.hash) })),
+        ...matches.map((m) => ({ to: opponentOf(m), live: m.phase !== 'done' })),
+        // who PUBLISHED which dwapp — the trade provenance (a publisher who
+        // isn't on the graph right now just yields a dropped dangling edge)
+        ...games.filter((g) => g.installed).map((g) => ({ from: g.publisher, to: g.id, live: false })),
+      ],
+      peers: peers.map((p) => ({ did: p.did, label: p.card?.name || undefined })),
+    });
+  };
+
+  const renderAll = () => { renderGraph(); renderGames(); renderRoster(); renderMatches(); renderBoard(); };
   const offChange = arena.onChange(renderAll);
   const offActivity = arena.onActivity(log);
   renderAll();
-  const rosterTimer = setInterval(renderRoster, 3000);   // presence has no single change hook here
+  const rosterTimer = setInterval(() => { renderRoster(); renderGraph(); }, 3000);   // presence has no single change hook here
 
   panel.addEventListener('click', async (e) => {
     const t = e.target.closest('[data-act],[data-install],[data-challenge]');
