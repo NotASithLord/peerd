@@ -20,7 +20,7 @@ describe('buildActorGraph', () => {
     });
     const by = (id: string) => g.nodes.find((n) => n.id === id)!;
     expect(by('nb-1')).toMatchObject({ kind: 'notebook', color: 'green', live: true, isActor: false });
-    expect(by('app-7')).toMatchObject({ kind: 'app', color: 'magenta', isActor: true });   // detail begins "actor"
+    expect(by('app-7')).toMatchObject({ kind: 'app', color: 'amber', isActor: true });     // engine color — magenta is reserved for the wire
     expect(by('app-9').isActor).toBe(false);                                                // plain app
   });
 

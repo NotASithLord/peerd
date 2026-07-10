@@ -37,8 +37,16 @@ export function renderActorGraph(el, input) {
     const a = (i / list.length) * 2 * Math.PI - Math.PI / 2 + phase;
     pos.set(n.id, [cx + r * Math.cos(a), cy + r * Math.sin(a)]);
   });
-  place(locals, 58, 0);
-  place(remotes, 96, Math.PI / 3);
+  place(locals, 52, 0);
+  place(remotes, 98, Math.PI / 3);
+
+  // THE DWEB BOUNDARY (owner direction): a magenta bubble encloses YOUR peerd
+  // — self + every local actor, each in its own module color — and magenta
+  // dots live only OUTSIDE it (real p2p peers). Edges crossing the bubble ARE
+  // the wire. Radius: past the local ring + its labels, short of the remotes.
+  const BUBBLE_R = 74;
+  const bubble = `<circle class="ag-bubble" cx="${cx}" cy="${cy}" r="${BUBBLE_R}"/>`
+    + `<text class="pn-label ag-bubble-label" x="${cx + BUBBLE_R * 0.72}" y="${(cy - BUBBLE_R * 0.72).toFixed(1)}">d</text>`;
 
   const line = (e) => {
     const f = pos.get(e.from), t = pos.get(e.to);
@@ -54,10 +62,11 @@ export function renderActorGraph(el, input) {
       + `</g>`;
   };
 
-  // edges under nodes; self drawn last so its ring sits on top
+  // bubble under edges under nodes; self drawn last so its ring sits on top
   const ordered = [...nodes].sort((a) => (a.id === 'self' ? 1 : -1));
   el.innerHTML = `<svg class="pn-graph ag-graph" viewBox="0 0 ${W} ${H}" role="img" aria-label="your agent web">${
-     edges.map(line).join('')
+     bubble
+     }${edges.map(line).join('')
      }${ordered.map(dot).join('')
      }</svg>`;
 }
