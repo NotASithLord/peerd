@@ -89,7 +89,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 510 → 511: the Z.ai GLM provider adapter (peerd-provider/adapters/glm.js).
 // 511 → 513: the dwapp actor manifest + personality (peerd-runtime/actor/app-actor-manifest.js, app-actor.js).
 // 513 → 514: the actor graph model (peerd-runtime/actor/actor-graph.js).
-const COVERED_FLOOR = 514;
+// 514 → 518: the game framework core (peerd-runtime/game/commit-reveal.js,
+// match-reducer.js, match-log.js, match-driver.js — the trustless
+// agent-vs-agent match protocol, docs/specs/PEERD-GAME-ARENA.md).
+const COVERED_FLOOR = 518;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

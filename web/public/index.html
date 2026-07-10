@@ -161,6 +161,23 @@
   .pn-edge{stroke:rgba(255,255,255,0.2);stroke-width:1}.pn-edge--faint{stroke:rgba(255,255,255,0.07)}
   .pn-dot{stroke:var(--base);stroke-width:1.5}.pn-label{fill:var(--faint);font-family:var(--mono);font-size:9px;text-anchor:middle}
 
+  /* arena (real) */
+  .arena-card{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:8px 11px;margin:5px 0}
+  .arena-card .ic{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:700;color:#0a0c0d;flex:none}
+  .arena-card-name{color:var(--white);font-weight:600}
+  .arena-tag{margin-left:auto;font-size:10px;color:var(--green);border:1px solid var(--line2);border-radius:5px;padding:2px 7px}
+  .install-btn{margin-left:auto;font-family:var(--mono);font-size:11px;border:1px solid var(--line2);background:var(--panel2);color:var(--paper);border-radius:7px;padding:5px 10px;cursor:pointer}
+  .install-btn:hover:not(:disabled){border-color:var(--faint)}.install-btn:disabled{opacity:.5;cursor:default}
+  .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
+  .arena-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+  .arena-pill{font-family:var(--mono);font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line2);border-radius:999px;padding:2px 8px}
+  .arena-pill.on{color:var(--muted);background:var(--panel2)}
+  .arena-pill.now{color:var(--white);border-color:var(--faint);background:var(--panel2)}
+  .arena-verdict{font-family:var(--mono);font-size:12px;color:var(--paper);margin-top:7px}
+  .arena-verdict.won{color:var(--green)}.arena-verdict.lost{color:var(--red)}
+  .arena-log{max-height:120px}
+  .nb-bar label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+
   /* soon */
   .soon-box{display:flex;flex-direction:column;gap:10px}
   .term{font-family:var(--mono);font-size:11.5px;line-height:1.6;color:#d3ecda;background:#070908;border:1px solid var(--line2);border-radius:9px;padding:11px 13px;white-space:pre-wrap}.term .dim{color:var(--faint)}.term .pr{color:var(--green)}
@@ -220,6 +237,7 @@
             <button class="pc" data-act="notebook"><span class="ic k-engine">N</span>Launch a JS notebook</button>
             <button class="pc" data-act="webvm"><span class="ic k-engine">⌘</span>Launch a Linux VM<span class="soon">soon</span></button>
             <button class="pc" data-act="peers"><span class="ic k-dweb">◈</span>Show the peer network</button>
+            <button class="pc" data-act="arena"><span class="ic k-dweb">◆</span>Open the game arena</button>
             <button class="pc" data-act="app"><span class="ic k-engine">◇</span>Build a small app<span class="soon">soon</span></button>
           </div>
           <div class="composer"><textarea id="composer" placeholder="Download a local model to chat freely…" disabled></textarea><button class="send" id="send" disabled>↑</button></div>
@@ -249,6 +267,7 @@
   import { probeLocalModelCapability } from '/peerd-provider/local-model-capability.js';
   import { makeAgent, looksGarbled } from '/web/agent.js';
   import { startAgentMesh } from '/web/agent-mesh.js';   // full-participant agent peer (a2a over the demo lobby)
+  import { createArena, mountArenaUI } from '/web/arena.js';   // trustless p2p games (dwapps) on the same mesh
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
 
@@ -266,6 +285,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     home:     { glyph:'p', fav:'',         title:'Home',     addr:()=>'home' },
     notebook: { glyph:'N', fav:'k-engine', title:'notebook', addr:(n)=>`notebook/${n}` },
     peers:    { glyph:'◈', fav:'k-dweb',   title:'peers',    addr:()=>'peers/peerd-global', single:true },
+    arena:    { glyph:'◆', fav:'k-dweb',   title:'arena',    addr:()=>'arena/puzzle-race', single:true },
     app:      { glyph:'◇', fav:'k-engine', title:'app',      addr:()=>'app/new', single:true, soon:true },
     webvm:    { glyph:'⌘', fav:'k-engine', title:'webvm',    addr:()=>'webvm/debian', single:true, soon:true },
   };
@@ -299,6 +319,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   }
 
   function panelHTML(kind, id){
+    if(kind==='arena') return `<div class="arena-mount"><span class="hint">joining the agent mesh…</span></div>`;
     if(kind==='notebook') return `<textarea class="nb-editor" spellcheck="false"></textarea>
       <div class="nb-bar"><button class="run">▸ Run</button><span class="hint">fresh sealed worker · ⌘/Ctrl + Enter</span></div>
       <div class="nb-section">output</div><div class="nb-output"></div>
@@ -326,6 +347,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     const p=document.createElement('section'); p.className='tabpanel'; p.dataset.panel=id; p.setAttribute('role','tabpanel'); p.hidden=true; p.innerHTML=panelHTML(kind,id);
     $('#viewport').appendChild(p);
     if(kind==='notebook') wireNotebook(p,id,seed);
+    if(kind==='arena') wireArena(p);
     activate(id);
     if(kind==='notebook'&&run) p._run&&p._run();
     return id;
@@ -352,6 +374,7 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   const PRECODED = {
     notebook: { ask:'Launch a JS notebook', say:'Opening a notebook and running it in a sealed worker.<div class="toolcall"><span class="g">N</span>js_create → js_run</div>', go:()=>openTab('notebook',{seed:SAMPLE,run:true}) },
     peers:    { ask:'Show the peer network', say:'Joining the live peerd lobby over WebRTC.<div class="toolcall" style="border-left-color:var(--magenta)"><span class="g" style="background:var(--magenta)">◈</span>dweb_discover</div>', go:()=>openTab('peers') },
+    arena:    { ask:'Open the game arena', say:'Games are dwapps: shared, discovered, and installed peer-to-peer — then agents play each other trustlessly (commit-reveal answers, co-signed results). Open this page in a second tab to race yourself.<div class="toolcall" style="border-left-color:var(--magenta)"><span class="g" style="background:var(--magenta)">◆</span>dweb_discover → install → challenge</div>', go:()=>openTab('arena') },
     webvm:    { ask:'Launch a Linux VM',     say:'A real Debian VM in WebAssembly — wired in a later slice.', go:()=>openTab('webvm') },
     app:      { ask:'Build a small app',     say:'Client-side app in a sandboxed iframe — wired in a later slice.', go:()=>openTab('app') },
   };
@@ -381,15 +404,16 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
     { type:'function', function:{ name:'show_peers', description:'Open the live peer-network tab to show who is connected on the peerd dweb.', parameters:{ type:'object', properties:{} } } },
     { type:'function', function:{ name:'discover_agents', description:'List other AI agents currently connected on the peer-to-peer agent network — each with its did (address) and capabilities. Call this before talk_to_agent.', parameters:{ type:'object', properties:{} } } },
     { type:'function', function:{ name:'talk_to_agent', description:'Send a message to another agent on the peer network by its did and get its reply back. Use discover_agents first to get a did.', parameters:{ type:'object', properties:{ did:{ type:'string', description:'the target agent did (from discover_agents)' }, message:{ type:'string', description:'what to say or ask' } }, required:['did','message'] } } },
+    { type:'function', function:{ name:'play_puzzle_race', description:'Challenge another agent to the p2p Puzzle Race game and play the match to completion. Handles everything: shares or installs the game dwapp over the mesh, challenges the peer (their agent auto-installs and accepts), races (commit-reveal answers, sealed-worker solving), and returns the verified outcome. Optional did picks the opponent; otherwise the first agent online is challenged.', parameters:{ type:'object', properties:{ did:{ type:'string', description:'opponent agent did (optional; from discover_agents)' } } } } },
   ];
   // dweb-flavored tools get the magenta ◈ mark in the chat (brand: the d module).
-  const DWEB_TOOLS = new Set(['show_peers','discover_agents','talk_to_agent']);
+  const DWEB_TOOLS = new Set(['show_peers','discover_agents','talk_to_agent','play_puzzle_race']);
   // why the one-call rule: same lesson as the extension's oneShot (#162) — a
   // flag nothing teaches never gets used, and a small model especially needs
   // the shortcut SPELLED OUT. One notebook run hands the raw console/return
   // straight back, so one tool call + one short answer settles most tasks;
   // extra turns just burn the local model's tokens/latency.
-  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (a small model on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY this format — for example: <tool_call>{"name":"run_notebook","arguments":{"code":"const x = 2 + 2; console.log(x); return x;"}}</tool_call> — valid JSON inside the tags, the code as ONE quoted JSON string. ONE run_notebook call settles most tasks: do ALL the work in a single notebook run (compute, format, chart in one script — its console output and return value come straight back to you raw), then give a short final answer. Only call again if the result shows you something genuinely new to do. Prefer run_notebook for anything computational. You are also a PEER on a live agent network: other peerd agents are connected right now — use discover_agents to see who is online (with their capabilities), and talk_to_agent to send one a message and get its reply. Other agents can message you too. When the user asks you to reach, greet, or collaborate with another agent, use these. Be concise.`;
+  const SYSTEM = `You are peerd, an AI agent running locally in the user's browser (a small model on WebGPU). You act by calling tools, which open real tabs in this peerd-lite browser. Tools: run_notebook (write+run JavaScript in a sealed worker — use it for any computation, data, or charts), show_peers (open the live peer network). To call a tool, emit EXACTLY this format — for example: <tool_call>{"name":"run_notebook","arguments":{"code":"const x = 2 + 2; console.log(x); return x;"}}</tool_call> — valid JSON inside the tags, the code as ONE quoted JSON string. ONE run_notebook call settles most tasks: do ALL the work in a single notebook run (compute, format, chart in one script — its console output and return value come straight back to you raw), then give a short final answer. Only call again if the result shows you something genuinely new to do. Prefer run_notebook for anything computational. You are also a PEER on a live agent network: other peerd agents are connected right now — use discover_agents to see who is online (with their capabilities), and talk_to_agent to send one a message and get its reply. Other agents can message you too. When the user asks you to reach, greet, or collaborate with another agent, use these. You can also COMPETE: play_puzzle_race challenges another agent to a trustless peer-to-peer puzzle race (the game is a dwapp that trades itself over the mesh; answers are commit-reveal fair and the result is co-signed) — use it when asked to play, race, or compete. Be concise.`;
 
   async function agentRunNotebook(code){
     const id = openTab('notebook', { seed: code });        // open + seed, no auto-run
@@ -422,6 +446,29 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
       if(!r?.ok) return 'could not reach that agent: ' + (r?.error||'unknown error');
       return 'reply from …' + did.slice(-6) + ': ' + (r.reply||'(empty reply)');
     }
+    if(name==='play_puzzle_race'){
+      const a = await ensureArena();
+      openTab('arena');
+      // ensure a playable game: install a discovered one, else share our own
+      if(!a.games().some(g=>g.installed)){
+        const discovered = a.games().find(g=>!g.installed);
+        try { if(discovered) await a.install(discovered.id); else await a.sharePuzzleRace(); }
+        catch(e){ return 'could not get the game: ' + (e?.message||e); }
+      }
+      const m = await ensureAgentMesh();
+      const did = String(args?.did||'') || (m.discover()[0]?.did ?? '');
+      if(!did) return 'No other agents are online to challenge. Open peerd-lite in a second tab so another agent joins, then try again.';
+      let matchId;
+      try { matchId = await a.challenge(did); }
+      catch(e){ return 'challenge failed: ' + (e?.message||e); }
+      const final = await a.whenDone(matchId);
+      const o = final.outcome || { kind:'aborted', reason:'unknown' };
+      const summary = o.kind==='win'
+        ? (o.winner===a.selfDid ? 'YOU WON' : 'you lost') + ' (' + o.reason + ')'
+        : o.kind + ' (' + o.reason + ')';
+      return 'match ' + matchId + ' vs …' + did.slice(-6) + ': ' + summary
+        + (final.coSigned ? ' — result co-signed by both agents and published to the lobby leaderboard.' : ' — result not co-signed (opponent did not counter-sign).');
+    }
     return 'unknown tool: ' + name;
   }
 
@@ -441,11 +488,18 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
   let agentMesh=null, meshStarting=null, answerChain=Promise.resolve();
   const AGENT_CARD = { name:'peerd-lite agent', description:'A local Gemma agent running in a browser tab.',
     skills:[{ id:'notebook', name:'run JS', description:'writes and runs JavaScript in a sealed worker' }] };
+  // local-dev seam: ?rendezvous=ws://…&lobby=… drives the REAL page against a
+  // local signaling node (the arena harness / dev loop); absent → production
+  // defaults in agent-mesh.js. Harmless on the deployed page: both values only
+  // change which lobby THIS tab joins.
+  const MESH_OVERRIDES = (()=>{ const q=new URLSearchParams(location.search); const url=q.get('rendezvous'), lobby=q.get('lobby');
+    return { ...(url?{url}:{}) , ...(lobby?{lobby}:{}) }; })();
   function ensureAgentMesh(){
     if(agentMesh) return Promise.resolve(agentMesh);
     if(meshStarting) return meshStarting;
     meshStarting = startAgentMesh({
       card: AGENT_CARD,
+      ...MESH_OVERRIDES,
       onRoster:(peers)=>{ const s=document.getElementById('statPeers'); if(s){ s.innerHTML='<span class="s-dot"></span>agents: '+peers.length; s.classList.add('live'); } },
       onInbound:(msg)=>{ if(msg.kind==='ask') answerPeer(msg); },
     }).then((m)=>{ agentMesh=m; return m; }).catch((e)=>{ meshStarting=null; throw e; });
@@ -463,6 +517,29 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
       say('bot', `<span class="dim">you → ${tag}:</span> ${answer.replace(/</g,'&lt;')}`);
       try { await agentMesh.reply(msg.from, msg.reqId, answer); } catch(e){ /* peer gone */ }
     });
+  }
+
+  // ---- the game arena (trustless p2p games; web/arena.js) ----
+  // One arena core per page, started with the mesh — it must be LIVE (not
+  // just tab-mounted) so this agent can be challenged and auto-accept while
+  // the user is elsewhere. The arena tab only binds UI onto it.
+  let arenaCore=null, arenaStarting=null;
+  function ensureArena(){
+    if(arenaCore) return Promise.resolve(arenaCore);
+    if(arenaStarting) return arenaStarting;
+    arenaStarting = ensureAgentMesh().then(async (m)=>{
+      const a = await createArena({ mesh: m });
+      // surface the arena's headline beats in the chat — visceral, not chatty
+      a.onActivity((line)=>{ if(/challenge from|match m-|auto-installed/.test(line)) say('bot', `<span style="color:var(--faint)">◈ arena:</span> ${line.replace(/</g,'&lt;')}`); });
+      arenaCore = a; return a;
+    }).catch((e)=>{ arenaStarting=null; throw e; });
+    return arenaStarting;
+  }
+  function wireArena(panel){
+    const mount = panel.querySelector('.arena-mount');
+    ensureArena().then((a)=>{
+      mountArenaUI(mount, { arena: a, roster: ()=> (agentMesh ? agentMesh.discover() : []) });
+    }).catch((e)=>{ mount.innerHTML = `<span class="soon-note">couldn’t join the mesh: ${(e?.message||e).toString().replace(/</g,'&lt;')}</span>`; });
   }
 
   let agent=null, gemmaReady=false, gemmaLoading=false;
@@ -557,8 +634,10 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
         setGemmaStat('ready · local');
         composer.disabled=false; sendBtn.disabled=false; composer.placeholder=`Ask ${m.label} to do something…`; composer.focus();
         agent = makeAgent({ generate: generateGemma, runTool, tools: TOOLS, system: SYSTEM });
-        ensureAgentMesh().catch(()=>{});   // join the demo lobby so other agents can reach this one
-        say('bot',`${m.label} is loaded and running on your GPU — no key, no server. Ask me anything: I can write and run notebooks, open the peer network, and talk to other agents on the p2p network. Try <i>"find another agent and say hi"</i>.`);
+        // join the demo lobby AND start the arena core, so this agent is
+        // reachable — and challengeable (auto-accept) — from other tabs.
+        ensureArena().catch(()=>{ ensureAgentMesh().catch(()=>{}); });
+        say('bot',`${m.label} is loaded and running on your GPU — no key, no server. Ask me anything: I can write and run notebooks, open the peer network, talk to other agents on the p2p network — and challenge them to a puzzle race. Try <i>"find another agent and race them"</i>.`);
         return;
       }catch(e){
         clearTimeout(watchdog); lastErr=e; console.warn(`[model] ${m.label} failed to load`, e);

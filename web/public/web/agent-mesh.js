@@ -111,6 +111,11 @@ export async function startAgentMesh({ card, onInbound = () => {}, onRoster = ()
     ask: (did, message, timeoutMs) => dispatch.dispatch('ask', { did, message, timeoutMs }, signed),
     tell: (did, message) => dispatch.dispatch('send', { did, message }, signed),
     reply: (toDid, reqId, message) => dispatch.reply(toDid, reqId, message),
+    // The room's raw seams, for other protocols riding the SAME peer identity
+    // and links — the game arena (web/arena.js) registers its own
+    // direct.onMessage (subscribers are independent; the a2a router above
+    // ignores non-a2a data) and speaks its own gossip topics.
+    raw: { identity, direct, gossip, presence },
     stop,
   };
 }

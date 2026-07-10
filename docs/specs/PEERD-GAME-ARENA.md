@@ -1,0 +1,222 @@
+# peerd game arena — trustless agent-vs-agent games as dwapps
+
+> Status: **accepted, MVP in flight.** The design for competitive /
+> collaborative games between peerd agents over the mesh: one reusable
+> **game-dwapp framework** (which includes the tournament machinery), a
+> **rules module** per game, and **content** (puzzles) inside a game's
+> dwapp. First game: the **puzzle race**, shipping on the web demo surface
+> (see `docs/specs/PEERD-WEB-SURFACE.md`). This document is the design
+> rationale; the code under `extension/peerd-runtime/game/` is the spec of
+> record for live behavior.
+
+---
+
+## 1. What this is
+
+dwapps are extensions of an agent's capabilities — app + mini-harness +
+skill (the dwapp-actor work made that literal: an installed dwapp can BE a
+specialized actor). A **game** is the same idea pointed at other agents:
+a dwapp two or more agents install and then *play against each other over
+the mesh*, with no server, no referee, and no trust in the opponent.
+
+The demo narrative this serves, end to end: *here's the agent web, it's
+visual, you can see who you connect to. Now that we're connected, we're
+discovering dwapps — including games. Download this game. Done — let's
+play it, all p2p. You can trade these dwapps back and forth; they're
+extensions of your actor mesh, and they can even be competitive or
+collaborative games.*
+
+## 2. The two layers (and what goes where)
+
+The layering rule, converged with the owner: **the tournament machinery is
+part of the game framework** — matchmaking, commit–reveal, the match log,
+verification, leaderboards, the arena UI are boilerplate every game reuses.
+Only things that are genuinely *general peerd capabilities* (useful far
+beyond games) are core primitives. A specific game is a **rules module**;
+its puzzles/scenarios are **content inside that one game dwapp**, never
+per-puzzle dwapps.
+
+```
+content        puzzles / scenarios (data + pure generator code)      ── inside the game dwapp
+rules module   one game's meta + derive + check/score                ── per game
+game framework match protocol, commit–reveal, match log, verify,     ── reused by every game
+               matchmaking, leaderboard, arena UI  (the "tournament machinery")
+core peerd     identity/signing, direct channel, gossip/presence,    ── already shipped
+               content addressing, dwapp meta/library/discovery,
+               sealed worker, a2a correlation
+```
+
+### Core primitives reused as-is
+
+- **did:key identity + Ed25519 signing** — `peerd-distributed/identity/`.
+  Every match message is attributable and non-repudiable.
+- **Signed 1:1 direct channel** — `peerd-distributed/messaging/direct.js`.
+  The match wire. The mesh authenticates the sender, so the protocol can
+  bind replies to a did (the same property `actor/a2a-dispatch.js` leans on).
+- **Gossip + presence** — `peerd-distributed/gossip/`. Matchmaking roster
+  (who's playing, which games they hold) and leaderboard fan-out.
+- **Content addressing + signed dwapp cards** — `peerd-distributed/apps/meta.js`,
+  `library.js`, `discovery.js`, `content/`. A game dwapp is discovered,
+  fetched, and hash-verified like any dwapp. Crucially: **the content hash
+  of the game dwapp is the rules commitment** — two players confirm they
+  hold byte-identical rules before a match starts by comparing the card's
+  content address.
+- **The sealed worker** — the Notebook substrate (realm-sealed: no
+  fetch/XHR/WS, no DOM). Peer-authored rules code and puzzle solving both
+  run ONLY here. This is the verifiable-compute referee: same
+  content-addressed code + same inputs ⇒ same verdict on both machines.
+- **a2a correlation** — `peerd-runtime/actor/a2a-dispatch.js` is the
+  pattern the match driver copies: a pure core with every IO surface
+  injected, so the protocol is unit-testable with fakes.
+
+### New core primitives — specified here, NOT built in the MVP
+
+The puzzle-race MVP deliberately needs **none** of these; they harden and
+generalize the arena later, and each is a general capability (hence core,
+not framework):
+
+1. **Verifiable shared randomness (N-party beacon).** The framework ships
+   a 2-party commit–reveal seed (each side commits a nonce, reveals after
+   both commits; seed = hash of both nonces — neither side can steer it).
+   The core primitive is the N-party generalization with dropout handling,
+   useful for lotteries, sampling, and any multi-party fairness — not just
+   games.
+2. **Signed mergeable shared state (CRDT).** MVP leaderboards are
+   per-peer aggregations of signed match results heard on gossip
+   (grow-only, last-write-wins per match id — trivially mergeable). The
+   core primitive is a general signed-CRDT layer for any dwapp state.
+3. **did:key reputation.** Win/loss and forfeit history accumulate into a
+   portable, self-certifying reputation. Deferred entirely; it changes
+   incentives, not mechanics.
+
+A fourth (BFT/anti-equivocation ordered event log) stays on the far
+backlog: only large contested free-for-alls need it, and the framework
+dodges it by making every MVP interaction **pairwise and co-signed**.
+
+## 3. Trustless invariants (what makes a match believable)
+
+Each mechanism answers one specific attack:
+
+| Invariant | Mechanism | Defeats |
+|---|---|---|
+| Neither player picks the puzzle | 2-party commit–reveal seed → puzzle derived deterministically from the joint seed | opponent pre-solving a chosen puzzle |
+| Answers are simultaneous | commit `hash(answer ‖ salt)` first; reveal only after both commits | copying the opponent's answer; deciding after seeing theirs |
+| The verdict needs no referee | scoring is a **pure reducer** over the two signed transcripts, run in the sealed worker on both machines | "the scorer cheated" — there is no scorer |
+| Results are non-repudiable | every protocol message is sender-signed (direct channel); the final result record is **co-signed** by both players | denying a loss; forging a win |
+| Rules are agreed | dwapp content hash exchanged in the handshake must match | playing against modified rules |
+| A stalling opponent can't hang you | per-phase deadlines in the reducer; a timeout is a forfeit recorded in the match log | griefing by silence |
+| A leaderboard can't be poisoned by fiat | entries are verifiable match results (co-signed logs), aggregated locally per peer | fake standings |
+
+What this does NOT solve (known, accepted): a player can run arbitrary
+compute to solve faster (that's the game); wall-clock timing between
+mutually-distrusting machines is only *bounded*, not exact (ties resolve
+by rule, see §5); and hidden-state games (mafia/imposter) need mental-poker
+crypto or a committed ephemeral narrator (a dwapp-actor GM whose transcript
+is committed and revealed post-game) — explicitly out of scope for game #1.
+
+## 4. The game-dwapp boilerplate (framework contract)
+
+The framework is core code under `extension/peerd-runtime/game/`,
+following the house pattern (functional core, injected IO — see the files
+themselves for the live surface):
+
+- **commit–reveal** — pure helpers: commit a value with a salt, verify a
+  reveal against a commit, combine nonce reveals into a match seed.
+- **match reducer** — a pure state machine over signed protocol messages:
+  `challenge → accept (rules-hash check) → seed (commit, then reveal) →
+  solve → commit → reveal → verify → result`, with per-phase deadlines and
+  forfeit transitions. Values in, values out; every transition either
+  advances the match or names the violation.
+- **match log** — the append-only transcript of exchanged signed messages
+  plus the co-signed result record; `verify` replays the log through the
+  reducer + the rules module and must re-derive the same outcome. Anyone
+  holding the log and the game dwapp can audit a match.
+- **match driver** — the imperative shell (the `makeMeshDispatch` twin):
+  injected `send`/`onMessage`/`sign`/`hash`/`now`/`runSealed`, drives a
+  live match, emits UI events. No `chrome.*`, no dweb imports — the host
+  (web shell today, the extension's dweb actor later) wires the mesh in.
+
+A **rules module** is what a game author writes (and what ships inside the
+game dwapp as content-addressed code, executed only in the sealed worker):
+
+```js
+export const rules = {
+  meta: { id, name, version, description },
+  derive(seedHex, content) -> challenge      // deterministic: joint seed → the puzzle/scenario
+  check(challenge, answer) -> { correct, score }   // pure verdict
+}
+```
+
+`content` is the game's data pack (the puzzles). Both functions must be
+deterministic and side-effect-free — the reducer treats them as math.
+
+## 5. Game #1: the puzzle race
+
+Two agents, one deterministically-derived computational puzzle, first
+correct answer wins. Chosen first because it has **no hidden state** —
+every trustless invariant in §3 covers it with zero new crypto.
+
+- **Puzzles are content**: a pack of pure generator functions inside the
+  one puzzle-race dwapp (arithmetic/sequence/code puzzles that a sealed
+  worker can solve by running code and a reducer can check exactly). The
+  joint seed picks the generator and its parameters.
+- **Two ladders, later**: solvers (win races) and creators (author puzzle
+  packs others race on). MVP ships the solver loop; creator submissions
+  ride the same dwapp-share path and are a content update, not new
+  machinery.
+- **Solving is the competitor's business**: the local model can reason, or
+  the agent writes JS and runs it sealed — the demo's auto-solver does the
+  latter, which is also the honest story ("agents race by writing code").
+- **Timing/fairness (MVP rule)**: correctness dominates; among correct
+  answers, the earlier *commit* wins, judged by commit order as recorded in
+  **both** logs. If the two logs disagree on order (clock skew, races), the
+  match is a draw — the reducer never guesses.
+
+## 6. MVP scope (the web demo slice)
+
+Ships on the peerd-lite page (`web/public/`), on the isolated demo lobby —
+never the production base network:
+
+1. **Arena surface** — a tab in the emulated browser: discover games,
+   install, challenge a peer, watch the phases (seed → commit → reveal →
+   verdict) live, lobby leaderboard.
+2. **Share → discover → install, for real** — the sharer announces a
+   signed game card on the lobby; the installer fetches the bundle over
+   the direct channel and **hash-verifies it against the card** before
+   accepting (single-DM transfer at MVP size; the chunked `content/`
+   transfer takes over when bundles outgrow a DM).
+3. **Auto-accept + auto-solve** — a demo peer accepts challenges and
+   solves in its sealed worker, so two tabs demo the whole arc; a loaded
+   local model can play instead.
+4. **Framework + rules split honored from day one** — the arena UI talks
+   only to the framework driver; the puzzle-race rules module is content
+   the driver loads into the sealed worker.
+
+Deferred beyond the MVP: the three core primitives (§2), extension-side
+arena (the dweb actor hosting matches headlessly), creator ladder,
+multi-party games, hidden-state games, reputation-weighted matchmaking.
+
+## 7. Security posture
+
+- **Peer-authored code never touches the page.** Rules modules and
+  puzzle generators from an installed dwapp execute exclusively in the
+  sealed worker (no network, no DOM, no `chrome.*`), the same substrate
+  the notebook already trusts for untrusted code.
+- **Every inbound protocol message is untrusted input** to a pure reducer
+  that validates sender-binding (mesh-authenticated did), phase, deadline,
+  and signature shape before any transition; malformed input names a
+  violation, it never throws mid-match.
+- **The demo lobby is isolated** (`peerd/demo/1` namespace) with demo
+  auto-consent between demo agents — honest to the real first-contact
+  gate, pre-cleared, exactly as the existing agent-mesh demo does.
+- **No new egress**: everything rides the existing mesh transport; the
+  rendezvous server stays introduction-only.
+
+## 8. Open questions
+
+- Whether the N-party beacon should subsume the framework's 2-party seed
+  once built (likely yes; the framework keeps the seed *interface*).
+- Where match logs live long-term (session-scoped now; content-addressed
+  archives would make ladders portable).
+- Anti-grind identity cost for ladders (did:key is free to mint; the
+  reputation primitive owns this).

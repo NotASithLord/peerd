@@ -40,6 +40,7 @@
     "package:all": "bun packaging/package.ts --all",
     "package:web": "bun packaging/package-web.ts",
     "check:web": "bun packaging/check-web-boundary.ts",
+    "test:arena": "bun scripts/cdp/run-arena-twotab.mjs",
     "preflight": "bun packaging/preflight.ts",
     "release": "bun packaging/release.ts",
     "feeds:check": "bun packaging/check-feeds.ts",

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<!--
+  arena-twotab.html — harness page for run-arena-twotab.mjs. NOT deployed
+  (lives in scripts/cdp/, served by the runner alongside web-dist/): a
+  headless-drivable peerd-lite agent peer that joins an isolated harness
+  lobby and AUTO-PLAYS the whole dream-demo arc by role —
+    role=host  : share the puzzle-race game dwapp on the lobby
+    role=guest : discover it → install (hash-verified bundle over the direct
+                 channel) → challenge the host → race to a co-signed result
+  The runner polls window.__ARENA__.report() on both contexts and asserts the
+  two sides converged on the same verified outcome.
+-->
+<html lang="en">
+<head><meta charset="UTF-8" /><title>arena twotab harness</title></head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+  import { startAgentMesh } from '/web/agent-mesh.js';
+  import { createArena } from '/web/arena.js';
+
+  const q = new URLSearchParams(location.search);
+  const name = q.get('name') || 'peer';
+  const role = q.get('role') || 'guest';
+  const url = q.get('url');
+  const lobby = q.get('lobby') || 'peerd/harness/arena';
+
+  const logEl = document.getElementById('log');
+  const log = (s) => { logEl.textContent += `${s}\n`; };
+
+  const state = {
+    ready: false, did: null, role, peers: 0, games: [], matches: [],
+    scores: [], activity: [], error: null,
+    shared: false, installed: false, challenged: false,
+  };
+  window.__ARENA__ = { get ready() { return state.ready; }, report: () => JSON.stringify(state) };
+
+  const main = async () => {
+    const mesh = await startAgentMesh({
+      card: { name, description: 'arena harness peer', skills: [] },
+      lobby, url,
+      onRoster: (peers) => { state.peers = peers.length; },
+    });
+    state.did = mesh.myDid;
+    const arena = await createArena({ mesh });
+    arena.onActivity((line) => { state.activity.push(line); log(line); });
+    const refresh = () => {
+      state.games = arena.games();
+      state.matches = arena.matches().map((m) => ({
+        matchId: m.matchId, phase: m.phase, coSigned: m.coSigned,
+        outcome: m.outcome, resultString: m.resultString ?? null,
+      }));
+      state.scores = arena.scores();
+    };
+    arena.onChange(refresh);
+    state.ready = true;
+    log(`${name} up as ${role}: ${mesh.myDid}`);
+
+    if (role === 'host') {
+      await arena.sharePuzzleRace();
+      state.shared = true;
+      refresh();
+      return; // the host now just serves installs + auto-accepts challenges
+    }
+
+    // guest: wait for a discoverable game + a visible peer, then play once.
+    const tick = async () => {
+      try {
+        refresh();
+        if (state.challenged) return;
+        const discovered = arena.games().find((g) => !g.mine);
+        const peer = mesh.discover()[0];
+        if (!discovered || !peer) return;
+        state.challenged = true;
+        if (!discovered.installed) { await arena.install(discovered.id); state.installed = true; }
+        refresh();
+        const matchId = await arena.challenge(peer.did);
+        log(`challenged ${peer.did} → ${matchId}`);
+        await arena.whenDone(matchId);
+        refresh();
+      } catch (e) {
+        state.error = e?.message || String(e);
+        log(`ERROR ${state.error}`);
+      }
+    };
+    setInterval(tick, 750);
+  };
+
+  main().catch((e) => { state.error = e?.message || String(e); log(`FATAL ${state.error}`); });
+</script>
+</body>
+</html>
