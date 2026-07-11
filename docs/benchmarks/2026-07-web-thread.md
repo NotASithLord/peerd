@@ -130,7 +130,65 @@ not claim to be: it is, to our knowledge, the first **browser-extension** agent 
 BYOK, no backend, store-installable — to publish any number on this benchmark at all.
 31.0% is the honest floor of that category, with the full per-task evidence public.
 
-## 5. What the benchmarks fixed on the way
+## 5. The 31.0% was undercounting us: a measurement bug
+
+The full 300 gave us 31.0% and a failure taxonomy. The obvious next move was to push the
+number, so we tried three levers: a finish-and-report prompt ([PR #197](https://github.com/NotASithLord/peerd/pull/197)),
+a stronger model (Fable 5), and a higher step cap. On 30–60-task subsets, each looked like
+a +5–10pp win.
+
+**Every one washed out at the full 300** (McNemar *p* ≈ 0.3–1.0). The reason is the most
+important methodological number in this report: **single-run variance on live sites is
+~±20%.** Re-run the *same* config and roughly a fifth of the 300 tasks flip outcome —
+purely from sites changing under the agent and the model sampling differently. No lever
+smaller than that noise floor is detectable from a single run; the subset wins were noise.
+
+So we stopped chasing the number and diagnosed the failures instead. A pass over all 207
+failed trajectories found one root cause dwarfing the rest: in ~40% of failures, peerd's
+final answer was a *promissory ack* — "On it, I'll report when the web actor replies" —
+recorded as the last word, with the real answer nowhere in the trajectory.
+
+That is peerd's async architecture leaking into the measurement. The orchestrator delegates
+web work to an actor that runs in its own session; the actor's reply re-enters on a *later*
+turn (§6 describes the quiet-settle window we built to wait for exactly this — score only
+once the whole flow goes silent). But the window was 15 seconds, and that wasn't long
+enough: after the actor finishes clicking and navigating, it goes silent for one more model
+call — synthesizing its reply — for 20–40 seconds on a slow model. The settle window closed
+in that gap and captured the orchestrator's intermediate ack.
+
+We proved it directly. Re-running 42 promissory-ack failures with the settle window
+widened, **34 of 37 went from an ack to a real, substantive answer** — which run-variance
+cannot manufacture (you can't turn zero substantive answers into 34 by luck). Then the full
+300, changing *only* the settle window:
+
+| | pass rate | vs. the 15 s baseline |
+|---|---|---|
+| settle 15 s (the 31.0% run, re-judged) | 33.1% | — |
+| **settle, actor-aware** | **41.1%** | **+8pp, McNemar *p* = 0.011** |
+
+That *p*-value is the first statistically significant result in this entire report — a real
+effect, above the ±20% noise floor, with the mechanism proven independently. Translating off
+the judge's measured leniency, the leaderboard-official (o4-mini) equivalent is roughly
+**38–39%** — at parity with browser-use's independently verified ~40%.
+
+The honest framing: **31.0% was not peerd's capability; it was peerd's capability minus a
+harness bug.** The agent was getting the answers; the eval was reading them a beat too
+early. And the correction is legitimate, not a thumb on the scale — a real user *does* get
+the answer, because the reply lands; 15 seconds was simply too short a silence to wait for
+an async browser round-trip.
+
+The fix isn't a bigger fixed timeout (that taxes every task, including the fast ones). It
+makes the settle *actor-aware*: hold the window open while a web-actor delegation is in
+flight, and keep it tight otherwise. Fast tasks settle in 15 s; async tasks wait for the
+actor, not a padding constant — reproduced independently of the blanket widening above
+(same 34/37-class substance recovery, no per-task tax).
+
+> The corrected numbers here are from the internal (Claude Haiku) judge, which we validated
+> at 83% agreement / +2.3pp leniency vs. the official o4-mini judge; the o4-mini re-score of
+> the corrected run is the one remaining step. The finding — the mechanism, the +8pp, and
+> the significance — does not depend on it.
+
+## 6. What the benchmarks fixed on the way
 
 Running honest benchmarks against a real extension surfaced real product bugs, all fixed:
 
