@@ -1,8 +1,8 @@
 # Chrome Web Store — reviewer notes (paste into "Notes for reviewer")
 
-Two placeholders to fill before submitting, marked `«…»` below:
-a test API key (or a statement that a demo video is provided instead)
-and the demo video URL.
+One placeholder to fill before submitting, marked `«…»` below: the
+demo video URL. No test API key is provided — the demo video covers
+the full flow instead.
 
 ---
 
@@ -19,9 +19,9 @@ no servers and receives no data.
 ## How to test
 
 1. Install, open the side panel (toolbar icon).
-2. Onboarding asks for an AI provider API key.
-   **Test key (Anthropic):** «PASTE TEST KEY — or remove this line and
-   rely on the demo video»
+2. Onboarding asks for an AI provider API key. peerd is
+   bring-your-own-key with no accounts, so there is no test credential
+   to share; the demo video below shows every flow end-to-end instead.
 3. Ask something that exercises page automation, e.g. open any article
    and ask "summarize this page", or "open hacker news and tell me the
    top three stories".
