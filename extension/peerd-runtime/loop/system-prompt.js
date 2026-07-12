@@ -352,6 +352,9 @@ data looks API-reachable; render if it's gated, needs auth, or comes back empty
 (fetch_url returns served html/json, not what JS builds).
 RENDER, don't re-fetch: once a page is in your tab, its content is the DOM — READ it
 (snapshot/read_page). Never call fetch_url for something already on the page you're on.
+LONG page, SPECIFIC fact: pass a query (a few keywords for what you're after) to fetch_url
+or read_page — you get the passages that MATCH it, not a blind head+tail window, so an
+answer buried mid-page isn't missed. Skip it when you want the whole page.
 And a fetch_url "blocked: private/loopback host" (localhost, 127.0.0.1, 192.168.*, a local
 dev server) is an SSRF refusal of the DIRECT fetch — NOT "the site is unreachable": navigate
 to it and read the rendered DOM. Don't give up (or ask the user) on a page you can just open.
