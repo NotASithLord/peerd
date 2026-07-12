@@ -160,13 +160,21 @@
   .pn-edge{stroke:rgba(255,255,255,0.2);stroke-width:1}.pn-edge--faint{stroke:rgba(255,255,255,0.07)}
   .pn-dot{stroke:var(--base);stroke-width:1.5}.pn-label{fill:var(--faint);font-family:var(--mono);font-size:9px;text-anchor:middle}
 
-  /* arena (real) */
-  .arena-card{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:8px 11px;margin:5px 0}
-  .arena-card .ic{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:700;color:#0a0c0d;flex:none}
-  .arena-card-name{color:var(--white);font-weight:600}
-  .arena-tag{margin-left:auto;font-size:10px;color:var(--green);border:1px solid var(--line2);border-radius:5px;padding:2px 7px}
-  .install-btn{margin-left:auto;font-family:var(--mono);font-size:11px;border:1px solid var(--line2);background:var(--panel2);color:var(--paper);border-radius:7px;padding:5px 10px;cursor:pointer}
+  /* arena (real) — apps are SQUARE store tiles; peers are ROUND magenta chips */
+  .arena-shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:9px;margin:5px 0;font-family:var(--mono)}
+  .dwapp-tile{display:flex;flex-direction:column;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:12px 9px 10px;text-align:center}
+  .dwapp-icon{width:54px;height:54px;border-radius:13px;background:var(--panel2);border:1px solid var(--line2);display:grid;place-items:center;overflow:hidden}
+  .dwapp-icon svg{width:100%;height:100%;display:block}
+  .dwapp-name{font-size:12px;font-weight:600;color:var(--white);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dwapp-meta{font-size:9.5px;color:var(--faint)}
+  .arena-tag{font-size:10px;color:var(--green);border:1px solid var(--line2);border-radius:5px;padding:2px 7px}
+  .install-btn{font-family:var(--mono);font-size:11px;border:1px solid var(--line2);background:var(--panel2);color:var(--paper);border-radius:7px;padding:5px 10px;cursor:pointer}
   .install-btn:hover:not(:disabled){border-color:var(--faint)}.install-btn:disabled{opacity:.5;cursor:default}
+  .dwapp-tile .install-btn,.dwapp-tile .arena-tag{width:100%;text-align:center;margin-top:1px}
+  .arena-peers{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:5px 0 2px;font-family:var(--mono)}
+  .peer-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);border:1px solid var(--line2);border-radius:999px;padding:3px 10px;background:var(--panel)}
+  .peer-chip .pc-dot{width:7px;height:7px;border-radius:50%;background:var(--magenta);flex:none}
+  .arena-match .hint b{color:var(--paper);font-weight:600}
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
   .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
   .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:9px;margin:5px 0 3px}
@@ -295,7 +303,7 @@
   import { probeLocalModelCapability } from '/peerd-provider/local-model-capability.js';
   import { makeAgent, looksGarbled } from '/web/agent.js';
   import { startAgentMesh } from '/web/agent-mesh.js';   // full-participant agent peer (a2a over the demo lobby)
-  import { createArena, mountArenaUI } from '/web/arena.js';   // trustless p2p games (dwapps) on the same mesh
+  import { createArena, mountArenaUI, seedShelf } from '/web/arena.js';   // trustless p2p games (dwapps) on the same mesh
   import { openDwapp, fetchPadTemplate, bakePixelPad } from '/web/dwapp-host.js';   // run/create/remix dwapps in-page
 
   const SAMPLE = `import { table, chart, mean, round } from 'peerd:std';
@@ -569,6 +577,10 @@ return 'computed ' + data.length + ' rows in the sealed worker';`;
       const a = await createArena({ mesh: m });
       // surface the arena's headline beats in the chat — visceral, not chatty
       a.onActivity((line)=>{ if(/challenge from|match m-|auto-installed/.test(line)) say('bot', `<span style="color:var(--faint)">◈ arena:</span> ${line.replace(/</g,'&lt;')}`); });
+      // a fresh lobby stocks its own shelf (one elected seeder; arena.js) —
+      // the shell had NO auto-seed before, so its store depended on a manual
+      // share button; now both hosts bootstrap the same way
+      seedShelf({ arena: a, mesh: m });
       arenaCore = a; return a;
     }).catch((e)=>{ arenaStarting=null; throw e; });
     return arenaStarting;

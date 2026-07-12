@@ -25,6 +25,7 @@ import { isGameMessage } from '/peerd-runtime/game/match-reducer.js';
 import { resultSigningBytes } from '/peerd-runtime/game/match-log.js';
 import { runNotebook } from '/web/notebook-host.js';
 import { renderActorGraph } from '/web/actor-graph-view.js';
+import { fetchPadTemplate, bakePixelPad } from '/web/dwapp-host.js';
 
 const GAMES_TOPIC = 'peerd/demo/arena/games/v1';
 const RESULTS_TOPIC = 'peerd/demo/arena/results/v1';
@@ -358,10 +359,12 @@ export async function createArena({ mesh }) {
   // bytes are local — an un-installed card is just a card.
   const kindOf = (files) => (files?.['rules.js'] ? 'game' : files?.['index.html'] ? 'app' : files ? 'data' : null);
 
-  /** Challenge a peer to the first installed GAME. @param {string} peerDid */
-  const challenge = async (peerDid) => {
-    const g = [...games.values()].find((x) => kindOf(x.files) === 'game');
-    if (!g) throw new Error('no installed game to play — share or install one first');
+  /** Challenge a peer — to a SPECIFIC installed game when its store id is
+   * given (the tile's race button), else the first installed one (API/demo
+   * convenience). @param {string} peerDid @param {string} [gameId] */
+  const challenge = async (peerDid, gameId) => {
+    const g = gameId ? games.get(gameId) : [...games.values()].find((x) => kindOf(x.files) === 'game');
+    if (!g || kindOf(g.files) !== 'game') throw new Error('no installed game to play — share or install one first');
     activity(`challenging ${shortDid(peerDid)} to "${g.name}"…`);
     return await driver.challenge(peerDid, { gameId: g.card.salt, rulesHash: g.hash, deadlines: DEMO_DEADLINES });
   };
@@ -403,11 +406,41 @@ export async function createArena({ mesh }) {
   };
 }
 
+/**
+ * Seed a fresh lobby's shelf so visitors always find something to install:
+ * the built-in game plus a sample pixel pad (the brand 'p', drawn in pixels).
+ * Per ITEM — only what the lobby is still missing gets shared. One
+ * deterministic seeder (the lexicographically-smallest did) does it; everyone
+ * else waits for its cards — two fresh tabs otherwise race to self-seed
+ * duplicates. why the delay: the WebRTC link takes a few seconds to form;
+ * seeding before the first gossip exchange defeats the election.
+ * @param {{ arena: Awaited<ReturnType<typeof createArena>>, mesh: any, delayMs?: number }} opts
+ */
+export const seedShelf = async ({ arena, mesh, delayMs = 10_000 }) => {
+  await new Promise((r) => setTimeout(r, delayMs));
+  try {
+    const dids = [mesh.myDid, ...mesh.discover().map((p) => p.did)].sort();
+    if (dids[0] !== mesh.myDid) return;
+    if (!arena.games().some((g) => /puzzle race/i.test(g.name))) await arena.sharePuzzleRace();
+    if (!arena.games().some((g) => /pixel/i.test(g.name))) {
+      const art = new Array(256).fill(0);
+      const px = (x, y) => { art[y * 16 + x] = 1; };
+      for (let y = 3; y <= 12; y++) px(4, y);
+      for (let x = 5; x <= 9; x++) { px(x, 3); px(x, 8); }
+      for (let y = 4; y <= 7; y++) px(10, y);
+      const files = bakePixelPad(await fetchPadTemplate(), { title: 'peerd pixels', art });
+      await arena.shareDwapp({ slug: 'pixel-pad', name: 'peerd pixels', description: 'a drawing, traded as a dwapp — install it, remix it, reshare it', files });
+    }
+  } catch { /* another tab seeded first — fine */ }
+};
+
 // ---------------------------------------------------------------------------
 // UI — the arena tab. Grayscale like the rest of the shell; the magenta ◈
 // marks the dweb-carried pieces, win/lose reuse the existing status colors.
-
-const PHASES = ['proposed', 'seeding', 'solving', 'revealing', 'scoring', 'signing', 'done'];
+// Two deliberately DIFFERENT visual languages (owner direction): dwapps are
+// SQUARE store tiles with icons; peers are small ROUND magenta chips — round
+// + magenta echoes the graph's peer dots, so "over the wire" reads the same
+// everywhere.
 
 // Protocol reasons → human verdicts (fallback: the raw reason).
 const REASON_LABELS = {
@@ -429,19 +462,21 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
     <div class="arena">
       <div class="nb-section">the agent web <span class="hint">— you · your actors · agents on the mesh</span></div>
       <div class="arena-graph" data-slot="graph"></div>
+      <div class="arena-peers" data-slot="peers"></div>
       <div class="nb-section">the dwapp store <span class="hint">— apps and games, created + traded peer-to-peer, run sandboxed</span></div>
-      <div class="arena-games" data-slot="games"><span class="hint">nothing on the shelf yet — make or share something, or open this page in a second tab</span></div>
-      <div class="nb-bar">
-        ${makePad ? '<button class="run" data-act="make">✎ Make a pixel pad</button>' : ''}
-        <button class="run" data-act="share">◈ Share Puzzle Race</button>
-        <label class="hint"><input type="checkbox" data-act="auto" checked> auto-accept challenges</label>
+      <div class="arena-shelf" data-slot="games"><span class="hint">the shelf is filling — a fresh lobby seeds itself in a few seconds…</span></div>
+      ${makePad ? `<div class="nb-bar">
+        <button class="run" data-act="make">✎ Make a pixel pad</button>
+        <span class="hint">draw something — it ships onto the mesh as YOUR dwapp</span>
+      </div>` : ''}
+      <div data-sec="matches" hidden>
+        <div class="nb-section">races <span class="hint">— commit-reveal fair, co-signed</span></div>
+        <div class="arena-matches" data-slot="matches"></div>
       </div>
-      <div class="nb-section">matches</div>
-      <div class="arena-matches" data-slot="matches"><span class="hint">no matches yet</span></div>
-      <div class="nb-section">leaderboard <span class="hint">— co-signed results only, signatures verified locally</span></div>
-      <div class="arena-board" data-slot="board"><span class="hint">no verified results yet</span></div>
-      <div class="nb-section">agents online</div>
-      <div class="arena-roster" data-slot="roster"><span class="hint">joining the lobby…</span></div>
+      <div data-sec="board" hidden>
+        <div class="nb-section">leaderboard <span class="hint">— co-signed results only, signatures verified locally</span></div>
+        <div class="arena-board" data-slot="board"></div>
+      </div>
       <div class="nb-section">activity</div>
       <div class="nb-console arena-log" data-slot="log"></div>
       <p class="substrate">mounts: peerd-runtime/game (match reducer + driver) · peerd-distributed meta/gossip/direct · rules run SEALED in the notebook worker · lobby peerd/demo/1</p>
@@ -458,45 +493,92 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
     el.scrollTop = el.scrollHeight;
   };
 
+  // --- store tiles: the icon IS the content ---------------------------------
+  // A shared pixel pad shows the creator's ACTUAL drawing (parsed back out of
+  // the baked bundle — user content gets color); anything else gets a
+  // deterministic grayscale identicon from its signed hash, so a card is
+  // recognizable BEFORE its bytes are local. The reveal when an install swaps
+  // identicon → real art is the trade made visible.
+  const PAD_COLORS = ['', 'var(--cyan)', 'var(--red)', 'var(--amber)', 'var(--green)', 'var(--magenta)'];
+  const padArt = (id) => {
+    const m = arena.bundle(id)?.files?.['index.html']?.match(/var BAKED = (\[[0-9,\s]*\]);/);
+    if (!m) return null;
+    try {
+      const a = JSON.parse(m[1]);
+      return Array.isArray(a) && a.length === 256 && a.every((v) => typeof v === 'number') ? a : null;
+    } catch { return null; }
+  };
+  const tileIcon = (g) => {
+    const art = g.installed ? padArt(g.id) : null;
+    if (art) {
+      const rects = art.map((v, i) => (v >= 1 && v <= 5
+        ? `<rect x="${i % 16}" y="${Math.floor(i / 16)}" width="1" height="1" fill="${PAD_COLORS[Math.floor(v)]}"/>` : '')).join('');
+      return `<svg viewBox="0 0 16 16" shape-rendering="crispEdges" aria-hidden="true">${rects}</svg>`;
+    }
+    let rects = '';
+    for (let col = 0; col < 3; col++) {
+      for (let row = 0; row < 5; row++) {
+        const nib = parseInt(g.hash[(col * 5 + row) % g.hash.length], 16);
+        if (nib % 2 === 0) continue;
+        const shade = nib > 8 ? 0.5 : 0.26;
+        rects += `<rect x="${col + 1}" y="${row + 1}" width="1" height="1" fill="rgba(232,230,225,${shade})"/>`;
+        if (col < 2) rects += `<rect x="${5 - col}" y="${row + 1}" width="1" height="1" fill="rgba(232,230,225,${shade})"/>`;
+      }
+    }
+    return `<svg viewBox="0 0 7 7" shape-rendering="crispEdges" aria-hidden="true">${rects}</svg>`;
+  };
+
   const KIND_BADGE = { game: '⛏ game', app: '◇ app', data: '· data' };
   const renderGames = () => {
     const gs = arena.games();
     slot('games').innerHTML = gs.length === 0
-      ? '<span class="hint">nothing on the shelf yet — make or share something, or open this page in a second tab</span>'
-      : gs.map((g) => `
-        <div class="arena-card">
-          <span class="ic k-dweb">◈</span>
-          <span class="arena-card-name">${esc(g.name)}</span>
-          <span class="hint">${g.kind ? `${KIND_BADGE[g.kind] ?? g.kind} · ` : ''}by ${g.mine ? 'you' : esc(shortDid(g.publisher))} · ${esc(g.hash.slice(0, 10))}…</span>
-          ${g.installed
-    ? `${g.kind === 'app' && openBundle ? `<button class="install-btn" data-open="${esc(g.id)}">▶ open</button>` : ''}${
-      g.kind === 'game' && roster().length > 0 ? '<button class="install-btn arena-race-btn" data-race="1">⚡ race</button>' : ''
-    }<span class="arena-tag">installed</span>`
-    : `<button class="install-btn" data-install="${esc(g.id)}">⬇ install</button>`}
-        </div>`).join('');
+      ? '<span class="hint">the shelf is filling — a fresh lobby seeds itself in a few seconds…</span>'
+      : gs.map((g) => {
+        const action = !g.installed
+          ? `<button class="install-btn" data-install="${esc(g.id)}">⬇ install</button>`
+          : g.kind === 'app' && openBundle ? `<button class="install-btn" data-open="${esc(g.id)}">▶ open</button>`
+            : g.kind === 'game' ? (roster().length > 0
+              ? `<button class="install-btn arena-race-btn" data-race="${esc(g.id)}">⚡ race</button>`
+              : '<span class="arena-tag">needs a rival</span>')
+              : '<span class="arena-tag">installed</span>';
+        return `
+        <div class="dwapp-tile">
+          <div class="dwapp-icon">${tileIcon(g)}</div>
+          <div class="dwapp-name" title="${esc(g.name)}">${esc(g.name)}</div>
+          <div class="dwapp-meta">${g.kind ? KIND_BADGE[g.kind] ?? g.kind : '◈ dwapp'} · by ${g.mine ? 'you' : esc(shortDid(g.publisher))}</div>
+          ${action}
+        </div>`;
+      }).join('');
   };
 
-  const renderRoster = () => {
+  // peers: round magenta chips — presence, not product. Racing lives on the
+  // game's own tile, so a peer needs no buttons.
+  const renderPeers = () => {
     const peers = roster();
-    slot('roster').innerHTML = peers.length === 0
-      ? '<span class="hint">no other agents online — open peerd-lite in a second tab to add one</span>'
-      : peers.map((p) => `
-        <div class="arena-card">
-          <span class="ic k-dweb">◈</span>
-          <span class="arena-card-name">${esc(p.card?.name || 'agent')}</span>
-          <span class="hint">${esc(shortDid(p.did))}</span>
-          <button class="install-btn" data-challenge="${esc(p.did)}">◆ challenge</button>
-        </div>`).join('');
+    slot('peers').innerHTML = peers.length === 0
+      ? '<span class="hint">no other agents yet — open this page in a second tab, or send someone the invite link</span>'
+      : `<span class="hint">on the mesh:</span>${peers.map((p) => `
+        <span class="peer-chip"><span class="pc-dot"></span>${esc(p.card?.name || 'agent')} <span class="hint">${esc(shortDid(p.did))}</span></span>`).join('')}`;
   };
+
+  // The reducer's seven protocol phases collapse to four HUMAN stages — the
+  // protocol detail belongs in the spec, not the pills.
+  const STAGES = ['handshake', 'mining', 'reveal', 'done'];
+  const stageOf = (phase) => (phase === 'done' ? 3
+    : phase === 'revealing' || phase === 'scoring' || phase === 'signing' ? 2
+      : phase === 'solving' ? 1 : 0);
+  const sec = (name, show) => { panel.querySelector(`[data-sec="${name}"]`).hidden = !show; };
 
   const renderMatches = () => {
     const ms = arena.matches();
-    if (ms.length === 0) { slot('matches').innerHTML = '<span class="hint">no matches yet</span>'; return; }
+    sec('matches', ms.length > 0);
+    if (ms.length === 0) return;
     slot('matches').innerHTML = ms.slice(-6).reverse().map((m) => {
       const meIdx = m.players.challenger === arena.selfDid ? 'challenger' : 'acceptor';
       const opp = meIdx === 'challenger' ? m.players.acceptor : m.players.challenger;
-      const phaseIdx = PHASES.indexOf(m.phase);
-      const pills = PHASES.map((p, i) => `<span class="arena-pill${i < phaseIdx ? ' on' : ''}${i === phaseIdx ? ' now' : ''}">${p}</span>`).join('');
+      const gameName = arena.games().find((g) => g.hash === m.rulesHash)?.name ?? 'game';
+      const stage = stageOf(m.phase);
+      const pills = STAGES.map((p, i) => `<span class="arena-pill${i < stage ? ' on' : ''}${i === stage ? ' now' : ''}">${p}</span>`).join('');
       // The puzzle itself — the thing being raced. Rules output is
       // peer-derived content: escaped and clamped, never trusted markup.
       const prompt = m.challenge?.prompt
@@ -523,7 +605,7 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
         : `<div class="arena-verdict">● ${esc(o.kind)} — ${esc(reasonLabel(o.reason))}${m.coSigned ? ' · co-signed ✓' : ''}</div>`;
       return `
         <div class="arena-match">
-          <div class="hint">vs ${esc(shortDid(opp))} · ${esc(m.gameId)} · ${esc(m.matchId)}</div>
+          <div class="hint"><b>${esc(gameName)}</b> · vs ${esc(shortDid(opp))}</div>
           ${prompt}
           <div class="arena-pills">${pills}</div>
           ${race}
@@ -535,9 +617,9 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
 
   const renderBoard = () => {
     const boards = arena.boards();
-    slot('board').innerHTML = boards.length === 0
-      ? '<span class="hint">no verified results yet</span>'
-      : boards.map((b) => `
+    sec('board', boards.length > 0);
+    if (boards.length === 0) return;
+    slot('board').innerHTML = boards.map((b) => `
         <div class="hint">${esc(b.name)} · ${esc(b.rulesHash.slice(0, 10))}…</div>
         <table class="nb-table"><tr><th>agent</th><th>w</th><th>l</th><th>d</th></tr>${b.rows.map((r) => `
           <tr><td>${r.did === arena.selfDid ? 'you' : esc(shortDid(r.did))}</td><td>${r.w}</td><td>${r.l}</td><td>${r.d}</td></tr>`).join('')}</table>`).join('');
@@ -571,36 +653,34 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
     });
   };
 
-  const renderAll = () => { renderGraph(); renderGames(); renderRoster(); renderMatches(); renderBoard(); };
+  const renderAll = () => { renderGraph(); renderGames(); renderPeers(); renderMatches(); renderBoard(); };
   const offChange = arena.onChange(renderAll);
   const offActivity = arena.onActivity(log);
   renderAll();
-  // 1s ticker: the live-race countdown needs it; roster/graph only every 3rd
-  // tick (presence has no single change hook here).
+  // 1s ticker: the live-race countdown needs it; peers/graph/shelf only every
+  // 3rd tick (presence has no single change hook here, and the race button's
+  // visibility follows the roster).
   let tick = 0;
   const rosterTimer = setInterval(() => {
     renderMatches();
-    if (++tick % 3 === 0) { renderRoster(); renderGraph(); }
+    if (++tick % 3 === 0) { renderPeers(); renderGraph(); renderGames(); }
   }, 1000);
 
   panel.addEventListener('click', async (e) => {
-    const t = e.target.closest('[data-act],[data-install],[data-challenge],[data-open],[data-race]');
+    const t = e.target.closest('[data-act],[data-install],[data-open],[data-race]');
     if (!t) return;
     try {
-      if (t.dataset.act === 'share') { t.disabled = true; await arena.sharePuzzleRace(); t.textContent = '◈ shared'; }
-      else if (t.dataset.act === 'make' && makePad) { await makePad(); }
-      else if (t.dataset.act === 'auto') arena.setAutoAccept(t.checked);
+      if (t.dataset.act === 'make' && makePad) { await makePad(); }
       else if (t.dataset.install) { t.disabled = true; await arena.install(t.dataset.install); }
       else if (t.dataset.open && openBundle) { openBundle(t.dataset.open); }
       else if (t.dataset.race) {
-        // race = challenge the first agent online with the installed game
+        // race THIS game against the first agent online
         const peer = roster()[0];
         if (!peer) throw new Error('no agents online — open this page in a second tab');
         t.disabled = true;
-        await arena.challenge(peer.did);
+        await arena.challenge(peer.did, t.dataset.race);
         t.disabled = false;
       }
-      else if (t.dataset.challenge) { t.disabled = true; await arena.challenge(t.dataset.challenge); t.disabled = false; }
     } catch (err) {
       log(`error: ${err?.message || err}`);
       t.disabled = false;
