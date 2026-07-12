@@ -185,7 +185,16 @@
   @keyframes verdict-in{0%{opacity:0;transform:translateY(4px) scale(.98)}60%{transform:none}100%{opacity:1}}
   .ag-graph .pn-edge:not(.pn-edge--faint){stroke-dasharray:5 4;animation:ag-wire 1.1s linear infinite}
   @keyframes ag-wire{to{stroke-dashoffset:-9}}
-  .ag-bubble{fill:rgba(217,70,239,0.045);stroke:var(--magenta);stroke-opacity:.5;stroke-width:1.2}
+  .ag-bubble{fill:rgba(217,70,239,0.045);stroke:var(--magenta);stroke-opacity:.5;stroke-width:1.2;stroke-dasharray:4 6}
+  .ag-orbit{fill:none;stroke:rgba(255,255,255,0.10);stroke-width:1;stroke-dasharray:2 9}
+  .ag-crawl-slow{animation:ag-crawl 26s linear infinite}
+  .ag-crawl-slower{animation:ag-crawl 60s linear infinite reverse}
+  @keyframes ag-crawl{to{stroke-dashoffset:-200}}
+  .ag-float{animation:ag-bob var(--bob-dur,3.6s) ease-in-out infinite alternate}
+  @keyframes ag-bob{from{transform:translateY(-2.4px)}to{transform:translateY(2.4px)}}
+  @media (prefers-reduced-motion: reduce){
+    .ag-float,.ag-crawl-slow,.ag-crawl-slower,.ag-graph .pn-edge{animation:none;stroke-dasharray:none}
+  }
   .ag-bubble-label{fill:var(--magenta);fill-opacity:.6;font-size:10px;font-weight:700}
   .ag-graph{display:block;width:100%;max-width:560px;height:auto;margin:0 auto}
   .arena-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}

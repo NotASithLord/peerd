@@ -284,7 +284,11 @@ export async function createArena({ mesh }) {
         clearTimeout(timer); pendingFetch.delete(id); reject(e);
       });
     });
-    if (!files || typeof files !== 'object' || typeof files['rules.js'] !== 'string') throw new Error('malformed bundle');
+    // shape only — a bundle is ANY flat map of text files (a game, an app,
+    // data); the SIGNED HASH below is the real gate.
+    const paths = files && typeof files === 'object' && !Array.isArray(files) ? Object.keys(files) : [];
+    if (paths.length === 0 || paths.length > 32
+        || !paths.every((k) => k.length <= 128 && typeof files[k] === 'string')) throw new Error('malformed bundle');
     if (canonicalize(files).length > MAX_BUNDLE_BYTES) throw new Error('bundle too large');
     // THE trust step: bytes must hash to the version the publisher signed.
     if (await bundleHash(files) !== g.hash) throw new Error('bundle hash does not match the signed card');
@@ -425,19 +429,19 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
     <div class="arena">
       <div class="nb-section">the agent web <span class="hint">— you · your actors · agents on the mesh</span></div>
       <div class="arena-graph" data-slot="graph"></div>
-      <div class="nb-section">the dwapp shelf <span class="hint">— the p2p app store: created, shared, installed peer-to-peer</span></div>
+      <div class="nb-section">the dwapp store <span class="hint">— apps and games, created + traded peer-to-peer, run sandboxed</span></div>
       <div class="arena-games" data-slot="games"><span class="hint">nothing on the shelf yet — make or share something, or open this page in a second tab</span></div>
       <div class="nb-bar">
         ${makePad ? '<button class="run" data-act="make">✎ Make a pixel pad</button>' : ''}
         <button class="run" data-act="share">◈ Share Puzzle Race</button>
         <label class="hint"><input type="checkbox" data-act="auto" checked> auto-accept challenges</label>
       </div>
-      <div class="nb-section">agents online</div>
-      <div class="arena-roster" data-slot="roster"><span class="hint">joining the lobby…</span></div>
       <div class="nb-section">matches</div>
       <div class="arena-matches" data-slot="matches"><span class="hint">no matches yet</span></div>
       <div class="nb-section">leaderboard <span class="hint">— co-signed results only, signatures verified locally</span></div>
       <div class="arena-board" data-slot="board"><span class="hint">no verified results yet</span></div>
+      <div class="nb-section">agents online</div>
+      <div class="arena-roster" data-slot="roster"><span class="hint">joining the lobby…</span></div>
       <div class="nb-section">activity</div>
       <div class="nb-console arena-log" data-slot="log"></div>
       <p class="substrate">mounts: peerd-runtime/game (match reducer + driver) · peerd-distributed meta/gossip/direct · rules run SEALED in the notebook worker · lobby peerd/demo/1</p>
@@ -465,7 +469,9 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
           <span class="arena-card-name">${esc(g.name)}</span>
           <span class="hint">${g.kind ? `${KIND_BADGE[g.kind] ?? g.kind} · ` : ''}by ${g.mine ? 'you' : esc(shortDid(g.publisher))} · ${esc(g.hash.slice(0, 10))}…</span>
           ${g.installed
-    ? `${g.kind === 'app' && openBundle ? `<button class="install-btn" data-open="${esc(g.id)}">▶ open</button>` : ''}<span class="arena-tag">installed</span>`
+    ? `${g.kind === 'app' && openBundle ? `<button class="install-btn" data-open="${esc(g.id)}">▶ open</button>` : ''}${
+      g.kind === 'game' && roster().length > 0 ? '<button class="install-btn arena-race-btn" data-race="1">⚡ race</button>' : ''
+    }<span class="arena-tag">installed</span>`
     : `<button class="install-btn" data-install="${esc(g.id)}">⬇ install</button>`}
         </div>`).join('');
   };
@@ -578,7 +584,7 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
   }, 1000);
 
   panel.addEventListener('click', async (e) => {
-    const t = e.target.closest('[data-act],[data-install],[data-challenge],[data-open]');
+    const t = e.target.closest('[data-act],[data-install],[data-challenge],[data-open],[data-race]');
     if (!t) return;
     try {
       if (t.dataset.act === 'share') { t.disabled = true; await arena.sharePuzzleRace(); t.textContent = '◈ shared'; }
@@ -586,6 +592,14 @@ export function mountArenaUI(panel, { arena, roster, localActors = () => [], ope
       else if (t.dataset.act === 'auto') arena.setAutoAccept(t.checked);
       else if (t.dataset.install) { t.disabled = true; await arena.install(t.dataset.install); }
       else if (t.dataset.open && openBundle) { openBundle(t.dataset.open); }
+      else if (t.dataset.race) {
+        // race = challenge the first agent online with the installed game
+        const peer = roster()[0];
+        if (!peer) throw new Error('no agents online — open this page in a second tab');
+        t.disabled = true;
+        await arena.challenge(peer.did);
+        t.disabled = false;
+      }
       else if (t.dataset.challenge) { t.disabled = true; await arena.challenge(t.dataset.challenge); t.disabled = false; }
     } catch (err) {
       log(`error: ${err?.message || err}`);

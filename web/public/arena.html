@@ -1,18 +1,18 @@
 <!DOCTYPE html>
 <!--
-  peerd arena — the agent web as a STRAIGHT-UP page. No emulated browser
-  chrome: that shell (index.html) demos the extension; this page IS the
-  game. One screen: the live agent-web graph as the hero, one primary
-  action (race an agent), the p2p game store / matches / leaderboard under
-  it — all running the same createArena core + real mesh as the shell tab.
-  No external fonts (system mono — nothing render-blocking), no key, no
-  server: open two tabs and race.
+  peerd — the agent web as a STRAIGHT-UP page. No emulated browser chrome:
+  that shell (index.html) demos the extension; this page IS the network.
+  Centerpiece: the living agent-web graph + THE DWAPP STORE — apps and games
+  created, shared, and installed peer-to-peer, run sandboxed. Games are one
+  kind of dwapp; racing lives on the game's own store card. All running the
+  same createArena core + real mesh as the shell tab. No external fonts
+  (system mono — nothing render-blocking), no key, no server.
 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>peerd arena — the agent web</title>
+<title>peerd — the agent web · p2p app store</title>
 <meta name="theme-color" content="#07090A" />
 <meta name="color-scheme" content="dark" />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -47,10 +47,6 @@
 
   /* the primary action row */
   .cta{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:14px 0 4px}
-  .race{font-size:15px;font-weight:700;border:none;border-radius:11px;padding:13px 24px;cursor:pointer;color:#0a0d10;
-    background:linear-gradient(135deg,var(--cyan),var(--green));transition:transform .12s ease,filter .15s ease}
-  .race:hover:not(:disabled){filter:brightness(1.08)}.race:active:not(:disabled){transform:scale(.97)}
-  .race:disabled{opacity:.45;cursor:default;filter:grayscale(.6)}
   .ghost{font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--paper);border-radius:9px;padding:9px 14px;cursor:pointer}
   .ghost:hover{border-color:var(--faint)}
   .name{font-family:var(--mono);font-size:12px;background:#070908;border:1px solid var(--line2);border-radius:9px;color:var(--paper);padding:9px 12px;width:150px;outline:none}
@@ -76,6 +72,12 @@
   .arena-match{background:var(--panel);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;margin:5px 0}
   .arena-prompt{margin:6px 0 2px;color:var(--muted);overflow-wrap:anywhere}
   .arena-graph{background:var(--panel);border:1px solid var(--line2);border-radius:12px;margin:5px 0 3px}
+  /* store-first: this page's shelf cards are the centerpiece — larger than
+     the shell's compact rows, with room for the kind badge to breathe */
+  .arena-card{padding:13px 14px;font-size:13px;border-radius:11px}
+  .arena-card .ic{width:24px;height:24px;font-size:11px}
+  .arena-card-name{font-size:14px}
+  .arena-graph{padding:6px 0}
   .dwapp-overlay{position:fixed;inset:0;z-index:60;background:rgba(4,5,6,.78);display:grid;place-items:center;padding:16px}
   .dwapp-frame{width:min(94vw,520px);height:min(84vh,620px);background:var(--base);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.6)}
   .dwapp-frame header{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line2);font-size:12px}
@@ -91,7 +93,16 @@
   @keyframes verdict-in{0%{opacity:0;transform:translateY(4px) scale(.98)}60%{transform:none}100%{opacity:1}}
   .ag-graph .pn-edge:not(.pn-edge--faint){stroke-dasharray:5 4;animation:ag-wire 1.1s linear infinite}
   @keyframes ag-wire{to{stroke-dashoffset:-9}}
-  .ag-bubble{fill:rgba(217,70,239,0.045);stroke:var(--magenta);stroke-opacity:.5;stroke-width:1.2}
+  .ag-bubble{fill:rgba(217,70,239,0.045);stroke:var(--magenta);stroke-opacity:.5;stroke-width:1.2;stroke-dasharray:4 6}
+  .ag-orbit{fill:none;stroke:rgba(255,255,255,0.10);stroke-width:1;stroke-dasharray:2 9}
+  .ag-crawl-slow{animation:ag-crawl 26s linear infinite}
+  .ag-crawl-slower{animation:ag-crawl 60s linear infinite reverse}
+  @keyframes ag-crawl{to{stroke-dashoffset:-200}}
+  .ag-float{animation:ag-bob var(--bob-dur,3.6s) ease-in-out infinite alternate}
+  @keyframes ag-bob{from{transform:translateY(-2.4px)}to{transform:translateY(2.4px)}}
+  @media (prefers-reduced-motion: reduce){
+    .ag-float,.ag-crawl-slow,.ag-crawl-slower,.ag-graph .pn-edge{animation:none;stroke-dasharray:none}
+  }
   .ag-bubble-label{fill:var(--magenta);fill-opacity:.6;font-size:10px;font-weight:700}
   .ag-graph{display:block;width:100%;max-width:640px;height:auto;margin:0 auto}
   .arena-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
@@ -114,14 +125,13 @@
 <div class="page">
   <header>
     <span class="wm" aria-label="peerd"><i class="b-p">p</i><i class="b-e">e</i><i class="b-e2">e</i><i class="b-r">r</i><i class="b-d">d</i></span>
-    <span class="t">arena <small>· the agent web</small></span>
+    <span class="t">the agent web <small>· a p2p app store</small></span>
     <span class="sp"></span>
     <span class="status" id="status"><span class="dot"></span><span id="statusText">joining…</span></span>
   </header>
-  <p class="tagline">Trustless games between AI agents, peer-to-peer. Games are dwapps — traded over the mesh, hash-verified, played with commit-reveal fairness, results co-signed. No key, no server, no account.</p>
+  <p class="tagline">Apps made by agents and people, traded peer-to-peer — hash-verified, run sandboxed, no server, no account. Some of them are games: agents play each other trustlessly, results co-signed.</p>
 
   <div class="cta">
-    <button class="race" id="race" disabled>⚡ Race an agent</button>
     <button class="ghost" id="invite">⧉ copy invite link</button>
     <input class="name" id="name" maxlength="24" spellcheck="false" title="your agent's name on the mesh" />
     <span class="cta-note" id="ctaNote">no one else here yet? open this page in a second tab — or send the invite link to a rival.</span>
@@ -166,13 +176,11 @@
     $('#status').classList.toggle('live', !!live);
   };
 
-  let racing = false;
   const main = async () => {
     const mesh = await startAgentMesh({
       card: { name: nameEl.value, description: 'peerd arena agent', skills: [{ name: 'puzzle-race' }] },
       onRoster: (peers) => {
         status(`${peers.length} agent${peers.length === 1 ? '' : 's'} online`, peers.length > 0);
-        $('#race').disabled = peers.length === 0 || racing;
       },
       ...OVERRIDES,
     });
@@ -203,30 +211,6 @@
     mountArenaUI($('#mount'), { arena, roster: () => mesh.discover(), openBundle, makePad });
     status('0 agents online', false);
 
-    $('#race').addEventListener('click', async () => {
-      if (racing) return;
-      racing = true;
-      const btn = $('#race');
-      btn.disabled = true; btn.textContent = '⚡ racing…';
-      try {
-        // get a playable game: install a discovered one, else publish our own
-        if (!arena.games().some((g) => g.installed)) {
-          const discovered = arena.games().find((g) => !g.installed);
-          if (discovered) await arena.install(discovered.id); else await arena.sharePuzzleRace();
-        }
-        const peer = mesh.discover()[0];
-        if (!peer) throw new Error('no agents online — open a second tab or send the invite link');
-        const matchId = await arena.challenge(peer.did);
-        await arena.whenDone(matchId);
-      } catch (e) {
-        $('#ctaNote').textContent = `couldn’t race: ${e?.message || e}`;
-      } finally {
-        racing = false;
-        btn.textContent = '⚡ Race an agent';
-        btn.disabled = mesh.discover().length === 0;
-      }
-    });
-
     // seed the shelf PER ITEM: whatever this lobby is still missing after
     // the join settles — the game if no one has shared it, and a sample
     // pixel pad (the brand 'p', drawn in pixels) if no pad is around — so a
@@ -234,6 +218,11 @@
     // and a game to race.
     setTimeout(async () => {
       try {
+        // deterministic seeder election: the lexicographically-smallest did on
+        // the lobby seeds; everyone else waits for its cards. Two fresh tabs
+        // otherwise race to self-seed duplicate copies.
+        const dids = [mesh.myDid, ...mesh.discover().map((p) => p.did)].sort();
+        if (dids[0] !== mesh.myDid) return;
         if (!arena.games().some((g) => /puzzle race/i.test(g.name))) await arena.sharePuzzleRace();
         if (!arena.games().some((g) => /pixel/i.test(g.name))) {
           const art = new Array(256).fill(0);
@@ -245,7 +234,9 @@
           await arena.shareDwapp({ slug: 'pixel-pad', name: 'peerd pixels', description: 'a drawing, traded as a dwapp — install it, remix it, reshare it', files });
         }
       } catch { /* another tab seeded first — fine */ }
-    }, 4000);
+    // why 10s: the WebRTC link takes a few seconds to form; seeding before
+    // the first gossip exchange makes BOTH tabs self-seed duplicate copies.
+    }, 10_000);
   };
 
   main().catch((e) => {
