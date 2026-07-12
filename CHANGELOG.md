@@ -10,6 +10,63 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-10
+
+### Added
+- **Z.ai GLM as a BYOK provider.** Use GLM-5.2 (and the rest of the GLM
+  lineup) directly from z.ai, not routed through OpenRouter. Z.ai's API is
+  OpenAI-compatible, so the adapter is a thin sibling of the OpenRouter one:
+  same wire format, different base URL and key shape. Shows up in
+  Settings under Providers.
+- **`fetch_url` returns clean markdown by default.** HTML is converted with
+  vendored Readability and Turndown, running in the offscreen document,
+  instead of handing back raw page source. Non-article pages, Firefox
+  (no extraction client there), or an extraction error all fall back to
+  today's raw behavior. An oversized body no longer silently loses its
+  tail: it spills to a local cache and the model sees a head and tail
+  window with a note on how to page through the rest with the new
+  `read_web_cache` tool.
+- **`read_page` gains `mode:'content'`.** It grabs the rendered DOM after
+  JavaScript has run and routes it through the same extraction and paging
+  pipeline `fetch_url` uses, so a tab-driven task gets the same clean
+  markdown a fetched page does. The default snapshot mode (interactable
+  elements for clicking and typing) is unchanged.
+- **An experimental code surface for the web actor** (default off, opt-in
+  under Settings → Behavior). Instead of one tool call per action, the
+  actor can write Playwright-style JS against a sealed `page.goto` /
+  `click` / `fill` / `snapshot` bridge, with the same gated dispatch,
+  denylist, and audit as the normal tool-call path underneath. Measured
+  against the tool-call path on the Online-Mind2Web benchmark it did not
+  win (26.7% vs 20.7%, more steps, more step-cap failures), so tool calls
+  stay the default; the code surface ships anyway because a real
+  benchmark harness for a browser-extension agent came out of building it.
+
+### Fixed
+- **A "New chat" mid-task could leave an abandoned actor still running.**
+  Resetting a session now stops its live turn and cascades the stop to
+  every actor it had spawned, the same way the Stop button already does.
+- **A spent Z.ai account retried instead of failing over.** Z.ai reports
+  out-of-credit as an HTTP 429 with its own error code, which the retry
+  classifier didn't recognize, so a drained account burned three retries
+  before giving up instead of switching providers.
+- **GLM-4.6 was priced about three times too high**, which could trip a
+  spend limit early or inflate the cost display for no reason. Corrected
+  to its published rate.
+- **An OpenAI streaming error could be blamed on OpenRouter** in the
+  error text, since the shared stream parser wasn't told which provider
+  it was reading for.
+- **A few research-preset tool manifests were missing `read_web_cache`**
+  even though they allowed the tools that produce a spillable body, so a
+  paged-out fetch or page read left the model unable to read its own
+  overflow, burning turns on a call the manifest then refused.
+- **`read_page`'s content mode could truncate silently.** A render past
+  its size cap now says so explicitly instead of reporting `truncated:
+  false` on a body that was actually cut.
+- **The cache-eviction message for a paged-out read pointed at the wrong
+  fix.** It told the model to re-fetch the URL, which for a rendered
+  page throws away the post-JavaScript DOM it already had; the hint is
+  now specific to how the content was originally captured.
+
 ## [0.2.6] - 2026-07-06
 
 ### Fixed
