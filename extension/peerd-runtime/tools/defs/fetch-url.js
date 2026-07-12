@@ -19,7 +19,7 @@
 import { fetchUrl } from '../web/primitives.js';
 import { originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { windowText, pagingFooter } from '../web/spill.js';
+import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
 
 const MAX_BODY_CHARS = 16_000;   // hard cap to avoid context-blast on huge payloads
@@ -64,6 +64,7 @@ export const fetchUrlTool = {
       url: { type: 'string', description: 'Absolute URL (must include an http(s) scheme).' },
       method: { type: 'string', enum: ['GET', 'POST'], description: 'HTTP method. Default GET.' },
       raw: { type: 'boolean', description: 'HTML responses are extracted to clean markdown by default (boilerplate stripped). Pass true to get the raw HTML instead — e.g. when you need markup, attributes, or embedded script/JSON the extraction would drop.' },
+      query: { type: 'string', description: 'What you are looking for on this page (a few keywords). When the page is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window — so a mid-page answer is not missed. Omit to get the head+tail window.' },
       headers: {
         type: 'object',
         description: 'Request headers. Tool-supplied Cookie / Authorization are always stripped (you cannot inject a credential). Content-Type is set automatically for JSON bodies.',
@@ -148,18 +149,29 @@ export const fetchUrlTool = {
       // the cache capability is absent (a ctx without webCache).
       const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
         /** @type {any} */ (ctx).webCache);
-      const win = windowText(workingBody, MAX_BODY_CHARS);
-      let text = win.window;
-      const truncated = win.windowed;
+      // When the caller named a query AND the body is prose (not JSON — BM25 is
+      // for paragraphs, not object trees), surface the most-relevant PASSAGES
+      // instead of a blind head+tail window: a long page's answer usually sits
+      // mid-document. excerptRelevant returns null (no query / no match / too
+      // few passages) → fall back to windowText. Either way the FULL text is
+      // stored and pageable; this only picks a better first window.
+      const query = typeof args.query === 'string' ? args.query.trim() : '';
+      const ex = (query && !/(json|graphql)/i.test(ct))
+        ? excerptRelevant(workingBody, query, MAX_BODY_CHARS) : null;
+      const win = windowText(workingBody, MAX_BODY_CHARS);   // always computed (cheap) — the fallback path
+      let text = ex ? ex.excerpt : win.window;
+      const truncated = ex ? ex.excerpted : win.windowed;
       /** @type {string | null} */
       let footer = null;
-      if (win.windowed && webCache?.key && webCache?.put) {
+      if (truncated && webCache?.key && webCache?.put) {
         const cacheKey = webCache.key();
         try {
           await webCache.put({ key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody });
-          footer = pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
-        } catch { /* spill failed — the window (with its elision marker) still ships */ }
-      } else if (win.windowed && !webCache) {
+          footer = ex
+            ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
+            : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+        } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
+      } else if (truncated && !webCache) {
         // No cache capability → the pre-spill behavior (head-only slice).
         text = workingBody.slice(0, MAX_BODY_CHARS);
       }
