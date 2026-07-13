@@ -81,7 +81,8 @@ const mapStopReason = (finish) => {
  * @param {ReadableStream<Uint8Array>} body
  * @param {{ provider?: string }} [opts]
  *   `provider` labels in-stream error events so the UI names the right
- *   source (this parser is shared by OpenRouter AND Ollama).
+ *   source (this parser is shared by OpenRouter, OpenAI, Z.ai GLM, and
+ *   Ollama — each passes its own name; the default is only a fallback).
  * @returns {AsyncGenerator<ProviderEvent>}
  */
 export async function* fromOpenAiStream(body, { provider = 'openrouter' } = {}) {

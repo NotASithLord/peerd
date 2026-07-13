@@ -65,12 +65,16 @@ const DB_NAME = 'peerd';
 // v10 — audit_meta: the audit log's hash-chain head record (R4 tamper
 // evidence). One tiny record ({ key: 'audit_chain_head', id, chain })
 // pinning the newest entry so tail truncation is detectable.
-// v11 — web_extract_cache: fetch_url's spill-and-page store. When a fetched
-// body overflows the tool budget, the FULL text is spilled here (records
-// { key, url, format, text, storedAt }) and the model gets a head+tail window
-// plus the exact read_web_cache paging call — instead of silently losing the
-// middle. Same posture as vm_http_cache: fetched public bytes, unencrypted
-// extension-scoped disk, best-effort, safe to clear at any time.
+// v11 — web_extract_cache: the spill-and-page store for fetch_url AND
+// read_page mode:'content'. When a read overflows the tool budget, the FULL
+// text is spilled here (records { key, url, format, text, storedAt }) and the
+// model gets a head+tail window plus the exact read_web_cache paging call —
+// instead of silently losing the middle. Unencrypted extension-scoped disk,
+// best-effort, safe to clear at any time. NOTE: unlike vm_http_cache's fetched
+// public bytes, read_page content is the RENDERED DOM of a tab the user may be
+// logged into, so an entry can hold authenticated page text; it is not purged
+// on vault lock (same at-rest posture as session_messages/memory, which also
+// persist plaintext here).
 const DB_VERSION = 11;
 
 /**

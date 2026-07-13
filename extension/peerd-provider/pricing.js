@@ -81,12 +81,16 @@ export const DEFAULT_PRICING = Object.freeze({
 
   // ---- Z.ai GLM (native adapter; bare model ids) ----
   // Source: docs.z.ai/guides/overview/pricing (2026-07 snapshot, USD / 1M tokens).
-  // GLM-5.2 flagship tier; cacheRead is the cached-input rate. Z.ai reports no
-  // separate cache-write line (0). GLM-4.5-Air (the web-actor runner) is
-  // intentionally absent — its lower tier is left to user override rather than
-  // a guessed number; an unknown id degrades to an honest "estimate unavailable".
-  'glm-5.2': Object.freeze({ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }),
-  'glm-4.6': Object.freeze({ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }),
+  // Each tier is priced from its own published rate — GLM-4.6 is a distinctly
+  // cheaper tier than the 5.2 flagship, NOT the same rate card. Z.ai reports no
+  // separate cache-write line (0); cacheRead is the published cached-input rate
+  // (GLM-4.6 has no published cached rate, so it carries the 5.2 tier's ~0.19x
+  // ratio applied to its input — an estimate, still far closer than the
+  // flagship's number). GLM-4.5-Air (the web-actor runner) is intentionally
+  // absent — its lower tier is left to user override rather than a guessed
+  // number; an unknown id degrades to an honest "estimate unavailable".
+  'glm-5.2': Object.freeze({ input: 1.4,  output: 4.4,  cacheRead: 0.26, cacheWrite: 0 }),
+  'glm-4.6': Object.freeze({ input: 0.43, output: 1.74, cacheRead: 0.08, cacheWrite: 0 }),
 
   // ---- Ollama (local inference — $0 by construction) ----
   // why: the CostChip prices by model id; without entries the curated
