@@ -99,8 +99,19 @@ async function main() {
     };
     log(`SMOKE — wire-fake against ${fixture.url}${ACTOR_SURFACE ? ` (${ACTOR_SURFACE} surface)` : ''}; no dataset, no key, no cost.`);
   } else {
-    const shard = ALL.slice(OFFSET, OFFSET + COUNT);
-    log(`OM2W ${revision.slice(0, 8)} — tasks ${OFFSET}..${OFFSET + shard.length - 1} of ${ALL.length}, model=${MODEL || PROVIDER} → ${OUT}`);
+    // --task-ids=<file>: run an ARBITRARY set of task_ids (one per line), not a
+    // contiguous offset/count shard. Used to re-run a specific failure cluster
+    // (e.g. the promissory-ack tasks) under a changed harness knob.
+    const idsFile = flag('task-ids', false) ? String(flag('task-ids', '')) : '';
+    const shard = idsFile
+      ? (() => {
+          const wanted = new Set(readFileSync(idsFile, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean));
+          return ALL.filter((t) => wanted.has(t.task_id));
+        })()
+      : ALL.slice(OFFSET, OFFSET + COUNT);
+    log(idsFile
+      ? `OM2W ${revision.slice(0, 8)} — ${shard.length} task(s) from ${idsFile}, model=${MODEL || PROVIDER} → ${OUT}`
+      : `OM2W ${revision.slice(0, 8)} — tasks ${OFFSET}..${OFFSET + shard.length - 1} of ${ALL.length}, model=${MODEL || PROVIDER} → ${OUT}`);
     todo = shard.filter((t) => !existsSync(join(OUT, t.task_id, 'result.json')));   // resumable
     log(`${shard.length - todo.length} already exported; ${todo.length} to run`);
     if (!todo.length) { log('nothing to do'); process.exit(0); }

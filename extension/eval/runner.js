@@ -20,7 +20,7 @@ import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, lastActivityAt: number, runnerUsd: number }} Turn
+ * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, lastActivityAt: number, runnerUsd: number, outstandingActors: number }} Turn
  */
 
 // The runner's own $ for a task — 'local' is FREE, a cloud runner is priced from
@@ -80,7 +80,7 @@ let turn = fresh();
 // scorecard stays honest (main is low, the actor's spend appears — not "free").
 // The bucket keeps the `runner` name for continuity with the runnerModel A/B.
 /** @returns {Turn} */
-function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, lastActivityAt: 0, runnerUsd: 0 }; }
+function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, lastActivityAt: 0, runnerUsd: 0, outstandingActors: 0 }; }
 
 // 'eval' (not 'sidepanel') so an open home page doesn't think the side panel
 // popped out — joins uiPorts for turn/* all the same. See service-worker onConnect.
@@ -95,20 +95,33 @@ function fresh() { return { session: null, tools: [], tokens: 0, cost: null, run
 // only score after SETTLE_MS of total silence across the orchestrator AND its
 // actor. Bounded by the task's timeoutMs (runTask races this against a sleep).
 // why 15s: a delegated task has real inter-event gaps — the ack-idle before the
-// actor spins up, and a snapshot-heavy actor step whose model call is slow. At
-// 8s a snapshot-heavy task settled EARLY, mid-flight. 15s clears the largest
-// observed gap; a stuck turn still bails on the task's own timeoutMs, and
-// durationMs is measured to LAST ACTIVITY so the idle wait doesn't inflate it.
+// actor spins up, and a snapshot-heavy actor step whose model call is slow. 15s
+// clears the largest event-to-event gap; a stuck turn still bails on the task's
+// own timeoutMs, and durationMs is measured to LAST ACTIVITY so the idle wait
+// doesn't inflate it. why NOT larger: the ONE gap 15s couldn't cover is the web
+// actor's own reply-SYNTHESIS — after its last page op the actor goes silent for
+// a full model call (~20-40s on a slow model) before its reply-wake re-enters
+// the orchestrator with the real answer. A blanket bump to 60s "fixed" it (score
+// 33%→41% at full-300, McNemar p=0.011) but taxed EVERY task +45s. The precise
+// fix instead: HOLD the settle while a web-actor delegation is in flight (see
+// outstandingActors below) so that synthesis gap can't trigger capture, and keep
+// the window tight at 15s once no actor is outstanding. Fast tasks settle in 15s;
+// async tasks wait for the actor, not a fixed padding.
 const SETTLE_MS = 15_000;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let settleTimer = null;
-// Reset the settle countdown on activity; when it elapses with no new event,
-// the delegated round-trip is finished → resolve the task's done promise.
+// Reset the settle countdown on activity; when it elapses with no new event AND
+// no web-actor delegation is still in flight, the round-trip is finished →
+// resolve the task's done promise. If an actor is outstanding (started, not yet
+// done) the window elapsing is the synthesis-gap false alarm — reschedule instead
+// of resolving. Bounded by the task's own timeoutMs even if an actor never
+// reports done (a hung actor).
 const bumpSettle = () => {
   if (!turn.started || !turn.resolveDone) return;   // no active task / not begun
   turn.lastActivityAt = Date.now();                 // for the work-time duration metric
   if (settleTimer) clearTimeout(settleTimer);
-  settleTimer = setTimeout(() => {
+  settleTimer = setTimeout(function fire() {
+    if (turn.outstandingActors > 0) { settleTimer = setTimeout(fire, SETTLE_MS); return; }
     settleTimer = null;
     if (turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
   }, SETTLE_MS);
@@ -158,8 +171,13 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
       bumpSettle();
       break;
     // Actor lifecycle events are ACTIVITY — they must hold the settle window
-    // open while the delegated work runs.
-    case 'turn/actor-start': case 'turn/actor-state': case 'turn/actor-done': bumpSettle(); break;
+    // open while the delegated work runs. start/done also bracket an OUTSTANDING
+    // delegation: while the count is > 0 the settle-fire is suppressed (see
+    // bumpSettle), so the actor's silent reply-synthesis gap can't capture the
+    // orchestrator's intermediate ack. clamp at 0 so a missed start can't wedge.
+    case 'turn/actor-start': turn.outstandingActors++; bumpSettle(); break;
+    case 'turn/actor-done': turn.outstandingActors = Math.max(0, turn.outstandingActors - 1); bumpSettle(); break;
+    case 'turn/actor-state': bumpSettle(); break;
     case 'turn/error': turn.error = msg.error; bumpSettle(); break;
     // streaming:true = the orchestrator (or a wake) is producing output → keep
     // waiting. streaming:false = it went idle → START the settle countdown (a
