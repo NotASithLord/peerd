@@ -290,6 +290,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const toolContext = await buildToolContext(isActor
     ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
+  // why: thread THIS turn's abort signal onto the tool ctx so a tool that can
+  // block IN-BAND unwinds on Stop / the turn timeout instead of parking the
+  // turn — message_actor with await:true (which resolves the actor's reply into
+  // the tool result), and a headless script run. The offscreen actor path
+  // already gets its own signal; this closes the same gap for the orchestrator,
+  // whose awaited web delegation must stay cancellable. The controller aborts on
+  // Stop (turnSlots.claim → abortController.abort()).
+  toolContext.abortSignal = abortController.signal;
 
   // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
   // goal cuts below change mid-turn, so the advertised list must follow.

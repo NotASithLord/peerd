@@ -134,6 +134,44 @@ describe('message_actor — happy path + correlation', () => {
   });
 });
 
+describe('message_actor — awaitReply (in-band reply mode)', () => {
+  test('await resolves the fenced reply INTO the tool result — no later-turn wake', async () => {
+    const { messageActor, reentries, turnsRun } = harness();
+    // The orchestrator opts into an in-band await for a single primary task.
+    const r = await messageActor({
+      to: 'app-1', message: 'get the price', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    // The actor turn still ran on the actor session, exactly like the async path.
+    expect(turnsRun).toEqual([{ actorSessionId: 'res-1', message: 'get the price' }]);
+    // The substance came back HERE, fenced — the caller answers with it directly,
+    // instead of ending its turn on an "I'll report back" deferral.
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('<u origin="app-1">built the thing</u>');
+    // …and it did NOT re-enter the sender on a later turn (that's the async path).
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('await unwinds on the abort signal (Stop / turn timeout) with a failure result', async () => {
+    // A hung actor turn that never replies — the exact "parked forever" case the
+    // race exists to prevent. The already-aborted signal must resolve the await now.
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { fn(); }, advanceQueue: () => {}, stop: () => true },
+    });
+    const ac = new AbortController();
+    ac.abort();
+    const r = await messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true, awaitSignal: ac.signal,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('aborted');
+    // No later-turn wake fires for an awaited call, even on abort.
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+});
+
 describe('message_actor — error path still wakes the sender', () => {
   test('a thrown actor turn re-enters the sender with an error notice', async () => {
     const { messageActor, reentries } = harness({

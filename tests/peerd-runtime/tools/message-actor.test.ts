@@ -51,14 +51,26 @@ describe('message_actor — case 6: strict boolean coercions', () => {
     expect(missing.seen.req.inbound).toBe(false);
   });
 
-  test('awaitReply is true ONLY for an actor session (PR #134 reply mode)', async () => {
+  test('awaitReply: a spawned actor ALWAYS awaits; the orchestrator opts in with await:true', async () => {
+    // A spawned (ephemeral) actor awaits its reply no matter what (PR #134).
     const sub = recordingCtx({ session: { sessionId: 's', kind: 'spawned' } });
     await messageActorTool.execute({ to: 'web', message: 'hi' }, sub.ctx);
     expect(sub.seen.req.awaitReply).toBe(true);
 
+    // The orchestrator ('main') defaults to the async wake — reply on a later turn.
     const main = recordingCtx({ session: { sessionId: 's', kind: 'main' } });
     await messageActorTool.execute({ to: 'web', message: 'hi' }, main.ctx);
-    expect(main.seen.req.awaitReply).toBe(false); // 'main' !== 'spawned'
+    expect(main.seen.req.awaitReply).toBe(false); // default: fire-and-continue
+
+    // …but the orchestrator can OPT IN to an in-band await for a primary task.
+    const awaited = recordingCtx({ session: { sessionId: 's', kind: 'main' } });
+    await messageActorTool.execute({ to: 'web', message: 'hi', await: true }, awaited.ctx);
+    expect(awaited.seen.req.awaitReply).toBe(true);
+
+    // Strict boolean: a truthy non-true does NOT flip the default async path.
+    const loose = recordingCtx({ session: { sessionId: 's', kind: 'main' } });
+    await messageActorTool.execute({ to: 'web', message: 'hi', await: 'yes' }, loose.ctx);
+    expect(loose.seen.req.awaitReply).toBe(false); // 'yes' !== true
   });
 });
 
