@@ -267,16 +267,41 @@
    of pinned to the left. */
 .peerd-net-graph { display: block; width: 100%; max-width: 560px; height: auto; margin: 4px auto; }
 
-/* The "You" hub — neutral fill, a pulsing distributed-magenta ring. */
-.pn-self { fill: var(--bg); stroke: var(--magenta); stroke-width: 2; }
-.pn-self-ring { fill: none; stroke: var(--magenta); stroke-width: 1.5; opacity: 0.5; animation: pn-pulse 2.4s ease-in-out infinite; }
+/* The "You" hub — the orchestrator is NEUTRAL (paper), never magenta: since
+   the agent-web merge, magenta belongs to the boundary and what's beyond it. */
+.pn-self { fill: var(--bg); stroke: var(--fg); stroke-width: 2; }
+.pn-self-ring { fill: none; stroke: var(--fg); stroke-width: 1.5; opacity: 0.4; animation: pn-pulse 2.4s ease-in-out infinite; }
 .pn-self-label { fill: var(--fg); font-size: 12px; font-weight: 600; }
 @keyframes pn-pulse { 0%, 100% { opacity: 0.18; stroke-width: 1; } 50% { opacity: 0.6; stroke-width: 2.5; } }
 
-/* Peer dots + labels. Dot fill is set inline (per-did brand color). */
+/* Node dots + labels. Dot fill is set inline: magenta for peers (the wire's
+   color), the module color for each actor. */
 .pn-dot { stroke: var(--bg); stroke-width: 1.5; }
 .pn-dot--faint { opacity: 0.45; }
 .pn-label { fill: var(--fg); font-size: 10px; text-anchor: middle; }
+
+/* THE DWEB BOUNDARY — the dashed magenta membrane your peerd lives inside.
+   It crawls slowly (stroke-dashoffset) and the faint peer-ring orbit counter-
+   crawls: the two drifts are what keep the picture from reading flat. */
+.pn-boundary { fill: rgba(217, 70, 239, 0.035); stroke: var(--magenta); stroke-opacity: 0.5; stroke-width: 1.2; stroke-dasharray: 4 6; }
+.pn-orbit { fill: none; stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 9; opacity: 0.7; }
+.pn-crawl { animation: pn-crawl 30s linear infinite; }
+.pn-crawl-rev { animation: pn-crawl 70s linear infinite reverse; }
+@keyframes pn-crawl { to { stroke-dashoffset: -200; } }
+.pn-boundary-label { fill: var(--magenta); fill-opacity: 0.65; font-size: 11px; font-weight: 700; }
+
+/* Actors: a soft color halo under each dot (the depth cue), and a dashed badge
+   ring on a DWAPP actor — an agent persona, not just a sandbox. Live actors'
+   halos breathe; the hub edge glows in the actor's own color. */
+.pn-halo { opacity: 0.16; }
+.pn-actor .pn-label { font-size: 9.5px; }
+.pn-actor .pn-halo { animation: pn-breathe 3.4s ease-in-out infinite; }
+.pn-actor--off { opacity: 0.45; }
+.pn-actor--off .pn-halo { animation: none; }
+.pn-actor-badge { fill: none; stroke-width: 1; stroke-dasharray: 2.5 3; opacity: 0.8; animation: pn-crawl 24s linear infinite; }
+.pn-edge--actor { opacity: 0.22; }
+.pn-edge--actor.pn-edge--alive { opacity: 0.5; stroke-dasharray: 5 4; animation: pn-flow 1.2s linear infinite; }
+@keyframes pn-breathe { 0%, 100% { opacity: 0.10; } 50% { opacity: 0.22; } }
 
 /* Edges colored by the REAL ICE path — the honest-infrastructure beat. */
 .pn-edge { stroke-width: 1.4; opacity: 0.55; fill: none; }
@@ -293,6 +318,10 @@
 @keyframes pn-flow { to { stroke-dashoffset: -11; } }
 @keyframes pn-blink { 0%, 100% { opacity: 0.18; } 50% { opacity: 0.5; } }
 
+.peerd-net-legend {
+  text-align: center; color: var(--fg-muted); font-size: 11px; opacity: 0.8;
+  margin: 0 auto 10px; max-width: 560px;
+}
 .peerd-net-empty {
   padding: 16px; text-align: center; color: var(--fg-muted); font-size: 13px;
   border: 1px dashed var(--border); border-radius: var(--radius);
@@ -341,6 +370,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .pn-self-ring, .pn-edge--connecting, .pn-intro-edge { animation: none; }
+  .pn-crawl, .pn-crawl-rev, .pn-actor .pn-halo, .pn-actor-badge, .pn-edge--alive { animation: none; }
   .library-card, .disc-card { transition: none; }
   .library-card:hover, .disc-card:hover { transform: none; }
   .library-refresh.is-spinning, .disc-refresh.is-spinning { animation: none; }

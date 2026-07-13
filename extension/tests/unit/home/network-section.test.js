@@ -106,6 +106,60 @@ describe('home.network', () => {
     } finally { unmount(); }
   });
 
+  // The agent-web merge: actor rows (actors/graph) render INSIDE the boundary
+  // in module colors; peers render MAGENTA (the wire's color — owner direction
+  // 2026-07-10), never a random brand hue; a dwapp actor wears the badge ring.
+  it('renders actors inside the dweb boundary and magenta peers beyond it', async () => {
+    const send = makeSend({
+      'dweb/distributed/info': () => ({
+        ...LIVE_INFO,
+        peers: [{ did: 'did:key:zPeerOne', name: 'ana', linked: true, path: 'direct-ipv6' }],
+        peerCount: 1, linkedCount: 1,
+      }),
+      'actors/graph': () => ({
+        ok: true,
+        actors: [
+          { type: 'notebook', handle: 'nb-1', name: 'scratch', live: true, isActor: false },
+          { type: 'app', handle: 'app-1', name: 'Puzzle Race', live: false, isActor: true },
+        ],
+      }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      // the boundary + both rings' furniture
+      expect(root.querySelector('.pn-boundary')).toBeTruthy();
+      expect(root.querySelector('.pn-orbit')).toBeTruthy();
+      // two actor nodes, module-colored (notebook green, app amber), one badge
+      const actorDots = [...root.querySelectorAll('.pn-actor .pn-dot')];
+      expect(actorDots.length).toBe(2);
+      const fills = actorDots.map((d) => d.getAttribute('fill'));
+      expect(fills).toContain('#22C55E');
+      expect(fills).toContain('#F59E0B');
+      expect(root.querySelectorAll('.pn-actor-badge').length).toBe(1);
+      // the peer dot is magenta — not a random brand color
+      const peerDot = [...root.querySelectorAll('.pn:not(.pn-actor) .pn-dot')]
+        .find((d) => d.getAttribute('fill') === '#D946EF');
+      expect(peerDot).toBeTruthy();
+      // facts row counts the actors
+      expect(root.textContent).toContain('Actors');
+    } finally { unmount(); }
+  });
+
+  // The actor half fails SOFT: a locked vault (ok:false) must still render the
+  // peers-only live view, never blank the section.
+  it('vault-locked actors/graph degrades to a peers-only graph', async () => {
+    const send = makeSend({
+      'dweb/distributed/info': () => LIVE_INFO,
+      'actors/graph': () => ({ ok: false, error: 'vault-locked' }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      expect(root.querySelector('.peerd-net-facts')).toBeTruthy();
+      expect(root.querySelector('.pn-boundary')).toBeTruthy();
+      expect(root.querySelectorAll('.pn-actor').length).toBe(0);
+    } finally { unmount(); }
+  });
+
   it('a successful start dispatches dweb/base/start and shows the live view', async () => {
     let started = false;
     const send = makeSend({

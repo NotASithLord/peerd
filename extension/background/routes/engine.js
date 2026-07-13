@@ -14,6 +14,7 @@ export const makeEngineRoutes = (deps) => {
   const {
     vault, auditLog, pushState, browser, vmHttpFetch,
     appRegistry, vmRegistry, jsRegistry, appClient, appTabTracker,
+    vmTabTracker, jsTabTracker,
     opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
@@ -99,6 +100,48 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       try {
         return { ok: true, apps: await appRegistry.list() };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
+    // --- The agent web (home's Network → agent-web view) -------------------
+    // YOUR side of the graph: every engine instance as an actor row (the
+    // actor_list vocabulary — type/handle/name/live), apps flagged when their
+    // bundle declared a dwapp actor, plus the dweb actor when it's enabled.
+    // The page merges these with the mesh peers it already polls
+    // (dweb/distributed/info) into one picture: actors INSIDE the dweb
+    // boundary, peers beyond it. Metadata only (never OPFS bodies); `live` =
+    // the instance has its tab open right now (the tracker knows). Vault-gated
+    // like apps/list — instance names are user content; the section degrades
+    // to a peers-only graph while locked.
+    'actors/graph': async () => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
+      try {
+        /** @type {{ type: string, handle: string, name: string, live: boolean, isActor: boolean }[]} */
+        const actors = [];
+        const add = (/** @type {string} */ type, /** @type {any[]} */ records, /** @type {any} */ tracker) => {
+          for (const r of records) {
+            actors.push({
+              type,
+              handle: String(r.id),
+              name: String(r.name ?? r.id).slice(0, 40),
+              live: tracker?.getTabId?.(r.id) != null,
+              isActor: type === 'app' && !!r.actor,
+            });
+          }
+        };
+        add('webvm', await vmRegistry.list(), vmTabTracker);
+        add('notebook', await jsRegistry.list(), jsTabTracker);
+        add('app', await appRegistry.list(), appTabTracker);
+        // live instances first, newest catalog entries next; a hard cap keeps
+        // the ring readable (the Library remains the exhaustive list)
+        actors.sort((a, b) => Number(b.live) - Number(a.live));
+        const capped = actors.slice(0, 14);
+        if (DWEB_ENABLED && settingsStore.get().dwebAgentEnabled) {
+          capped.push({ type: 'dweb', handle: 'dweb', name: 'dweb agent', live: true, isActor: true });
+        }
+        return { ok: true, actors: capped };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }

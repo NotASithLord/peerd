@@ -339,21 +339,23 @@ const gate = (heading, copy) => m('.options-gate', m('.options-gate-card', [
 ]));
 
 // The rail's nav items. Chat + Chats are present only when home OWNS the chat
-// (no side panel open — single-homed). Discover/Network/Contacts are dweb-only
+// (no side panel open — single-homed). Discover/Agent web/Contacts are dweb-only
 // (absent on the store build and when the user switches dweb off).
 /** @param {boolean} showDweb */
 const navItems = (showDweb) => [
   // "Chats" is the top-level rail item; the chat page itself carries the
   // recent-chats list + "New chat" column (ChatListPanel, ChatGPT-style).
   ...(sidePanelOpen ? [] : [{ id: 'chat', label: 'Chats' }]),
+  // The agent web leads the rail after Chats (owner direction 2026-07-12:
+  // promote it — one picture of you, your actors, and the mesh). Keeps the
+  // 'network' view id so a saved activeView still restores.
+  ...(showDweb ? [{ id: 'network', label: 'Agent web' }] : []),
   { id: 'library', label: 'Library' },
   ...(showDweb ? [
     { id: 'discover', label: 'Discover' },
     { id: 'contacts', label: 'Contacts' },
   ] : []),
-  // Lab sits next-to-last, just before Network (when the dweb group is present).
   { id: 'eval', label: 'Lab' },
-  ...(showDweb ? [{ id: 'network', label: 'Network' }] : []),
 ];
 
 // The chat switcher — Chats live INSIDE the chat page (owner 2026-06-18): the
@@ -487,7 +489,7 @@ const notifBanner = (n) => m('.notif-banner', [
   m('span.notif-banner-text', [m('strong', n.title), n.body ? ` — ${n.body}` : '']),
   m('button.home-popout', {
     onclick: () => { setView(n.link); peerNotifications.dismiss(n.id); },
-  }, n.link === 'discover' ? 'View in Discover' : 'View network'),
+  }, n.link === 'discover' ? 'View in Discover' : 'View agent web'),
   m('button.notif-banner-x', { 'aria-label': 'Dismiss', onclick: () => peerNotifications.dismiss(n.id) }, '×'),
 ]);
 

@@ -1,12 +1,15 @@
 // @ts-check
-// home/network-section.js — the peers + network-info view (dweb, preview-only).
+// home/network-section.js — THE AGENT WEB view (dweb, preview-only).
 //
-// A live window onto the always-on base network: who you're connected to, by
-// what real path (the IPv6 bet, on screen), and the lobby/DHT facts. The
-// centerpiece is an animated radial peer graph in the WebTorrent spirit — YOU
-// at the hub, peers orbiting, each in its own peerd brand color — but honest
-// about a browser mesh: nodes are dids/names, NOT IPs (WebRTC hides peer IPs),
-// and each edge shows its TRUE ICE path (direct IPv6 / IPv4-STUN / relay).
+// The network view, promoted into the whole picture: YOU at the hub, your
+// ACTORS (WebVM / Notebook / App instances, dwapp actors marked, the dweb
+// agent) orbiting INSIDE the dashed magenta dweb boundary in their module
+// colors, and the mesh PEERS beyond it — all magenta, because magenta is the
+// wire. Still honest about a browser mesh: peer nodes are dids/names, NOT IPs
+// (WebRTC hides peer IPs), and each boundary-crossing edge shows its TRUE ICE
+// path (direct IPv6 / IPv4-STUN / relay). Actor rows arrive from the SW's
+// actors/graph route (engine registries + tab trackers); peers from
+// dweb/distributed/info — merged here, rendered as one living graph.
 //
 // Data arrives over ONE SW round-trip (dweb/distributed/info → the offscreen
 // base host's info()); this page is a pure CLIENT — it never imports the dweb
@@ -32,34 +35,36 @@ import m from '/vendor/mithril/mithril.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 
-// --- brand color per peer (random per did, cached for the session) -----------
-// Mirrors the commons participant rail (owner direction 2026-06-12: every dweb
-// peer gets a peerd brand color, chosen at random client-side — the sanctioned
-// exception to "one accent on monochrome", because the peers ARE the content).
-// Cached in a module Map so a peer keeps its color across the 3s refresh and any
-// graph rebuild. p·cyan e·red e·amber r·green d·magenta.
-const BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
-/** @type {Map<string, string>} */
-const colorByDid = new Map();
-/** @param {string} did */
-const colorOf = (did) => {
-  if (!colorByDid.has(did)) {
-    // ponytail: hard cap, just clear — the colors are cosmetic random, so
-    // re-rolling on the rare overflow is invisible, and the Map can't grow
-    // unbounded across a long session with peer churn.
-    if (colorByDid.size >= 512) colorByDid.clear();
-    colorByDid.set(did, BRAND[Math.floor(Math.random() * BRAND.length)]);
-  }
-  // why the cast: the key was just ensured present above, so this is
-  // always a string — Map.get's `| undefined` is unreachable here.
-  return /** @type {string} */ (colorByDid.get(did));
+// --- the agent-web color law (owner direction, 2026-07-10) -------------------
+// MAGENTA IS RESERVED for what lives over the wire: mesh peers, the dweb
+// boundary, the dweb actor. Everything INSIDE the boundary wears its own
+// module's color. This supersedes the old random-brand-per-peer rule on THIS
+// graph (peers all magenta = unmistakably "beyond the boundary"); the commons
+// participant rail keeps its rainbow. Hexes mirror peerd-runtime's actor-graph
+// KIND_COLOR (the canonical mapping) — inlined because this page is a pure
+// client and never imports runtime modules (same precedent as the old inline
+// BRAND row). p·cyan e·red e·amber r·green d·magenta.
+const MAGENTA = '#D946EF';
+/** @type {Record<string, string>} */
+const KIND_HEX = {
+  web: '#00B7EB', webvm: '#F59E0B', notebook: '#22C55E', app: '#F59E0B',
+  integration: '#00B7EB', tab: '#22C55E', dweb: MAGENTA,
 };
+/** @param {string} kind */
+const kindColor = (kind) => KIND_HEX[kind] ?? '#E8E6E1';
+// The bootstrap rendezvous is INFRASTRUCTURE, not an agent — neutral, never
+// magenta, so the "magenta = a peer's agent" read stays exact.
+const BOOTSTRAP_COLOR = 'rgba(232,230,225,0.5)';
+/** @param {Peer} p */
+const peerColor = (p) => (p.kind === 'bootstrap' ? BOOTSTRAP_COLOR : MAGENTA);
 
 // did short form — the codebase-canonical last 8 chars (rooms.js short()).
 /** @param {string} did */
 const short = (did) => (typeof did === 'string' ? did.slice(-8) : '????????');
 /** @param {Peer} p */
 const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim().slice(0, 18) : short(p.did));
+/** @param {string} s */
+const label20 = (s) => (s.length <= 20 ? s : `${s.slice(0, 19)}…`);
 
 // The honest connectivity label + a kind (for color). Never fabricates a path:
 // link-less peers are "heard via gossip"; a linked peer whose ICE stats haven't
@@ -91,14 +96,19 @@ const bootstrapPeer = (info) => (info.bootstrapUrl && info.rendezvous !== 'none'
   ? { did: BOOTSTRAP_DID, name: domainOf(info.bootstrapUrl), linked: info.rendezvous === 'up', kind: 'bootstrap' }
   : null);
 
-// --- the animated radial peer graph ------------------------------------------
-// Mithril owns the SVG SHELL (the <svg>, the static "You" hub); this component
-// owns the peer LAYER imperatively (createElementNS into <g.pn-layer>) and a
-// requestAnimationFrame loop that springs each peer to its slot on a slowly
-// rotating ring, with light mutual repulsion + damping so it breathes like the
-// WebTorrent graph. Mithril never declares children for .pn-layer, so its
-// diff leaves our imperative nodes (and their rAF-written geometry) untouched.
-// prefers-reduced-motion → a static ring, no rAF.
+// --- the animated AGENT-WEB graph --------------------------------------------
+// One living picture of your whole agent world: YOU at the hub; your ACTORS
+// (WebVMs, Notebooks, Apps — dwapp actors marked) on an inner ring INSIDE the
+// dashed magenta dweb boundary, each in its module color with a soft halo;
+// mesh PEERS beyond the boundary on the outer ring, all magenta — edges that
+// cross the boundary ARE the wire, still labeled with their true ICE path.
+// Mithril owns the SVG SHELL (the <svg>, the boundary, the static "You" hub);
+// this component owns the node LAYER imperatively (createElementNS into
+// <g.pn-layer>) and a requestAnimationFrame loop that springs each node to its
+// slot — the two rings counter-rotate slowly, so the picture breathes with
+// depth instead of spinning as one plate. Mithril never declares children for
+// .pn-layer, so its diff leaves our imperative nodes (and their rAF-written
+// geometry) untouched. prefers-reduced-motion → static rings, no rAF.
 /**
  * @typedef {object} NodeRef
  * @property {SVGGElement} g
@@ -108,12 +118,17 @@ const bootstrapPeer = (info) => (info.bootstrapUrl && info.rendezvous !== 'none'
  * @property {number} intro
  * @property {string | null} via
  * @property {SVGLineElement | null} introEdge
+ * @property {SVGCircleElement | null} [halo]
+ * @property {SVGCircleElement | null} [badge]
  */
 /** @typedef {{ x: number, y: number, vx: number, vy: number }} Phys */
+/** @typedef {{ type: string, handle: string, name?: string, live?: boolean, isActor?: boolean }} ActorRow */
 
-const PeerGraph = () => {
+const AgentWebGraph = () => {
   const W = 600, H = 380, CX = W / 2, CY = H / 2;
-  const RING = Math.min(W, H) * 0.36;
+  const RING = Math.min(W, H) * 0.36;          // peers — beyond the boundary
+  const BOUNDARY_R = 96;                        // the dweb membrane
+  const ACTOR_RING = 58;                        // your actors — inside it
   const MAX = 40;                 // graph node cap (the list shows the rest)
   const INTRO_FRAMES = 165;       // the introduction handoff window (~2.75s @ 60fps) — long enough to read
   /** @type {Map<string, Phys>} */
@@ -122,10 +137,13 @@ const PeerGraph = () => {
   const nodes = new Map();        // did -> { g, line, dot, label, intro, via, introEdge }
   /** @type {Peer[]} */
   let peers = [];
+  /** @type {ActorRow[]} */
+  let actors = [];
   /** @type {Element | null} */
   let layer = null;
   let raf = 0;
-  let rot = 0;
+  let rot = 0;      // outer (peer) ring rotation
+  let rot2 = 0;     // inner (actor) ring — counter-rotates for depth
   let reduced = false;
   /** @type {MediaQueryList | null} */
   let mq = null;          // the prefers-reduced-motion query (re-checked live)
@@ -139,17 +157,24 @@ const PeerGraph = () => {
   /** @type {Map<string, string>} */
   const pendingIntro = new Map(); // did -> introId, for joins that happened off-screen
 
-  // Peer i of n sits at an even angle on the ring (radius RING, ALWAYS — a lone
-  // peer still orbits; the old `n<=1 ? 0` collapsed it onto the hub). rot turns
-  // the whole ring slowly so it breathes. Verified in tools/check-graph-physics.mjs.
+  // Node i of n sits at an even angle on its ring (ALWAYS at full radius — a
+  // lone node still orbits; the old `n<=1 ? 0` collapsed it onto the hub). The
+  // ring's own rotation turns it slowly so it breathes. Spring constants
+  // verified in tools/check-graph-physics.mjs.
   /**
    * @param {number} i
    * @param {number} n
+   * @param {number} radius
+   * @param {number} spin
    */
-  const slot = (i, n) => {
-    const ang = (i / Math.max(1, n)) * Math.PI * 2 - Math.PI / 2 + rot;
-    return { x: CX + Math.cos(ang) * RING, y: CY + Math.sin(ang) * RING };
+  const slotAt = (i, n, radius, spin) => {
+    const ang = (i / Math.max(1, n)) * Math.PI * 2 - Math.PI / 2 + spin;
+    return { x: CX + Math.cos(ang) * radius, y: CY + Math.sin(ang) * radius };
   };
+  /** @param {number} i @param {number} n */
+  const slot = (i, n) => slotAt(i, n, RING, rot);
+  /** @param {number} i @param {number} n */
+  const actorSlot = (i, n) => slotAt(i, n, ACTOR_RING, rot2);
 
   /**
    * @param {string} tag
@@ -168,16 +193,27 @@ const PeerGraph = () => {
   const setPeers = (list) => {
     peers = [...(list || [])].sort((a, b) => (a.did < b.did ? -1 : a.did > b.did ? 1 : 0)).slice(0, MAX);
   };
+  // Actor node ids share the physics/nodes maps with peer dids — prefix them so
+  // a handle can never collide with a did.
+  /** @param {ActorRow} a */
+  const actorId = (a) => `a:${a.handle}`;
+  /** @param {ActorRow[]} list */
+  const setActors = (list) => {
+    actors = [...(list || [])].sort((a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0));
+  };
 
   /**
    * @param {NodeRef} ref
    * @param {number} x
    * @param {number} y
+   * @param {number} [labelDy]
    */
-  const writeGeom = (ref, x, y) => {
+  const writeGeom = (ref, x, y, labelDy = 20) => {
     ref.dot.setAttribute('cx', String(x)); ref.dot.setAttribute('cy', String(y));
     ref.line.setAttribute('x2', String(x)); ref.line.setAttribute('y2', String(y));
-    ref.label.setAttribute('x', String(x)); ref.label.setAttribute('y', String(y + 20));
+    ref.label.setAttribute('x', String(x)); ref.label.setAttribute('y', String(y + labelDy));
+    if (ref.halo) { ref.halo.setAttribute('cx', String(x)); ref.halo.setAttribute('cy', String(y)); }
+    if (ref.badge) { ref.badge.setAttribute('cx', String(x)); ref.badge.setAttribute('cy', String(y)); }
   };
 
   // Arm the introduction handoff for `n`: snap its dot back to the introducer and
@@ -196,7 +232,7 @@ const PeerGraph = () => {
     n.intro = INTRO_FRAMES; n.via = introId;
     if (n.introEdge) { n.introEdge.remove(); n.introEdge = null; }
     const vp = peers.find((x) => x.did === introId);
-    n.introEdge = /** @type {SVGLineElement} */ (mk('line', { class: 'pn-intro-edge', x1: st.x, y1: st.y, x2: st.x, y2: st.y, stroke: colorOf((vp && vp.did) || introId) }));
+    n.introEdge = /** @type {SVGLineElement} */ (mk('line', { class: 'pn-intro-edge', x1: st.x, y1: st.y, x2: st.x, y2: st.y, stroke: vp ? peerColor(vp) : MAGENTA }));
     n.g.insertBefore(n.introEdge, n.g.firstChild);  // in the node's group → removed with it
   };
 
@@ -209,15 +245,16 @@ const PeerGraph = () => {
     pendingIntro.clear();
   };
 
-  // Reconcile the SVG peer layer + physics with the latest peers list.
+  // Reconcile the SVG node layer + physics with the latest peers + actors.
   const sync = () => {
     // local const so TS keeps the non-null narrowing inside the forEach below
     const lyr = layer;
     if (!lyr) return;
-    const live = new Set(peers.map((p) => p.did));
-    for (const [did, n] of [...nodes]) {
-      if (!live.has(did)) { n.g.remove(); nodes.delete(did); phys.delete(did); }
+    const live = new Set([...peers.map((p) => p.did), ...actors.map(actorId)]);
+    for (const [id, n] of [...nodes]) {
+      if (!live.has(id)) { n.g.remove(); nodes.delete(id); phys.delete(id); }
     }
+    syncActors(lyr);
     peers.forEach((p, i) => {
       const info = pathInfo(p);
       const faint = info.kind === 'gossip' || info.kind === 'connecting';
@@ -251,10 +288,49 @@ const PeerGraph = () => {
       }
       n.line.setAttribute('class', `pn-edge pn-edge--${info.kind}`);
       n.dot.setAttribute('class', `pn-dot${faint ? ' pn-dot--faint' : ''}`);
-      n.dot.setAttribute('fill', colorOf(p.did));
+      n.dot.setAttribute('fill', peerColor(p));
       n.label.textContent = labelOf(p);
     });
     if (reduced) place();
+  };
+
+  // Reconcile the ACTOR ring: your instances, each in its module color with a
+  // soft halo; a dwapp actor wears a dashed badge ring (it is an agent persona,
+  // not just a sandbox). New actors spring OUT FROM THE HUB — born from you.
+  /** @param {Element} lyr */
+  const syncActors = (lyr) => {
+    actors.forEach((a, i) => {
+      const id = actorId(a);
+      const color = kindColor(a.type);
+      let n = nodes.get(id);
+      if (!n) {
+        phys.set(id, { x: CX, y: CY, vx: 0, vy: 0 });
+        const g = /** @type {SVGGElement} */ (mk('g', { class: 'pn pn-actor' }));
+        const line = /** @type {SVGLineElement} */ (mk('line', { x1: CX, y1: CY, x2: CX, y2: CY }));
+        const halo = /** @type {SVGCircleElement} */ (mk('circle', { class: 'pn-halo', r: 13, cx: CX, cy: CY }));
+        const dot = /** @type {SVGCircleElement} */ (mk('circle', { r: 7, cx: CX, cy: CY }));
+        const badge = a.isActor
+          ? /** @type {SVGCircleElement} */ (mk('circle', { class: 'pn-actor-badge', r: 10.5, cx: CX, cy: CY }))
+          : null;
+        const label = /** @type {SVGTextElement} */ (mk('text', { class: 'pn-label', x: CX, y: CY }));
+        g.append(line, halo, ...(badge ? [badge] : []), dot, label);
+        lyr.append(g);
+        n = { g, line, dot, label, intro: 0, via: null, introEdge: null, halo, badge };
+        nodes.set(id, n);
+        if (reduced) { const s = actorSlot(i, actors.length); const st = phys.get(id); if (st) { st.x = s.x; st.y = s.y; } }
+      }
+      // a sleeping actor (no tab open) recedes as a WHOLE — halo, badge, edge
+      // and label together, not just the dot
+      n.g.setAttribute('class', `pn pn-actor${a.live ? '' : ' pn-actor--off'}`);
+      n.dot.setAttribute('class', 'pn-dot pn-actor-dot');
+      n.dot.setAttribute('fill', color);
+      n.halo?.setAttribute('fill', color);
+      n.badge?.setAttribute('stroke', color);
+      n.line.setAttribute('class', `pn-edge pn-edge--actor${a.live ? ' pn-edge--alive' : ''}`);
+      n.line.setAttribute('stroke', color);
+      // A crowded ring keeps labels only on LIVE actors (the Library lists all).
+      n.label.textContent = (actors.length > 8 && !a.live) ? '' : label20(a.name || String(a.handle));
+    });
   };
 
   const place = () => {
@@ -265,6 +341,14 @@ const PeerGraph = () => {
       st.x = s.x; st.y = s.y;
       writeGeom(ref, s.x, s.y);
     });
+    actors.forEach((a, i) => {
+      const id = actorId(a);
+      const st = phys.get(id), ref = nodes.get(id);
+      if (!st || !ref) return;
+      const s = actorSlot(i, actors.length);
+      st.x = s.x; st.y = s.y;
+      writeGeom(ref, s.x, s.y, 18);
+    });
   };
 
   // Spring each peer toward its (slowly rotating) ring slot, with damping. No
@@ -273,6 +357,18 @@ const PeerGraph = () => {
   // in tools/check-graph-physics.mjs (all counts converge to the ring, no NaN).
   const tick = () => {
     rot += 0.0011;
+    rot2 -= 0.00065;   // inner ring counter-rotates, slower — parallax depth
+    actors.forEach((a, i) => {
+      const id = actorId(a);
+      const st = phys.get(id), ref = nodes.get(id);
+      if (!st || !ref) return;
+      const t = actorSlot(i, actors.length);
+      st.vx += (t.x - st.x) * 0.012;
+      st.vy += (t.y - st.y) * 0.012;
+      st.vx *= 0.88; st.vy *= 0.88;
+      st.x += st.vx; st.y += st.vy;
+      writeGeom(ref, st.x, st.y, 18);
+    });
     const n = peers.length;
     peers.forEach((p, i) => {
       const st = phys.get(p.did), ref = nodes.get(p.did);
@@ -316,10 +412,11 @@ const PeerGraph = () => {
   };
 
   return {
-    /** @param {{ dom: Element, attrs: { peers: Peer[] } }} vnode */
+    /** @param {{ dom: Element, attrs: { peers: Peer[], actors?: ActorRow[] } }} vnode */
     oncreate(vnode) {
       layer = vnode.dom.querySelector('.pn-layer');
       setPeers(vnode.attrs.peers);
+      setActors(vnode.attrs.actors ?? []);
       sync();
       mq = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
       mq?.addEventListener?.('change', applyMotion);
@@ -333,9 +430,10 @@ const PeerGraph = () => {
       }, { threshold: [0, 0.4] });
       io.observe(vnode.dom);
     },
-    /** @param {{ attrs: { peers: Peer[] } }} vnode */
+    /** @param {{ attrs: { peers: Peer[], actors?: ActorRow[] } }} vnode */
     onupdate(vnode) {
       setPeers(vnode.attrs.peers);
+      setActors(vnode.attrs.actors ?? []);
       sync();
     },
     onremove() {
@@ -344,14 +442,24 @@ const PeerGraph = () => {
       if (raf) cancelAnimationFrame(raf);
       raf = 0; nodes.clear(); phys.clear(); pendingIntro.clear();
     },
-    /** @param {{ attrs: { selfLabel?: string, peers?: Peer[] } }} vnode */
+    /** @param {{ attrs: { selfLabel?: string, peers?: Peer[], actors?: ActorRow[] } }} vnode */
     view(vnode) {
       const selfLabel = vnode.attrs.selfLabel || 'You';
       const count = (vnode.attrs.peers || []).length;
+      const actorCount = (vnode.attrs.actors || []).length;
+      // THE DWEB BOUNDARY: your peerd lives inside the dashed magenta membrane
+      // (a faint counter-crawling orbit guides the peer ring); edges that cross
+      // it are the wire. Static shell — Mithril never touches .pn-layer.
       return m('svg.peerd-net-graph', {
         viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet',
-        role: 'img', 'aria-label': `Network graph: you and ${count} peer${count === 1 ? '' : 's'}`,
+        role: 'img',
+        'aria-label': `The agent web: you, ${actorCount} actor${actorCount === 1 ? '' : 's'} inside the dweb boundary, ${count} peer${count === 1 ? '' : 's'} beyond it`,
       }, [
+        m('circle.pn-boundary.pn-crawl', { cx: CX, cy: CY, r: BOUNDARY_R }),
+        m('circle.pn-orbit.pn-crawl-rev', { cx: CX, cy: CY, r: RING }),
+        m('text.pn-boundary-label', {
+          x: CX + BOUNDARY_R * 0.74, y: CY - BOUNDARY_R * 0.72, 'text-anchor': 'middle',
+        }, 'd'),
         m('g.pn-layer'),                                              // imperatively managed
         m('circle.pn-self-ring', { cx: CX, cy: CY, r: 17 }),
         m('circle.pn-self', { cx: CX, cy: CY, r: 11 }),
@@ -371,12 +479,16 @@ const fact = (k, v) => m('.peerd-net-fact', [
 ]);
 
 /**
- * The Network section, mounted on the home page (DWEB_ENABLED only).
+ * The AGENT WEB section, mounted on the home page (DWEB_ENABLED only) — the
+ * network view promoted into the full picture: your actors inside the dweb
+ * boundary, the mesh beyond it.
  * @returns {object} a Mithril component; attrs: { send }
  */
 export const NetworkSection = () => {
   /** @type {any} */
   let info = null;       // last dweb/distributed/info reply
+  /** @type {ActorRow[]} */
+  let actors = [];       // last actors/graph reply (empty while vault-locked)
   let loading = true;
   /** @type {string | null} */
   let error = null;
@@ -389,9 +501,16 @@ export const NetworkSection = () => {
   /** @param {Send} send */
   const refresh = async (send) => {
     try {
-      const r = await send({ type: 'dweb/distributed/info' });
+      // one poll, both halves of the picture: the mesh (peers + paths) and
+      // your actors (engine instances + the dweb agent). The actor half fails
+      // SOFT — vault locked / route error just means a peers-only graph.
+      const [r, a] = await Promise.all([
+        send({ type: 'dweb/distributed/info' }),
+        send({ type: 'actors/graph' }).catch(() => null),
+      ]);
       if (r && r.ok === false) { error = r.error || 'unavailable'; info = null; }
       else { info = r; error = null; }
+      actors = (a && a.ok && Array.isArray(a.actors)) ? a.actors : [];
     } catch (e) {
       error = /** @type {{ message?: string }} */ (e)?.message || String(e);
     }
@@ -472,11 +591,15 @@ export const NetworkSection = () => {
       return m('.peerd-net', [
         m('.peerd-net-facts', [
           fact('You', short(info.did)),
+          fact('Actors', String(actors.length)),
           fact('Lobby', info.lobby || '—'),
           fact('Peers', `${info.peerCount} · ${info.linkedCount} direct`),
           fact('DHT', String(info.dhtSize ?? 0)),
         ]),
-        m(PeerGraph, { peers: graphPeers, selfLabel: 'You' }),   // no wrapper — sits on the page bg
+        m(AgentWebGraph, { peers: graphPeers, actors, selfLabel: 'You' }),   // no wrapper — sits on the page bg
+        // the one-line legend: how to read the picture
+        m('.peerd-net-legend', 'your actors live inside the magenta boundary, each in its module color — '
+          + 'everything beyond it is the wire, and every crossing edge shows its true path'),
         peers.length === 0 && !boot
           ? m('.peerd-net-empty', 'You’re the first one here. The network is live and listening, '
               + 'and peers appear as they come online, each link showing its true path.')
@@ -484,7 +607,7 @@ export const NetworkSection = () => {
             const pi = pathInfo(p);
             const isBoot = p.kind === 'bootstrap';
             return m('li.peerd-net-row', { key: p.did }, [
-              m('span.peerd-net-swatch', { style: `background:${colorOf(p.did)}` }),
+              m('span.peerd-net-swatch', { style: `background:${peerColor(p)}` }),
               m('span.peerd-net-name', labelOf(p)),
               m('span.peerd-net-did', isBoot ? '' : short(p.did)),
               m('span.peerd-net-path', { class: `peerd-net-path--${pi.kind}` }, pi.label),
