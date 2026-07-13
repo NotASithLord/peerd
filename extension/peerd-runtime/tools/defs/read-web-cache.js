@@ -51,7 +51,7 @@ export const readWebCacheTool = {
     if (!webCache?.get) return { ok: false, error: 'web_cache_unavailable' };
     const rec = await webCache.get(args.key).catch(() => undefined);
     if (!rec || typeof rec.text !== 'string') {
-      return { ok: false, error: `no_such_key: ${args.key} — the cache entry may have been evicted; re-fetch the URL.` };
+      return { ok: false, error: `no_such_key: ${args.key} — the cache entry may have been evicted; re-run the read that produced it (fetch_url, or read_page mode:'content' for a tab you've already rendered — don't fetch_url a page you can still see).` };
     }
     const limit = Math.min(typeof args.limit === 'number' && args.limit > 0 ? args.limit : MAX_SLICE_CHARS, MAX_SLICE_CHARS);
     const page = pageSlice(rec.text, typeof args.offset === 'number' ? args.offset : 0, limit);

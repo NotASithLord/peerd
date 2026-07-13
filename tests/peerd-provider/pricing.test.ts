@@ -66,4 +66,17 @@ describe('DEFAULT_PRICING ↔ MODEL_CATALOG parity', () => {
     expect(DEFAULT_PRICING['claude-haiku-4-5-20251001']).toEqual(
       { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 });
   });
+
+  test('Z.ai GLM rates are per-tier, not the flagship copied down', () => {
+    // Regression guard: glm-4.6 shipped priced identically to the glm-5.2
+    // flagship ($1.4/$4.4), a ~3x overestimate that inflated the CostChip and
+    // tripped spend limits early. GLM-4.6 is a distinctly cheaper tier.
+    // Source: docs.z.ai/guides/overview/pricing (2026-07, USD / MTok).
+    expect(DEFAULT_PRICING['glm-5.2']).toEqual(
+      { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 });
+    expect(DEFAULT_PRICING['glm-4.6']).toEqual(
+      { input: 0.43, output: 1.74, cacheRead: 0.08, cacheWrite: 0 });
+    // the two tiers must NOT share a rate card
+    expect(DEFAULT_PRICING['glm-4.6'].input).not.toBe(DEFAULT_PRICING['glm-5.2'].input);
+  });
 });

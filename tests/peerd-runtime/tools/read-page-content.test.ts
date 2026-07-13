@@ -78,6 +78,45 @@ describe('read_page mode:content', () => {
     }
   });
 
+  test('fail-open: a grab-script failure (executeScript throws) falls through to the SNAPSHOT', async () => {
+    // the extractor is present and healthy — only the outerHTML grab throws, so
+    // this exercises the fourth fail-open path the header names but the loop above
+    // (which only varies the client) never reaches.
+    const ctx = ctxWith({
+      webOffscreenClient: { extractMarkdown: async () => ({ readerable: true, markdown: 'unreached', title: 'T' }) },
+      scripting: {
+        executeScript: async ({ func }: any) => {
+          if (String(func.name) === 'readOuterHtmlInjected') throw new Error('grab boom');
+          return [{ result: { title: 'T', url: 'https://site.example/article', text: 'snapshot text', interactables: [] } }];
+        },
+      },
+    });
+    const r = await readPageTool.execute({ mode: 'content' }, ctx as any);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.content).toContain('snapshot text');
+  });
+
+  test('a 2MB-clipped raw DOM surfaces htmlTruncated (distinct from paging truncation)', async () => {
+    const ctx = ctxWith({
+      webOffscreenClient: { extractMarkdown: async () => ({ readerable: true, markdown: '# T\n\nhead only', title: 'T' }) },
+      scripting: {
+        executeScript: async ({ func }: any) => {
+          if (String(func.name) === 'readOuterHtmlInjected') {
+            return [{ result: { html: '<html><body>clipped</body></html>', htmlTruncated: true, url: 'https://site.example/article', title: 'T' } }];
+          }
+          return [{ result: { title: 'T', url: 'https://site.example/article', text: 'snapshot text', interactables: [] } }];
+        },
+      },
+    });
+    const r = await readPageTool.execute({ mode: 'content' }, ctx as any);
+    if (!r.ok) throw new Error('expected ok');
+    const body = fencedBody(r.content!);
+    expect(body.htmlTruncated).toBe(true);
+    // the markdown fit the window, so paging truncation is false — the two signals
+    // are independent, which is the point of the separate field.
+    expect(body.truncated).toBe(false);
+  });
+
   test('the default mode is untouched (no extractor call)', async () => {
     let called = false;
     const ctx = ctxWith({ webOffscreenClient: { extractMarkdown: async () => { called = true; return { readerable: true, markdown: 'x' }; } } });

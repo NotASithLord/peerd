@@ -29,7 +29,7 @@ export const mapError = (e) => {
   if (e.startsWith('provider-usage-limit')) {
     const detail = e.slice('provider-usage-limit'.length).replace(/^[:\s]+/, '').trim();
     const suffix = detail ? ` (${detail})` : '';
-    return `Usage/credit limit reached — your provider account is out of credit or over a spend/usage cap. Check your Anthropic / OpenRouter billing & limits, then retry.${suffix}`;
+    return `Usage/credit limit reached — your provider account is out of credit or over a spend/usage cap. Check your provider's billing & limits, then retry.${suffix}`;
   }
 
   const s = e.toLowerCase();
@@ -42,7 +42,7 @@ export const mapError = (e) => {
   // Account/credit/quota limits often arrive as 400/403 with a message,
   // not 429 — catch them by content before the generic HTTP fallback.
   if (has('credit balance', 'billing', 'quota', 'insufficient_quota', 'usage limit', 'plan limit')) {
-    return 'Provider account limit — out of credit or over a usage cap. Check your Anthropic / OpenRouter billing, then retry.';
+    return "Provider account limit — out of credit or over a usage cap. Check your provider's billing, then retry.";
   }
   if (e.startsWith('provider-http-429') || has('http 429', 'rate_limit', 'rate limit')) {
     return 'Rate limited (429) — your provider is throttling, or your account hit a usage/credit limit. Wait a moment and retry; if it persists, check your provider account.';
