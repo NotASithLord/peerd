@@ -4,7 +4,7 @@
 // paging contract honest live here.
 
 import { describe, test, expect } from 'bun:test';
-import { windowText, pagingFooter, pageSlice } from '../../../extension/peerd-runtime/tools/web/spill.js';
+import { windowText, pagingFooter, pageSlice, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
 
 describe('windowText', () => {
   test('text at or under the budget passes through whole', () => {
@@ -53,5 +53,65 @@ describe('pageSlice', () => {
     expect(pageSlice(text, 8, 100).slice).toBe('ij');        // limit past the end → to end
     expect(pageSlice(text, 99, 3)).toMatchObject({ slice: '', remaining: 0 });  // offset past end
     expect(pageSlice(text, 0, 0).slice).toBe('a');           // degenerate limit → at least 1 char
+  });
+});
+
+describe('excerptRelevant (BM25 query-relevant excerpting)', () => {
+  // A long page: filler paragraphs surrounding one that actually answers the query.
+  const filler = (n: number) =>
+    Array.from({ length: n }, (_, i) => `Section ${i}. General background prose about unrelated topics, navigation, cookies, and boilerplate footer links repeated across the site.`);
+  const needle = 'Qatar Airways economy class checked baggage allowance is 30 kg per passenger on most routes.';
+  const page = [...filler(20), needle, ...filler(20)].join('\n\n');
+
+  test('no query → returns null so the caller falls back to head/tail windowing', () => {
+    expect(excerptRelevant(page, '', 400)).toBeNull();
+    expect(excerptRelevant(page, '   ', 400)).toBeNull();
+  });
+
+  test('text at or under budget passes through whole (not excerpted)', () => {
+    const r = excerptRelevant('a short body about baggage', 'baggage', 1000);
+    expect(r).not.toBeNull();
+    expect(r!.excerpted).toBe(false);
+    expect(r!.excerpt).toBe('a short body about baggage');
+  });
+
+  test('surfaces the passage that answers the query and drops the filler', () => {
+    const budget = 400;   // far smaller than the full page → must choose
+    const r = excerptRelevant(page, 'Qatar economy baggage allowance kg', budget);
+    expect(r).not.toBeNull();
+    expect(r!.excerpted).toBe(true);
+    // the answer is present even though it sat in the MIDDLE (a head+tail window would miss it)
+    expect(r!.excerpt).toContain('30 kg');
+    // it dropped most passages (chose a few relevant, not all 41)
+    expect(r!.passagesShown).toBeLessThan(r!.passagesTotal);
+    // and it flagged that passages were elided, so the model knows it isn't the whole page
+    expect(r!.excerpt).toMatch(/passage\(s\)/);
+    // budget respected
+    expect(r!.charsShown).toBeLessThanOrEqual(budget);
+  });
+
+  test('kept passages stay in document order', () => {
+    // two needles far apart; both should appear, first one before the second
+    const p = [needle, ...filler(30), 'Business class baggage allowance is 40 kg.'].join('\n\n');
+    const r = excerptRelevant(p, 'baggage allowance kg', 500);
+    expect(r).not.toBeNull();
+    const i30 = r!.excerpt.indexOf('30 kg');
+    const i40 = r!.excerpt.indexOf('40 kg');
+    if (i30 !== -1 && i40 !== -1) expect(i30).toBeLessThan(i40);   // document order preserved
+  });
+
+  test('query that matches nothing → null (fall back to windowing)', () => {
+    expect(excerptRelevant(page, 'xyzzyquux nonexistentterm', 400)).toBeNull();
+  });
+});
+
+describe('excerptFooter', () => {
+  test('names the passages shown, the query, and the read_web_cache call', () => {
+    const f = excerptFooter({ key: 'wc-abc-1', total: 90_000, passagesShown: 3, passagesTotal: 55, query: 'baggage allowance' });
+    expect(f).toContain('read_web_cache');
+    expect(f).toContain('"key": "wc-abc-1"');
+    expect(f).toContain('3 passage(s)');
+    expect(f).toContain('baggage allowance');
+    expect(f).toContain('NOT a contiguous slice');   // the honesty flag: it's relevance-ranked, not a window
   });
 });

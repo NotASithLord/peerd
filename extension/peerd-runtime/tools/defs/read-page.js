@@ -14,7 +14,7 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
-import { windowText, pagingFooter } from '../web/spill.js';
+import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 
 // Content mode shares fetch_url's body budget — one read costs like one fetch.
 const CONTENT_BODY_CHARS = 16_000;
@@ -45,6 +45,7 @@ export const readPageTool = {
         enum: ['snapshot', 'content'],
         description: "snapshot (default): text + interactables for OPERATING the page. content: the readable core as markdown for READING it.",
       },
+      query: { type: 'string', description: "content mode only: what you're looking for (a few keywords). When the page is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window. Omit for the head+tail window." },
     },
   },
   sideEffect: 'read',
@@ -77,17 +78,25 @@ export const readPageTool = {
               const origin = originOfUrl(grabbed.url || tab.url);
               const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
                 /** @type {any} */ (ctx).webCache);
+              // Query-relevant excerpt when the caller named what it's after
+              // (markdown is always prose here); else the head+tail window. Same
+              // spill contract — full markdown stored + pageable either way.
+              const query = typeof args.query === 'string' ? args.query.trim() : '';
+              const excerpt = query ? excerptRelevant(ex.markdown, query, CONTENT_BODY_CHARS) : null;
               const win = windowText(ex.markdown, CONTENT_BODY_CHARS);
-              let text = win.window;
+              let text = excerpt ? excerpt.excerpt : win.window;
+              const truncated = excerpt ? excerpt.excerpted : win.windowed;
               /** @type {string | null} */
               let footer = null;
-              if (win.windowed && webCache?.key && webCache?.put) {
+              if (truncated && webCache?.key && webCache?.put) {
                 const cacheKey = webCache.key();
                 try {
                   await webCache.put({ key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: ex.markdown });
-                  footer = pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
-                } catch { /* spill failed — the window (with its elision marker) still ships */ }
-              } else if (win.windowed && !webCache) {
+                  footer = excerpt
+                    ? excerptFooter({ key: cacheKey, total: excerpt.total, passagesShown: excerpt.passagesShown, passagesTotal: excerpt.passagesTotal, query })
+                    : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+                } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
+              } else if (truncated && !webCache) {
                 text = ex.markdown.slice(0, CONTENT_BODY_CHARS);
               }
               const fenced = wrapUntrusted({
@@ -95,7 +104,7 @@ export const readPageTool = {
                 body: JSON.stringify({
                   mode: 'content', url: grabbed.url || tab.url,
                   ...(ex.title ? { title: ex.title } : {}),
-                  format: 'markdown', truncated: win.windowed, body: text,
+                  format: 'markdown', truncated, body: text,
                   // the RAW DOM was clipped at 2MB before extraction — the
                   // readable core may be missing its tail (distinct from
                   // `truncated`, which only means the markdown was windowed).
