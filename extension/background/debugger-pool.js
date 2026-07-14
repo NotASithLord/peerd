@@ -112,6 +112,21 @@ export const createDebuggerPool = () => {
       }
     }
     await browser.debugger.sendCommand({ tabId }, 'Runtime.enable');
+    // why: the driven tab is usually BACKGROUNDED — peerd never steals focus
+    // (DESIGN-12). But Gmail-class pages gate keyboard shortcuts, caret
+    // placement, and focus/blur-driven behavior on document.hasFocus(), which
+    // is false for a background tab. Focus EMULATION makes the page believe
+    // it's focused without raising anything — the no-steal replacement for
+    // Page.bringToFront, which yanked the whole browser window to the OS
+    // foreground on every key dispatch and hijacked the user's focus while
+    // they worked in other apps/windows. Cleared automatically on detach;
+    // re-applied here on every (re-)attach. Best-effort: an engine without
+    // the command just loses the emulation, never the attach.
+    try {
+      await browser.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+    } catch (e) {
+      console.debug('[debugger-pool] focus emulation unavailable', e?.message ?? e);
+    }
     attached.add(tabId);
     console.log('[debugger-pool] attached + Runtime enabled on', tabId);
   };
@@ -187,15 +202,13 @@ export const createDebuggerPool = () => {
    */
   const dispatchKeys = async (tabId, events) => {
     await attach(tabId);
-    // why: Gmail and friends listen on focusable elements for keyboard
-    // shortcuts. The active element needs to be document.body (or some
-    // non-input element) for shortcuts like `*+u` to register; if the
-    // search box has focus, the keys go to the input instead. The
-    // caller is expected to manage focus, but we ensure the page is
-    // focused first via the focus() RPC.
-    try {
-      await browser.debugger.sendCommand({ tabId }, 'Page.bringToFront');
-    } catch { /* not critical */ }
+    // why NO Page.bringToFront here: it brought the tab's whole browser
+    // window to the OS foreground on EVERY call — an agent typing its way
+    // through a page repeatedly stole the user's focus out of other apps and
+    // windows (the DESIGN-12 no-focus-steal rule applies to key dispatch
+    // too). Gmail-class shortcut handlers that gate on document.hasFocus()
+    // still work: attach() enables focus emulation, so the page believes
+    // it's focused while staying in the background.
     for (const ev of events) {
       const base = {
         key: ev.key,
