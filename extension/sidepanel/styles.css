@@ -660,6 +660,15 @@ html, body, #app {
   outline-offset: -2px;
 }
 .goal-toggle:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Live run — the toggle is the run's state light (mode-badge.js). Slightly
+ * softer than the armed accent so "running" reads as steady state, not a
+ * hot switch; tabular digits keep "turn N" from wobbling as N ticks. */
+.goal-toggle.is-running {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border-color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
 
 .body { flex: 1; padding: 14px; overflow-y: auto; }
 
@@ -1924,6 +1933,47 @@ button.icon:hover { background: var(--bg); }
   max-width: 16ch;
 }
 .goal-bar-stop { font-size: 11px; padding: 2px 10px; }
+
+/* Todo card (components/todo-card.js) — the goal run's visible
+   plan-of-record. Same calm bordered-card voice as .goal-bar: grayscale,
+   check marks and dimming carry the progress, no accent color. Capped
+   height so a full 12-item plan can't crowd the transcript. */
+.todo-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.todo-card-head {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 6px;
+}
+.todo-card-title { font-weight: 600; }
+.todo-card-meta { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.todo-card-live { color: var(--fg-muted); font-size: 11px; margin-left: auto; }
+.todo-list {
+  list-style: none;
+  margin: 0; padding: 0;
+  max-height: 168px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.todo-item { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.todo-box {
+  flex: none;
+  width: 13px; height: 13px;
+  border: 1px solid var(--fg-muted);
+  border-radius: 3px;
+  font-size: 10px; line-height: 12px; text-align: center;
+  color: var(--fg);
+}
+.todo-item.is-done .todo-box { background: var(--fg-muted); color: var(--bg); border-color: var(--fg-muted); }
+.todo-item.is-done .todo-text { color: var(--fg-muted); text-decoration: line-through; }
+.todo-item.is-next .todo-text { font-weight: 600; }
+.todo-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* In-flight async-actor status bar (DESIGN-11) — mirrors .goal-bar:
    a bordered elevated card, grayscale, the brand spinner the only color. */
