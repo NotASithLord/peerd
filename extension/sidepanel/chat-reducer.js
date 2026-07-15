@@ -505,8 +505,14 @@ export const reduceChat = (state, msg) => {
       // Per-session guard: a turn streaming in a BACKGROUND chat must not snap
       // the view to its transcript. Null current = fresh surface adopting it.
       if (state.session.sessionId && state.session.sessionId !== msg.session.sessionId) return state;
+      // why todos here: the goal run's plan-of-record (session.todos) is
+      // written mid-turn by the todo_* tools, and the TodoCard reads it off
+      // state.session — but this LIVE push carries only sessionId+messages, so
+      // without it the card wouldn't tick until the next full 'state' snapshot.
+      // undefined on non-goal turns (the card self-hides), so it's harmless.
       return { ...state, session: { ...state.session,
-        sessionId: msg.session.sessionId, messages: msg.session.messages }, lastError: null };
+        sessionId: msg.session.sessionId, messages: msg.session.messages,
+        todos: msg.session.todos }, lastError: null };
     case 'turn/cost':
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, cost: { ...state.cost, turn: msg.turn, session: msg.session,
