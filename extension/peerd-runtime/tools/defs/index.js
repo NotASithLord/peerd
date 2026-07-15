@@ -56,6 +56,7 @@ import { completeGoalTool }            from './complete-goal.js';
 import { scheduleCreateTool }          from './schedule-create.js';
 import { scheduleListTool }            from './schedule-list.js';
 import { scheduleCancelTool }          from './schedule-cancel.js';
+import { todoInitTool, todoCheckTool, todoAddTool } from './todo.js';
 import { dwebShareTool }               from './dweb-share.js';
 import { dwebDiscoverTool }            from './dweb-discover.js';
 import { dwebInstallTool }             from './dweb-install.js';
@@ -124,6 +125,9 @@ export {
   scheduleCreateTool,
   scheduleListTool,
   scheduleCancelTool,
+  todoInitTool,
+  todoCheckTool,
+  todoAddTool,
   // dweb (network — preview only, exposure-gated off the store build)
   dwebShareTool,
   dwebDiscoverTool,
@@ -212,13 +216,16 @@ export const BUILTIN_TOOLS = Object.freeze([
   // review (clean-context read-only reviewer — feature 08)
   requestReviewTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
-  // exposure.js reveals it to the model ONLY while a goal run is active.
+  // exposure.js reveals them to the model ONLY while a goal run is active.
   completeGoalTool,
   // scheduling — background Routines (loop/scheduler.js). Main-agent tools; not
   // exposure-gated, so the agent can set up / list / cancel standing tasks.
   scheduleCreateTool,
   scheduleListTool,
   scheduleCancelTool,
+  todoInitTool,
+  todoCheckTool,
+  todoAddTool,
   // dweb (network publish/discover/install — preview only; exposure.js hides
   // these from the agent on the store build, where DWEB_ENABLED is false)
   dwebDiscoverTool,

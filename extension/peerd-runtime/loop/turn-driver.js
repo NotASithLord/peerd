@@ -26,6 +26,10 @@ import { SessionNotFoundError } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
 import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
+// The prewalk planning nudge (loop/prewalk.js) — appended to the system
+// prompt only while session.prewalk.phase === 'planning'. Pure text; the
+// swap/restore IO rides the injected reconcilePrewalk/maybePrewalkSwap deps.
+import { PREWALK_NUDGE } from './prewalk.js';
 
 // pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
 // relay, a security seam — one implementation, no drift).
@@ -47,6 +51,13 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // The context inspector's capture hook (optional; a no-op default so the
     // driver never depends on the debug surface being wired).
     recordModelCall = () => {},
+    // Prewalk (loop/prewalk.js), both optional so actor/test drivers stay
+    // inert: reconcilePrewalk applies a pending planning→executing model swap
+    // (or restores stale state) at the TURN boundary — before pricing,
+    // context-window and reasoning resolve, so all three see the swapped
+    // model; maybePrewalkSwap is the per-tool-call gate that flips the phase.
+    reconcilePrewalk = null,
+    maybePrewalkSwap = null,
   } = deps;
 
 /**
@@ -100,7 +111,15 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // (cost/clamp/scheduler/key/egress below) but a kind-aware per-turn SETUP: no
   // user-tab/memory context, an actor-only descriptor list + tuned prompt, the
   // 'actor' exposure marker, and the per-instance pin. Reused for cost.
-  const turnSession = sessionId ? await sessions.get(sessionId) : null;
+  let turnSession = sessionId ? await sessions.get(sessionId) : null;
+  // Prewalk turn-boundary reconcile: apply a pending executor swap (so THIS
+  // turn's model/pricing/window all read the executor), or restore a stale
+  // planner (a run that died without its run-end restore). Best-effort — a
+  // reconcile failure runs the turn on the unreconciled record.
+  if (turnSession?.prewalk && turnSession.kind !== 'actor' && typeof reconcilePrewalk === 'function') {
+    try { turnSession = (await reconcilePrewalk(turnSession)) ?? turnSession; }
+    catch (e) { console.warn('[turn] prewalk reconcile failed', e); }
+  }
   const isActor = turnSession?.kind === 'actor';
   /** @type {string|undefined} */
   const actorType = isActor ? turnSession.actorType : undefined;
@@ -193,7 +212,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // defense text). Absent → collapses to nothing. The per-change cache
     // break this causes is by design.
     const promptSession = await sessions.get(sessionId);
-    return renderSystemPrompt({
+    // Prewalk: the planning nudge rides the prompt ONLY during the planning
+    // phase. Because the prompt re-renders per turn, the executor's first
+    // turn simply never contains it — the "prune the planning instruction"
+    // half of the handoff falls out of the render, no history surgery.
+    const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
+      ? `\n\n${PREWALK_NUDGE}`
+      : '';
+    return (await renderSystemPrompt({
       memoryBlock,
       temporalBlock,
       skillsBlock,
@@ -209,7 +235,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
       // buildToolContext from the setting — the prompt teaches page.* for 'code'.
       ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface } : {}),
-    });
+    // why await: renderSystemPrompt is async — concatenating the un-awaited
+    // promise would bake "[object Promise]" into the prompt.
+    })) + prewalkBlock;
   };
 
   // Tool descriptors passed to the provider — name, description, and
@@ -303,6 +331,15 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // If a CDP-backed tool reported the debugger isn't available, surface a
     // one-time "enable advanced automation" nudge to the side panel.
     maybeNudgeDebuggerGrant(result);
+    // Prewalk swap gate: a successful mutating call while the session is in
+    // its planning phase may flip it to 'executing' (the model swap itself
+    // applies at the next turn's reconcile). Awaited so the phase write can't
+    // race this turn's remaining dispatches; a gate failure never breaks the
+    // tool result. Main turns only — actors have no prewalk state.
+    if (!isActor && typeof maybePrewalkSwap === 'function') {
+      try { await maybePrewalkSwap({ sessionId, name: call?.name, ok: /** @type {any} */ (result)?.ok === true }); }
+      catch (e) { console.warn('[turn] prewalk swap gate failed', e); }
+    }
     return result;
   };
   // why: the loop's concurrent-dispatch scheduler partitions a multi-tool

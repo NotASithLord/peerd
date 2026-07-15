@@ -54,6 +54,48 @@ describe('makeGoalRunner — the goal loop', () => {
     expect(runner.get('s1')).toBe(null);
   });
 
+  it('continuations embed the live todo block (the per-turn plan reminder)', async () => {
+    const calls: TurnArgs[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async (args: TurnArgs) => {
+        calls.push(args);
+        if (calls.length === 3) runner.complete('s-todo');
+      },
+      // The SW binds this to formatTodoBlock(session.todos) — here a fake
+      // that changes between turns, pinning the RE-READ-per-turn contract.
+      getTodoBlock: async () => (calls.length < 2 ? 'Plan (0/2 done):\n[ ] 1. a  ← next' : 'Plan (1/2 done):\n[x] 1. a'),
+      maxIterations: 10,
+    });
+    await runner.start({ sessionId: 's-todo', goal: 'g' });
+    await settle(() => !runner.isActive('s-todo'));
+
+    expect(calls.length).toBe(3);
+    expect(calls[0].userText).toBe('g');                        // turn 1: bare goal, no list yet
+    expect(calls[1].userText).toContain('Plan (0/2 done):');    // fresh read each continuation
+    expect(calls[1].userText).toContain('todo_check');          // the steering line rides along
+    expect(calls[2].userText).toContain('Plan (1/2 done):');
+  });
+
+  it('a throwing getTodoBlock degrades to a block-less continuation, never a dead turn', async () => {
+    const calls: TurnArgs[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async (args: TurnArgs) => {
+        calls.push(args);
+        if (calls.length === 2) runner.complete('s-todo-err');
+      },
+      getTodoBlock: async () => { throw new Error('idb hiccup'); },
+      maxIterations: 10,
+    });
+    await runner.start({ sessionId: 's-todo-err', goal: 'g' });
+    await settle(() => !runner.isActive('s-todo-err'));
+
+    expect(calls.length).toBe(2);
+    expect(calls[1].userText).toContain('Continue working autonomously');
+    expect(calls[1].userText).not.toContain('Plan (');
+  });
+
   it('halt() stops it after the in-flight turn (terminal phase = halted)', async () => {
     const calls: TurnArgs[] = [];
     const events: any[] = [];

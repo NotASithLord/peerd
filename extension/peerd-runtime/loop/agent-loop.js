@@ -445,6 +445,17 @@ export async function* runUserTurn(ctx) {
       // here is safe.
       let historyForModel = injectResumeNotes(
         /** @type {InternalMessage[]} */ (trimPlan.messages));
+      // why: signed thinking blocks are MODEL-BOUND — replaying one authored
+      // by a different model (a prewalk executor swap, or any future
+      // mid-session model change) fails the provider's signature check and
+      // 400s the turn. Assistant messages record the model that wrote them,
+      // so strip thinkingBlocks that don't match the model about to be
+      // called; the visible `thinking` text stays for the transcript.
+      historyForModel = historyForModel.map((msg) => (
+        msg.role === 'assistant' && Array.isArray(msg.thinkingBlocks)
+          && msg.model && msg.model !== session.model
+          ? { ...msg, thinkingBlocks: undefined }
+          : msg));
       // why: the model must see the attachment BYTES on the turn they
       // were sent (every step of it — history is rebuilt from the
       // session per step), while the persisted record stays stripped.

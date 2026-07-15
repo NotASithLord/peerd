@@ -20,7 +20,7 @@ import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null }} Turn
+ * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
  */
 
 // The runner's own $ for a task. 'local' (the on-device runner) is FREE; a cloud
@@ -44,7 +44,7 @@ const costFields = (c) => c ? {
   costUsd: typeof c.cost === 'number' ? c.cost : 0,
 } : { ...ZERO_COST };
 /** @returns {Turn} */
-const newTurn = () => ({ session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null });
+const newTurn = () => ({ session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
 
 /** @param {any} session */
 const finalAnswer = (session) => {
@@ -77,7 +77,12 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
   const port = browser.runtime.connect({ name: 'eval' });
   port.onMessage.addListener((/** @type {any} */ msg) => {
     switch (msg?.type) {
-      case 'turn/state': turn.session = msg.session; turn.started = true; break;
+      case 'turn/state':
+        turn.session = msg.session; turn.started = true;
+        // Which model(s) actually ran this task — the prewalk arm's "did the
+        // swap happen" signal (planner then executor both show up here).
+        if (msg.session?.model) turn.modelsSeen.add(msg.session.model);
+        break;
       case 'turn/delta': turn.started = true; break;
       case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); break;
       case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } break;
@@ -92,7 +97,15 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
       case 'turn/error': turn.error = msg.error; break;
       case 'turn/streaming':
         if (msg.streaming) turn.started = true;
-        else if (turn.started && turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
+        // Goal-mode tasks span MANY turns — streaming:false fires between every
+        // iteration, so only the goal/state terminal below may resolve them.
+        else if (!turn.goalMode && turn.started && turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
+        break;
+      case 'goal/state':
+        turn.started = true;
+        if (turn.goalMode && msg.active === false && turn.resolveDone) {
+          const r = turn.resolveDone; turn.resolveDone = null; r();
+        }
         break;
       case 'local-model/progress': onProgress(msg.progress || {}); break;
       default: break;
@@ -193,9 +206,15 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     return { url, title, text };
   }
 
-  /** @param {any} task @param {string} [runnerCfg] */
-  async function runTask(task, runnerCfg) {
+  // goal=true runs the task as a GOAL RUN (agent/send goal:true): the agent
+  // keeps taking turns until complete_goal / cap / stop — the arc the prewalk
+  // arm exercises (prewalk only engages on goal runs). Completion is the
+  // run's terminal goal/state, not turn/streaming; timeouts stop the run so
+  // it can't keep driving turns into the NEXT task's session.
+  /** @param {any} task @param {string} [runnerCfg] @param {{ goal?: boolean }} [opts] */
+  async function runTask(task, runnerCfg, opts = {}) {
     turn = newTurn();
+    turn.goalMode = !!opts.goal;
     log(`\n▶ ${task.id} — ${task.title}`);
     await browser.runtime.sendMessage({ type: 'session/reset' });
     await closeAgentTabs();
@@ -205,17 +224,26 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     /** @type {Promise<void>} */
     const donePromise = new Promise((res) => { turn.resolveDone = res; });
     const start = Date.now();
-    const reply = await browser.runtime.sendMessage({ type: 'agent/send', text: task.prompt, activeTabId: subjId });
+    const reply = await browser.runtime.sendMessage({
+      type: 'agent/send', text: task.prompt, activeTabId: subjId,
+      ...(turn.goalMode ? { goal: true } : {}),
+    });
     if (!reply?.ok) {
       const detail = `agent/send rejected: ${reply?.error}`;
       log(`  ✗ ${detail}`);
       return { id: task.id, pass: false, detail, error: reply?.error, steps: 0, tokens: 0, ...ZERO_COST, runnerTokens: 0, runnerCostUsd: 0, durationMs: 0, tools: [] };
     }
-    await Promise.race([donePromise, sleep(task.timeoutMs ?? 90_000)]);
+    // A goal run is many turns; give it more wall clock than a single turn.
+    const timeoutMs = task.timeoutMs ?? (turn.goalMode ? 300_000 : 90_000);
+    await Promise.race([donePromise, sleep(timeoutMs)]);
     const durationMs = Date.now() - start;
     const timedOut = !!turn.resolveDone;
     turn.resolveDone = null;
-    if (timedOut) log('  ⏱ timed out (still scoring end state)');
+    if (timedOut) {
+      log('  ⏱ timed out (still scoring end state)');
+      // A live goal run would keep driving turns past this task — halt it.
+      if (turn.goalMode) await browser.runtime.sendMessage({ type: 'agent/stop' }).catch(() => {});
+    }
     await settleSubject();
     const end = await resolveEndTab();
     const tabInfo = await readTab(end?.id ?? subjId);
@@ -230,9 +258,10 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     const freshTok = cost.inputTokens + cost.outputTokens;
     const runnerTokens = turn.runner.inputTokens + turn.runner.outputTokens + turn.runner.cacheReadTokens + turn.runner.cacheWriteTokens;
     const runnerCostUsd = priceRunnerUsd(runnerCfg, turn.runner);
-    log(`  ${res.pass ? '✓ PASS' : '✗ FAIL'} — ${res.detail}  [${state.steps} steps · ${(durationMs / 1000).toFixed(1)}s · runner ${runnerTokens} tok · $${runnerCostUsd.toFixed(4)} runner + $${cost.costUsd.toFixed(4)} main]`);
+    const models = [...turn.modelsSeen];
+    log(`  ${res.pass ? '✓ PASS' : '✗ FAIL'} — ${res.detail}  [${state.steps} steps · ${(durationMs / 1000).toFixed(1)}s · runner ${runnerTokens} tok · $${runnerCostUsd.toFixed(4)} runner + $${cost.costUsd.toFixed(4)} main${models.length > 1 ? ` · models ${models.join(' → ')}` : ''}]`);
     if (!res.pass && state.answer) log(`       agent said: "${state.answer.slice(0, 200).replace(/\s+/g, ' ')}"`);
-    return { id: task.id, pass: res.pass, detail: res.detail, error: state.error, steps: state.steps, tokens: state.tokens, ...cost, runnerTokens, runnerCostUsd, durationMs, tools: state.tools };
+    return { id: task.id, pass: res.pass, detail: res.detail, error: state.error, steps: state.steps, tokens: state.tokens, ...cost, runnerTokens, runnerCostUsd, durationMs, tools: state.tools, models };
   }
 
   // onTask({ index, total, id }) lets the UI show live progress per task.
@@ -243,18 +272,19 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
    * @param {string} suiteId @param {boolean} showTabs
    * @param {(p: { index: number, total: number, id: string }) => void} [onTask]
    * @param {string} [runnerCfg]
+   * @param {{ goal?: boolean }} [opts]  goal:true runs every task as a goal run
    */
-  async function runSuite(suiteId, showTabs, onTask = () => {}, runnerCfg) {
+  async function runSuite(suiteId, showTabs, onTask = () => {}, runnerCfg, opts = {}) {
     wireListeners();
     await ensureSubject(showTabs);
     const tasks = /** @type {Record<string, { tasks: any[] }>} */ (SUITES)[suiteId]?.tasks ?? TASKS;
-    log(`  suite: ${suiteId} (${tasks.length} tasks)`);
+    log(`  suite: ${suiteId} (${tasks.length} tasks${opts.goal ? ' · goal mode' : ''})`);
     /** @type {any[]} */
     const results = [];
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
       onTask({ index: i, total: tasks.length, id: task.id });
-      try { results.push(await runTask(task, runnerCfg)); }
+      try { results.push(await runTask(task, runnerCfg, opts)); }
       catch (e) { log(`  ✗ runner error: ${/** @type {{ message?: string }} */ (e)?.message ?? e}`); results.push({ id: task.id, pass: false, detail: 'runner error', error: String(e), steps: 0, tokens: 0, ...ZERO_COST, runnerTokens: 0, runnerCostUsd: 0, durationMs: 0, tools: [] }); }
     }
     return { card: aggregate(results), results };
@@ -284,11 +314,18 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
   const setMainModel = (provider, model) => browser.runtime.sendMessage({ type: 'settings/update', patch: { providerName: provider, providerModel: model } });
   const readMainModel = async () => { try { const r = await browser.runtime.sendMessage({ type: 'state/get' }); const s = r?.state?.settings; return { provider: s?.providerName ?? '', model: s?.providerModel ?? '' }; } catch { return { provider: '', model: '' }; } };
 
-  // config = { mainProvider, mainModel, runnerCfg }. Sets BOTH models, runs the
-  // suite, returns the scorecard. (The caller restores the user's settings.)
+  // Prewalk arm control — the benchmarking switch for the goal-run handoff
+  // (loop/prewalk.js). Set per config leg, saved/restored with the models.
+  const readPrewalk = async () => { try { const r = await browser.runtime.sendMessage({ type: 'state/get' }); return r?.state?.settings?.prewalkEnabled === true; } catch { return false; } };
+  /** @param {boolean} val */
+  const setPrewalk = (val) => browser.runtime.sendMessage({ type: 'settings/update', patch: { prewalkEnabled: !!val } });
+
+  // config = { mainProvider, mainModel, runnerCfg, goal?, prewalk? }. Sets the
+  // models + the prewalk arm, runs the suite (as goal runs when goal:true),
+  // returns the scorecard. (The caller restores the user's settings.)
   /**
    * @param {string} label
-   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string }} config
+   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string, goal?: boolean, prewalk?: boolean }} config
    * @param {string} suiteId @param {boolean} showTabs
    * @param {(p: { index: number, total: number, id: string }) => void} [onTask]
    */
@@ -296,36 +333,44 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     const rm = await configToRunnerModel(config.runnerCfg);
     if (config.mainProvider && config.mainModel) await setMainModel(config.mainProvider, config.mainModel);
     await setRunnerModel(rm);
+    // prewalk only means anything on goal runs; set it explicitly per leg so
+    // an A/B is always a controlled comparison, whatever the user's setting.
+    await setPrewalk(!!config.prewalk);
     await sleep(200); // let the SW rebuild the session + tool-contexts with the new models
-    log(`\n──────── ${label}: main "${config.mainModel}" · runner "${config.runnerCfg}" ────────`);
-    const { card, results } = await runSuite(suiteId, showTabs, onTask, config.runnerCfg);
+    log(`\n──────── ${label}: main "${config.mainModel}" · runner "${config.runnerCfg}"${config.goal ? ' · goal' : ''}${config.prewalk ? ' · prewalk' : ''} ────────`);
+    const { card, results } = await runSuite(suiteId, showTabs, onTask, config.runnerCfg, { goal: !!config.goal });
     return { label, config, card, results };
   }
 
-  // Save the user's models, run, restore — the Lab never leaves your chat on a
-  // different model than you set.
+  // Save the user's models + prewalk arm, run, restore — the Lab never leaves
+  // your chat on a different model (or a flipped experiment) than you set.
   /** @param {() => Promise<any>} fn */
   async function withSavedModels(fn) {
     const savedMain = await readMainModel();
     const savedRunner = await readRunnerModel();
+    const savedPrewalk = await readPrewalk();
     try { return await fn(); }
     finally {
       await setMainModel(savedMain.provider, savedMain.model);
       await setRunnerModel(savedRunner);
-      log(`\nrestored your models (main ${JSON.stringify(savedMain.model)}, runner ${JSON.stringify(savedRunner)}).`);
+      await setPrewalk(savedPrewalk);
+      log(`\nrestored your settings (main ${JSON.stringify(savedMain.model)}, runner ${JSON.stringify(savedRunner)}, prewalk ${savedPrewalk ? 'on' : 'off'}).`);
     }
   }
+  /** @typedef {{ mainProvider?: string, mainModel?: string, runnerCfg?: string, goal?: boolean, prewalk?: boolean }} ArmConfig */
   /**
-   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string }} config
+   * @param {ArmConfig} config
    * @param {string} suiteId @param {boolean} showTabs
    * @param {(p: { index: number, total: number, id: string }) => void} [onTask]
    */
   const runOne = (config, suiteId, showTabs, onTask = () => {}) =>
     withSavedModels(() => runOneConfig('A', config, suiteId, showTabs, onTask));
-  // Run the suite under config A, then config B (each a main+runner pair).
+  // Run the suite under config A, then config B. Each config is a main+runner
+  // pair plus the run-shape flags (goal / prewalk) — so the same helper drives
+  // a model A/B or a baseline-vs-prewalk arm comparison.
   /**
-   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string }} configA
-   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string }} configB
+   * @param {ArmConfig} configA
+   * @param {ArmConfig} configB
    * @param {string} suiteId @param {boolean} showTabs
    * @param {(p: { index: number, total: number, id: string }) => void} [onTask]
    */
