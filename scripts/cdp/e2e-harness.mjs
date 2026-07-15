@@ -200,6 +200,9 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   const CHROME = resolveChrome();
   log('chrome:', CHROME);
   const profile = mkdtempSync(join(tmpdir(), 'peerd-e2e-'));
+  // why: a live task can trigger a file download; without redirection Chrome
+  // dumps it into the REAL ~/Downloads. Send them to a temp dir cleaned on exit.
+  const downloadDir = mkdtempSync(join(tmpdir(), 'peerd-dl-'));
 
   const chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
@@ -218,12 +221,22 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
     if (closed) return; closed = true;
     try { chrome?.kill('SIGKILL'); } catch { /* */ }
     try { rmSync(profile, { recursive: true, force: true }); } catch { /* */ }
+    try { rmSync(downloadDir, { recursive: true, force: true }); } catch { /* */ }
   };
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
   const port = await waitForCdpPort(profile);
   log('cdp port:', port);
+
+  // Redirect downloads browser-wide to the temp dir (headless honors this CDP
+  // call where profile Preferences often don't). Best-effort: attach to the
+  // browser target and leave the conn open so the setting persists for the run.
+  try {
+    const ver = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
+    const browserConn = await attach(ver.webSocketDebuggerUrl);
+    await browserConn.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
+  } catch { /* download redirect is best-effort; never block the run on it */ }
 
   // 1) discover peerd's id from its SW target (proves the extension loaded)
   const sw = await waitFor(() => findPeerdSw(port), { budgetMs: READY_BUDGET_MS });
