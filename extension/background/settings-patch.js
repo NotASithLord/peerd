@@ -151,6 +151,17 @@ export const normalizeSettingsPatch = (patch, {
     // with saved settings; resolveRunnerModel reads this pin.
     next.runnerModel = patch.runnerModel.trim().slice(0, 200);
   }
+  if (typeof patch.prewalkEnabled === 'boolean') {
+    // Prewalk (loop/prewalk.js): frontier model plans a goal run, a cheap
+    // executor inherits the live context at the first landed action.
+    next.prewalkEnabled = patch.prewalkEnabled;
+  }
+  if (typeof patch.prewalkExecutorModel === 'string') {
+    // Prewalk executor pin. '' = the provider's fast default
+    // (defaultRunnerModel); non-empty = a SAME-PROVIDER model id — the same
+    // contract as runnerModel above.
+    next.prewalkExecutorModel = patch.prewalkExecutorModel.trim().slice(0, 200);
+  }
   // Idle vault auto-lock interval (ms). 0 = never; otherwise clamp to a
   // sane range [1min, 24h]. The caller applies this to the live vault so
   // the change takes effect without an SW restart.

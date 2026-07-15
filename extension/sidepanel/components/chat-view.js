@@ -16,6 +16,7 @@ import { MessageList } from './message-list.js';
 import { InputBar } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
+import { TodoCard } from './todo-card.js';
 import { AsyncTasksBar } from './async-tasks-bar.js';
 import { ContextInspector } from './context-inspector.js';
 
@@ -137,6 +138,14 @@ export const ChatView = {
       // otherwise.
       m(GoalBar, { goal: state.goalRuns?.[state.session?.sessionId ?? ''], send }),
 
+      // The goal run's plan-of-record (session.todos, the todo_* tools) — the
+      // visible checklist that ticks as the run works. Renders straight off
+      // the session snapshot; stays up after the run ends as its receipt.
+      m(TodoCard, {
+        todos: /** @type {any} */ (state.session)?.todos,
+        active: !!state.goalRuns?.[state.session?.sessionId ?? '']?.active,
+      }),
+
       // In-flight async spawned (DESIGN-11). Pinned + self-hiding: the agent
       // can fire background spawned whose results land later as wake turns,
       // so this shows what's still cooking. Keyed to the ACTIVE session —
@@ -193,11 +202,14 @@ export const ChatView = {
           : null,
         // Goal arming — the in-chat entry point for goal mode. Arms the NEXT
         // send to launch an autonomous goal run; the InputBar consumes the arm
-        // and disarms. Greyed until there's a key (the send it arms needs one).
+        // and disarms — but the toggle STAYS lit while the run itself is live
+        // (it reflects state.goalRuns), and clicking it then stops the run.
         m(GoalToggle, {
           armed: ui.goalArmed,
+          run: state.goalRuns?.[sid ?? ''] ?? null,
           disabled: !hasKey,
           onToggle: (/** @type {boolean} */ next) => { ui.goalArmed = next; },
+          onStop: () => send({ type: 'agent/stop' }),
         }),
         m('.spacer'),
         // /system presence chip — the session's custom instructions

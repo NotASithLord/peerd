@@ -24,6 +24,15 @@ export { makeTurnDriver } from './loop/turn-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
 export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';
+// The goal run's plan-of-record (session.todos) — pure list ops + the
+// prompt-facing renderer the SW binds into the goal continuation.
+export { initTodos, checkTodo, addTodo, nextPending, todoProgress, formatTodoBlock, MAX_TODO_ITEMS } from './todo/core.js';
+// Prewalk (loop/prewalk.js): frontier model plans a goal run, a cheap
+// executor inherits the live context at the first landed action. Pure
+// policy — the SW owns the session writes and the run lifecycle.
+export {
+  resolvePrewalkExecutor, armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, PREWALK_NUDGE,
+} from './loop/prewalk.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.

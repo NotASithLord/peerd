@@ -134,6 +134,21 @@ export const defaults = {
   // Same on both channels.
   runnerModel: { store: '', preview: '' },
 
+  // Prewalk (loop/prewalk.js): a goal run opens on the chat's (frontier)
+  // model with a hidden plan-first nudge, then hands the LIVE context to a
+  // cheap executor model at the first landed action — todo list ticking, one
+  // valid move already in history. OFF by default on BOTH channels until the
+  // in-extension Lab's baseline-vs-prewalk arms validate spend/pass/speed
+  // (home/eval-section.js); flip deliberately, not by shipping.
+  prewalkEnabled: { store: false, preview: false },
+
+  // Prewalk executor override. '' = no pin — resolve the active provider's
+  // fast default (the same defaultRunnerModel rung the web actor rides, e.g.
+  // Haiku on Anthropic). A non-empty value pins a SAME-PROVIDER model id
+  // (cross-provider executors are a deliberate later step — keys, failover
+  // and pricing are provider-scoped).
+  prewalkExecutorModel: { store: '', preview: '' },
+
   // Cost telemetry: the meter is always on; the hard limit is opt-in.
   spendLimitUsd: { store: 0, preview: 0 },
   pricingOverrides: { store: {}, preview: {} },

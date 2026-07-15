@@ -30,6 +30,7 @@ import { SUITES } from '../eval/tasks.js';
  * @property {any} progress
  * @property {string} suiteId
  * @property {boolean} showTabs
+ * @property {boolean} goalRuns
  * @property {boolean} showTasks
  * @property {string} mainA
  * @property {string} runnerA
@@ -49,7 +50,7 @@ let engine = null;
 /** @type {EvalUi} */
 const ui = {
   loaded: false, warn: '', running: false, progress: null,
-  suiteId: 'simple', showTabs: false, showTasks: false,
+  suiteId: 'simple', showTabs: false, goalRuns: false, showTasks: false,
   mainA: '', runnerA: '', mainB: '', runnerB: '',
   allOptions: [], cloudOptions: [], localLabel: null,
   ab: null, single: null, log: [],
@@ -65,7 +66,7 @@ const parseMain = (val) => { const i = String(val).indexOf('::'); return i < 0 ?
 /** @param {'A' | 'B'} side */
 const configFor = (side) => {
   const { provider, model } = parseMain(side === 'A' ? ui.mainA : ui.mainB);
-  return { mainProvider: provider, mainModel: model, runnerCfg: side === 'A' ? ui.runnerA : ui.runnerB };
+  return { mainProvider: provider, mainModel: model, runnerCfg: side === 'A' ? ui.runnerA : ui.runnerB, goal: ui.goalRuns };
 };
 
 async function loadModels() {
@@ -128,6 +129,25 @@ async function runSingle() {
   finally { ui.running = false; ui.progress = null; m.redraw(); }
 }
 
+// Baseline vs prewalk — the SAME config (side A's pair), both legs as goal
+// runs; the only variable is the prewalk handoff. This is THE gate for
+// flipping prewalkEnabled on by default: it must hold pass rate while
+// cutting $ and time (compare stencil.so/blog/prewalk's receipts).
+async function runPrewalkAB() {
+  if (ui.running) return;
+  ui.running = true; ui.ab = null; ui.single = null; ui.log = []; ui.progress = null; m.redraw();
+  try {
+    const base = { ...configFor('A'), goal: true };
+    ui.ab = await ensureEngine().runAB(
+      { ...base, prewalk: false },
+      { ...base, prewalk: true },
+      ui.suiteId, ui.showTabs,
+      (/** @type {any} */ p) => { ui.progress = p; m.redraw(); },
+    );
+  } catch (e) { pushLog(`prewalk A/B aborted: ${/** @type {{ message?: string }} */ (e)?.message ?? e}`); }
+  finally { ui.running = false; ui.progress = null; m.redraw(); }
+}
+
 /** @param {number} ms */
 const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
 /** @param {number} [n] */
@@ -136,8 +156,9 @@ const usd = (n) => `$${(n ?? 0).toFixed(5)}`;
 const runnerUsd = (n) => ((n ?? 0) > 0 ? usd(n) : 'free'); // local runner reads "free"
 /** @param {string} id */
 const shortModel = (id) => String(id).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, ''); // strip provider/ + date
-/** @param {{ mainModel: string, runnerCfg: string }} cfg */
-const pairLabel = (cfg) => `${shortModel(cfg.mainModel)} / ${cfg.runnerCfg === 'local' ? 'local' : shortModel(cfg.runnerCfg)}`;
+/** @param {{ mainModel: string, runnerCfg: string, goal?: boolean, prewalk?: boolean }} cfg */
+const pairLabel = (cfg) => `${shortModel(cfg.mainModel)} / ${cfg.runnerCfg === 'local' ? 'local' : shortModel(cfg.runnerCfg)}`
+  + `${cfg.goal ? ' · goal' : ''}${cfg.prewalk ? ' · prewalk' : ''}`;
 
 /** @param {{ a: any, b: any, delta: any }} result */
 function abBoard({ a, b, delta }) {
@@ -199,11 +220,19 @@ export const EvalSection = {
         m('label.eval-check', {
           title: 'Off: the agent runs in a hidden, background window. On: a visible window (its own tab bar) you can watch — it never takes focus either way.',
         }, [m('input', { type: 'checkbox', checked: ui.showTabs, disabled: ui.running, onchange: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.showTabs = e.target.checked; } }), 'show tabs']),
+        m('label.eval-check', {
+          title: 'Run every task as an autonomous GOAL run (plan → todo checklist → turns until complete_goal) instead of a single chat turn. Slower per task; exercises the goal loop the prewalk A/B measures.',
+        }, [m('input', { type: 'checkbox', checked: ui.goalRuns, disabled: ui.running, onchange: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.goalRuns = e.target.checked; } }), 'goal runs']),
       ]),
       m('.eval-pairs', [pairCol('A'), m('.eval-pair-vs', 'vs'), pairCol('B')]),
       m('.eval-controls', [
         m('button.eval-btn.primary', { disabled: ui.running || !ui.mainA || !ui.mainB, onclick: runAB }, 'Run A/B'),
         m('button.eval-btn', { disabled: ui.running || !ui.mainA, onclick: runSingle }, 'Run A only'),
+        m('button.eval-btn', {
+          disabled: ui.running || !ui.mainA,
+          title: 'Side A\'s config, two legs of goal runs: baseline vs prewalk (plan on the main model, hand the live context to a cheap executor at the first landed action). The gate for turning the prewalk setting on: pass rate must hold while $ and time drop.',
+          onclick: runPrewalkAB,
+        }, 'Run prewalk A/B'),
       ]),
       m('button.eval-disclosure', { onclick: () => { ui.showTasks = !ui.showTasks; } },
         `${ui.showTasks ? '▾' : '▸'} exactly what the ${suite()?.tasks.length ?? 0} ${ui.suiteId} tasks run`),

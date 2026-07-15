@@ -405,6 +405,30 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
   };
 
   /**
+   * Set or CLEAR the session's prewalk state (loop/prewalk.js). null removes
+   * the field entirely (absent = "no prewalk", the shape every consumer keys
+   * on) — a generic update() spread can't unset a key, hence this setter.
+   * Optionally restores the planner provider/model in the SAME write, so a
+   * run-end restore can't be torn by a crash between two writes.
+   *
+   * @param {string} sessionId
+   * @param {import('../loop/prewalk.js').PrewalkState | null} state
+   * @param {{ provider?: string, model?: string }} [modelPatch]
+   */
+  const setPrewalk = async (sessionId, state, modelPatch) => {
+    const record = await getRecord(sessionId);
+    if (!record) throw new SessionNotFoundError(sessionId);
+    const { prewalk: _removed, ...rest } = record;
+    const updated = {
+      ...rest,
+      ...(modelPatch ?? {}),
+      ...(state ? { prewalk: state } : {}),
+    };
+    await idb.put(STORE, updated);
+    return assemble(updated);
+  };
+
+  /**
    * Persist the session's rolling trim-summary state.
    *
    * @param {string} sessionId
@@ -430,6 +454,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     setCustomSystemPrompt,
     setToolManifest,
     setCost,
+    setPrewalk,
     setTrimSummary,
   });
 };

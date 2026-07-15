@@ -131,6 +131,50 @@ export const BehaviorSection = {
       // never steals focus. open_tab active:false opens quietly when needed.)
 
       m('.settings-divider'),
+      m('h3', 'Prewalk (experimental)'),
+      (() => {
+        const pwOn = state.settings?.prewalkEnabled === true;
+        return [
+          m('p', pwOn
+            ? 'On. Goal runs open on your chat model for the planning phase (explore → commit a todo checklist → first action), then hand the live context to a cheaper executor model for the rest of the run. Spend drops; the plan and progress stay visible in the todo card.'
+            : 'Off. Goal runs stay on your chat model end-to-end. Turning this on makes a goal run plan on your chat model, then continue on a cheaper executor model once its first action lands — same context, lower spend. Benchmark it first in the home page Lab (baseline vs prewalk).'),
+          m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
+            m('button.secondary', {
+              type: 'button',
+              disabled: ui.prewalkBusy,
+              onclick: async () => {
+                if (ui.prewalkBusy) return;
+                ui.prewalkBusy = true; m.redraw();
+                try {
+                  await send({ type: 'settings/update', patch: { prewalkEnabled: !pwOn } });
+                } catch (e) {
+                  console.warn('[options] prewalk toggle failed', e);
+                } finally {
+                  ui.prewalkBusy = false; m.redraw();
+                }
+              },
+            }, ui.prewalkBusy ? '…' : pwOn ? 'Turn off prewalk' : 'Turn on prewalk'),
+          ]),
+          pwOn ? [
+            m('.input-row', [
+              m('label', { for: 'prewalk-executor' }, 'Executor model'),
+              m('input', {
+                id: 'prewalk-executor',
+                type: 'text',
+                placeholder: 'empty = provider fast default (e.g. Haiku)',
+                value: state.settings?.prewalkExecutorModel ?? '',
+                onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+                  await send({ type: 'settings/update', patch: { prewalkExecutorModel: e.target.value } });
+                  m.redraw();
+                },
+              }),
+            ]),
+            m('p.hint', 'A model id on the SAME provider as the chat. Leave empty to use the provider’s fast default — the same model the web actor rides.'),
+          ] : null,
+        ];
+      })(),
+
+      m('.settings-divider'),
       m('h3', 'Advanced automation'),
       (() => {
         // Firefox has no chrome.debugger WebExtension API (the build
@@ -314,6 +358,7 @@ export const BehaviorSection = {
       resetRow(send, [
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'advancedAutomationEnabled', 'devMode',
         'autoResumeInterruptedTurns', 'providerFailoverEnabled', 'providerFallbacks',
+        'prewalkEnabled', 'prewalkExecutorModel',
       ]),
     ]);
   },
