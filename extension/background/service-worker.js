@@ -2713,19 +2713,20 @@ scheduler = makeScheduler({
 });
 
 // The chrome.alarms wake: fires even with the panel closed and the SW asleep.
+// resumeSchedules (defined below; referenced at fire time, post-boot) sequences
+// goalRunner.resume() → load → tick so the isRunning() guard sees paused goal
+// runs — an alarm can respawn a dead SW, racing goal-run resume.
 browser.alarms?.onAlarm?.addListener((/** @type {any} */ alarm) => {
   if (alarm?.name !== SCHEDULE_ALARM_NAME) return;
-  scheduler?.tick().catch((/** @type {unknown} */ e) => console.error('[sw] schedule tick (alarm) failed', e));
+  resumeSchedules().catch((/** @type {unknown} */ e) => console.error('[sw] schedule tick (alarm) failed', e));
 });
 
 // Browser-start wake: rehydrate + catch up any routines that came due while the
 // browser was off. Redundant with the top-level boot catch-up (which runs on
 // every SW spawn), but onStartup is the guaranteed cold-browser-start signal;
-// load() is idempotent and tick() is serialized, so both firing is harmless.
+// resumeSchedules is idempotent + serialized, so both firing is harmless.
 browser.runtime?.onStartup?.addListener(() => {
-  Promise.resolve(scheduler?.load())
-    .then(() => scheduler?.tick())
-    .catch((/** @type {unknown} */ e) => console.error('[sw] schedule onStartup catch-up failed', e));
+  resumeSchedules().catch((/** @type {unknown} */ e) => console.error('[sw] schedule onStartup catch-up failed', e));
 });
 
 // ---------------------------------------------------------------------------
@@ -3980,11 +3981,25 @@ const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ r
 // kv mirror for resume) would survive a Stop and resurrect on the next unlock.
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.stop(sid);
 const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
-// Background scheduling: the vault/unlock path re-ticks the scheduler so any
-// routine that came due while locked (tick() defers firing when locked) runs the
-// moment the key is back — the "as soon as peerd is back on" guarantee for the
-// locked case. Idempotent + serialized inside the runner.
-const resumeSchedules = () => /** @type {any} */ (scheduler)?.tick();
+// Background scheduling: drive a full scheduler catch-up. The SINGLE entry point
+// for every wake (alarm, onStartup, cold boot, vault unlock) so the ordering is
+// defined in ONE place and can't drift per-caller.
+//
+// why resume goal runs FIRST: tick()'s isRunning() guard (which stops a goal-mode
+// routine from firing a second session while its previous run is still going)
+// reads goalRunner.isActive(lastSessionId) — the IN-MEMORY map. After an SW
+// eviction / auto-lock, a paused goal run lives only in the kv mirror until
+// goalRunner.resume() re-adds it, and resume() re-adds AFTER an `await kv.get`. If
+// tick() ran first it would see the routine as not-running and fire a duplicate
+// while resume() re-drives the original — two concurrent runs for one routine.
+// Sequencing resume() → load() → tick() closes that window. Both resume() and
+// load() are idempotent (skip ids already live), so calling this from every wake
+// — even one where goal runs were already resumed — is safe.
+const resumeSchedules = () => Promise.resolve(/** @type {any} */ (goalRunner)?.resume())
+  .catch(() => {})
+  .then(() => /** @type {any} */ (scheduler)?.load())
+  .then(() => /** @type {any} */ (scheduler)?.tick())
+  .catch((e) => console.error('[sw] schedule catch-up failed', e));
 const ensureSession = ensureCurrentSession;
 
 // Message routes live in background/routes/*.js as import-free, deps-injected
@@ -4289,10 +4304,9 @@ for (const deadKey of ['ralph.plan.v1', 'ralph.loop.v1']) {
 // Background scheduling: rehydrate the registered routines on every SW spawn and
 // run a catch-up pass. This is the primary "run it as soon as peerd is back on"
 // junction — a routine whose nextRunAt already passed (browser was off, SW was
-// evicted) fires here. tick() self-defers while the vault is locked (a firing
-// needs the model key) and the vault/unlock path re-ticks, so calling it
-// unconditionally is safe. The chrome.alarms + onStartup wakes cover the cases
-// where no SW spawn otherwise happens.
-Promise.resolve(scheduler?.load())
-  .then(() => scheduler?.tick())
-  .catch((e) => console.error('[sw] schedule boot catch-up failed', e));
+// evicted) fires here. resumeSchedules self-defers while the vault is locked (a
+// firing needs the model key) and the vault/unlock path re-runs it, so calling it
+// unconditionally is safe. It resumes goal runs BEFORE ticking (so a paused
+// goal-mode routine isn't fired twice — see resumeSchedules). The chrome.alarms +
+// onStartup wakes cover the cases where no SW spawn otherwise happens.
+resumeSchedules();

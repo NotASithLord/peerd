@@ -128,6 +128,37 @@ describe('makeScheduler — tick fires due routines', () => {
     expect(h.fired).toHaveLength(MAX_FIRINGS_PER_TICK);
   });
 
+  it('caps firings across the WHOLE tick() call even when a re-tick lands mid-persist', async () => {
+    // Regression: the firing cap must bind the whole tick() call, not each
+    // re-tick pass. Simulate a concurrent wake (alarm/unlock) arriving during a
+    // persist await by re-entering tick() once from kv.set — it should set the
+    // re-tick flag (run another pass), NOT reset a per-pass counter and stampede.
+    let clock = 1_000_000;
+    const store = new Map<string, any>();
+    const fired: any[] = [];
+    let idSeq = 0;
+    let reentered = false;
+    /** @type {any} */
+    let sched: ReturnType<typeof makeScheduler>;
+    sched = makeScheduler({
+      fireRoutine: async (r: any) => { fired.push(r); return { sessionId: `s-${r.id}` }; },
+      kv: {
+        get: async (k: string) => store.get(k),
+        set: async (k: string, v: any) => {
+          store.set(k, v);
+          if (!reentered) { reentered = true; await sched.tick(); } // concurrent wake mid-persist
+        },
+      },
+      now: () => clock,
+      makeId: () => `r${++idSeq}`,
+    });
+    for (let i = 0; i < MAX_FIRINGS_PER_TICK + 3; i++) sched.add({ prompt: `p${i}`, every: '1h' });
+    clock += 2 * HOUR;                       // all due
+    await sched.tick();
+    expect(reentered).toBe(true);            // the re-entrant wake actually happened
+    expect(fired.length).toBe(MAX_FIRINGS_PER_TICK);  // still capped for the whole call
+  });
+
   it('skips a routine whose previous run is still going (no pile-up)', async () => {
     const h = makeHarness();
     const r = (h.scheduler.add({ prompt: 'x', every: '1m' }) as any).routine;

@@ -213,6 +213,12 @@ export const makeScheduler = ({
     // this same call rather than dropped.
     const consumeRetick = () => { const r = retickRequested; retickRequested = false; return r; };
     const totals = { fired: 0, deferred: 0, skipped: 0 };
+    // Cap firings across the WHOLE tick() call, not per re-tick pass. A concurrent
+    // wake landing during a pass's `await persist()` sets retickRequested, and a
+    // per-pass counter would reset to 0 on the next pass — letting one tick() call
+    // stampede past MAX_FIRINGS_PER_TICK. Hoisting the counter binds the cap to the
+    // whole call; leftovers drain on the next (re-armed, past-due) wake.
+    let firedThisTick = 0;
     try {
       do {
         const at = now();
@@ -224,9 +230,8 @@ export const makeScheduler = ({
           totals.deferred += due.length;
           continue;
         }
-        let firedThisPass = 0;
         for (const routine of due) {
-          if (firedThisPass >= MAX_FIRINGS_PER_TICK) break;  // throttle the herd
+          if (firedThisTick >= MAX_FIRINGS_PER_TICK) break;  // throttle the herd
           if (firing.has(routine.id)) continue;
           // Skip a routine whose previous firing is still running — advance it a
           // slot so it retries next cadence instead of piling up concurrent runs.
@@ -251,7 +256,7 @@ export const makeScheduler = ({
             })
             .catch((e) => console.error('[schedule] fireRoutine threw', e))
             .finally(() => firing.delete(routine.id));
-          firedThisPass += 1;
+          firedThisTick += 1;
           totals.fired += 1;
         }
         // More due than we fired (throttle or skips) → re-arm; the past-due
