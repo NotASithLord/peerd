@@ -55,6 +55,7 @@
  * @property {{ mode?: string, confirmActions?: boolean }} [permission]
  * @property {string} [customSystemPrompt]
  * @property {string} [toolManifest]
+ * @property {import('/peerd-runtime/todo/core.js').TodoItem[]} [todos]  the goal run's plan-of-record (TodoCard)
  */
 
 /**
