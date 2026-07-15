@@ -30,7 +30,20 @@
 // arrives quickly.
 //
 // Everything here is pure (Bun-tested); the IO — session reads/writes, the
-// live goal-run check, audit — lives in the SW wiring and turn-driver seams.
+// live goal-run check, audit — lives in the SW wiring (prewalk-controller.js)
+// and turn-driver seams.
+//
+// KNOWN LIMITATION (low, off-by-default): the executor's first turn inherits
+// the global reasoning setting. The cross-model thinking strip (agent-loop.js)
+// removes the planner's signed thinking from replayed history, which is
+// correct — but if a planning turn ends on a DANGLING tool_use (interrupted
+// mid-dispatch) rather than the clean text end the nudge steers toward, the
+// executor's first request could carry a thinking-stripped tool_use turn with
+// reasoning on, which the API can 400. The common goal flow appends a fresh
+// user continuation between turns (so the risk is narrow), and replaying the
+// planner's signed thinking would 400 anyway — there is no strictly-better
+// option inside the strip. Revisit if the executor first-turn ever needs
+// reasoning forced off; today prewalk is opt-in and this edge is rare.
 
 /**
  * Prewalk state, persisted on the session record for the run's lifetime.

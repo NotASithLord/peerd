@@ -1949,6 +1949,9 @@ button.icon:hover { background: var(--bg); }
   display: flex; align-items: baseline; gap: 8px;
   margin-bottom: 6px;
 }
+/* Ended-run receipt: one compact line, no list below — drop the head's
+   bottom margin so it doesn't leave trailing space. */
+.todo-card--done .todo-card-head { margin-bottom: 0; }
 .todo-card-title { font-weight: 600; }
 .todo-card-meta { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
 .todo-card-live { color: var(--fg-muted); font-size: 11px; margin-left: auto; }

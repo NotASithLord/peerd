@@ -74,6 +74,14 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
   // 'eval' (NOT 'sidepanel') — joins uiPorts for the turn/* stream but does NOT
   // count as "the side panel is open". The Lab runs inside the home page, so a
   // 'sidepanel'-named port here would make the home think the panel popped out.
+  // A push belongs to the CURRENT task's subject session. turn/state carries
+  // the subject record (actors use turn/actor-state, never turn/state), so
+  // turn.session.sessionId is the subject id — set before the subject's own
+  // cost/goal events. Requiring it to be KNOWN and to MATCH rejects both
+  // background-session pushes and a prior task's late "zombie" events.
+  /** @param {{ sessionId?: string }} msg */
+  const isSubject = (msg) => !!turn.session?.sessionId && msg.sessionId === turn.session.sessionId;
+
   const port = browser.runtime.connect({ name: 'eval' });
   port.onMessage.addListener((/** @type {any} */ msg) => {
     switch (msg?.type) {
@@ -85,7 +93,17 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
         break;
       case 'turn/delta': turn.started = true; break;
       case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); break;
-      case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } break;
+      case 'turn/cost':
+        // why msg.session (cumulative) not msg.turn (last-turn-only): a GOAL
+        // run spans many turns, and prewalk makes the LAST turn the cheap
+        // executor while baseline's last turn is the frontier model — reading
+        // msg.turn would drop the expensive planning turns and bias the A/B
+        // toward prewalk. msg.session is the run total (same CostTally shape).
+        // why the sessionId guard: the 'eval' port receives turn/cost for
+        // EVERY session incl. web-actor turns; without it an actor turn's tally
+        // clobbers the subject's. Actor spend rides turn/spawned-cost below.
+        if (isSubject(msg) && msg.session) { turn.tokens = tally(msg.session); turn.cost = msg.session; }
+        break;
       case 'turn/spawned-cost':
         if (msg.usage) {
           turn.runner.inputTokens += msg.usage.inputTokens || 0;
@@ -102,6 +120,11 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
         else if (!turn.goalMode && turn.started && turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
         break;
       case 'goal/state':
+        // why isSubject: a timed-out prior task's run can emit a late terminal
+        // AFTER this task started (its aborted turn tail settles whenever). Only
+        // the CURRENT subject's terminal may resolve THIS task — else task N's
+        // zombie resolves task N+1 mid-run and contaminates the A/B.
+        if (!isSubject(msg)) break;
         turn.started = true;
         if (turn.goalMode && msg.active === false && turn.resolveDone) {
           const r = turn.resolveDone; turn.resolveDone = null; r();
