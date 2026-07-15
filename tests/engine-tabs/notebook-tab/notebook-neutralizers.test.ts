@@ -5,11 +5,11 @@
 // js_notebook code runs in the same realm right after the seal module
 // evaluates. The real-realm behavior (actual worker globals, evaluation
 // order vs static imports, the host relay) is covered by the in-browser
-// suite (extension/tests/unit/notebook-tab/notebook-seal.test.js); this file
+// suite (extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js); this file
 // pins the pure semantics against mock globals.
 
 import { describe, test, expect } from 'bun:test';
-import { applyRealmSeal } from '../../extension/notebook-tab/notebook-neutralizers.js';
+import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 
 // Mock worker global: network primitives live where they live in a real
 // DedicatedWorkerGlobalScope — constructors as own props of the global,

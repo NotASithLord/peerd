@@ -26,7 +26,7 @@
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
-import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/engine-tabs/notebook-tab/worker-source.js';
 import { ACTORS_BRIDGE_GUARD_MS } from '/peerd-runtime/index.js';
 
 let jobSeq = 0;

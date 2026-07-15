@@ -7,12 +7,12 @@
 // links still point at the real Firefox bug + W3C standards thread — the whole
 // point of the notice. If someone edits a URL, this catches it in the terminal.
 
-import { describe, it, expect } from '../../framework.js';
+import { describe, it, expect } from '../../../framework.js';
 import {
   buildFirefoxWebVmNote,
   FIREFOX_WEBVM_BUG,
   W3C_WEBEXT_ISSUES,
-} from '/vm-tab/firefox-webvm-note.js';
+} from '/engine-tabs/vm-tab/firefox-webvm-note.js';
 
 describe('buildFirefoxWebVmNote', () => {
   it('names WebVM + Firefox and frames it as a platform limit, not a peerd bug', () => {

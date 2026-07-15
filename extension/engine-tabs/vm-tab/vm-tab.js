@@ -36,8 +36,8 @@ import {
 } from '/peerd-engine/index.js';
 import { base64ToBytes } from '/shared/util.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
-import { PEERD_PRINTF_RE, stripChunk } from '/vm-tab/marker-strip.js';
-import { buildFirefoxWebVmNote } from '/vm-tab/firefox-webvm-note.js';
+import { PEERD_PRINTF_RE, stripChunk } from '/engine-tabs/vm-tab/marker-strip.js';
+import { buildFirefoxWebVmNote } from '/engine-tabs/vm-tab/firefox-webvm-note.js';
 
 // WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
 // it via the COOP/COEP manifest keys; Firefox doesn't honor them, so

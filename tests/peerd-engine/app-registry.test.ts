@@ -4,7 +4,7 @@ import { createStorageStub } from '../setup.ts';
 
 describe('createAppRegistry', () => {
   test('exports APP_TAB_PATH', () => {
-    expect(APP_TAB_PATH).toBe('/app-tab/index.html');
+    expect(APP_TAB_PATH).toBe('/engine-tabs/app-tab/index.html');
   });
 
   test('create() requires name + records tags + entryFile', async () => {

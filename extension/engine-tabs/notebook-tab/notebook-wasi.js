@@ -30,7 +30,7 @@
 
 import {
   WASI, File, Directory, OpenFile, PreopenDirectory, ConsoleStdout,
-} from '../vendor/browser-wasi-shim/index.js';
+} from '../../vendor/browser-wasi-shim/index.js';
 
 // Per-stream collector cap. Generous for tool output, small enough that a
 // runaway printf loop can't balloon the 'done' postMessage payload.
@@ -60,7 +60,7 @@ const toBytes = (v) => {
 // no hunting the web for a binary (a live agent burned a whole session on
 // exactly that hunt). Hand-assembled — fd_write the message to stdout, then
 // proc_exit 0 — and regenerable from source:
-// tests/notebook-tab/wasi-test-module.ts buildHelloModule('hello from wasi\n')
+// tests/engine-tabs/notebook-tab/wasi-test-module.ts buildHelloModule('hello from wasi\n')
 // (the bun suite pins these bytes against that builder, so blob and source
 // cannot drift).
 const DEMO_MODULE_B64 =
@@ -79,7 +79,7 @@ export const demoModule = () => Uint8Array.from(atob(DEMO_MODULE_B64), (c) => c.
  * Build the in-memory Inode tree the module sees, from flat caller paths
  * ('data/input.txt' → nested Directories). Pure; exported for tests.
  * @param {Record<string, string | Uint8Array | ArrayBuffer>} files
- * @returns {Map<string, import('../vendor/browser-wasi-shim/index.js').Inode>}
+ * @returns {Map<string, import('../../vendor/browser-wasi-shim/index.js').Inode>}
  */
 export const buildFileTree = (files) => {
   /** @type {Map<string, any>} */

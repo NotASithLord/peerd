@@ -7,7 +7,7 @@
 // declaration order, so the leak attempt must already find a sealed
 // realm.
 
-import '/notebook-tab/realm-seal.js';
+import '/engine-tabs/notebook-tab/realm-seal.js';
 import './seal-order-leaky.js';
 
 postMessage({

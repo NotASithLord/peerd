@@ -8,7 +8,7 @@
 // pure source assembly and belongs in the fast bun tier.
 
 import { describe, test, expect } from 'bun:test';
-import { buildWorkerSource, DEFAULT_WORKER_CAPS } from '../../extension/notebook-tab/worker-source.js';
+import { buildWorkerSource, DEFAULT_WORKER_CAPS } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 
 // A minimal resolverDeps — buildEntry only needs these to assemble the entry;
 // the user code has no imports, so readFile/makeBlobUrl are never hit.
