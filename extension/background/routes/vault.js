@@ -21,7 +21,7 @@ export const makeVaultRoutes = (deps) => {
   const {
     vault, auditLog, kv, idb, base64ToBytes,
     ensureOffscreen, maybeStartBaseNetwork, pushState, purgeVaultBlob,
-    confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
+    confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns, resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -69,6 +69,9 @@ export const makeVaultRoutes = (deps) => {
           .then(() => sessionCache.sessionGet('currentSessionId'))
           .then((/** @type {any} */ cur) => maybeAutoResume(cur))
           .catch(() => {});
+        // Background scheduling: run any routine that came due while the vault
+        // was locked (tick() deferred it) now that the key is back.
+        Promise.resolve(resumeSchedules?.()).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof WrongPassphraseError) return { ok: false, error: 'wrong-passphrase' };
@@ -205,6 +208,8 @@ export const makeVaultRoutes = (deps) => {
           .then(() => sessionCache.sessionGet('currentSessionId'))
           .then((/** @type {any} */ cur) => maybeAutoResume(cur))
           .catch(() => {});
+        // Background scheduling: drain routines that came due while locked.
+        Promise.resolve(resumeSchedules?.()).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof PrfNotEnrolledError) return { ok: false, error: 'prf-not-enrolled' };

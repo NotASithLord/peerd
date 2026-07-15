@@ -24,6 +24,10 @@ export { makeTurnDriver } from './loop/turn-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
 export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';
+// Background scheduling: standing Routines that fire unattended on a cadence and
+// catch up as soon as peerd is back on. loop/scheduler.js (runner) + schedule.js
+// (pure math).
+export { makeScheduler, SCHEDULE_ROUTINES_KEY, SCHEDULE_ALARM_NAME } from './loop/scheduler.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.

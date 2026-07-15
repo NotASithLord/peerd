@@ -136,6 +136,8 @@ import {
   filterByGoalActive,
   makeGoalRunner,
   GOAL_MAX_ITERATIONS,
+  makeScheduler,
+  SCHEDULE_ALARM_NAME,
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
@@ -1002,6 +1004,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     completeGoalRun: sessionId
       ? (/** @type {string} */ summary) => goalRunner?.complete(/** @type {string} */ (sessionId), summary) ?? false
       : undefined,
+    // why: the schedule_* tools call these to register / list / remove background
+    // Routines (loop/scheduler.js). Resolved lazily — `scheduler` is built after
+    // this fn (same late-dep dance as goalRunner). Routines are GLOBAL (not
+    // per-session), so these are present regardless of sessionId.
+    scheduleAdd: (/** @type {any} */ req) => scheduler?.add(req) ?? { ok: false, error: 'schedule_unavailable' },
+    scheduleList: () => scheduler?.list() ?? [],
+    scheduleRemove: (/** @type {string} */ id) => scheduler?.remove(id) ?? false,
     dom: undefined,
     // why: vm is a SW-side client that proxies vm/run + vm/write-file
     // messages via chrome.tabs.sendMessage to the discrete VM tab.
@@ -2387,6 +2396,11 @@ const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSe
 // orchestrator wiring uses). filterByGoalActive is a pure descriptor filter.
 /** @type {ReturnType<typeof makeGoalRunner> | null} */
 let goalRunner = null;
+// Background scheduling (loop/scheduler.js): forward-declared like goalRunner so
+// buildToolContext's schedule_* hooks resolve it lazily; built just below once
+// runAgentTurn / startGoalRun exist.
+/** @type {ReturnType<typeof makeScheduler> | null} */
+let scheduler = null;
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
@@ -2427,6 +2441,93 @@ goalRunner = makeGoalRunner({
   // resume() (on vault unlock) re-drives them. Without it the run is in-memory
   // only and an MV3 recycle would silently drop it.
   kv,
+});
+
+// ---------------------------------------------------------------------------
+// 5b1. Background scheduling — standing Routines (loop/scheduler.js)
+// ---------------------------------------------------------------------------
+// A Routine fires an agent run unattended on a cadence, and catches up as soon
+// as peerd is back on (see the three tick() wakes below: chrome.alarms, cold
+// boot, vault unlock). The runner is the time-triggered sibling of goalRunner —
+// same durable-mirror-in-storage.local contract — with the IO injected here.
+
+// Arm (or clear) the single wake alarm for the soonest routine. chrome.alarms
+// persists across SW eviction AND browser restart, and a `when` in the past
+// fires ~immediately on the next browser start — that's the "run as soon as the
+// browser is back on" mechanism for the SW-asleep / browser-off cases.
+const setScheduleAlarm = (/** @type {number | null} */ whenMs) => {
+  try {
+    if (whenMs == null) { browser.alarms?.clear?.(SCHEDULE_ALARM_NAME); return; }
+    // chrome.alarms floors very-near/near-past `when` to ~1 min out; that's fine
+    // — a due routine still fires promptly, and the boot/unlock ticks cover the
+    // immediate case without waiting for the alarm.
+    browser.alarms?.create?.(SCHEDULE_ALARM_NAME, { when: whenMs });
+  } catch (e) { console.error('[sw] schedule alarm set failed', e); }
+};
+
+// Content-free desktop notification when a routine starts (DECISIONS #20 posture:
+// title only, never the task text or any result). The run itself streams into
+// its own session; this just tells a user with the panel closed that it fired.
+const notifyRoutineFired = () => {
+  try {
+    browser.notifications?.create?.({
+      type: 'basic',
+      iconUrl: browser.runtime.getURL('icons/icon128.png'),
+      title: 'peerd routine running',
+      message: 'A scheduled task started. Open peerd to see it.',
+    });
+  } catch (e) { console.warn('[sw] routine notify failed', e); }
+};
+
+// Fire ONE routine: mint a fresh, dedicated session (tagged with the routine id
+// for provenance — NOT the foreground currentSessionId, so it never disturbs the
+// user's active chat), then drive it. 'goal' mode reuses the goal runner (an
+// autonomous multi-step run until complete_goal); 'turn' mode is a single agent
+// turn. trusted:true — a routine is USER-authored first-party work, same posture
+// as goal mode; untrusted CONTENT it later pulls is still fenced behind actors.
+const fireRoutine = async (/** @type {any} */ routine) => {
+  const ap = await ensureActiveProvider();
+  const inherited = await resolvePermission(null);
+  const created = await sessions.create({
+    provider: ap.name,
+    model: ap.model,
+    permissionMode: inherited.mode,
+    confirmActions: inherited.confirmActions,
+  });
+  await sessions.update(created.sessionId, { routineId: routine.id }).catch(() => {});
+  auditLog.append({ type: 'routine_fired', details: { routineId: routine.id, mode: routine.mode, sessionId: created.sessionId } }).catch(() => {});
+  if (routine.mode === 'turn') {
+    runAgentTurn({ sessionId: created.sessionId, userText: routine.prompt, synthetic: false, trusted: true })
+      .catch((/** @type {unknown} */ e) => console.error('[sw] routine turn threw', e));
+  } else {
+    await startGoalRun({ sessionId: created.sessionId, goal: routine.prompt });
+  }
+  notifyRoutineFired();
+  return { sessionId: created.sessionId };
+};
+
+scheduler = makeScheduler({
+  fireRoutine,
+  kv,
+  isLocked: () => vault.isLocked(),
+  setAlarm: setScheduleAlarm,
+  onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
+});
+
+// The chrome.alarms wake: fires even with the panel closed and the SW asleep.
+browser.alarms?.onAlarm?.addListener((/** @type {any} */ alarm) => {
+  if (alarm?.name !== SCHEDULE_ALARM_NAME) return;
+  scheduler?.tick().catch((/** @type {unknown} */ e) => console.error('[sw] schedule tick (alarm) failed', e));
+});
+
+// Browser-start wake: rehydrate + catch up any routines that came due while the
+// browser was off. Redundant with the top-level boot catch-up (which runs on
+// every SW spawn), but onStartup is the guaranteed cold-browser-start signal;
+// load() is idempotent and tick() is serialized, so both firing is harmless.
+browser.runtime?.onStartup?.addListener(() => {
+  Promise.resolve(scheduler?.load())
+    .then(() => scheduler?.tick())
+    .catch((/** @type {unknown} */ e) => console.error('[sw] schedule onStartup catch-up failed', e));
 });
 
 // ---------------------------------------------------------------------------
@@ -3675,6 +3776,11 @@ const startGoalRun = (/** @type {{ sessionId: string, goal: string }} */ req) =>
 // kv mirror for resume) would survive a Stop and resurrect on the next unlock.
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.stop(sid);
 const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
+// Background scheduling: the vault/unlock path re-ticks the scheduler so any
+// routine that came due while locked (tick() defers firing when locked) runs the
+// moment the key is back — the "as soon as peerd is back on" guarantee for the
+// locked case. Idempotent + serialized inside the runner.
+const resumeSchedules = () => /** @type {any} */ (scheduler)?.tick();
 const ensureSession = ensureCurrentSession;
 
 // Message routes live in background/routes/*.js as import-free, deps-injected
@@ -3708,6 +3814,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
+    resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -3974,3 +4081,14 @@ vault.attemptResume().then((resumed) => {
 for (const deadKey of ['ralph.plan.v1', 'ralph.loop.v1']) {
   Promise.resolve(kv.delete(deadKey)).catch(() => {});
 }
+
+// Background scheduling: rehydrate the registered routines on every SW spawn and
+// run a catch-up pass. This is the primary "run it as soon as peerd is back on"
+// junction — a routine whose nextRunAt already passed (browser was off, SW was
+// evicted) fires here. tick() self-defers while the vault is locked (a firing
+// needs the model key) and the vault/unlock path re-ticks, so calling it
+// unconditionally is safe. The chrome.alarms + onStartup wakes cover the cases
+// where no SW spawn otherwise happens.
+Promise.resolve(scheduler?.load())
+  .then(() => scheduler?.tick())
+  .catch((e) => console.error('[sw] schedule boot catch-up failed', e));
