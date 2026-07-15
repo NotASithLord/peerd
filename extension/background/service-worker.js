@@ -136,6 +136,12 @@ import {
   filterByGoalActive,
   makeGoalRunner,
   GOAL_MAX_ITERATIONS,
+  formatTodoBlock,
+  // prewalk (loop/prewalk.js) — pure policy; the SW owns the IO below
+  resolvePrewalkExecutor,
+  armPrewalk,
+  shouldPrewalkSwap,
+  markPrewalkSwapped,
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
@@ -803,6 +809,13 @@ const resolvePermission = async (activeSession) => {
   return { mode: normalizeMode(rawMode), confirmActions: normalizeConfirmActions(rawConfirm) };
 };
 
+// Per-session promise chains serializing todo read-modify-writes (the
+// ctx.todoStore below). Keyed by sessionId; an entry is just the tail of the
+// chain, so the map stays tiny and dies with the SW (the persisted list is
+// the durable state).
+/** @type {Map<string, Promise<unknown>>} */
+const todoChains = new Map();
+
 /**
  * Build a ToolContext for the current call. The agent loop (commit 2)
  * will pass this into the dispatcher per tool call; the side-panel
@@ -1001,6 +1014,31 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // outside an active run, which the tool surfaces as a harmless no-op.
     completeGoalRun: sessionId
       ? (/** @type {string} */ summary) => goalRunner?.complete(/** @type {string} */ (sessionId), summary) ?? false
+      : undefined,
+    // why: the todo_* tools mutate the session's plan-of-record through this
+    // serialized read-modify-write (todoChains, module scope) — two todo ops
+    // in one concurrent tool wave would otherwise race the record and lose an
+    // update. apply(fn): fn is PURE (todo/core.js); a result with ok+todos is
+    // persisted, anything else is returned untouched. Goal-run-scoped like
+    // completeGoalRun: absent outside a live run, so the tools no-op cleanly.
+    todoStore: sessionId && goalRunner?.isActive(/** @type {string} */ (sessionId))
+      ? {
+          apply: (/** @type {(todos: any) => any} */ fn) => {
+            const sid = /** @type {string} */ (sessionId);
+            const next = (todoChains.get(sid) ?? Promise.resolve()).then(async () => {
+              const rec = await sessions.get(sid);
+              const out = fn(rec?.todos);
+              if (out?.ok && Array.isArray(out.todos)) {
+                await sessions.update(sid, { todos: out.todos });
+              }
+              return out;
+            });
+            // why swallow for the CHAIN only: a failed apply must not wedge
+            // every later todo op; the caller still sees its own rejection.
+            todoChains.set(sid, next.catch(() => {}));
+            return next;
+          },
+        }
       : undefined,
     dom: undefined,
     // why: vm is a SW-side client that proxies vm/run + vm/write-file
@@ -2387,6 +2425,119 @@ const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSe
 // orchestrator wiring uses). filterByGoalActive is a pure descriptor filter.
 /** @type {ReturnType<typeof makeGoalRunner> | null} */
 let goalRunner = null;
+
+// ---------------------------------------------------------------------------
+// Prewalk (loop/prewalk.js) — the SW-side IO around the pure policy: arm a
+// goal run, flip planning→executing when the gate fires, apply the model swap
+// at turn boundaries, restore the planner when the run ends (or is found
+// stale). The session record is the single source of truth; this Set is only
+// the O(1) "is anything armed here" guard so the per-tool-call gate does no
+// IO for the 99.9% of calls with no prewalk in play. Rebuilt lazily by
+// reconcilePrewalk after an SW restart.
+/** @type {Set<string>} */
+const prewalkPlanningSessions = new Set();
+
+// Turn-boundary reconcile (turn-driver calls it right after loading the turn
+// session, main sessions only). Three jobs: (a) restore + clear STALE state —
+// a run that died without its run-end restore (rare: requires losing both the
+// in-memory run and the kv mirror; a vault-lock PAUSE can also look stale for
+// the one turn before resume() re-drives, costing only the swap, never the
+// chat); (b) seed the planning Set after an SW restart; (c) apply the pending
+// executor swap so this turn's model/pricing/window all read the executor.
+const reconcilePrewalk = async (/** @type {any} */ session) => {
+  const pw = session?.prewalk;
+  if (!pw) return session;
+  const sid = session.sessionId;
+  if (!(goalRunner?.isActive(sid) ?? false)) {
+    prewalkPlanningSessions.delete(sid);
+    const restored = await sessions.setPrewalk(sid, null, {
+      provider: pw.plannerProvider, model: pw.plannerModel,
+    });
+    auditLog.append({ type: 'prewalk_restored', sessionId: sid, details: { reason: 'stale', plannerModel: pw.plannerModel } }).catch(() => {});
+    return restored;
+  }
+  if (pw.phase === 'planning') {
+    prewalkPlanningSessions.add(sid);
+    return session;
+  }
+  if (session.provider !== pw.executorProvider || session.model !== pw.executorModel) {
+    const swapped = await sessions.update(sid, {
+      provider: pw.executorProvider, model: pw.executorModel,
+    });
+    auditLog.append({ type: 'prewalk_swap_applied', sessionId: sid, details: { executorProvider: pw.executorProvider, executorModel: pw.executorModel } }).catch(() => {});
+    postChatNote(`Prewalk: plan landed — continuing on ${pw.executorModel}.`);
+    return swapped;
+  }
+  return session;
+};
+
+// The per-tool-call gate (turn-driver's toolDispatch): a successful mutating
+// call during the planning phase, with the todo list committed, flips the
+// phase. The MODEL swap itself waits for the next turn's reconcile — see
+// loop/prewalk.js for why boundaries.
+const maybePrewalkSwap = async (/** @type {{ sessionId?: string|null, name?: string, ok?: boolean }} */ { sessionId, name, ok }) => {
+  if (!sessionId || ok !== true || !prewalkPlanningSessions.has(sessionId)) return;
+  const session = await sessions.get(sessionId);
+  const pw = /** @type {any} */ (session)?.prewalk;
+  const fire = shouldPrewalkSwap({
+    prewalk: pw,
+    todosCount: /** @type {any} */ (session)?.todos?.length ?? 0,
+    toolName: String(name ?? ''),
+    sideEffect: getTool(String(name ?? ''))?.sideEffect,
+    ok: true,
+  });
+  if (!fire) return;
+  await sessions.setPrewalk(sessionId, markPrewalkSwapped(pw, Date.now()));
+  prewalkPlanningSessions.delete(sessionId);
+  auditLog.append({ type: 'prewalk_swapped', sessionId, details: { trigger: name, executorProvider: pw.executorProvider, executorModel: pw.executorModel } }).catch(() => {});
+};
+
+// Arm a fresh goal run (called by startGoalRun below, before the runner
+// starts driving). Quiet no-op unless the setting is on AND an executor
+// distinct from the session's model resolves. Any stale state from an
+// earlier run is restored first so arming reads the true planner model.
+const armPrewalkForRun = async (/** @type {string} */ sessionId) => {
+  try {
+    if (!sessionId || !settingsStore.get().prewalkEnabled) return;
+    let session = await sessions.get(sessionId);
+    if (!session) return;
+    const stale = /** @type {any} */ (session).prewalk;
+    if (stale) {
+      session = await sessions.setPrewalk(sessionId, null, {
+        provider: stale.plannerProvider, model: stale.plannerModel,
+      });
+    }
+    if (!session) return;
+    const provider = listProviders().find((/** @type {any} */ p) => p.name === session.provider);
+    const executor = resolvePrewalkExecutor({ settings: settingsStore.get(), provider });
+    const armed = armPrewalk(session, executor, Date.now());
+    if (!armed) return;
+    await sessions.setPrewalk(sessionId, armed);
+    prewalkPlanningSessions.add(sessionId);
+    auditLog.append({ type: 'prewalk_armed', sessionId, details: { executorProvider: armed.executorProvider, executorModel: armed.executorModel } }).catch(() => {});
+  } catch (e) {
+    console.warn('[sw] prewalk arm failed', e);
+  }
+};
+
+// Run-end restore: put the chat back on the planner model and clear the
+// state, whatever phase the run ended in. Keyed restore (not a snapshot
+// write), so it composes with the reconcile path's stale-cleanup.
+const restorePrewalkForRun = async (/** @type {string} */ sessionId) => {
+  try {
+    prewalkPlanningSessions.delete(sessionId);
+    const session = await sessions.get(sessionId);
+    const pw = /** @type {any} */ (session)?.prewalk;
+    if (!pw) return;
+    await sessions.setPrewalk(sessionId, null, {
+      provider: pw.plannerProvider, model: pw.plannerModel,
+    });
+    auditLog.append({ type: 'prewalk_restored', sessionId, details: { reason: 'run-end', plannerModel: pw.plannerModel, swapped: !!pw.swappedAt } }).catch(() => {});
+  } catch (e) {
+    console.warn('[sw] prewalk restore failed', e);
+  }
+};
+
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
@@ -2400,6 +2551,8 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
   recordModelCall: contextSnapshots.record,
+  // prewalk: the turn-boundary swap/restore + the per-tool-call gate (above).
+  reconcilePrewalk, maybePrewalkSwap,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -2418,7 +2571,11 @@ goalRunner = makeGoalRunner({
   // transcript (cap / halt). 'done' needs none — complete_goal's tool result is
   // the visible record. (Permission needs no restore: resolvePermission computes
   // the autonomy from the live run, so it reverts on its own when the run ends.)
-  onRunEnd: (/** @type {any} */ _sid, /** @type {any} */ info) => {
+  onRunEnd: (/** @type {any} */ sid, /** @type {any} */ info) => {
+    // Prewalk: put the chat back on the planner model whatever way the run
+    // ended. Fire-and-forget — the reconcile path self-heals if this write
+    // is lost.
+    restorePrewalkForRun(sid).catch(() => {});
     if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
     else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
   },
@@ -2427,6 +2584,10 @@ goalRunner = makeGoalRunner({
   // resume() (on vault unlock) re-drives them. Without it the run is in-memory
   // only and an MV3 recycle would silently drop it.
   kv,
+  // The live plan-of-record for each continuation prompt — re-read per turn
+  // so check-offs show; '' when no list yet (todo/core.js formatTodoBlock).
+  getTodoBlock: async (/** @type {string} */ sid) =>
+    formatTodoBlock(/** @type {any} */ (await sessions.get(sid))?.todos),
 });
 
 // ---------------------------------------------------------------------------
@@ -3668,7 +3829,13 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // Goal mode (the Goal toggle). Autonomy is NOT a stored flip — resolvePermission
 // computes Act+confirm-off from the live run — so start/halt are just the runner
 // surface. resumeGoalRuns re-drives persisted runs after an interactive unlock.
-const startGoalRun = (/** @type {{ sessionId: string, goal: string }} */ req) => /** @type {any} */ (goalRunner)?.start(req);
+// why arm-then-start: prewalk state must be on the session BEFORE the run's
+// first turn renders its system prompt (the planning nudge reads it). Arming
+// is a quiet no-op when the setting is off or no distinct executor resolves.
+const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ req) => {
+  await armPrewalkForRun(req?.sessionId);
+  return /** @type {any} */ (goalRunner)?.start(req);
+};
 // why stop() not halt(): user-initiated cancels (Stop button, steer-takeover,
 // new-chat, archive) must DURABLY end the run — halt() only marks an in-memory
 // run, so a vault-lock-PAUSED run (evicted from the runner's map but kept in the

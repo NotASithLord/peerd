@@ -403,7 +403,12 @@ export const filterByDwebActive = (descriptors, dwebActive) =>
 // a run — otherwise a normal chat would see a "complete the goal" tool with no
 // goal. It's dropped unless the session has a live run; a stray call when it's
 // hidden still dispatches, but the tool's execute() no-ops (see complete-goal.js).
-export const GOAL_ONLY_TOOLS = Object.freeze(new Set(['complete_goal']));
+export const GOAL_ONLY_TOOLS = Object.freeze(new Set([
+  'complete_goal',
+  // The plan-of-record checklist (todo/core.js) — the goal run's spine, and
+  // what a prewalk executor steers by. Same reveal contract as complete_goal.
+  'todo_init', 'todo_check', 'todo_add',
+]));
 
 /** Is this a tool that should appear ONLY during an active goal run? Pure. @param {string} name */
 export const isGoalOnlyTool = (name) => GOAL_ONLY_TOOLS.has(name);

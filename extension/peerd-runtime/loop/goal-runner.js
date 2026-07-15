@@ -33,13 +33,18 @@ export const GOAL_RUNS_KEY = 'goal.runs.v1';
  * The hidden continuation nudge sent as turns 2..N. Frames the autonomy
  * contract and points the agent at complete_goal. The goal text is repeated
  * verbatim so a long run never loses the north star (each turn's history is
- * trimmed independently).
+ * trimmed independently) — and the live todo list rides along for the same
+ * reason: the plan-of-record is re-surfaced every turn, so the model (or the
+ * cheaper model prewalk swapped in) steers by the checklist instead of by
+ * memory of it.
  * @param {string} goal
+ * @param {string} [todoBlock]  formatTodoBlock(session.todos); '' when no list
  */
-export const goalContinuationPrompt = (goal) => [
+export const goalContinuationPrompt = (goal, todoBlock = '') => [
   'Continue working autonomously toward this goal:',
   '',
   goal,
+  ...(todoBlock ? ['', todoBlock, '', 'Work the next unchecked item; call todo_check the moment its validation passes.'] : []),
   '',
   'Take the next concrete step now. Do NOT stop to ask me for confirmation or',
   'permission — keep going. When (and ONLY when) the goal is FULLY achieved,',
@@ -75,10 +80,14 @@ export const goalContinuationPrompt = (goal) => [
  * @param {{ get(k:string):Promise<any>, set(k:string,v:any):Promise<void>, delete(k:string):Promise<void> }} [deps.kv]
  *   Durable mirror of the active runs (storage.local). Omit for pure in-memory
  *   (tests): persistence + resume become no-ops.
+ * @param {(sessionId: string) => Promise<string>} [deps.getTodoBlock]
+ *   Renders the session's live todo list for the continuation prompt
+ *   (formatTodoBlock over session.todos, bound by the SW). Optional + best-
+ *   effort: absent or throwing → the continuation goes out without the block.
  * @param {number} [deps.maxIterations]
  * @param {() => number} [deps.now]
  */
-export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now }) => {
+export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, getTodoBlock, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
 
@@ -200,10 +209,17 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
         emit(sid, 'running');
         /** @type {{ ok?: boolean, stopReason?: string } | void} */
         let outcome;
+        // The live plan-of-record for this continuation — re-read per turn so
+        // check-offs from the previous turn show. Best-effort: a read failure
+        // just drops the block, never the turn.
+        let todoBlock = '';
+        if (!first && typeof getTodoBlock === 'function') {
+          try { todoBlock = await getTodoBlock(sid); } catch { todoBlock = ''; }
+        }
         try {
           outcome = await runTurn({
             sessionId: sid,
-            userText: first ? run.goal : goalContinuationPrompt(run.goal),
+            userText: first ? run.goal : goalContinuationPrompt(run.goal, todoBlock),
             // turn 1 is the user's real goal message; continuations are hidden.
             synthetic: !first,
             // DESIGN-17: a goal is USER-initiated, so each continuation is a

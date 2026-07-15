@@ -53,6 +53,7 @@ import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
 import { completeGoalTool }            from './complete-goal.js';
+import { todoInitTool, todoCheckTool, todoAddTool } from './todo.js';
 import { dwebShareTool }               from './dweb-share.js';
 import { dwebDiscoverTool }            from './dweb-discover.js';
 import { dwebInstallTool }             from './dweb-install.js';
@@ -117,6 +118,9 @@ export {
   requestReviewTool,
   // goal mode (Goal toggle — exposure-gated to active runs only)
   completeGoalTool,
+  todoInitTool,
+  todoCheckTool,
+  todoAddTool,
   // dweb (network — preview only, exposure-gated off the store build)
   dwebShareTool,
   dwebDiscoverTool,
@@ -205,8 +209,11 @@ export const BUILTIN_TOOLS = Object.freeze([
   // review (clean-context read-only reviewer — feature 08)
   requestReviewTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
-  // exposure.js reveals it to the model ONLY while a goal run is active.
+  // exposure.js reveals them to the model ONLY while a goal run is active.
   completeGoalTool,
+  todoInitTool,
+  todoCheckTool,
+  todoAddTool,
   // dweb (network publish/discover/install — preview only; exposure.js hides
   // these from the agent on the store build, where DWEB_ENABLED is false)
   dwebDiscoverTool,

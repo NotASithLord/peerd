@@ -32,6 +32,8 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   openrouterModels: [],
   advancedAutomationEnabled: true,
   runnerModel: "",
+  prewalkEnabled: false,
+  prewalkExecutorModel: "",
   spendLimitUsd: 0,
   pricingOverrides: {},
   confirmWebWrites: true,
