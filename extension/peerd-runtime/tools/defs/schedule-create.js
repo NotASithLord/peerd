@@ -74,6 +74,33 @@ export const scheduleCreateTool = {
     if (!args?.every && !args?.dailyAt) {
       return { ok: false, error: 'schedule_required', content: 'Provide a cadence: `every` (e.g. "6h") or `dailyAt` (e.g. "08:00").' };
     }
+    // Arming a routine is arming PERSISTENT, UNATTENDED autonomy — higher
+    // consequence than a normal write, so it FORCE-confirms even when the global
+    // confirm toggle is off (the dweb_share/install pattern). This is the seam
+    // that (1) stops an injection-influenced turn from silently planting a
+    // standing trusted run, and (2) blocks routine-from-routine self-replication
+    // — a firing runs with the panel closed, so its confirm can't be answered and
+    // the create is declined. When the toggle is ON, the dispatcher already
+    // confirmed this write, so we don't double-prompt.
+    const permission = /** @type {{ confirmActions?: boolean } | undefined} */ (
+      /** @type {{ permission?: unknown }} */ (ctx).permission);
+    const confirm = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+      /** @type {unknown} */ (ctx.confirm));
+    if (permission?.confirmActions === false && confirm) {
+      const cadence = args.every ? `every ${String(args.every).trim()}` : `daily at ${String(args.dailyAt).trim()}`;
+      const runMode = args.mode === 'turn' ? 'a single turn' : 'an autonomous run';
+      const ans = await confirm({
+        tool: 'schedule_create',
+        sideEffect: 'write',
+        kind: 'schedule_arm',
+        origins: [],
+        summary: `Schedule a background routine (${cadence}, ${runMode})? It will run unattended, even with the panel closed:\n"${args.prompt.trim()}"`,
+        sessionId: ctx.session?.sessionId ?? null,
+      });
+      if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
+        return { ok: false, error: 'declined', content: 'User declined to arm the routine.' };
+      }
+    }
     const res = await scheduleAdd({
       prompt: args.prompt,
       every: args.every,
@@ -83,7 +110,9 @@ export const scheduleCreateTool = {
     if (!res?.ok) {
       const why = res?.error === 'invalid-schedule'
         ? 'Could not parse the cadence. Use `every` like "30m"/"6h"/"1d", or `dailyAt` like "08:00".'
-        : `Could not create the routine (${res?.error ?? 'unknown'}).`;
+        : res?.error === 'too-many-routines'
+          ? 'The routine limit is reached. Remove one with schedule_cancel before adding another.'
+          : `Could not create the routine (${res?.error ?? 'unknown'}).`;
       return { ok: false, error: res?.error ?? 'schedule_create_failed', content: why };
     }
     const r = res.routine;

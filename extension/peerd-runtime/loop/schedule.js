@@ -108,10 +108,18 @@ export const computeNextRun = (schedule, fromMs, anchorMs) => {
  */
 export const describeSchedule = (schedule) => {
   if (schedule.kind === 'interval') {
-    const mins = Math.round(schedule.everyMs / MINUTE_MS);
-    if (mins % (24 * 60) === 0) return `every ${mins / (24 * 60)}d`;
-    if (mins % 60 === 0) return `every ${mins / 60}h`;
-    return `every ${mins}m`;
+    // EXACT cadence — no lossy minute-rounding (a 90s interval must not read as
+    // "2m"). Decompose everyMs into d/h/m/s and join the nonzero parts.
+    let rest = Math.max(0, Math.round(schedule.everyMs / 1000)); // whole seconds
+    const d = Math.floor(rest / 86_400); rest %= 86_400;
+    const h = Math.floor(rest / 3_600); rest %= 3_600;
+    const m = Math.floor(rest / 60); const s = rest % 60;
+    const parts = [];
+    if (d) parts.push(`${d}d`);
+    if (h) parts.push(`${h}h`);
+    if (m) parts.push(`${m}m`);
+    if (s) parts.push(`${s}s`);
+    return `every ${parts.join('') || '0s'}`;
   }
   const h = Math.floor(schedule.atMinutes / 60);
   const m = schedule.atMinutes % 60;

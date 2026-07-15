@@ -65,6 +65,20 @@ describe('computeNextRun — interval', () => {
     const from = anchor + 2 * HOUR; // exactly on a grid point → strictly-after gives next
     expect(computeNextRun(schedule, from, anchor)).toBe(anchor + 3 * HOUR);
   });
+
+  it('returns the anchor instant when the clock is BEFORE the anchor (skew branch)', () => {
+    // fromMs < anchorMs → steps clamped to 0 → the anchor itself (still > fromMs).
+    expect(computeNextRun(schedule, anchor - 100 * MIN, anchor)).toBe(anchor);
+  });
+});
+
+describe('parseSchedule — floor boundary', () => {
+  it('keeps >= 60s and floors < 60s to exactly the minimum', () => {
+    expect(parseSchedule({ every: '60s' })).toEqual({ kind: 'interval', everyMs: 60_000 });
+    expect(parseSchedule({ every: '61s' })).toEqual({ kind: 'interval', everyMs: 61_000 });
+    expect(parseSchedule({ every: '59s' })).toEqual({ kind: 'interval', everyMs: 60_000 }); // floored
+    expect(parseSchedule({ every: '0m' })).toBeNull();                                       // <=0 rejected
+  });
 });
 
 describe('computeNextRun — daily (local wall-clock)', () => {
@@ -100,6 +114,13 @@ describe('describeSchedule', () => {
   it('renders a zero-padded daily label', () => {
     expect(describeSchedule({ kind: 'daily', atMinutes: 8 * 60 })).toBe('daily at 08:00');
     expect(describeSchedule({ kind: 'daily', atMinutes: 9 * 60 + 5 })).toBe('daily at 09:05');
+  });
+
+  it('renders EXACT non-whole-minute intervals (no lossy rounding)', () => {
+    // regression: 90s used to round to "every 2m"; 23h59m30s to "every 1d".
+    expect(describeSchedule({ kind: 'interval', everyMs: 90_000 })).toBe('every 1m30s');
+    expect(describeSchedule({ kind: 'interval', everyMs: 86_370_000 })).toBe('every 23h59m30s');
+    expect(describeSchedule({ kind: 'interval', everyMs: 90 * MIN })).toBe('every 1h30m');
   });
 });
 

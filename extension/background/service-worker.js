@@ -919,9 +919,15 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
     // that set trusted:true (goal turns + actor reply-wakes do). FAIL-CLOSED:
-    // any NEW re-entry source (future peer messages / scheduled tasks) is inbound
-    // by default and must never set trusted; the gate's `=== active` check is the
-    // second wall. Direct/composer builds: synthetic false → inbound false.
+    // any NEW re-entry source (peer messages) is inbound by default and must
+    // never set trusted; the gate's `=== active` check is the second wall.
+    // Direct/composer builds: synthetic false → inbound false.
+    // Scheduled routines (loop/scheduler.js): a firing's FIRST turn is
+    // synthetic:false (inbound:false, a real turn like a typed message); a
+    // 'goal'-mode firing's CONTINUATIONS run trusted like any goal run. Their
+    // first-party standing is earned at ARM time — schedule_create force-confirms,
+    // so a routine can't be planted (or self-replicate) without the user
+    // approving its exact prompt — not asserted here per-firing.
     inbound: synthetic === true && trusted !== true,
     // DESIGN-17: an actor's bound instance + kind (the gate's per-instance pin
     // + positive kind-scope read these; absent on non-actor ctx).
@@ -2432,9 +2438,19 @@ goalRunner = makeGoalRunner({
   // transcript (cap / halt). 'done' needs none — complete_goal's tool result is
   // the visible record. (Permission needs no restore: resolvePermission computes
   // the autonomy from the live run, so it reverts on its own when the run ends.)
-  onRunEnd: (/** @type {any} */ _sid, /** @type {any} */ info) => {
-    if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
-    else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+  onRunEnd: (/** @type {any} */ sid, /** @type {any} */ info) => {
+    // why the foreground guard: postChatNote broadcasts a session-agnostic
+    // system-note and the reducer appends it to whatever chat is OPEN. A
+    // background scheduled routine's goal run ends in its OWN (never-foreground)
+    // session, so without this its "capped/halted" note would pop into an
+    // unrelated chat the user is reading. Only surface it when the ending run IS
+    // the foreground chat; a background routine's outcome rides its own session
+    // + the routine notification instead.
+    Promise.resolve(sessionCache.sessionGet('currentSessionId')).then((cur) => {
+      if (cur !== sid) return;
+      if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
+      else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+    }).catch(() => {});
   },
   // why kv: a goal run must survive an SW restart and keep going while the user
   // is in another chat — the runner mirrors active runs to storage.local and
@@ -2486,18 +2502,32 @@ const notifyRoutineFired = () => {
 // turn. trusted:true — a routine is USER-authored first-party work, same posture
 // as goal mode; untrusted CONTENT it later pulls is still fenced behind actors.
 const fireRoutine = async (/** @type {any} */ routine) => {
+  // why settingsStore.load() first: a cold-unlock catch-up can reach here before
+  // loadSettings() (un-awaited at boot) has hydrated, so ensureActiveProvider
+  // would pick the channel-default provider instead of the user's. load() is
+  // idempotent — same guard the maybeAutoResume path uses.
+  await settingsStore.load().catch(() => {});
   const ap = await ensureActiveProvider();
-  const inherited = await resolvePermission(null);
+  // why explicit ACT + confirm-off (NOT resolvePermission(null)): a routine runs
+  // UNATTENDED with the panel closed. Inheriting the foreground chat's mode would
+  // make the run's autonomy depend on whatever chat happened to be open at the
+  // firing instant — a Plan-mode foreground would silently restrict it, and a
+  // confirm-on foreground would DEADLOCK the background turn on a prompt no one
+  // can answer. An unattended run must be self-determined: Act, no confirms.
   const created = await sessions.create({
     provider: ap.name,
     model: ap.model,
-    permissionMode: inherited.mode,
-    confirmActions: inherited.confirmActions,
+    permissionMode: PERMISSION_MODES.ACT,
+    confirmActions: false,
   });
   await sessions.update(created.sessionId, { routineId: routine.id }).catch(() => {});
   auditLog.append({ type: 'routine_fired', details: { routineId: routine.id, mode: routine.mode, sessionId: created.sessionId } }).catch(() => {});
   if (routine.mode === 'turn') {
-    runAgentTurn({ sessionId: created.sessionId, userText: routine.prompt, synthetic: false, trusted: true })
+    // synthetic:false makes this a REAL first turn (inbound:false) exactly like a
+    // user's typed message — no `trusted` needed (it's redundant when synthetic is
+    // false). The routine's first-party standing comes from the confirm-to-arm gate
+    // in schedule_create, not from a trusted flag here.
+    runAgentTurn({ sessionId: created.sessionId, userText: routine.prompt, synthetic: false })
       .catch((/** @type {unknown} */ e) => console.error('[sw] routine turn threw', e));
   } else {
     await startGoalRun({ sessionId: created.sessionId, goal: routine.prompt });
@@ -2510,6 +2540,12 @@ scheduler = makeScheduler({
   fireRoutine,
   kv,
   isLocked: () => vault.isLocked(),
+  // Skip a firing whose PREVIOUS run is still going (a goal loop slower than the
+  // routine's cadence) so it can't pile up concurrent runs — the runner advances
+  // it a slot instead. A 'turn'-mode routine has no goal run, so it never blocks
+  // here; a 'goal'-mode routine's last session is live iff goalRunner says so.
+  isRunning: (/** @type {any} */ routine) =>
+    !!routine.lastSessionId && (goalRunner?.isActive(routine.lastSessionId) ?? false),
   setAlarm: setScheduleAlarm,
   onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
 });
