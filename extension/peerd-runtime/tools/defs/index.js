@@ -53,6 +53,9 @@ import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
 import { completeGoalTool }            from './complete-goal.js';
+import { scheduleCreateTool }          from './schedule-create.js';
+import { scheduleListTool }            from './schedule-list.js';
+import { scheduleCancelTool }          from './schedule-cancel.js';
 import { todoInitTool, todoCheckTool, todoAddTool } from './todo.js';
 import { dwebShareTool }               from './dweb-share.js';
 import { dwebDiscoverTool }            from './dweb-discover.js';
@@ -118,6 +121,10 @@ export {
   requestReviewTool,
   // goal mode (Goal toggle — exposure-gated to active runs only)
   completeGoalTool,
+  // scheduling (background Routines — loop/scheduler.js)
+  scheduleCreateTool,
+  scheduleListTool,
+  scheduleCancelTool,
   todoInitTool,
   todoCheckTool,
   todoAddTool,
@@ -211,6 +218,11 @@ export const BUILTIN_TOOLS = Object.freeze([
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
   // exposure.js reveals them to the model ONLY while a goal run is active.
   completeGoalTool,
+  // scheduling — background Routines (loop/scheduler.js). Main-agent tools; not
+  // exposure-gated, so the agent can set up / list / cancel standing tasks.
+  scheduleCreateTool,
+  scheduleListTool,
+  scheduleCancelTool,
   todoInitTool,
   todoCheckTool,
   todoAddTool,

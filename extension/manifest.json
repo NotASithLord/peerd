@@ -25,6 +25,7 @@
     "idle",
     "offscreen",
     "notifications",
+    "alarms",
     "debugger"
   ],
   "host_permissions": [
