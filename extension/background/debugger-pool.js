@@ -38,6 +38,21 @@ export const createDebuggerPool = () => {
   const attached = new Set();
   /** @type {Map<number, string[]>} per-tab console-event buffer */
   const consoleBufs = new Map();
+  // In-flight Runtime.evaluate rejectors, per tab (issue #176). With
+  // awaitPromise:true an evaluate against a page whose promise never settles
+  // (hung navigation/network) — or a tab that closes / detaches mid-call —
+  // never resolves, parking the agent turn forever. Tab-close and detach
+  // reject every pending evaluate for that tab; a deadline (below) bounds the
+  // hung-page case.
+  /** @type {Map<number, Set<(err: Error) => void>>} */
+  const pendingEvals = new Map();
+  /** @param {number} tabId @param {string} why */
+  const rejectPendingEvals = (tabId, why) => {
+    const set = pendingEvals.get(tabId);
+    if (!set) return;
+    pendingEvals.delete(tabId);
+    for (const reject of set) reject(new Error(`page_exec: ${why}`));
+  };
 
   // why: `chrome.debugger` may not exist in this build at all. It's a
   // CHANNEL-GATED permission — required (install-time) in the preview/dev
@@ -75,6 +90,7 @@ export const createDebuggerPool = () => {
       console.log('[debugger-pool] detach', source.tabId, reason);
       attached.delete(source.tabId);
       consoleBufs.delete(source.tabId);
+      rejectPendingEvals(source.tabId, `debugger detached (${reason ?? 'unknown'}) mid-evaluate`);
     });
   };
 
@@ -84,6 +100,7 @@ export const createDebuggerPool = () => {
   browser.tabs.onRemoved.addListener((tabId) => {
     attached.delete(tabId);
     consoleBufs.delete(tabId);
+    rejectPendingEvals(tabId, 'the tab closed mid-evaluate');
   });
 
   const attach = async (tabId) => {
@@ -139,7 +156,13 @@ export const createDebuggerPool = () => {
     consoleBufs.delete(tabId);
   };
 
-  const evaluate = async (tabId, expression, opts = {}) => {
+  // Deadline for one Runtime.evaluate (issue #176). Generous — an agent
+  // script may legitimately await slow fetches/navigation — but finite, so a
+  // never-settling page promise rejects instead of hanging the dispatch.
+  // Callers can widen per-call via opts.timeoutMs (kept OUT of the CDP params).
+  const EVALUATE_DEADLINE_MS = 120_000;
+
+  const evaluate = async (tabId, expression, { timeoutMs = EVALUATE_DEADLINE_MS, ...opts } = {}) => {
     await attach(tabId);
     // Reset console buffer just before the call so we capture only
     // this evaluate's output. Concurrent evals on the same tab would
@@ -164,21 +187,40 @@ export const createDebuggerPool = () => {
     const wrapped = `(async () => {\n${expression}\n})()`;
     let result;
     try {
-      result = await browser.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-        expression: wrapped,
-        // The IIFE returns a Promise; awaitPromise unwraps it so we
-        // get the actual return value (or thrown rejection) back.
-        awaitPromise: true,
-        returnByValue: true,
-        // Trusted-Types pages (`require-trusted-types-for 'script'`,
-        // e.g. Gmail / Notion / Slack) reject injected script, so
-        // evaluation uses CDP's sanctioned opt-in for user-privileged
-        // tooling — the same channel DevTools uses.
-        allowUnsafeEvalBlockedByCSP: true,
-        // Treat the eval as a user gesture so gesture-gated APIs
-        // (focus, clipboard, fullscreen) work from the script.
-        userGesture: true,
-        ...opts,
+      // Race the CDP call against the deadline and the per-tab rejectors
+      // (tab close / debugger detach) — sendCommand itself never times out,
+      // and awaitPromise pins it on the page's promise. The loser command may
+      // still settle later inside Chrome; its result is dropped.
+      result = await new Promise((resolve, reject) => {
+        const set = pendingEvals.get(tabId) ?? new Set();
+        pendingEvals.set(tabId, set);
+        const timer = setTimeout(() => {
+          fail(new Error(`page_exec: the page script did not settle within ${Math.round(timeoutMs / 1000)}s — hung promise or unresponsive page`));
+        }, timeoutMs);
+        /** @param {Error} e */
+        const fail = (e) => { cleanup(); reject(e); };
+        const cleanup = () => {
+          clearTimeout(timer);
+          set.delete(fail);
+          if (set.size === 0 && pendingEvals.get(tabId) === set) pendingEvals.delete(tabId);
+        };
+        set.add(fail);
+        browser.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+          expression: wrapped,
+          // The IIFE returns a Promise; awaitPromise unwraps it so we
+          // get the actual return value (or thrown rejection) back.
+          awaitPromise: true,
+          returnByValue: true,
+          // Trusted-Types pages (`require-trusted-types-for 'script'`,
+          // e.g. Gmail / Notion / Slack) reject injected script, so
+          // evaluation uses CDP's sanctioned opt-in for user-privileged
+          // tooling — the same channel DevTools uses.
+          allowUnsafeEvalBlockedByCSP: true,
+          // Treat the eval as a user gesture so gesture-gated APIs
+          // (focus, clipboard, fullscreen) work from the script.
+          userGesture: true,
+          ...opts,
+        }).then((/** @type {any} */ r) => { cleanup(); resolve(r); }, fail);
       });
     } finally {
       // Always drain the buffer, even on throw, so the next call starts

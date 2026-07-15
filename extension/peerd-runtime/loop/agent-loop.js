@@ -80,6 +80,20 @@ const REQUIRED_CTX = [
 // clicks or two file edits must not interleave).
 const CONCURRENT_TOOLS = new Set(['actor_create']);
 
+// Hard ceiling on ONE tool dispatch (issue #176). A dispatch that never
+// settles — the concrete leaf is an un-timed CDP Runtime.evaluate against a
+// hung page — parks the turn generator forever: the turn's finally never runs,
+// the slot never releases, and Stop/session-reset abort a controller nobody
+// observes. Racing every dispatch against the turn's abort signal AND this
+// deadline converts a hang into a normal errored tool result, so the loop
+// advances and the slot unwinds. why 10 minutes: generous enough for the
+// legitimately-slow tools (WebVM commands, an awaited actor delegation, slow
+// page loads — and a confirm-parked tool decline-settles at its own 120s
+// timeout), while still bounding "forever". NOTE the loser keeps running
+// detached — its eventual settlement is dropped; late side effects are
+// possible but strictly better than a permanently wedged session.
+const DISPATCH_DEADLINE_MS = 10 * 60_000;
+
 // Yield settled values in completion order. Each input promise MUST resolve
 // (the dispatcher below never rejects), so there is no rejection branch —
 // one sibling's failure becomes its own error result, never a batch reject.
@@ -762,7 +776,41 @@ export async function* runUserTurn(ctx) {
       /** @type {ToolResult} */
       let dispatchResult;
       try {
-        dispatchResult = await toolDispatch({ id: tu.id, name: tu.name, args: tu.input });
+        // Race the dispatch against the turn's abort signal + the hard deadline
+        // (issue #176) — see DISPATCH_DEADLINE_MS. Without this, an un-settling
+        // dispatch pins the generator between wave boundaries (the only places
+        // wasAborted() is checked), making Stop / session-reset a no-op against
+        // a hung turn. The synthesized failure result lets the wave complete;
+        // the boundary abort check right after the waves then ends the turn.
+        dispatchResult = await /** @type {Promise<ToolResult>} */ (new Promise((resolveDispatch) => {
+          let settled = false;
+          /** @param {ToolResult} v */
+          const finish = (v) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(deadline);
+            if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
+            resolveDispatch(v);
+          };
+          /** @param {string} error */
+          const failWith = (error) => finish({
+            ok: false, error,
+            meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
+          });
+          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled');
+          const deadline = setTimeout(
+            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`),
+            DISPATCH_DEADLINE_MS,
+          );
+          toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
+            (/** @type {ToolResult} */ r) => finish(r),
+            (/** @type {unknown} */ e) => failWith(/** @type {{ message?: string }} */ (e)?.message ?? String(e)),
+          );
+          if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+          }
+        }));
       } catch (e) {
         dispatchResult = {
           ok: false,

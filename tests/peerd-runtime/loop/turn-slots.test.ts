@@ -203,3 +203,34 @@ describe('makeTurnSlots — onAbort (decline parked confirms on abort)', () => {
     expect(slots.isBusy('a')).toBe(true);
   });
 });
+
+// The abort watchdog (issue #176): stop() on a turn parked on an
+// abort-ignoring await must eventually free the slot, or the session reads
+// busy forever and queued wakes never drain.
+describe('makeTurnSlots — stop watchdog (force-release a hung turn)', () => {
+  const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test('a hung turn (never releases after abort) is force-released after the grace', async () => {
+    const slots = makeTurnSlots({ forceReleaseMs: 10 });
+    slots.claim('a');                                // the turn never release()s
+    let woke = false;
+    expect(slots.stop('a')).toBe(true);
+    slots.runWhenIdle('a', () => { woke = true; });  // queued behind the zombie
+    expect(slots.isBusy('a')).toBe(true);            // still pinned pre-watchdog
+    await tick(30);
+    expect(slots.isBusy('a')).toBe(false);           // watchdog reaped the slot
+    expect(woke).toBe(true);                         // and drained the queue
+  });
+
+  test('a well-behaved turn that unwinds in time is NOT double-released onto a successor', async () => {
+    const slots = makeTurnSlots({ forceReleaseMs: 10 });
+    const first = slots.claim('a');
+    slots.stop('a');
+    first.release();                                 // unwinds promptly, as normal
+    const second = slots.claim('a');                 // a new turn claims before the grace fires
+    await tick(30);
+    // The watchdog is controller-scoped: it must not free the NEW turn's claim.
+    expect(slots.isBusy('a')).toBe(true);
+    expect(second.controller.signal.aborted).toBe(false);
+  });
+});

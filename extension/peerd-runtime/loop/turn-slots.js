@@ -36,14 +36,15 @@
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
  *   advanceQueue: (sessionId: string) => void,
  * }}
- * @param {{ onAbort?: (sessionId: string) => void }} [deps]
+ * @param {{ onAbort?: (sessionId: string) => void, forceReleaseMs?: number }} [deps]
  *   onAbort fires whenever a session's turn is aborted (a steer-live supersede
  *   or Stop). The SW wires it to confirmCoordinator.declineSession, so a turn
  *   parked on ctx.confirm() is unblocked (declined) instead of left stranded
  *   for the full timeout while a steered turn writes the same session. Default
  *   no-op (tests / orchestrators that don't need it).
+ *   forceReleaseMs overrides the abort watchdog delay (tests).
  */
-export const makeTurnSlots = ({ onAbort } = {}) => {
+export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
   /** @type {Map<string, AbortController>} */
   const slots = new Map();
   /** @type {Map<string, Array<() => void>>} idle-wake queue per session */
@@ -67,6 +68,25 @@ export const makeTurnSlots = ({ onAbort } = {}) => {
     // the post-Stop gen-skip in actor-messaging) must call advanceQueue below
     // to keep the pump moving.
     try { fn(); } catch { /* swallowed */ }
+  };
+
+  // Abort watchdog (issue #176). Slot removal normally relies on the turn's
+  // own release() — but a turn parked on an abort-ignoring await (an un-timed
+  // CDP call, a stuck page promise) never unwinds, so abort() alone would pin
+  // the slot for the SW lifetime: the session reads busy forever and queued
+  // idle-wakes never drain. After an abort, if the SAME controller still owns
+  // the slot once the grace elapses, force-release it. Self-scoped like
+  // release(): if the turn DID unwind (or a steer re-claimed), the guard
+  // no-ops. The zombie turn's own late release() is equally self-scoped, so a
+  // forced release can't clear a newer turn's claim.
+  /** @param {string} sessionId @param {AbortController} controller */
+  const forceReleaseAfterGrace = (sessionId, controller) => {
+    setTimeout(() => {
+      if (slots.get(sessionId) === controller) {
+        slots.delete(sessionId);
+        drainIdle(sessionId);
+      }
+    }, forceReleaseMs);
   };
 
   return {
@@ -96,6 +116,11 @@ export const makeTurnSlots = ({ onAbort } = {}) => {
       if (!controller) return false;
       controller.abort();
       onAbort?.(sessionId); // decline any confirm this turn is parked on
+      // A well-behaved turn observes the abort and release()s within ms; a
+      // hung one never does — reap it so Stop actually frees the session.
+      // (claim()'s supersede path needs no watchdog: it re-claims the slot
+      // for the new turn in the same tick.)
+      forceReleaseAfterGrace(sessionId, controller);
       return true;
     },
 
