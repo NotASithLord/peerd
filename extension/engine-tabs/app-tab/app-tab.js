@@ -192,7 +192,7 @@ const renderMode = async () => {
     runnerReady = false;
     expectingRunnerLoad = true;
     runnerStarted = true;
-    frame.src = '/app-tab/runner.html';
+    frame.src = '/engine-tabs/app-tab/runner.html';
     // Watchdog: if the runner never announces ready (threw / failed to load),
     // surface an error instead of sitting on the boot screen forever.
     if (runnerWatchdog) clearTimeout(runnerWatchdog);

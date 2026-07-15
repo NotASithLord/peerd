@@ -21,7 +21,7 @@
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
-import { applyRealmSeal } from '../../../extension/notebook-tab/notebook-neutralizers.js';
+import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
@@ -194,7 +194,7 @@ export const scenario: Scenario = {
     // The pure seal runs here; the real-worker-realm proof (and the a2a run's
     // egress + delegation refusals) is exercised in the in-browser suite:
     result.verifiedBy = [
-      'extension/tests/unit/notebook-tab/notebook-seal.test.js (real worker realm)',
+      'extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm)',
       'extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
     ].join('; ');

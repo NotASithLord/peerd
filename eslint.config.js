@@ -399,7 +399,7 @@ export default [
   // [[Construct]], so arrowing them would make `new Worker()` throw "not a
   // constructor" instead of the actionable NotebookEgressBlockedError.
   {
-    files: ['extension/notebook-tab/notebook-neutralizers.js'],
+    files: ['extension/engine-tabs/notebook-tab/notebook-neutralizers.js'],
     rules: { 'prefer-arrow-callback': 'off' },
   },
 ];

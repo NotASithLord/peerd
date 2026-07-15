@@ -37,7 +37,7 @@
   },
   "sandbox": {
     "pages": [
-      "app-tab/runner.html"
+      "engine-tabs/app-tab/runner.html"
     ]
   },
   "cross_origin_embedder_policy": {

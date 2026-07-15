@@ -139,4 +139,4 @@ export const createAppRegistry = (deps) => {
   return { ...base, searchMetadata };
 };
 
-export const APP_TAB_PATH = '/app-tab/index.html';
+export const APP_TAB_PATH = '/engine-tabs/app-tab/index.html';

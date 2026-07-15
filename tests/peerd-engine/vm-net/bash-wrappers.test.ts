@@ -28,7 +28,7 @@ beforeAll(() => {
   // Evaluate the WRAPPERS_BASH template literal exactly as the module does —
   // \${...} → ${...}, \\n → \n, ${stubsBash()} etc. interpolated — so we test
   // the REAL generated bash, not a copy.
-  const src = readFileSync(new URL('../../../extension/vm-tab/vm-tab.js', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../../../extension/engine-tabs/vm-tab/vm-tab.js', import.meta.url), 'utf8');
   const m = src.match(/const WRAPPERS_BASH = `([\s\S]*?)`;/);
   if (!m) throw new Error('WRAPPERS_BASH not found in vm-tab.js');
   // eslint-disable-next-line no-new-func

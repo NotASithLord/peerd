@@ -43,7 +43,7 @@
   },
 
   "sandbox": {
-    "pages": ["app-tab/runner.html"]
+    "pages": ["engine-tabs/app-tab/runner.html"]
   },
 
   "cross_origin_embedder_policy": { "value": "require-corp" },

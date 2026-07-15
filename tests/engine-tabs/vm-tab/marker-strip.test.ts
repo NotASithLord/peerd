@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { stripChunk, peerdTailLen, stripPeerdMarkers } from '../../extension/vm-tab/marker-strip.js';
+import { stripChunk, peerdTailLen, stripPeerdMarkers } from '../../../extension/engine-tabs/vm-tab/marker-strip.js';
 
 // The WebVM terminal must show clean command output: peerd's completion-marker
 // machinery (the `printf '\n%s:%s\n' '___PEERD_<id>___' "$?"` echo and the

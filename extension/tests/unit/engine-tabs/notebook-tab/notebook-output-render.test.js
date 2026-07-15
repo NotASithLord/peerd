@@ -5,10 +5,10 @@
 // and — crucially — HTML-looking strings render as INERT TEXT (the output pane
 // is the privileged extension origin; agent strings must never become markup).
 
-import { describe, it, expect } from '../../framework.js';
+import { describe, it, expect } from '../../../framework.js';
 import {
   isFlatRow, isRowArray, isDescriptor, renderTable, renderChart, renderReturnValue,
-} from '/notebook-tab/output-render.js';
+} from '/engine-tabs/notebook-tab/output-render.js';
 
 describe('notebook output-render', () => {
   it('classifies table-able data', () => {

@@ -41,7 +41,7 @@ import { isTrustedSender } from '/shared/messaging.js';
 // connection lives here so the network outlives any tab.
 import './dweb-base.js';
 // (WebVM used to be hosted here. As of the discrete-VM rework, each
-// WebVM lives in its own browser tab at /vm-tab/index.html and runs
+// WebVM lives in its own browser tab at /engine-tabs/vm-tab/index.html and runs
 // CheerpX in that tab. The offscreen doc keeps the SW keepalive port
 // + the voice transcriber.)
 

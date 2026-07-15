@@ -4,7 +4,7 @@ import { createStorageStub } from '../setup.ts';
 
 describe('createNotebookRegistry', () => {
   test('exports NOTEBOOK_TAB_PATH + NOTEBOOK_OPFS_ROOT constants', () => {
-    expect(NOTEBOOK_TAB_PATH).toBe('/notebook-tab/index.html');
+    expect(NOTEBOOK_TAB_PATH).toBe('/engine-tabs/notebook-tab/index.html');
     expect(NOTEBOOK_OPFS_ROOT).toBe('peerd-notebooks');
   });
 
