@@ -63,14 +63,14 @@ import './unit/peerd-engine/overlay.test.js';
 import './unit/peerd-engine/personal-index-durability.test.js';
 
 // --- chassis: notebook-tab ---
-import './unit/notebook-tab/notebook-seal.test.js';
-import './unit/notebook-tab/notebook-output-render.test.js';
+import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
+import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
 import './unit/red-team/sandbox-escape.test.js';
 
 // --- chassis: vm-tab ---
-import './unit/vm-tab/firefox-webvm-note.test.js';
+import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';

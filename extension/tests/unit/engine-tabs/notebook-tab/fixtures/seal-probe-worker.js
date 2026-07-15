@@ -5,7 +5,7 @@
 // realm. Driven by command messages from the test page, which also
 // plays the host side of the fetch bridge.
 
-import '/notebook-tab/realm-seal.js';
+import '/engine-tabs/notebook-tab/realm-seal.js';
 
 /**
  * The sealed realm replaces `fetch` with the audited Notebook bridge,

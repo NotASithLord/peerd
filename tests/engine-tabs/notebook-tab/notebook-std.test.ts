@@ -10,7 +10,7 @@ import {
   chunk, zip, partition,
   parseJsonl, toJsonl, dedupeBy,
   gcd, lcm, factorial, modpow,
-} from '../../extension/notebook-tab/notebook-std.js';
+} from '../../../extension/engine-tabs/notebook-tab/notebook-std.js';
 
 describe('peerd:std display helpers (pure descriptors)', () => {
   test('table → a table descriptor; non-array → empty rows', () => {

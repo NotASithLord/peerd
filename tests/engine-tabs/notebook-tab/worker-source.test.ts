@@ -4,7 +4,7 @@
 // throws "cannot resolve" (the field failure: peerd.self.import('peerd:std')).
 
 import { describe, test, expect } from 'bun:test';
-import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../../extension/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 
 const resolverDeps = {
   readFile: async () => { throw new Error('no OPFS in this test'); },

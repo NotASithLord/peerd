@@ -79,7 +79,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
   // peerd:wasi END TO END in the real substrate: builtin resolution in the
   // sealed worker, the vendored shim linking, a wasm module actually executing.
   // The module is a hand-assembled wasm32-wasi command (fd_write "hello from
-  // wasm\n" to stdout, proc_exit 0) — regenerate with tests/notebook-tab/
+  // wasm\n" to stdout, proc_exit 0) — regenerate with tests/engine-tabs/notebook-tab/
   // wasi-test-module.ts buildHelloModule('hello from wasm\n').
   it('peerd:wasi runs a wasm32-wasi module inside a headless job', async () => {
     const helloWasmB64 = 'AGFzbQEAAAABEANgBH9/f38Bf2ABfwBgAAACRgIWd2FzaV9zbmFwc2hvdF9wcmV2aWV3MQhmZF93cml0ZQAAFndhc2lfc25hcHNob3RfcHJldmlldzEJcHJvY19leGl0AAEDAgECBQMBAAEHEwIGbWVtb3J5AgAGX3N0YXJ0AAIKIQEfAEEAQRA2AgBBBEEQNgIAQQFBAEEBQQwQABpBABABCwsWAQBBEAsQaGVsbG8gZnJvbSB3YXNtCg==';

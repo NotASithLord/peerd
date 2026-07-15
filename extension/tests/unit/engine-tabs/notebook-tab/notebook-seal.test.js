@@ -1,7 +1,7 @@
 // @ts-check
 // Realm seal, proven in a REAL worker realm — the thing the bun suite
 // cannot do. Spawns module workers whose first static import is the
-// PRODUCTION seal module (/notebook-tab/realm-seal.js), exactly like the
+// PRODUCTION seal module (/engine-tabs/notebook-tab/realm-seal.js), exactly like the
 // worker entries notebook-tab.js assembles, and verifies:
 //   - every raw network channel throws NotebookEgressBlockedError,
 //   - the native fetch is gone from the actual prototype chain and the
@@ -12,9 +12,9 @@
 //     body (the old pre-prologue gap),
 //   - the page CSP second fence stays pinned at connect-src 'none'.
 
-import { describe, it, expect } from '../../framework.js';
+import { describe, it, expect } from '../../../framework.js';
 
-const FIXTURES = '/tests/unit/notebook-tab/fixtures';
+const FIXTURES = '/tests/unit/engine-tabs/notebook-tab/fixtures';
 
 // why file workers, not blobs: the CDP harness serves the runner over
 // http, where the runner page CSP (script-src 'self') blocks blob-URL
@@ -194,7 +194,7 @@ describe('notebook-tab realm seal (real worker realm)', () => {
     // source (extension origin / test web root) to pin the shipped CSP —
     // not a network egress (same rationale as loop/system-prompt.js).
     // eslint-disable-next-line no-restricted-globals
-    const resp = await fetch('/notebook-tab/index.html');
+    const resp = await fetch('/engine-tabs/notebook-tab/index.html');
     const html = await resp.text();
     const meta = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i);
     expect(meta?.[1]).toBe("connect-src 'none'");

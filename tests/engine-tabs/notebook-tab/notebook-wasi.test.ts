@@ -7,7 +7,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   runWasi, buildFileTree, readFileTree, WasiRunError, demoModule,
-} from '../../extension/notebook-tab/notebook-wasi.js';
+} from '../../../extension/engine-tabs/notebook-tab/notebook-wasi.js';
 import {
   buildHelloModule, buildEchoModule, buildFloodModule,
   buildEmptyModule, buildNonWasiModule,

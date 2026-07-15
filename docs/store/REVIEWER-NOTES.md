@@ -66,7 +66,7 @@ will flag:
    no remote fetch of agent-actioned files can happen, even from a
    crafted message. The installer code ships but is unreachable; the
    remote paths return in a later version with their own review.
-5. **WASI modules (`notebook-tab/notebook-wasi.js`)** — the JavaScript
+5. **WASI modules (`engine-tabs/notebook-tab/notebook-wasi.js`)** — the JavaScript
    sandbox can run wasm32-wasi programs (e.g. query a SQLite file the
    user provides, decode an archive) via `WebAssembly.compile`, under
    the same `wasm-unsafe-eval` CSP allowance the bundled WASM above
@@ -140,7 +140,7 @@ The Notebook specifically: the `js_notebook` Web Worker runs
 agent-authored code, so its raw network primitives (XHR / WebSocket /
 EventSource / WebTransport, plus native `fetch` recovered off the
 prototype, and any nested `Worker`) are neutralized at the boundary by
-the host page's CSP `connect-src 'self'` (extension/notebook-tab/index.html),
+the host page's CSP `connect-src 'self'` (extension/engine-tabs/notebook-tab/index.html),
 which the worker and its descendants inherit — verified empirically. The
 only egress that leaves the Notebook is the audited `peerd.egress.fetch` bridge,
 which is governed by the open-web `webFetch` gates above.

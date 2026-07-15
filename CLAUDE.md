@@ -36,10 +36,11 @@ Each maps to one letter and color in the brand wordmark:
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
 
 The extension *chassis* lives outside these modules: `background/`,
-`offscreen/`, `sidepanel/`, `vm-tab/`, `notebook-tab/`, `app-tab/`,
-`permissions/`, `eval/`, `shared/`, `tests/`, `vendor/`, `icons/`. Each
-`peerd-engine` execution kind owns a dedicated tab page under its
-`*-tab/` directory; `permissions/` hosts user-gesture surfaces such as
+`offscreen/`, `sidepanel/`, `engine-tabs/`, `permissions/`, `eval/`,
+`shared/`, `tests/`, `vendor/`, `icons/`. Each `peerd-engine` execution
+kind owns a dedicated tab page under `engine-tabs/` (`engine-tabs/vm-tab/`,
+`engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) — grouped so the
+three engine host surfaces sit together; `permissions/` hosts user-gesture surfaces such as
 the mic-permission grant page; `eval/` is the live end-to-end eval
 harness. (There is no `content/` directory — DOM work happens via
 injected functions, not a persistent content script.) Outside
@@ -221,7 +222,8 @@ exists today:
    the module code). Three are hosted in their own visible tab — WebVM
    (CheerpX), Notebook (sealed JS worker + OPFS), App (opaque-origin
    iframe) — each with a registry in `peerd-engine`, a runtime in its tab
-   page (`vm-tab/`, `notebook-tab/`, `app-tab/`), and a tab tracker + RPC
+   page under `engine-tabs/` (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`,
+   `engine-tabs/app-tab/`), and a tab tracker + RPC
    client in `background/`. The fourth, the **headless worker** (`script`),
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same
