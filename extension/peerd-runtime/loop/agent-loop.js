@@ -113,6 +113,36 @@ export async function* asCompleted(promises) {
 }
 
 /**
+ * Strip signed `thinkingBlocks` from assistant messages authored by a
+ * DIFFERENT model than the one about to be called. Signed thinking blocks are
+ * MODEL-BOUND — replaying one to another model (a prewalk executor swap, or a
+ * user model-switch mid-chat) fails the provider's signature check and 400s
+ * the turn. Assistant messages record their author model (`msg.model`), so a
+ * mismatch is the strip signal; the visible `thinking` text is kept (it's
+ * transcript, never replayed). Pure — returns a new array, shallow-copying
+ * only the messages it strips; every other message passes through by
+ * reference. For a session that never switches model, every assistant
+ * message's `model` equals `model`, so this is a strict no-op.
+ *
+ * NOTE the author-model premise is exact only under the current adapter set:
+ * mid-turn provider failover (turn-driver) could stamp `session.model` on a
+ * message the fallback actually produced, but only the Anthropic adapter emits
+ * signed `thinkingBlocks` and the registry holds one Anthropic provider, so a
+ * failover chain can't contain two signature-emitting entries — the mismatch
+ * that would matter is unreachable today.
+ *
+ * @template {{ role?: string, model?: string, thinkingBlocks?: unknown }} M
+ * @param {M[]} messages
+ * @param {string | undefined} model   the model about to be called (session.model)
+ * @returns {M[]}
+ */
+export const stripCrossModelThinking = (messages, model) => messages.map((msg) => (
+  msg.role === 'assistant' && Array.isArray(msg.thinkingBlocks)
+    && msg.model && msg.model !== model
+    ? { ...msg, thinkingBlocks: undefined }
+    : msg));
+
+/**
  * Run a single user turn against the model. May iterate through several
  * model calls if the model uses tools (each tool result feeds into the
  * next call until stop_reason !== 'tool_use').
@@ -443,19 +473,9 @@ export async function* runUserTurn(ctx) {
       // path the messages are always loop-shaped InternalMessages, and
       // injectResumeNotes only ever reads assistant `thinking`, so narrowing
       // here is safe.
-      let historyForModel = injectResumeNotes(
-        /** @type {InternalMessage[]} */ (trimPlan.messages));
-      // why: signed thinking blocks are MODEL-BOUND — replaying one authored
-      // by a different model (a prewalk executor swap, or any future
-      // mid-session model change) fails the provider's signature check and
-      // 400s the turn. Assistant messages record the model that wrote them,
-      // so strip thinkingBlocks that don't match the model about to be
-      // called; the visible `thinking` text stays for the transcript.
-      historyForModel = historyForModel.map((msg) => (
-        msg.role === 'assistant' && Array.isArray(msg.thinkingBlocks)
-          && msg.model && msg.model !== session.model
-          ? { ...msg, thinkingBlocks: undefined }
-          : msg));
+      let historyForModel = stripCrossModelThinking(
+        injectResumeNotes(/** @type {InternalMessage[]} */ (trimPlan.messages)),
+        session.model);
       // why: the model must see the attachment BYTES on the turn they
       // were sent (every step of it — history is rebuilt from the
       // session per step), while the persisted record stays stripped.

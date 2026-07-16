@@ -140,6 +140,10 @@ export const GoalToggle = {
       class: [on ? 'is-on' : '', running ? 'is-running' : ''].filter(Boolean).join(' '),
       disabled: !!disabled && !running,
       'aria-pressed': String(on),
+      // While running the click STOPS the run — put that in the accessible
+      // name (the visible label is just "Goal · turn N"; aria-pressed alone
+      // doesn't convey "clicking stops it").
+      'aria-label': running ? `Goal run active, turn ${run?.iteration ?? ''} — activate to stop` : undefined,
       title: running
         ? 'A goal run is live in this chat — the agent keeps taking turns until '
           + 'it\'s done. Click to stop the run.'

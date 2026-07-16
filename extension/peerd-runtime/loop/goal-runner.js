@@ -112,6 +112,23 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
   const isActive = (sid) => { const r = runs.get(sid); return !!r && !r.completed && !r.halted; };
 
   /**
+   * Is a run for this session recorded in the DURABLE mirror — i.e. live OR
+   * merely not-yet-resumed after an SW restart OR vault-lock-paused (evicted
+   * from the map but kept in the mirror for resume)? Prewalk's reconcile
+   * consults this so a mid-restart/paused run is never mistaken for a dead one
+   * and wrongly restored to the planner model. A no-op (false) without kv.
+   * @param {string} sid @returns {Promise<boolean>}
+   */
+  const isPersisted = async (sid) => {
+    if (isActive(sid)) return true;
+    if (!kv) return false;
+    try {
+      const stored = await kv.get(GOAL_RUNS_KEY);
+      return !!(stored && typeof stored === 'object' && Object.hasOwn(stored, sid));
+    } catch { return false; }
+  };
+
+  /**
    * The 'running' goal/state payloads for every LIVE run — for replaying to a
    * port that just (re)connected. The loop's emit() only reaches ports connected
    * at the time it fires, and the SW state snapshot carries no goal-run field, so
@@ -324,5 +341,5 @@ export const makeGoalRunner = ({ runTurn, onEvent = () => {}, onRunEnd = () => {
     return { resumed };
   };
 
-  return Object.freeze({ start, halt, stop, complete, isActive, get, activeStates, drive, resume });
+  return Object.freeze({ start, halt, stop, complete, isActive, isPersisted, get, activeStates, drive, resume });
 };

@@ -37,6 +37,9 @@ export { initTodos, checkTodo, addTodo, nextPending, todoProgress, formatTodoBlo
 export {
   resolvePrewalkExecutor, armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, PREWALK_NUDGE,
 } from './loop/prewalk.js';
+// The prewalk lifecycle controller — the testable imperative shell the SW
+// binds real IO into (arm / reconcile / maybeSwap / restore).
+export { makePrewalkController } from './loop/prewalk-controller.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.
