@@ -33,6 +33,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   advancedAutomationEnabled: true,
   runnerModel: "",
   prewalkEnabled: false,
+  enginePrewalkEnabled: false,
   prewalkExecutorModel: "",
   spendLimitUsd: 0,
   pricingOverrides: {},

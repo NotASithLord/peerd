@@ -156,6 +156,11 @@ export const normalizeSettingsPatch = (patch, {
     // executor inherits the live context at the first landed action.
     next.prewalkEnabled = patch.prewalkEnabled;
   }
+  if (typeof patch.enginePrewalkEnabled === 'boolean') {
+    // Engine-actor prewalk: VM/Notebook/App actors run turn 1 on the frontier
+    // model, then swap to the cheap executor for the rest of their life.
+    next.enginePrewalkEnabled = patch.enginePrewalkEnabled;
+  }
   if (typeof patch.prewalkExecutorModel === 'string') {
     // Prewalk executor pin. '' = the provider's fast default
     // (defaultRunnerModel); non-empty = a SAME-PROVIDER model id — the same

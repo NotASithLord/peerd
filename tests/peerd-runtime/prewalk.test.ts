@@ -8,6 +8,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   resolvePrewalkExecutor, armPrewalk, shouldPrewalkSwap, markPrewalkSwapped,
   PREWALK_EXEMPT_TOOLS, PREWALK_NUDGE,
+  ENGINE_ACTOR_KINDS, isEngineActorKind, shouldEngineActorSwap,
 } from '../../extension/peerd-runtime/loop/prewalk.js';
 
 const anthropic = { name: 'anthropic', defaultRunnerModel: 'claude-haiku-4-5' };
@@ -86,6 +87,31 @@ describe('markPrewalkSwapped', () => {
     expect(swapped.swappedAt).toBe(NOW + 5);
     expect(swapped.plannerModel).toBe('claude-opus-4-8');
     expect(swapped.executorModel).toBe('claude-haiku-4-5');
+  });
+});
+
+describe('engine-actor prewalk helpers', () => {
+  const armed = { phase: 'planning', plannerProvider: 'anthropic', plannerModel: 'claude-opus-4-8', executorProvider: 'anthropic', executorModel: 'claude-haiku-4-5', armedAt: NOW } as const;
+
+  test('the engine actor kinds are exactly VM/Notebook/App (not web/dweb)', () => {
+    expect([...ENGINE_ACTOR_KINDS].sort()).toEqual(['app', 'notebook', 'webvm']);
+    expect(isEngineActorKind('webvm')).toBe(true);
+    expect(isEngineActorKind('notebook')).toBe(true);
+    expect(isEngineActorKind('app')).toBe(true);
+    expect(isEngineActorKind('web')).toBe(false);   // already cheap — not armed
+    expect(isEngineActorKind('dweb')).toBe(false);
+    expect(isEngineActorKind(undefined)).toBe(false);
+  });
+
+  test('swaps only PAST the first turn (a prior assistant exists) and not already on the executor', () => {
+    // First turn: no prior assistant → stay on the frontier planner.
+    expect(shouldEngineActorSwap({ prewalk: armed, hasPriorAssistant: false, provider: 'anthropic', model: 'claude-opus-4-8' })).toBe(false);
+    // Second turn: prior assistant exists, still on planner → swap.
+    expect(shouldEngineActorSwap({ prewalk: armed, hasPriorAssistant: true, provider: 'anthropic', model: 'claude-opus-4-8' })).toBe(true);
+    // Already on the executor → no-op.
+    expect(shouldEngineActorSwap({ prewalk: armed, hasPriorAssistant: true, provider: 'anthropic', model: 'claude-haiku-4-5' })).toBe(false);
+    // No prewalk → never.
+    expect(shouldEngineActorSwap({ prewalk: null, hasPriorAssistant: true, provider: 'anthropic', model: 'claude-opus-4-8' })).toBe(false);
   });
 });
 

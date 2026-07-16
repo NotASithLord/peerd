@@ -58,6 +58,9 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // model; maybePrewalkSwap is the per-tool-call gate that flips the phase.
     reconcilePrewalk = null,
     maybePrewalkSwap = null,
+    // Engine-actor prewalk: swaps a VM/Notebook/App actor to its cheap executor
+    // from its second turn onward. Optional so actor/test drivers stay inert.
+    reconcileEngineActor = null,
   } = deps;
 
 /**
@@ -115,10 +118,19 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // Prewalk turn-boundary reconcile: apply a pending executor swap (so THIS
   // turn's model/pricing/window all read the executor), or restore a stale
   // planner (a run that died without its run-end restore). Best-effort — a
-  // reconcile failure runs the turn on the unreconciled record.
-  if (turnSession?.prewalk && turnSession.kind !== 'actor' && typeof reconcilePrewalk === 'function') {
-    try { turnSession = (await reconcilePrewalk(turnSession)) ?? turnSession; }
-    catch (e) { console.warn('[turn] prewalk reconcile failed', e); }
+  // reconcile failure runs the turn on the unreconciled record. Two disjoint
+  // paths: the goal-run reconcile for a CHAT session, and the engine-actor
+  // reconcile for an ENGINE actor (VM/Notebook/App) — the actor swaps to its
+  // cheap executor from its second turn onward. A web/dweb/spawned actor
+  // carries no prewalk and is untouched.
+  if (turnSession?.prewalk) {
+    try {
+      if (turnSession.kind !== 'actor' && typeof reconcilePrewalk === 'function') {
+        turnSession = (await reconcilePrewalk(turnSession)) ?? turnSession;
+      } else if (turnSession.kind === 'actor' && typeof reconcileEngineActor === 'function') {
+        turnSession = (await reconcileEngineActor(turnSession)) ?? turnSession;
+      }
+    } catch (e) { console.warn('[turn] prewalk reconcile failed', e); }
   }
   const isActor = turnSession?.kind === 'actor';
   /** @type {string|undefined} */

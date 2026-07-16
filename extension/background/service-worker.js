@@ -2477,8 +2477,10 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
   recordModelCall: contextSnapshots.record,
-  // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate.
+  // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate,
+  // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
   reconcilePrewalk: prewalk.reconcile, maybePrewalkSwap: prewalk.maybeSwap,
+  reconcileEngineActor: prewalk.reconcileEngineActor,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -2701,6 +2703,12 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
   await entry.reg.setDefaultForSession(created.sessionId, record.id);
   await entry.reg.setActorSession(record.id, created.sessionId);
   auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
+  // Engine-actor prewalk: an engine actor is minted on the frontier (owner
+  // chat) model; when enginePrewalkEnabled, arm it so it keeps that model for
+  // its first turn and swaps to the cheap executor thereafter. Quiet no-op when
+  // the setting is off or no distinct executor resolves. Awaited so the state
+  // is on the record before the actor's first turn renders.
+  await prewalk.armEngineActor(created.sessionId);
   return created.sessionId;
 };
 
@@ -3505,8 +3513,18 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 // clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
 const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
   if (!actorClient) return null;
-  const rec = await sessions.get(actorSessionId);
-  if (!rec) return null;
+  const loaded = await sessions.get(actorSessionId);
+  if (!loaded) return null;
+  // Engine-actor prewalk swap on the OFFSCREEN path. reconcileEngineActor is ALSO
+  // wired into the in-SW turn-driver, but a Chrome engine actor runs HERE and
+  // returns before that path is reached — so without this the swap NEVER fires on
+  // the primary platform. why here: the worker is seeded from rec.provider/rec.model
+  // below, so the swap must land (and persist) before we read them; costOf + the
+  // card then also read the executor model. No-op for a non-engine / unarmed actor
+  // (returns the record unchanged when there's no prewalk).
+  let rec = loaded;
+  try { rec = (await prewalk.reconcileEngineActor(rec)) ?? rec; }
+  catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
   const { controller, release } = turnSlots.claim(actorSessionId);
   try {
     // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system

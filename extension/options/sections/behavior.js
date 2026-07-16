@@ -155,7 +155,32 @@ export const BehaviorSection = {
               },
             }, ui.prewalkBusy ? '…' : pwOn ? 'Turn off prewalk' : 'Turn on prewalk'),
           ]),
-          pwOn ? [
+          (() => {
+            const engOn = state.settings?.enginePrewalkEnabled === true;
+            return [
+              m('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' }, [
+                m('button.secondary', {
+                  type: 'button',
+                  disabled: ui.enginePrewalkBusy,
+                  onclick: async () => {
+                    if (ui.enginePrewalkBusy) return;
+                    ui.enginePrewalkBusy = true; m.redraw();
+                    try {
+                      await send({ type: 'settings/update', patch: { enginePrewalkEnabled: !engOn } });
+                    } catch (e) {
+                      console.warn('[options] engine prewalk toggle failed', e);
+                    } finally {
+                      ui.enginePrewalkBusy = false; m.redraw();
+                    }
+                  },
+                }, ui.enginePrewalkBusy ? '…' : engOn ? 'Turn off engine-actor prewalk' : 'Turn on engine-actor prewalk'),
+              ]),
+              m('p.hint', engOn
+                ? 'On. VM/Notebook/App actors run their first turn on your chat model, then swap to the executor below — lower cost on multi-turn engine work.'
+                : 'Also apply prewalk to engine actors (VM/Notebook/App): first turn on your chat model to plan against the real instance state, then the cheaper executor for the rest. Benchmark it in the home Lab first.'),
+            ];
+          })(),
+          (pwOn || state.settings?.enginePrewalkEnabled === true) ? [
             m('.input-row', [
               m('label', { for: 'prewalk-executor' }, 'Executor model'),
               m('input', {
@@ -169,7 +194,7 @@ export const BehaviorSection = {
                 },
               }),
             ]),
-            m('p.hint', 'A model id on the SAME provider as the chat. Leave empty to use the provider’s fast default — the same model the web actor rides.'),
+            m('p.hint', 'A model id on the SAME provider as the chat, shared by goal-run and engine-actor prewalk. Leave empty to use the provider’s fast default — the same model the web actor rides.'),
           ] : null,
         ];
       })(),
@@ -358,7 +383,7 @@ export const BehaviorSection = {
       resetRow(send, [
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'advancedAutomationEnabled', 'devMode',
         'autoResumeInterruptedTurns', 'providerFailoverEnabled', 'providerFallbacks',
-        'prewalkEnabled', 'prewalkExecutorModel',
+        'prewalkEnabled', 'enginePrewalkEnabled', 'prewalkExecutorModel',
       ]),
     ]);
   },

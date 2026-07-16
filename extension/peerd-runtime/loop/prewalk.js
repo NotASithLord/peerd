@@ -165,3 +165,43 @@ export const shouldPrewalkSwap = ({ prewalk, todosCount, toolName, sideEffect, o
 export const markPrewalkSwapped = (prewalk, now) => ({
   ...prewalk, phase: 'executing', swappedAt: now,
 });
+
+// ── engine-actor prewalk ────────────────────────────────────────────────────
+// The three ENGINE actor kinds (VM/Notebook/App) are minted on the owner
+// chat's (frontier) model — unlike the web actor, which is already on the
+// cheap runner tier. Engine-actor prewalk keeps that frontier model for the
+// actor's FIRST turn (plan + first action against the real instance state the
+// orchestrator was blind to), then swaps to the cheap executor for every later
+// turn. It's the same context-window handoff as the goal-run path, aimed at a
+// different tier — and SIMPLER: no run-liveness coupling, no todo/mutating
+// gate, and NO restore (a disposable, instance-bound actor lives out its life
+// on the executor; when its instance is deleted the session goes with it).
+//
+// why turn-boundary (not first-action): an actor's model is fixed per turn, so
+// the swap can only land BETWEEN turns. The first message_actor delegation is
+// the plan-forming turn on the frontier model; the swap takes effect from the
+// second delegation onward. A one-shot actor (a single delegation) never
+// swaps and stays on the frontier — correct: there's no later turn to make
+// cheaper, and nothing was lost.
+export const ENGINE_ACTOR_KINDS = Object.freeze(new Set(['webvm', 'notebook', 'app']));
+
+/** @param {string} [kind] */
+export const isEngineActorKind = (kind) => ENGINE_ACTOR_KINDS.has(kind ?? '');
+
+/**
+ * Should an armed engine actor swap to its executor now? True once it is PAST
+ * its first turn (a prior assistant message exists in its session) and not yet
+ * on the executor. Pure — the caller reads liveness from the session record.
+ *
+ * @param {Object} inputs
+ * @param {PrewalkState | null | undefined} inputs.prewalk
+ * @param {boolean} inputs.hasPriorAssistant  does the actor session already carry an assistant turn?
+ * @param {string | undefined} inputs.provider  the session's current provider
+ * @param {string | undefined} inputs.model     the session's current model
+ * @returns {boolean}
+ */
+export const shouldEngineActorSwap = ({ prewalk, hasPriorAssistant, provider, model }) => (
+  !!prewalk
+  && hasPriorAssistant === true
+  && (provider !== prewalk.executorProvider || model !== prewalk.executorModel)
+);
