@@ -143,7 +143,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 633 → 635: App asset classification and the full binary runner test.
 // 635 → 636: the recoverable publish transaction is shared by dweb hosts.
 // 636 → 639: dweb reseed, content ownership, and share rollback are checked.
-const COVERED_FLOOR = 647;
+// 647 → 648: the adaptive per-origin pacing reducer is checked from its first
+// commit, keeping the pure policy core inside the extension typecheck ratchet.
+const COVERED_FLOOR = 648;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
