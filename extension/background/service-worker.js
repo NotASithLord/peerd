@@ -2477,8 +2477,10 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
   recordModelCall: contextSnapshots.record,
-  // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate.
+  // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate,
+  // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
   reconcilePrewalk: prewalk.reconcile, maybePrewalkSwap: prewalk.maybeSwap,
+  reconcileEngineActor: prewalk.reconcileEngineActor,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -2701,6 +2703,12 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
   await entry.reg.setDefaultForSession(created.sessionId, record.id);
   await entry.reg.setActorSession(record.id, created.sessionId);
   auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
+  // Engine-actor prewalk: an engine actor is minted on the frontier (owner
+  // chat) model; when enginePrewalkEnabled, arm it so it keeps that model for
+  // its first turn and swaps to the cheap executor thereafter. Quiet no-op when
+  // the setting is off or no distinct executor resolves. Awaited so the state
+  // is on the record before the actor's first turn renders.
+  await prewalk.armEngineActor(created.sessionId);
   return created.sessionId;
 };
 

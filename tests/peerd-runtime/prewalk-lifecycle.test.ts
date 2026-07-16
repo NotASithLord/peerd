@@ -44,11 +44,11 @@ const TOOLS: Record<string, { sideEffect: string }> = {
 };
 
 // A controllable rig: real store + controller, fake run-liveness + settings.
-const rig = (opts: { prewalkEnabled?: boolean; executor?: string } = {}) => {
+const rig = (opts: { prewalkEnabled?: boolean; enginePrewalkEnabled?: boolean; executor?: string } = {}) => {
   const store = makeStore();
   const active = new Set<string>();
   const persisted = new Set<string>();
-  const settings = { prewalkEnabled: opts.prewalkEnabled ?? true, prewalkExecutorModel: opts.executor ?? 'claude-haiku-4-5' };
+  const settings = { prewalkEnabled: opts.prewalkEnabled ?? true, enginePrewalkEnabled: opts.enginePrewalkEnabled ?? true, prewalkExecutorModel: opts.executor ?? 'claude-haiku-4-5' };
   const audits: any[] = [];
   let clock = 1;
   const controller = makePrewalkController({
@@ -222,5 +222,73 @@ describe('prewalk controller — the review findings', () => {
     active.add(same.sessionId);
     await controller.armForRun(same.sessionId);
     expect('prewalk' in (await store.get(same.sessionId))!).toBe(false);
+  });
+});
+
+describe('prewalk controller — engine actors', () => {
+  // A VM/Notebook/App actor session, minted on the frontier (owner-chat) model.
+  const newEngineActor = (store: ReturnType<typeof makeStore>, actorType = 'webvm') =>
+    store.create({ provider: 'anthropic', model: 'claude-opus-4-8', kind: 'actor', actorType: actorType as any, instanceId: 'vm-1' });
+  // Append one assistant turn (the "first turn happened" signal reconcile reads).
+  const addAssistantTurn = async (store: ReturnType<typeof makeStore>, sid: string, i: number) =>
+    store.appendMessage(sid, { role: 'assistant', content: 'ran a command', id: `a${i}`, when: i } as any);
+
+  test('arm on mint, first turn stays on frontier, second turn swaps to executor, then lives there', async () => {
+    const { store, controller } = rig();
+    const a = await newEngineActor(store);
+
+    // ARM (mintActor). Planning phase; model unchanged (frontier).
+    await controller.armEngineActor(a.sessionId);
+    let rec: any = await store.get(a.sessionId);
+    expect(rec.prewalk.phase).toBe('planning');
+    expect(rec.model).toBe('claude-opus-4-8');
+
+    // FIRST turn (no prior assistant) → reconcile keeps the frontier model.
+    rec = await controller.reconcileEngineActor(rec);
+    expect(rec.model).toBe('claude-opus-4-8');
+    expect(rec.prewalk.phase).toBe('planning');
+
+    // The first turn produces an assistant message.
+    await addAssistantTurn(store, a.sessionId, 1);
+
+    // SECOND turn → reconcile swaps to the executor + marks executing, one write.
+    rec = await controller.reconcileEngineActor((await store.get(a.sessionId))!);
+    expect(rec.model).toBe('claude-haiku-4-5');
+    expect(rec.prewalk.phase).toBe('executing');
+
+    // THIRD turn → already on the executor, no-op (and never restores).
+    await addAssistantTurn(store, a.sessionId, 2);
+    rec = await controller.reconcileEngineActor((await store.get(a.sessionId))!);
+    expect(rec.model).toBe('claude-haiku-4-5');
+    expect('prewalk' in rec).toBe(true);   // NO restore — the actor lives on the executor
+  });
+
+  test('armEngineActor no-ops: setting off, non-engine actor kind, and executor == model', async () => {
+    const { store, controller, settings } = rig();
+
+    settings.enginePrewalkEnabled = false;
+    const off = await newEngineActor(store);
+    await controller.armEngineActor(off.sessionId);
+    expect('prewalk' in (await store.get(off.sessionId))!).toBe(false);
+
+    settings.enginePrewalkEnabled = true;
+    // A WEB actor is already cheap — not an engine kind, must not arm.
+    const web = await store.create({ provider: 'anthropic', model: 'claude-opus-4-8', kind: 'actor', actorType: 'web' as any });
+    await controller.armEngineActor(web.sessionId);
+    expect('prewalk' in (await store.get(web.sessionId))!).toBe(false);
+
+    // Engine actor already on the cheap model → no distinct executor, no arm.
+    const cheap = await store.create({ provider: 'anthropic', model: 'claude-haiku-4-5', kind: 'actor', actorType: 'notebook' as any, instanceId: 'nb-1' });
+    await controller.armEngineActor(cheap.sessionId);
+    expect('prewalk' in (await store.get(cheap.sessionId))!).toBe(false);
+  });
+
+  test('armEngineActor is idempotent — a second call leaves the state alone', async () => {
+    const { store, controller } = rig();
+    const a = await newEngineActor(store, 'app');
+    await controller.armEngineActor(a.sessionId);
+    const first = (await store.get(a.sessionId))!.prewalk;
+    await controller.armEngineActor(a.sessionId);
+    expect((await store.get(a.sessionId))!.prewalk).toEqual(first);
   });
 });

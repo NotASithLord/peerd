@@ -142,11 +142,20 @@ export const defaults = {
   // (home/eval-section.js); flip deliberately, not by shipping.
   prewalkEnabled: { store: false, preview: false },
 
+  // Engine-actor prewalk (loop/prewalk-controller.js): the three engine actor
+  // kinds (VM/Notebook/App) are minted on the chat's (frontier) model. With
+  // this on, an engine actor runs its FIRST turn on that model, then swaps to
+  // the cheap executor for every later turn — lower cost on multi-turn engine
+  // work (a VM build, a notebook iteration) at held-or-better quality. Shares
+  // the prewalkExecutorModel pin below. OFF by default on BOTH channels until
+  // the Lab's engine-actor A/B validates it (home/eval-section.js).
+  enginePrewalkEnabled: { store: false, preview: false },
+
   // Prewalk executor override. '' = no pin — resolve the active provider's
   // fast default (the same defaultRunnerModel rung the web actor rides, e.g.
   // Haiku on Anthropic). A non-empty value pins a SAME-PROVIDER model id
   // (cross-provider executors are a deliberate later step — keys, failover
-  // and pricing are provider-scoped).
+  // and pricing are provider-scoped). Shared by goal-run and engine-actor prewalk.
   prewalkExecutorModel: { store: '', preview: '' },
 
   // Cost telemetry: the meter is always on; the hard limit is opt-in.

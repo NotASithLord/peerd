@@ -24,8 +24,18 @@
 //   - arm() ALWAYS clears stale state first (a crashed run's leftovers),
 //     THEN gates the re-arm on the setting — so a disabled setting can never
 //     leave a prior run's executor state stranded on the record.
+//
+// The controller ALSO carries the ENGINE-ACTOR prewalk path (armEngineActor /
+// reconcileEngineActor): the same context-window handoff aimed at the three
+// engine actor kinds (VM/Notebook/App), which are minted on the frontier
+// (owner-chat) model. It's simpler than the goal-run path — no run-liveness
+// coupling, no todo/mutating gate, no restore — the actor runs turn 1 on the
+// frontier model and lives out its life on the executor. See prewalk.js.
 
-import { armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, resolvePrewalkExecutor } from './prewalk.js';
+import {
+  armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, resolvePrewalkExecutor,
+  shouldEngineActorSwap, isEngineActorKind,
+} from './prewalk.js';
 
 /**
  * @typedef {Object} PrewalkControllerDeps
@@ -33,7 +43,7 @@ import { armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, resolvePrewalkExecut
  * @property {{ isActive: (id: string) => boolean, isPersisted?: (id: string) => Promise<boolean> }} goalRunner
  *   isActive — the live in-memory run map. isPersisted — the durable mirror
  *   (optional; absent → treated as false, i.e. in-memory only).
- * @property {{ get: () => { prewalkEnabled?: boolean, prewalkExecutorModel?: string } }} settings
+ * @property {{ get: () => { prewalkEnabled?: boolean, enginePrewalkEnabled?: boolean, prewalkExecutorModel?: string } }} settings
  * @property {() => Array<{ name?: string, defaultRunnerModel?: string }>} listProviders
  * @property {(name: string) => ({ sideEffect?: string } | undefined)} getTool
  * @property {(entry: { type: string, sessionId?: string, details?: object }) => unknown} [appendAudit]
@@ -157,5 +167,62 @@ export const makePrewalkController = ({
     }
   };
 
-  return { armForRun, reconcile, maybeSwap, restoreForRun };
+  // ── engine-actor prewalk ──────────────────────────────────────────────────
+
+  /**
+   * Arm an engine actor at mint time (VM/Notebook/App). Quiet no-op unless the
+   * setting is on, the session is an engine actor, and a distinct cheap
+   * executor resolves (armPrewalk returns null when the executor equals the
+   * actor's own model). Idempotent — a session already carrying prewalk is left
+   * alone. No stale-cleanup needed: an actor session is freshly minted here.
+   * @param {string} sessionId
+   */
+  const armEngineActor = async (sessionId) => {
+    try {
+      if (!sessionId || !settings.get().enginePrewalkEnabled) return;
+      const session = await sessions.get(sessionId);
+      if (!session || session.kind !== 'actor' || !isEngineActorKind(session.actorType)) return;
+      if (session.prewalk) return;
+      const provider = listProviders().find((p) => p.name === session.provider);
+      const executor = resolvePrewalkExecutor({ settings: settings.get(), provider });
+      const armed = armPrewalk(session, executor, now());
+      if (!armed) return;
+      await sessions.setPrewalk(sessionId, armed);
+      audit('engine_prewalk_armed', sessionId, { actorType: session.actorType, executorProvider: armed.executorProvider, executorModel: armed.executorModel });
+    } catch (e) {
+      console.warn('[prewalk] engine actor arm failed', e);
+    }
+  };
+
+  /**
+   * Reconcile at an engine actor's turn start (turn-driver, engine kinds only).
+   * Keeps the frontier model for the first turn; once the actor is past it (a
+   * prior assistant turn exists), swaps model→executor and marks executing — in
+   * ONE write (setPrewalk carries the model patch). No restore: the actor stays
+   * on the executor for the rest of its life. Returns the (possibly swapped)
+   * session the turn should run on.
+   * @param {any} session
+   */
+  const reconcileEngineActor = async (session) => {
+    const pw = session?.prewalk;
+    if (!pw) return session;
+    const sid = session.sessionId;
+    const onExecutor = session.provider === pw.executorProvider && session.model === pw.executorModel;
+    // Already swapped and on the executor — nothing to do.
+    if (pw.phase === 'executing' && onExecutor) return session;
+    const hasPriorAssistant = Array.isArray(session.messages)
+      && session.messages.some((/** @type {any} */ m) => m?.role === 'assistant');
+    if (!shouldEngineActorSwap({ prewalk: pw, hasPriorAssistant, provider: session.provider, model: session.model })) {
+      return session;
+    }
+    // Past the first turn (or drifted off the executor) → land on the executor,
+    // marking executing, in a single atomic write.
+    const swapped = await sessions.setPrewalk(sid, markPrewalkSwapped(pw, now()), {
+      provider: pw.executorProvider, model: pw.executorModel,
+    });
+    audit('engine_prewalk_swapped', sid, { actorType: session.actorType, executorProvider: pw.executorProvider, executorModel: pw.executorModel });
+    return swapped;
+  };
+
+  return { armForRun, reconcile, maybeSwap, restoreForRun, armEngineActor, reconcileEngineActor };
 };

@@ -20,7 +20,7 @@ import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
+ * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
  */
 
 // The runner's own $ for a task. 'local' (the on-device runner) is FREE; a cloud
@@ -44,7 +44,7 @@ const costFields = (c) => c ? {
   costUsd: typeof c.cost === 'number' ? c.cost : 0,
 } : { ...ZERO_COST };
 /** @returns {Turn} */
-const newTurn = () => ({ session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
+const newTurn = () => ({ session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
 
 /** @param {any} session */
 const finalAnswer = (session) => {
@@ -111,6 +111,28 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
           turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
           turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
         }
+        break;
+      // message_actor-driven actors (WEB + the engine VM/Notebook/App actors)
+      // broadcast turn/actor-cost, NOT turn/spawned-cost (which is the
+      // actor_create/spawn path). Fold it into the SAME runner bucket — without
+      // this an engine actor's spend is invisible here, so the engine-actor
+      // prewalk down-shift wouldn't register in the A/B. Tokens ride msg.usage
+      // (absent on the in-SW fallback, which sends cost only); the SW-priced USD
+      // (msg.cost.cost) is accumulated so the row reports the actor's REAL spend.
+      case 'turn/actor-cost':
+        if (msg.usage) {
+          turn.runner.inputTokens += msg.usage.inputTokens || 0;
+          turn.runner.outputTokens += msg.usage.outputTokens || 0;
+          turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
+          turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
+        }
+        if (typeof msg.cost?.cost === 'number') turn.runnerUsd += msg.cost.cost;
+        break;
+      // An actor turn's session snapshot — its model(s) show the planner→
+      // executor handoff (engine-actor prewalk). turn/actor-state, not
+      // turn/state (which is the subject/main session only).
+      case 'turn/actor-state':
+        if (msg.session?.model) turn.modelsSeen.add(msg.session.model);
         break;
       case 'turn/error': turn.error = msg.error; break;
       case 'turn/streaming':
@@ -280,7 +302,11 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     const cost = costFields(turn.cost);
     const freshTok = cost.inputTokens + cost.outputTokens;
     const runnerTokens = turn.runner.inputTokens + turn.runner.outputTokens + turn.runner.cacheReadTokens + turn.runner.cacheWriteTokens;
-    const runnerCostUsd = priceRunnerUsd(runnerCfg, turn.runner);
+    // Prefer the ACTUAL accumulated actor spend (turn/actor-cost, SW-priced from
+    // the actor's real model — so an engine-actor prewalk down-shift shows here)
+    // over re-pricing by runnerCfg, which exists for the runner-model A/B and
+    // reads 'local' (=$0) otherwise.
+    const runnerCostUsd = turn.runnerUsd > 0 ? turn.runnerUsd : priceRunnerUsd(runnerCfg, turn.runner);
     const models = [...turn.modelsSeen];
     log(`  ${res.pass ? '✓ PASS' : '✗ FAIL'} — ${res.detail}  [${state.steps} steps · ${(durationMs / 1000).toFixed(1)}s · runner ${runnerTokens} tok · $${runnerCostUsd.toFixed(4)} runner + $${cost.costUsd.toFixed(4)} main${models.length > 1 ? ` · models ${models.join(' → ')}` : ''}]`);
     if (!res.pass && state.answer) log(`       agent said: "${state.answer.slice(0, 200).replace(/\s+/g, ' ')}"`);
@@ -342,13 +368,17 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
   const readPrewalk = async () => { try { const r = await browser.runtime.sendMessage({ type: 'state/get' }); return r?.state?.settings?.prewalkEnabled === true; } catch { return false; } };
   /** @param {boolean} val */
   const setPrewalk = (val) => browser.runtime.sendMessage({ type: 'settings/update', patch: { prewalkEnabled: !!val } });
+  // Engine-actor prewalk arm — the switch for the VM/Notebook/App handoff.
+  const readEnginePrewalk = async () => { try { const r = await browser.runtime.sendMessage({ type: 'state/get' }); return r?.state?.settings?.enginePrewalkEnabled === true; } catch { return false; } };
+  /** @param {boolean} val */
+  const setEnginePrewalk = (val) => browser.runtime.sendMessage({ type: 'settings/update', patch: { enginePrewalkEnabled: !!val } });
 
-  // config = { mainProvider, mainModel, runnerCfg, goal?, prewalk? }. Sets the
-  // models + the prewalk arm, runs the suite (as goal runs when goal:true),
-  // returns the scorecard. (The caller restores the user's settings.)
+  // config = { mainProvider, mainModel, runnerCfg, goal?, prewalk?, enginePrewalk? }.
+  // Sets the models + both prewalk arms, runs the suite (as goal runs when
+  // goal:true), returns the scorecard. (The caller restores the user's settings.)
   /**
    * @param {string} label
-   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string, goal?: boolean, prewalk?: boolean }} config
+   * @param {{ mainProvider?: string, mainModel?: string, runnerCfg?: string, goal?: boolean, prewalk?: boolean, enginePrewalk?: boolean }} config
    * @param {string} suiteId @param {boolean} showTabs
    * @param {(p: { index: number, total: number, id: string }) => void} [onTask]
    */
@@ -356,31 +386,34 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     const rm = await configToRunnerModel(config.runnerCfg);
     if (config.mainProvider && config.mainModel) await setMainModel(config.mainProvider, config.mainModel);
     await setRunnerModel(rm);
-    // prewalk only means anything on goal runs; set it explicitly per leg so
-    // an A/B is always a controlled comparison, whatever the user's setting.
+    // Set BOTH prewalk arms explicitly per leg so an A/B is always a controlled
+    // comparison, whatever the user's own settings are.
     await setPrewalk(!!config.prewalk);
+    await setEnginePrewalk(!!config.enginePrewalk);
     await sleep(200); // let the SW rebuild the session + tool-contexts with the new models
-    log(`\n──────── ${label}: main "${config.mainModel}" · runner "${config.runnerCfg}"${config.goal ? ' · goal' : ''}${config.prewalk ? ' · prewalk' : ''} ────────`);
+    log(`\n──────── ${label}: main "${config.mainModel}" · runner "${config.runnerCfg}"${config.goal ? ' · goal' : ''}${config.prewalk ? ' · prewalk' : ''}${config.enginePrewalk ? ' · engine-prewalk' : ''} ────────`);
     const { card, results } = await runSuite(suiteId, showTabs, onTask, config.runnerCfg, { goal: !!config.goal });
     return { label, config, card, results };
   }
 
-  // Save the user's models + prewalk arm, run, restore — the Lab never leaves
-  // your chat on a different model (or a flipped experiment) than you set.
+  // Save the user's models + both prewalk arms, run, restore — the Lab never
+  // leaves your chat on a different model (or a flipped experiment) than you set.
   /** @param {() => Promise<any>} fn */
   async function withSavedModels(fn) {
     const savedMain = await readMainModel();
     const savedRunner = await readRunnerModel();
     const savedPrewalk = await readPrewalk();
+    const savedEnginePrewalk = await readEnginePrewalk();
     try { return await fn(); }
     finally {
       await setMainModel(savedMain.provider, savedMain.model);
       await setRunnerModel(savedRunner);
       await setPrewalk(savedPrewalk);
-      log(`\nrestored your settings (main ${JSON.stringify(savedMain.model)}, runner ${JSON.stringify(savedRunner)}, prewalk ${savedPrewalk ? 'on' : 'off'}).`);
+      await setEnginePrewalk(savedEnginePrewalk);
+      log(`\nrestored your settings (main ${JSON.stringify(savedMain.model)}, runner ${JSON.stringify(savedRunner)}, prewalk ${savedPrewalk ? 'on' : 'off'}, engine-prewalk ${savedEnginePrewalk ? 'on' : 'off'}).`);
     }
   }
-  /** @typedef {{ mainProvider?: string, mainModel?: string, runnerCfg?: string, goal?: boolean, prewalk?: boolean }} ArmConfig */
+  /** @typedef {{ mainProvider?: string, mainModel?: string, runnerCfg?: string, goal?: boolean, prewalk?: boolean, enginePrewalk?: boolean }} ArmConfig */
   /**
    * @param {ArmConfig} config
    * @param {string} suiteId @param {boolean} showTabs
