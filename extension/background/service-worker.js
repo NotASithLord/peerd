@@ -3513,8 +3513,18 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 // clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
 const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
   if (!actorClient) return null;
-  const rec = await sessions.get(actorSessionId);
-  if (!rec) return null;
+  const loaded = await sessions.get(actorSessionId);
+  if (!loaded) return null;
+  // Engine-actor prewalk swap on the OFFSCREEN path. reconcileEngineActor is ALSO
+  // wired into the in-SW turn-driver, but a Chrome engine actor runs HERE and
+  // returns before that path is reached — so without this the swap NEVER fires on
+  // the primary platform. why here: the worker is seeded from rec.provider/rec.model
+  // below, so the swap must land (and persist) before we read them; costOf + the
+  // card then also read the executor model. No-op for a non-engine / unarmed actor
+  // (returns the record unchanged when there's no prewalk).
+  let rec = loaded;
+  try { rec = (await prewalk.reconcileEngineActor(rec)) ?? rec; }
+  catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
   const { controller, release } = turnSlots.claim(actorSessionId);
   try {
     // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system

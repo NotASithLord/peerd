@@ -20,7 +20,7 @@ import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
+ * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, runnerUsdByKey: Map<string, number>, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
  */
 
 // The runner's own $ for a task. 'local' (the on-device runner) is FREE; a cloud
@@ -44,7 +44,7 @@ const costFields = (c) => c ? {
   costUsd: typeof c.cost === 'number' ? c.cost : 0,
 } : { ...ZERO_COST };
 /** @returns {Turn} */
-const newTurn = () => ({ session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
+const newTurn = () => ({ session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, runnerUsdByKey: new Map(), error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
 
 /** @param {any} session */
 const finalAnswer = (session) => {
@@ -126,7 +126,15 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
           turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
           turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
         }
-        if (typeof msg.cost?.cost === 'number') turn.runnerUsd += msg.cost.cost;
+        // USD accounting differs by broadcaster: the offscreen heap-split path
+        // (service-worker) fires ONCE per actor turn with that turn's TOTAL, while
+        // the in-SW path (turn-driver onCost) RE-EMITS a GROWING CUMULATIVE per
+        // usage fold. Key the latest value per actor turn (parentToolUseId) and sum
+        // the keys — correct for both; a straight += multiply-counts the in-SW stream.
+        if (typeof msg.cost?.cost === 'number') {
+          turn.runnerUsdByKey.set(msg.parentToolUseId ?? 'anon', msg.cost.cost);
+          turn.runnerUsd = [...turn.runnerUsdByKey.values()].reduce((sum, v) => sum + v, 0);
+        }
         break;
       // An actor turn's session snapshot — its model(s) show the planner→
       // executor handoff (engine-actor prewalk). turn/actor-state, not

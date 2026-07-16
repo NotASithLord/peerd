@@ -159,7 +159,10 @@ async function runEnginePrewalkAB() {
   const suiteId = 'engine-actor';
   m.redraw();
   try {
-    const base = configFor('A');
+    // Force normal turns (not goal) whatever the 'goal runs' checkbox says — this
+    // A/B isolates the engine-actor swap on plain message_actor turns, per the
+    // contract note above. (runPrewalkAB is the goal-run counterpart.)
+    const base = { ...configFor('A'), goal: false };
     ui.ab = await ensureEngine().runAB(
       { ...base, enginePrewalk: false },
       { ...base, enginePrewalk: true },
@@ -226,6 +229,16 @@ const pairCol = (side) => m('.eval-pair', [
 // The selected suite (the id is a free string in state; SUITES is keyed).
 const suite = () => SUITES[/** @type {keyof typeof SUITES} */ (ui.suiteId)];
 
+// Suites the home Lab can actually run. The web-actor suite uses the __FIXTURE__
+// sentinel that ONLY eval/runner.js (the CDP bench, fed by a local fixture server)
+// substitutes — the home Lab's eval-engine has no fixture server, so those tasks
+// would all-fail here. Hide any suite whose tasks carry the sentinel (self-
+// maintaining: a new fixture suite is filtered automatically). why detect the
+// sentinel, not the id: keeps the two surfaces from drifting.
+const usesFixture = (/** @type {any} */ s) => (s.tasks ?? []).some((/** @type {any} */ t) =>
+  String(t.startUrl ?? '').includes('__FIXTURE__') || String(t.prompt ?? '').includes('__FIXTURE__'));
+const labSuites = Object.values(SUITES).filter((/** @type {any} */ s) => !usesFixture(s));
+
 export const EvalSection = {
   oninit() { if (!ui.loaded) loadModels().catch(() => {}); },
   view() {
@@ -238,7 +251,7 @@ export const EvalSection = {
       m('p.eval-note', 'A run takes over the agent session (your current chat resets) and drives a hidden browser window — don\'t start a chat while it runs.'),
       m('.eval-controls', [
         m('label.eval-field', ['suite', m('select', { value: ui.suiteId, disabled: ui.running, onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui.suiteId = e.target.value; } },
-          Object.values(SUITES).map((/** @type {any} */ s) => m('option', { value: s.id }, `${s.label} · ${s.tasks.length} tasks`)))]),
+          labSuites.map((/** @type {any} */ s) => m('option', { value: s.id }, `${s.label} · ${s.tasks.length} tasks`)))]),
         m('label.eval-check', {
           title: 'Off: the agent runs in a hidden, background window. On: a visible window (its own tab bar) you can watch — it never takes focus either way.',
         }, [m('input', { type: 'checkbox', checked: ui.showTabs, disabled: ui.running, onchange: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.showTabs = e.target.checked; } }), 'show tabs']),
