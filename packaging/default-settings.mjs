@@ -124,6 +124,15 @@ export const defaults = {
   // no chrome.debugger API, so the setting is moot there on either channel.
   advancedAutomationEnabled: { store: false, preview: true },
 
+  // Watch mode (background/watch-mode.js): the OPT-IN inverse of DESIGN-12's
+  // no-focus-steal. OFF by default — peerd drives its tab in the background so
+  // it never interrupts you. Toggle it on from the side-panel top bar and peerd
+  // brings the agent's current tab to the foreground and FOLLOWS it as the agent
+  // moves between tabs, so you watch the real page live (the browser is the
+  // viewer — no screenshot/capture, no new permission, both channels). Off both
+  // channels: watching is a per-moment choice, not a default posture.
+  watchAgentTab: { store: false, preview: false },
+
   // Web actor model override. '' is NO override — the web actor resolves to
   // the active provider's fast default (Haiku on Anthropic via
   // adapter.defaultRunnerModel; resolveRunnerModel), NOT the chat model. So out

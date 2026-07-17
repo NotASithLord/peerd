@@ -120,6 +120,12 @@ export const normalizeSettingsPatch = (patch, {
     // off switch is about the background model calls, not writes.
     next.autoMemoryEnabled = patch.autoMemoryEnabled;
   }
+  if (typeof patch.watchAgentTab === 'boolean') {
+    // Watch mode: foreground + follow the agent's tab (background/watch-mode.js).
+    // The SW's onSettingsChanged foregrounds the current agent tab the moment
+    // this flips on; each later agent tab touch follows while it stays on.
+    next.watchAgentTab = patch.watchAgentTab;
+  }
   if (typeof patch.confirmWebWrites === 'boolean') {
     // #53: anti-exfil gate. When OFF, non-GET web egress (fetch_url + the WebVM
     // bridge) is auto-approved (risk-acknowledged); ON (default) confirms.
