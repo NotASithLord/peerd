@@ -31,6 +31,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   ollamaHost: "http://localhost:11434",
   openrouterModels: [],
   advancedAutomationEnabled: true,
+  watchAgentTab: false,
   runnerModel: "",
   prewalkEnabled: false,
   enginePrewalkEnabled: false,

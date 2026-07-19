@@ -2020,8 +2020,11 @@ const closeSidePanel = async () => {
 // calls noteAgentTab/scheduleWebTabHint/broadcastAgentTab/showWebTabHint from
 // its tool-context + port wiring, and setTabAnchor from the actor-turn start.
 const {
-  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen,
-} = makeTabAffordances({ browser, uiPorts, denylistStore, closeSidePanel });
+  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab,
+} = makeTabAffordances({
+  browser, uiPorts, denylistStore, closeSidePanel,
+  isWatchOn: () => settingsStore.get().watchAgentTab === true,
+});
 
 // Confirmation coordinator. The dispatcher's async confirmation step
 // calls ctx.confirm(prompt); this pushes a 'confirm/request' to the side
@@ -3060,6 +3063,9 @@ const leaveDwebAgentInbox = async () => {
 const onSettingsChanged = () => {
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
   else leaveDwebAgentInbox().catch(() => {});
+  // Watch mode just flipped on → foreground the agent's current tab immediately,
+  // rather than waiting for its next tab touch. No-op when off / no agent tab.
+  if (settingsStore.get().watchAgentTab === true) focusAgentTab();
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
 // clear the SW-side membership flag for a clean re-join on the next start.
