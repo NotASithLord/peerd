@@ -14,7 +14,7 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} [opts]
+   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} [opts]
    *   a2a: expose the `mesh` agent-to-agent client; actors: expose the `actors`
    *   delegation client (the script surface). caps: capability profile for the
    *   sealed worker (default = the historical js_run surface); caps.page also
@@ -23,12 +23,15 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
    *   runId ride as trusted job params to the relay routes.
    * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }> }>}
    */
-  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps } = {}) => {
+  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch } = {}) => {
     await ensureOffscreen();
     const reply = await sendMessage({
       type: 'job/run', code, timeoutMs,
       ...(a2a ? { a2a: true, ownerSessionId } : {}),
       ...(actors ? { actors: true, ownerSessionId, ownerToolUseId, runId } : {}),
+      // DESIGN-19: a site-client run — the pinned origin + its owner ride as trusted
+      // job params; job-runner forces every other cap off.
+      ...(siteFetch ? { siteFetch, ownerSessionId } : {}),
       ...(caps ? { caps, ownerSessionId } : {}),
     });
     if (!reply?.ok) throw new Error(reply?.error ?? 'headless job failed');

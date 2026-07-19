@@ -351,6 +351,7 @@ export default [
       'extension/peerd-runtime/dom/walk-injected.js',
       'extension/peerd-runtime/dom/framework-state.js',
       'extension/peerd-runtime/dom/pull-in-hint-injected.js',
+      'extension/peerd-runtime/dom/fetch-tap-injected.js',
       'extension/background/debugger-pool.js',
       'extension/peerd-runtime/tools/defs/watch-changes.js',
     ],

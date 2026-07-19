@@ -23,6 +23,10 @@ import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { fetchUrlTool }              from './fetch-url.js';
 import { readWebCacheTool }          from './read-web-cache.js';
+import { siteClientRunTool }         from './site-client-run.js';
+import { siteClientReadTool }        from './site-client-read.js';
+import { siteClientWriteTool }       from './site-client-write.js';
+import { siteCaptureTool }           from './site-capture.js';
 import { actorListTool }             from './actor-list.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
@@ -85,6 +89,11 @@ export {
   // sessions
   actorListTool,
   openTabTool,
+  // site clients (DESIGN-19 — per-origin derived API clients; web-actor-only)
+  siteClientRunTool,
+  siteClientReadTool,
+  siteClientWriteTool,
+  siteCaptureTool,
   // engine (the one cross-kind create; per-kind ops below)
   sandboxCreateTool,
   // engine (WebVM)
@@ -176,6 +185,14 @@ export const BUILTIN_TOOLS = Object.freeze([
   // fetch_url's spill-and-page read side — same exposure (web actor only; the
   // cache holds fetched page content).
   readWebCacheTool,
+  // site clients (DESIGN-19) — per-origin derived API clients. All web-actor-only
+  // (hidden from main; allowed for kind:'web' in exposure.js). run executes the
+  // stored client in the sealed worker under an origin-pinned fetch; read inspects
+  // it; write persists it (confirm-gated); capture records traffic to derive it.
+  siteClientRunTool,
+  siteClientReadTool,
+  siteClientWriteTool,
+  siteCaptureTool,
   // engine — sandbox_create is the one cross-kind bootstrap (it folded
   // vm_create/js_create/app_create); the per-kind ops below are all
   // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.

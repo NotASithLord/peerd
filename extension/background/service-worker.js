@@ -210,6 +210,15 @@ import {
   inspectImport,
   applyImport,
   ExportPassphraseError,
+  // DESIGN-19 site clients — per-origin derived API clients (store + pure helpers)
+  createSiteClientStore,
+  resolveSiteUrl,
+  buildMintInjection,
+  digestCapture,
+  // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap (chrome.scripting), for capture
+  // on every channel (store-Chrome + Firefox, no new permission).
+  installFetchTapInjected,
+  drainFetchTapInjected,
   // skills (progressive-disclosure SKILL.md)
   createSkillStore,
   createSkillRegistry,
@@ -289,6 +298,9 @@ import {
   makeVmHttpFetch,
   makeGitCredentialRoutes,
   WEB_WRITE_CONFIRM_KEY,
+  // DESIGN-19: the shared non-GET web-write predicate (site-fetch/call gates a
+  // non-GET through the same web:write confirm as fetch_url / call_api).
+  needsWebWriteConfirm,
 } from '/peerd-engine/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
@@ -651,6 +663,12 @@ const sessions = createSessionStore({ idb });
 // its confirmation-gated writeWithConfirm. Foundational for skills (07)
 // and auto-memory (09).
 const memory = createMemoryStore({ idb });
+
+// DESIGN-19 site clients — per-origin derived API clients (dossier + module),
+// its OWN IDB DB (a distinct trust class from skills — a client is never
+// loadable as a skill). Injected as ctx.siteClients for the web actor's
+// site_client_* tools and read at mint for fenced dossier injection.
+const siteClientStore = createSiteClientStore();
 
 // Profiles (ROADMAP "Profiles", deprioritized to the default-profile
 // shape). Exactly ONE record exists — 'default' — carrying peerName
@@ -1200,6 +1218,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // descriptions in memory; getBody hits IDB only when the model
     // actually loads a skill.
     skills: skillRegistry,
+    // DESIGN-19: the site-client store (run/read/write reach it). Stripped from any
+    // actor whose toolset lacks the site_client_* tools (CAPABILITY_CONSUMERS.siteClients);
+    // present on the web actor. Harmless on the main ctx (the tools are hidden + gated).
+    siteClients: siteClientStore,
+    // DESIGN-19: the capture closure for site_capture (Tap A CDP / Tap B scripting),
+    // injected ONLY for a tab-backed web actor below (like adoptWebTab). Absent → the
+    // tool returns site_capture_unavailable.
     // why a frozen COPY, not the live array: a tool context handed the live
     // list lets a stray tool/hook mutate the denylist for the whole SW lifetime;
     // a frozen snapshot makes the seed + user overlay read-only per context.
@@ -1272,6 +1297,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // adopted tab. (The >=1-tab case mutates activeTab in place, which the shallow copy
       // already shares; only the 0->1 reassignment needs the setter.)
       resCtx.repinActiveTab = (/** @type {any} */ tab) => { resCtx.activeTab = tab; };
+      // DESIGN-19: site_capture — inject the capture manager ONLY for a tab-backed
+      // web actor (an API actor has no tab to observe). It survives the strip because
+      // site_capture is in this actor's allow-set (CAPABILITY_CONSUMERS.siteCapture).
+      resCtx.siteCapture = siteCaptureManager;
     }
     return resCtx;
   }
@@ -2815,6 +2844,156 @@ const pageCallRoute = {
   },
 };
 
+// ── DESIGN-19 — the site-fetch/call route (a site-client run's ONLY egress) ──
+// A site.fetch(pathOrUrl) call inside a sealed site-client worker relays here
+// (offscreen job-runner → 'site-fetch/call'). SECURITY, the whole point of doing
+// this SW-side (the a2a/page-call posture):
+//   • OWNER + PINNED ORIGIN ride from the trusted job params, never the worker.
+//   • The owner must be a WEB actor (tab or API) — not a general worker power.
+//   • resolveSiteUrl pins every request to the origin (cross-origin REFUSED) —
+//     the worker cannot point the fetch at another host.
+//   • Denylist-checked; a non-GET crosses the shared web:write confirm.
+//   • The fetch runs through the actor's SESSION-SCOPED webFetch (cookies ride
+//     same-origin, keyless — identical authority to fetch_url), so this relay adds
+//     nothing the live actor doesn't already have for its own origin.
+const siteFetchCallRoute = {
+  /** @param {{ ownerSessionId?: string, siteOrigin?: string, pathOrUrl?: string, method?: string, headers?: Record<string,string>, body?: unknown }} msg */
+  'site-fetch/call': async ({ ownerSessionId, siteOrigin, pathOrUrl, method, headers, body } = {}) => {
+    if (vault.isLocked()) return { ok: false, error: 'locked' };
+    if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'site_fetch_no_owner' };
+    const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
+      return { ok: false, error: 'site_fetch_not_web_actor' };
+    }
+    const pin = normalizeApiOrigin(siteOrigin);
+    if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+    const resolved = resolveSiteUrl(pathOrUrl, pin);
+    if ('error' in resolved) return { ok: false, error: resolved.error };
+    const url = resolved.url;
+    // Denylist floor (the origin gate's SW-side twin): a site client can't reach a
+    // denylisted host even if one was somehow stored.
+    const host = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
+    if (host) {
+      const hit = matchesDenylist(host, denylistStore.patterns());
+      if (hit) return { ok: false, error: `denylisted: ${host} matches '${hit}'` };
+    }
+    const httpMethod = String(method ?? 'GET').toUpperCase();
+    // Anti-exfil: a non-GET can transmit in-context data. Confirm by default via
+    // the SHARED web:write key (one approval governs fetch_url + call_api + this).
+    if (needsWebWriteConfirm(httpMethod)) {
+      const ans = await confirmAction(/** @type {any} */ ({
+        tool: 'web:write', kind: 'web_write', origins: [pin],
+        summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
+        sessionId: ownerSessionId,
+      }));
+      if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined: user declined the site-client write.' };
+    }
+    // The actor's SESSION-SCOPED / origin-pinned webFetch — same wrappers
+    // buildToolContext hands the web/API actor. Cookies ride only same-origin to
+    // the owned origin; the worker never holds a credential.
+    let scopedFetch;
+    if (owner.backing === 'api') {
+      scopedFetch = withApiCredentials(webFetch, () => pin, {
+        getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+        audit: (/** @type {any} */ e) => auditLog.append(e),
+      });
+    } else {
+      // A tab actor: scope to the owned tab's LIVE origin (matches the pin when the
+      // actor is on that site; a mismatch is naturally sessionless at the boundary).
+      const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
+      let tabOrigin = pin;
+      if (typeof ownedTabId === 'number') {
+        const t = await browser.tabs.get(ownedTabId).catch(() => null);
+        if (t?.url) tabOrigin = originOfTabUrl(/** @type {string} */ (t.url));
+      }
+      scopedFetch = withSessionScopedCredentials(webFetch, () => tabOrigin);
+    }
+    // Strip tool-supplied credential headers (a laundered injection forging one) —
+    // the real same-origin cookies come from the jar via the boundary.
+    /** @type {Record<string, string>} */
+    const safeHeaders = {};
+    for (const [k, v] of Object.entries(headers ?? {})) {
+      if (['cookie', 'authorization', 'proxy-authorization'].includes(k.toLowerCase())) continue;
+      if (typeof v === 'string') safeHeaders[k] = v;
+    }
+    let reqBody = body;
+    if (reqBody !== undefined && typeof reqBody !== 'string') {
+      reqBody = JSON.stringify(reqBody);
+      if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) safeHeaders['Content-Type'] = 'application/json';
+    }
+    try {
+      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody) });
+      const ct = res.headers.get('content-type') ?? '';
+      const text = (await res.text()).slice(0, 200_000);   // hard cap on relayed bytes
+      let json = null;
+      if (/(json|graphql)/i.test(ct)) { try { json = JSON.parse(text); } catch { json = null; } }
+      return { ok: true, value: { status: res.status, finalUrl: res.url ?? url, contentType: ct || null, body: text, json } };
+    } catch (e) {
+      const err = /** @type {{ reason?: string, message?: string }} */ (e);
+      if (err?.reason === 'redirect_blocked') return { ok: false, error: `redirected: ${url} issued a redirect (not followed). Use the final URL.` };
+      if (err?.reason === 'private_network') return { ok: false, error: `blocked: ${url} is a private/loopback host (SSRF defense).` };
+      return { ok: false, error: err?.message ?? 'site_fetch_failed' };
+    }
+  },
+};
+
+// DESIGN-19 — the options-surface routes for stored site clients: list (metas
+// only — no module bodies) + delete. The dossier/module are NOT secrets (they hold
+// no credentials by construction), so this is ungated like the denylist routes.
+const siteClientRoutes = {
+  'site-client/list': async () => {
+    try {
+      const metas = await siteClientStore.listMeta();
+      // Project to the UI-relevant fields (never the body).
+      return { ok: true, clients: metas.map((/** @type {any} */ mMeta) => ({
+        origin: mMeta.origin, summary: mMeta.summary, endpoints: mMeta.endpoints?.length ?? 0,
+        auth: mMeta.auth, deriver: mMeta.deriver, sizeBytes: mMeta.sizeBytes,
+        derivedAt: mMeta.derivedAt, lastVerifiedAt: mMeta.lastVerifiedAt, recentFailures: mMeta.recentFailures,
+      })) };
+    } catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+  },
+  'site-client/delete': async (/** @type {{ origin?: string }} */ { origin } = {}) => {
+    if (typeof origin !== 'string' || !origin) return { ok: false, error: 'origin-required' };
+    try { await siteClientStore.remove(origin); return { ok: true }; }
+    catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+  },
+};
+
+// ── DESIGN-19 — the capture MANAGER (Tap A CDP / Tap B scripting) ────────────
+// One capability behind the two taps: CDP Network where the debugger ships
+// (advancedAutomationOn — the SAME gate every other CDP path uses), else the
+// chrome.scripting MAIN-world fetch/XHR wrap (all channels, no new permission).
+// Returns a redacted, templatized endpoint inventory via the pure digester.
+const siteCaptureManager = {
+  /** @param {{ tabId: number, origins: string[] }} o */
+  start: async ({ tabId }) => {
+    if (advancedAutomationOn() && debuggerPool.startNetworkCapture) {
+      await debuggerPool.startNetworkCapture(tabId);
+      return { tap: 'cdp' };
+    }
+    await browser.scripting.executeScript({
+      target: { tabId }, world: 'MAIN', func: installFetchTapInjected,
+    });
+    return { tap: 'tap' };
+  },
+  /** @param {{ tabId: number, origins: string[] }} o */
+  stop: async ({ tabId, origins }) => {
+    /** @type {any[]} */
+    let events = [];
+    let deriver = 'capture-tap';
+    if (advancedAutomationOn() && debuggerPool.stopNetworkCapture && debuggerPool.isAttached?.(tabId)) {
+      events = await debuggerPool.stopNetworkCapture(tabId);
+      deriver = 'capture-cdp';
+    } else {
+      const [res] = await browser.scripting.executeScript({
+        target: { tabId }, world: 'MAIN', func: drainFetchTapInjected,
+      });
+      events = /** @type {any} */ (res?.result)?.events ?? [];
+    }
+    return digestCapture(events, { origins, deriver: /** @type {any} */ (deriver) });
+  },
+};
+
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
 // origin) — origin-keyed (vs the tab store's tabId key) because an API origin never
@@ -3622,6 +3801,28 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
   }
 };
 
+// DESIGN-19: web/API actor sessions that have already had their site-client
+// dossier injected this SW lifetime (once-per-session guard for mint injection).
+// In-memory only — a fresh SW re-injects, which is harmless (it re-seeds a fenced
+// note the actor already had).
+const siteClientInjected = new Set();
+
+// Resolve the ORIGIN a web/API actor is bound to, for the site-client lookup: an
+// API actor owns its FIXED origin (the session record's instanceId/origin), a tab
+// actor owns its tab's LIVE origin. Returns a normalized origin or null.
+const resolveActorOrigin = async (/** @type {string} */ actorSessionId, /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
+  const rec = await sessions.get(actorSessionId).catch(() => null);
+  if (rec?.backing === 'api') {
+    // The API actor's owned origin is its instanceId (mintApiActor sets it).
+    return normalizeApiOrigin(rec.instanceId ?? instanceId);
+  }
+  // A tab actor: the live origin of its owned tab.
+  const tabId = typeof actorTabId === 'number' ? actorTabId : webActorTabBindings.tabFor(actorSessionId);
+  if (typeof tabId !== 'number') return null;
+  const t = await browser.tabs.get(tabId).catch(() => null);
+  return t?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (t.url))) : null;
+};
+
 const actorMessaging = makeActorMessaging({
   resolveActor: async (/** @type {string} */ instanceId, /** @type {{ senderSessionId?: string | null }} */ opts = {}) => {
     // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
@@ -3664,6 +3865,25 @@ const actorMessaging = makeActorMessaging({
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
   runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name, oneShot }) => {
+    // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
+    // site client, prepend its dossier — the tool-authored staleness header
+    // OUTSIDE the fence, the dossier body wrapUntrusted-fenced (every byte is
+    // derived, untrusted-provenance). ONCE per actor session (a guard Set), so it
+    // seeds the actor's knowledge without re-bloating every turn. The module BODY
+    // is never injected — the actor loads it on demand via site_client_read/run.
+    let deliveredMessage = message;
+    if (kind === 'web' && !siteClientInjected.has(actorSessionId)) {
+      try {
+        const originForClient = await resolveActorOrigin(actorSessionId, instanceId, actorTabId);
+        if (originForClient) {
+          const meta = await siteClientStore.getMeta(originForClient).catch(() => null);
+          if (meta) {
+            siteClientInjected.add(actorSessionId);
+            deliveredMessage = `${buildMintInjection(meta)}\n\n---\n\n${message}`;
+          }
+        }
+      } catch (e) { console.debug('[site-client] mint injection skipped', e); }
+    }
     // DESIGN-18 tab-card anchoring: pin this actor's OWNED tab to the message_actor turn
     // driving it NOW (parentToolUseId), so its inline notice flows to this message's turn
     // (and resurfaces here when re-messaged) rather than to whatever user message is latest
@@ -3700,13 +3920,13 @@ const actorMessaging = makeActorMessaging({
     // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
     // fall back to the in-SW turn below (offscreen unavailable / never started).
     if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
-      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
+      const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
       if (off) return off;
     }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
-    await runAgentTurn({ sessionId: actorSessionId, userText: message, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
+    await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
     return fresh
@@ -4052,6 +4272,15 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // A sealed-worker page.* call → the SAME gated dispatch the tool-call actor
   // uses, pinned to the actor's owned tab (owner + tab resolved trusted-side).
   ...(/** @type {any} */ (pageCallRoute)),
+
+  // --- DESIGN-19: the site-client run's ONLY egress (origin-pinned, confirmed) ---
+  // A sealed-worker site.fetch call → the actor's session-scoped webFetch, pinned
+  // to the client's origin (owner + origin resolved trusted-side; cross-origin
+  // refused; non-GET confirmed via the shared web:write key).
+  ...(/** @type {any} */ (siteFetchCallRoute)),
+
+  // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
+  ...(/** @type {any} */ (siteClientRoutes)),
 })));
 
 // The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel

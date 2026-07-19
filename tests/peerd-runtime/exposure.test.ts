@@ -281,8 +281,14 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // call_api stays OUT — the web actor's open-web read is fetch_url (sessionless),
     // not the credential-capable call_api.
     expect(isAllowedForActorType('call_api', 'web')).toBe(false);
-    // == DOM toolset + fetch_url + read_web_cache (drift: bump if the set grows).
-    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 2);
+    // == DOM toolset + fetch_url + read_web_cache + the 4 DESIGN-19 site-client
+    // tools (run/read/write/capture) (drift: bump if the set grows).
+    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 6);
+    // DESIGN-19: the site-client family is in the web actor's toolset.
+    for (const n of ['site_client_run', 'site_client_read', 'site_client_write', 'site_capture']) {
+      expect(isAllowedForActorType(n, 'web')).toBe(true);
+      expect(isAllowedForActorType(n, 'app')).toBe(false);
+    }
     // read_web_cache pages a spilled fetch_url body — same tier as the fetch.
     expect(isAllowedForActorType('read_web_cache', 'web')).toBe(true);
     expect(isAllowedForActorType('read_web_cache', 'app')).toBe(false);
@@ -297,7 +303,13 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_pdf']) {
       expect(isAllowedForActor(n, 'web', 'api')).toBe(false);
     }
-    expect(actorAllowedToolsFor('web', 'api').size).toBe(2);   // fetch_url + read_web_cache
+    // DESIGN-19: an API actor CAN run/read/write a site client for its fixed origin,
+    // but NOT site_capture (no tab to observe).
+    expect(isAllowedForActor('site_client_run', 'web', 'api')).toBe(true);
+    expect(isAllowedForActor('site_client_write', 'web', 'api')).toBe(true);
+    expect(isAllowedForActor('site_capture', 'web', 'api')).toBe(false);
+    // fetch_url + read_web_cache + site_client_run/read/write (capture excluded).
+    expect(actorAllowedToolsFor('web', 'api').size).toBe(5);
     // A tab backing (and an absent backing — the DESIGN-17 default) keeps the FULL set.
     expect(isAllowedForActor('click', 'web', 'tab')).toBe(true);
     expect(isAllowedForActor('click', 'web', undefined)).toBe(true);
@@ -403,9 +415,9 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(isAllowedForActor('page_code', 'web', 'tab', undefined)).toBe(false);
     expect(isAllowedForActor('navigate', 'web', 'tab', 'tools')).toBe(true);
     expect(isAllowedForActor('navigate', 'web', 'tab', undefined)).toBe(true);
-    // An API backing ignores the surface entirely — still fetch_url-only.
+    // An API backing ignores the surface entirely — still fetch/site-client only.
     expect(isAllowedForActor('page_code', 'web', 'api', 'code')).toBe(false);
-    expect(actorAllowedToolsFor('web', 'api', 'code').size).toBe(2);   // fetch_url + read_web_cache (surface ignored for api)
+    expect(actorAllowedToolsFor('web', 'api', 'code').size).toBe(5);   // fetch_url + read_web_cache + site_client run/read/write (surface ignored for api)
   });
 
   test('page_code is contained: hidden from main, in NO other actor kind\'s allow-set', () => {

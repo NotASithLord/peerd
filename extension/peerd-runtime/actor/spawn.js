@@ -127,6 +127,11 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   safeFetch:          [],
   webFetch:           ['vm_import', 'fetch_url'],
   webCache:           ['fetch_url', 'read_web_cache', 'read_page'],
+  // DESIGN-19 site clients — the two-tier store (run/read/write reach it) and the
+  // capture closure (site_capture only). Stripped from any child/actor whose
+  // toolset lacks them, like every other capability-by-need closure.
+  siteClients:        ['site_client_run', 'site_client_read', 'site_client_write'],
+  siteCapture:        ['site_capture'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect'],
   idb:                ['inspect'],
@@ -158,7 +163,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
   jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
   jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list'],
-  jsOffscreenClient:  ['script', 'a2a_run', 'page_code'],
+  jsOffscreenClient:  ['script', 'a2a_run', 'page_code', 'site_client_run'],
   appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
     'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],

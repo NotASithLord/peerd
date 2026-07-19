@@ -25,3 +25,5 @@ export { pullInHintInjected } from './pull-in-hint-injected.js';
 // No-CDP framework-state introspection (read_state's scripting fallback):
 // a MAIN-world injectable, the scripting twin of debugger-pool's CDP path.
 export { readFrameworkStateInjected } from './framework-state.js';
+// DESIGN-19 Tap B — the MAIN-world fetch/XHR tap for site-client capture.
+export { installFetchTapInjected, drainFetchTapInjected } from './fetch-tap-injected.js';

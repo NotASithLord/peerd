@@ -68,6 +68,8 @@ export const createDebuggerPool = () => {
   // which point the namespace necessarily exists (attach itself needs it).
   // Idempotent; the flag makes re-attach cheap.
   let globalListenersBound = false;
+  // DESIGN-19 Tap A: bound once, the first time a Network capture starts.
+  let netListenerBound = false;
   const ensureGlobalListeners = () => {
     if (globalListenersBound) return;
     globalListenersBound = true;
@@ -484,10 +486,74 @@ export const createDebuggerPool = () => {
     return { ok: true, ...(out?.result?.value ?? { framework: null }) };
   };
 
+  // ── DESIGN-19 Tap A: CDP Network capture ─────────────────────────────────
+  // Record the page's OWN requests while the web actor drives it, on preview/dev
+  // where CDP ships (the same channel gate as every other debugger-pool path). Far
+  // higher fidelity than the scripting fetch/XHR tap (Tap B): sees all requests
+  // incl. workers, with real timing. CREDENTIALS ARE SANITIZED AT THIS BOUNDARY —
+  // request headers are reduced to posture MARKERS (bearer/cookie presence), never
+  // values; response bodies are size-capped samples. Nothing here stores a secret.
+  /** @type {Map<number, Map<string, any>>} per-tab in-flight requests by requestId */
+  const netCaptures = new Map();
+  const RESP_BODY_SAMPLE = 4_000;
+
+  const onNetworkEvent = (/** @type {any} */ source, /** @type {string} */ method, /** @type {any} */ params) => {
+    const cap = netCaptures.get(source.tabId);
+    if (!cap) return;
+    if (method === 'Network.requestWillBeSent') {
+      const req = params.request ?? {};
+      const h = req.headers ?? {};
+      // Posture markers ONLY — never the credential value.
+      const hasAuth = Object.keys(h).some((k) => k.toLowerCase() === 'authorization');
+      const bearer = hasAuth && /bearer/i.test(String(h.Authorization ?? h.authorization ?? ''));
+      const hasCookie = Object.keys(h).some((k) => k.toLowerCase() === 'cookie');
+      cap.set(params.requestId, {
+        method: req.method ?? 'GET', url: req.url ?? '',
+        reqHeaders: { ...(bearer ? { authorization: 'Bearer' } : hasAuth ? { authorization: 'present' } : {}), ...(hasCookie ? { cookie: 'present' } : {}) },
+      });
+    } else if (method === 'Network.responseReceived') {
+      const e = cap.get(params.requestId);
+      if (e) { e.status = params.response?.status; e.contentType = params.response?.mimeType; }
+    } else if (method === 'Network.loadingFinished') {
+      const e = cap.get(params.requestId);
+      // Best-effort response body sample for JSON-ish responses (shape sketch fuel).
+      if (e && /json|javascript|text/i.test(e.contentType ?? '')) {
+        browser.debugger.sendCommand({ tabId: source.tabId }, 'Network.getResponseBody', { requestId: params.requestId })
+          .then((/** @type {any} */ r) => {
+            if (!netCaptures.get(source.tabId)) return;   // capture stopped meanwhile
+            const raw = typeof r?.body === 'string' ? (r.base64Encoded ? '' : r.body) : '';
+            if (raw) { try { e.resSample = JSON.parse(raw.slice(0, RESP_BODY_SAMPLE * 4)); } catch { e.resSample = raw.slice(0, RESP_BODY_SAMPLE); } }
+          })
+          .catch(() => {});
+      }
+    }
+  };
+
+  const startNetworkCapture = async (/** @type {number} */ tabId) => {
+    await attach(tabId);
+    ensureGlobalListeners();
+    if (!netListenerBound) {
+      netListenerBound = true;
+      browser.debugger.onEvent.addListener(onNetworkEvent);
+    }
+    netCaptures.set(tabId, new Map());
+    await browser.debugger.sendCommand({ tabId }, 'Network.enable', {}).catch(() => {});
+  };
+
+  const stopNetworkCapture = async (/** @type {number} */ tabId) => {
+    const cap = netCaptures.get(tabId);
+    netCaptures.delete(tabId);
+    await browser.debugger.sendCommand({ tabId }, 'Network.disable', {}).catch(() => {});
+    // Give any in-flight getResponseBody promises a microtask to settle isn't
+    // reliable; the samples we already have are enough — return the snapshot.
+    return cap ? [...cap.values()] : [];
+  };
+
   return {
     attach, detach, evaluate, dispatchKeys, getAxTree, captureScreenshot,
     clickBackendNode, setValueBackendNode,
     readFrameworkState,
+    startNetworkCapture, stopNetworkCapture,
     isAttached: (tabId) => attached.has(tabId),
   };
 };
