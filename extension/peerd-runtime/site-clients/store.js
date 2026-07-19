@@ -98,9 +98,13 @@ export const createSiteClientStore = (deps = {}) => {
     put: async ({ dossier, body }) => {
       const validated = validateDossier(dossier);
       const validBody = validateClientBody(body);
-      const prior = await tx(META_STORE, 'readonly', async (t) =>
-        /** @type {import('./core.js').SiteClientMeta | undefined} */ (await reqP(t.objectStore(META_STORE).get(validated.origin))) ?? null);
-      const { meta } = stampRecord({ dossier: validated, body: validBody, prior, now: now() });
+      // Read the prior meta AND body so stampRecord can tell a dossier-only patch
+      // (body unchanged → keep verification) from a fresh derivation (reset it).
+      const { prior, priorBody } = await tx([META_STORE, BODY_STORE], 'readonly', async (t) => ({
+        prior: /** @type {import('./core.js').SiteClientMeta | undefined} */ (await reqP(t.objectStore(META_STORE).get(validated.origin))) ?? null,
+        priorBody: /** @type {any} */ (await reqP(t.objectStore(BODY_STORE).get(validated.origin)))?.body ?? '',
+      }));
+      const { meta } = stampRecord({ dossier: validated, body: validBody, prior, priorBody, now: now() });
       await tx([META_STORE, BODY_STORE], 'readwrite', (t) => {
         t.objectStore(META_STORE).put(meta);
         t.objectStore(BODY_STORE).put({ origin: meta.origin, body: validBody });

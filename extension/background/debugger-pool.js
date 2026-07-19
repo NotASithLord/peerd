@@ -496,6 +496,8 @@ export const createDebuggerPool = () => {
   /** @type {Map<number, Map<string, any>>} per-tab in-flight requests by requestId */
   const netCaptures = new Map();
   const RESP_BODY_SAMPLE = 4_000;
+  // Window for in-flight getResponseBody reads to land after Network.disable.
+  const SETTLE_MS = 200;
 
   const onNetworkEvent = (/** @type {any} */ source, /** @type {string} */ method, /** @type {any} */ params) => {
     const cap = netCaptures.get(source.tabId);
@@ -542,11 +544,17 @@ export const createDebuggerPool = () => {
 
   const stopNetworkCapture = async (/** @type {number} */ tabId) => {
     const cap = netCaptures.get(tabId);
-    netCaptures.delete(tabId);
+    // why keep the map ALIVE during the settle: getResponseBody promises started on
+    // loadingFinished write their sample back only while `netCaptures.get(tabId)` is
+    // truthy (the onNetworkEvent guard). Deleting first would make every in-flight
+    // sample bail. So: stop new events (Network.disable), give pending body reads a
+    // brief window to land, snapshot, THEN delete. Endpoints survive regardless
+    // (recorded on requestWillBeSent); this only recovers the shape-sketch notes.
     await browser.debugger.sendCommand({ tabId }, 'Network.disable', {}).catch(() => {});
-    // Give any in-flight getResponseBody promises a microtask to settle isn't
-    // reliable; the samples we already have are enough — return the snapshot.
-    return cap ? [...cap.values()] : [];
+    await new Promise((resolve) => { setTimeout(resolve, SETTLE_MS); });
+    const events = cap ? [...cap.values()] : [];
+    netCaptures.delete(tabId);
+    return events;
   };
 
   return {

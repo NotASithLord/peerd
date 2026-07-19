@@ -99,10 +99,14 @@ export const siteClientWriteTool = {
       tool: 'site_client_write',
       sideEffect: 'write',
       kind: 'site_client_write',
+      // The proposal carries the full module `body` + `prevBody` + dossier so the
+      // confirm UI can render the executable code (not just this one-line summary) —
+      // the code is the dangerous half, so the summary NAMES it as runnable JS rather
+      // than reading like a benign prose edit.
       proposal,
-      summary: `${proposal.op} site client ${origin} — ${proposal.dossier.endpoints.length} endpoint(s), `
-        + `+${proposal.endpointDelta.added}/−${proposal.endpointDelta.removed} endpoints, `
-        + `body ${proposal.bodyBytesBefore}→${proposal.bodyBytesAfter}B`,
+      summary: `${proposal.op} site client ${origin} — persists ${proposal.bodyBytesAfter}B of `
+        + `RUNNABLE JS (was ${proposal.bodyBytesBefore}B) + ${proposal.dossier.endpoints.length} endpoint(s) `
+        + `(+${proposal.endpointDelta.added}/−${proposal.endpointDelta.removed}). Review the module before allowing.`,
       origins: [],
       sessionId: ctx.session?.sessionId ?? null,
     });

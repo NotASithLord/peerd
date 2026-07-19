@@ -67,6 +67,11 @@ export function installFetchTapInjected() {
         var url = ''; var method = 'GET'; var headers;
         try {
           url = (typeof input === 'string') ? input : (input && input.url) || '';
+          // ABSOLUTIZE against the page URL — the app calls fetch('/api/...') far
+          // more often than an absolute URL, and the digester's inScope parses the
+          // URL with no base (throws → drops the event). Resolving here is what makes
+          // relative-path traffic (the common case) survive the scope filter.
+          try { url = new URL(url, location.href).href; } catch (e0) { /* keep raw */ }
           method = (init && init.method) || (input && input.method) || 'GET';
           headers = (init && init.headers) || (input && input.headers);
         } catch (e) { /* record what we can */ }
@@ -91,7 +96,11 @@ export function installFetchTapInjected() {
     var origSend = XHR && XHR.prototype && XHR.prototype.send;
     if (origOpen && origSend) {
       XHR.prototype.open = function (m, u) {
-        try { this.__peerd = { method: String(m || 'GET').toUpperCase(), url: String(u || '') }; } catch (e) { /* skip */ }
+        try {
+          var abs = String(u || '');
+          try { abs = new URL(abs, location.href).href; } catch (e0) { /* keep raw */ }
+          this.__peerd = { method: String(m || 'GET').toUpperCase(), url: abs };
+        } catch (e) { /* skip */ }
         return origOpen.apply(this, arguments);
       };
       XHR.prototype.send = function () {

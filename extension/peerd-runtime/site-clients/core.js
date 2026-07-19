@@ -139,7 +139,17 @@ export const validateClientBody = (body) => {
   if (body.length > MAX_CLIENT_BODY_CHARS) {
     throw new RangeError(`site-client body too large: ${body.length} > ${MAX_CLIENT_BODY_CHARS} chars`);
   }
-  return body.trim() === '' ? '' : body;
+  const trimmed = body.trim() === '' ? '' : body;
+  // FAIL LOUD at the write boundary on module-only syntax. site_client_run embeds
+  // the body inside an async IIFE (`const client = await (async () => { <body> })()`),
+  // where a top-level `export`/`import` is a hard SyntaxError — so an un-runnable
+  // client would otherwise persist through a confirmed write and fail on EVERY run.
+  // The body must instead RETURN its ops object. Heuristic (line-leading keyword),
+  // which is what breaks the wrapper anyway.
+  if (trimmed && /^[ \t]*(export|import)\b/m.test(trimmed)) {
+    throw new SyntaxError('site-client body must not use top-level export/import — the module runs inside an async function and must RETURN its ops object instead.');
+  }
+  return trimmed;
 };
 
 /**
@@ -322,14 +332,17 @@ export const resolveSiteUrl = (pathOrUrl, pinnedOrigin) => {
   if (!pin) return { error: `site-client: bad pinned origin: ${pinnedOrigin}` };
   const raw = typeof pathOrUrl === 'string' ? pathOrUrl.trim() : '';
   if (!raw) return { error: 'site-client: fetch needs a path or URL' };
-  // A relative path (or query/fragment-only) joins to the pin.
-  if (/^\/|^\?|^#/.test(raw) || !/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
-    try { return { url: new URL(raw, `${pin}/`).toString() }; }
-    catch { return { error: `site-client: bad path: ${raw}` }; }
-  }
-  // An absolute URL — allowed only same-origin to the pin.
+  // Parse relative-to-pin OR absolute in ONE step, then enforce the pin on the
+  // RESULT. why the single post-check (not a branch): WHATWG URL resolution turns
+  // several "relative-looking" inputs into a DIFFERENT origin — `//evil.com`,
+  // `\\evil.com`, `/\evil.com` (protocol-relative + backslash forms all resolve
+  // cross-origin against a base). Branching on shape and trusting the relative
+  // branch let those escape the pin (a hostile client body could then combine a
+  // credentialed same-origin read with cross-origin GET exfil). Resolving against
+  // the base and asserting `u.origin === pin` on the OUTPUT closes the whole class
+  // — a bare path stays same-origin, anything that resolves elsewhere is refused.
   let u;
-  try { u = new URL(raw); } catch { return { error: `site-client: bad url: ${raw}` }; }
+  try { u = new URL(raw, `${pin}/`); } catch { return { error: `site-client: bad path or url: ${raw}` }; }
   if (u.origin !== pin) {
     return { error: `site-client: cross-origin fetch refused — this run is pinned to ${pin}, not ${u.origin}. Derive a separate client for that origin.` };
   }
@@ -346,10 +359,16 @@ export const resolveSiteUrl = (pathOrUrl, pinnedOrigin) => {
  * @param {ReturnType<typeof validateDossier>} input.dossier
  * @param {string} input.body
  * @param {SiteClientMeta | null} input.prior
+ * @param {string} [input.priorBody]  the prior module body, to detect a dossier-only
+ *   patch (body unchanged) so it doesn't needlessly reset verification.
  * @param {number} [input.now]
  * @returns {{ meta: SiteClientMeta, body: string }}
  */
-export const stampRecord = ({ dossier, body, prior, now = Date.now() }) => {
+export const stampRecord = ({ dossier, body, prior, priorBody, now = Date.now() }) => {
+  // A dossier-only patch (the executable module is byte-identical) must NOT reset
+  // verification — only a changed MODULE means the client must re-earn trust. A
+  // fresh derivation (new/changed body) resets lastVerifiedAt + recentFailures.
+  const bodyUnchanged = prior != null && typeof priorBody === 'string' && priorBody === body;
   /** @type {SiteClientMeta} */
   const meta = {
     origin: dossier.origin,
@@ -358,11 +377,10 @@ export const stampRecord = ({ dossier, body, prior, now = Date.now() }) => {
     auth: dossier.auth,
     deriver: dossier.deriver,
     sizeBytes: body.length,
-    derivedAt: now,
-    // A fresh derivation resets verification + failure count — the model must
-    // re-earn trust in the new client by a successful run.
-    lastVerifiedAt: 0,
-    recentFailures: 0,
+    // derivedAt reflects when the MODULE was last derived — keep it on a prose-only edit.
+    derivedAt: bodyUnchanged ? (prior?.derivedAt ?? now) : now,
+    lastVerifiedAt: bodyUnchanged ? (prior?.lastVerifiedAt ?? 0) : 0,
+    recentFailures: bodyUnchanged ? (prior?.recentFailures ?? 0) : 0,
     createdAt: prior?.createdAt ?? now,
     updatedAt: now,
   };

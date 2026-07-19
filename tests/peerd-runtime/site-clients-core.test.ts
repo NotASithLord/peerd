@@ -76,7 +76,7 @@ describe('validateDossier — normalize + hard caps', () => {
 
 describe('validateClientBody — cap + delete-signal', () => {
   test('passes a normal body through', () => {
-    expect(validateClientBody('export const ops = {}')).toBe('export const ops = {}');
+    expect(validateClientBody('return { ops: {} }')).toBe('return { ops: {} }');
   });
   test('empty/whitespace → "" (delete signal)', () => {
     expect(validateClientBody('   \n ')).toBe('');
@@ -87,19 +87,25 @@ describe('validateClientBody — cap + delete-signal', () => {
   test('throws on non-string', () => {
     expect(() => validateClientBody(123 as unknown as string)).toThrow(TypeError);
   });
+  test('rejects top-level export/import (would SyntaxError inside the run IIFE)', () => {
+    expect(() => validateClientBody('export const ops = {}')).toThrow(SyntaxError);
+    expect(() => validateClientBody('import x from "y";\nreturn {}')).toThrow(SyntaxError);
+    // a body that RETURNS its ops is fine
+    expect(validateClientBody('return { list: () => site.fetch("/x") }')).toContain('return');
+  });
 });
 
 describe('buildClientWriteProposal — the confirm-gated diff (trifecta seam)', () => {
   const dossier = { origin: 'api.stripe.com', summary: 'payments', endpoints: [{ method: 'GET', path: '/v1/charges' }] };
 
   test('create: agent write REQUIRES confirmation', () => {
-    const p = buildClientWriteProposal({ dossier, body: 'export const ops={}', prior: null });
+    const p = buildClientWriteProposal({ dossier, body: 'return { ops: {} }', prior: null });
     expect(p.op).toBe('create');
     expect(p.key).toBe('https://api.stripe.com');
     expect(p.requiresConfirmation).toBe(true);
   });
   test('user-originated write skips the prompt', () => {
-    const p = buildClientWriteProposal({ dossier, body: 'export const ops={}', prior: null, origin: 'user' });
+    const p = buildClientWriteProposal({ dossier, body: 'return { ops: {} }', prior: null, origin: 'user' });
     expect(p.requiresConfirmation).toBe(false);
   });
   test('empty body against a prior = delete', () => {
@@ -168,6 +174,16 @@ describe('resolveSiteUrl — the one-origin-per-run pin', () => {
     const r = resolveSiteUrl('https://evil.com/steal', pin);
     expect('error' in r).toBe(true);
     if ('error' in r) expect(r.error).toContain('cross-origin');
+  });
+  test('SECURITY: protocol-relative + backslash forms that resolve cross-origin are refused', () => {
+    // Regression for the origin-pin escape: these all take the "relative" shape but
+    // WHATWG-resolve to a DIFFERENT origin against the base. The post-resolution
+    // same-origin assertion must catch every one.
+    for (const evil of ['//evil.com/steal', '\\\\evil.com/x', '/\\evil.com', '/\\/evil.com', '//evil.com:1234/y']) {
+      const r = resolveSiteUrl(evil, pin);
+      expect('error' in r).toBe(true);
+      if ('url' in r) expect(new URL(r.url).origin).toBe(pin);   // belt-and-suspenders
+    }
   });
   test('empty / bad input errors', () => {
     expect('error' in resolveSiteUrl('', pin)).toBe(true);

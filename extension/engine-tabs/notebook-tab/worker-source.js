@@ -341,8 +341,11 @@ globalThis.peerd.page = __page;
 // site-fetch/call route, which resolves the path against the PINNED origin, runs it
 // through the actor's session-scoped + denylisted + audited webFetch, and confirms a
 // non-GET (web:write). The worker cannot choose the origin, add credentials, or reach
-// any other host — cross-origin is refused at the route. Returns { ok, status, headers,
-// body (text), json }.
+// any other host — cross-origin is refused at the route. RESOLVES to
+// { status, finalUrl, contentType, body (text), json } for ANY HTTP response —
+// NOTE: no Fetch-API 'ok' and json is already the parsed value or null (not a
+// method); it REJECTS only when the call is refused/blocked or the network fails,
+// so check status yourself and wrap in try/catch.
 const siteRelay = makeBridge('site-fetch', { timeoutMs: 60000, timeoutMessage: (p) => 'site.fetch ' + (p.pathOrUrl || '') + ' timed out' });
 const __site = {
   origin: ${JSON.stringify(siteFetch)},

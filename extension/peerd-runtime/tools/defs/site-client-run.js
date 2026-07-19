@@ -33,7 +33,11 @@ export const siteClientRunTool = {
     'RETURNS — call e.g. `await client.listCharges()`), and',
     'site.fetch(path, { method, headers, body }) makes ONE request PINNED to the',
     'origin (it carries your session same-origin, exactly like fetch_url — never pass',
-    'credentials). Cross-origin fetches are refused. TREAT THE CLIENT AS A CACHE: it',
+    'credentials). site.fetch RESOLVES to { status, finalUrl, contentType, body, json }',
+    'for ANY HTTP response — check `status` yourself; it is NOT a Fetch Response (no',
+    '.ok, and json is already the parsed value or null, not a method). It only THROWS',
+    'when the call is REFUSED (cross-origin, denylisted, redirect, declined write) or',
+    'the network fails, so wrap in try/catch. TREAT THE CLIENT AS A CACHE: it',
     'may be stale or wrong. If a call fails or returns something off, DRIVE THE PAGE',
     'instead (ground truth) and propose a fix with site_client_write. Returns the',
     'run value + console, fenced (the bytes are the site\'s).',
@@ -86,9 +90,11 @@ export const siteClientRunTool = {
       return { ok: false, error: `site_client_run_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     }
     // A run that threw INSIDE the sealed worker (result.error) is a client failure
-    // → accrue it against staleness; a clean run bumps verification.
-    const ranOk = !result?.error;
-    await store.recordRun(origin, { ok: ranOk }).catch(() => {});
+    // → accrue it against staleness; a clean run bumps verification. EXCEPTION: a
+    // user-DECLINED non-GET write is not evidence the client is stale, so it does
+    // not touch the staleness counters (the run still surfaces the decline).
+    const declined = typeof result?.error === 'string' && /declined/i.test(result.error);
+    if (!declined) await store.recordRun(origin, { ok: !result?.error }).catch(() => {});
     return { ok: true, content: formatRunResult(origin, args.code, result) };
   },
 };

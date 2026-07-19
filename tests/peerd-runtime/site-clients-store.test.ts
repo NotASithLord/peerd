@@ -33,17 +33,17 @@ const now = () => clock;
 describe('createSiteClientStore — put / get / listMeta', () => {
   test('put stamps a full meta and stores the body separately', async () => {
     const store = makeStore(now);
-    const meta = await store.put({ dossier: dossier(), body: 'export const ops = {}' });
+    const meta = await store.put({ dossier: dossier(), body: 'return { ops: 1 }' });
     expect(meta.origin).toBe('https://api.stripe.com');
     expect(meta.auth).toBe('bearer');
     expect(meta.deriver).toBe('capture-cdp');
-    expect(meta.sizeBytes).toBe('export const ops = {}'.length);
+    expect(meta.sizeBytes).toBe('return { ops: 1 }'.length);
     expect(meta.derivedAt).toBe(1_000);
     expect(meta.lastVerifiedAt).toBe(0);
     expect(meta.recentFailures).toBe(0);
 
     const full = await store.get('https://api.stripe.com');
-    expect(full?.body).toBe('export const ops = {}');
+    expect(full?.body).toBe('return { ops: 1 }');
     expect(full?.meta.summary).toBe('payments API');
   });
 
@@ -66,6 +66,18 @@ describe('createSiteClientStore — put / get / listMeta', () => {
     expect(meta2.createdAt).toBe(1_000);      // preserved
     expect(meta2.derivedAt).toBe(5_000);      // bumped
     expect(meta2.lastVerifiedAt).toBe(0);     // reset — must re-earn trust
+  });
+
+  test('a dossier-only patch (body unchanged) PRESERVES verification', async () => {
+    const store = makeStore(now);
+    await store.put({ dossier: dossier(), body: 'v1' });
+    await store.recordRun('https://api.stripe.com', { ok: true });
+    clock = 5_000;
+    // Same body, new summary → verification (and derivedAt) must survive.
+    const meta = await store.put({ dossier: dossier({ summary: 'edited prose' }), body: 'v1' });
+    expect(meta.summary).toBe('edited prose');
+    expect(meta.lastVerifiedAt).toBe(1_000);   // preserved, not reset
+    expect(meta.derivedAt).toBe(1_000);        // module unchanged → derivedAt kept
   });
 
   test('listMeta returns all metas, no bodies deserialized', async () => {

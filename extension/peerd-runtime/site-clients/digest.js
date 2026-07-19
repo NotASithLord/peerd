@@ -24,7 +24,7 @@ const CREDENTIAL_HEADERS = new Set([
 // Query/body param NAMES whose VALUES are redacted to a sentinel (a token/secret
 // riding a param, not a header). The name is kept (it's part of the API shape);
 // only the value is dropped.
-const SECRET_PARAM_RE = /(token|secret|password|passwd|api[-_]?key|auth|session|csrf|xsrf|bearer|access[-_]?token|refresh[-_]?token|sig|signature)/i;
+const SECRET_PARAM_RE = /(token|secret|password|passwd|api[-_]?key|auth|session|csrf|xsrf|bearer|access[-_]?token|refresh[-_]?token|sig|signature|\bs?sid\b)/i;
 
 // A value that LOOKS like a credential regardless of its param name — a long
 // high-entropy-ish opaque string. Redacted defensively.
