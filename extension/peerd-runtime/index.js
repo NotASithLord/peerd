@@ -142,6 +142,14 @@ export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
 } from './actor/web-actor.js';
+// DESIGN-19: site clients — per-origin derived API clients. The pure core
+// (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
+// the two-tier store, and the capture digester. See site-clients/index.js.
+export {
+  normalizeSiteOrigin, validateDossier, buildClientWriteProposal,
+  stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
+  createSiteClientStore, digestCapture, redactHeaders,
+} from './site-clients/index.js';
 // PR #119: the host-side handler for the web actor's code-REPL arm — turns a
 // page.<method> RPC (made inside the sealed worker) into the SAME gated tool
 // dispatch the tool-call web actor uses, pinned to the actor's owned tab.
@@ -324,6 +332,9 @@ export {
   describeSource,
   domWalkInjected,
   pullInHintInjected,
+  // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap for site-client capture.
+  installFetchTapInjected,
+  drainFetchTapInjected,
 } from './dom/index.js';
 
 // --- errors -------------------------------------------------------------

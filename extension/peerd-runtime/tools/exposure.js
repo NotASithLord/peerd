@@ -52,6 +52,11 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // read_web_cache pages a SPILLED fetch_url body — the same fetched page
   // content, so the same web-actor-only tier.
   'read_web_cache',
+  // DESIGN-19 site clients — per-origin derived API clients. All web-actor-only:
+  // run executes a client (untrusted-provenance code) behind an origin-pinned
+  // fetch; read/capture ingest page/response bytes; write persists them. Same
+  // tier as fetch_url — the orchestrator delegates web work via message_actor.
+  'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
 ]));
 
 /** Is this tool hidden from the main agent (actor-only)? Pure. @param {string} name */
@@ -179,7 +184,13 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   // clean DOM-only list. The web actor is the only ctx allowed fetch_url, and
   // the capability strip (spawn.js) keeps it keyless: webFetch survives,
   // getSecret / safeFetch do not.
-  web: Object.freeze(new Set([...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_web_cache'])),
+  // Plus the DESIGN-19 site-client family: run/read/write persist + replay derived
+  // per-origin API clients; site_capture records traffic to derive them (tab only —
+  // an API actor has no tab, so the WEB_API_TOOLS set below drops site_capture).
+  web: Object.freeze(new Set([
+    ...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_web_cache',
+    'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
+  ])),
   // The dweb actor — the mesh's operator (global singleton, handle "dweb").
   // Exactly the dweb family, nothing else: no egress tools, no DOM, no engine
   // mutation — the envoy posture. Its worst case must be a wrong reply, so the
@@ -206,7 +217,12 @@ export const isAllowedForActorType = (name, kind) => actorAllowedTools(kind).has
 // from its allow-set. It keeps only the keyless, tab-free fetch_url. Used by BOTH the
 // gate (refuse a DOM tool for an API backing) and the capability strip (drop the DOM
 // capabilities), so an API actor is genuinely fetch-only, not just gated.
-const WEB_API_TOOLS = Object.freeze(new Set(['fetch_url', 'read_web_cache']));
+// Plus the site-client run/read/write (an API actor CAN persist + replay a client
+// for its fixed origin) — but NOT site_capture, which needs a tab it never has.
+const WEB_API_TOOLS = Object.freeze(new Set([
+  'fetch_url', 'read_web_cache',
+  'site_client_run', 'site_client_read', 'site_client_write',
+]));
 
 /**
  * The Set an actor may call given its kind AND (for a web actor) its backing — the

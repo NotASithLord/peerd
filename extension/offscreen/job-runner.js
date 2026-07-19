@@ -74,7 +74,7 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
  *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
  *   script surface); caps.page needs ownerSessionId — the actor session this
  *   job runs FOR, set by the SW (trusted), the worker can never supply it.
@@ -96,7 +96,7 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
  *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
  *   delegation client (the orchestrator's script surface); caps: capability
  *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
@@ -106,11 +106,17 @@ export const runJob = async (job, deps) => {
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  *   sendToSW relays a worker bridge message to the SW route of that name.
  */
-const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, caps, ownerSessionId, ownerToolUseId, runId }, { sendToSW }) => {
+const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId }, { sendToSW }) => {
   // The job's capability profile — enforced HERE (the host refuses the bridge
   // message) as well as in the generated worker surface (worker-source.js), so
   // a realm-seal escape alone cannot re-open a disabled lane.
-  const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
+  // DESIGN-19: a site-client run forces EVERY standard cap off — its ONLY outward
+  // edge is the pinned site.fetch (the site-fetch-request relay below). Even if the
+  // caller passed a wider profile, siteFetch closes it, the a2a-run posture applied
+  // to the site lane.
+  const profile = siteFetch
+    ? { page: false, egress: false, subagent: false, opfs: false }
+    : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const jobId = `job-${Date.now().toString(36)}-${++jobSeq}`;
   // Per-job EPHEMERAL OPFS subtree — peerd.self.* + relative imports work within
   // the run, then it's nuked. Durable state belongs in a Notebook, not here.
@@ -126,7 +132,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, c
 
   let built;
   try {
-    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors, actorsGuardMs: ACTORS_BRIDGE_GUARD_MS, caps: profile });
+    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors, actorsGuardMs: ACTORS_BRIDGE_GUARD_MS, caps: profile, siteFetch });
   } catch (e) {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -292,6 +298,34 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, c
             });
           } catch (e) {
             worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+          }
+          return;
+        }
+        if (m.type === 'site-fetch-request') {
+          // DESIGN-19: the site-client run's ONLY outward edge. Refuse unless this
+          // is a site-client run (siteFetch set) with a trusted owner — the OWNER +
+          // the PINNED ORIGIN ride from the runJob params (SW-set, trusted), NEVER
+          // from the worker message. The SW route resolves the worker's pathOrUrl
+          // against the pinned origin (cross-origin refused) and runs it through the
+          // actor's session-scoped, denylisted, audited webFetch — this relay adds
+          // no authority and cannot pick the host.
+          if (!siteFetch || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'site-fetch-response', rid: m.rid, ok: false, error: 'site fetch is disabled for this run' });
+            return;
+          }
+          usedEgress = true;   // the run reached the web (its pinned origin) → untrusted bytes
+          try {
+            const resp = await sendToSW('site-fetch/call', {
+              ownerSessionId, siteOrigin: siteFetch,
+              pathOrUrl: m.pathOrUrl, method: m.method, headers: m.headers, body: m.body,
+            });
+            // The bridge resolves on m.result and rejects on m.error — so the
+            // response object rides under `result`, and an SW-side refusal (ok:false)
+            // surfaces as a thrown Error inside the run.
+            if (resp?.ok) worker.postMessage({ type: 'site-fetch-response', rid: m.rid, result: resp.value });
+            else worker.postMessage({ type: 'site-fetch-response', rid: m.rid, error: resp?.error ?? 'site fetch failed' });
+          } catch (e) {
+            worker.postMessage({ type: 'site-fetch-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
           }
           return;
         }

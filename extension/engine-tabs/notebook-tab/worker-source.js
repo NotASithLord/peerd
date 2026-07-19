@@ -56,6 +56,7 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
  * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
+ * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
  * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }} [opts.caps]
  *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
@@ -64,7 +65,7 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '' }) => {
   const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
@@ -333,6 +334,25 @@ const __page = {
 };
 globalThis.page = __page;
 globalThis.peerd.page = __page;
+` : ''}${siteFetch ? `
+// --- site.* (DESIGN-19 site client) proxy — ONE origin-pinned fetch ---
+// A site-client run's ONLY outward edge: site.fetch(path, { method, headers, body })
+// leaves the sealed realm as a site-fetch-request the host relays to the SW
+// site-fetch/call route, which resolves the path against the PINNED origin, runs it
+// through the actor's session-scoped + denylisted + audited webFetch, and confirms a
+// non-GET (web:write). The worker cannot choose the origin, add credentials, or reach
+// any other host — cross-origin is refused at the route. RESOLVES to
+// { status, finalUrl, contentType, body (text), json } for ANY HTTP response —
+// NOTE: no Fetch-API 'ok' and json is already the parsed value or null (not a
+// method); it REJECTS only when the call is refused/blocked or the network fails,
+// so check status yourself and wrap in try/catch.
+const siteRelay = makeBridge('site-fetch', { timeoutMs: 60000, timeoutMessage: (p) => 'site.fetch ' + (p.pathOrUrl || '') + ' timed out' });
+const __site = {
+  origin: ${JSON.stringify(siteFetch)},
+  fetch: (pathOrUrl, init) => siteRelay({ pathOrUrl, method: (init && init.method) || 'GET', headers: (init && init.headers) || {}, body: init && init.body }),
+};
+globalThis.site = __site;
+globalThis.peerd.site = __site;
 ` : ''}${profile.egress ? '' : `
 // Capability profile: NO egress. peerd.egress.fetch throws in-realm; the host
 // relay refuses any 'fetch-request' this realm still emits (global fetch is the

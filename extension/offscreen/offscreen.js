@@ -339,6 +339,8 @@ const onJobMessage = (msg, sender, sendResponse) => {
     {
       code: msg.code, timeoutMs: msg.timeoutMs,
       a2a: msg.a2a === true, actors: msg.actors === true,
+      // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
+      siteFetch: typeof msg.siteFetch === 'string' ? msg.siteFetch : '',
       // caps + ownerSessionId ride from the SW's job/run message (trusted: the
       // sender gate above). The WORKER never supplies either — job-runner
       // attaches them from these params and ignores anything in the worker's
