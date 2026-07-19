@@ -20,7 +20,9 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
    *   sealed worker (default = the historical js_run surface); caps.page also
    *   needs ownerSessionId — the actor session the page bridge dispatches FOR,
    *   set only from a trusted ctx (PR #119). ownerSessionId / ownerToolUseId /
-   *   runId ride as trusted job params to the relay routes.
+   *   runId ride as trusted job params to the relay routes. runId forwards on
+   *   ANY lane (#153) — a runId-carrying job registers with the runner's
+   *   liveJobs map, which is what lets abortHeadless terminate it on Stop.
    * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }> }>}
    */
   execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps } = {}) => {
@@ -28,8 +30,9 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
     const reply = await sendMessage({
       type: 'job/run', code, timeoutMs,
       ...(a2a ? { a2a: true, ownerSessionId } : {}),
-      ...(actors ? { actors: true, ownerSessionId, ownerToolUseId, runId } : {}),
+      ...(actors ? { actors: true, ownerSessionId, ownerToolUseId } : {}),
       ...(caps ? { caps, ownerSessionId } : {}),
+      ...(runId ? { runId } : {}),
     });
     if (!reply?.ok) throw new Error(reply?.error ?? 'headless job failed');
     return reply.result;
