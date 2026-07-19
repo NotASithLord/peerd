@@ -814,6 +814,13 @@ button.icon {
   cursor: pointer;
 }
 button.icon:hover { background: var(--bg); }
+/* Active toggle (watch mode on): filled monochrome — invert fg/bg, no new accent
+   color (brand rule: grayscale surfaces, the five brand marks are the only color). */
+button.icon.is-active {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
 
 /* --- chat view layout --- */
 .app-shell { display: flex; flex-direction: column; min-height: 100%; }

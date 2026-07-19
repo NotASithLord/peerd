@@ -21,6 +21,7 @@ import { openHome } from '/shared/open-home.js';
 import { decidePullIn } from './panel-affordance.js';
 import { pullInHintInjected } from '/peerd-runtime/index.js';
 import { matchesDenylist } from '/peerd-egress/index.js';
+import { shouldFollowAgentTab } from './watch-mode.js';
 
 // The home agent-tab card's Open button draws a fresh brand color each time the
 // card is (re)generated — the sanctioned "peers/actions are the content" accent
@@ -33,8 +34,9 @@ const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF']
  * @param {{ broadcast: (m: any) => void, hasNamed: (name: string) => boolean }} deps.uiPorts
  * @param {{ patterns: () => any }} deps.denylistStore
  * @param {() => Promise<any>} deps.closeSidePanel
+ * @param {() => boolean} [deps.isWatchOn]  live read of the watchAgentTab setting (default off)
  */
-export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSidePanel }) => {
+export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSidePanel, isWatchOn = () => false }) => {
   const HOME_URL = browser.runtime.getURL('home/home.html');
 
   // ── 1. the agent-tab card ──────────────────────────────────────────────────
@@ -90,6 +92,27 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     // passive current-flag refresh on tab activation).
     agentTabInfo = { tabId, windowId, kind, name, label: text, color, opened, parentToolUseId };
     broadcastAgentTab(true);
+    // Watch mode: FOLLOW the agent onto this tab. No-op unless the user opted in
+    // (isWatchOn) and it isn't already the active tab — see focusAgentTab.
+    focusAgentTab();
+  };
+
+  // Bring the agent's tab to the foreground (+ its window), the OPT-IN inverse of
+  // DESIGN-12's no-focus-steal: only when the user turned watch mode on. Called on
+  // every agent tab touch (noteAgentTab) so watching FOLLOWS the agent across tabs,
+  // and by the SW the instant the setting flips on (onSettingsChanged). The agent
+  // addresses tabs by id, never by focus, so foregrounding a tab for the user never
+  // changes what the agent does — it just un-hides the work. Best-effort: a
+  // vanished tab/window is swallowed (the follow is cosmetic, never load-bearing).
+  const focusAgentTab = async () => {
+    if (!shouldFollowAgentTab({ watchOn: isWatchOn(), agentTabId, activeTabId })) return;
+    const winId = agentTabInfo?.windowId;
+    try {
+      await browser.tabs?.update?.(agentTabId, { active: true });
+      if (typeof winId === 'number') await browser.windows?.update?.(winId, { focused: true });
+    } catch (e) {
+      console.debug('[sw] watch-mode focus skipped', (/** @type {{ message?: string }} */ (e))?.message ?? e);
+    }
   };
   // Track the active tab so the card hides when you're on the agent tab, and shows
   // again when you move away.
@@ -253,5 +276,5 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
     pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: true });
   });
 
-  return { noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen };
+  return { noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab };
 };

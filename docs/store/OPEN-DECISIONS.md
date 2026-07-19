@@ -196,6 +196,23 @@ package."
 
 ---
 
+## 5. Anti-bot detection posture — OPEN (see `ANTI-BOT-POSTURE.md`)
+
+A later-arising judgment call, not one of the original four. A field
+report surfaced that the web actor tripped a site's velocity/CAPTCHA
+wall by acting faster than a human. We shipped a first mitigation
+(human-cadence action pacing) and researched the rest. The full option
+set — challenge hand-back, co-pilot/assist-only on hostile sites,
+CDP-footprint minimization, API-first routing, site-posture tiers, and
+the techniques we deliberately REJECT (fingerprint spoofing, proxies,
+CAPTCHA-solvers) — plus the load-bearing reframe (detection ≠ permission;
+some sites' ToS forbid extension automation outright, enforceably) lives
+in `ANTI-BOT-POSTURE.md` as a spec with per-option `DECISION:` lines to
+fill in. Decide alongside the store-submission posture (§1): it bears on
+the store-vs-preview automation-surface trade-off.
+
+---
+
 ## Already decided (for the record)
 
 - CSP `connect-src` keeps `https:`: the agent fetches user-chosen pages
