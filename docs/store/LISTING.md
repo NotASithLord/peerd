@@ -78,7 +78,7 @@ English
 | Screenshots (≥1, max 5) | 1280×800 or 640×400 | ☐ capture — see shot list below |
 | Small promo tile | 440×280 PNG | ✅ `docs/store/assets/promo-440x280.png` |
 | Marquee promo tile (optional) | 1400×560 PNG | ✅ `docs/store/assets/marquee-1400x560.png` |
-| Privacy policy URL | published page | ☐ deploy `the website/privacy.html` → https://peerd.ai/privacy |
+| Privacy policy URL | published page | ☐ publish `docs/store/PRIVACY.md` at https://peerd.ai/privacy (deploys from the `peerd-site` repo) |
 | Demo video for reviewer | unlisted YouTube link | ☐ record (agent task → VM boot → audit log) |
 
 ### Screenshot shot list (1280×800)
@@ -86,7 +86,8 @@ English
 1. Side panel open next to a real article, mid-task: user asked for a
    summary, assistant's answer visible. (Hero shot.)
 2. The assistant operating a page: tab group visible, automation in
-   progress, Chrome's debugger banner in frame.
+   progress. (Shoot from the store build — it operates pages via
+   chrome.scripting, so there is no debugger banner to stage.)
 3. VM tab with the terminal: `uname -a` output after "boot a linux vm".
 4. Audit log view: allowed + denied entries visible (show a denylist
    block of a bank if possible).
