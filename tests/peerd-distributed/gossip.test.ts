@@ -117,6 +117,54 @@ describe('topic gossip', () => {
     expect(audits).toContain('gossip_rate_limited');
     ga.close(); gb.close(); ma.close(); mb.close();
   });
+
+  test('an oversized publish dies at the first hop — delivered nowhere, relayed nowhere', async () => {
+    // The token bucket counts FRAMES, so it is blind to ONE huge envelope;
+    // only the byte cap sees it. Chain a — b — c (a and c are NOT linked):
+    // if b relayed it onward, c would see it — and that relay is the
+    // amplification this cap exists to stop.
+    const audits: string[] = [];
+    const [idA, idB, idC] = await Promise.all([generateIdentity(), generateIdentity(), generateIdentity()]);
+    const ma = createRoomMesh({ roomId: 'r', identity: idA });
+    const mb = createRoomMesh({ roomId: 'r', identity: idB });
+    const mc = createRoomMesh({ roomId: 'r', identity: idC });
+    const ga = createGossip({ mesh: ma });
+    const gb = createGossip({ mesh: mb, audit: (t: string) => audits.push(t) });
+    const gc = createGossip({ mesh: mc });
+
+    const [ab, ba] = memoryPair();
+    await Promise.all([
+      createSession({ channel: ab, identity: idA }),
+      createSession({ channel: ba, identity: idB }),
+    ]);
+    ma.addLink(ab, idB.did);
+    mb.addLink(ba, idA.did);
+    const [bc, cb] = memoryPair();
+    await Promise.all([
+      createSession({ channel: bc, identity: idB }),
+      createSession({ channel: cb, identity: idC }),
+    ]);
+    mb.addLink(bc, idC.did);
+    mc.addLink(cb, idB.did);
+
+    const atB: any[] = [];
+    const atC: any[] = [];
+    gb.subscribe('feed', (m: any) => atB.push(m));
+    gc.subscribe('feed', (m: any) => atC.push(m));
+
+    // A normal post traverses the whole chain — proves the topology relays.
+    await ga.publish('feed', { post: 'small' });
+    await tick(60);
+    expect(atC.map((m) => m.data.post)).toEqual(['small']);
+
+    await ga.publish('feed', { post: 'x'.repeat(40_000) });
+    await tick(60);
+    expect(atB).toHaveLength(1); // b never delivered it to its own subscribers
+    expect(atC).toHaveLength(1); // and never forwarded it to c
+    expect(audits).toContain('gossip_envelope_oversized');
+    ga.close(); gb.close(); gc.close();
+    ma.close(); mb.close(); mc.close();
+  });
 });
 
 describe('presence', () => {
@@ -351,5 +399,65 @@ describe('topic sync (late-join backfill)', () => {
     pa.sync.close();
     close([pa]);
     meshB.close(); meshR.close();
+  });
+
+  test('an oversized envelope in a backfill response is never retained (no re-serving)', async () => {
+    // The store IS the amplifier: whatever lands here is re-served to every
+    // peer that syncs, on every new link. A relay must not be able to plant
+    // an oversized frame in our history by skipping the live flood.
+    const audits: string[] = [];
+    const [raw] = await clique(1);
+    const store = createMemoryTopicStore();
+    const sync = createTopicSync({
+      mesh: raw.mesh, gossip: raw.gossip, store, audit: (t: string) => audits.push(t),
+    });
+    sync.retain('feed');
+
+    // B authors a validly-signed but oversized post — nothing forged here,
+    // it must be refused purely on size.
+    const idB = await generateIdentity();
+    const meshB = createRoomMesh({ roomId: 'room', identity: idB });
+    const bEnv = await meshB.sign(4, 0, { topic: 'feed', data: { post: 'x'.repeat(40_000) } });
+
+    const idR = await generateIdentity();
+    const meshR = createRoomMesh({ roomId: 'room', identity: idR });
+    const [ca, cr] = memoryPair();
+    await Promise.all([
+      createSession({ channel: ca, identity: raw.identity }),
+      createSession({ channel: cr, identity: idR }),
+    ]);
+    raw.mesh.addLink(ca, idR.did);
+    meshR.addLink(cr, raw.identity.did);
+    await tick();
+
+    const delivered: any[] = [];
+    raw.gossip.subscribe('feed', (m: any) => delivered.push(m));
+    const resp = await meshR.sign(4, 3, { topic: 'feed', envs: [bEnv] });
+    meshR.send(raw.identity.did, resp);
+    await tick(60);
+
+    expect(delivered).toHaveLength(0);
+    expect(sync.history('feed')).toHaveLength(0);
+    expect(audits).toContain('sync_env_oversized');
+    sync.close();
+    close([raw]);
+    meshB.close(); meshR.close();
+  });
+
+  test('our OWN oversized publish is not retained — we do not serve what the room refuses', async () => {
+    const audits: string[] = [];
+    const [raw] = await clique(1);
+    const sync = createTopicSync({
+      mesh: raw.mesh, gossip: raw.gossip, store: createMemoryTopicStore(),
+      audit: (t: string) => audits.push(t),
+    });
+    sync.retain('feed');
+
+    await sync.publish('feed', { post: 'ok' });
+    await sync.publish('feed', { post: 'x'.repeat(40_000) });
+    expect(sync.history('feed').map((e: any) => e.body.data.post)).toEqual(['ok']);
+    expect(audits).toContain('sync_env_oversized');
+    sync.close();
+    close([raw]);
   });
 });
