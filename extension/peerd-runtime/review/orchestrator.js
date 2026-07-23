@@ -143,6 +143,11 @@ export const makeRequestReview = (deps) => {
     const out = await spawnActor({
       task,
       tools: allowed,
+      // #160: SW-side marker. Grants the three instance READS (spawn re-adds them
+      // to the grantable surface) and stamps ctx.exposure='review' so the
+      // actor-tier gate admits exactly those three. Set HERE, in the SW-bound
+      // orchestrator — actor_create cannot reach this field.
+      review: true,
       maxSteps,
       parentSessionId,
       parentDepth,

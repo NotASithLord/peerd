@@ -65,6 +65,12 @@ const REVIEWER_TOOLS = Object.freeze(new Set([
   'actor_list', 'actor_tasks', 'app_search', 'capture', 'complete_goal',
   'inspect', 'load_skill', 'now', 'read_memory', 'schedule_list',
   'todo_add', 'todo_check', 'todo_init',
+  // #160 — the instance READS. Actor-only for every other ctx (tools/exposure.js
+  // REVIEW_INSTANCE_READS + the gate's positively-scoped exemption); granted here
+  // so a review of App/Notebook code can open the files AROUND the diff instead of
+  // guessing from it. Reads only — the writes stay actor-only, and the reviewer
+  // still holds no outward closure.
+  'js_read_file', 'app_read_file', 'app_list_files',
 ]));
 
 /** Exported for the invariant tests (and so the grant is greppable). */

@@ -33,7 +33,7 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
 // fenced reads, already gate-refused for a non-actor). Both are pure.
-import { mainAgentDescriptors, filterActorSurface } from '../tools/exposure.js';
+import { mainAgentDescriptors, filterActorSurface, REVIEW_INSTANCE_READS, EXPOSURE_REVIEW } from '../tools/exposure.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 /** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
@@ -340,6 +340,13 @@ export const makeSpawnActor = (deps) => {
    * @param {number} [req.maxOutputTokens]         per-call output cap (default 4096)
    * @param {number} [req.maxDepth]                depth ceiling (default 5)
    * @param {boolean} [req.allowRecursion]         keep actor_create in the subset
+   * @param {boolean} [req.review]                 issue 160 - SW-ONLY. Set solely by the
+   *   review orchestrator (review/orchestrator.js). Re-adds the three instance
+   *   READS (REVIEW_INSTANCE_READS) to the grantable surface and stamps
+   *   ctx.exposure='review', which the actor-tier gate admits for those three
+   *   names only. NOT reachable from the model: actor_create builds its spawn
+   *   request from an explicit field whitelist and never spreads args (pinned by
+   *   a test in review.test.ts). Never accept this from a worker or tool arg.
    * @param {string} req.parentSessionId           who is spawning this
    * @param {number} [req.parentDepth]             spawner's depth (child = +1)
    * @param {boolean} [req.parentInbound]          was the SPAWNING turn inbound
@@ -369,6 +376,9 @@ export const makeSpawnActor = (deps) => {
       maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
       maxDepth = DEFAULT_MAX_DEPTH,
       allowRecursion = false,
+      // #160: SW-ONLY flag (the review orchestrator). Grants the three instance
+      // reads + stamps the review exposure marker. Unreachable from model args.
+      review = false,
       parentSessionId,
       parentDepth = 0,
       parentInbound,
@@ -434,7 +444,21 @@ export const makeSpawnActor = (deps) => {
     // authority the spawning agent itself lacks. Filtering the grantable universe here is
     // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to
     // the web actor via message_actor like the main agent does.
-    const grantable = filterActorSurface(mainAgentDescriptors(getToolDescriptors()));
+    // #160: a REVIEW spawn re-adds the three instance READS that filterActorSurface
+    // just dropped — by name, from the descriptors we already have. This is the
+    // whole exemption: a positive re-add, never "skip the narrowing for review"
+    // (which would restore fetch_url / read_page / site_client_run too, i.e. build
+    // the exfiltration channel the reviewer must not have). `review` can only be
+    // set by an SW-side caller — the review orchestrator — because actor_create
+    // builds its spawn request from an explicit field whitelist and never spreads
+    // model args (pinned by a test).
+    const surface = filterActorSurface(mainAgentDescriptors(getToolDescriptors()));
+    const grantable = review
+      ? surface.concat(
+        getToolDescriptors().filter((t) => REVIEW_INSTANCE_READS.has(t.name)
+          && !surface.some((s) => s.name === t.name)),
+      )
+      : surface;
     const subset = narrowTools(grantable, { tools, allowRecursion, allow: parentAllow });
     const allowedNames = new Set(subset.map((t) => t.name));
     const subsetDescriptors = subset.map((t) => ({
@@ -552,7 +576,13 @@ export const makeSpawnActor = (deps) => {
       // (message_actor awaitReply) can race its wait against it and unwind when
       // the wall-clock timeout / cancel fires — restrictCtxCapabilities passes
       // through any key not in CAPABILITY_CONSUMERS, so this survives the strip.
-      const childCtx = restrictCtxCapabilities({ ...baseCtx, audit: taggedAudit, abortSignal: controller.signal }, allowedNames);
+      // The review marker is stamped HERE, SW-side, from the trusted spawn req —
+      // never carried in from a worker or a model arg. gates.js keys the #160
+      // exemption on it (positively, and only for the three read names).
+      const childCtx = restrictCtxCapabilities({
+        ...baseCtx, audit: taggedAudit, abortSignal: controller.signal,
+        ...(review ? { exposure: EXPOSURE_REVIEW } : {}),
+      }, allowedNames);
       return (call) => {
         // Defense in depth: even if the model hallucinates a tool name
         // outside its granted subset, the dispatch refuses it. The

@@ -60,7 +60,10 @@ const DESCRIPTORS = [
 describe('readOnlyToolNames', () => {
   test('grants only names on the positive allowlist', () => {
     const names = readOnlyToolNames(DESCRIPTORS);
-    expect(names.sort()).toEqual(['actor_list', 'inspect', 'now', 'read_memory'].sort());
+    expect(names.sort()).toEqual([
+      'actor_list', 'inspect', 'now', 'read_memory',
+      'js_read_file', 'app_read_file', 'app_list_files',   // #160
+    ].sort());
   });
 
   test('EXPOSES NO write or mutate_external tools to the reviewer', () => {
@@ -295,7 +298,10 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
     const granted = new Set(calls[0].tools);
     // The reviewer's grant is the positive allowlist ∩ read-tagged — NOT
     // "everything read-tagged" (which would have included fetch_url).
-    expect([...granted].sort()).toEqual(['actor_list', 'inspect', 'now', 'read_memory']);
+    expect([...granted].sort()).toEqual([
+      'actor_list', 'app_list_files', 'app_read_file', 'inspect',
+      'js_read_file', 'now', 'read_memory',
+    ]);
     // ASSERT: no write/mutate/orchestration tool exposed
     for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create', 'request_review']) {
       expect(granted.has(w)).toBe(false);
@@ -419,10 +425,27 @@ describe('reviewer grant — through the real narrowing pipeline', () => {
     for (const t of ['click', 'app_write_file', 'submit_form', 'message_actor', 'actor_create', 'request_review']) {
       expect(granted.has(t)).toBe(false);
     }
-    // Instance reads are actor-only today (#159) — this is exactly what issue
-    // #160 proposes to re-add, deliberately and by name. Until then: absent.
+    // Instance reads are actor-only (#159), so a NORMAL spawned child never gets
+    // them — filterActorSurface drops them from the grantable universe.
     for (const t of ['js_read_file', 'app_read_file', 'app_list_files']) {
       expect(granted.has(t)).toBe(false);
+    }
+
+    // …and the #160 REVIEW spawn re-adds exactly those three, and ONLY those:
+    // egress and writes stay gone even on the review path.
+    const { REVIEW_INSTANCE_READS } = await import('../../extension/peerd-runtime/tools/exposure.js');
+    const reviewGrantable = (grantable as any[]).concat(
+      (DESCRIPTORS as any[]).filter((t) => REVIEW_INSTANCE_READS.has(t.name)),
+    );
+    const reviewGranted = new Set(
+      narrowTools(reviewGrantable as any, { tools: readOnlyToolNames(DESCRIPTORS), allowRecursion: false })
+        .map((t: any) => t.name),
+    );
+    for (const t of ['js_read_file', 'app_read_file', 'app_list_files']) {
+      expect(reviewGranted.has(t)).toBe(true);
+    }
+    for (const t of ['fetch_url', 'read_page', 'site_client_run', 'app_write_file', 'message_actor']) {
+      expect(reviewGranted.has(t)).toBe(false);
     }
   });
 
@@ -445,5 +468,53 @@ describe('reviewer grant — through the real narrowing pipeline', () => {
     ]) {
       expect(survivors.has(cap)).toBe(false);
     }
+  });
+});
+
+// ---- #160: the review exemption, and its blast radius ---------------------
+//
+// The exemption is the ONE hole in the actor-only wall, so these pin that it is
+// exactly one hole: the three READ names, only under the SW-stamped marker.
+describe('#160 review exemption — positively scoped on BOTH axes', () => {
+  test('a review ctx may hold the three instance READS — and nothing else actor-only', async () => {
+    const { actorTierGate } = await import('../../extension/peerd-runtime/tools/gates.js');
+    const { EXPOSURE_REVIEW } = await import('../../extension/peerd-runtime/tools/exposure.js');
+    const reviewCtx = { exposure: EXPOSURE_REVIEW } as any;
+
+    for (const name of ['js_read_file', 'app_read_file', 'app_list_files']) {
+      expect(actorTierGate({ name } as any, {}, reviewCtx)).toBe(null); // no opinion → allowed
+    }
+    // every actor-only WRITE stays refused for the very same ctx
+    for (const name of ['app_write_file', 'app_delete', 'js_write_file', 'js_delete', 'edit_file', 'vm_write_file']) {
+      expect(actorTierGate({ name } as any, {}, reviewCtx)?.allowed).toBe(false);
+    }
+  });
+
+  test('the SAME three reads stay refused for a NON-review, non-actor ctx', async () => {
+    const { actorTierGate } = await import('../../extension/peerd-runtime/tools/gates.js');
+    for (const ctx of [{ exposure: 'main' }, {}, { exposure: 'spoofed' }] as any[]) {
+      for (const name of ['js_read_file', 'app_read_file', 'app_list_files']) {
+        expect(actorTierGate({ name } as any, {}, ctx)?.allowed).toBe(false);
+      }
+    }
+  });
+
+  test('the exemption grants no EGRESS — the marker does not widen anything else', async () => {
+    const { actorTierGate } = await import('../../extension/peerd-runtime/tools/gates.js');
+    const { EXPOSURE_REVIEW, REVIEW_INSTANCE_READS } = await import('../../extension/peerd-runtime/tools/exposure.js');
+    // the exempt set is exactly three reads — no fetch/page/site/dweb tool in it
+    expect([...REVIEW_INSTANCE_READS].sort()).toEqual(['app_list_files', 'app_read_file', 'js_read_file']);
+    // and a review ctx is still refused the dweb family
+    const dwebTool = { name: 'dweb_discover', dweb: true } as any;
+    expect(actorTierGate(dwebTool, {}, { exposure: EXPOSURE_REVIEW } as any)?.allowed).toBe(false);
+  });
+
+  // The marker is only trustworthy because the model cannot set it. actor_create
+  // builds its spawn request from an EXPLICIT field whitelist; if someone ever
+  // spreads model args into it, the exemption becomes forgeable.
+  test('actor_create cannot forge the review flag (its spawn req is whitelisted)', async () => {
+    const src = await Bun.file('extension/peerd-runtime/tools/defs/actor-create.js').text();
+    expect(src).not.toContain('...args');          // no arg spread into the req
+    expect(src).not.toMatch(/review\s*:/);         // never sets the flag
   });
 });
