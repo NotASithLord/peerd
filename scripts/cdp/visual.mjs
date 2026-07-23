@@ -17,7 +17,25 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const BASELINE_DIR = join(HERE, 'baselines');
+
+// ---- the baseline authority -------------------------------------------------
+//
+// why ONE platform owns the committed baselines: macOS and Linux cannot be
+// pixel-compared. ~96% of the side panel's rendered text uses the
+// `-apple-system, system-ui, …` stack, which resolves to a DIFFERENT family per
+// OS — so advance widths change, so paragraphs re-wrap. That is layout drift,
+// not edge noise, and no tolerance admits it while still catching a real UI
+// change. So baselines are captured and compared on the CI runner only.
+//
+// Off-authority runs (a dev's mac) still capture and still diff — against a
+// gitignored self-baseline — so the agent verify loop can LOOK at the render
+// and see what moved. They just never gate.
+export const VISUAL_AUTHORITY = 'linux-x64';
+export const VISUAL_PLATFORM = process.env.VISUAL_PLATFORM || `${process.platform}-${process.arch}`;
+export const IS_AUTHORITY = VISUAL_PLATFORM === VISUAL_AUTHORITY;
+export const BASELINE_DIR = IS_AUTHORITY
+  ? join(HERE, 'baselines', VISUAL_AUTHORITY)
+  : join(HERE, 'baselines-local', VISUAL_PLATFORM);
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -118,26 +136,50 @@ export function comparePixels(a, b, { tolerance = 8 } = {}) {
   return { dimsMatch: true, diffPixels, totalPixels, ratio: totalPixels ? diffPixels / totalPixels : 0 };
 }
 
+// why this is 0.0005 and not the 2% it used to be: on a pinned platform +
+// pinned Chrome the capture is BYTE-IDENTICAL run to run (measured: two
+// independent launches, 0.0000% at tolerance 0 on every state). The noise floor
+// is zero, so nearly any movement is signal.
+//
+// 2% was theatre, and this is measured, not asserted: at the old 756x413 capture
+// it silently accepted a brand-new toolbar button (0.066%), a new `debug` chip
+// plus a global uppercase→lowercase label change (0.267%), and eight releases of
+// version-string drift. A whole-UI corner-radius change (6px→10px) scores
+// 0.03-0.28% — every one of those passed. Roughly 7.5x headroom on the worst
+// real change the suite had ever seen.
+//
+// UNVERIFIED: the Linux runner's own noise floor. If the CI job proves flaky on
+// an unchanged tree, raise this — but measure the floor first and put the number
+// in the commit message, rather than nudging it until green.
+export const DEFAULT_THRESHOLD = 0.0005;
+
 /**
  * Compare a freshly-captured PNG against a committed baseline, or (re)write the
  * baseline. Returns a verdict the scenario turns into a named check.
  * @param {string} name  baseline key (file is baselines/<name>.png)
  * @param {Buffer} pngBuffer  the captured screenshot
  * @param {{ update?: boolean, threshold?: number, tolerance?: number }} [opts]
- * @returns {{ name:string, wrote:boolean, missing:boolean, dimsMatch:boolean, ratio:number, pass:boolean, threshold:number }}
+ * @returns {{ name:string, wrote:boolean, missing:boolean, dimsMatch:boolean, ratio:number, pass:boolean, rawPass:boolean, gated:boolean, threshold:number }}
  */
-export function compareToBaseline(name, pngBuffer, { update = false, threshold = 0.02, tolerance = 8 } = {}) {
+export function compareToBaseline(name, pngBuffer, { update = false, threshold = DEFAULT_THRESHOLD, tolerance = 8 } = {}) {
   const file = join(BASELINE_DIR, `${name}.png`);
   const exists = existsSync(file);
   if (update || !exists) {
     mkdirSync(BASELINE_DIR, { recursive: true });
     writeFileSync(file, pngBuffer);
-    return { name, wrote: true, missing: !exists, dimsMatch: true, ratio: 0, pass: true, threshold };
+    return { name, wrote: true, missing: !exists, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: IS_AUTHORITY, threshold };
   }
   const base = decodePng(readFileSync(file));
   const shot = decodePng(pngBuffer);
   const { dimsMatch, ratio } = comparePixels(base, shot, { tolerance });
-  return { name, wrote: false, missing: false, dimsMatch, ratio, pass: dimsMatch && ratio <= threshold, threshold };
+  const rawPass = dimsMatch && ratio <= threshold;
+  return {
+    name, wrote: false, missing: false, dimsMatch, ratio, threshold,
+    rawPass, gated: IS_AUTHORITY,
+    // Off-authority never fails the run — the ratio is still reported and the
+    // diff image is still written, so a human/agent can look at what moved.
+    pass: IS_AUTHORITY ? rawPass : true,
+  };
 }
 
 export const UPDATE_BASELINES = process.env.UPDATE_BASELINES === '1';
