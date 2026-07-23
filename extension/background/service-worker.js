@@ -3060,12 +3060,15 @@ const leaveDwebAgentInbox = async () => {
 // on/off, so a disable withdraws presence instead of lingering until SW restart.
 // Named onSettingsChanged so it wires to the settings route by shorthand (the
 // deps-wiring meta-test forbids key:value mis-wires).
-const onSettingsChanged = () => {
+const onSettingsChanged = (/** @type {any} */ patch) => {
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
   else leaveDwebAgentInbox().catch(() => {});
-  // Watch mode just flipped on → foreground the agent's current tab immediately,
-  // rather than waiting for its next tab touch. No-op when off / no agent tab.
-  if (settingsStore.get().watchAgentTab === true) focusAgentTab();
+  // Watch mode: react to the TRANSITION, not the state. why: this fires on EVERY
+  // settings write, so keying off `settings.watchAgentTab === true` meant picking a
+  // model (or nudging any unrelated toggle) hours later teleported the user onto a
+  // long-dead agent tab. normalizeSettingsPatch only emits keys the caller actually
+  // sent, so the key's PRESENCE here is exactly "the user just touched the toggle".
+  if (patch?.watchAgentTab === true) focusAgentTab();
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
 // clear the SW-side membership flag for a clean re-join on the next start.
