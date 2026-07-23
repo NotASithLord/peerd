@@ -10,6 +10,8 @@
 // conversation) and READ-ONLY tools (it cannot edit — the writer stays the
 // single writer). See docs/REVIEW.md and DESIGN additions.
 
+import { wrapUntrusted } from '../prompt-wrap.js';
+
 // why: the summary is re-sent on every subsequent parent turn, so cap the
 // rendered text. The full reviewer transcript is in the side panel by
 // expanding this card.
@@ -161,5 +163,22 @@ const formatReviewSummary = (out) => {
   if (text.length > MAX_RESULT_CHARS) {
     text = `${text.slice(0, MAX_RESULT_CHARS)}\n…[truncated — expand the card for the full review]`;
   }
-  return text;
+  // FENCE the reviewer's output before it lands in the parent's context.
+  //
+  // why: every line above is MODEL-AUTHORED by the reviewer, and the reviewer's
+  // whole input is a diff — untrusted content by construction (review/read-only.js
+  // header). On a parse failure review/schema.js hands up to 2000 chars of RAW
+  // reviewer text through as `summary`, so a crafted diff's instructions can ride
+  // out of the reviewer verbatim. The PARENT is the one context that holds a
+  // channel (message_actor → the web actor → fetch_url), so an unfenced review
+  // summary is the single place diff-borne text could steer something outward.
+  // The reviewer itself has no egress (spawn narrows it off the main-agent
+  // surface and restrictCtxCapabilities strips the closures), which is why this
+  // is a hardening rather than a live hole — but a two-model-hop route is exactly
+  // what the fence exists for, and it costs one call.
+  return wrapUntrusted({
+    origin: 'request_review (reviewer model output, derived from an untrusted diff)',
+    tool: 'request_review',
+    body: text,
+  });
 };
