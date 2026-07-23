@@ -104,9 +104,39 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
   // addresses tabs by id, never by focus, so foregrounding a tab for the user never
   // changes what the agent does — it just un-hides the work. Best-effort: a
   // vanished tab/window is swallowed (the follow is cosmetic, never load-bearing).
+  // The agent tab we last followed — the follow fires only when the agent MOVES
+  // to a different tab. why: noteAgentTab fires on every tool touch, and goal
+  // mode / script fan-out drive several actors (and tabs) in parallel, so a
+  // per-touch follow made two live actors ping-pong the foreground several times
+  // per model step. Following the CHANGE, not the touch, makes a settled agent
+  // silent — and it also stops re-stealing focus the user deliberately moved away.
+  /** @type {number | null} */ let lastFollowedTabId = null;
+
   const focusAgentTab = async () => {
-    if (!shouldFollowAgentTab({ watchOn: isWatchOn(), agentTabId, activeTabId })) return;
-    const winId = agentTabInfo?.windowId;
+    if (typeof agentTabId !== 'number') return;
+    // Resolve "is it already in front?" from LIVE state rather than the remembered
+    // activeTabId scalar — that one is unseeded after an MV3 respawn and is global
+    // while `active` is per-window, which defeated this guard in exactly the
+    // two-window layout watch mode encourages (see watch-mode.js).
+    let alreadyInFront = false;
+    let winId = agentTabInfo?.windowId;
+    try {
+      const tab = await browser.tabs?.get?.(agentTabId);
+      if (!tab) return;                                  // tab vanished — nothing to follow
+      winId = tab.windowId ?? winId;
+      alreadyInFront = tab.active === true && tab.windowId === lastFocusedWindowId;
+    } catch { return; }                                  // gone mid-flight — never guess
+    if (!shouldFollowAgentTab({
+      watchOn: isWatchOn(),
+      // The toggle lives in the side panel, so the panel IS what "watching" means.
+      // A parked home tab must not count — its port outlives every SW respawn.
+      panelOpen: uiPorts.hasNamed('sidepanel'),
+      chromeFocused,
+      agentTabId,
+      alreadyInFront,
+    })) return;
+    if (agentTabId === lastFollowedTabId) return;        // same tab — already followed it
+    lastFollowedTabId = agentTabId;
     try {
       await browser.tabs?.update?.(agentTabId, { active: true });
       if (typeof winId === 'number') await browser.windows?.update?.(winId, { focused: true });
@@ -232,9 +262,20 @@ export const makeTabAffordances = ({ browser, uiPorts, denylistStore, closeSideP
   // (modern) onCommand both supply the tab, so this only backstops engines whose
   // command callback omits it. Seeded at boot, kept warm on focus changes.
   /** @type {number | null} */ let lastFocusedWindowId = null;
-  browser.windows?.getLastFocused?.().then((/** @type {any} */ w) => { lastFocusedWindowId = w?.id ?? lastFocusedWindowId; }).catch(() => {});
+  // Is the BROWSER the focused application right now? Watch mode's follow reads
+  // it: the worst thing a stray follow can do is haul Chrome over the app the
+  // user alt-tabbed to, so if they aren't even in the browser we never raise a
+  // window. onFocusChanged reports WINDOW_ID_NONE precisely when Chrome loses
+  // focus; the boot seed reads the real `focused` flag rather than assuming.
+  let chromeFocused = false;
+  browser.windows?.getLastFocused?.().then((/** @type {any} */ w) => {
+    lastFocusedWindowId = w?.id ?? lastFocusedWindowId;
+    chromeFocused = w?.focused === true;
+  }).catch(() => {});
   browser.windows?.onFocusChanged?.addListener((/** @type {number} */ winId) => {
-    if (winId != null && winId !== browser.windows.WINDOW_ID_NONE) lastFocusedWindowId = winId;
+    const none = winId == null || winId === browser.windows.WINDOW_ID_NONE;
+    chromeFocused = !none;
+    if (!none) lastFocusedWindowId = winId;
   });
 
   // The pull-in itself — open() runs synchronously (no await before it) to keep the
