@@ -351,6 +351,7 @@ export default [
       'extension/peerd-runtime/dom/walk-injected.js',
       'extension/peerd-runtime/dom/framework-state.js',
       'extension/peerd-runtime/dom/pull-in-hint-injected.js',
+      'extension/peerd-runtime/dom/fetch-tap-injected.js',
       'extension/background/debugger-pool.js',
       'extension/peerd-runtime/tools/defs/watch-changes.js',
     ],
@@ -379,7 +380,7 @@ export default [
 
   // --- heap-split Worker: a WORKER-SAFE subset, not the barrel ---
   // offscreen/actor-worker.js is the ONE dedicated Worker (its own heap) that runs
-  // the agent loop for every offscreen loop (reasoning subagents + bound actors). It
+  // the agent loop for every offscreen loop (reasoning actors + bound actors). It
   // must import a MINIMAL, worker-safe subset (agent-loop.js + actor-worker-core.js —
   // both verified to touch no chrome.*/DOM at import) rather than the full
   // /peerd-runtime barrel, which re-exports voice/tools/etc. and would drag
@@ -399,7 +400,7 @@ export default [
   // [[Construct]], so arrowing them would make `new Worker()` throw "not a
   // constructor" instead of the actionable NotebookEgressBlockedError.
   {
-    files: ['extension/notebook-tab/notebook-neutralizers.js'],
+    files: ['extension/engine-tabs/notebook-tab/notebook-neutralizers.js'],
     rules: { 'prefer-arrow-callback': 'off' },
   },
 ];

@@ -10,27 +10,323 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-19
+
 ### Added
+- **Watch mode.** A top-bar toggle that brings the agent's current tab
+  to the foreground and follows it as the agent moves between tabs, so
+  you can watch the real page live with the chat docked beside it. The
+  agent normally drives its tab in the background and never steals
+  focus; this is the opt-in inverse for when you want to see it work.
+  Off by default, both channels.
+- **Routines: background scheduling.** A standing task can now run in
+  the background on a cadence, on an interval ("every 6h") or at a
+  daily local time, even with the side panel closed. New
+  `schedule_create` / `schedule_list` / `schedule_cancel` tools; each
+  firing runs in its own fresh session as an autonomous goal loop (or a
+  single turn). A routine that came due while peerd was locked or the
+  browser was off fires once as soon as peerd is back on, never as a
+  burst, and nothing fires while the vault is locked.
+- **Prewalk (experimental, off by default).** A goal run can open on
+  the frontier chat model, which writes a todo plan and lands the first
+  action, then hand the live context to a cheaper executor model that
+  grinds out the rest. Comes with a session-persisted todo checklist
+  the goal prompt re-surfaces on every continuation (rendered as a live
+  card that ticks as the run works), a sticky Goal toggle that stays
+  lit for the whole run (clicking it stops the run), and Lab A/B arms
+  that measure spend, pass rate, and speed baseline-vs-prewalk. VM,
+  Notebook, and App actors get the same swap under their own toggle:
+  the first turn plans on the frontier model against real instance
+  state, later turns run on the cheap executor.
+- **Site clients.** The web actor can derive, persist, and replay a
+  per-origin API client (a prose dossier plus a JS module) so future
+  work against a site calls its API directly instead of re-driving the
+  DOM. A client is treated as an unreliable cache: verified on use,
+  self-healed on failure, and saving one always crosses a user confirm.
+  It executes in the sealed keyless worker with exactly one outward
+  edge, a fetch pinned to the client's own origin. Capture-assisted
+  derivation works on every channel, with credentials redacted to
+  posture markers at the boundary.
+- **Query-relevant excerpts for oversized pages.** `fetch_url` and
+  `read_page` take an optional `query`; when a long page overflows the
+  window, the model now sees the passages that best match what it was
+  looking for (BM25-ranked, reassembled in document order) instead of a
+  blind head-and-tail slice. The full text stays stored and pageable
+  via `read_web_cache`, and without a query behavior is unchanged.
+
+### Changed
+- **The web actor finishes the action and reports the substance.** Two
+  prompt additions targeting the two most common failure shapes in the
+  benchmark taxonomy: stopping one step short of the required action,
+  and finding the answer but replying with a pointer instead of stating
+  it. Measured +6.7 points on Online-Mind2Web against a matched control
+  on both models tested.
+
+### Fixed
+- **Agent typing no longer steals OS focus.** Key dispatch raised the
+  driven tab's window to the foreground on every call, continuously
+  yanking focus from whatever you were doing. The tab now gets CDP
+  focus emulation instead: the page believes it is focused, so
+  shortcut handlers still work, but the window is never raised.
+- **A hung tool call can no longer wedge a turn forever.** Every tool
+  dispatch now races the turn's Stop signal and a hard deadline, the
+  CDP evaluate leaf gets its own timeout, and a watchdog force-releases
+  the turn slot after a grace period, so Stop works mid-dispatch
+  instead of only between tool waves.
+- **Stop now terminates an in-flight `a2a_run`.** The mesh-code worker
+  used to keep running to its wall clock after the turn aborted,
+  holding one of the shared headless job slots for up to two minutes.
+- **The OpenAI adapter no longer makes a futile network call every
+  turn.** It fetched `/v1/models` each turn to read a context-window
+  field that endpoint does not have, so the call could only ever return
+  nothing; the static window table (which always supplied the real
+  value anyway) is now used directly.
+
+## [0.2.7] - 2026-07-10
+
+### Added
+- **Z.ai GLM as a BYOK provider.** Use GLM-5.2 (and the rest of the GLM
+  lineup) directly from z.ai, not routed through OpenRouter. Z.ai's API is
+  OpenAI-compatible, so the adapter is a thin sibling of the OpenRouter one:
+  same wire format, different base URL and key shape. Shows up in
+  Settings under Providers.
+- **`fetch_url` returns clean markdown by default.** HTML is converted with
+  vendored Readability and Turndown, running in the offscreen document,
+  instead of handing back raw page source. Non-article pages, Firefox
+  (no extraction client there), or an extraction error all fall back to
+  today's raw behavior. An oversized body no longer silently loses its
+  tail: it spills to a local cache and the model sees a head and tail
+  window with a note on how to page through the rest with the new
+  `read_web_cache` tool.
+- **`read_page` gains `mode:'content'`.** It grabs the rendered DOM after
+  JavaScript has run and routes it through the same extraction and paging
+  pipeline `fetch_url` uses, so a tab-driven task gets the same clean
+  markdown a fetched page does. The default snapshot mode (interactable
+  elements for clicking and typing) is unchanged.
+- **An experimental code surface for the web actor** (default off, opt-in
+  under Settings → Behavior). Instead of one tool call per action, the
+  actor can write Playwright-style JS against a sealed `page.goto` /
+  `click` / `fill` / `snapshot` bridge, with the same gated dispatch,
+  denylist, and audit as the normal tool-call path underneath. Measured
+  against the tool-call path on the Online-Mind2Web benchmark it did not
+  win (26.7% vs 20.7%, more steps, more step-cap failures), so tool calls
+  stay the default; the code surface ships anyway because a real
+  benchmark harness for a browser-extension agent came out of building it.
+
+### Fixed
+- **A "New chat" mid-task could leave an abandoned actor still running.**
+  Resetting a session now stops its live turn and cascades the stop to
+  every actor it had spawned, the same way the Stop button already does.
+- **A spent Z.ai account retried instead of failing over.** Z.ai reports
+  out-of-credit as an HTTP 429 with its own error code, which the retry
+  classifier didn't recognize, so a drained account burned three retries
+  before giving up instead of switching providers.
+- **GLM-4.6 was priced about three times too high**, which could trip a
+  spend limit early or inflate the cost display for no reason. Corrected
+  to its published rate.
+- **An OpenAI streaming error could be blamed on OpenRouter** in the
+  error text, since the shared stream parser wasn't told which provider
+  it was reading for.
+- **A few research-preset tool manifests were missing `read_web_cache`**
+  even though they allowed the tools that produce a spillable body, so a
+  paged-out fetch or page read left the model unable to read its own
+  overflow, burning turns on a call the manifest then refused.
+- **`read_page`'s content mode could truncate silently.** A render past
+  its size cap now says so explicitly instead of reporting `truncated:
+  false` on a body that was actually cut.
+- **The cache-eviction message for a paged-out read pointed at the wrong
+  fix.** It told the model to re-fetch the URL, which for a rendered
+  page throws away the post-JavaScript DOM it already had; the hint is
+  now specific to how the content was originally captured.
+
+## [0.2.6] - 2026-07-06
+
+### Fixed
+- **A web actor could be wrongly refused a read of its own tab.** The
+  dispatcher gate that pins a web actor to the one tab it owns compared an
+  explicit `tabId` argument against `actorInstanceId`. That field is the
+  fixed literal `'web'`, the actor's stable `message_actor` address, not a
+  tab id (only an API actor's instanceId is still a real identifier, its
+  origin). So the comparison could never match, and any DOM tool call that
+  named its own tab explicitly (`read_page`, `click`, and so on) was refused
+  with a confusing "pinned to tab web" error, even though it was the actor's
+  own tab. The gate now compares against the actor's actually-owned tab
+  instead. This was a false-positive refusal, not a security gap: the
+  independent execute-time resolver already only ever targeted the owned
+  tab or failed closed.
+- **The search shortcut in the web actor's own prompt pointed at a URL that
+  always redirects.** The prompt told the actor to search with
+  `fetch_url https://duckduckgo.com/html/?q=...`, but that path 302s to
+  `html.duckduckgo.com`, and `fetch_url` does not follow redirects (by
+  design: see `docs/security/THREAT-MODEL.md` INV-7). Every search burned a
+  turn on a guaranteed redirect error before the actor retried correctly.
+  The prompt now names the right host (`html.duckduckgo.com/html/?q=...`)
+  and says why the bare host fails, so search works on the first try.
+- **A oneShot delegation whose CODE crashed now gets its recovery turn.**
+  The oneShot contract always said "an errored round falls through to the
+  normal loop", but the clean-round test only saw tool-LEVEL errors, and a
+  notebook eval whose code threw (a CompileError, a bad import) returns
+  ok:true with the `[ERROR]` text as its content. So the crash
+  short-circuited straight back to the orchestrator as the raw reply and
+  the actor never debugged its own sandbox (field transcript: a notebook
+  actor bounced the same CompileError back twice). `js_notebook` now marks
+  such results `evalError` and the one-shot latch disarms on it, exactly
+  like a tool failure: the actor recovers and iterates, as promised. A
+  headless CI test also now pins `peerd:wasi` + `demoModule()` as
+  importable and runnable from a `script` job (a field session reported
+  the import unreachable; current source proves green, so a stale install
+  is the likely culprit, reload the extension).
+
+### Added
+- **`peerd:wasi` ships a self-test module.** `demoModule()` (exported next
+  to `runWasi`) returns a tiny (187-byte) known-good wasm32-wasi hello
+  module, embedded in the extension, so the agent can smoke-test
+  `runWasi(demoModule())` inside the sealed worker with no network and no
+  toolchain, instead of hunting the web for a working binary (a live
+  session burned itself on exactly that hunt). The blob is hand-assembled,
+  regenerable from `tests/notebook-tab/wasi-test-module.ts`, and the bun
+  suite pins the embedded bytes against that builder so blob and source
+  cannot drift. Taught in the `script` / `js_create` lore and the code-mode
+  prompt.
+
+### Fixed
+- **`resp.bytes()` works in sandboxed code now.** The sealed-realm fetch
+  bridge (Notebook / script / a2a runs) listed `bytes` on its response but
+  as a raw data property, so `resp.bytes()` (the platform `Response.bytes()`
+  shape every model reaches for) threw "not a function". It's a method
+  returning `Promise<Uint8Array>` now, matching the platform. Found in the
+  field: an agent burned several turns rediscovering `arrayBuffer()` while
+  smoke-testing `runWasi`.
+- **The web actor no longer talks itself out of rendering.** Field
+  transcript: asked for live sports schedules, the web actor tried fetches,
+  declared itself "fetch-only", claimed it lacked an open-tab tool, and
+  bounced the task back to the user, while the render path was fully wired
+  (`navigate` lazily opens + adopts its tab in the 0-tab state). The
+  machinery was right; the words were wrong. Three model-facing fixes:
+  `navigate`'s description now states it OPENS the tab when the actor owns
+  none (it read "navigate the target tab", implying one must exist); the web
+  actor's lore states it can ALWAYS render and must never report itself
+  fetch-only; the shared actor rules forbid addressing the user ("would you
+  like me to…" has no one to answer it, do the work or report what
+  blocked). And the orchestrator's `message_actor` teaching now says: never
+  narrate unobserved actor progress, and re-send with the capability
+  restated when an actor wrongly claims its kind can't do something.
+
+### Changed
+- **"Subagent" is now "actor" everywhere.** The heap-split already made a
+  subagent an ephemeral actor on the same substrate as the bound (sandbox /
+  web / dweb) actors; the vocabulary now matches. Model-facing: the
+  `spawn_subagent` tool is **`actor_create`**, `subagent_cancel` is
+  **`actor_cancel`**, `subagent_tasks` is **`actor_tasks`** (pairs with
+  `sandbox_create`: a sandbox always has a dedicated bound actor;
+  `actor_create` alone makes an ephemeral one). Internally the
+  `peerd-runtime/subagent/` module is `peerd-runtime/actor/`, and the
+  spawned-child concept keeps a distinct name where it must not collide
+  with bound actors: session kind `'subagent'` is now **`'spawned'`**, and
+  the child transcript stream is `turn/spawned-*`. Breaking for stored
+  sessions from earlier builds (0.x posture: no migration shims): old
+  `kind:'subagent'` records and skills/evals naming `spawn_subagent`
+  need the new names.
+
+## [0.2.5] - 2026-07-05
+
+### Security
+- **Three residual risks from the threat model narrowed before wider
+  exposure** (R4/R5/R6, each documented honestly in
+  docs/security/THREAT-MODEL.md):
+  - **The audit log is tamper-evident now.** Every entry extends a SHA-256
+    hash chain, and a head record pins the newest link. Rewritten, deleted,
+    inserted, or truncated entries fail verification. The debug bundle runs
+    the verification and stamps the result into its provenance. This is
+    evidence, not proof: in-origin code execution can still recompute the
+    chain. That boundary is stated, not hidden.
+  - **Session confirm grants are origin-bound.** "Yes for this session" now
+    means this tool ON this origin. Approving `click` on one site no longer
+    silently covers every site the chat visits. This generalizes the host
+    scoping web writes already had.
+  - **Transfer import is gated.** Imported provider endpoints must be https
+    (or local loopback) and are named in the summary the user approves.
+    Imported hooks land DISABLED and untrusted until re-enabled per hook in
+    Settings. A memory import states its prompt-injection consequence in the
+    apply notices.
+
+### Added
+- **Standing peer conversations on the mesh** (preview only). The dweb
+  actor's agent-to-agent surface was single-shot: one ask, one reply, the
+  thread forgotten. An inbound peer message only ever reported to YOU,
+  never back to the peer. Now a conversation is a THREAD. `mesh.converse(did,
+  message)` opens one and returns a `convId`. A later peer message on that
+  thread wakes the dweb actor WITH the prior turns as context, and the actor's
+  answer goes BACK to the peer. The reply-to-a-peer edge is the owner-chosen
+  gate: per-conversation reply consent (approve once per thread, revoke by
+  blocking the peer). `mesh.say(convId, message)` continues a thread from code.
+  The convId threads through the wire envelope. A convId is a bearer token, so
+  only its owning did may extend it. The thread store is capped and TTL-evicted
+  (a peer can't grow SW memory). `dweb_block` closes every thread with that
+  peer. Proven over real WebRTC by the two-peer harness (converse → the peer's
+  reply threads the convId back → say continues it).
+
+### Added
+- **OpenAI provider adapter.** Direct BYOK access to OpenAI's own API
+  (`api.openai.com`), distinct from reaching OpenAI models through the
+  OpenRouter gateway. A user with an OpenAI key and no OpenRouter account
+  now gets first-class access, billed to their OpenAI account. The wire
+  format is the reference OpenAI `/chat/completions`, so it reuses the same
+  request/response formatters as the OpenRouter adapter (retry set, hard-limit
+  fast-fail, streaming). The key attaches at fetch-header time and never
+  enters the request body. It shows up in Settings → Providers with the current
+  GPT-5.x flagships seeded in the picker. The manifest already covered the
+  host via `<all_urls>` + the `https:` CSP, so nothing new is requested.
+- **The debug surface: serious observability without a vendor.** peerd's
+  chain of events was already recorded (audit log, lineage, delegation
+  traces) but trapped across surfaces. Now it comes OUT, locally, on the
+  user's say-so. Three pieces:
+  - **Debug bundle export**: a chip-sized `debug` button in the chat mode
+    row saves one JSON file per session. It includes the full transcript
+    INCLUDING every descendant actor/subagent session (the delegation tree,
+    walked by parent links), the audit slice for that set, cost, a settings
+    snapshot (keys can't appear, they live only in the vault and attach at
+    fetch-header time), live context snapshots, a classified failure index,
+    and a provenance block that says plainly what may be missing (pruned
+    audit, evicted snapshots). The same data exports as an **OpenTelemetry
+    trace** (OTLP/JSON, delegation = span parentage, gen_ai semconv
+    attributes) for any OTel viewer the user already runs. It is converted in
+    the panel from the same payload, with no second route, no wire, and no
+    vendor.
+  - **Failure-class chips**: every failed tool card and failed turn now
+    carries its classified failure neighborhood (policy / auth / limits /
+    provider / timeout / aborted / environment / agent / internal) as a
+    small chip next to the raw error, so triage starts at "whose fault,
+    roughly" instead of string-parsing. The same classifier annotates the
+    bundle and stamps OTel span status.
+  - **The context inspector** (dev mode): "what did the model actually
+    see?". The service worker keeps a small in-memory ring of shaped
+    request snapshots per session (system prompt clipped, messages capped,
+    binary payloads stripped with a visible sentinel), captured at the two
+    seams that together cover every model call: the orchestrator's turn
+    driver and the actor/subagent relay route. A modal lists each call
+    (who, model, sizes, content) and is honest about the ring's lifetime:
+    it empties with the service worker, and says so.
 - **The orchestrator delegates from code: `script` grows an `actors` client.**
   The same bet that gave the web actor and the mesh their code surfaces now
-  reaches the orchestrator itself: inside the `script` tool (the renamed
-  `js_run` — the generalized name models actually reach for), code can
+  reaches the orchestrator itself. Inside the `script` tool (the renamed
+  `js_run`, the generalized name models actually reach for), code can
   `await actors.ask(to, goal)` to delegate and get the reply back as a value,
   `actors.send(to, goal)` to hand off without waiting, and `actors.list()`
-  for the roster. Fan-out and plumbing move into one script — ask several
-  actors at once, feed one's output into the next as a variable — so
-  intermediate bytes never transit the orchestrator's context at all, which
-  is simultaneously the token win and a deepening of the isolation thesis.
+  for the roster. Fan-out and plumbing move into one script: ask several
+  actors at once, feed one's output into the next as a variable. Intermediate
+  bytes never transit the orchestrator's context at all, which is both a token
+  win and a deepening of the isolation thesis.
   Nothing new is trusted: every delegation runs the full message_actor gate
   chain per call (sender gate, rate caps, duplicate-intent, the oneShot
   sandbox rule, audit), the worker can never spoof whose behalf it acts on
   (owner identity rides trusted job params), and a script that delegated has
   its output fenced (actor replies are untrusted bytes).
   **Observability is the contract, not an afterthought**: every run returns a
-  [DELEGATIONS] trace — op, target, outcome, timing, with failed-op detail
-  fenced — that survives script errors, timeouts, and Stop; the side panel
-  streams a live per-delegation feed on the script card while it runs; each
-  op lands in the audit log tagged via:script; and Stop actually unwinds the
+  [DELEGATIONS] trace (op, target, outcome, timing, with failed-op detail
+  fenced) that survives script errors, timeouts, and Stop. The side panel
+  streams a live per-delegation feed on the script card while it runs. Each
+  op lands in the audit log tagged via:script. Stop actually unwinds the
   whole fan (pending asks abort, their actor turns die, the worker is
   terminated). Proven end to end by a live e2e state: one script, a real
   web-actor round trip, the reply resolving into the running code.

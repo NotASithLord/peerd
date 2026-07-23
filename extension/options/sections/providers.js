@@ -45,6 +45,13 @@ const OPENROUTER_MARK =
   + '</g>'
   + '<g fill="#fff"><circle cx="8" cy="16" r="2"/><circle cx="23.5" cy="10.5" r="2"/><circle cx="23.5" cy="21.5" r="2"/></g>'
   + '</svg>';
+// Z.ai: a teal tile with a white Z monogram — brand-evocative, not a logo clone.
+const ZAI_MARK =
+  '<svg viewBox="0 0 32 32" width="26" height="26" role="img" aria-label="Z.ai">'
+  + '<rect width="32" height="32" rx="7" fill="#0EA5A4"/>'
+  + '<path d="M9 10 H23 L11 22 H23" fill="none" stroke="#fff" stroke-width="2.6"'
+  + ' stroke-linecap="round" stroke-linejoin="round"/>'
+  + '</svg>';
 // Ollama: a minimal llama-head silhouette on a neutral tile — evocative
 // of the upstream mark without reproducing it.
 const OLLAMA_MARK =
@@ -61,6 +68,7 @@ const OLLAMA_MARK =
 const providerLogo = (name) => {
   if (name === 'anthropic') return m('span.provider-logo', m.trust(ANTHROPIC_MARK));
   if (name === 'openrouter') return m('span.provider-logo', m.trust(OPENROUTER_MARK));
+  if (name === 'glm') return m('span.provider-logo', m.trust(ZAI_MARK));
   if (name === 'ollama') return m('span.provider-logo', m.trust(OLLAMA_MARK));
   return m('span.provider-logo.logo-generic', (String(name)[0] ?? '?').toUpperCase());
 };
@@ -142,7 +150,7 @@ export const ProvidersSection = {
     // failing on the first chat. Both shipped key providers use stable
     // sk- prefixes; absence from this map = no prefix check (fails open).
     /** @type {Record<string, string>} */
-    const KEY_PREFIX = { anthropic: 'sk-ant-', openrouter: 'sk-or-' };
+    const KEY_PREFIX = { anthropic: 'sk-ant-', openrouter: 'sk-or-', openai: 'sk-' };
 
     // Save a key for ONE provider, independently of the others.
     /** @param {string} name */
@@ -231,10 +239,16 @@ export const ProvidersSection = {
     const providerRows = ui.providerStatus ?? [
       { name: 'anthropic',  label: 'Anthropic',  hasKey: provider.current === 'anthropic'  && provider.hasKey },
       { name: 'openrouter', label: 'OpenRouter', hasKey: provider.current === 'openrouter' && provider.hasKey },
+      { name: 'openai',     label: 'OpenAI', hasKey: provider.current === 'openai' && provider.hasKey },
+      { name: 'glm',        label: 'Z.ai',       hasKey: provider.current === 'glm'        && provider.hasKey },
       { name: 'ollama',     label: 'Ollama (local)', hasKey: true, keyless: true },
     ];
     /** @param {string} name */
-    const keyPlaceholder = (name) => `${KEY_PREFIX[name] ?? 'sk-'}...`;
+    const keyPlaceholder = (name) => KEY_PREFIX[name]
+      ? `${KEY_PREFIX[name]}...`
+      // why: providers without a stable sk- prefix (Z.ai GLM keys are shaped
+      // `id.secret`) get a neutral hint rather than a misleading `sk-...`.
+      : 'your API key';
     // A provider is USABLE when it's keyed-with-key, or a keyless daemon we've
     // confirmed reachable (Ollama probed 'connected'). anyUsable gates the whole
     // "Default model for new chats" block: on a fresh install (nothing
@@ -352,8 +366,10 @@ export const ProvidersSection = {
     return m('div', [
       m('p', 'Bring your own key — set one per provider; each is stored '
         + 'independently and encrypted in the vault. OpenRouter is an '
-        + 'OpenAI-compatible gateway to many vendors’ models. Ollama '
-        + 'runs models on THIS machine — keyless, $0, fully local.'),
+        + 'OpenAI-compatible gateway to many vendors’ models. Z.ai serves '
+        + 'its GLM models (GLM-5.2, …) from a direct OpenAI-compatible '
+        + 'endpoint. Ollama runs models on THIS machine — keyless, $0, '
+        + 'fully local.'),
       // The on-device WebGPU model is a full provider now — its card hosts the
       // hardware-test → download → ready flow inline (the old split-out
       // "On-device models" section is folded in here), with a status-driven

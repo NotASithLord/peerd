@@ -18,6 +18,10 @@
 //   await mesh.send(did, "…")              // fire-and-forget (needs consent)
 //   await mesh.publishCard({ name, … })    // advertise MY card (needs consent)
 //   await mesh.inbox()                     // drain DMs received during this run
+//   await mesh.converse(did, "…", {timeoutMs}) // open a STANDING conversation:
+//                                          // like ask, but returns { convId } so a
+//                                          // LATER peer message continues the thread
+//   await mesh.say(convId, "…", {timeoutMs})   // send the next turn on a convId
 
 import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
@@ -48,9 +52,12 @@ export const a2aRunTool = {
     'a request and RETURNS the peer\'s one reply (or {timedOut:true}); mesh.send(',
     'did, message) is fire-and-forget; mesh.publishCard({name, description, skills})',
     'advertises YOUR agent so peers can discover you; mesh.inbox() drains messages',
-    'received during this run. FIRST contact to a peer needs the user\'s ok (a',
-    'signing call is refused until approved). Write ONE script that does the whole',
-    'exchange and RETURN the outcome — do not fire one message per turn.',
+    'received during this run. For a STANDING conversation use mesh.converse(did,',
+    'message) — it returns { convId }; a later peer message on that thread wakes',
+    'you with the prior turns, and mesh.say(convId, message) sends the next turn.',
+    'FIRST contact to a peer needs the user\'s ok (a signing call is refused until',
+    'approved); replying to a peer on a thread needs per-conversation consent.',
+    'Write ONE script that does the whole exchange and RETURN the outcome.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -65,18 +72,39 @@ export const a2aRunTool = {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || !args.code.trim()) return { ok: false, error: 'code_required' };
-    const jsOffscreenClient = /** @type {{ execHeadless?: (code: string, opts: object) => Promise<any> } | undefined} */ (
-      /** @type {any} */ (ctx).jsOffscreenClient);
+    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<any>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function } }} */ (
+      /** @type {unknown} */ (ctx));
+    const jsOffscreenClient = c.jsOffscreenClient;
     if (!jsOffscreenClient?.execHeadless) return { ok: false, error: 'a2a_unavailable' };
     const ownerSessionId = ctx.session?.sessionId;
     if (!ownerSessionId) return { ok: false, error: 'a2a: no owner session' };
+    // A turn that is ALREADY stopped must not launch a worker at all — the
+    // 'abort' event never re-fires on an aborted signal, so a run started now
+    // would hold a shared headless slot for its full 135s wall-clock (#153).
+    if (c.abortSignal?.aborted) {
+      return { ok: false, error: 'a2a_aborted: the turn was stopped before the run started' };
+    }
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
+    // Stop plumbing (#153, mirrors the script tool): a runId-carrying job is
+    // registered by the offscreen runner, so aborting the dweb-actor turn
+    // terminates the worker promptly instead of orphaning it to its timeout.
+    const runId = `a2arun-${ownerSessionId}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    /** @type {(() => void) | undefined} */
+    let onAbort;
+    if (c.abortSignal && jsOffscreenClient.abortHeadless) {
+      onAbort = () => { jsOffscreenClient.abortHeadless?.(runId, ownerSessionId); };
+      c.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
     try {
-      const result = await jsOffscreenClient.execHeadless(args.code, { timeoutMs, a2a: true, ownerSessionId });
+      const result = await jsOffscreenClient.execHeadless(args.code, { timeoutMs, a2a: true, ownerSessionId, runId });
       return { ok: true, content: formatA2AResult(args.code, result) };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       return { ok: false, error: `a2a_run_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+    } finally {
+      if (onAbort && c.abortSignal) {
+        try { c.abortSignal.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
+      }
     }
   },
 };

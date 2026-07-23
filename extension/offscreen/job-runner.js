@@ -3,10 +3,10 @@
 //
 // The headless sibling of the Notebook tab's runEval (DECISIONS #25, "runJob"):
 // the SAME sealed worker (worker-source.js — realm seal first, peerd.* surface,
-// the fetch/opfs/subagent bridges), but hosted in the offscreen document with NO
+// the fetch/opfs/actor bridges), but hosted in the offscreen document with NO
 // UI, an EPHEMERAL OPFS scratch that is nuked when the job ends, and output
-// ACCUMULATED into the return value. Egress + subagent relay through the SAME
-// audited SW routes the tab uses (sw/web-fetch, subagent/spawn), so
+// ACCUMULATED into the return value. Egress + actor relay through the SAME
+// audited SW routes the tab uses (sw/web-fetch, actor/spawn), so
 // denylist + SSRF + audit are enforced centrally regardless of host.
 //
 // SECURITY — defense-in-depth is WEAKER here than the tab, by one layer, and
@@ -26,7 +26,7 @@
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 
 import { opfsHelpers, buildModule } from '/peerd-engine/index.js';
-import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/engine-tabs/notebook-tab/worker-source.js';
 import { ACTORS_BRIDGE_GUARD_MS } from '/peerd-runtime/index.js';
 
 let jobSeq = 0;
@@ -64,7 +64,7 @@ const MAX_ACTORS_JOBS = 2;
 let activeActorsJobs = 0;
 
 // Cap concurrent headless workers so a loop (or many parallel script calls /
-// sub-agents) can't fork-bomb the offscreen renderer. Each job is its own thread
+// actors) can't fork-bomb the offscreen renderer. Each job is its own thread
 // + ephemeral OPFS; a handful at once is plenty. (The capability surface's own
 // rule: engine.spawn* → resource exhaustion → hard caps.)
 const MAX_CONCURRENT_JOBS = 4;
@@ -74,7 +74,10 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
+ *   script surface); caps.page needs ownerSessionId — the actor session this
+ *   job runs FOR, set by the SW (trusted), the worker can never supply it.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, actorsTrace?: Array<object> }>}
  */
@@ -93,15 +96,27 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
+ * @param {{ code: string, timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string }} job
  *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
- *   delegation client (the orchestrator's script surface). ownerSessionId /
- *   ownerToolUseId / runId are attached to every relay from TRUSTED job params,
- *   never from the worker message (the worker can't spoof who it acts as).
+ *   delegation client (the orchestrator's script surface); caps: capability
+ *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
+ *   page-bridge lane, PR #119). ownerSessionId / ownerToolUseId / runId are
+ *   attached to every relay from TRUSTED job params, never from the worker
+ *   message (the worker can't spoof who it acts as).
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any> }} deps
  *   sendToSW relays a worker bridge message to the SW route of that name.
  */
-const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, ownerSessionId, ownerToolUseId, runId }, { sendToSW }) => {
+const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId }, { sendToSW }) => {
+  // The job's capability profile — enforced HERE (the host refuses the bridge
+  // message) as well as in the generated worker surface (worker-source.js), so
+  // a realm-seal escape alone cannot re-open a disabled lane.
+  // DESIGN-19: a site-client run forces EVERY standard cap off — its ONLY outward
+  // edge is the pinned site.fetch (the site-fetch-request relay below). Even if the
+  // caller passed a wider profile, siteFetch closes it, the a2a-run posture applied
+  // to the site lane.
+  const profile = siteFetch
+    ? { page: false, egress: false, subagent: false, opfs: false }
+    : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const jobId = `job-${Date.now().toString(36)}-${++jobSeq}`;
   // Per-job EPHEMERAL OPFS subtree — peerd.self.* + relative imports work within
   // the run, then it's nuked. Durable state belongs in a Notebook, not here.
@@ -117,7 +132,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
 
   let built;
   try {
-    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors, actorsGuardMs: ACTORS_BRIDGE_GUARD_MS });
+    built = await buildWorkerSource(code, { entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors, actorsGuardMs: ACTORS_BRIDGE_GUARD_MS, caps: profile, siteFetch });
   } catch (e) {
     await opfs.nuke().catch(() => {});
     return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -175,24 +190,26 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
         // display() has no surface here (the agent should RETURN its result).
         if (m.type === 'log' || m.type === 'display') return;
 
-        if (m.type === 'subagent-request') {
+        if (m.type === 'actor-request') {
           // An a2a run is the dweb actor's MESH-ONLY surface. Its tool allow-set
-          // grants no delegation (no spawn_subagent), so the worker's
+          // grants no delegation (no actor_create), so the worker's
           // peerd.runtime.runAgent must not re-grant it — refuse at the host, the
-          // authoritative choke point (the worker surface can't be trusted).
-          if (a2a) {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: 'subagent spawn is disabled for a2a runs (the dweb actor does not delegate)' });
+          // authoritative choke point (the worker surface can't be trusted). The
+          // caps profile (PR #119: the page_code worker) is the second no-spawn
+          // lane, enforced the same way.
+          if (a2a || !profile.subagent) {
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: a2a ? 'actor spawn is disabled for a2a runs (the dweb actor does not delegate)' : 'actor spawn capability is disabled for this job' });
             return;
           }
           const a = m.args ?? {};
           try {
-            const resp = await sendToSW('subagent/spawn', {
+            const resp = await sendToSW('actor/spawn', {
               task: a.task, tools: a.tools, maxSteps: a.maxSteps, maxDepth: a.maxDepth, allowRecursion: a.allowRecursion,
             });
-            if (!resp?.ok) worker.postMessage({ type: 'subagent-response', rid: m.rid, error: resp?.error ?? 'subagent failed' });
-            else worker.postMessage({ type: 'subagent-response', rid: m.rid, result: resp.result });
+            if (!resp?.ok) worker.postMessage({ type: 'actor-response', rid: m.rid, error: resp?.error ?? 'actor failed' });
+            else worker.postMessage({ type: 'actor-response', rid: m.rid, result: resp.result });
           } catch (e) {
-            worker.postMessage({ type: 'subagent-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+            worker.postMessage({ type: 'actor-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
           }
           return;
         }
@@ -264,9 +281,10 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
           // Same envoy posture: the dweb actor has no egress (no fetch_url in its
           // allow-set). The a2a worker still carries the seal's bridged fetch +
           // peerd.egress.fetch, so the host is where we deny it — the mesh is the
-          // ONLY outward edge an a2a run gets.
-          if (a2a) {
-            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)' });
+          // ONLY outward edge an a2a run gets. The caps profile (PR #119: the
+          // page_code worker) is the second no-egress lane, same choke point.
+          if (a2a || !profile.egress) {
+            worker.postMessage({ type: 'fetch-response', rid: m.rid, ok: false, status: 0, bodyB64: null, error: a2a ? 'egress is disabled for a2a runs (the dweb actor talks only to the mesh)' : 'egress capability is disabled for this job' });
             return;
           }
           usedEgress = true;   // the run touched the web → its output carries untrusted bytes
@@ -283,7 +301,58 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, o
           }
           return;
         }
+        if (m.type === 'site-fetch-request') {
+          // DESIGN-19: the site-client run's ONLY outward edge. Refuse unless this
+          // is a site-client run (siteFetch set) with a trusted owner — the OWNER +
+          // the PINNED ORIGIN ride from the runJob params (SW-set, trusted), NEVER
+          // from the worker message. The SW route resolves the worker's pathOrUrl
+          // against the pinned origin (cross-origin refused) and runs it through the
+          // actor's session-scoped, denylisted, audited webFetch — this relay adds
+          // no authority and cannot pick the host.
+          if (!siteFetch || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'site-fetch-response', rid: m.rid, ok: false, error: 'site fetch is disabled for this run' });
+            return;
+          }
+          usedEgress = true;   // the run reached the web (its pinned origin) → untrusted bytes
+          try {
+            const resp = await sendToSW('site-fetch/call', {
+              ownerSessionId, siteOrigin: siteFetch,
+              pathOrUrl: m.pathOrUrl, method: m.method, headers: m.headers, body: m.body,
+            });
+            // The bridge resolves on m.result and rejects on m.error — so the
+            // response object rides under `result`, and an SW-side refusal (ok:false)
+            // surfaces as a thrown Error inside the run.
+            if (resp?.ok) worker.postMessage({ type: 'site-fetch-response', rid: m.rid, result: resp.value });
+            else worker.postMessage({ type: 'site-fetch-response', rid: m.rid, error: resp?.error ?? 'site fetch failed' });
+          } catch (e) {
+            worker.postMessage({ type: 'site-fetch-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+          }
+          return;
+        }
+        if (m.type === 'page-request') {
+          // PR #119: the code-REPL actor's page bridge. The OWNER identity rides
+          // from the runJob params (the SW set it — trusted), NEVER from the
+          // worker message: a hostile realm cannot name another session. The SW
+          // route re-derives the owned tab from its own bindings and dispatches
+          // through the full gate stack, so this relay adds no authority.
+          if (!profile.page || typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            worker.postMessage({ type: 'page-response', rid: m.rid, error: 'page capability is disabled for this job' });
+            return;
+          }
+          try {
+            const resp = await sendToSW('page/call', { method: m.method, args: m.args, ownerSessionId });
+            if (resp?.ok) worker.postMessage({ type: 'page-response', rid: m.rid, result: resp.value });
+            else worker.postMessage({ type: 'page-response', rid: m.rid, error: resp?.error ?? 'page call failed' });
+          } catch (e) {
+            worker.postMessage({ type: 'page-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+          }
+          return;
+        }
         if (m.type === 'opfs-request') {
+          if (!profile.opfs) {
+            worker.postMessage({ type: 'opfs-response', rid: m.rid, error: 'opfs capability is disabled for this job' });
+            return;
+          }
           try {
             let result;
             if (m.op === 'read') result = await opfs.read(m.args.path);

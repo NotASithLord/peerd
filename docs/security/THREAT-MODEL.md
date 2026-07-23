@@ -50,15 +50,15 @@ between them.
 | Surface | What runs there | Holds the key |
 |---|---|---|
 | Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
-| Offscreen document (`offscreen/`) | Per-actor and per-subagent worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
+| Offscreen document (`offscreen/`) | Per-actor and per-actor worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
-| Sandbox tabs (`vm-tab/`, `notebook-tab/`, `app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
+| Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
 
 The module map (`p`rovider, `e`gress, `e`ngine, `r`untime, `d`istributed) is in
 [`CLAUDE.md`](../../CLAUDE.md). Security-relevant code is concentrated in
 `peerd-egress/` (vault, egress, denylist, audit) and in the
-`peerd-runtime/subagent/` and `peerd-runtime/tools/` layers (the heap split and
+`peerd-runtime/actor/` and `peerd-runtime/tools/` layers (the heap split and
 the gate stack).
 
 ---
@@ -70,14 +70,14 @@ the gate stack).
 peerd splits "the agent" into separate roles so that no single reasoning context
 holds both untrusted input and dangerous capability. Enforcement lives in
 `peerd-runtime/tools/exposure.js`, `peerd-runtime/tools/gates.js`, and
-`peerd-runtime/subagent/`.
+`peerd-runtime/actor/`.
 
 | Actor | Trusted with | Not permitted to |
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
 | The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
 | A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| A subagent | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
+| An actor | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
 | The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
@@ -85,9 +85,9 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 
 - B1. Untrusted content and the orchestrator's heap. This is the most important
   boundary. Page text, command output, file contents, and peer bytes are read only
-  inside a keyless actor or subagent worker heap, and return to the orchestrator
+  inside a keyless actor or actor worker heap, and return to the orchestrator
   only as `wrapUntrusted`-fenced data. Enforced by the heap split
-  (`peerd-runtime/subagent/actor-worker-core.js`,
+  (`peerd-runtime/actor/actor-worker-core.js`,
   `background/offscreen-actor-client.js`).
 - B2. An agent heap and the network or the key. Model calls and tool calls leave a
   worker only through two service-worker-gated relays. The service worker adds
@@ -125,7 +125,7 @@ malicious separate extension, and physical device access.
 | Local files (WebVM filesystem, Notebook and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
 | Peer bundles (dwapps, data, agent cards) | Received over the mesh | Content addressing, Ed25519 signatures, size and shape caps |
 | The agent's own authority (its tools, its delegation) | The orchestrator | Exposure and actor-tier gates, the sender gate, Plan and Act mode |
-| The audit log (record of security events) | IndexedDB, extension origin | Append-only by convention (see residual risk R4, no tamper resistance) |
+| The audit log (record of security events) | IndexedDB, extension origin | Append-only, hash-chained for tamper evidence (residual risk R4: evident, not proof) |
 
 ---
 
@@ -141,7 +141,7 @@ the agent reads, try to induce fetches, and run script in its own origin.
 Cannot: reach the vault key, run in a privileged context, or make the agent's
 authority act outside its gates.
 Defenses: the memory boundary keeps page bytes out of the orchestrator's heap (B1).
-The web actor that reads the page is keyless (`subagent/spawn.js`
+The web actor that reads the page is keyless (`actor/spawn.js`
 `restrictCtxCapabilities` strips `getSecret` and `safeFetch`). The credentialed
 egress path is an exact-origin allowlist (`safeFetch`). Open-web fetches are gated
 by the SSRF block and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced
@@ -155,9 +155,9 @@ which is untrusted external tool metadata or instructions that make the agent ac
 an attacker's behalf, maps onto peerd's real analog: the A2A and inbound-mesh surface
 (agent-cards and peer messages).
 Defenses (the analogs of MCP tool-description sanitization): the sender gate
-(`subagent/delegation-lineage.js` `mayMessageActor`) makes an inbound turn unable to
-delegate, and taints any subagent spawned from an injected turn. The A2A translation
-core (`subagent/a2a-api.js` `meshCallToOp`) rejects unknown methods and malformed
+(`actor/delegation-lineage.js` `mayMessageActor`) makes an inbound turn unable to
+delegate, and taints any actor spawned from an injected turn. The A2A translation
+core (`actor/a2a-api.js` `meshCallToOp`) rejects unknown methods and malformed
 args. Signing ops require per-target consent (`meshMethodSigns`).
 Proven by: scenario 05.
 
@@ -239,12 +239,12 @@ Code: `peerd-egress/denylist/denylist.js`, `fetch/web-fetch.js`,
 
 <a id="inv-3"></a>
 ### INV-3. The heap that reads a page holds no secret and returns only fenced data
-The web, actor, and subagent worker heap has `getSecret` and `safeFetch`
+The web, actor, and actor worker heap has `getSecret` and `safeFetch`
 unconditionally stripped (`restrictCtxCapabilities`), cannot pass a function or key
 across the model-call boundary (`makeRelayedCallModel` drops every function), and its
 untrusted summary re-enters the orchestrator wrapped as data (`makeActorSummaryFence`
 and `wrapUntrusted`) with a delimiter the content cannot forge (`neutralizeFence`).
-Code: `peerd-runtime/subagent/spawn.js`, `peerd-runtime/subagent/actor-worker-core.js`,
+Code: `peerd-runtime/actor/spawn.js`, `peerd-runtime/actor/actor-worker-core.js`,
 `tools/prompt-wrap.js`. Red-team: scenario 03.
 
 <a id="inv-4"></a>
@@ -259,29 +259,34 @@ Code: `peerd-distributed/content/manifest.js`, `identity/keypair.js`,
 
 <a id="inv-5"></a>
 ### INV-5. An untrusted party cannot hijack the agent's authority
-An inbound (peer-originated) turn can never make the agent delegate, and a subagent
+An inbound (peer-originated) turn can never make the agent delegate, and an actor
 spawned by an inbound or injected turn is tainted for its whole subtree. Forged,
 severed, foreign-rooted, and cyclic lineages fail closed. A poisoned mesh op (bad
 method or args) is rejected, and signing as the user requires per-target consent.
-Code: `peerd-runtime/subagent/delegation-lineage.js` (`mayMessageActor`,
-`buildAncestry`), `subagent/a2a-api.js`. Red-team: scenario 05.
+Code: `peerd-runtime/actor/delegation-lineage.js` (`mayMessageActor`,
+`buildAncestry`), `actor/a2a-api.js`. Red-team: scenario 05.
 
 <a id="inv-6"></a>
 ### INV-6. Sandboxed code is confined to an audited bridge
 In a Notebook or headless worker realm, every raw network channel throws, the native
 `fetch` is deleted off the prototype chain, and the bridge is pinned non-writable and
 non-configurable so in-realm sabotage cannot unseat it. No fresh un-sealed realm can
-be created, and OPFS import paths collapse `..` inside the instance root. The App runs
+be created, and OPFS import paths collapse `..` inside the instance root. A wasm32-wasi
+module run in that realm via the `peerd:wasi` builtin holds strictly less than the realm
+itself: its only imports are the vendored shim's WASI preview1 syscalls, and every
+descriptor behind them is wrapper-built (stdin bytes, size-capped output collectors, an
+in-memory file table from the call) — no network channel exists for the seal to even
+block. The App runs
 at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 `allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs.
-Code: `notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
+Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, and the manifest sandbox CSP. Red-team: scenario 06,
 with the real-realm proof in
-`extension/tests/unit/notebook-tab/notebook-seal.test.js`,
+`extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js`,
 `extension/tests/unit/offscreen/job-runner.test.js`, and
 `extension/tests/unit/red-team/sandbox-escape.test.js`.
 
@@ -299,7 +304,7 @@ scenario 07.
 For a corpus of injection payloads, the authority each one seeks is denied by a real
 mechanism: exfil is denied by the keyless heap and the allowlist, navigation to a
 sensitive site by the denylist, SSRF by the private-network guard, a low-level DOM tool
-on the main turn by the exposure gate, an actor-only tool via a subagent by the tier
+on the main turn by the exposure gate, an actor-only tool via an actor by the tier
 gate, a cross-instance call by the instance pin, a write in Plan mode by Plan and Act
 mode, and a fence break-out by `neutralizeFence`. This is the difference from a
 single-context agent (a "browser-use"-style agent) that runs the model, the tools, the
@@ -377,19 +382,29 @@ evaluating peerd should know. Each cites where it lives in the code.
   the skill body loads into context as trusted instructions with no untrusted-content
   fence. A malicious shared skill is a direct instruction-injection vector. Installing a
   skill runs its author's prompt. (`peerd-runtime/skills/`.)
-- R4. The audit log is not tamper-resistant. It is append-only by convention in
-  IndexedDB. Any code in the extension origin can rewrite or delete entries. There is no
-  hash chain or signing. It records events for an honest system. It cannot resist an
-  attacker who already has in-origin code execution. (`peerd-egress/audit/log.js`.)
-- R5. Confirm grants are origin-blind. A session-scoped "Yes" is keyed by tool name
-  only, so approving `click` once approves it for every origin in that chat, and the
-  confirm prompt text is agent-supplied, so a misleading description could induce a
-  "yes". An origin-scoped grant store is future work. (`peerd-egress/confirm/protocol.js`.)
-- R6. Transfer import is an untrusted-deserialization surface. A shared settings or
-  session export can inject provider endpoints (redirecting egress), repopulate memory
-  (poisoning), and reinstall skills from arbitrary origins. The secret crypto and
-  unknown-key dropping are sound. The endpoint, hook, and memory injection path is not
-  otherwise gated. Import only files you trust. (`peerd-runtime/transfer/transfer.js`.)
+- R4 (narrowed). The audit log is tamper-EVIDENT, not tamper-proof. Every entry
+  extends a SHA-256 hash chain and a head record pins the newest link, so a rewritten
+  entry, a deleted middle entry, a truncated tail, or an inserted record fails
+  verification (`verify()`, surfaced in the debug bundle's provenance) — including
+  the cheaper attack of deleting the tail AND the head record together, which fails
+  closed on the surviving chained prefix. What remains out of reach: an attacker with
+  in-origin code execution can recompute the whole chain and the head — no in-origin scheme can prevent that without a secret the
+  origin does not hold. (`peerd-egress/audit/chain.js`, `audit/log.js`.)
+- R5 (narrowed). Confirm grants are origin-BOUND: a session-scoped "Yes" is keyed by
+  tool + the prompt's dispatcher-computed origin (the pinned tab for DOM tools, the
+  target host for web writes), so approving `click` on one site no longer covers any
+  other site; the origin line the user sees is system-derived. What remains: the
+  DESCRIPTION text is agent-supplied, so a misleading summary could still induce a
+  "yes" for the named origin. (`background/confirm-grant-key.js`,
+  `peerd-egress/confirm/protocol.js`.)
+- R6 (narrowed). Transfer import is a gated untrusted-deserialization surface.
+  Provider endpoints are validated (https or local loopback only) and named in the
+  summary the user approves; imported hooks land DISABLED and untrusted (a JS hook
+  cannot compile without an explicit re-trust in Settings); a memory import states its
+  prompt-injection consequence in the apply notices. What remains: an approved https
+  endpoint is still an egress redirection the user chose to accept, and imported
+  memory is trusted once the user proceeds. Import only files you trust.
+  (`peerd-runtime/transfer/transfer.js`.)
 - R7. A malicious co-installed extension or compromised origin is out of scope. The live
   key is reachable to any code running in the extension origin, and is mirrored into
   `chrome.storage.session` for service-worker-restart resume. The stated threat model is
@@ -420,8 +435,10 @@ evaluating peerd should know. Each cites where it lives in the code.
   `peerd-egress/fetch/safe-fetch.js`.)
 
 Candidates for future red-team scenarios, from the partially-defended surfaces above:
-R2 memory poisoning, R3 skill-body smuggling, R6 transfer-import injection, and R5
-origin-blind confirm grants.
+R2 memory poisoning and R3 skill-body smuggling. (R4 chain tampering, R5 grant
+scoping, and R6 import gating gained direct bun coverage when they were narrowed:
+tests/peerd-egress/audit-chain.test.ts, tests/background/confirm-grant-key.test.ts,
+and the R6 block in tests/peerd-runtime/transfer/transfer.test.ts.)
 
 ---
 

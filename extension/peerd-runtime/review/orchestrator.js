@@ -3,10 +3,10 @@
 //
 // This is the imperative shell that turns "review this diff" into a spawned
 // reviewer agent + a parsed structured summary. It REUSES the existing
-// subagent machinery (peerd-runtime/subagent/spawn.js) rather than standing
+// actor machinery (peerd-runtime/actor/spawn.js) rather than standing
 // up a second orchestrator:
 //
-//   - clean context: spawnSubagent({ task }) already creates a FRESH child
+//   - clean context: spawnActor({ task }) already creates a FRESH child
 //     session whose only input is `task`. The reviewer never sees the
 //     parent's messages — that's the clean-context property, for free.
 //   - read-only enforcement: we pass `tools: readOnlyToolNames(...)` so the
@@ -16,7 +16,7 @@
 //   - structured summary: the reviewer's final text is parsed by
 //     parseReviewSummary into {verdict, severity, issues[], fixes}.
 //
-// Everything IO is injected (spawnSubagent, getToolDescriptors, audit,
+// Everything IO is injected (spawnActor, getToolDescriptors, audit,
 // and optionally feature 02's checkpoints + feature 03's permissions). That
 // keeps this unit-testable in Bun with a mock spawn.
 
@@ -31,8 +31,8 @@ import { parseReviewSummary } from './schema.js';
  * the request_review tool) and exposes it on the `review/run` route.
  *
  * @param {Object} deps
- * @param {(req: object) => Promise<{ result: string, sessionId: string|null, toolCalls: number, durationMs: number, exceeded?: true, refused?: true }>} deps.spawnSubagent
- *   The EXISTING bound spawnSubagent from makeSpawnSubagent. We do not
+ * @param {(req: object) => Promise<{ result: string, sessionId: string|null, toolCalls: number, durationMs: number, exceeded?: true, refused?: true }>} deps.spawnActor
+ *   The EXISTING bound spawnActor from makeSpawnActor. We do not
  *   re-implement spawning; we call it with a read-only tool subset.
  * @param {() => Array<{ name: string, sideEffect?: string }>} deps.getToolDescriptors
  *   Full registered descriptors (with sideEffect) — the read-only filter input.
@@ -46,7 +46,7 @@ import { parseReviewSummary } from './schema.js';
  */
 export const makeRequestReview = (deps) => {
   const {
-    spawnSubagent,
+    spawnActor,
     getToolDescriptors,
     appendAudit = async () => {},
     checkpoints,
@@ -140,7 +140,7 @@ export const makeRequestReview = (deps) => {
     // Layer 2 (what it can DO): the spawn machinery already refuses any
     // tool outside the granted subset at dispatch — the subset narrowing
     // is the enforcement; the reviewer never gets a write tool to call.
-    const out = await spawnSubagent({
+    const out = await spawnActor({
       task,
       tools: allowed,
       maxSteps,
@@ -148,7 +148,7 @@ export const makeRequestReview = (deps) => {
       parentDepth,
       parentToolUseId,
       // why: a reviewer that tried to spawn its own children would escape
-      // the read-only contract; spawn already strips spawn_subagent unless
+      // the read-only contract; spawn already strips actor_create unless
       // allowRecursion, and `allowed` never contains it, so this is moot —
       // but we keep it explicit for the integrator reading this call.
       allowRecursion: false,

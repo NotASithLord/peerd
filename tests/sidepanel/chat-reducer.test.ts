@@ -106,11 +106,11 @@ describe('reduceChat', () => {
     expect(s1.asyncTasks.p1).toEqual([{ taskId: 'as-1' }]);
   });
 
-  test('subagent-start seeds a shell; subagent-state folds the authoritative session', () => {
-    const seeded = reduceChat(INITIAL_STATE, { type: 'turn/subagent-start', sessionId: 'c1', depth: 1, task: 'research' });
-    expect(seeded.subagents.sessions.c1.task).toBe('research');
-    const folded = reduceChat(seeded, { type: 'turn/subagent-state', session: { sessionId: 'c1', messages: [{ id: 'x' }] } });
-    expect(folded.subagents.sessions.c1.messages).toHaveLength(1);
+  test('actor-start seeds a shell; actor-state folds the authoritative session', () => {
+    const seeded = reduceChat(INITIAL_STATE, { type: 'turn/spawned-start', sessionId: 'c1', depth: 1, task: 'research' });
+    expect(seeded.spawned.sessions.c1.task).toBe('research');
+    const folded = reduceChat(seeded, { type: 'turn/spawned-state', session: { sessionId: 'c1', messages: [{ id: 'x' }] } });
+    expect(folded.spawned.sessions.c1.messages).toHaveLength(1);
   });
 
   test('actor display card: start seeds, state slices to fromIndex, done stops streaming', () => {
@@ -186,11 +186,11 @@ describe('reduceChat', () => {
     // Same-session 'state' push (Plan/Act toggle, /system, settings) must NOT wipe a live card.
     const sameSession = reduceChat(a0, { type: 'state', state: { session: { sessionId: 'A', messages: [] } } });
     expect(sameSession.actors['tu-1']).toBeDefined();
-    // An ACTUAL switch to B prunes actors/subagents/asyncTasks (they belong to A's transcript).
+    // An ACTUAL switch to B prunes actors/spawned/asyncTasks (they belong to A's transcript).
     const switched = reduceChat(a0, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } });
     expect(switched.session.sessionId).toBe('B');
     expect(switched.actors).toEqual({});
-    expect(switched.subagents).toEqual(INITIAL_STATE.subagents);
+    expect(switched.spawned).toEqual(INITIAL_STATE.spawned);
     expect(switched.asyncTasks).toEqual(INITIAL_STATE.asyncTasks);
   });
 

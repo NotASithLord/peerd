@@ -2,7 +2,7 @@
 // Persistent catalog of WebVMs.
 //
 // Each VM is a discrete instance with its own disk overlay (IDB DB) and
-// hosted in its own browser tab (extension://<id>/vm-tab/index.html#<id>).
+// hosted in its own browser tab (extension://<id>/engine-tabs/vm-tab/index.html#<id>).
 // This module owns the metadata — the live tabs themselves are tracked
 // by the SW in-memory (vmId → tabId) and reconstructed from
 // chrome.tabs.query on SW boot.
@@ -72,4 +72,4 @@ export const createVmRegistry = (deps) =>
     },
   }, deps);
 
-export const VM_TAB_PATH = '/vm-tab/index.html';
+export const VM_TAB_PATH = '/engine-tabs/vm-tab/index.html';

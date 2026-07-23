@@ -109,7 +109,7 @@ export const shouldExtract = ({
   minChars = AUTO_MEMORY_MIN_CHARS,
 }) => {
   if (!session) return { extract: false, reason: 'no-session' };
-  // Subagent/runner sessions are decomposition scratch — their parent
+  // Actor/runner sessions are decomposition scratch — their parent
   // chat is the one that wraps up.
   if ((session.kind ?? 'chat') !== 'chat') return { extract: false, reason: 'not-a-chat' };
   // why cast: the param keeps `messages` un-narrowed for caller/test

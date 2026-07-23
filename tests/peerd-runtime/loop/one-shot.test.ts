@@ -206,6 +206,30 @@ describe('runUserTurn — one-shot', () => {
     expect(s.messages.some((m: any) => m.stopReason === 'one_shot')).toBe(false);
   });
 
+  test('an ok:true eval whose CODE crashed (evalError) also falls through — the field bug', async () => {
+    // The live failure: a notebook actor ran oneShot code that threw a
+    // CompileError. js_notebook returns ok:true (the eval ran; [ERROR] is the
+    // result) so is_error never fires — and the raw crash short-circuited back
+    // as the reply instead of the promised recovery turn. The evalError marker
+    // must disarm the latch exactly like a tool-level error.
+    const store = makeStore();
+    store.seed('s1');
+    const { model, state } = makeCountingModel();
+    const ctx = baseCtx(store, {
+      callModel: model,
+      oneShot: true,
+      toolDispatch: async () => ({ ok: true, content: '> code\n[0ms]\n[ERROR]\nCompileError: bad wasm', evalError: true, meta: {} }),
+    });
+    await drain(runUserTurn(ctx));
+
+    // the crash round did NOT suffice -> the model got its recovery turn.
+    expect(state.calls).toBe(2);
+    const s = await store.get('s1');
+    const last = s.messages[s.messages.length - 1];
+    expect(last.content).toBe('summary');
+    expect(s.messages.some((m: any) => m.stopReason === 'one_shot')).toBe(false);
+  });
+
   test('without oneShot (default) the loop runs the full turn — summarize inference happens', async () => {
     const store = makeStore();
     store.seed('s1');

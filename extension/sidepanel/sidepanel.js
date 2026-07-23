@@ -15,7 +15,7 @@ import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
 import { App } from './components/app.js';
 import { createVoiceManager } from '/peerd-runtime/index.js';
-import { INITIAL_STATE, reduceChat, putSubagentSession } from './chat-reducer.js';
+import { INITIAL_STATE, reduceChat, putSpawnedSession } from './chat-reducer.js';
 
 /** @typedef {import('./chat-reducer.js').ChatState} ChatState */
 /** @typedef {import('./chat-reducer.js').ReducerMsg} ReducerMsg */
@@ -87,13 +87,13 @@ const handlePortDisconnect = () => {
     streaming: false,
     notices: INITIAL_STATE.notices,
     goalRuns: INITIAL_STATE.goalRuns,
-    // why: actors/subagents/asyncTasks are SW-OWNED live projections too. A card
+    // why: actors/spawned/asyncTasks are SW-OWNED live projections too. A card
     // created with {streaming:true} would otherwise linger as a stuck 'working…'
     // chip — the SW that drove it died, and its boot redrain re-runs the turn
     // with no parentToolUseId, so the card never receives turn/actor-done. Reset
     // them; a revived SW re-seeds anything still live via turn/actor-state.
     actors: INITIAL_STATE.actors,
-    subagents: INITIAL_STATE.subagents,
+    spawned: INITIAL_STATE.spawned,
     asyncTasks: INITIAL_STATE.asyncTasks,
   };
   m.redraw();
@@ -112,25 +112,25 @@ connectPort();
  */
 const send = (msg) => browser.runtime.sendMessage(msg);
 
-// Lazy-load a subagent session for a nested transcript. Used when the
-// user expands a spawn_subagent card whose child wasn't streamed live
+// Lazy-load an actor session for a nested transcript. Used when the
+// user expands an actor_create card whose child wasn't streamed live
 // (e.g. after a side-panel reload). Deduped by an in-flight set so a
 // re-expand mid-fetch doesn't fire a second request.
 /** @type {Set<string>} */
-const subagentFetchInFlight = new Set();
+const actorFetchInFlight = new Set();
 /** @param {string} sessionId */
-const loadSubagent = (sessionId) => {
+const loadActor = (sessionId) => {
   if (!sessionId) return;
-  if (currentState.subagents.sessions[sessionId]?.messages?.length) return;
-  if (subagentFetchInFlight.has(sessionId)) return;
-  subagentFetchInFlight.add(sessionId);
+  if (currentState.spawned.sessions[sessionId]?.messages?.length) return;
+  if (actorFetchInFlight.has(sessionId)) return;
+  actorFetchInFlight.add(sessionId);
   send({ type: 'session/get', sessionId }).then((resp) => {
-    subagentFetchInFlight.delete(sessionId);
+    actorFetchInFlight.delete(sessionId);
     if (resp?.ok && resp.session) {
-      currentState = putSubagentSession(currentState, resp.session);
+      currentState = putSpawnedSession(currentState, resp.session);
       m.redraw();
     }
-  }).catch(() => { subagentFetchInFlight.delete(sessionId); });
+  }).catch(() => { actorFetchInFlight.delete(sessionId); });
 };
 
 // Reentry guard for voice auto-restore so a chatty state push doesn't
@@ -261,7 +261,7 @@ const requestDebugger = async (noticeId) => {
 const openAgentTab = (tabId) => {
   try { browser.tabs.update(tabId, { active: true }); } catch (e) { console.warn('[sidepanel] focus tab failed', e); }
 };
-const uiActions = { loadSubagent, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
 
 // ---- brand hand-off: is the options tab the active one? -------------------
 //

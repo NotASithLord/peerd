@@ -3,7 +3,7 @@
 // shared createTabTracker.
 //
 // Each WebVM is a discrete browser tab at
-//   chrome-extension://<id>/vm-tab/index.html#<vmId>
+//   chrome-extension://<id>/engine-tabs/vm-tab/index.html#<vmId>
 // The tab streams a CheerpX disk image, so "ready" can take a while —
 // hence the 30s timeout, longer than the Notebook / app trackers.
 //

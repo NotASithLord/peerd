@@ -111,7 +111,7 @@ describe('makeAutoMemory', () => {
       expect(calls.length).toBe(0);
     }
     {
-      const { auto, calls } = makeWorld({ session: substantiveSession({ kind: 'subagent' }) });
+      const { auto, calls } = makeWorld({ session: substantiveSession({ kind: 'spawned' }) });
       expect((await auto.maybeExtract('s1', 'archive')).skipped).toBe('not-a-chat');
       expect(calls.length).toBe(0);
     }

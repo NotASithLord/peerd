@@ -152,6 +152,84 @@ export const ApiIntegrationsSection = {
       m('.settings-divider'),
       m('h3', 'Git credentials'),
       m(GitCredentialsSection, { send }),
+
+      // DESIGN-19 site clients fold in here too — per-origin derived API clients the
+      // web actor builds from observed traffic. Not secrets (they hold no
+      // credentials), but same conceptual family (per-origin agent web state), so
+      // they live on this page. SiteClientsSection owns its own list/delete lifecycle.
+      m('.settings-divider'),
+      m('h3', 'Site clients'),
+      m(SiteClientsSection, { send }),
+    ]);
+  },
+};
+
+// DESIGN-19 — stored site clients (per-origin derived API clients). Read-only +
+// delete: the agent derives + patches them (confirm-gated) via the web actor;
+// here the user sees what's stored and can remove any. Shows staleness so a stale
+// client is legible. No bodies are ever fetched — list returns metas only.
+const fmtAge = (/** @type {number} */ ts) => {
+  if (!ts) return 'never';
+  const days = Math.floor((Date.now() - ts) / 86_400_000);
+  return days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`;
+};
+
+export const SiteClientsSection = {
+  oninit(/** @type {any} */ vnode) {
+    vnode.state.clients = null;   // Array | null (loading)
+    vnode.state.busy = false;
+    vnode.state.msg = null;
+    SiteClientsSection.load(vnode);
+  },
+
+  load(/** @type {any} */ vnode) {
+    vnode.attrs.send({ type: 'site-client/list' }).then((/** @type {any} */ r) => {
+      vnode.state.clients = r?.ok ? r.clients : [];
+      m.redraw();
+    }).catch(() => { vnode.state.clients = []; m.redraw(); });
+  },
+
+  view: (/** @type {{ attrs: { send: any }, state: any }} */ { attrs: { send }, state: ui }) => {
+    const remove = async (/** @type {string} */ origin) => {
+      if (ui.busy) return;
+      ui.busy = true; ui.msg = null; m.redraw();
+      const r = await send({ type: 'site-client/delete', origin });
+      ui.busy = false;
+      if (r?.ok) {
+        ui.clients = (ui.clients ?? []).filter((/** @type {any} */ x) => x.origin !== origin);
+        ui.msg = { ok: true, text: `Removed the site client for ${origin}.` };
+      } else {
+        ui.msg = { ok: false, text: r?.error ?? 'Could not remove it.' };
+      }
+      m.redraw();
+    };
+
+    return m('div', [
+      m('p.hint', [
+        'Reusable API clients the agent ', m('strong', 'derived'), ' from watching sites you '
+        + 'browsed — so it can call an API directly instead of re-driving the page. They hold '
+        + 'no credentials (your session rides the browser), run pinned to their origin, and are ',
+        m('strong', 'a cache, not a contract'), ' (the agent verifies them on use). Remove any here.',
+      ]),
+      ui.clients === null
+        ? m('p.hint', 'Loading…')
+        : ui.clients.length === 0
+          ? m('p.hint', 'No site clients yet — the agent creates these as it works.')
+          : m('.provider-cards', ui.clients.map((/** @type {any} */ c) => m('.provider-card', [
+              m('.provider-card-main', [
+                m('.provider-card-text', [
+                  m('span.provider-card-name', c.origin),
+                  m('span.key-badge.key-set', `${c.endpoints} endpoint${c.endpoints === 1 ? '' : 's'}`),
+                  c.recentFailures > 0 ? m('span.key-badge.key-unset', `${c.recentFailures} recent failure${c.recentFailures === 1 ? '' : 's'}`) : null,
+                ]),
+                m('span', { style: 'margin-left:auto;' },
+                  m('button.linkish', { type: 'button', disabled: ui.busy, onclick: () => remove(c.origin) }, 'Remove')),
+              ]),
+              m('p.hint', { style: 'margin:4px 0 0;' },
+                `${c.summary ? `${c.summary} · ` : ''}auth: ${c.auth} · derived ${fmtAge(c.derivedAt)} · `
+                + `${c.lastVerifiedAt ? `verified ${fmtAge(c.lastVerifiedAt)}` : 'unverified'} · via ${c.deriver}`),
+            ]))),
+      ui.msg ? m(`p.key-msg${ui.msg.ok ? '.ok' : '.err'}`, ui.msg.text) : null,
     ]);
   },
 };

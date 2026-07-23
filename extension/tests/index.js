@@ -35,7 +35,7 @@ import './unit/peerd-provider/ollama-recommend.test.js';
 // --- peerd-runtime ---
 import './unit/peerd-runtime/sessions-store.test.js';
 import './unit/peerd-runtime/agent-loop.test.js';
-import './unit/peerd-runtime/subagent-spawn.test.js';
+import './unit/peerd-runtime/actor-spawn.test.js';
 import './unit/peerd-runtime/dispatcher.test.js';
 import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';
@@ -63,14 +63,14 @@ import './unit/peerd-engine/overlay.test.js';
 import './unit/peerd-engine/personal-index-durability.test.js';
 
 // --- chassis: notebook-tab ---
-import './unit/notebook-tab/notebook-seal.test.js';
-import './unit/notebook-tab/notebook-output-render.test.js';
+import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
+import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
 import './unit/red-team/sandbox-escape.test.js';
 
 // --- chassis: vm-tab ---
-import './unit/vm-tab/firefox-webvm-note.test.js';
+import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
@@ -96,6 +96,7 @@ import './unit/sidepanel/api-integrations.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
+import './unit/sidepanel/failure-chip.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

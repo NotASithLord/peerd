@@ -21,7 +21,7 @@
 //     per-host allowlist. So exfil/C2 to an arbitrary PUBLIC domain over
 //     the open-web path is NOT prevented here; the architectural
 //     mitigation is that fetch_url is web-actor-only and that context is
-//     KEYLESS — the capability strip (subagent/spawn.js) removes getSecret /
+//     KEYLESS — the capability strip (actor/spawn.js) removes getSecret /
 //     safeFetch, so an injected page can't launder the user's credentials
 //     out over webFetch (see web-fetch.js).
 //   - Network requests originating from web pages the agent is browsing

@@ -78,6 +78,14 @@ export const defaults = {
   // tool action. The chat mode-row dial raises it per task.
   reasoningEffort: { store: 'medium', preview: 'medium' },
 
+  // PR #119 — the web actor's ACTION surface. 'tools' (default, both channels):
+  // the actor drives its tab via discrete click/type/navigate tool calls.
+  // 'code': the Aside-style A/B arm — the actor WRITES Playwright-shaped JS
+  // (page.goto/click/fill/…) in a sealed REPL; perception stays the a11y
+  // snapshot. Experiment knob, off by default even on preview — flipped by the
+  // eval bench to A/B the two surfaces. Unknown stored values coerce to 'tools'.
+  webActorActionSurface: { store: 'tools', preview: 'tools' },
+
   // Empty on fresh install — NO provider is assumed. The first provider the
   // user configures auto-activates (provider/setKey for keyed providers,
   // ensureActiveProvider for a reachable keyless daemon at first chat). Until
@@ -116,6 +124,15 @@ export const defaults = {
   // no chrome.debugger API, so the setting is moot there on either channel.
   advancedAutomationEnabled: { store: false, preview: true },
 
+  // Watch mode (background/watch-mode.js): the OPT-IN inverse of DESIGN-12's
+  // no-focus-steal. OFF by default — peerd drives its tab in the background so
+  // it never interrupts you. Toggle it on from the side-panel top bar and peerd
+  // brings the agent's current tab to the foreground and FOLLOWS it as the agent
+  // moves between tabs, so you watch the real page live (the browser is the
+  // viewer — no screenshot/capture, no new permission, both channels). Off both
+  // channels: watching is a per-moment choice, not a default posture.
+  watchAgentTab: { store: false, preview: false },
+
   // Web actor model override. '' is NO override — the web actor resolves to
   // the active provider's fast default (Haiku on Anthropic via
   // adapter.defaultRunnerModel; resolveRunnerModel), NOT the chat model. So out
@@ -125,6 +142,30 @@ export const defaults = {
   // automatically. The KEY stays `runnerModel` for saved-settings continuity.
   // Same on both channels.
   runnerModel: { store: '', preview: '' },
+
+  // Prewalk (loop/prewalk.js): a goal run opens on the chat's (frontier)
+  // model with a hidden plan-first nudge, then hands the LIVE context to a
+  // cheap executor model at the first landed action — todo list ticking, one
+  // valid move already in history. OFF by default on BOTH channels until the
+  // in-extension Lab's baseline-vs-prewalk arms validate spend/pass/speed
+  // (home/eval-section.js); flip deliberately, not by shipping.
+  prewalkEnabled: { store: false, preview: false },
+
+  // Engine-actor prewalk (loop/prewalk-controller.js): the three engine actor
+  // kinds (VM/Notebook/App) are minted on the chat's (frontier) model. With
+  // this on, an engine actor runs its FIRST turn on that model, then swaps to
+  // the cheap executor for every later turn — lower cost on multi-turn engine
+  // work (a VM build, a notebook iteration) at held-or-better quality. Shares
+  // the prewalkExecutorModel pin below. OFF by default on BOTH channels until
+  // the Lab's engine-actor A/B validates it (home/eval-section.js).
+  enginePrewalkEnabled: { store: false, preview: false },
+
+  // Prewalk executor override. '' = no pin — resolve the active provider's
+  // fast default (the same defaultRunnerModel rung the web actor rides, e.g.
+  // Haiku on Anthropic). A non-empty value pins a SAME-PROVIDER model id
+  // (cross-provider executors are a deliberate later step — keys, failover
+  // and pricing are provider-scoped). Shared by goal-run and engine-actor prewalk.
+  prewalkExecutorModel: { store: '', preview: '' },
 
   // Cost telemetry: the meter is always on; the hard limit is opt-in.
   spendLimitUsd: { store: 0, preview: 0 },

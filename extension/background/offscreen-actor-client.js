@@ -1,6 +1,6 @@
 // @ts-check
 // background/offscreen-actor-client.js — the SW-side client for EVERY offscreen
-// agent loop (the heap split): ephemeral reasoning subagents (spawn.js) AND bound
+// agent loop (the heap split): ephemeral spawned reasoners (spawn.js) AND bound
 // actors (the actor turn). One client, one set of routes (model-call + tool-dispatch
 // + loop-event); a reasoning child grants no tools, so it only ever exercises
 // model-call.
@@ -26,18 +26,27 @@
  * @param {(call: object, ctx: object) => Promise<any>} deps.dispatchToolCall
  * @param {(call: any, actorType: string|undefined, instanceId: string|undefined) => void} deps.pinActorCall
  * @param {(ctx: any, allowedNames: Set<string>) => any} [deps.restrictCtxCapabilities]  phase 4:
- *   strip a subagent ctx down to the capabilities its GRANTED tools need (capability-by-need),
- *   the analog of the actor's kind-scoped strip. Required to run tool-bearing subagents offscreen.
+ *   strip an actor ctx down to the capabilities its GRANTED tools need (capability-by-need),
+ *   the analog of the actor's kind-scoped strip. Required to run tool-bearing spawned offscreen.
  * @param {(actorSessionId: string) => (number | undefined)} [deps.ownedTabFor]  a
  *   tab-backed WEB actor's currently-owned tab id (phase 3) — read per dispatch so a
  *   mid-turn navigate that adopts a tab (0→1) is seen by the NEXT tool call. undefined
  *   for engine/API actors (no tab) and the 0-tab web state.
  * @param {string} deps.EXPOSURE_ACTOR
  * @param {() => number} [deps.now]
+ * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
+ *   inspector's capture hook — fed every delegated model call with the runMeta-derived
+ *   identity (never the worker's own claim). Optional; defaults to a no-op.
+ * @param {(msg: Record<string, any>) => void} [deps.broadcastOp]  announce each settled
+ *   ACTOR tool dispatch on the UI ports ('actor/op' — name/args/ok, observability only).
+ *   The offscreen heap emits no turn/tool-use, so this is how the eval harness's OM2W
+ *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
  */
 export const makeOffscreenActorClient = ({
   ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, now = Date.now,
+  recordModelCall = () => {},
+  broadcastOp = (/** @type {any} */ _msg) => {},
 }) => {
   let seq = 0;
   /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
@@ -51,8 +60,12 @@ export const makeOffscreenActorClient = ({
   const abortedRuns = new Set();
   /** @type {Map<string, (ev: object) => void>} runId → onEvent */
   const runOnEvent = new Map();
+  /** @type {Map<string, { sessionId: string, label: string }>} runId → identity for the
+   * context inspector: the model-call route only carries runId + body args, so the
+   * session (and a human label for WHOSE call this is) is stashed at run() time. */
+  const runMeta = new Map();
   /** @type {Map<string, AbortSignal>} sessionId → the in-flight run's abort signal.
-   * Phase 4: a subagent's BLOCKING tool (message_actor awaitReply) runs SW-side via the
+   * Phase 4: an actor's BLOCKING tool (message_actor awaitReply) runs SW-side via the
    * relay and races the reply against the child's cancel; the child's signal is only
    * visible at run() time, so stash it here for the tool-dispatch route to read. One run
    * per session at a time (turn slots serialize), so a plain Map is enough. */
@@ -66,6 +79,10 @@ export const makeOffscreenActorClient = ({
     await ensureOffscreen();
     const runId = `aw-${now().toString(36)}-${++seq}`;
     if (onEvent) runOnEvent.set(runId, onEvent);
+    runMeta.set(runId, {
+      sessionId: job.actorSessionId,
+      label: job.actorType ? `actor:${job.actorType}` : `actor d${job.depth ?? 1}`,
+    });
     const abortRun = () => {
       abortedRuns.add(runId);   // cover a model-call that hasn't reached the route yet
       for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
@@ -91,6 +108,7 @@ export const makeOffscreenActorClient = ({
       // it already fired under {once:true}); keeps nothing dangling on the turn signal.
       signal?.removeEventListener('abort', abortRun);
       runOnEvent.delete(runId);
+      runMeta.delete(runId);
       inflight.delete(runId);
       abortedRuns.delete(runId);
       if (signal && signalBySession.get(job.actorSessionId) === signal) signalBySession.delete(job.actorSessionId);
@@ -107,6 +125,12 @@ export const makeOffscreenActorClient = ({
       const ac = new AbortController();
       const set = inflight.get(key) ?? new Set();
       set.add(ac); inflight.set(key, set);
+      // The context inspector sees every DELEGATED model call here — the one
+      // relay every actor and actor heap uses. Identity comes from the
+      // runMeta stash, never the worker's args (a worker must not be able to
+      // relabel whose context this was).
+      const meta = runMeta.get(key);
+      if (meta) recordModelCall({ ...(args ?? {}), sessionId: meta.sessionId, label: meta.label });
       /** @type {any[]} */
       const events = [];
       try {
@@ -128,27 +152,27 @@ export const makeOffscreenActorClient = ({
         const rec = actorSessionId ? await sessions.get(actorSessionId) : null;
         if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
 
-        // Phase 4 — a SUBAGENT is a tool-bearing EPHEMERAL actor. Its toolset is the
+        // Phase 4 — a spawned child is a tool-bearing EPHEMERAL actor. Its toolset is the
         // NARROWED-GENERAL set persisted at spawn (rec.grantedTools), not an instance
         // pin. Rebuild its restricted ctx SW-side EXACTLY as the in-SW spawn path does
         // (buildToolContext → audit-tag → abortSignal → restrictCtxCapabilities over the
         // granted set) and re-check the relayed call against grantedTools first — the
         // worker's call args (shaped by tool output it read) are never trusted, the same
         // defense-in-depth as the actor pin.
-        if (rec.kind === 'subagent') {
-          if (!restrictCtxCapabilities) return { ok: false, error: 'actor/tool-dispatch: subagent offscreen not wired' };
+        if (rec.kind === 'spawned') {
+          if (!restrictCtxCapabilities) return { ok: false, error: 'actor/tool-dispatch: actor offscreen not wired' };
           const granted = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
-          if (typeof call?.name !== 'string' || !granted.has(call.name)) return { ok: false, error: `tool_not_available_to_subagent: ${call?.name}` };
+          if (typeof call?.name !== 'string' || !granted.has(call.name)) return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
           const base = await buildToolContext({ sessionId: actorSessionId });
           const sig = signalBySession.get(/** @type {string} */ (actorSessionId));
           // Stamp the child lineage on every audit its tools emit (parity with spawn.js's taggedAudit).
-          const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, subagentSessionId: actorSessionId, depth: rec.depth } });
+          const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, actorSessionId, depth: rec.depth } });
           const ctx = restrictCtxCapabilities({ ...base, audit, ...(sig ? { abortSignal: sig } : {}) }, granted);
           const result = await dispatchToolCall(call, ctx);
           return { ok: true, result };
         }
 
-        if (rec.kind !== 'actor') return { ok: false, error: 'actor/tool-dispatch: not an actor or subagent session' };
+        if (rec.kind !== 'actor') return { ok: false, error: 'actor/tool-dispatch: not an actor or actor session' };
         // Phase 3: a WEB actor (kind 'web', backing tab) OWNS one tab; its DOM tools
         // must target THAT tab and the origin/denylist gate must see its origin.
         // Resolve the owned tab id HERE, per dispatch (never trust the worker), so a
@@ -168,6 +192,17 @@ export const makeOffscreenActorClient = ({
         // ctx.activeTab; still runs so engine/edit_file calls normalize.)
         pinActorCall(call, rec.actorType, rec.instanceId);
         const result = await dispatchToolCall(call, ctx);
+        // Announce the settled dispatch — pure observability, zero authority
+        // (the gated dispatch already ran; consumers see name/args/ok only).
+        // why: an OFFSCREEN actor turn emits no turn/tool-use broadcast (that
+        // path is turn-driver's, in-SW only) — without this the eval harness's
+        // OM2W recorder can't see the actor's page actions. Best-effort.
+        try {
+          broadcastOp({
+            type: 'actor/op', sessionId: actorSessionId,
+            name: call?.name, args: call?.args ?? {}, ok: result?.ok !== false,
+          });
+        } catch { /* display-only */ }
         return { ok: true, result };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };

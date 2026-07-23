@@ -4,7 +4,7 @@
 //
 // A config is a PAIR of models, because that's what actually runs a task:
 //   • the MAIN model — the chat agent that plans + orchestrates
-//   • the WEB ACTOR model — the sub-agent that reads/acts on pages
+//   • the WEB ACTOR model — the actor that reads/acts on pages
 // Both are configurable per side, so you can compare e.g. "cloud main + cloud
 // web actor" vs "fully on-device (local main + local web actor)" — and the cost
 // is honest: a fully-local config reads $0 total.
@@ -30,6 +30,7 @@ import { SUITES } from '../eval/tasks.js';
  * @property {any} progress
  * @property {string} suiteId
  * @property {boolean} showTabs
+ * @property {boolean} goalRuns
  * @property {boolean} showTasks
  * @property {string} mainA
  * @property {string} runnerA
@@ -49,7 +50,7 @@ let engine = null;
 /** @type {EvalUi} */
 const ui = {
   loaded: false, warn: '', running: false, progress: null,
-  suiteId: 'simple', showTabs: false, showTasks: false,
+  suiteId: 'simple', showTabs: false, goalRuns: false, showTasks: false,
   mainA: '', runnerA: '', mainB: '', runnerB: '',
   allOptions: [], cloudOptions: [], localLabel: null,
   ab: null, single: null, log: [],
@@ -65,7 +66,7 @@ const parseMain = (val) => { const i = String(val).indexOf('::'); return i < 0 ?
 /** @param {'A' | 'B'} side */
 const configFor = (side) => {
   const { provider, model } = parseMain(side === 'A' ? ui.mainA : ui.mainB);
-  return { mainProvider: provider, mainModel: model, runnerCfg: side === 'A' ? ui.runnerA : ui.runnerB };
+  return { mainProvider: provider, mainModel: model, runnerCfg: side === 'A' ? ui.runnerA : ui.runnerB, goal: ui.goalRuns };
 };
 
 async function loadModels() {
@@ -128,6 +129,50 @@ async function runSingle() {
   finally { ui.running = false; ui.progress = null; m.redraw(); }
 }
 
+// Baseline vs prewalk — the SAME config (side A's pair), both legs as goal
+// runs; the only variable is the prewalk handoff. This is THE gate for
+// flipping prewalkEnabled on by default: it must hold pass rate while
+// cutting $ and time (compare stencil.so/blog/prewalk's receipts).
+async function runPrewalkAB() {
+  if (ui.running) return;
+  ui.running = true; ui.ab = null; ui.single = null; ui.log = []; ui.progress = null; m.redraw();
+  try {
+    const base = { ...configFor('A'), goal: true };
+    ui.ab = await ensureEngine().runAB(
+      { ...base, prewalk: false },
+      { ...base, prewalk: true },
+      ui.suiteId, ui.showTabs,
+      (/** @type {any} */ p) => { ui.progress = p; m.redraw(); },
+    );
+  } catch (e) { pushLog(`prewalk A/B aborted: ${/** @type {{ message?: string }} */ (e)?.message ?? e}`); }
+  finally { ui.running = false; ui.progress = null; m.redraw(); }
+}
+
+// Engine-actor A/B — side A's config, both legs NORMAL turns (not goal), on the
+// engine-actor suite; the only variable is enginePrewalk. The gate for flipping
+// enginePrewalkEnabled on: pass rate holds while runner-$ (the engine actor's
+// spend) drops. Forces the engine-actor suite so there's multi-turn actor work
+// to swap on.
+async function runEnginePrewalkAB() {
+  if (ui.running) return;
+  ui.running = true; ui.ab = null; ui.single = null; ui.log = []; ui.progress = null;
+  const suiteId = 'engine-actor';
+  m.redraw();
+  try {
+    // Force normal turns (not goal) whatever the 'goal runs' checkbox says — this
+    // A/B isolates the engine-actor swap on plain message_actor turns, per the
+    // contract note above. (runPrewalkAB is the goal-run counterpart.)
+    const base = { ...configFor('A'), goal: false };
+    ui.ab = await ensureEngine().runAB(
+      { ...base, enginePrewalk: false },
+      { ...base, enginePrewalk: true },
+      suiteId, ui.showTabs,
+      (/** @type {any} */ p) => { ui.progress = p; m.redraw(); },
+    );
+  } catch (e) { pushLog(`engine-actor A/B aborted: ${/** @type {{ message?: string }} */ (e)?.message ?? e}`); }
+  finally { ui.running = false; ui.progress = null; m.redraw(); }
+}
+
 /** @param {number} ms */
 const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
 /** @param {number} [n] */
@@ -136,8 +181,9 @@ const usd = (n) => `$${(n ?? 0).toFixed(5)}`;
 const runnerUsd = (n) => ((n ?? 0) > 0 ? usd(n) : 'free'); // local runner reads "free"
 /** @param {string} id */
 const shortModel = (id) => String(id).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, ''); // strip provider/ + date
-/** @param {{ mainModel: string, runnerCfg: string }} cfg */
-const pairLabel = (cfg) => `${shortModel(cfg.mainModel)} / ${cfg.runnerCfg === 'local' ? 'local' : shortModel(cfg.runnerCfg)}`;
+/** @param {{ mainModel: string, runnerCfg: string, goal?: boolean, prewalk?: boolean, enginePrewalk?: boolean }} cfg */
+const pairLabel = (cfg) => `${shortModel(cfg.mainModel)} / ${cfg.runnerCfg === 'local' ? 'local' : shortModel(cfg.runnerCfg)}`
+  + `${cfg.goal ? ' · goal' : ''}${cfg.prewalk ? ' · prewalk' : ''}${cfg.enginePrewalk ? ' · engine-prewalk' : ''}`;
 
 /** @param {{ a: any, b: any, delta: any }} result */
 function abBoard({ a, b, delta }) {
@@ -183,6 +229,16 @@ const pairCol = (side) => m('.eval-pair', [
 // The selected suite (the id is a free string in state; SUITES is keyed).
 const suite = () => SUITES[/** @type {keyof typeof SUITES} */ (ui.suiteId)];
 
+// Suites the home Lab can actually run. The web-actor suite uses the __FIXTURE__
+// sentinel that ONLY eval/runner.js (the CDP bench, fed by a local fixture server)
+// substitutes — the home Lab's eval-engine has no fixture server, so those tasks
+// would all-fail here. Hide any suite whose tasks carry the sentinel (self-
+// maintaining: a new fixture suite is filtered automatically). why detect the
+// sentinel, not the id: keeps the two surfaces from drifting.
+const usesFixture = (/** @type {any} */ s) => (s.tasks ?? []).some((/** @type {any} */ t) =>
+  String(t.startUrl ?? '').includes('__FIXTURE__') || String(t.prompt ?? '').includes('__FIXTURE__'));
+const labSuites = Object.values(SUITES).filter((/** @type {any} */ s) => !usesFixture(s));
+
 export const EvalSection = {
   oninit() { if (!ui.loaded) loadModels().catch(() => {}); },
   view() {
@@ -195,15 +251,28 @@ export const EvalSection = {
       m('p.eval-note', 'A run takes over the agent session (your current chat resets) and drives a hidden browser window — don\'t start a chat while it runs.'),
       m('.eval-controls', [
         m('label.eval-field', ['suite', m('select', { value: ui.suiteId, disabled: ui.running, onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui.suiteId = e.target.value; } },
-          [m('option', { value: 'simple' }, 'Simple · 30 tasks'), m('option', { value: 'robust' }, 'Robust · 55 tasks')])]),
+          labSuites.map((/** @type {any} */ s) => m('option', { value: s.id }, `${s.label} · ${s.tasks.length} tasks`)))]),
         m('label.eval-check', {
           title: 'Off: the agent runs in a hidden, background window. On: a visible window (its own tab bar) you can watch — it never takes focus either way.',
         }, [m('input', { type: 'checkbox', checked: ui.showTabs, disabled: ui.running, onchange: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.showTabs = e.target.checked; } }), 'show tabs']),
+        m('label.eval-check', {
+          title: 'Run every task as an autonomous GOAL run (plan → todo checklist → turns until complete_goal) instead of a single chat turn. Slower per task; exercises the goal loop the prewalk A/B measures.',
+        }, [m('input', { type: 'checkbox', checked: ui.goalRuns, disabled: ui.running, onchange: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.goalRuns = e.target.checked; } }), 'goal runs']),
       ]),
       m('.eval-pairs', [pairCol('A'), m('.eval-pair-vs', 'vs'), pairCol('B')]),
       m('.eval-controls', [
         m('button.eval-btn.primary', { disabled: ui.running || !ui.mainA || !ui.mainB, onclick: runAB }, 'Run A/B'),
         m('button.eval-btn', { disabled: ui.running || !ui.mainA, onclick: runSingle }, 'Run A only'),
+        m('button.eval-btn', {
+          disabled: ui.running || !ui.mainA,
+          title: 'Side A\'s config, two legs of goal runs: baseline vs prewalk (plan on the main model, hand the live context to a cheap executor at the first landed action). The gate for turning the prewalk setting on: pass rate must hold while $ and time drop.',
+          onclick: runPrewalkAB,
+        }, 'Run prewalk A/B'),
+        m('button.eval-btn', {
+          disabled: ui.running || !ui.mainA,
+          title: 'Side A\'s config on the engine-actor suite (multi-turn VM/Notebook work): baseline vs engine-prewalk (VM/Notebook/App actors run turn 1 on the main model, then swap to the cheap executor). The gate for turning engine-actor prewalk on: pass rate holds while the runner-$ (the actor\'s spend) drops.',
+          onclick: runEnginePrewalkAB,
+        }, 'Run engine A/B'),
       ]),
       m('button.eval-disclosure', { onclick: () => { ui.showTasks = !ui.showTasks; } },
         `${ui.showTasks ? '▾' : '▸'} exactly what the ${suite()?.tasks.length ?? 0} ${ui.suiteId} tasks run`),

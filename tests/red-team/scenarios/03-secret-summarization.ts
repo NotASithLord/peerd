@@ -8,7 +8,7 @@
 //
 // peerd blocks this by memory separation, not by filtering:
 //   1. The web actor's heap has NO secret to summarize, restrictCtxCapabilities
-//      unconditionally strips getSecret/safeFetch from any actor/subagent ctx,
+//      unconditionally strips getSecret/safeFetch from any actor/actor ctx,
 //      whatever the granted toolset.
 //   2. Even if injected code smuggles a key/function into the model-call args,
 //      makeRelayedCallModel drops every function at the postMessage boundary, so
@@ -21,8 +21,8 @@
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
-import { restrictCtxCapabilities } from '../../../extension/peerd-runtime/subagent/spawn.js';
-import { makeRelayedCallModel, makeActorSummaryFence } from '../../../extension/peerd-runtime/subagent/actor-worker-core.js';
+import { restrictCtxCapabilities } from '../../../extension/peerd-runtime/actor/spawn.js';
+import { makeRelayedCallModel, makeActorSummaryFence } from '../../../extension/peerd-runtime/actor/actor-worker-core.js';
 import { wrapUntrusted, neutralizeFence } from '../../../extension/peerd-runtime/tools/prompt-wrap.js';
 
 export const scenario: Scenario = {
@@ -40,7 +40,7 @@ export const scenario: Scenario = {
     for (const grant of [['read_memory'], ['read_page', 'click', 'type'], ['script', 'read_memory', 'write_memory']]) {
       const ctx: Record<string, unknown> = {
         getSecret: async () => 'sk-ant-SECRET', safeFetch: async () => new Response(''),
-        spawnSubagent: async () => {}, memory: { get: () => {} },
+        spawnActor: async () => {}, memory: { get: () => {} },
       };
       const before = JSON.stringify(Object.keys(ctx));
       const out = restrictCtxCapabilities(ctx, new Set(grant));

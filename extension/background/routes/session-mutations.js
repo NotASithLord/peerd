@@ -16,7 +16,7 @@ export const makeSessionMutationRoutes = (deps) => {
   const {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume, haltGoalRun,
+    maybeAutoResume, haltGoalRun, turnSlots, actorMessaging,
   } = deps;
 
   return {
@@ -50,6 +50,27 @@ export const makeSessionMutationRoutes = (deps) => {
       // persisted record, so a "new chat" can't be undone by a resume() on the
       // next unlock even if the SW is torn down right after this handler (#60).
       if (previousId) await haltGoalRun?.(previousId);
+      // A "new chat" abandons the current session, so its BACKGROUND WORK must
+      // stop — not keep running invisibly. haltGoalRun (above) ends any goal
+      // loop; this ends the live TURN and CASCADES to its in-flight ACTORS (each
+      // runs on its OWN turn slot, so stopping the orchestrator alone leaves
+      // delegated web/VM/App/Notebook work running to completion). why: without
+      // it, New-chat mid-web-task — and the OM2W eval harness, which
+      // session/resets between EVERY task — leaks a live web-actor loop; they
+      // pile up until the SW saturates and every later turn stalls (the harness
+      // "2 tasks then a wall of timeouts"). Mirrors agent/stop's cascade
+      // (routes/sessions.js). Guarded so callers that don't wire the slots (unit
+      // tests) are a no-op.
+      if (previousId && turnSlots?.stop?.(previousId)) {
+        auditLog.append({ type: 'session_ended', sessionId: previousId, details: { reason: 'session_reset' } }).catch(() => {});
+      }
+      if (previousId && actorMessaging?.stopActorsFor) {
+        for (const actorSessionId of actorMessaging.stopActorsFor(previousId)) {
+          if (turnSlots.stop(actorSessionId)) {
+            auditLog.append({ type: 'actor_stopped', sessionId: previousId, details: { actorSessionId, reason: 'session_reset_cascade' } }).catch(() => {});
+          }
+        }
+      }
       await sessionCache.sessionDelete('currentSessionId');
       sessionState.clear();
       pushState();
@@ -64,12 +85,12 @@ export const makeSessionMutationRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       const session = await sessions.get(sessionId);
       if (!session) return { ok: false, error: 'session-not-found' };
-      // DESIGN-17 / subagents: only real CHATS are switchable. An actor/subagent
+      // DESIGN-17 / spawned sessions: only real CHATS are switchable. An actor/actor
       // is reached by message / through its parent, never made the active chat —
       // already hidden from session/list, this is the matching guard so a crafted
       // id can't park currentSessionId on a non-chat session.
       const switchKind = session.kind ?? 'chat';
-      if (switchKind === 'actor' || switchKind === 'subagent') {
+      if (switchKind === 'actor' || switchKind === 'spawned') {
         return { ok: false, error: 'not-a-chat' };
       }
       const previousId = await sessionCache.sessionGet('currentSessionId');

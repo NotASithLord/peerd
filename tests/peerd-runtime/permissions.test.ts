@@ -45,7 +45,7 @@ const TOOLS = {
   navigate:      { name: 'navigate',      sideEffect: 'write',           primitive: 'tab' },
   open_tab:      { name: 'open_tab',      sideEffect: 'mutate_external',  primitive: 'tab' },
   vm_delete:     { name: 'vm_delete',     sideEffect: 'destructive',      primitive: 'webvm' },
-  message_actor: { name: 'message_actor', sideEffect: 'write',            primitive: 'subagent' },
+  message_actor: { name: 'message_actor', sideEffect: 'write',            primitive: 'spawned' },
 } as const; // why: keep sideEffect as the SideEffect literal union, not string
 
 // ---- classifyAction: the taxonomy --------------------------------------

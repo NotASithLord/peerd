@@ -4,12 +4,12 @@
 /** @typedef {import('/peerd-provider/types.js').InternalMessage} InternalMessage */
 
 /**
- * @typedef {'chat' | 'subagent' | 'actor'} SessionKind
+ * @typedef {'chat' | 'spawned' | 'actor'} SessionKind
  *   'chat'     — a top-level conversation the user drives. Shows in /chats.
- *   'subagent' — a session spawned by another session (the model via
- *                spawn_subagent, or Notebook code via peerd.runtime.runAgent).
+ *   'spawned' — a session spawned by another session (the model via
+ *                actor_create, or Notebook code via peerd.runtime.runAgent).
  *                Hidden from /chats; discovered through its parent's
- *                transcript. See docs/SUBAGENTS.md.
+ *                transcript. See docs/ACTORS.md.
  *   'actor' — a per-instance agent that OWNS one tab-hosted execution
  *                instance (WebVM / Notebook / App): it exclusively holds that
  *                environment's mutating tools and is addressed only by
@@ -30,19 +30,19 @@
  * @property {number} [archivedAt]            present when archived
  * @property {string} [title]                 V1.x — derived from first message
  *
- * Subagent parentage (see docs/SUBAGENTS.md). A subagent is just a
+ * Actor parentage (see docs/ACTORS.md). An actor is just a
  * session with a parent — no new shape, four fields. Solo dev: no
  * migration code, so these default at read time (`kind ?? 'chat'`,
- * `depth ?? 0`) for sessions written before subagents landed.
- * @property {SessionKind} kind               'chat' (default) | 'subagent' | 'actor'
+ * `depth ?? 0`) for sessions written before spawned landed.
+ * @property {SessionKind} kind               'chat' (default) | 'spawned' | 'actor'
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
- * @property {string} [task]                  the spawning prompt (subagents only)
- * @property {string[]} [grantedTools]        a subagent's narrowed toolset (post-manifest
+ * @property {string} [task]                  the spawning prompt (spawned only)
+ * @property {string[]} [grantedTools]        an actor's narrowed toolset (post-manifest
  *   intersection), persisted at spawn so the heap-split offscreen tool-dispatch rebuilds
  *   the child's restricted ctx from it and re-checks every relayed call — never the worker's.
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
  * @property {boolean} [spawnedTrusted]       was the SPAWNING turn trusted (non-inbound)?
- *   The per-hop verdict the trusted-lineage gate (subagent/delegation-lineage.js)
+ *   The per-hop verdict the trusted-lineage gate (actor/delegation-lineage.js)
  *   walks: stamped server-side at create() by spawn.js, never model-supplied.
  *   Absent on roots (nothing spawned them — treated as trusted) and on records
  *   written before the async-actor refactor (a PARENTED record missing it reads
@@ -53,8 +53,8 @@
  * — for a `web` actor — the owned tabId AS A STRING) and `actorType` (the
  * kind, used to scope its toolset + prompt). The FORWARD pointer lives on the
  * engine registry record (`actorSessionId`) for the three engine kinds, or in
- * the tab→session bindings store (`subagent/web-actor.js`) for `web`. These
- * are the REVERSE pointer the actor turn reads. Absent on chat/subagent.
+ * the tab→session bindings store (`actor/web-actor.js`) for `web`. These
+ * are the REVERSE pointer the actor turn reads. Absent on chat/actor.
  * @property {string} [instanceId]            the instance (engine id), the owned tabId (String), or — for a DESIGN-18 API actor — the owned ORIGIN
  * @property {'webvm' | 'notebook' | 'app' | 'web' | 'dweb'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab OR (DESIGN-18) an API origin; dweb = the mesh operator (global singleton)
  * @property {'tab' | 'api'} [backing]         DESIGN-18: a `web` actor's backing — 'tab' (default; absent = tab) drives a DOM at a MUTABLE origin; 'api' owns ONE FIXED origin, fetch-only, no tab ever
@@ -63,6 +63,19 @@
  * provider `usage` events × the local pricing table. Absent on sessions
  * created before the feature; defaulted to an empty tally at read time.
  * @property {import('../cost/accumulator.js').CostTally} [cost]
+ *
+ * Goal-run plan-of-record (todo/core.js) — written by the todo_* tools
+ * during a goal run, rendered live by the side panel's todo card (it rides
+ * the ordinary state snapshots), and re-surfaced in every goal continuation
+ * prompt. Absent until a run calls todo_init.
+ * @property {import('../todo/core.js').TodoItem[]} [todos]
+ *
+ * Prewalk state (loop/prewalk.js) — present only while a prewalk-armed goal
+ * run owns this session. phase 'planning' = frontier model, nudge injected;
+ * 'executing' = the first mutating action landed, the session runs on the
+ * executor model from the next turn. Cleared (and the planner model
+ * restored) when the run ends.
+ * @property {import('../loop/prewalk.js').PrewalkState} [prewalk]
  *
  * Plan/Act permission state, written at create() and flipped
  * mid-session via update() so the choice survives a SW restart
@@ -80,14 +93,14 @@
  * composer command). Rendered as an appended <session_instructions>
  * block — it AUGMENTS the base prompt, never replaces it (the base
  * carries the security/defense text). Absent = none set; cleared by
- * removing the key (sessions/store.js setCustomSystemPrompt). Subagents
- * deliberately do NOT inherit it (see subagent/spawn.js).
+ * removing the key (sessions/store.js setCustomSystemPrompt). Actors
+ * deliberately do NOT inherit it (see actor/spawn.js).
  * @property {string} [customSystemPrompt]
  *
  * Per-session tool exposure manifest (the /tools composer command;
  * tools/manifests.js). Absent = every registered tool stays exposed —
  * today's behavior. When present, the main turn's descriptor list and
- * the exposure gate both intersect with it (fail-closed), and subagents
+ * the exposure gate both intersect with it (fail-closed), and spawned
  * INHERIT it (the inverse of customSystemPrompt — a manifest is an
  * authority bound, not a preference, so a child must never escalate
  * past it). Cleared by removing the key (setToolManifest).

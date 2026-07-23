@@ -96,43 +96,65 @@ export const ModeSelector = {
 };
 
 /**
- * Goal toggle. The mode-row entry point for goal mode (loop/goal-runner.js):
- * it arms the NEXT message to be the goal of an autonomous run — the agent
- * keeps taking turns toward it, visibly in the chat, until it calls
- * complete_goal (or Stop / a cap). The InputBar consumes the arm (sending
- * `agent/send` with goal:true) and disarms — one launch per arm. While a run
- * is live it shows in the GoalBar. why "Goal" not "Loop": the control is a
- * one-shot launch-with-a-goal, not a sticky mode — the word matches the
- * behavior. Same pill family + accent-when-armed as the planact controls
- * (owner call for this row).
+ * Goal toggle. The mode-row entry point for goal mode (loop/goal-runner.js),
+ * and — while a run is live — its STATE light. Three faces:
+ *
+ *   off      "Goal"           click arms the next message as a goal
+ *   armed    "Goal: on"       click disarms (the send consumes the arm)
+ *   running  "Goal · turn N"  the toggle STAYS lit for the whole run —
+ *                             armed hands off to running when the run's
+ *                             goal/state arrives, so launching a goal never
+ *                             reads as the switch "turning itself off".
+ *                             Click stops the run (same route as the
+ *                             GoalBar's Stop).
+ *
+ * why sticky: the original one-shot arm untoggled on send, which read as
+ * "did it even start?" — the control now mirrors the run's actual lifecycle
+ * (owner direction 2026-07-15). Same pill family + accent as the planact
+ * controls.
  *
  * attrs:
  *   armed     — whether the next send is armed to launch a goal run
+ *   run       — this chat's live goal-run state (state.goalRuns[sid]) or null
  *   disabled  — no API key yet (the send it arms can't fire)
  *   onToggle  — flip handler; receives the next armed boolean
+ *   onStop    — stop the live run (only consulted while running)
  */
 export const GoalToggle = {
   /**
    * @param {{ attrs: {
    *   armed?: boolean,
+   *   run?: { active?: boolean, iteration?: number } | null,
    *   disabled?: boolean,
    *   onToggle: (next: boolean) => void,
+   *   onStop?: () => void,
    * } }} vnode
    */
-  view: ({ attrs: { armed, disabled, onToggle } }) => {
-    const on = !!armed;
+  view: ({ attrs: { armed, run, disabled, onToggle, onStop } }) => {
+    const running = !!run?.active;
+    const on = running || !!armed;
+    const label = running
+      ? `Goal · turn ${run?.iteration ?? '…'}`
+      : on ? 'Goal: on' : 'Goal';
     return m('button.goal-toggle', {
-      class: on ? 'is-on' : '',
-      disabled: !!disabled,
+      class: [on ? 'is-on' : '', running ? 'is-running' : ''].filter(Boolean).join(' '),
+      disabled: !!disabled && !running,
       'aria-pressed': String(on),
-      title: on
-        ? 'Goal is armed — your next message starts an autonomous run: the agent '
-          + 'keeps taking turns, acting WITHOUT per-action confirmation, until the '
-          + 'goal is met or you Stop. Click to disarm.'
-        : 'Goal — arm the next message to run as an autonomous goal: the agent keeps '
-          + 'taking turns, acting without per-action confirmation, until it\'s done or you Stop.',
-      onclick: () => onToggle(!on),
-    }, on ? 'Goal: on' : 'Goal');
+      // While running the click STOPS the run — put that in the accessible
+      // name (the visible label is just "Goal · turn N"; aria-pressed alone
+      // doesn't convey "clicking stops it").
+      'aria-label': running ? `Goal run active, turn ${run?.iteration ?? ''} — activate to stop` : undefined,
+      title: running
+        ? 'A goal run is live in this chat — the agent keeps taking turns until '
+          + 'it\'s done. Click to stop the run.'
+        : on
+          ? 'Goal is armed — your next message starts an autonomous run: the agent '
+            + 'keeps taking turns, acting WITHOUT per-action confirmation, until the '
+            + 'goal is met or you Stop. Click to disarm.'
+          : 'Goal — arm the next message to run as an autonomous goal: the agent keeps '
+            + 'taking turns, acting without per-action confirmation, until it\'s done or you Stop.',
+      onclick: () => (running ? onStop?.() : onToggle(!on)),
+    }, label);
   },
 };
 

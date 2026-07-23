@@ -25,10 +25,10 @@
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
-import { formatBytes } from '/peerd-runtime/index.js';
+import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
-/** @typedef {import('../chat-reducer.js').SubagentSession} SubagentSession */
+/** @typedef {import('../chat-reducer.js').SpawnedSession} SpawnedSession */
 
 /** @typedef {Record<string, ((...args: any[]) => any) | undefined>} UiActions */
 
@@ -66,10 +66,10 @@ import { formatBytes } from '/peerd-runtime/index.js';
  * @typedef {Object} TranscriptArgs
  * @property {ChatMessage[]} [messages]
  * @property {Record<string, { stdout: string, stderr: string }>} [vmStreams]
- * @property {{ byToolUse?: Record<string, string>, sessions?: Record<string, SubagentSession> }} [subagents]
+ * @property {{ byToolUse?: Record<string, string>, sessions?: Record<string, SpawnedSession> }} [spawned]
  * @property {Record<string, any>} [actors]
  * @property {Record<string, any[]>} [scriptOps]
- * @property {(sessionId: string) => void} [loadSubagent]
+ * @property {(sessionId: string) => void} [loadActor]
  * @property {string} [peerName]
  * @property {number} [depth]
  * @property {TabEvent[]} [tabEvents]
@@ -91,20 +91,20 @@ const scrollIfNearBottom = (el) => {
   if (distance < NEAR_BOTTOM_PX) el.scrollTop = el.scrollHeight;
 };
 
-// How many levels of nested subagent transcript to render inline before
+// How many levels of nested actor transcript to render inline before
 // stopping. Deeper runs still exist and are inspectable, but rendering
-// them inline would explode the layout. See docs/SUBAGENTS.md.
+// them inline would explode the layout. See docs/ACTORS.md.
 const MAX_NESTED_DEPTH = 5;
 
 // Render one transcript (a flat message array) as keyed user/assistant
-// rows. Shared between the top-level chat and every nested subagent
-// transcript — a spawn_subagent card renders its child by calling this
+// rows. Shared between the top-level chat and every nested actor
+// transcript — an actor_create card renders its child by calling this
 // again at depth+1, so the structure is naturally recursive.
 /**
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth = 0, tabEvents = [], uiActions }) => {
+const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions }) => {
   const groups = groupMessages(messages ?? []);
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
@@ -143,7 +143,7 @@ const renderTranscript = ({ messages, vmStreams, subagents, actors, scriptOps, l
         ? m(ActorReplyMessage, { key: g.message.id, message: g.message })
         : m(AssistantMessage, {
             key: g.message.id, message: g.message, toolResults: g.toolResults,
-            vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth,
+            vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth,
           }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
@@ -164,9 +164,9 @@ export const MessageList = {
   onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
 
   /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, tabEvents, uiActions } }) =>
+  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions } }) =>
     m('.message-list',
-      renderTranscript({ messages, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth: 0, tabEvents, uiActions })),
+      renderTranscript({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth: 0, tabEvents, uiActions })),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -310,14 +310,14 @@ const AssistantMessage = {
    * @param {{ attrs: {
    *   message: ChatMessage, toolResults: PairedTool[],
    *   vmStreams?: Record<string, { stdout: string, stderr: string }>,
-   *   subagents?: TranscriptArgs['subagents'],
+   *   spawned?: TranscriptArgs['spawned'],
    *   actors?: Record<string, any>,
    *   scriptOps?: Record<string, any[]>,
-   *   loadSubagent?: (sessionId: string) => void,
+   *   loadActor?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
    * } }} vnode
    */
-  view: ({ attrs: { message, toolResults, vmStreams, subagents, actors, scriptOps, loadSubagent, peerName, depth } }) => {
+  view: ({ attrs: { message, toolResults, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth } }) => {
     const hasText = typeof message.content === 'string' && message.content.length > 0;
     const hasToolUses = toolResults.length > 0;
     const hasThinking = typeof message.thinking === 'string' && message.thinking.length > 0;
@@ -354,6 +354,14 @@ const AssistantMessage = {
           : message.error
             ? m('.bubble.bubble-error', m('.error-line', message.error))
             : null,
+      // Failure-class chip — the classified NEIGHBORHOOD of a failed turn
+      // (policy / provider / timeout / …), so a user triaging doesn't have
+      // to parse the raw error to know whose fault it roughly was.
+      message.error
+        ? m('span.failure-kind-chip',
+            { title: 'failure class' },
+            classifyFailure(message.error, { stopReason: message.stopReason }).kind)
+        : null,
       // Stop-reason chip — truncations and caps must never be silent.
       // max_tokens with neither text nor tools = the thinking-only
       // truncation the loop auto-continues; say so. max_steps = the
@@ -379,10 +387,10 @@ const AssistantMessage = {
               // 'cancelled', not a perpetual 'running…' (see ToolCall).
               interrupted: message.stopReason === 'aborted',
               liveStream: vmStreams?.[toolUse.id] ?? null,
-              subagents,
+              spawned,
               actors,
               scriptOps,
-              loadSubagent,
+              loadActor,
               peerName,
               depth: depth ?? 0,
             })
@@ -485,25 +493,25 @@ const ToolCall = {
    *     toolUse: ToolUse, toolResult: ToolResult|null,
    *     interrupted?: boolean,
    *     liveStream?: { stdout: string, stderr: string }|null,
-   *     subagents?: TranscriptArgs['subagents'],
+   *     spawned?: TranscriptArgs['spawned'],
    *     actors?: Record<string, any>,
    *     scriptOps?: Record<string, any[]>,
-   *     loadSubagent?: (sessionId: string) => void,
+   *     loadActor?: (sessionId: string) => void,
    *     peerName?: string, depth?: number,
    *   },
    *   state: ToolCallState,
    * }} vnode
    */
-  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, subagents, actors, scriptOps, loadSubagent, peerName, depth }, state: ui }) => {
-    // spawn_subagent gets its own card: the expanded body is the child's
+  view: ({ attrs: { toolUse, toolResult, interrupted, liveStream, spawned, actors, scriptOps, loadActor, peerName, depth }, state: ui }) => {
+    // actor_create gets its own card: the expanded body is the child's
     // full transcript rendered inline (recursively), not a result blob.
-    if (toolUse.name === 'spawn_subagent') {
-      return renderSubagentCard({ toolUse, toolResult, interrupted, subagents, actors, loadSubagent, peerName, depth: depth ?? 0, ui });
+    if (toolUse.name === 'actor_create') {
+      return renderSpawnedCard({ toolUse, toolResult, interrupted, spawned, actors, loadActor, peerName, depth: depth ?? 0, ui });
     }
     // DESIGN-17 P1: message_actor gets the actor glass-pane card (its work
     // rendered inline from the turn/actor-* display stream).
     if (toolUse.name === 'message_actor') {
-      return renderActorCard({ toolUse, toolResult, interrupted, actors, subagents, loadSubagent, peerName, depth: depth ?? 0, ui });
+      return renderActorCard({ toolUse, toolResult, interrupted, actors, spawned, loadActor, peerName, depth: depth ?? 0, ui });
     }
     const meta = toolResult?.meta ?? null;
     // why 'cancelled': a tool_use with no result on an ABORTED turn (Stop /
@@ -536,6 +544,13 @@ const ToolCall = {
           { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
+        // Failure-class chip on a failed card: the classified neighborhood
+        // (policy / environment / timeout / …) at a glance; the raw error
+        // stays one click away in the expanded result body.
+        status === 'failed'
+          ? m('span.failure-kind-chip', { title: 'failure class' },
+              classifyFailure(typeof toolResult?.content === 'string' ? toolResult.content : '').kind)
+          : null,
         m('.spacer'),
         status === 'pending' ? m('span.tool-pending', 'running…')
           : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
@@ -601,59 +616,59 @@ const ToolCall = {
   },
 };
 
-// ─── Subagent card ─────────────────────────────────────────────────────────
+// ─── Actor card ─────────────────────────────────────────────────────────
 //
-// A spawn_subagent tool call renders as a disclosure whose body is the
+// An actor_create tool call renders as a disclosure whose body is the
 // CHILD session's transcript, indented and rendered by the same
 // renderTranscript used for the top-level chat — so a child's own
-// spawn_subagent cards expand further, recursively. Capped at
+// actor_create cards expand further, recursively. Capped at
 // MAX_NESTED_DEPTH visually; deeper runs are still inspectable.
 /**
  * @param {{
  *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
- *   subagents?: TranscriptArgs['subagents'], actors?: Record<string, any>,
- *   loadSubagent?: (sessionId: string) => void,
+ *   spawned?: TranscriptArgs['spawned'], actors?: Record<string, any>,
+ *   loadActor?: (sessionId: string) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
  * }} args
  */
-const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, actors, loadSubagent, peerName, depth, ui }) => {
+const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, loadActor, peerName, depth, ui }) => {
   const meta = toolResult?.meta ?? null;
   const status = toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending');
-  const childId = resolveChildSessionId(toolUse, toolResult, subagents);
-  const childSession = childId ? subagents?.sessions?.[childId] : null;
+  const childId = resolveChildSessionId(toolUse, toolResult, spawned);
+  const childSession = childId ? spawned?.sessions?.[childId] : null;
   const task = childSession?.task ?? toolUse.input?.task ?? '';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
 
   const onToggle = () => {
     ui.expanded = !ui.expanded;
     // Lazy-fetch the child on first expand (e.g. after a reload, when the
-    // live stream isn't in memory). loadSubagent dedupes.
-    if (ui.expanded && childId && loadSubagent) loadSubagent(childId);
+    // live stream isn't in memory). loadActor dedupes.
+    if (ui.expanded && childId && loadActor) loadActor(childId);
   };
 
-  return m(`.tool-call.tool-subagent.tool-${status}`, [
+  return m(`.tool-call.tool-actor.tool-${status}`, [
     m('.tool-call-header', { onclick: onToggle }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
         { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
-      m('span.tool-name', 'spawn_subagent'),
+      m('span.tool-name', 'actor_create'),
       m('span.tool-args', `"${truncate(String(task), 48)}"`),
       m('.spacer'),
       status === 'pending' ? m('span.tool-pending', 'running…')
         : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
         : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
     ]),
-    ui.expanded ? m('.subagent-body', [
+    ui.expanded ? m('.actor-body', [
       status === 'failed' && toolResult
         ? m('p.error-line', formatResultContent(toolResult))
         : null,
       tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
         : (childSession && childSession.messages.length > 0)
-          ? m('.subagent-transcript',
-              renderTranscript({ messages: childSession.messages, subagents, actors, loadSubagent, peerName, depth: depth + 1 }))
+          ? m('.actor-transcript',
+              renderTranscript({ messages: childSession.messages, spawned, actors, loadActor, peerName, depth: depth + 1 }))
           : childId
-            ? m('p.muted', status === 'pending' ? 'subagent running…' : status === 'cancelled' ? 'subagent cancelled' : 'loading transcript…')
+            ? m('p.muted', status === 'pending' ? 'actor running…' : status === 'cancelled' ? 'actor cancelled' : 'loading transcript…')
             : m('p.muted', 'no child transcript recorded'),
     ]) : null,
   ]);
@@ -661,16 +676,16 @@ const renderSubagentCard = ({ toolUse, toolResult, interrupted, subagents, actor
 
 // DESIGN-17 P1 glass pane: the message_actor card. The actor is a hidden,
 // long-lived actor; the orchestrator only delegates to it. This renders the
-// actor's work for THIS message inline (the subagent live-view, for an actor)
+// actor's work for THIS message inline (the actor live-view, for an actor)
 // — driven by the turn/actor-* display stream (chat-reducer `actors`, keyed
 // by this tool_use id). The tool RESULT is just the async "delivered" ack, so the
 // card's live state (streaming / error / cost) — not the result — drives the chip.
 /**
  * @param {{ toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
- *   actors?: Record<string, any>, subagents?: TranscriptArgs['subagents'],
- *   loadSubagent?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
+ *   actors?: Record<string, any>, spawned?: TranscriptArgs['spawned'],
+ *   loadActor?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
  */
-const renderActorCard = ({ toolUse, toolResult, interrupted, actors, subagents, loadSubagent, peerName, depth, ui }) => {
+const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, loadActor, peerName, depth, ui }) => {
   const card = actors?.[toolUse.id] ?? null;
   const task = String(toolUse.input?.message ?? '');
   const who = card?.name ?? card?.instanceId ?? toolUse.input?.to ?? '';
@@ -704,13 +719,13 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, subagents, 
         : card?.cost ? m('span.tool-duration', { title: 'this actor turn’s spend' }, `$${Number(card.cost.cost ?? 0).toFixed((card.cost.cost ?? 0) < 0.01 ? 4 : 2)}`)
         : null,
     ]),
-    ui.expanded ? m('.subagent-body', [
+    ui.expanded ? m('.actor-body', [
       card?.error ? m('p.error-line', String(card.error)) : null,
       tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
         : (card && Array.isArray(card.messages) && card.messages.length > 0)
-          ? m('.subagent-transcript',
-              renderTranscript({ messages: card.messages, actors, subagents, loadSubagent, peerName, depth: depth + 1 }))
+          ? m('.actor-transcript',
+              renderTranscript({ messages: card.messages, actors, spawned, loadActor, peerName, depth: depth + 1 }))
           : m('p.muted', card?.streaming ? 'actor working…'
               // No card after a non-error "delivered" ack = the reply already landed
               // on a later turn (the live stream was lost to a reload / SW restart).
@@ -720,18 +735,18 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, subagents, 
   ]);
 };
 
-// Find the child session id for a spawn_subagent card. The live map
-// (populated by turn/subagent-start during this panel's lifetime) is
+// Find the child session id for an actor_create card. The live map
+// (populated by turn/spawned-start during this panel's lifetime) is
 // authoritative; after a reload we fall back to parsing the id out of
-// the tool result's formatted header ("subagent (session <id>, ...").
+// the tool result's formatted header ("actor (session <id>, ...").
 /**
  * @param {ToolUse} toolUse
  * @param {ToolResult|null} toolResult
- * @param {TranscriptArgs['subagents']} subagents
+ * @param {TranscriptArgs['spawned']} spawned
  * @returns {string|null}
  */
-const resolveChildSessionId = (toolUse, toolResult, subagents) => {
-  const live = subagents?.byToolUse?.[toolUse.id];
+const resolveChildSessionId = (toolUse, toolResult, spawned) => {
+  const live = spawned?.byToolUse?.[toolUse.id];
   if (live) return live;
   const content = toolResult?.content;
   if (typeof content === 'string') {
@@ -794,7 +809,7 @@ const formatResultContent = (toolResult) => {
 //                     web     — outbound HTTP through safeFetch/webFetch
 //   runtime (green)   tab     — DOM/page/tab driving
 //                     time    — clock / temporal grounding
-//                     subagent— agent-loop orchestration (docs/SUBAGENTS.md)
+//                     actor— agent-loop orchestration (docs/ACTORS.md)
 //   engine  (amber)   webvm    — WebVM execution kind
 //                     notebook — Notebook execution kind
 //                     app      — App execution kind
@@ -810,7 +825,7 @@ const PRIMITIVE_MODULE = Object.freeze({
   web:      'egress',
   tab:      'runtime',
   time:     'runtime',
-  subagent: 'runtime',
+  actor: 'runtime',
   webvm:    'engine',
   notebook: 'engine',
   app:      'engine',

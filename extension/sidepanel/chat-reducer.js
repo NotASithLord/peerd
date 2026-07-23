@@ -34,8 +34,8 @@
  */
 
 /**
- * A subagent's nested session (its own message array).
- * @typedef {Object} SubagentSession
+ * An actor's nested session (its own message array).
+ * @typedef {Object} SpawnedSession
  * @property {string} sessionId
  * @property {ChatMessage[]} messages
  * @property {string} [kind]
@@ -55,6 +55,7 @@
  * @property {{ mode?: string, confirmActions?: boolean }} [permission]
  * @property {string} [customSystemPrompt]
  * @property {string} [toolManifest]
+ * @property {import('/peerd-runtime/todo/core.js').TodoItem[]} [todos]  the goal run's plan-of-record (TodoCard)
  */
 
 /**
@@ -93,7 +94,7 @@
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
- * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SubagentSession> }} subagents
+ * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
  * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} actors
  * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
@@ -182,15 +183,15 @@ export const INITIAL_STATE = Object.freeze({
   agentTabEvents: Object.freeze([]),
   // Streaming stdout/stderr per in-flight vm_boot, keyed by toolUseId.
   vmStreams: Object.freeze({}),
-  // Subagent transcripts for inline rendering under spawn_subagent tool
-  // cards (docs/SUBAGENTS.md).
-  subagents: Object.freeze({ byToolUse: {}, sessions: {} }),
+  // Actor transcripts for inline rendering under actor_create tool
+  // cards (docs/ACTORS.md).
+  spawned: Object.freeze({ byToolUse: {}, sessions: {} }),
   // DESIGN-17 P1 glass pane: actor DISPLAY cards, keyed by the message_actor
   // tool_use id. Each is self-contained (its own sliced transcript) so a long-lived
   // actor messaged N times shows N distinct exchanges, not its whole history.
   // { sessionId, kind, instanceId, name, fromIndex, messages, streaming, error, cost }.
   actors: Object.freeze({}),
-  // In-flight async subagents (DESIGN-11), keyed by PARENT session id.
+  // In-flight async spawned (DESIGN-11), keyed by PARENT session id.
   asyncTasks: Object.freeze({}),
   // Goal mode (the mode-row Goal toggle) — active runs keyed by sessionId, so
   // a run continuing in a background chat tracks independently of the one in
@@ -279,17 +280,17 @@ const applyError = (state, { sessionId, messageId, error }) => {
       mm.id === messageId ? { ...mm, streaming: false, error } : mm) } };
 };
 
-// ---- subagent nested-transcript reducers ----------------------------------
+// ---- actor nested-transcript reducers ----------------------------------
 
 /**
  * @param {ChatState} state
- * @param {SubagentSession} session
+ * @param {SpawnedSession} session
  * @returns {ChatState}
  */
-export const putSubagentSession = (state, session) => ({
+export const putSpawnedSession = (state, session) => ({
   ...state,
-  subagents: { ...state.subagents,
-    sessions: { ...state.subagents.sessions, [session.sessionId]: session } },
+  spawned: { ...state.spawned,
+    sessions: { ...state.spawned.sessions, [session.sessionId]: session } },
 });
 
 /**
@@ -298,10 +299,10 @@ export const putSubagentSession = (state, session) => ({
  * @param {(mm: ChatMessage) => ChatMessage} mapFn
  * @returns {ChatState}
  */
-const patchSubagentMessages = (state, sessionId, mapFn) => {
-  const session = state.subagents.sessions[sessionId];
+const patchActorMessages = (state, sessionId, mapFn) => {
+  const session = state.spawned.sessions[sessionId];
   if (!session) return state;
-  return putSubagentSession(state, { ...session, messages: session.messages.map(mapFn) });
+  return putSpawnedSession(state, { ...session, messages: session.messages.map(mapFn) });
 };
 
 // DESIGN-17 P1 glass pane: merge a patch into an actor card (keyed by the
@@ -352,40 +353,40 @@ export const reduceChat = (state, msg) => {
       }
       return { ...state, goalRuns: next };
     }
-    case 'turn/subagent-start': {
-      // why these casts: a subagent-start message always carries a string
+    case 'turn/spawned-start': {
+      // why these casts: an actor-start message always carries a string
       // sessionId (and parentToolUseId when present) by contract — the
       // permissive ReducerMsg types them optional, so name the invariant.
       const sid = /** @type {string} */ (msg.sessionId);
-      return { ...state, subagents: { ...state.subagents,
+      return { ...state, spawned: { ...state.spawned,
         byToolUse: msg.parentToolUseId
-          ? { ...state.subagents.byToolUse, [msg.parentToolUseId]: sid }
-          : state.subagents.byToolUse,
+          ? { ...state.spawned.byToolUse, [msg.parentToolUseId]: sid }
+          : state.spawned.byToolUse,
         // Seed an empty shell so an expanded card shows "running…" before
         // the first state push lands.
-        sessions: state.subagents.sessions[sid]
-          ? state.subagents.sessions
-          : { ...state.subagents.sessions,
-              [sid]: { sessionId: sid, kind: 'subagent', depth: msg.depth, task: msg.task, messages: [] } } } };
+        sessions: state.spawned.sessions[sid]
+          ? state.spawned.sessions
+          : { ...state.spawned.sessions,
+              [sid]: { sessionId: sid, kind: 'spawned', depth: msg.depth, task: msg.task, messages: [] } } } };
     }
-    case 'turn/subagent-state':
-      return putSubagentSession(state, msg.session);
-    case 'turn/subagent-delta':
-      return patchSubagentMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
+    case 'turn/spawned-state':
+      return putSpawnedSession(state, msg.session);
+    case 'turn/spawned-delta':
+      return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, content: (mm.content ?? '') + msg.text } : mm);
-    case 'turn/subagent-stop':
-      return patchSubagentMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
+    case 'turn/spawned-stop':
+      return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, streaming: false, stopReason: msg.stopReason } : mm);
-    case 'turn/subagent-error':
-      return patchSubagentMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
+    case 'turn/spawned-error':
+      return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, streaming: false, error: msg.error } : mm);
-    case 'turn/subagent-tool-use':
-    case 'turn/subagent-tool-result':
-    case 'turn/subagent-done':
-      // The turn/subagent-state pushes carry the authoritative message array;
+    case 'turn/spawned-tool-use':
+    case 'turn/spawned-tool-result':
+    case 'turn/spawned-done':
+      // The turn/spawned-state pushes carry the authoritative message array;
       // these are live complements we don't fold separately.
       return state;
-    // DESIGN-17 P1 glass pane — the actor DISPLAY stream (parallel to subagents,
+    // DESIGN-17 P1 glass pane — the actor DISPLAY stream (parallel to spawned,
     // keyed by the message_actor tool_use id). Each event carries parentToolUseId
     // so there is no viewed-session guard: an actor card renders regardless of
     // which chat is in view (it belongs to the orchestrator's transcript).
@@ -486,14 +487,14 @@ export const reduceChat = (state, msg) => {
       const sessionChanged = msg.state?.session?.sessionId !== state.session.sessionId;
       const stillHalted = !sessionChanged && state.cost.limitReached;
       const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
-      // why prune on switch: actors/subagents/asyncTasks are keyed by tool_use id
+      // why prune on switch: actors/spawned/asyncTasks are keyed by tool_use id
       // and belong to the orchestrator transcript being navigated AWAY from — the
       // state snapshot never carries them, so without this they survive into the
       // new chat (never rendering — renderActorCard matches by viewed tool_use id —
       // but accumulating for the panel's lifetime). A still-live one re-seeds via
       // turn/actor-state on switch-back. Only on an ACTUAL switch, not every push.
       const pruneProjections = sessionChanged
-        ? { actors: INITIAL_STATE.actors, subagents: INITIAL_STATE.subagents, asyncTasks: INITIAL_STATE.asyncTasks }
+        ? { actors: INITIAL_STATE.actors, spawned: INITIAL_STATE.spawned, asyncTasks: INITIAL_STATE.asyncTasks }
         : {};
       return { ...state, ...msg.state, ...pruneProjections, pendingConfirm: state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
@@ -505,8 +506,14 @@ export const reduceChat = (state, msg) => {
       // Per-session guard: a turn streaming in a BACKGROUND chat must not snap
       // the view to its transcript. Null current = fresh surface adopting it.
       if (state.session.sessionId && state.session.sessionId !== msg.session.sessionId) return state;
+      // why todos here: the goal run's plan-of-record (session.todos) is
+      // written mid-turn by the todo_* tools, and the TodoCard reads it off
+      // state.session — but this LIVE push carries only sessionId+messages, so
+      // without it the card wouldn't tick until the next full 'state' snapshot.
+      // undefined on non-goal turns (the card self-hides), so it's harmless.
       return { ...state, session: { ...state.session,
-        sessionId: msg.session.sessionId, messages: msg.session.messages }, lastError: null };
+        sessionId: msg.session.sessionId, messages: msg.session.messages,
+        todos: msg.session.todos }, lastError: null };
     case 'turn/cost':
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, cost: { ...state.cost, turn: msg.turn, session: msg.session,

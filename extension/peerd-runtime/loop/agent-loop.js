@@ -71,14 +71,28 @@ const REQUIRED_CTX = [
 ];
 
 // Tools safe to dispatch CONCURRENTLY by NAME, independent of permission
-// classification. spawn_subagent orchestrates a child session that owns
+// classification. actor_create orchestrates a child session that owns
 // its own gate pipeline + session and shares no external mutable state with
 // its siblings, so N spawns in one turn can run in parallel instead of
 // one-at-a-time. Everything else earns concurrency only via the injected
 // permission classifier (ctx.classifyToolCall → READ class), preserving
 // peerd's single-writer posture for DOM / VM / file side effects (two
 // clicks or two file edits must not interleave).
-const CONCURRENT_TOOLS = new Set(['spawn_subagent']);
+const CONCURRENT_TOOLS = new Set(['actor_create']);
+
+// Hard ceiling on ONE tool dispatch (issue #176). A dispatch that never
+// settles — the concrete leaf is an un-timed CDP Runtime.evaluate against a
+// hung page — parks the turn generator forever: the turn's finally never runs,
+// the slot never releases, and Stop/session-reset abort a controller nobody
+// observes. Racing every dispatch against the turn's abort signal AND this
+// deadline converts a hang into a normal errored tool result, so the loop
+// advances and the slot unwinds. why 10 minutes: generous enough for the
+// legitimately-slow tools (WebVM commands, an awaited actor delegation, slow
+// page loads — and a confirm-parked tool decline-settles at its own 120s
+// timeout), while still bounding "forever". NOTE the loser keeps running
+// detached — its eventual settlement is dropped; late side effects are
+// possible but strictly better than a permanently wedged session.
+const DISPATCH_DEADLINE_MS = 10 * 60_000;
 
 // Yield settled values in completion order. Each input promise MUST resolve
 // (the dispatcher below never rejects), so there is no rejection branch —
@@ -97,6 +111,36 @@ export async function* asCompleted(promises) {
     yield value;
   }
 }
+
+/**
+ * Strip signed `thinkingBlocks` from assistant messages authored by a
+ * DIFFERENT model than the one about to be called. Signed thinking blocks are
+ * MODEL-BOUND — replaying one to another model (a prewalk executor swap, or a
+ * user model-switch mid-chat) fails the provider's signature check and 400s
+ * the turn. Assistant messages record their author model (`msg.model`), so a
+ * mismatch is the strip signal; the visible `thinking` text is kept (it's
+ * transcript, never replayed). Pure — returns a new array, shallow-copying
+ * only the messages it strips; every other message passes through by
+ * reference. For a session that never switches model, every assistant
+ * message's `model` equals `model`, so this is a strict no-op.
+ *
+ * NOTE the author-model premise is exact only under the current adapter set:
+ * mid-turn provider failover (turn-driver) could stamp `session.model` on a
+ * message the fallback actually produced, but only the Anthropic adapter emits
+ * signed `thinkingBlocks` and the registry holds one Anthropic provider, so a
+ * failover chain can't contain two signature-emitting entries — the mismatch
+ * that would matter is unreachable today.
+ *
+ * @template {{ role?: string, model?: string, thinkingBlocks?: unknown }} M
+ * @param {M[]} messages
+ * @param {string | undefined} model   the model about to be called (session.model)
+ * @returns {M[]}
+ */
+export const stripCrossModelThinking = (messages, model) => messages.map((msg) => (
+  msg.role === 'assistant' && Array.isArray(msg.thinkingBlocks)
+    && msg.model && msg.model !== model
+    ? { ...msg, thinkingBlocks: undefined }
+    : msg));
 
 /**
  * Run a single user turn against the model. May iterate through several
@@ -123,7 +167,7 @@ export async function* asCompleted(promises) {
  *   Optional. Called at the START of each step to recompute the advertised
  *   tools (progressive disclosure — an instance created this turn reveals its
  *   ops on the next step). When absent, ctx.tools is used unchanged for the
- *   whole turn (subagents / runners). A throw keeps the prior set.
+ *   whole turn (spawned / runners). A throw keeps the prior set.
  * @param {(call: { id: string, name: string, args: object }) => Promise<ToolResult>} [ctx.toolDispatch]
  *   Pre-bound dispatch fn. Required if tools are provided.
  * @param {(name: string) => (import('../permissions/policy.js').PermissionVerdict | null)} [ctx.classifyToolCall]
@@ -131,8 +175,8 @@ export async function* asCompleted(promises) {
  *   returns the SAME decideAction verdict the dispatcher will enforce
  *   (action class + confirm), or null for unknown tools. READ-class,
  *   non-confirming calls may run concurrently; everything else stays
- *   serial. Omitted (subagent/runner loops today) → only the by-name
- *   CONCURRENT_TOOLS set (spawn_subagent) is treated as safe.
+ *   serial. Omitted (actor/runner loops today) → only the by-name
+ *   CONCURRENT_TOOLS set (actor_create) is treated as safe.
  * @param {{ enabled?: boolean, budgetTokens?: number, effort?: 'low'|'medium'|'high'|'xhigh'|'max' }} [ctx.reasoning]
  *   Extended-thinking control, passed straight to the provider. When
  *   enabled, reasoning streams as `reasoning` loop events and signed
@@ -142,9 +186,9 @@ export async function* asCompleted(promises) {
  *   the first stream chunk after abort, persists whatever was streamed,
  *   and yields a clean stop event with stopReason='aborted'.
  * @param {number} [ctx.maxSteps]
- *   Per-turn step cap. Defaults to MAX_STEPS. Subagents pass a smaller
+ *   Per-turn step cap. Defaults to MAX_STEPS. Actors pass a smaller
  *   value (default 20) so a runaway child can't burn the parent's whole
- *   budget — see docs/SUBAGENTS.md. Hitting it yields the same clean
+ *   budget — see docs/ACTORS.md. Hitting it yields the same clean
  *   stopReason='max_steps' the default cap does.
  * @param {(req: { sessionId: string, state: object, newlyDropped: object[] }) => void} [ctx.enrichTrimSummary]
  *   Optional seam for model-quality trim-summary enrichment. Called
@@ -165,7 +209,7 @@ export async function* asCompleted(promises) {
  * @param {boolean} [ctx.synthetic]
  *   Mark the appended user message `synthetic` (API-sanctioned but hidden
  *   from the chat UI, like the truncation-continue path). Used by the
- *   async-subagent reintegration wake (DESIGN-11): the child's result
+ *   async-actor reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
  * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [ctx.actorReply]
  *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
@@ -220,7 +264,7 @@ export async function* runUserTurn(ctx) {
   // why: the main turn passes refreshTools to recompute the advertised tool
   // list each step (progressive disclosure — an instance created this turn
   // reveals its ops on the next step). Without it, activeTools stays the
-  // initial set (subagents / runners use a fixed narrowed toolset).
+  // initial set (spawned / runners use a fixed narrowed toolset).
   let activeTools = tools;
 
   // 1. Persist the user's message and emit state.
@@ -293,7 +337,7 @@ export async function* runUserTurn(ctx) {
       role: 'user',
       content: userText,
       ...(liveAttachments ? { attachments: stripAttachments(liveAttachments) } : {}),
-      // why: an async-subagent reintegration wake (DESIGN-11) rides a
+      // why: an async-actor reintegration wake (DESIGN-11) rides a
       // synthetic user turn — API-sanctioned, hidden from the chat UI like
       // the truncation-continue path below. The wake framing is trusted; the
       // child's result text inside it is wrapUntrusted by the caller.
@@ -429,8 +473,9 @@ export async function* runUserTurn(ctx) {
       // path the messages are always loop-shaped InternalMessages, and
       // injectResumeNotes only ever reads assistant `thinking`, so narrowing
       // here is safe.
-      let historyForModel = injectResumeNotes(
-        /** @type {InternalMessage[]} */ (trimPlan.messages));
+      let historyForModel = stripCrossModelThinking(
+        injectResumeNotes(/** @type {InternalMessage[]} */ (trimPlan.messages)),
+        session.model);
       // why: the model must see the attachment BYTES on the turn they
       // were sent (every step of it — history is rebuilt from the
       // session per step), while the persisted record stays stripped.
@@ -679,7 +724,7 @@ export async function* runUserTurn(ctx) {
     // why: push the FINALIZED assistant message (now carrying its tool_use
     // blocks) to the side panel BEFORE dispatch. Tool cards render only
     // from state snapshots; without this the next snapshot isn't emitted
-    // until AFTER the dispatch block, so N parallel subagent cards stayed
+    // until AFTER the dispatch block, so N parallel actor cards stayed
     // invisible for the whole run (and their live transcripts had no card
     // to stream into). Now the cards appear pending the instant dispatch
     // starts and fill in live.
@@ -762,7 +807,41 @@ export async function* runUserTurn(ctx) {
       /** @type {ToolResult} */
       let dispatchResult;
       try {
-        dispatchResult = await toolDispatch({ id: tu.id, name: tu.name, args: tu.input });
+        // Race the dispatch against the turn's abort signal + the hard deadline
+        // (issue #176) — see DISPATCH_DEADLINE_MS. Without this, an un-settling
+        // dispatch pins the generator between wave boundaries (the only places
+        // wasAborted() is checked), making Stop / session-reset a no-op against
+        // a hung turn. The synthesized failure result lets the wave complete;
+        // the boundary abort check right after the waves then ends the turn.
+        dispatchResult = await /** @type {Promise<ToolResult>} */ (new Promise((resolveDispatch) => {
+          let settled = false;
+          /** @param {ToolResult} v */
+          const finish = (v) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(deadline);
+            if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
+            resolveDispatch(v);
+          };
+          /** @param {string} error */
+          const failWith = (error) => finish({
+            ok: false, error,
+            meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
+          });
+          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled');
+          const deadline = setTimeout(
+            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`),
+            DISPATCH_DEADLINE_MS,
+          );
+          toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
+            (/** @type {ToolResult} */ r) => finish(r),
+            (/** @type {unknown} */ e) => failWith(/** @type {{ message?: string }} */ (e)?.message ?? String(e)),
+          );
+          if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+          }
+        }));
       } catch (e) {
         dispatchResult = {
           ok: false,
@@ -803,12 +882,12 @@ export async function* runUserTurn(ctx) {
     // EXISTING permission classification doing double duty as the scheduler:
     //   - READ class → safe (reads share no mutable state, and decideAction
     //     never confirms a read, so no modal can race another).
-    //   - confirm:true → NEVER safe, even for spawn_subagent — a turn must
+    //   - confirm:true → NEVER safe, even for actor_create — a turn must
     //     not stack two confirmation modals (serialize confirms).
-    //   - otherwise only the by-name CONCURRENT_TOOLS set (spawn_subagent)
+    //   - otherwise only the by-name CONCURRENT_TOOLS set (actor_create)
     //     qualifies; every write stays strictly serial in emitted order.
-    // Without a classifier (subagent/runner loops) we keep the original
-    // spawn_subagent-only behavior.
+    // Without a classifier (actor/runner loops) we keep the original
+    // actor_create-only behavior.
     const classify = typeof ctx.classifyToolCall === 'function' ? ctx.classifyToolCall : null;
     /** @param {ToolUseBlock} tu */
     const isConcurrencySafe = (tu) => {
@@ -822,6 +901,10 @@ export async function* runUserTurn(ctx) {
 
     /** @type {ToolResultBlock[]} */
     const toolResults = [];
+    // One-shot honesty: a tool can succeed while the CODE it evaluated crashed
+    // (a notebook eval's ok:true + in-band [ERROR] — the evalError marker).
+    // Such a round must NOT short-circuit as "clean"; track it per round.
+    let roundHadEvalError = false;
     // partitionToolBatch groups CONSECUTIVE safe calls into concurrent
     // waves and leaves everything else as single sequential waves, in the
     // model's emitted order — a safe call is never hoisted past an unsafe
@@ -849,6 +932,7 @@ export async function* runUserTurn(ctx) {
         const blocksById = new Map();
         for await (const { tu, dispatchResult, block } of asCompleted(wave.calls.map(dispatchOne))) {
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           blocksById.set(tu.id, block);
         }
         // Persist in the model's emitted order for stable transcripts
@@ -866,12 +950,22 @@ export async function* runUserTurn(ctx) {
           };
           const { dispatchResult, block } = await dispatchOne(tu);
           yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           toolResults.push(block);
         }
         if (abortedMidBatch) break;
       }
     }
-    if (abortedMidBatch) {
+    // why the extra wasAborted(): the per-wave checks run BEFORE each dispatch,
+    // so an abort landing DURING the batch's FINAL dispatch is seen by neither —
+    // the loop would fall through and append the tool-results message. Under a
+    // steer-live supersede that append races the NEW turn (claim() aborts and
+    // starts it immediately, without waiting for this loop to unwind), landing
+    // the results AFTER the steer's user message + assistant stub — a history
+    // whose tool_result no longer follows its tool_use, which the provider
+    // rejects on every later call (the format layer's orphan-tool_result
+    // demotion is the wire-side backstop for sessions already shaped that way).
+    if (abortedMidBatch || wasAborted()) {
       // Mirror the pre-dispatch abort guard (:683): mark a DELIBERATE stop (not a
       // resumable tools-pending interruption) and drop the partial tool_result
       // message, so the turn ends cleanly on the aborted assistant message and
@@ -912,7 +1006,7 @@ export async function* runUserTurn(ctx) {
     // FAILED, one round did NOT suffice — disarm one-shot (below) so the model gets
     // its normal recover/explain turns for the REST of this turn. The first CLEAN
     // round short-circuits; multi-step work simply never sets the flag.
-    if (oneShotArmed && toolResults.length > 0 && !toolResults.some((b) => b.is_error)) {
+    if (oneShotArmed && toolResults.length > 0 && !toolResults.some((b) => b.is_error) && !roundHadEvalError) {
       const toolOut = toolResults
         .map((b) => (typeof b.content === 'string' ? b.content : JSON.stringify(b.content)))
         .join('\n').trim();

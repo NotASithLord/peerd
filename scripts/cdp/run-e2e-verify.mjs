@@ -26,7 +26,10 @@ import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPeerd, unlockAndReady, resetSession, freezeAnimations, log } from './e2e-harness.mjs';
 import { STATES } from './states.mjs';
-import { compareToBaseline, decodePng, writeDiffImage, BASELINE_DIR, UPDATE_BASELINES } from './visual.mjs';
+import {
+  compareToBaseline, decodePng, writeDiffImage, BASELINE_DIR, UPDATE_BASELINES,
+  VISUAL_PLATFORM, VISUAL_AUTHORITY, IS_AUTHORITY,
+} from './visual.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
@@ -66,9 +69,12 @@ const makeRecorder = (ctx, state) => {
       const v = compareToBaseline(name, png, { update: UPDATE_BASELINES, ...opts });
       const entry = {
         name, ratio: Number(v.ratio.toFixed(5)), threshold: v.threshold,
-        pass: v.pass, wrote: v.wrote, current: relative(ROOT, curFile),
+        pass: v.pass, rawPass: v.rawPass ?? v.pass, gated: v.gated ?? true,
+        platform: VISUAL_PLATFORM, wrote: v.wrote, current: relative(ROOT, curFile),
       };
-      if (!v.wrote && v.dimsMatch && !v.pass) {
+      // why keyed on rawPass, not pass: off-authority `pass` is forced true, but
+      // the diff image is exactly what that lane exists to produce.
+      if (!v.wrote && v.dimsMatch && !entry.rawPass) {
         const baseFile = join(BASELINE_DIR, `${name}.png`);
         const diffFile = join(ARTIFACTS, `${name}-diff.png`);
         writeDiffImage(decodePng(readFileSync(baseFile)), decodePng(png), diffFile, opts);
@@ -77,9 +83,9 @@ const makeRecorder = (ctx, state) => {
       }
       visuals.push(entry);
       const status = v.wrote ? 'baseline written'
-        : v.pass ? `OK ${(v.ratio * 100).toFixed(2)}%`
-          : `DIFF ${(v.ratio * 100).toFixed(2)}% > ${(v.threshold * 100).toFixed(0)}%`;
-      log(`  ${v.pass ? 'PASS' : 'FAIL'}  [${state.name}] visual:${name} — ${status}`);
+        : entry.rawPass ? `OK ${(v.ratio * 100).toFixed(2)}%`
+          : `DIFF ${(v.ratio * 100).toFixed(2)}% > ${(v.threshold * 100).toFixed(2)}%${entry.gated ? '' : ' (off-authority, not gating)'}`;
+      log(`  ${entry.rawPass ? 'PASS' : entry.gated ? 'FAIL' : 'note'}  [${state.name}] visual:${name} — ${status}`);
     },
     result() {
       const ok = checks.every((c) => c.pass) && visuals.every((v) => v.pass);
@@ -125,11 +131,19 @@ async function main() {
 
   const checksTotal = results.reduce((n, r) => n + r.checks.length, 0);
   const checksFailed = results.reduce((n, r) => n + r.checks.filter((c) => !c.pass).length, 0);
-  const visualFailed = results.reduce((n, r) => n + r.visuals.filter((v) => !v.pass).length, 0);
+  // Counted on rawPass so an off-authority run still REPORTS what moved, even
+  // though those renders don't fail the exit code.
+  const visualFailed = results.reduce((n, r) => n + r.visuals.filter((v) => !(v.rawPass ?? v.pass)).length, 0);
   const ok = results.every((r) => r.ok);
   const report = {
     ok,
     runAt: new Date().toISOString(),
+    visual: {
+      platform: VISUAL_PLATFORM,
+      authority: VISUAL_AUTHORITY,
+      gating: IS_AUTHORITY,
+      baselineDir: relative(ROOT, BASELINE_DIR),
+    },
     summary: { states: results.length, checksTotal, checksFailed, visualFailed },
     artifactsDir: relative(ROOT, ARTIFACTS),
     states: results,
@@ -146,6 +160,10 @@ async function main() {
   }
   log('');
   log(`${ok ? 'VERIFY PASSED' : 'VERIFY FAILED'} — ${results.length} states, ${checksTotal - checksFailed}/${checksTotal} checks${visualFailed ? `, ${visualFailed} visual diff(s)` : ''}`);
+  if (visualFailed && !IS_AUTHORITY) {
+    log(`NOTE: visual diffs above are INFORMATIONAL — ${VISUAL_PLATFORM} is not the baseline`);
+    log(`authority (${VISUAL_AUTHORITY}). Look at the -diff.png files; CI decides pass/fail.`);
+  }
   log(`artifacts + result.json → ${relative(ROOT, ARTIFACTS)}/`);
   process.exit(ok ? 0 : 1);
 }

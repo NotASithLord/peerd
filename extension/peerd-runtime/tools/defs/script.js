@@ -19,7 +19,7 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import {
   renderTraceLines, traceGoalLines, traceErrorDetails,
   ACTORS_JOB_DEFAULT_TIMEOUT_MS, ACTORS_JOB_MAX_TIMEOUT_MS,
-} from '../../subagent/actors-api.js';
+} from '../../actor/actors-api.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
@@ -66,12 +66,18 @@ export const scriptTool = {
     'in code. `to` is anything message_actor accepts; a failed ask returns',
     'failed:true (actor-level) or throws (refusal/timeout — the message says',
     'why); every delegation is individually gated + audited and shows live in',
-    'chat. (Delegate ENVIRONMENT work to actors; spawn_subagent stays the tool',
+    'chat. (Delegate ENVIRONMENT work to actors; actor_create stays the tool',
     'for a pure reasoning/research subtask.) peerd:std ships the math/data',
     'helpers (import { mean, stdev, quantile, sum, groupBy, countBy, range,',
     'chunk, parseJsonl, toJsonl, dedupeBy } from \'peerd:std\'; table/chart need',
-    'a Notebook to render). Returns the value, console output, any error, and',
-    'a [DELEGATIONS] trace of every actors op.',
+    'a Notebook to render). peerd:wasi runs a compiled wasm32-wasi BINARY over',
+    'an in-memory FS — import { runWasi } from \'peerd:wasi\'; await',
+    'runWasi(bytes, { args, env, stdin, files }) → { exitCode, stdout, stderr,',
+    'files } (bytes from peerd.egress.fetch(url).bytes; the module gets NO',
+    'network and sees ONLY the files you pass; demoModule() from the same',
+    'import is a known-good module — smoke-test runWasi(demoModule()) before',
+    'hunting real binaries). Returns the value, console',
+    'output, any error, and a [DELEGATIONS] trace of every actors op.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -103,7 +109,7 @@ export const scriptTool = {
     //     chat's main turn — an actor's keyless narrowing strips it, a child
     //     without the message_actor grant loses the closure);
     //   • the SESSION is a top-level chat (the actors/call route refuses
-    //     subagent/actor owners — minting the stub for them would advertise a
+    //     actor/actor owners — minting the stub for them would advertise a
     //     surface every op then refuses);
     //   • the CODE references `actors` at all (any use requires the
     //     identifier, aliasing included) — a pure-compute script must keep the
@@ -111,7 +117,7 @@ export const scriptTool = {
     // The SW actors/call route re-verifies the owner per op regardless.
     const sessionKind = /** @type {{ kind?: string } | undefined} */ (ctx.session)?.kind;
     const actorsOn = typeof c.messageActor === 'function' && !!c.scriptRuns && !!sid
-      && sessionKind !== 'subagent' && sessionKind !== 'actor'
+      && sessionKind !== 'spawned' && sessionKind !== 'actor'
       && /\bactors\b/.test(args.code);
     // A turn that is ALREADY stopped must not launch a worker at all — the
     // 'abort' event will never re-fire on an aborted signal, so a run started
@@ -177,11 +183,13 @@ export const scriptTool = {
 };
 
 /**
+ * Format a headless run result for the model. Shared with page_code (the web
+ * actor's code-REPL tool, PR #119) — same worker substrate, same result shape.
  * @param {string} code
  * @param {RunResult} r
  * @returns {string}
  */
-const formatRunResult = (code, r) => {
+export const formatRunResult = (code, r) => {
   const lines = [];
   const oneLineCode = code.length > 200 ? `${code.slice(0, 200)}…` : code;
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')} (headless)`);

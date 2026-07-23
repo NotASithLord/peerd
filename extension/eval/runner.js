@@ -14,12 +14,13 @@
 import browser from '/vendor/browser-polyfill.js';
 import { TASKS, SUITES } from './tasks.js';
 import { aggregate, compare } from './score.js';
+import { makeOm2wRecorder } from './om2w-recorder.js';
 import { costOf } from '/peerd-provider/index.js';
 import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null }} Turn
+ * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, lastActivityAt: number, runnerUsd: number, outstandingActors: number }} Turn
  */
 
 // The runner's own $ for a task — 'local' is FREE, a cloud runner is priced from
@@ -73,36 +74,115 @@ let turn = fresh();
 // cacheReadTokens, cacheWriteTokens, cost (USD) }. We keep the whole thing so
 // the scorecard can split cheap cache-reads from full-price fresh tokens and
 // report actual $/task, instead of collapsing it all into one number.
-// runner: tokens spent by the web actor (+ any subagents) THIS turn — separate
+// runner: tokens spent by the web actor (+ any spawned actors) THIS turn — separate
 // from `cost` (the main session's spend). Page mechanics live off the main
 // context in the actor; this is where that offloaded spend shows up so the
 // scorecard stays honest (main is low, the actor's spend appears — not "free").
 // The bucket keeps the `runner` name for continuity with the runnerModel A/B.
 /** @returns {Turn} */
-function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null }; }
+function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, lastActivityAt: 0, runnerUsd: 0, outstandingActors: 0 }; }
 
 // 'eval' (not 'sidepanel') so an open home page doesn't think the side panel
 // popped out — joins uiPorts for turn/* all the same. See service-worker onConnect.
+// A task is "done" only when the WHOLE flow has gone quiet — not on the first
+// idle. why: peerd's web work is an ASYNC actor round-trip (the orchestrator
+// delegates via message_actor, its turn ends on the ack, the web actor drives
+// the page in its OWN session, then its reply wakes the orchestrator to report).
+// The old "resolve on the first streaming:false" scored that intermediate ack —
+// so a delegated task's answer was "I've asked the web actor…", never the real
+// result (and the REAL answer then bled into the NEXT task's window). Instead we
+// watch for a QUIET-SETTLE window: any activity event resets the timer, and we
+// only score after SETTLE_MS of total silence across the orchestrator AND its
+// actor. Bounded by the task's timeoutMs (runTask races this against a sleep).
+// why 15s: a delegated task has real inter-event gaps — the ack-idle before the
+// actor spins up, and a snapshot-heavy actor step whose model call is slow. 15s
+// clears the largest event-to-event gap; a stuck turn still bails on the task's
+// own timeoutMs, and durationMs is measured to LAST ACTIVITY so the idle wait
+// doesn't inflate it. why NOT larger: the ONE gap 15s couldn't cover is the web
+// actor's own reply-SYNTHESIS — after its last page op the actor goes silent for
+// a full model call (~20-40s on a slow model) before its reply-wake re-enters
+// the orchestrator with the real answer. A blanket bump to 60s "fixed" it (score
+// 33%→41% at full-300, McNemar p=0.011) but taxed EVERY task +45s. The precise
+// fix instead: HOLD the settle while a web-actor delegation is in flight (see
+// outstandingActors below) so that synthesis gap can't trigger capture, and keep
+// the window tight at 15s once no actor is outstanding. Fast tasks settle in 15s;
+// async tasks wait for the actor, not a fixed padding.
+const SETTLE_MS = 15_000;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let settleTimer = null;
+// Reset the settle countdown on activity; when it elapses with no new event AND
+// no web-actor delegation is still in flight, the round-trip is finished →
+// resolve the task's done promise. If an actor is outstanding (started, not yet
+// done) the window elapsing is the synthesis-gap false alarm — reschedule instead
+// of resolving. Bounded by the task's own timeoutMs even if an actor never
+// reports done (a hung actor).
+const bumpSettle = () => {
+  if (!turn.started || !turn.resolveDone) return;   // no active task / not begun
+  turn.lastActivityAt = Date.now();                 // for the work-time duration metric
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(function fire() {
+    if (turn.outstandingActors > 0) { settleTimer = setTimeout(fire, SETTLE_MS); return; }
+    settleTimer = null;
+    if (turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
+  }, SETTLE_MS);
+};
+
 const port = browser.runtime.connect({ name: 'eval' });
 port.onMessage.addListener((/** @type {any} */ msg) => {
   switch (msg?.type) {
-    case 'turn/state': turn.session = msg.session; turn.started = true; break;
-    case 'turn/delta': turn.started = true; break;
-    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); break;
-    case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } break;
-    case 'turn/subagent-cost':
+    case 'turn/state': turn.session = msg.session; turn.started = true; bumpSettle(); break;
+    case 'turn/delta': turn.started = true; bumpSettle(); break;
+    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); om2w?.onToolUse(msg); bumpSettle(); break;
+    // OM2W trajectory capture: a page action becomes a step when its RESULT
+    // lands (post-execution state → the after-action screenshot). Also a real
+    // activity signal for the settle window.
+    case 'turn/tool-result': om2w?.onToolResult(msg); bumpSettle(); break;
+    // The CODE surface's real page actions: each settled page.* op inside a
+    // page_code call, announced by the SW page/call route ('page/op'). Without
+    // these a code-arm trajectory records as [navigate, answer] — no work for
+    // the judge to see.
+    case 'page/op': om2w?.onPageOp(msg); bumpSettle(); break;
+    // The OFFSCREEN actor heap's tool dispatches (actor/tool-dispatch) — the
+    // analog of turn/tool-use for actor turns, which emit no turn/* events.
+    case 'actor/op': om2w?.onActorOp(msg); bumpSettle(); break;
+    case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;
+    case 'turn/spawned-cost':
       if (msg.usage) {
         turn.runner.inputTokens += msg.usage.inputTokens || 0;
         turn.runner.outputTokens += msg.usage.outputTokens || 0;
         turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
         turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
       }
+      bumpSettle();
       break;
-    case 'turn/error': turn.error = msg.error; break;
-    case 'turn/streaming':
-      if (msg.streaming) turn.started = true;
-      else if (turn.started && turn.resolveDone) { const r = turn.resolveDone; turn.resolveDone = null; r(); }
+    // The OFFSCREEN actor heap's spend (heap-split actors broadcast
+    // turn/actor-cost, not turn/spawned-cost) — same ACTOR bucket, so the
+    // scorecard's avgRunnerTokens keeps seeing delegated web work. Tokens ride
+    // in msg.usage (msg.cost is costOf's { cost: USD } only); the priced USD is
+    // accumulated too so the row can report the actor's ACTUAL spend.
+    case 'turn/actor-cost':
+      if (msg.usage) {
+        turn.runner.inputTokens += msg.usage.inputTokens || 0;
+        turn.runner.outputTokens += msg.usage.outputTokens || 0;
+        turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
+        turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
+      }
+      if (typeof msg.cost?.cost === 'number') turn.runnerUsd += msg.cost.cost;
+      bumpSettle();
       break;
+    // Actor lifecycle events are ACTIVITY — they must hold the settle window
+    // open while the delegated work runs. start/done also bracket an OUTSTANDING
+    // delegation: while the count is > 0 the settle-fire is suppressed (see
+    // bumpSettle), so the actor's silent reply-synthesis gap can't capture the
+    // orchestrator's intermediate ack. clamp at 0 so a missed start can't wedge.
+    case 'turn/actor-start': turn.outstandingActors++; bumpSettle(); break;
+    case 'turn/actor-done': turn.outstandingActors = Math.max(0, turn.outstandingActors - 1); bumpSettle(); break;
+    case 'turn/actor-state': bumpSettle(); break;
+    case 'turn/error': turn.error = msg.error; bumpSettle(); break;
+    // streaming:true = the orchestrator (or a wake) is producing output → keep
+    // waiting. streaming:false = it went idle → START the settle countdown (a
+    // later actor reply-wake will bump it again and push the finish back).
+    case 'turn/streaming': turn.started = true; bumpSettle(); break;
     // Local-model download progress (broadcast by the SW while Gemma loads).
     case 'local-model/progress': handleDlProgress(msg.progress || {}); break;
     default: break;
@@ -117,6 +197,14 @@ let subjectId = null;
 let subjectWin = null;
 /** @type {number | null} */
 let runnerTabId = null;
+
+// The base URL of the local fixture server (web-actor suite). The CDP driver
+// starts the server on an ephemeral port and passes it into run(); tasks carry
+// the __FIXTURE__ sentinel so nothing hard-codes a port. Empty → left as-is (a
+// __FIXTURE__ task simply fails its check, never crashes the run).
+let fixtureBaseUrl = '';
+/** @param {string} [s] @returns {string | undefined} */
+const applyFixture = (s) => (typeof s === 'string' && fixtureBaseUrl) ? s.replace(/__FIXTURE__/g, fixtureBaseUrl) : s;
 async function ensureSubject() {
   if (runnerTabId == null) {
     try { runnerTabId = (await browser.tabs.getCurrent())?.id ?? -1; } catch { runnerTabId = -1; }
@@ -225,6 +313,41 @@ async function navigateTab(tabId, url) {
   }));
 }
 
+// ── OM2W trajectory capture (Online-Mind2Web adapter) ───────────────────────
+// Active only when the driver runs with om2w:true. Screenshots ride
+// chrome.tabs.captureVisibleTab, which only grabs a window's FOREGROUND tab —
+// so capture ACTIVATES the agent's current tab first (the agent addresses tabs
+// by id, never by focus, so activation doesn't change its behavior; it's also
+// the harvest-state precedent of bringing a tab forward to unthrottle it).
+// JPEG q70 keeps a 25-step trajectory a few MB, within a comfortable CDP pull.
+/** @type {ReturnType<typeof makeOm2wRecorder> | null} */
+let om2w = null;
+
+async function captureAgentTab() {
+  const tab = await resolveEndTab();
+  if (!tab?.id) throw new Error('om2w capture: no agent tab');
+  try { await browser.tabs.update(tab.id, { active: true }); } catch { /* tab vanished mid-capture */ }
+  // An action that navigates leaves the tab LOADING; the OM2W screenshot is the
+  // AFTER-action state, so wait for it to settle (bounded) before the grab —
+  // otherwise captureVisibleTab throws ("tab is loading"). Poll status; cap ~4s.
+  for (let i = 0; i < 20; i++) {
+    let t; try { t = await browser.tabs.get(tab.id); } catch { break; }
+    if (t?.status === 'complete') break;
+    await sleep(200);
+  }
+  await sleep(150);   // let the activation/paint land before the grab
+  // One retry — captureVisibleTab can transiently fail right at a load boundary.
+  try { return await browser.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 }); }
+  catch { await sleep(300); return browser.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 }); }
+}
+
+const makeTaskRecorder = () => makeOm2wRecorder({
+  capture: captureAgentTab,
+  tabInfo: async () => { const t = await resolveEndTab(); return t?.url ?? null; },
+  // The 25-step run-rule: halt the agent the way the Stop button does.
+  stop: () => { browser.runtime.sendMessage({ type: 'agent/stop' }).catch(() => {}); },
+});
+
 /** @param {number} tabId */
 async function readTab(tabId) {
   let url = '', title = '', text = '';
@@ -253,29 +376,44 @@ function finalAnswer(session) {
 
 /** @param {any} task @param {string} [runnerCfg] */
 async function runTask(task, runnerCfg) {
+  // Kill any settle timer left pending from the previous task before we swap in
+  // a fresh turn — otherwise its late fire could resolve THIS task's donePromise.
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
   turn = fresh();
   log(`\n▶ ${task.id} — ${task.title}`);
   await browser.runtime.sendMessage({ type: 'session/reset' });
   await closeAgentTabs(); // clear tabs peerd opened in PRIOR tasks → clean window to score
   // subjectId is set by ensureSubject before any task runs; cast off the null.
   const subjId = /** @type {number} */ (subjectId);
-  if (task.startUrl) { log(`  nav → ${task.startUrl}`); await navigateTab(subjId, task.startUrl); }
+  // Substitute the fixture base into the __FIXTURE__ sentinel (web-actor suite);
+  // a no-op for every task that doesn't use it.
+  const startUrl = applyFixture(task.startUrl);
+  const prompt = applyFixture(task.prompt) ?? task.prompt;
+  if (startUrl) { log(`  nav → ${startUrl}`); await navigateTab(subjId, startUrl); }
+  // OM2W mode: step 0 is this initial navigation — recorded with its screenshot.
+  if (om2w && task.om2w) await om2w.begin(startUrl ?? null).catch((/** @type {any} */ e) => log(`  om2w begin failed: ${e?.message ?? e}`));
 
   /** @type {Promise<void>} */
   const donePromise = new Promise((res) => { turn.resolveDone = res; });
   const start = Date.now();
   // activeTabId pins the agent to the subject tab without focusing it — the SW's
   // buildToolContext uses tabs.get(activeTabId) instead of the active-tab query.
-  const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'agent/send', text: task.prompt, activeTabId: subjId }));
+  const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'agent/send', text: prompt, activeTabId: subjId }));
   if (!reply?.ok) {
     const detail = `agent/send rejected: ${reply?.error}`;
     log(`  ✗ ${detail}`);
     return { id: task.id, pass: false, detail, error: reply?.error, steps: 0, tokens: 0, ...ZERO_COST, durationMs: 0, tools: [] };
   }
   await Promise.race([donePromise, sleep(task.timeoutMs ?? 90_000)]);
-  const durationMs = Date.now() - start;
+  // Work time = start → last activity, EXCLUDING the quiet-settle idle wait (and
+  // any post-work idle) so the duration metric reflects real work, not the fixed
+  // settle window we add on top. Falls back to now for a silent turn.
+  const durationMs = (turn.lastActivityAt || Date.now()) - start;
   const timedOut = !!turn.resolveDone;
   turn.resolveDone = null;
+  // Stop the settle timer either way: on the timeout path it's still pending, and
+  // a late fire must never bleed into the next task's donePromise.
+  if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
   if (timedOut) log('  ⏱ timed out (still scoring end state)');
 
   await settleSubject();
@@ -296,7 +434,10 @@ async function runTask(task, runnerCfg) {
   // whole function (TDZ), breaking `turn = fresh()` at the top of runTask.
   const freshTok = cost.inputTokens + cost.outputTokens; // full-price input+output (MAIN context)
   const runnerTokens = turn.runner.inputTokens + turn.runner.outputTokens + turn.runner.cacheReadTokens + turn.runner.cacheWriteTokens;
-  const runnerCostUsd = priceRunnerUsd(runnerCfg, turn.runner);
+  // Prefer the ACTUAL accumulated actor spend (turn/actor-cost, priced by the
+  // SW from the actor's real model) over re-pricing by runnerCfg — cfg-based
+  // pricing exists for the runner-model A/B and reads 'local' (=$0) otherwise.
+  const runnerCostUsd = turn.runnerUsd > 0 ? turn.runnerUsd : priceRunnerUsd(runnerCfg, turn.runner);
   log(`  ${res.pass ? '✓ PASS' : '✗ FAIL'} — ${res.detail}  [${state.steps} steps · main ${freshTok} fresh + ${cost.cacheReadTokens} cache · runner ${runnerTokens} tok ($${runnerCostUsd.toFixed(4)}) · main $${cost.costUsd.toFixed(4)} · ${(durationMs / 1000).toFixed(1)}s]`);
   // why: per-task observability. The scorecard's failure rows only carry
   // id/detail/error — not WHICH tools ran or what the agent concluded. For a
@@ -305,7 +446,15 @@ async function runTask(task, runnerCfg) {
   // final answer (it usually explains what the agent THOUGHT it did).
   log(`       tools: [${state.tools.join(' → ') || '—'}]`);
   if (!res.pass && state.answer) log(`       agent said: "${state.answer.slice(0, 240).replace(/\s+/g, ' ')}"`);
-  return { id: task.id, pass: res.pass, detail: res.detail, error: state.error, steps: state.steps, tokens: state.tokens, ...cost, runnerTokens, runnerCostUsd, durationMs, tools: state.tools };
+  /** @type {Record<string, any>} */
+  const row = { id: task.id, pass: res.pass, detail: res.detail, error: state.error, steps: state.steps, tokens: state.tokens, ...cost, runnerTokens, runnerCostUsd, durationMs, tools: state.tools };
+  // OM2W mode: attach the recorded trajectory (actions + after-action shots +
+  // the final answer the exporter turns into the TASK_COMPLETE step).
+  if (om2w && task.om2w) {
+    const rec = await om2w.finish().catch(() => null);
+    if (rec) { row.om2w = { ...rec, finalAnswer: state.answer }; log(`       om2w: ${rec.actions.length} page action(s), ${rec.shots.length} shot(s)${rec.capped ? ' — CAPPED at 25' : ''}`); }
+  }
+  return row;
 }
 
 // why: lead with the honest cost split — fresh (full-price input+output, the
@@ -668,21 +817,47 @@ const evalDriver = {
   lastResults: null,
   /** @type {string | null} */
   lastError: null,
-  /** @param {{ suite?: string, limit?: number, taskIds?: string[], runnerCfg?: string }} [opts] */
+  /** @param {{ suite?: string, limit?: number, taskIds?: string[], runnerCfg?: string, fixtureBaseUrl?: string, tasks?: Array<{ id: string, title?: string, startUrl?: string | null, prompt: string, timeoutMs?: number, reference_length?: number }>, om2w?: boolean }} [opts] */
   run(opts = {}) {
     if (evalDriver.running) return;
     const { suite, limit, taskIds, runnerCfg } = opts;
+    // The web-actor suite's __FIXTURE__ tasks resolve against this (the CDP
+    // driver's fixture server); other suites ignore it.
+    fixtureBaseUrl = typeof opts.fixtureBaseUrl === 'string' ? opts.fixtureBaseUrl.replace(/\/$/, '') : '';
+    // OM2W mode: inline tasks (functions can't cross the CDP eval boundary, so
+    // the driver sends plain records and the check is attached HERE — a no-op
+    // pass, because OM2W tasks are scored OFFLINE by WebJudge, not by check()).
+    // The om2w flag arms the trajectory recorder for those tasks.
+    /** @type {any[] | undefined} */
+    const inlineTasks = (Array.isArray(opts.tasks) && opts.tasks.length)
+      ? opts.tasks.map((t) => ({
+        id: t.id, title: t.title ?? t.id, startUrl: t.startUrl ?? null, prompt: t.prompt,
+        timeoutMs: t.timeoutMs ?? 300_000, om2w: opts.om2w === true,
+        check: () => ({ pass: true, detail: 'scored externally (OM2W WebJudge)' }),
+      }))
+      : undefined;
+    om2w = (opts.om2w === true && inlineTasks) ? makeTaskRecorder() : null;
     evalDriver.running = true;
     evalDriver.lastCard = null; evalDriver.lastResults = null; evalDriver.lastError = null;
-    if (suite) { const sel = $('suite'); if (sel) sel.value = suite; }
+    if (suite) {
+      const sel = /** @type {HTMLSelectElement | null} */ ($('suite'));
+      if (sel) sel.value = suite;
+      // Fail LOUD if the requested suite didn't take (a missing <option> would
+      // otherwise silently fall back to 'simple' and score the wrong suite).
+      if (!sel || sel.value !== suite) {
+        evalDriver.lastError = `unknown suite "${suite}" (not in the registry)`;
+        evalDriver.running = false;
+        return;
+      }
+    }
     void (async () => {
       try {
         /** @type {any[] | undefined} */
-        let tasks;
-        if (Array.isArray(taskIds) && taskIds.length) {
+        let tasks = inlineTasks;
+        if (!tasks && Array.isArray(taskIds) && taskIds.length) {
           const all = selectedTasks();
           tasks = taskIds.map((id) => all.find((t) => t.id === id)).filter(Boolean);
-        } else if (typeof limit === 'number' && limit > 0) {
+        } else if (!tasks && typeof limit === 'number' && limit > 0) {
           tasks = selectedTasks().slice(0, limit);
         }
         const { card, results } = await runSuite(runnerCfg, tasks);
@@ -700,6 +875,26 @@ const evalDriver = {
 };
 /** @type {any} */ (window).__peerdEval = evalDriver;
 
+// Build the suite dropdown FROM the SUITES registry (not static HTML) so every
+// registered suite is selectable — by a human AND by the CDP driver, which sets
+// this <select>'s value to pick a suite. A suite missing an <option> here made
+// the driver's `sel.value = suite` silently no-op and fall back to 'simple'.
+function populateSuiteSelect() {
+  const sel = /** @type {HTMLSelectElement | null} */ ($('suite'));
+  if (!sel) return;
+  const cur = sel.value || 'simple';
+  sel.innerHTML = '';
+  for (const key of Object.keys(SUITES)) {
+    const s = /** @type {{ id: string, label: string, tasks: any[] }} */ (/** @type {any} */ (SUITES)[key]);
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = `${s.label} (${s.tasks.length} tasks)`;
+    sel.appendChild(opt);
+  }
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
 preflight();
+populateSuiteSelect(); // rebuild #suite from SUITES so web-actor (and any future suite) is selectable
 populateModelSelects(); // fills cloud models, then refreshLocalStatus() adds the local model if downloaded
 refreshBaselineUi();

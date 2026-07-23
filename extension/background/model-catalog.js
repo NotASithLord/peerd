@@ -55,6 +55,22 @@ export const makeModelCatalog = (deps) => {
       { model: 'minimax/minimax-m2',    label: 'MiniMax M2 (open · cheap)' },
       { model: 'openai/gpt-4o',         label: 'GPT-4o' },
     ],
+    // Direct OpenAI (api.openai.com). Led by the current flagship + its cheap
+    // sibling so a fresh OpenAI user gets a strong default before curating.
+    openai: [
+      { model: 'gpt-5.1',      label: 'GPT-5.1' },
+      { model: 'gpt-5.1-mini', label: 'GPT-5.1 mini (cheap)' },
+      { model: 'gpt-5',        label: 'GPT-5' },
+      { model: 'o4-mini',      label: 'o4-mini (reasoning)' },
+    ],
+    // Z.ai GLM direct API — small, known lineup of bare ids (`glm-*`). No live
+    // inventory fetch: GLM exposes a handful of models, not the gateway-scale
+    // catalog that justified OpenRouter's curation picker.
+    glm: [
+      { model: 'glm-5.2',      label: 'GLM-5.2 (1M · agentic)' },
+      { model: 'glm-4.6',      label: 'GLM-4.6' },
+      { model: 'glm-4.5-air',  label: 'GLM-4.5 Air (fast · cheap)' },
+    ],
     // Local WebGPU — only surfaced once downloaded/resident (gated in buildModelOptions).
     'local-webgpu': [
       { model: localModelId, label: 'Gemma 4 E2B' },

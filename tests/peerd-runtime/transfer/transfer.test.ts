@@ -166,3 +166,83 @@ describe('applyImport', () => {
     expect(calls.setSecret).toEqual([['anthropic', 'sk-2']]);
   });
 });
+
+// R6 — transfer import is an untrusted-deserialization surface. The three
+// authority-bearing sections get gates: endpoints validated to https/local
+// loopback, hooks quarantined (disabled + untrusted), memory named loudly.
+describe('R6 import gates', () => {
+  const stubIo = () => {
+    const calls: Record<string, any[]> = {
+      applySettings: [], setProviderEndpoints: [], setSecret: [], importMemory: [], saveHook: [],
+    };
+    return {
+      calls,
+      io: {
+        applySettings: async (p: any) => { calls.applySettings.push(p); },
+        setProviderEndpoints: async (v: any) => { calls.setProviderEndpoints.push(v); },
+        setSecret: async (n: string, v: string) => { calls.setSecret.push([n, v]); },
+        importMemory: async (p: any) => { calls.importMemory.push(p); return { written: p.docs.length, skipped: 0 }; },
+        saveHook: async (r: any) => { calls.saveHook.push(r); },
+      },
+    };
+  };
+
+  test('non-https endpoints are dropped and named; https + local loopback pass', async () => {
+    const { calls, io } = stubIo();
+    const res = await applyImport({
+      payload: makePayload({
+        providerEndpoints: { endpoints: [
+          { url: 'https://api.good.example/v1' },
+          { url: 'http://localhost:11434' },
+          { url: 'http://evil.example/steal' },
+          { url: 'ftp://weird.example' },
+          { url: 'not a url' },
+        ] },
+      }),
+      channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
+    });
+    expect(res.ok).toBe(true);
+    expect(calls.setProviderEndpoints.length).toBe(1);
+    const applied = calls.setProviderEndpoints[0].endpoints.map((e: any) => e.url);
+    expect(applied).toEqual(['https://api.good.example/v1', 'http://localhost:11434']);
+    if (!('notices' in res)) throw new Error('expected notices');
+    expect((res.notices as string[]).some((n) => n.includes('Dropped 3'))).toBe(true);
+  });
+
+  test('imported hooks land DISABLED and UNTRUSTED regardless of the file\'s flags', async () => {
+    const { calls, io } = stubIo();
+    await applyImport({
+      payload: makePayload({ hooks: [{ id: 'h1', event: 'pre-tool-use', kind: 'js', enabled: true, trusted: true, body: 'return {}' }] }),
+      channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
+    });
+    expect(calls.saveHook.length).toBe(1);
+    expect(calls.saveHook[0].enabled).toBe(false);
+    expect(calls.saveHook[0].trusted).toBe(false);
+    expect(calls.saveHook[0].body).toBe('return {}'); // the record itself is preserved for review
+  });
+
+  test('the inspect summary names endpoint urls and hook quarantine BEFORE apply', () => {
+    const res = inspectImport({
+      payload: makePayload({
+        providerEndpoints: { endpoints: [{ url: 'https://api.custom.example/v1' }] },
+        hooks: [{ id: 'h1', event: 'pre-tool-use' }, { id: 'h2', event: 'post-tool-use' }],
+      }),
+      channel: 'preview', knownSettingKeys: KNOWN_KEYS,
+    });
+    if (!res.ok || !res.summary) throw new Error('expected ok summary');
+    expect((res.summary as any).endpointUrls).toEqual(['https://api.custom.example/v1']);
+    expect((res.summary as any).hookIds).toEqual(['h1', 'h2']);
+    const joined = res.summary.notices.join(' ');
+    expect(joined).toContain('api.custom.example');
+    expect(joined).toContain('DISABLED');
+  });
+
+  test('a memory import states its consequence in the notices', async () => {
+    const { io } = stubIo();
+    const res = await applyImport({
+      payload: makePayload(), channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
+    });
+    if (!res.ok || !('notices' in res)) throw new Error('expected notices');
+    expect((res.notices as string[]).some((n) => n.includes('memory doc'))).toBe(true);
+  });
+});

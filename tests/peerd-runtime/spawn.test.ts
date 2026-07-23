@@ -1,35 +1,35 @@
 import { describe, test, expect } from 'bun:test';
 import {
-  makeSpawnSubagent,
+  makeSpawnActor,
   narrowTools,
   finalAssistantText,
   restrictCtxCapabilities,
   CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH,
-} from '../../extension/peerd-runtime/subagent/spawn.js';
+} from '../../extension/peerd-runtime/actor/spawn.js';
 
 // ---- pure helpers ---------------------------------------------------------
 
 describe('narrowTools', () => {
-  const all = [{ name: 'a' }, { name: 'b' }, { name: 'spawn_subagent' }];
+  const all = [{ name: 'a' }, { name: 'b' }, { name: 'actor_create' }];
 
-  test('default: inherits all parent tools MINUS spawn_subagent', () => {
+  test('default: inherits all parent tools MINUS actor_create', () => {
     expect(narrowTools(all, {}).map((t) => t.name)).toEqual(['a', 'b']);
   });
 
-  test('allowRecursion keeps spawn_subagent', () => {
+  test('allowRecursion keeps actor_create', () => {
     expect(narrowTools(all, { allowRecursion: true }).map((t) => t.name))
-      .toEqual(['a', 'b', 'spawn_subagent']);
+      .toEqual(['a', 'b', 'actor_create']);
   });
 
   test('explicit list intersects with registered tools', () => {
     expect(narrowTools(all, { tools: ['a', 'nope'] }).map((t) => t.name)).toEqual(['a']);
   });
 
-  test('explicit list still drops spawn_subagent unless allowRecursion', () => {
-    expect(narrowTools(all, { tools: ['a', 'spawn_subagent'] }).map((t) => t.name)).toEqual(['a']);
-    expect(narrowTools(all, { tools: ['a', 'spawn_subagent'], allowRecursion: true }).map((t) => t.name))
-      .toEqual(['a', 'spawn_subagent']);
+  test('explicit list still drops actor_create unless allowRecursion', () => {
+    expect(narrowTools(all, { tools: ['a', 'actor_create'] }).map((t) => t.name)).toEqual(['a']);
+    expect(narrowTools(all, { tools: ['a', 'actor_create'], allowRecursion: true }).map((t) => t.name))
+      .toEqual(['a', 'actor_create']);
   });
 
   test('empty array means NO tools', () => {
@@ -63,13 +63,14 @@ describe('restrictCtxCapabilities', () => {
     getSecret: () => 'KEY',
     safeFetch: () => {},
     webFetch: () => {},
+    webCache: { get: () => {}, put: () => {}, key: () => 'k' },
     memory: { read: () => {} },
     kv: { get: () => {} },
     idb: { getAll: () => {} },
-    spawnSubagent: () => {},
-    spawnSubagentAsync: () => {},
-    subagentTasks: () => {},
-    subagentCancel: () => {},
+    spawnActor: () => {},
+    spawnActorAsync: () => {},
+    actorTasks: () => {},
+    actorCancel: () => {},
     requestReview: () => {},
     dweb: { share: () => {} },
     // non-capability fields — always retained
@@ -86,14 +87,18 @@ describe('restrictCtxCapabilities', () => {
   const CAP_KEYS = Object.keys(CAPABILITY_CONSUMERS);
 
   test("a DOM-only runner toolset strips EVERY capability — no path to secrets/egress/spawn", () => {
-    const allowed = new Set(['snapshot', 'read_page', 'click', 'type', 'navigate', 'query_dom']);
+    // read_page is deliberately EXCLUDED here: it consumes webCache (its
+    // mode:'content' spill pager), so it is not a no-capability DOM tool — the
+    // read_page→webCache grant is asserted on its own below. The rest of the
+    // DOM toolset consumes nothing, so this set must strip every capability.
+    const allowed = new Set(['snapshot', 'click', 'type', 'navigate', 'query_dom']);
     const out = restrictCtxCapabilities(fullCtx(), allowed);
     for (const cap of CAP_KEYS) expect(out[cap as keyof typeof out]).toBeUndefined();
     // the high-value ones, called out explicitly
     expect('getSecret' in out).toBe(false);
     expect('safeFetch' in out).toBe(false);
     expect('webFetch' in out).toBe(false);
-    expect('spawnSubagent' in out).toBe(false);
+    expect('spawnActor' in out).toBe(false);
     expect('dweb' in out).toBe(false);
     // non-capability fields survive
     expect(out.activeTab).toEqual({ id: 1 });
@@ -104,6 +109,10 @@ describe('restrictCtxCapabilities', () => {
   test('a capability is KEPT when a granted tool consumes it', () => {
     expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']))).toBe(true);
     expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['vm_import']))).toBe(true);
+    // read_page mode:'content' pages its overflow through webCache — the grant
+    // that #189 added to CAPABILITY_CONSUMERS.webCache must survive narrowing.
+    expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_page']))).toBe(true);
+    expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
     // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
@@ -119,15 +128,15 @@ describe('restrictCtxCapabilities', () => {
     expect('safeFetch' in out).toBe(false);
     // but the ones with consumers are all kept
     expect('webFetch' in out).toBe(true);
-    expect('spawnSubagent' in out).toBe(true);
+    expect('spawnActor' in out).toBe(true);
   });
 
-  test('spawn closure is stripped for a non-recursive subagent (no spawn_subagent granted)', () => {
-    // the inherit-all-but-spawn case: tools present but spawn_subagent narrowed out.
+  test('spawn closure is stripped for a non-recursive actor (no actor_create granted)', () => {
+    // the inherit-all-but-spawn case: tools present but actor_create narrowed out.
     const allowed = new Set(['fetch_url', 'read_memory', 'request_review']);
     const out = restrictCtxCapabilities(fullCtx(), allowed);
-    expect('spawnSubagent' in out).toBe(false);
-    expect('spawnSubagentAsync' in out).toBe(false);
+    expect('spawnActor' in out).toBe(false);
+    expect('spawnActorAsync' in out).toBe(false);
     expect('webFetch' in out).toBe(true);   // fetch_url needs it
     expect('memory' in out).toBe(true);     // read_memory needs it
   });
@@ -141,7 +150,7 @@ describe('restrictCtxCapabilities', () => {
 
 // ---- orchestrator ---------------------------------------------------------
 
-// Minimal in-memory session store with the subagent fields the
+// Minimal in-memory session store with the actor fields the
 // orchestrator reads/writes. Mirrors createSessionStore's create/get
 // surface without pulling the `/shared`-rooted real implementation.
 const makeStore = () => {
@@ -183,7 +192,7 @@ const makeStore = () => {
 // assistant message to the store, and yields tool-use + stop events so
 // the orchestrator's counting/exceeded logic runs against real events.
 const makeMockLoop = (opts: { finalText?: string; toolUses?: number; stopReason?: string } = {}) => {
-  const { finalText = 'subagent done', toolUses = 0, stopReason = 'end_turn' } = opts;
+  const { finalText = 'actor done', toolUses = 0, stopReason = 'end_turn' } = opts;
   const calls: any[] = [];
   async function* loop(ctx: any) {
     // drive the model once so cappedCallModel's injected maxTokens shows up
@@ -217,7 +226,7 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
       getToolDescriptors: () => [
         { name: 'a', description: 'A', schema: {} },
         { name: 'b', description: 'B', schema: {} },
-        { name: 'spawn_subagent', description: 'S', schema: {} },
+        { name: 'actor_create', description: 'S', schema: {} },
       ],
       now: (() => { let t = 1000; return () => (t += 25); })(),
       ...extra,
@@ -225,19 +234,19 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
   };
 };
 
-describe('makeSpawnSubagent', () => {
-  test('creates a subagent session with parentage and inherits the parent model', async () => {
+describe('makeSpawnActor', () => {
+  test('creates an actor session with parentage and inherits the parent model', async () => {
     const store = makeStore();
     const parent = await store.create({ model: 'parent-model' });
     const { loop } = makeMockLoop({ finalText: 'hello from child' });
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 'do a thing', parentSessionId: parent.sessionId, parentDepth: 0 });
 
     if (out.sessionId === null) throw new Error('expected a child session');
     const child = store.map.get(out.sessionId);
-    expect(child.kind).toBe('subagent');
+    expect(child.kind).toBe('spawned');
     expect(child.parentSessionId).toBe(parent.sessionId);
     expect(child.depth).toBe(1);
     expect(child.task).toBe('do a thing');
@@ -255,7 +264,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({ permissionMode: 'plan', confirmActions: true });
     const { loop } = makeMockLoop();
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
 
@@ -270,7 +279,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop();
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
 
@@ -287,7 +296,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({ confirmActions: false });
     const { loop } = makeMockLoop();
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
 
@@ -302,7 +311,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop();
     const { deps, audits } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const before = store.map.size;
     const out = await spawn({
@@ -313,7 +322,7 @@ describe('makeSpawnSubagent', () => {
     expect(out.exceeded).toBe(true);
     expect(out.sessionId).toBeNull();
     expect(store.map.size).toBe(before);        // no child session created
-    expect(audits.some((a) => a.type === 'subagent_refused')).toBe(true);
+    expect(audits.some((a) => a.type === 'actor_refused')).toBe(true);
   });
 
   test('respects a custom maxDepth', async () => {
@@ -321,14 +330,14 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop();
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     // parentDepth 1 → child depth 2; maxDepth 1 refuses.
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId, parentDepth: 1, maxDepth: 1 });
     expect(out.refused).toBe(true);
   });
 
-  test('narrows tools and forbids spawn_subagent by default', async () => {
+  test('narrows tools and forbids actor_create by default', async () => {
     const store = makeStore();
     const parent = await store.create({});
     let seenTools: any[] = [];
@@ -338,13 +347,13 @@ describe('makeSpawnSubagent', () => {
       yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
     }
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     await spawn({ task: 't', parentSessionId: parent.sessionId });
     expect(seenTools.map((t: any) => t.name)).toEqual(['a', 'b']);
   });
 
-  test('explicit empty tools array → pure-reasoning subagent (no tools)', async () => {
+  test('explicit empty tools array → pure-reasoning actor (no tools)', async () => {
     const store = makeStore();
     const parent = await store.create({});
     let seenTools: any[] = [];
@@ -357,11 +366,11 @@ describe('makeSpawnSubagent', () => {
     const { deps } = baseDeps(store, loop, {
       buildToolContext: async () => { ctxBuilt = true; return { session: {}, audit: async () => {} }; },
     });
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     await spawn({ task: 't', parentSessionId: parent.sessionId, tools: [] });
     expect(seenTools).toEqual([]);
-    expect(ctxBuilt).toBe(false);   // no dispatcher plumbing for a tool-less subagent
+    expect(ctxBuilt).toBe(false);   // no dispatcher plumbing for a tool-less actor
   });
 
   test('counts tool calls and reports the result shape', async () => {
@@ -369,7 +378,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop({ finalText: 'R', toolUses: 3 });
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
     expect(out.toolCalls).toBe(3);
@@ -384,7 +393,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop({ stopReason: 'max_steps' });
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId, maxSteps: 5 });
     expect(out.exceeded).toBe(true);
@@ -395,7 +404,7 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop();
     const { deps, modelCalls } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     await spawn({ task: 't', parentSessionId: parent.sessionId, maxOutputTokens: 256 });
     expect(modelCalls.length).toBeGreaterThan(0);
@@ -407,25 +416,25 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop();
     const { deps, audits } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
     const tagged = audits.filter((a) => a.details?.parentSessionId === parent.sessionId);
     expect(tagged.length).toBeGreaterThan(0);
     for (const a of tagged) {
       expect(a.details.depth).toBe(1);
-      expect(a.details.subagentSessionId).toBe(out.sessionId);
+      expect(a.details.actorSessionId).toBe(out.sessionId);
     }
-    expect(audits.some((a) => a.type === 'subagent_spawned')).toBe(true);
-    expect(audits.some((a) => a.type === 'subagent_completed')).toBe(true);
+    expect(audits.some((a) => a.type === 'actor_spawned')).toBe(true);
+    expect(audits.some((a) => a.type === 'actor_completed')).toBe(true);
   });
 
-  test('forwards live events with subagent-start / subagent-stop bookends', async () => {
+  test('forwards live events with actor-start / actor-stop bookends', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const { loop } = makeMockLoop({ toolUses: 1 });
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const events: any[] = [];
     const out = await spawn({
@@ -433,10 +442,10 @@ describe('makeSpawnSubagent', () => {
       onEvent: (ev: any) => events.push(ev), parentToolUseId: 'card-1',
     });
 
-    expect(events[0].type).toBe('subagent-start');
+    expect(events[0].type).toBe('actor-start');
     expect(events[0].parentToolUseId).toBe('card-1');
     expect(events[0].sessionId).toBe(out.sessionId);
-    expect(events[events.length - 1].type).toBe('subagent-stop');
+    expect(events[events.length - 1].type).toBe('actor-stop');
     expect(events.some((e) => e.type === 'tool-use')).toBe(true);
   });
 
@@ -445,17 +454,17 @@ describe('makeSpawnSubagent', () => {
     const parent = await store.create({});
     const { loop } = makeMockLoop();
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
     const out = await spawn({ task: '   ', parentSessionId: parent.sessionId });
     expect(out.refused).toBe(true);
     expect(out.sessionId).toBeNull();
   });
 });
 
-// ---- subagent context building ---------------------------------------------
+// ---- actor context building ---------------------------------------------
 
-describe('subagent context building', () => {
-  test('getSystemPrompt renders the normal subagent prompt (base + taskOverride)', async () => {
+describe('actor context building', () => {
+  test('getSystemPrompt renders the normal actor prompt (base + taskOverride)', async () => {
     const store = makeStore();
     const parent = await store.create({});
     let seenSystem = '';
@@ -465,7 +474,7 @@ describe('subagent context building', () => {
       yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
     }
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
     await spawn({ task: 'a thing', parentSessionId: parent.sessionId });
     expect(seenSystem).toBe('sys task=a thing'); // base+taskOverride path
   });
@@ -478,7 +487,7 @@ describe('subagent context building', () => {
     const { deps } = baseDeps(store, loop, {
       buildToolContext: async (args: any) => { ctxArgs.push(args); return { session: { sessionId: args.sessionId }, audit: async () => {} }; },
     });
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
     await spawn({ task: 'a thing', parentSessionId: parent.sessionId });
     expect(ctxArgs.length).toBe(1);
     expect(ctxArgs[0].activeTabId).toBeUndefined();
@@ -494,13 +503,13 @@ describe('subagent context building', () => {
       yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
     }
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
     expect(out.usage).toEqual({ inputTokens: 110, outputTokens: 25, cacheReadTokens: 4000, cacheWriteTokens: 50 });
   });
 });
 
-describe('makeSpawnSubagent — persistDeltas (ephemeral speed path)', () => {
+describe('makeSpawnActor — persistDeltas (ephemeral speed path)', () => {
   test('persistDeltas:false threads to the loop; userText is exactly the task', async () => {
     const store = makeStore();
     const parent = await store.create({});
@@ -511,7 +520,7 @@ describe('makeSpawnSubagent — persistDeltas (ephemeral speed path)', () => {
       yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
     }
     const { deps, audits } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
 
     const events: any[] = [];
     await spawn({
@@ -524,11 +533,11 @@ describe('makeSpawnSubagent — persistDeltas (ephemeral speed path)', () => {
 
     expect(seen[0].userText).toBe('find the price');
     expect(seen[0].persistDeltas).toBe(false);
-    const child = [...store.map.values()].find((s: any) => s.kind === 'subagent');
+    const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
     expect(child.task).toBe('find the price');
-    const spawned = audits.find((a: any) => a.type === 'subagent_spawned');
+    const spawned = audits.find((a: any) => a.type === 'actor_spawned');
     expect(spawned.details.task).toBe('find the price');
-    const startEv = events.find((e: any) => e.type === 'subagent-start');
+    const startEv = events.find((e: any) => e.type === 'actor-start');
     expect(startEv.task).toBe('find the price');
   });
 
@@ -542,7 +551,7 @@ describe('makeSpawnSubagent — persistDeltas (ephemeral speed path)', () => {
       yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
     }
     const { deps } = baseDeps(store, loop);
-    const spawn = makeSpawnSubagent(deps);
+    const spawn = makeSpawnActor(deps);
     await spawn({ task: 'plain task', parentSessionId: parent.sessionId, parentDepth: 0 });
     expect(seen[0].userText).toBe('plain task');
     expect(seen[0].persistDeltas).toBe(true);

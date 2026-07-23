@@ -118,7 +118,7 @@ import {
   // file attachments — agent/send validates + shapes through the pure
   // core (fail closed) before the turn starts.
   prepareUserAttachments,
-  makeSpawnSubagent,
+  makeSpawnActor,
   makeRequestReview,
   createRefRegistry,
   SessionNotFoundError,
@@ -136,6 +136,11 @@ import {
   filterByGoalActive,
   makeGoalRunner,
   GOAL_MAX_ITERATIONS,
+  makeScheduler,
+  SCHEDULE_ALARM_NAME,
+  formatTodoBlock,
+  // prewalk — the lifecycle controller (testable shell); the SW binds real IO
+  makePrewalkController,
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
@@ -205,6 +210,15 @@ import {
   inspectImport,
   applyImport,
   ExportPassphraseError,
+  // DESIGN-19 site clients — per-origin derived API clients (store + pure helpers)
+  createSiteClientStore,
+  resolveSiteUrl,
+  buildMintInjection,
+  digestCapture,
+  // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap (chrome.scripting), for capture
+  // on every channel (store-Chrome + Firefox, no new permission).
+  installFetchTapInjected,
+  drainFetchTapInjected,
   // skills (progressive-disclosure SKILL.md)
   createSkillStore,
   createSkillRegistry,
@@ -218,24 +232,32 @@ import {
   // voice: the settings normalizers — the SW validates voiceVariant +
   // voiceEngine on settings/update (coerce unknowns).
   normalizeVariant, normalizeEngine,
-  // DESIGN-11: wrap an async-subagent's model-authored result (possibly
+  // DESIGN-11: wrap an async-actor's model-authored result (possibly
   // page-derived) as UNTRUSTED before it re-enters the parent's context.
   wrapUntrusted,
-  // DESIGN-11: the async-subagent orchestrator (testable; the SW injects its IO).
-  makeAsyncSubagents,
+  // DESIGN-11: the async-actor orchestrator (testable; the SW injects its IO).
+  makeAsyncActors,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
+  // Standing peer conversations — the pure thread registry (convId → turns).
+  createConversationRegistry,
   // DESIGN-17: web-actor core — tab→session bindings, the chat→web-actor
   // registry (the 0-or-1-tab actor), + the self-fenced summary.
   makeWebActorTabBindings, makeWebActorRegistry, fenceWebActorSummary,
+  // PR #119: the code-REPL arm's host-side page-call handler + the pure
+  // adopt-first-tab-on-goto decision.
+  makePageCallHandler, resolvePageTab,
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
   finalAssistantText,
+  // The debug surface: the bundle assembler + the delegation-tree walk the
+  // session/debugBundle route runs (pure; the SW supplies the reads).
+  assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
 import { flattenCategorisedDenylist, normalizeDenylistPattern } from '/peerd-egress/index.js';
@@ -246,8 +268,11 @@ import { createJsClient } from './notebook-client.js';
 import { createJsTabTracker } from './notebook-tab-tracker.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
 import { createScriptRunRegistry } from './script-runs.js';
+import { createContextSnapshots } from './context-snapshots.js';
+import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
+import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
@@ -273,6 +298,9 @@ import {
   makeVmHttpFetch,
   makeGitCredentialRoutes,
   WEB_WRITE_CONFIRM_KEY,
+  // DESIGN-19: the shared non-GET web-write predicate (site-fetch/call gates a
+  // non-GET through the same web:write confirm as fetch_url / call_api).
+  needsWebWriteConfirm,
 } from '/peerd-engine/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
@@ -558,6 +586,32 @@ const getSecret = (/** @type {string} */ name) => vault.getSecret(name);
 // ---------------------------------------------------------------------------
 const VM_HTTP_CACHE_STORE = 'vm_http_cache';
 
+// fetch_url's spill-and-page store (idb v11). Keys are time-prefixed so IDB's
+// sorted key order IS chronological order — eviction is then delUpTo on the
+// cutoff key (the vm_http_cache posture: fetched public bytes, best-effort,
+// safe to clear). Bounded so unbounded page-spills can't grow the profile.
+const WEB_EXTRACT_CACHE_STORE = 'web_extract_cache';
+const WEB_EXTRACT_CACHE_MAX_ENTRIES = 40;
+let webCacheSeq = 0;
+const webCache = {
+  /** Mint a new time-ordered cache key. */
+  key: () => `wc-${Date.now().toString(36)}-${(webCacheSeq += 1).toString(36)}`,
+  /** @param {{ key: string, url?: string, format?: string, text: string, storedAt?: number }} record */
+  put: async (record) => {
+    await idb.put(WEB_EXTRACT_CACHE_STORE, { storedAt: Date.now(), ...record });
+    // Best-effort eviction: keys sort chronologically (time-prefixed), so
+    // dropping everything up to the (count-MAX)th key keeps the newest MAX.
+    try {
+      const keys = /** @type {string[]} */ (await idb.getAllKeys(WEB_EXTRACT_CACHE_STORE));
+      if (keys.length > WEB_EXTRACT_CACHE_MAX_ENTRIES) {
+        await idb.delUpTo(WEB_EXTRACT_CACHE_STORE, keys[keys.length - WEB_EXTRACT_CACHE_MAX_ENTRIES - 1]);
+      }
+    } catch { /* eviction is hygiene, never a failure */ }
+  },
+  /** @param {string} key */
+  get: (key) => idb.get(WEB_EXTRACT_CACHE_STORE, key),
+};
+
 // The bridge fetch is now an IO-injected factory (vm-net/vm-http-fetch.js) so
 // its security-critical logic — the anti-exfil write gate, host-bound git-auth
 // injection, and the revalidating IDB cache — is bun-testable. The SW supplies
@@ -609,6 +663,12 @@ const sessions = createSessionStore({ idb });
 // its confirmation-gated writeWithConfirm. Foundational for skills (07)
 // and auto-memory (09).
 const memory = createMemoryStore({ idb });
+
+// DESIGN-19 site clients — per-origin derived API clients (dossier + module),
+// its OWN IDB DB (a distinct trust class from skills — a client is never
+// loadable as a skill). Injected as ctx.siteClients for the web actor's
+// site_client_* tools and read at mint for fenced dossier injection.
+const siteClientStore = createSiteClientStore();
 
 // Profiles (ROADMAP "Profiles", deprioritized to the default-profile
 // shape). Exactly ONE record exists — 'default' — carrying peerName
@@ -766,6 +826,13 @@ const resolvePermission = async (activeSession) => {
   return { mode: normalizeMode(rawMode), confirmActions: normalizeConfirmActions(rawConfirm) };
 };
 
+// Per-session promise chains serializing todo read-modify-writes (the
+// ctx.todoStore below). Keyed by sessionId; an entry is just the tail of the
+// chain, so the map stays tiny and dies with the SW (the persisted list is
+// the durable state).
+/** @type {Map<string, Promise<unknown>>} */
+const todoChains = new Map();
+
 /**
  * Build a ToolContext for the current call. The agent loop (commit 2)
  * will pass this into the dispatcher per tool call; the side-panel
@@ -773,14 +840,14 @@ const resolvePermission = async (activeSession) => {
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
-const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking } = {}) => {
+const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
   // sees the real denylist before any tool can dispatch. Resolves (never
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
-  // dispatch, subagents) routes through here, so all are covered.
+  // dispatch, spawned actors) routes through here, so all are covered.
   await denylistReady;
-  // why: the override lets the subagent orchestrator build a context
+  // why: the override lets the actor orchestrator build a context
   // bound to a CHILD session id instead of the chat's current one. With
   // no override this is identical to the original behaviour (the active
   // chat session). When overridden, depth comes from the target session
@@ -795,7 +862,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // Per-session tool manifest → the exposure gate's dispatch-time check.
   // Resolved from the session RECORD (main chat, or a child that inherited
   // the manifest at spawn), so every dispatch path that builds a context
-  // here — main turn, direct dispatch, subagents — enforces it.
+  // here — main turn, direct dispatch, spawned actors — enforces it.
   // null = no manifest = everything stays exposed.
   const toolAllow = resolveManifestAllow(activeSession?.toolManifest);
   // why: key presence is per-PROVIDER. A session created on OpenRouter
@@ -859,11 +926,19 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   } catch (e) {
     console.warn('[sw] active tab query failed', e);
   }
+  // PR #119: resolve the tab web actor's ACTION surface ONCE. An explicit arg
+  // wins (the page/call route forces 'tools' for its inner mapped dispatch);
+  // otherwise it's the live setting. Used BOTH to stamp ctx.actorSurface (gate +
+  // descriptors) AND the capability strip below — the turn driver doesn't pass
+  // actorSurface, so the strip can't read the raw param; it must use THIS.
+  const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
+    ? (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'))
+    : undefined;
   const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name.
-    // Subagents leave it unset. DESIGN-17: an actor turn sets 'actor' — the
+    // Actors leave it unset. DESIGN-17: an actor turn sets 'actor' — the
     // kind-scoped, instance-pinned tier (the web actor holds the DOM tools;
     // the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
@@ -872,9 +947,15 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
     // that set trusted:true (goal turns + actor reply-wakes do). FAIL-CLOSED:
-    // any NEW re-entry source (future peer messages / scheduled tasks) is inbound
-    // by default and must never set trusted; the gate's `=== active` check is the
-    // second wall. Direct/composer builds: synthetic false → inbound false.
+    // any NEW re-entry source (peer messages) is inbound by default and must
+    // never set trusted; the gate's `=== active` check is the second wall.
+    // Direct/composer builds: synthetic false → inbound false.
+    // Scheduled routines (loop/scheduler.js): a firing's FIRST turn is
+    // synthetic:false (inbound:false, a real turn like a typed message); a
+    // 'goal'-mode firing's CONTINUATIONS run trusted like any goal run. Their
+    // first-party standing is earned at ARM time — schedule_create force-confirms,
+    // so a routine can't be planted (or self-replicate) without the user
+    // approving its exact prompt — not asserted here per-firing.
     inbound: synthetic === true && trusted !== true,
     // DESIGN-17: an actor's bound instance + kind (the gate's per-instance pin
     // + positive kind-scope read these; absent on non-actor ctx).
@@ -883,6 +964,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // DESIGN-18: a web actor's backing (the gate reads it to refuse DOM tools for an
     // API actor, which has no tab). Absent = tab backing (the DESIGN-17 default).
     ...(actorBacking ? { backing: actorBacking } : {}),
+    // PR #119: a TAB web actor's ACTION surface — 'tools' (discrete DOM tools) or
+    // 'code' (page_code REPL). An explicit arg wins (the page/call route forces
+    // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
+    // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
+    ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -905,12 +991,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     toolManifestLabel: toolAllow ? manifestLabel(activeSession?.toolManifest) : null,
     session: {
       sessionId: sessionId ?? null,
-      // why: the spawn_subagent tool reads ctx.session.depth to compute
+      // why: the actor_create tool reads ctx.session.depth to compute
       // the child's depth (parent + 1) and enforce maxDepth. Defaults to
       // 0 for legacy sessions written before the field existed.
       depth: activeSession?.depth ?? 0,
       // why: message_actor reads ctx.session.kind to pick its reply mode
-      // (PR #134): a 'subagent' sender is an EPHEMERAL call-site with no
+      // (PR #134): a 'spawned' sender is an EPHEMERAL call-site with no
       // later turn to wake, so its actor reply is awaited into the tool
       // result instead of delivered as a re-entry wake.
       kind: activeSession?.kind ?? 'chat',
@@ -921,10 +1007,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // action confirms. { mode: 'plan'|'act', confirmActions: boolean }.
     permission,
     activeTab,
-    // why: the bound subagent orchestrator. The spawn_subagent tool calls
-    // ctx.spawnSubagent(...) to decompose a task into a child session
-    // that runs the same loop. Wired below; see makeSpawnSubagent.
-    spawnSubagent,
+    // why: the bound actor orchestrator. The actor_create tool calls
+    // ctx.spawnActor(...) to decompose a task into a child session
+    // that runs the same loop. Wired below; see makeSpawnActor.
+    spawnActor,
     // DESIGN-17: the message_actor orchestrator (wired below). An actor's own
     // ctx strips this back out (it's not in its toolset, so the keyless narrowing
     // removes it).
@@ -934,13 +1020,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // actors/call route derives every pending ask's awaitSignal from it, and
     // the tool aborts + releases on the way out — one Stop unwinds the fan.
     scriptRuns,
-    // why: DESIGN-11 async subagents. spawnSubagentAsync fires the child
+    // why: DESIGN-11 async spawned actors. spawnActorAsync fires the child
     // fire-and-forget and returns a handle; its result re-enters the parent
-    // as a later synthetic turn. subagentTasks/subagentCancel back the
-    // subagent_tasks (peek) and subagent_cancel tools, scoped to THIS session.
-    spawnSubagentAsync,
-    subagentTasks: () => subagentTasksSnapshot(sessionId),
-    subagentCancel: (/** @type {string} */ taskId) => subagentCancel(sessionId, taskId),
+    // as a later synthetic turn. actorTasks/actorCancel back the
+    // actor_tasks (peek) and actor_cancel tools, scoped to THIS session.
+    spawnActorAsync,
+    actorTasks: () => actorTasksSnapshot(sessionId),
+    actorCancel: (/** @type {string} */ taskId) => actorCancel(sessionId, taskId),
     // why: the request_review tool calls ctx.requestReview(...) to spawn a
     // clean-context READ-ONLY reviewer over a diff and get a structured
     // summary back. Bound below; see makeRequestReview. Feature 08.
@@ -951,6 +1037,38 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // outside an active run, which the tool surfaces as a harmless no-op.
     completeGoalRun: sessionId
       ? (/** @type {string} */ summary) => goalRunner?.complete(/** @type {string} */ (sessionId), summary) ?? false
+      : undefined,
+    // why: the schedule_* tools call these to register / list / remove background
+    // Routines (loop/scheduler.js). Resolved lazily — `scheduler` is built after
+    // this fn (same late-dep dance as goalRunner). Routines are GLOBAL (not
+    // per-session), so these are present regardless of sessionId.
+    scheduleAdd: (/** @type {any} */ req) => scheduler?.add(req) ?? { ok: false, error: 'schedule_unavailable' },
+    scheduleList: () => scheduler?.list() ?? [],
+    scheduleRemove: (/** @type {string} */ id) => scheduler?.remove(id) ?? false,
+    // why: the todo_* tools mutate the session's plan-of-record through this
+    // serialized read-modify-write (todoChains, module scope) — two todo ops
+    // in one concurrent tool wave would otherwise race the record and lose an
+    // update. apply(fn): fn is PURE (todo/core.js); a result with ok+todos is
+    // persisted, anything else is returned untouched. Goal-run-scoped like
+    // completeGoalRun: absent outside a live run, so the tools no-op cleanly.
+    todoStore: sessionId && goalRunner?.isActive(/** @type {string} */ (sessionId))
+      ? {
+          apply: (/** @type {(todos: any) => any} */ fn) => {
+            const sid = /** @type {string} */ (sessionId);
+            const next = (todoChains.get(sid) ?? Promise.resolve()).then(async () => {
+              const rec = await sessions.get(sid);
+              const out = fn(rec?.todos);
+              if (out?.ok && Array.isArray(out.todos)) {
+                await sessions.update(sid, { todos: out.todos });
+              }
+              return out;
+            });
+            // why swallow for the CHAIN only: a failed apply must not wedge
+            // every later todo op; the caller still sees its own rejection.
+            todoChains.set(sid, next.catch(() => {}));
+            return next;
+          },
+        }
       : undefined,
     dom: undefined,
     // why: vm is a SW-side client that proxies vm/run + vm/write-file
@@ -976,6 +1094,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // read_pdf — PDF text extraction in the offscreen doc (pdf.js needs a
     // Worker the SW can't host). Defined after ensureOffscreen below.
     pdfOffscreenClient,
+    // fetch_url's clean-content extraction — HTML -> markdown in the offscreen
+    // doc (Readability needs a DOM Document the SW can't build). Defined after
+    // ensureOffscreen below. NOT in spawn.js CAPABILITY_CONSUMERS (like
+    // pdfOffscreenClient), so it survives the web actor's capability strip.
+    webOffscreenClient,
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
@@ -1003,7 +1126,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') a2aRevoke(did); return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); } return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
       setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
@@ -1052,7 +1175,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // (the 0-tab fetch state) calls this from navigate to lazily OPEN + ADOPT its one
     // tab, bound to THIS actor's session. Injected ONLY for the web kind; the
     // capability strip drops it from any actor whose toolset lacks navigate, and
-    // it's absent on the main/subagent ctx (actorType unset). adoptWebTab
+    // it's absent on the main/actor ctx (actorType unset). adoptWebTab
     // is defined later in the file — referenced lazily here (called at turn time),
     // the same late-bound pattern as noteAgentTab.
     // DESIGN-18: an API actor (backing:'api') never renders — no tab, ever — so it
@@ -1069,6 +1192,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // any future tool that legitimately needs to hit a provider.
     safeFetch,
     webFetch,
+    // fetch_url's spill-and-page store: oversized fetched text spills here and
+    // read_web_cache pages it back. Stripped to exactly those two tools by
+    // spawn.js CAPABILITY_CONSUMERS.webCache.
+    webCache,
     // why: web tools open background tabs unconditionally (never-steal-
     // focus policy, 2026-06-12); settings ride along for other consumers.
     settings: { ...settingsStore.get() },
@@ -1091,6 +1218,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // descriptions in memory; getBody hits IDB only when the model
     // actually loads a skill.
     skills: skillRegistry,
+    // DESIGN-19: the site-client store (run/read/write reach it). Stripped from any
+    // actor whose toolset lacks the site_client_* tools (CAPABILITY_CONSUMERS.siteClients);
+    // present on the web actor. Harmless on the main ctx (the tools are hidden + gated).
+    siteClients: siteClientStore,
+    // DESIGN-19: the capture closure for site_capture (Tap A CDP / Tap B scripting),
+    // injected ONLY for a tab-backed web actor below (like adoptWebTab). Absent → the
+    // tool returns site_capture_unavailable.
     // why a frozen COPY, not the live array: a tool context handed the live
     // list lets a stray tool/hook mutate the denylist for the whole SW lifetime;
     // a frozen snapshot makes the seed + user overlay read-only per context.
@@ -1114,11 +1248,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   };
   // DESIGN-17: an ACTOR gets a KEYLESS, kind-narrowed tool context — a keyless,
   // narrow trust model. restrictCtxCapabilities strips every capability closure
-  // (getSecret, safeFetch, webFetch, spawnSubagent, memory, messageActor, …)
+  // (getSecret, safeFetch, webFetch, spawnActor, memory, messageActor, …)
   // that none of the actor's OWN kind tools need, so a confused/injected tool
   // has no path to secrets/egress/spawn. The loop still gets the provider key
   // via the turn driver's injected getSecret (off this ctx), exactly like a
-  // subagent. Non-actor ctx is unchanged.
+  // actor. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
     // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
     // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
@@ -1126,7 +1260,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // NOT in CAPABILITY_CONSUMERS (shared with the web actor's DOM tools), so they survive
     // here — the no-DOM guarantee for an API actor rests on the GATE refusing every DOM
     // tool (isAllowedForActor → fetch_url only), not on this strip.
-    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking)));
+    // PR #119: pass actorSurface — a CODE-surface web actor's allow-set is
+    // { page_code }, so WITHOUT the surface the strip computed the TOOLS
+    // allow-set (no page_code) and dropped jsOffscreenClient (page_code's
+    // execution client) — page_code then returned 'page_code_unavailable' on
+    // every call, silently breaking the whole code arm. The gate + descriptors
+    // were already surface-aware; this strip is the one place that wasn't.
+    const resCtx = restrictCtxCapabilities(ctx, new Set(actorAllowedToolsFor(actorType, actorBacking, effectiveActorSurface)));
     // The web actor's egress is SESSION-SCOPED at the boundary: its webFetch carries
     // the user's session ONLY for a request same-origin to the ORIGIN it owns (where it's
     // already in that session — no escalation, and it never holds a credential: the
@@ -1157,6 +1297,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // adopted tab. (The >=1-tab case mutates activeTab in place, which the shallow copy
       // already shares; only the 0->1 reassignment needs the setter.)
       resCtx.repinActiveTab = (/** @type {any} */ tab) => { resCtx.activeTab = tab; };
+      // DESIGN-19: site_capture — inject the capture manager ONLY for a tab-backed
+      // web actor (an API actor has no tab to observe). It survives the strip because
+      // site_capture is in this actor's allow-set (CAPABILITY_CONSUMERS.siteCapture).
+      resCtx.siteCapture = siteCaptureManager;
     }
     return resCtx;
   }
@@ -1179,67 +1323,70 @@ const originOfTabUrl = (/** @type {string} */ url) => {
 };
 
 // ---------------------------------------------------------------------------
-// Subagent orchestrator — one orchestrator, two surfaces.
+// Actor orchestrator — one orchestrator, two surfaces.
 // ---------------------------------------------------------------------------
 //
-// makeSpawnSubagent (peerd-runtime/subagent) stays pure with everything
+// makeSpawnActor (peerd-runtime/actor) stays pure with everything
 // injected; the SW binds the real loop/model/dispatcher/store/prompt/
-// audit. Both the spawn_subagent tool (via ctx.spawnSubagent) and the
-// subagent/spawn route (Notebook peerd.runtime.runAgent) call the same bound fn,
+// audit. Both the actor_create tool (via ctx.spawnActor) and the
+// actor/spawn route (Notebook peerd.runtime.runAgent) call the same bound fn,
 // so they share audit, gates, trust inheritance, and caps. The bound fn
 // also defaults a live-event forwarder that streams the child's turn to
 // the side panel's nested transcript, keyed by the child session id.
 
-const forwardSubagentEvent = (/** @type {any} */ ev) => {
+const forwardActorEvent = (/** @type {any} */ ev) => {
   if (!uiConnected()) return;
   const post = (/** @type {any} */ msg) => {
     try { uiPorts.broadcast(msg); }
-    catch (e) { console.warn('[sw] subagent forward failed', e); }
+    catch (e) { console.warn('[sw] actor forward failed', e); }
   };
-  // why: distinct turn/subagent-* types (not the parent's turn/*) so the
+  // why: distinct turn/spawned-* types (not the parent's turn/*) so the
   // side panel routes them into the per-child nested store instead of
   // clobbering the active chat's transcript.
   switch (ev.type) {
-    case 'subagent-start':
-      post({ type: 'turn/subagent-start', parentToolUseId: ev.parentToolUseId, parentSessionId: ev.parentSessionId, sessionId: ev.sessionId, depth: ev.depth, task: ev.task });
+    case 'actor-start':
+      post({ type: 'turn/spawned-start', parentToolUseId: ev.parentToolUseId, parentSessionId: ev.parentSessionId, sessionId: ev.sessionId, depth: ev.depth, task: ev.task });
       break;
-    case 'subagent-stop':
-      post({ type: 'turn/subagent-done', parentToolUseId: ev.parentToolUseId, sessionId: ev.sessionId, depth: ev.depth });
+    case 'actor-stop':
+      post({ type: 'turn/spawned-done', parentToolUseId: ev.parentToolUseId, sessionId: ev.sessionId, depth: ev.depth });
       break;
     case 'state':
-      post({ type: 'turn/subagent-state', session: ev.session });
+      post({ type: 'turn/spawned-state', session: ev.session });
       break;
     case 'delta':
-      post({ type: 'turn/subagent-delta', sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
+      post({ type: 'turn/spawned-delta', sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
       break;
     case 'tool-use':
-      post({ type: 'turn/subagent-tool-use', sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
+      post({ type: 'turn/spawned-tool-use', sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
       break;
     case 'tool-result':
-      post({ type: 'turn/subagent-tool-result', sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
+      post({ type: 'turn/spawned-tool-result', sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
       break;
     case 'stop':
-      post({ type: 'turn/subagent-stop', sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
+      post({ type: 'turn/spawned-stop', sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
       break;
     case 'error':
-      post({ type: 'turn/subagent-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
+      post({ type: 'turn/spawned-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
       break;
     case 'usage':
-      // why: subagent/actor spend is SEPARATE from the main turn tally (the
+      // why: actor/actor spend is SEPARATE from the main turn tally (the
       // main usage handler only folds its own session). Forward it so the eval
       // harness — and any future offload-cost meter — can attribute the
       // delegated work honestly instead of it looking free.
-      post({ type: 'turn/subagent-cost', sessionId: ev.sessionId, usage: ev.usage });
+      post({ type: 'turn/spawned-cost', sessionId: ev.sessionId, usage: ev.usage });
       break;
     default:
       break;
   }
 };
 
-const spawnSubagentCore = makeSpawnSubagent({
+const spawnActorCore = makeSpawnActor({
   sessions,
   runUserTurn,
   callModel: /** @type {any} */ (callModel),
+  // why the closure: contextSnapshots is declared further down the module —
+  // defer the reference to call time (the postChatNote late-dep pattern).
+  recordModelCall: (/** @type {Record<string, any>} */ call) => contextSnapshots.record(call),
   getSecret,
   safeFetch,
   appendAudit: /** @type {any} */ (auditLog.append),
@@ -1257,7 +1404,7 @@ const spawnSubagentCore = makeSpawnSubagent({
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
   // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
-  // in-SW loop — the SAME substrate a bound actor uses (a subagent is an ephemeral
+  // in-SW loop — the SAME substrate a bound actor uses (an actor is an ephemeral
   // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
   // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
   // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
@@ -1281,43 +1428,43 @@ const spawnSubagentCore = makeSpawnSubagent({
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
 // wire streaming; an explicit onEvent in `req` still wins.
-const spawnSubagent = (/** @type {any} */ req) => spawnSubagentCore({ onEvent: forwardSubagentEvent, ...req });
+const spawnActor = (/** @type {any} */ req) => spawnActorCore({ onEvent: forwardActorEvent, ...req });
 // PR #134 phase 5: the live-children registry riding on the spawn orchestrator —
-// agent/stop and subagent_cancel walk it to end whole delegation subtrees.
-const subagentLifecycle = {
-  stopSubtree: (/** @type {string} */ sessionId) => spawnSubagentCore.stopSubtree(sessionId),
-  liveChildrenOf: (/** @type {string} */ sessionId) => spawnSubagentCore.liveChildrenOf(sessionId),
+// agent/stop and actor_cancel walk it to end whole delegation subtrees.
+const actorLifecycle = {
+  stopSubtree: (/** @type {string} */ sessionId) => spawnActorCore.stopSubtree(sessionId),
+  liveChildrenOf: (/** @type {string} */ sessionId) => spawnActorCore.liveChildrenOf(sessionId),
 };
 
 // ---------------------------------------------------------------------------
-// Async subagents (DESIGN-11) — orchestration in peerd-runtime/subagent.
+// Async spawned actors (DESIGN-11) — orchestration in peerd-runtime/actor.
 // ---------------------------------------------------------------------------
 //
 // The spawn -> settle -> drain -> re-enter logic lives in a TESTABLE module
-// (makeAsyncSubagents, peerd-runtime/subagent/async-subagents.js); the SW only
-// injects its IO. spawn_subagent's async path returns a handle immediately and
+// (makeAsyncActors, peerd-runtime/actor/async-actors.js); the SW only
+// injects its IO. actor_create's async path returns a handle immediately and
 // the child's result re-enters the parent as a synthetic wake turn via
 // turnSlots.runWhenIdle (never aborts a live turn — DECISIONS #20). A per-chat
 // LIFETIME cap stops a re-spawn runaway (the live force-quit bug; reproduced in
-// tests/peerd-runtime/subagent/async-subagents.test.js).
+// tests/peerd-runtime/actor/async-actors.test.js).
 
 // Generic, content-free desktop notification (DECISIONS #20): title only —
 // NEVER the result text or any watched content.
-const notifyAsyncSubagent = (/** @type {number} */ count) => {
+const notifyAsyncActor = (/** @type {number} */ count) => {
   try {
     browser.notifications?.create?.({
       type: 'basic',
       iconUrl: browser.runtime.getURL('icons/icon128.png'),
-      title: count > 1 ? `${count} subagents finished` : 'A subagent finished',
+      title: count > 1 ? `${count} actors finished` : 'An actor finished',
       message: 'Open peerd to see the result.',
     });
-  } catch (e) { console.warn('[sw] async-subagent notify failed', e); }
+  } catch (e) { console.warn('[sw] async-actor notify failed', e); }
 };
 
 // Push the live async-task snapshot to the side panel (DESIGN-11 status bar).
 // why a snapshot push (not per-event): the orchestrator owns the task list;
 // the panel just mirrors it, keyed by parent session so it renders only the
-// active chat's in-flight tasks. References asyncSubagentsOrchestrator (defined
+// active chat's in-flight tasks. References asyncActorsOrchestrator (defined
 // just below) lazily — only ever called at a status transition, long after boot.
 const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
   if (!uiConnected()) return;
@@ -1325,54 +1472,54 @@ const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
     uiPorts.broadcast({
       type: 'async-tasks/update',
       parentSessionId,
-      tasks: asyncSubagentsOrchestrator.subagentTasks(parentSessionId),
+      tasks: asyncActorsOrchestrator.actorTasks(parentSessionId),
     });
   } catch (e) { console.warn('[sw] async-tasks push failed', e); }
 };
 
-const asyncSubagentsOrchestrator = makeAsyncSubagents({
-  spawnSubagent: (req) => spawnSubagent(req),
+const asyncActorsOrchestrator = makeAsyncActors({
+  spawnActor: (req) => spawnActor(req),
   // why lazy (arrows): turnSlots + runAgentTurn are defined LATER in this module
   // (after the agent loop). The orchestrator only calls these at wake time (long
   // after boot), so deferring the references avoids a TDZ at module load.
   turnSlots: {
     runWhenIdle: (sessionId, fn) => turnSlots.runWhenIdle(sessionId, fn),
     isBusy: (sessionId) => turnSlots.isBusy(sessionId),
-    // PR #134: subagent_cancel aborts the child's live slot (children run
+    // PR #134: actor_cancel aborts the child's live slot (children run
     // under slots now), instead of only dropping the result.
     stop: (sessionId) => turnSlots.stop(sessionId),
   },
   // PR #134: a cancel ends the child's own descendants too.
-  stopSubtree: (sessionId) => spawnSubagentCore.stopSubtree(sessionId),
-  // async-subagent wakes are NOT trusted to delegate (a parent reacting to a
-  // subagent result stays attended-gated for message_actor, like today) —
+  stopSubtree: (sessionId) => spawnActorCore.stopSubtree(sessionId),
+  // async-actor wakes are NOT trusted to delegate (a parent reacting to a
+  // actor result stays attended-gated for message_actor, like today) —
   // so this reenter deliberately does not forward trusted.
   reenter: ({ userText, sessionId, synthetic }) => runAgentTurn({ userText, sessionId, synthetic }),
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
-  forwardEvent: forwardSubagentEvent,
-  notify: notifyAsyncSubagent,
+  forwardEvent: forwardActorEvent,
+  notify: notifyAsyncActor,
   // Mirror the live task list to the side-panel status bar on every status
   // transition (spawn / settle / cancel / deliver) so the bar never goes stale.
   onTasksChanged: (parentSessionId) => pushAsyncTasks(parentSessionId),
   // Only the runaway guard (REFUSED) logs now — a rare, worth-seeing event.
-  log: (msg, data) => console.warn('[async-subagent]', msg, data),
+  log: (msg, data) => console.warn('[async-actor]', msg, data),
 });
-const { spawnSubagentAsync } = asyncSubagentsOrchestrator;
-// ctx aliases — the subagent_tasks / subagent_cancel tools call these scoped to
+const { spawnActorAsync } = asyncActorsOrchestrator;
+// ctx aliases — the actor_tasks / actor_cancel tools call these scoped to
 // their own session.
-const subagentTasksSnapshot = (/** @type {string} */ parentSessionId) => asyncSubagentsOrchestrator.subagentTasks(parentSessionId);
-const subagentCancel = (/** @type {string} */ parentSessionId, /** @type {string} */ taskId) => asyncSubagentsOrchestrator.subagentCancel(parentSessionId, taskId);
+const actorTasksSnapshot = (/** @type {string} */ parentSessionId) => asyncActorsOrchestrator.actorTasks(parentSessionId);
+const actorCancel = (/** @type {string} */ parentSessionId, /** @type {string} */ taskId) => asyncActorsOrchestrator.actorCancel(parentSessionId, taskId);
 
 // On vault unlock, re-drain any async children that finished while locked.
-vault.subscribe(() => { if (!vault.isLocked()) asyncSubagentsOrchestrator.onVaultUnlock(); });
+vault.subscribe(() => { if (!vault.isLocked()) asyncActorsOrchestrator.onVaultUnlock(); });
 
 // ---------------------------------------------------------------------------
 // Clean-context review orchestrator (feature 08).
 // ---------------------------------------------------------------------------
 //
-// makeRequestReview reuses the SAME bound spawnSubagent above — the reviewer
+// makeRequestReview reuses the SAME bound spawnActor above — the reviewer
 // is a spawned child with a clean session and a READ-ONLY tool subset. We
 // inject the full descriptor set WITH sideEffect (the read-only filter's
 // input), the audit log, the feature-02 checkpoint adapter (the `since`
@@ -1381,8 +1528,8 @@ vault.subscribe(() => { if (!vault.isLocked()) asyncSubagentsOrchestrator.onVaul
 // intersected with the local filter). Explicit diff / before+after
 // snapshots still take priority over the checkpoint path.
 const requestReview = makeRequestReview({
-  spawnSubagent,
-  // why: read-only filtering needs the sideEffect field; the subagent's
+  spawnActor,
+  // why: read-only filtering needs the sideEffect field; the actor's
   // getToolDescriptors omits it, so review gets its own descriptor fn.
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, sideEffect: t.sideEffect })),
   appendAudit: /** @type {any} */ (auditLog.append),
@@ -1413,13 +1560,13 @@ const requestReview = makeRequestReview({
 // Auto-memory + trim-summary enrichment (cheap clean-context calls)
 // ---------------------------------------------------------------------------
 //
-// Both features share ONE call shape: a tools:[] subagent spawn (clean
+// Both features share ONE call shape: a tools:[] actor spawn (clean
 // context, output cap) with the spend-limit preflight and the cost fold
 // into the parent session's tally built into makeCheapCall — so the
 // cost tracker and the user's spendLimitUsd see this background work.
 
 const cheapCall = makeCheapCall({
-  spawnSubagent,
+  spawnActor,
   sessions,
   // why read settings at call time: pricing overrides can change over
   // the SW's life; snapshotting at boot would price stale.
@@ -1741,8 +1888,14 @@ const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
 // consumers run) and read by the actors/call route below.
 const scriptRuns = createScriptRunRegistry();
 
+// The context inspector's capture ring — "what did the model see" per
+// session, SW-memory only. Fed from the two seams that together cover
+// every model call (the turn driver's failover wrapper, the actor relay
+// route below); read by the debug-bundle route and the inspector view.
+const contextSnapshots = createContextSnapshots();
+
 // The heap split: the ONE offscreen agent-loop client. It runs every non-
-// orchestrator loop — an ephemeral reasoning subagent (spawn.js, tools:[]) OR a
+// orchestrator loop — an ephemeral reasoning actor (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
 // 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
 // and dispatches there — the worker holds no
@@ -1757,7 +1910,7 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   buildToolContext,
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   pinActorCall,
-  // Phase 4: rebuild a subagent's narrowed-general tool ctx SW-side from its persisted
+  // Phase 4: rebuild an actor's narrowed-general tool ctx SW-side from its persisted
   // grantedTools (capability-by-need strip), the analog of the actor's kind-scoped strip.
   restrictCtxCapabilities,
   // Phase 3: a tab-backed web actor's currently-owned tab, read per dispatch (lazy —
@@ -1765,11 +1918,28 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
   ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
   EXPOSURE_ACTOR,
+  recordModelCall: contextSnapshots.record,
+  // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
+  // defined below, read at call time — same pattern as ownedTabFor). why: the
+  // offscreen actor heap has no turn/tool-use broadcast (that's turn-driver's,
+  // in-SW only), so without this the eval harness's OM2W recorder — and any
+  // activity view — is blind to what an actor actually did.
+  broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
 const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// The HTML -> markdown extraction client (fetch_url's clean-content path).
+// Readability/Turndown need a DOM Document only the offscreen doc can build
+// ('web/extract' in offscreen/web-extract.js). null where offscreen is
+// unavailable (Firefox) - fetch_url then degrades to today's raw-text
+// behavior (the read_pdf precedent for capability-absent contexts).
+const webOffscreenClient = offscreenAvailable ? makeOffscreenWebClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
@@ -1879,8 +2049,11 @@ const closeSidePanel = async () => {
 // calls noteAgentTab/scheduleWebTabHint/broadcastAgentTab/showWebTabHint from
 // its tool-context + port wiring, and setTabAnchor from the actor-turn start.
 const {
-  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen,
-} = makeTabAffordances({ browser, uiPorts, denylistStore, closeSidePanel });
+  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab,
+} = makeTabAffordances({
+  browser, uiPorts, denylistStore, closeSidePanel,
+  isWatchOn: () => settingsStore.get().watchAgentTab === true,
+});
 
 // Confirmation coordinator. The dispatcher's async confirmation step
 // calls ctx.confirm(prompt); this pushes a 'confirm/request' to the side
@@ -1941,15 +2114,12 @@ const confirmAction = async (prompt) => {
   if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
     return 'yes_once';
   }
-  // why scope the web-write grant by host: the prompt names a SPECIFIC host
-  // ("…send a POST request to {host}?"), so "approve for this session" must mean
-  // THIS host this session — not a blanket pass for non-GET egress to any host
-  // for the rest of the session. The prompt already carries origins:[host]; fold
-  // it into the grant key. Every other tool keys by its (already host-specific
-  // or host-agnostic-by-design) tool name.
-  const grantKey = prompt.tool === WEB_WRITE_CONFIRM_KEY
-    ? `${WEB_WRITE_CONFIRM_KEY}|${(Array.isArray(prompt.origins) && prompt.origins[0]) || ''}`
-    : prompt.tool;
+  // R5 (origin-bound grants): "approve for this session" means this tool ON
+  // this origin — the dispatcher computes prompt.origins (the pinned tab's
+  // origin for DOM tools, the target host for web writes), and the grant key
+  // folds it in. Approving `click` on site A no longer covers site B. Tools
+  // with no origin surface keep the bare tool key (confirm-grant-key.js).
+  const grantKey = confirmGrantKey(prompt);
   // DESIGN-17: an ACTOR never accumulates a STANDING grant — its confirms are
   // strictly PER-TURN (an actor can be steered by untrusted instance output
   // across turns, so a once-granted "yes for session" must not silence the next
@@ -2299,6 +2469,33 @@ const turnSlots = makeTurnSlots({ onAbort: (sid) => confirmCoordinator.declineSe
 // orchestrator wiring uses). filterByGoalActive is a pure descriptor filter.
 /** @type {ReturnType<typeof makeGoalRunner> | null} */
 let goalRunner = null;
+// Background scheduling (loop/scheduler.js): forward-declared like goalRunner so
+// buildToolContext's schedule_* hooks resolve it lazily; built just below once
+// runAgentTurn / startGoalRun exist.
+/** @type {ReturnType<typeof makeScheduler> | null} */
+let scheduler = null;
+
+// Prewalk (loop/prewalk-controller.js) — the lifecycle side effects, bound to
+// the SW's live IO. The controller owns the arm/reconcile/swap/restore logic
+// (Bun-tested); the SW just injects sessions/goalRunner/settings/etc. No
+// parallel in-memory Set: the swap gate keys on goalRunner.isActive and the
+// stale check on the durable goal-runs mirror (goalRunner.isPersisted), so
+// there's no bookkeeping that can desync from the run lifecycle. goalRunner is
+// forward-declared (built below), so read it live via a getter closure.
+const prewalk = makePrewalkController({
+  sessions,
+  goalRunner: {
+    isActive: (/** @type {string} */ sid) => goalRunner?.isActive(sid) ?? false,
+    isPersisted: (/** @type {string} */ sid) => goalRunner?.isPersisted(sid) ?? Promise.resolve(false),
+  },
+  settings: settingsStore,
+  listProviders,
+  getTool,
+  appendAudit: auditLog.append,
+  postChatNote: (/** @type {string} */ text) => postChatNote(text),
+  now: Date.now,
+});
+
 const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
   sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
@@ -2311,6 +2508,11 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  recordModelCall: contextSnapshots.record,
+  // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate,
+  // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
+  reconcilePrewalk: prewalk.reconcile, maybePrewalkSwap: prewalk.maybeSwap,
+  reconcileEngineActor: prewalk.reconcileEngineActor,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -2329,22 +2531,150 @@ goalRunner = makeGoalRunner({
   // transcript (cap / halt). 'done' needs none — complete_goal's tool result is
   // the visible record. (Permission needs no restore: resolvePermission computes
   // the autonomy from the live run, so it reverts on its own when the run ends.)
-  onRunEnd: (/** @type {any} */ _sid, /** @type {any} */ info) => {
-    if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
-    else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+  onRunEnd: (/** @type {any} */ sid, /** @type {any} */ info) => {
+    // Prewalk: put the chat back on the planner model whatever way the run
+    // ended. Fire-and-forget — restore is a no-op while a run isActive (so a
+    // superseding run's arm can't be clobbered), and the reconcile path
+    // self-heals if this write is ever lost. Runs for EVERY ending run (incl. a
+    // background routine's), so it is NOT under the foreground guard below.
+    prewalk.restoreForRun(sid).catch(() => {});
+    // why the foreground guard: postChatNote broadcasts a session-agnostic
+    // system-note and the reducer appends it to whatever chat is OPEN. A
+    // background scheduled routine's goal run ends in its OWN (never-foreground)
+    // session, so without this its "capped/halted" note would pop into an
+    // unrelated chat the user is reading. Only surface it when the ending run IS
+    // the foreground chat; a background routine's outcome rides its own session
+    // + the routine notification instead.
+    Promise.resolve(sessionCache.sessionGet('currentSessionId')).then((cur) => {
+      if (cur !== sid) return;
+      if (info?.phase === 'capped') postChatNote(`Goal run stopped — hit the ${GOAL_MAX_ITERATIONS}-turn limit without finishing.`);
+      else if (info?.phase === 'halted') postChatNote(info?.reason ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+    }).catch(() => {});
   },
   // why kv: a goal run must survive an SW restart and keep going while the user
   // is in another chat — the runner mirrors active runs to storage.local and
   // resume() (on vault unlock) re-drives them. Without it the run is in-memory
   // only and an MV3 recycle would silently drop it.
   kv,
+  // The live plan-of-record for each continuation prompt — re-read per turn
+  // so check-offs show; '' when no list yet (todo/core.js formatTodoBlock).
+  getTodoBlock: async (/** @type {string} */ sid) =>
+    formatTodoBlock(/** @type {any} */ (await sessions.get(sid))?.todos),
+});
+
+// ---------------------------------------------------------------------------
+// 5b1. Background scheduling — standing Routines (loop/scheduler.js)
+// ---------------------------------------------------------------------------
+// A Routine fires an agent run unattended on a cadence, and catches up as soon
+// as peerd is back on (see the three tick() wakes below: chrome.alarms, cold
+// boot, vault unlock). The runner is the time-triggered sibling of goalRunner —
+// same durable-mirror-in-storage.local contract — with the IO injected here.
+
+// Arm (or clear) the single wake alarm for the soonest routine. chrome.alarms
+// persists across SW eviction AND browser restart, and a `when` in the past
+// fires ~immediately on the next browser start — that's the "run as soon as the
+// browser is back on" mechanism for the SW-asleep / browser-off cases.
+const setScheduleAlarm = (/** @type {number | null} */ whenMs) => {
+  try {
+    if (whenMs == null) { browser.alarms?.clear?.(SCHEDULE_ALARM_NAME); return; }
+    // chrome.alarms floors very-near/near-past `when` to ~1 min out; that's fine
+    // — a due routine still fires promptly, and the boot/unlock ticks cover the
+    // immediate case without waiting for the alarm.
+    browser.alarms?.create?.(SCHEDULE_ALARM_NAME, { when: whenMs });
+  } catch (e) { console.error('[sw] schedule alarm set failed', e); }
+};
+
+// Content-free desktop notification when a routine starts (DECISIONS #20 posture:
+// title only, never the task text or any result). The run itself streams into
+// its own session; this just tells a user with the panel closed that it fired.
+const notifyRoutineFired = () => {
+  try {
+    browser.notifications?.create?.({
+      type: 'basic',
+      iconUrl: browser.runtime.getURL('icons/icon128.png'),
+      title: 'peerd routine running',
+      message: 'A scheduled task started. Open peerd to see it.',
+    });
+  } catch (e) { console.warn('[sw] routine notify failed', e); }
+};
+
+// Fire ONE routine: mint a fresh, dedicated session (tagged with the routine id
+// for provenance — NOT the foreground currentSessionId, so it never disturbs the
+// user's active chat), then drive it. 'goal' mode reuses the goal runner (an
+// autonomous multi-step run until complete_goal); 'turn' mode is a single agent
+// turn. trusted:true — a routine is USER-authored first-party work, same posture
+// as goal mode; untrusted CONTENT it later pulls is still fenced behind actors.
+const fireRoutine = async (/** @type {any} */ routine) => {
+  // why settingsStore.load() first: a cold-unlock catch-up can reach here before
+  // loadSettings() (un-awaited at boot) has hydrated, so ensureActiveProvider
+  // would pick the channel-default provider instead of the user's. load() is
+  // idempotent — same guard the maybeAutoResume path uses.
+  await settingsStore.load().catch(() => {});
+  const ap = await ensureActiveProvider();
+  // why explicit ACT + confirm-off (NOT resolvePermission(null)): a routine runs
+  // UNATTENDED with the panel closed. Inheriting the foreground chat's mode would
+  // make the run's autonomy depend on whatever chat happened to be open at the
+  // firing instant — a Plan-mode foreground would silently restrict it, and a
+  // confirm-on foreground would DEADLOCK the background turn on a prompt no one
+  // can answer. An unattended run must be self-determined: Act, no confirms.
+  const created = await sessions.create({
+    provider: ap.name,
+    model: ap.model,
+    permissionMode: PERMISSION_MODES.ACT,
+    confirmActions: false,
+  });
+  await sessions.update(created.sessionId, { routineId: routine.id }).catch(() => {});
+  auditLog.append({ type: 'routine_fired', details: { routineId: routine.id, mode: routine.mode, sessionId: created.sessionId } }).catch(() => {});
+  if (routine.mode === 'turn') {
+    // synthetic:false makes this a REAL first turn (inbound:false) exactly like a
+    // user's typed message — no `trusted` needed (it's redundant when synthetic is
+    // false). The routine's first-party standing comes from the confirm-to-arm gate
+    // in schedule_create, not from a trusted flag here.
+    runAgentTurn({ sessionId: created.sessionId, userText: routine.prompt, synthetic: false })
+      .catch((/** @type {unknown} */ e) => console.error('[sw] routine turn threw', e));
+  } else {
+    await startGoalRun({ sessionId: created.sessionId, goal: routine.prompt });
+  }
+  notifyRoutineFired();
+  return { sessionId: created.sessionId };
+};
+
+scheduler = makeScheduler({
+  fireRoutine,
+  kv,
+  isLocked: () => vault.isLocked(),
+  // Skip a firing whose PREVIOUS run is still going (a goal loop slower than the
+  // routine's cadence) so it can't pile up concurrent runs — the runner advances
+  // it a slot instead. A 'turn'-mode routine has no goal run, so it never blocks
+  // here; a 'goal'-mode routine's last session is live iff goalRunner says so.
+  isRunning: (/** @type {any} */ routine) =>
+    !!routine.lastSessionId && (goalRunner?.isActive(routine.lastSessionId) ?? false),
+  setAlarm: setScheduleAlarm,
+  onEvent: (/** @type {any} */ ev) => { if (uiConnected()) { try { uiPorts.broadcast(ev); } catch { /* port closed */ } } },
+});
+
+// The chrome.alarms wake: fires even with the panel closed and the SW asleep.
+// resumeSchedules (defined below; referenced at fire time, post-boot) sequences
+// goalRunner.resume() → load → tick so the isRunning() guard sees paused goal
+// runs — an alarm can respawn a dead SW, racing goal-run resume.
+browser.alarms?.onAlarm?.addListener((/** @type {any} */ alarm) => {
+  if (alarm?.name !== SCHEDULE_ALARM_NAME) return;
+  resumeSchedules().catch((/** @type {unknown} */ e) => console.error('[sw] schedule tick (alarm) failed', e));
+});
+
+// Browser-start wake: rehydrate + catch up any routines that came due while the
+// browser was off. Redundant with the top-level boot catch-up (which runs on
+// every SW spawn), but onStartup is the guaranteed cold-browser-start signal;
+// resumeSchedules is idempotent + serialized, so both firing is harmless.
+browser.runtime?.onStartup?.addListener(() => {
+  resumeSchedules().catch((/** @type {unknown} */ e) => console.error('[sw] schedule onStartup catch-up failed', e));
 });
 
 // ---------------------------------------------------------------------------
 // 5b2. DESIGN-17 — actor tab agents: the message_actor orchestrator
 // ---------------------------------------------------------------------------
 // An actor is a per-instance agent that OWNS one tab-hosted instance and
-// exclusively holds its tools. The orchestrator (the async-subagents shape,
+// exclusively holds its tools. The orchestrator (the async-actors shape,
 // specialized) is the mailbox to it; the SW supplies the IO — resolve + lazy-
 // mint the actor across the three registries, drive ONE actor turn (the
 // SAME runAgentTurn wrapper, kind-aware), and re-enter the sender with the reply.
@@ -2371,7 +2701,7 @@ const { mintOnce } = makeMintOnce();
 // Start the actor process on demand: lazily mint an actor session for an
 // instance (on the first message_actor). Inherits the spawning chat's RESOLVED
 // Plan/Act posture — resolved + stored EXPLICITLY so it can't silently widen to the
-// global default (the subagent guardrail-3 precedent). Binds BOTH directions:
+// global default (the actor guardrail-3 precedent). Binds BOTH directions:
 // actorSessionId on the registry record (the REGISTERED NAME — the stable
 // instance id → live session pointer resolveActor reads, like a Registry entry),
 // and the actor session as the instance's session-default so id-less tools
@@ -2391,7 +2721,7 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     // The actor inherits the owner chat's tool MANIFEST as an authority bound
-    // (the subagent precedent, spawn.js): a /tools-narrowed chat can't widen its
+    // (the actor precedent, spawn.js): a /tools-narrowed chat can't widen its
     // reach by delegating to an actor. A browse-only chat's actor is held to
     // browse-only's read DOM tools — the gate refuses click/type for it. null /
     // absent = no manifest = the actor keeps its full kind toolset.
@@ -2405,6 +2735,12 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
   await entry.reg.setDefaultForSession(created.sessionId, record.id);
   await entry.reg.setActorSession(record.id, created.sessionId);
   auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId: record.id, kind: entry.kind } }).catch(() => {});
+  // Engine-actor prewalk: an engine actor is minted on the frontier (owner
+  // chat) model; when enginePrewalkEnabled, arm it so it keeps that model for
+  // its first turn and swaps to the cheap executor thereafter. Quiet no-op when
+  // the setting is off or no distinct executor resolves. Awaited so the state
+  // is on the record before the actor's first turn renders.
+  await prewalk.armEngineActor(created.sessionId);
   return created.sessionId;
 };
 
@@ -2440,6 +2776,226 @@ const webActorRegistry = makeWebActorRegistry();
 const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
 hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
+
+// PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
+// web actor makes inside its sealed worker rides here (offscreen job-runner →
+// 'page/call'). SECURITY, the whole point of doing this SW-side:
+//   • The OWNER is the sessionId the offscreen relay attached from the trusted
+//     job params — never anything the worker put in its own message.
+//   • That session must be a tab-backed WEB actor; anything else (a bare js_run
+//     job, an engine actor, a stale id) is refused — the page capability is not
+//     a general worker power.
+//   • The tab is resolved AUTHORITATIVELY from webActorTabBindings.tabFor(owner):
+//     the owner can't name a tab, so it can only ever act on the ONE tab it owns
+//     (fail closed if it owns none).
+// Then makePageCallHandler translates → builds a normal tab web-actor ctx (NO
+// code surface, so the mapped navigate/click/type are allowed) → dispatches
+// through the FULL gate stack (denylist / confirm / audit), so this route adds
+// zero authority over the tool-call actor.
+const pageCallHandler = makePageCallHandler({
+  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+  buildActorContext: ({ sessionId, tabId }) => buildToolContext({
+    sessionId, activeTabId: tabId,
+    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
+    // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
+    // surface is 'code' (that's how it got here), but navigate/click/type must be
+    // ALLOWED for the page.* translation — else the setting would refuse them.
+    actorSurface: 'tools',
+  }),
+});
+const pageCallRoute = {
+  /** @param {{ method?: string, args?: object, ownerSessionId?: string }} msg */
+  'page/call': async ({ method, ownerSessionId, args } = {}) => {
+    if (vault.isLocked()) return { ok: false, error: 'locked' };
+    if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'page_call_no_owner' };
+    // The owner MUST be a live tab-backed web actor — the page surface is not a
+    // general worker capability. (findActorSession/get by id; reject otherwise.)
+    const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
+      return { ok: false, error: 'page_call_not_web_actor' };
+    }
+    // Authoritative tab: the ONE this actor owns (never a worker-supplied id).
+    // A fresh code actor owns none — and unlike the tool-call actor it has no
+    // direct `navigate` to lazily open one, so page.goto() IS its adopt path:
+    // open + bind its first tab here (the SAME adoptWebTab navigate uses), then
+    // dispatch pinned to it. Every other page.* with no tab is refused with an
+    // actionable "open a page first" message. See resolvePageTab.
+    const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
+    if (decision.action === 'refuse') return { ok: false, error: decision.error };
+    let tabId;
+    if (decision.action === 'adopt') {
+      const adopted = await adoptWebTab(ownerSessionId).catch(() => null);
+      if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
+      tabId = adopted.tabId;
+    } else {
+      tabId = decision.tabId;
+    }
+    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+    // Announce the settled op on the UI ports — pure observability, ZERO added
+    // authority (the gated dispatch already ran; consumers see method/ok only).
+    // why: a page_code call is ONE tool_use whose real page actions happen in
+    // here — invisible to the turn/tool-use stream. The eval harness's OM2W
+    // recorder (and any UI activity view) needs each op as a discrete
+    // after-action event, or a code-surface trajectory records as
+    // [navigate, answer] and a judge can't see the work.
+    uiPorts.broadcast({
+      type: 'page/op', sessionId: ownerSessionId, tabId,
+      method: /** @type {string} */ (method), args: args ?? {}, ok: outcome?.ok === true,
+      ...(outcome?.ok === false ? { error: String(outcome.error ?? '').slice(0, 200) } : {}),
+    });
+    return outcome;
+  },
+};
+
+// ── DESIGN-19 — the site-fetch/call route (a site-client run's ONLY egress) ──
+// A site.fetch(pathOrUrl) call inside a sealed site-client worker relays here
+// (offscreen job-runner → 'site-fetch/call'). SECURITY, the whole point of doing
+// this SW-side (the a2a/page-call posture):
+//   • OWNER + PINNED ORIGIN ride from the trusted job params, never the worker.
+//   • The owner must be a WEB actor (tab or API) — not a general worker power.
+//   • resolveSiteUrl pins every request to the origin (cross-origin REFUSED) —
+//     the worker cannot point the fetch at another host.
+//   • Denylist-checked; a non-GET crosses the shared web:write confirm.
+//   • The fetch runs through the actor's SESSION-SCOPED webFetch (cookies ride
+//     same-origin, keyless — identical authority to fetch_url), so this relay adds
+//     nothing the live actor doesn't already have for its own origin.
+const siteFetchCallRoute = {
+  /** @param {{ ownerSessionId?: string, siteOrigin?: string, pathOrUrl?: string, method?: string, headers?: Record<string,string>, body?: unknown }} msg */
+  'site-fetch/call': async ({ ownerSessionId, siteOrigin, pathOrUrl, method, headers, body } = {}) => {
+    if (vault.isLocked()) return { ok: false, error: 'locked' };
+    if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'site_fetch_no_owner' };
+    const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
+      return { ok: false, error: 'site_fetch_not_web_actor' };
+    }
+    const pin = normalizeApiOrigin(siteOrigin);
+    if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+    const resolved = resolveSiteUrl(pathOrUrl, pin);
+    if ('error' in resolved) return { ok: false, error: resolved.error };
+    const url = resolved.url;
+    // Denylist floor (the origin gate's SW-side twin): a site client can't reach a
+    // denylisted host even if one was somehow stored.
+    const host = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
+    if (host) {
+      const hit = matchesDenylist(host, denylistStore.patterns());
+      if (hit) return { ok: false, error: `denylisted: ${host} matches '${hit}'` };
+    }
+    const httpMethod = String(method ?? 'GET').toUpperCase();
+    // Anti-exfil: a non-GET can transmit in-context data. Confirm by default via
+    // the SHARED web:write key (one approval governs fetch_url + call_api + this).
+    if (needsWebWriteConfirm(httpMethod)) {
+      const ans = await confirmAction(/** @type {any} */ ({
+        tool: 'web:write', kind: 'web_write', origins: [pin],
+        summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
+        sessionId: ownerSessionId,
+      }));
+      if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined: user declined the site-client write.' };
+    }
+    // The actor's SESSION-SCOPED / origin-pinned webFetch — same wrappers
+    // buildToolContext hands the web/API actor. Cookies ride only same-origin to
+    // the owned origin; the worker never holds a credential.
+    let scopedFetch;
+    if (owner.backing === 'api') {
+      scopedFetch = withApiCredentials(webFetch, () => pin, {
+        getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+        audit: (/** @type {any} */ e) => auditLog.append(e),
+      });
+    } else {
+      // A tab actor: scope to the owned tab's LIVE origin (matches the pin when the
+      // actor is on that site; a mismatch is naturally sessionless at the boundary).
+      const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
+      let tabOrigin = pin;
+      if (typeof ownedTabId === 'number') {
+        const t = await browser.tabs.get(ownedTabId).catch(() => null);
+        if (t?.url) tabOrigin = originOfTabUrl(/** @type {string} */ (t.url));
+      }
+      scopedFetch = withSessionScopedCredentials(webFetch, () => tabOrigin);
+    }
+    // Strip tool-supplied credential headers (a laundered injection forging one) —
+    // the real same-origin cookies come from the jar via the boundary.
+    /** @type {Record<string, string>} */
+    const safeHeaders = {};
+    for (const [k, v] of Object.entries(headers ?? {})) {
+      if (['cookie', 'authorization', 'proxy-authorization'].includes(k.toLowerCase())) continue;
+      if (typeof v === 'string') safeHeaders[k] = v;
+    }
+    let reqBody = body;
+    if (reqBody !== undefined && typeof reqBody !== 'string') {
+      reqBody = JSON.stringify(reqBody);
+      if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) safeHeaders['Content-Type'] = 'application/json';
+    }
+    try {
+      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody) });
+      const ct = res.headers.get('content-type') ?? '';
+      const text = (await res.text()).slice(0, 200_000);   // hard cap on relayed bytes
+      let json = null;
+      if (/(json|graphql)/i.test(ct)) { try { json = JSON.parse(text); } catch { json = null; } }
+      return { ok: true, value: { status: res.status, finalUrl: res.url ?? url, contentType: ct || null, body: text, json } };
+    } catch (e) {
+      const err = /** @type {{ reason?: string, message?: string }} */ (e);
+      if (err?.reason === 'redirect_blocked') return { ok: false, error: `redirected: ${url} issued a redirect (not followed). Use the final URL.` };
+      if (err?.reason === 'private_network') return { ok: false, error: `blocked: ${url} is a private/loopback host (SSRF defense).` };
+      return { ok: false, error: err?.message ?? 'site_fetch_failed' };
+    }
+  },
+};
+
+// DESIGN-19 — the options-surface routes for stored site clients: list (metas
+// only — no module bodies) + delete. The dossier/module are NOT secrets (they hold
+// no credentials by construction), so this is ungated like the denylist routes.
+const siteClientRoutes = {
+  'site-client/list': async () => {
+    try {
+      const metas = await siteClientStore.listMeta();
+      // Project to the UI-relevant fields (never the body).
+      return { ok: true, clients: metas.map((/** @type {any} */ mMeta) => ({
+        origin: mMeta.origin, summary: mMeta.summary, endpoints: mMeta.endpoints?.length ?? 0,
+        auth: mMeta.auth, deriver: mMeta.deriver, sizeBytes: mMeta.sizeBytes,
+        derivedAt: mMeta.derivedAt, lastVerifiedAt: mMeta.lastVerifiedAt, recentFailures: mMeta.recentFailures,
+      })) };
+    } catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+  },
+  'site-client/delete': async (/** @type {{ origin?: string }} */ { origin } = {}) => {
+    if (typeof origin !== 'string' || !origin) return { ok: false, error: 'origin-required' };
+    try { await siteClientStore.remove(origin); return { ok: true }; }
+    catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+  },
+};
+
+// ── DESIGN-19 — the capture MANAGER (Tap A CDP / Tap B scripting) ────────────
+// One capability behind the two taps: CDP Network where the debugger ships
+// (advancedAutomationOn — the SAME gate every other CDP path uses), else the
+// chrome.scripting MAIN-world fetch/XHR wrap (all channels, no new permission).
+// Returns a redacted, templatized endpoint inventory via the pure digester.
+const siteCaptureManager = {
+  /** @param {{ tabId: number, origins: string[] }} o */
+  start: async ({ tabId }) => {
+    if (advancedAutomationOn() && debuggerPool.startNetworkCapture) {
+      await debuggerPool.startNetworkCapture(tabId);
+      return { tap: 'cdp' };
+    }
+    await browser.scripting.executeScript({
+      target: { tabId }, world: 'MAIN', func: installFetchTapInjected,
+    });
+    return { tap: 'tap' };
+  },
+  /** @param {{ tabId: number, origins: string[] }} o */
+  stop: async ({ tabId, origins }) => {
+    /** @type {any[]} */
+    let events = [];
+    let deriver = 'capture-tap';
+    if (advancedAutomationOn() && debuggerPool.stopNetworkCapture && debuggerPool.isAttached?.(tabId)) {
+      events = await debuggerPool.stopNetworkCapture(tabId);
+      deriver = 'capture-cdp';
+    } else {
+      const [res] = await browser.scripting.executeScript({
+        target: { tabId }, world: 'MAIN', func: drainFetchTapInjected,
+      });
+      events = /** @type {any} */ (res?.result)?.events ?? [];
+    }
+    return digestCapture(events, { origins, deriver: /** @type {any} */ (deriver) });
+  },
+};
 
 // DESIGN-18 — API actors. An API integration is a `web` actor (backing:'api') with NO
 // tab: it owns ONE FIXED origin and reaches it fetch-only. Keyed by (ownerChatId,
@@ -2686,6 +3242,9 @@ const leaveDwebAgentInbox = async () => {
 const onSettingsChanged = () => {
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
   else leaveDwebAgentInbox().catch(() => {});
+  // Watch mode just flipped on → foreground the agent's current tab immediately,
+  // rather than waiting for its next tab touch. No-op when off / no agent tab.
+  if (settingsStore.get().watchAgentTab === true) focusAgentTab();
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
 // clear the SW-side membership flag for a clean re-join on the next start.
@@ -2780,12 +3339,35 @@ const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string
 };
 const meshHostRoom = (/** @type {object} */ payload) =>
   browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+// Standing peer conversations (conversation-registry.js): the SW-side thread
+// store, sibling to meshDispatch's pending-ask map. converse/say open + extend
+// threads; an inbound turn carrying a known convId continues one (waking the
+// actor with prior turns as context) and the actor's answer goes BACK to the
+// peer under PER-CONVERSATION reply consent.
+const conversationRegistry = createConversationRegistry();
 const meshDispatch = makeMeshDispatch({
   sendDm: async (to, env) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'dm', to, data: env }).catch(() => null)); return { ok: r?.ok === true, id: r?.id, error: r?.error }; },
   listPeers: async () => { const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }).catch(() => null)); return Array.isArray(r?.peers) ? r.peers.map((/** @type {any} */ p) => ({ did: p.did, name: p.name })) : []; },
   fetchCard: async (did) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-get', did }).catch(() => null)); return r?.ok ? (r.card ?? null) : null; },
   publishCard: async (card) => { const r = /** @type {any} */ (await meshHostRoom({ op: 'card-set', card }).catch(() => null)); return { ok: r?.ok === true, did: r?.did, error: r?.error }; },
+  conversations: conversationRegistry,
 });
+
+// Per-CONVERSATION reply consent (the owner-chosen gate for the new outbound
+// edge). Replying to a peer on a standing thread needs the user's ok ONCE per
+// thread; after that it flows for that thread's life, and dweb_block revokes it
+// (closeDid drops the thread). Mirrors a2a first-contact, keyed by convId.
+const resolveReplyConsent = async (/** @type {string} */ convId, /** @type {string} */ did, /** @type {string} */ sessionId) => {
+  if (conversationRegistry.hasReplyConsent(convId)) return true;
+  const answer = await confirmAction({ tool: 'a2a_reply', sessionId, origins: [did] });
+  const granted = answer === 'yes_once' || answer === 'yes_session';
+  // "Allow for session" grants the thread standing reply consent; "Allow once"
+  // permits THIS reply only (no registry grant), so a one-off can't become a
+  // standing back-channel.
+  if (answer === 'yes_session') conversationRegistry.grantReplyConsent(convId);
+  auditLog.append({ type: 'a2a_reply_consent', details: { did, convId, approved: granted, standing: answer === 'yes_session' } }).catch(() => {});
+  return granted;
+};
 
 // The actors/call route — invoked by the offscreen relay for each `actors.*`
 // call an actors-enabled `script` run makes. ownerSessionId / ownerToolUseId /
@@ -2808,8 +3390,8 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
     const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
     // v1 is the ORCHESTRATOR's surface only: a top-level chat session. An
     // actor must never delegate (the recursion rule message_actor already
-    // enforces), and a subagent's channel is its own message_actor grant.
-    if (!owner || owner.kind === 'actor' || owner.kind === 'subagent') {
+    // enforces), and an actor's channel is its own message_actor grant.
+    if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
       return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
     }
     const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
@@ -2911,7 +3493,15 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
     // declined prompt, is refused here (the dispatch's did-gate can't see the
     // no-did publishCard, so enforcement must land in this route).
     if (signs) {
-      const consentTarget = op === 'publishCard' ? A2A_PUBLISH_CARD_KEY : /** @type {{ did?: string }} */ (args).did;
+      // Per-peer ops key on the peer's did; publishCard broadcasts the user's
+      // own card (no peer) so it keys on a sentinel; `say` carries only a convId,
+      // so resolve its thread's did — proactively continuing a thread is still
+      // messaging that peer and needs the same cleared target.
+      const consentTarget = op === 'publishCard'
+        ? A2A_PUBLISH_CARD_KEY
+        : op === 'say'
+          ? conversationRegistry.didFor(/** @type {{ convId?: string }} */ (args).convId ?? '')
+          : /** @type {{ did?: string }} */ (args).did;
       if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
       if (!a2aApprovedDids.has(consentTarget)) {
         const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
@@ -2937,13 +3527,45 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
     auditLog.append({ type: 'dweb_agent_rate_capped', details: { did } }).catch(() => {});
     return;
   }
+  // Standing conversation? An inbound ask/tell carrying a convId continues a
+  // thread: adopt it (a convId is a bearer token — adopt() rejects a foreign
+  // did), record the peer's turn, and later reply BACK to the peer instead of
+  // only noting the user. deliver is the pure handleInbound output.
+  const deliver = routed.deliver;
+  // Cap the wire convId (a peer controls it; an unbounded key is a memory sink).
+  const rawConvId = typeof deliver?.convId === 'string' ? deliver.convId : null;
+  const convId = rawConvId && rawConvId.length <= 128 ? rawConvId : null;
+  // ADOPT BEFORE the gate, and only record the peer turn when the thread is
+  // OURS to extend. adopt() binds convId→did (rejecting a foreign did), so a
+  // fresh thread is owned by this sender and record() extends it; a convId
+  // owned by ANOTHER did is refused here — record() has no did check of its
+  // own, so this is where the bearer-token invariant is enforced for inbound.
+  let ownsThread = false;
+  if (convId && deliver) {
+    conversationRegistry.adopt(convId, did);
+    ownsThread = conversationRegistry.ownedBy(convId, did);
+    if (ownsThread) conversationRegistry.record(convId, 'peer', deliver.message);
+  }
+  // Reply back only on an OWNED ask thread — computed AFTER adopt so a peer's
+  // first converse turn (a fresh thread) can still be answered.
+  const canReplyToPeer = ownsThread && deliver?.kind === 'ask';
   const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
-  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length } }).catch(() => {});
+  auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
   (async () => {
     const actor = await resolveDwebActor();
     if (!actor) return;
     const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
-    const wake = `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
+    // On a standing thread, hand the actor the recent turns (fenced — they carry
+    // peer bytes) so it answers in context, and steer it to reply to the PEER.
+    // Thread context only for a thread WE own (ownsThread) — a foreign convId
+    // must not pull another peer's turns into this wake.
+    const priorTurns = ownsThread ? conversationRegistry.turnsFor(/** @type {string} */ (convId)).slice(0, -1) : [];
+    const threadContext = priorTurns.length
+      ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurns.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
+      : '';
+    const wake = canReplyToPeer
+      ? `A mesh peer is having an ongoing conversation with your agent (their did is in the fence origin). Read their latest message and the thread, then END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph reply to send back to the PEER.${threadContext}\n\n${fenced}`
+      : `A mesh peer sent your agent a direct message (their did is in the fence origin). Observe it, update your ledger, block if abusive, and END with either ${DWEB_AGENT_NO_REPORT} or a one-paragraph note for the user.\n\n${fenced}`;
     turnSlots.runWhenIdle(actor.actorSessionId, () => {
       (async () => {
         const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
@@ -2967,6 +3589,20 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
         // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
         // here by the NO_REPORT convention — silence costs the user nothing.
         if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
+        // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
+        // by per-conversation reply consent (the owner's chosen gate for this new
+        // outbound edge). On grant, record the self turn and send the mesh reply;
+        // a decline falls through to the user note so the answer isn't lost.
+        if (canReplyToPeer) {
+          const cid = /** @type {string} */ (convId);
+          const consented = await resolveReplyConsent(cid, did, actor.actorSessionId);
+          if (consented) {
+            conversationRegistry.record(cid, 'self', note);
+            meshDispatch.reply(did, /** @type {any} */ (deliver).reqId, note, cid);
+            auditLog.append({ type: 'a2a_reply_sent', details: { did, convId } }).catch(() => {});
+            return;
+          }
+        }
         const active = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
         if (!active) return;
         const lead = 'Your dweb agent flagged inbound mesh activity:';
@@ -3062,19 +3698,37 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 // clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
 const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
   if (!actorClient) return null;
-  const rec = await sessions.get(actorSessionId);
-  if (!rec) return null;
+  const loaded = await sessions.get(actorSessionId);
+  if (!loaded) return null;
+  // Engine-actor prewalk swap on the OFFSCREEN path. reconcileEngineActor is ALSO
+  // wired into the in-SW turn-driver, but a Chrome engine actor runs HERE and
+  // returns before that path is reached — so without this the swap NEVER fires on
+  // the primary platform. why here: the worker is seeded from rec.provider/rec.model
+  // below, so the swap must land (and persist) before we read them; costOf + the
+  // card then also read the executor model. No-op for a non-engine / unarmed actor
+  // (returns the record unchanged when there's no prewalk).
+  let rec = loaded;
+  try { rec = (await prewalk.reconcileEngineActor(rec)) ?? rec; }
+  catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
   const { controller, release } = turnSlots.claim(actorSessionId);
   try {
     // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system
     // override (rec.customSystemPrompt). Actors get no memory/skills block (same
     // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
     const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
+    // PR #119 surface parity: the OFFSCREEN actor path must thread the web
+    // actor's action surface exactly like the in-SW path — same setting-derived
+    // value buildToolContext falls back to. Without it a code-surface actor is
+    // advertised the TOOLS descriptors (no page_code) and taught the tools
+    // lore, so the whole code arm silently degrades on the offscreen heap.
+    const actorSurface = (kind === 'web' && rec.backing !== 'api')
+      ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
+      : undefined;
     const systemPrompt = await renderSystemPrompt({
-      actorType: kind, backing: rec.backing, instanceId,
+      actorType: kind, backing: rec.backing, instanceId, actorSurface,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
     });
-    const tools = actorDescriptors(listTools(), kind, rec.backing)
+    const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
     const reasoning = {
@@ -3139,7 +3793,10 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
         const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
-        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost });
+        // usage rides along RAW: costOf returns only { cost: USD } — consumers
+        // that account TOKENS (the eval runner's ACTOR bucket) need the fields
+        // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
+        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
       } catch { /* cost telemetry is best-effort */ }
     }
     auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
@@ -3148,6 +3805,28 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
   } finally {
     release();
   }
+};
+
+// DESIGN-19: web/API actor sessions that have already had their site-client
+// dossier injected this SW lifetime (once-per-session guard for mint injection).
+// In-memory only — a fresh SW re-injects, which is harmless (it re-seeds a fenced
+// note the actor already had).
+const siteClientInjected = new Set();
+
+// Resolve the ORIGIN a web/API actor is bound to, for the site-client lookup: an
+// API actor owns its FIXED origin (the session record's instanceId/origin), a tab
+// actor owns its tab's LIVE origin. Returns a normalized origin or null.
+const resolveActorOrigin = async (/** @type {string} */ actorSessionId, /** @type {string} */ instanceId, /** @type {number|undefined} */ actorTabId) => {
+  const rec = await sessions.get(actorSessionId).catch(() => null);
+  if (rec?.backing === 'api') {
+    // The API actor's owned origin is its instanceId (mintApiActor sets it).
+    return normalizeApiOrigin(rec.instanceId ?? instanceId);
+  }
+  // A tab actor: the live origin of its owned tab.
+  const tabId = typeof actorTabId === 'number' ? actorTabId : webActorTabBindings.tabFor(actorSessionId);
+  if (typeof tabId !== 'number') return null;
+  const t = await browser.tabs.get(tabId).catch(() => null);
+  return t?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (t.url))) : null;
 };
 
 const actorMessaging = makeActorMessaging({
@@ -3192,6 +3871,25 @@ const actorMessaging = makeActorMessaging({
   // tools (and the origin gate) target THAT tab; undefined for engine kinds, where
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
   runActorTurn: async ({ actorSessionId, message, actorTabId, instanceId, kind, parentToolUseId, name, oneShot }) => {
+    // DESIGN-19 mint-time injection: if this web/API actor's origin has a stored
+    // site client, prepend its dossier — the tool-authored staleness header
+    // OUTSIDE the fence, the dossier body wrapUntrusted-fenced (every byte is
+    // derived, untrusted-provenance). ONCE per actor session (a guard Set), so it
+    // seeds the actor's knowledge without re-bloating every turn. The module BODY
+    // is never injected — the actor loads it on demand via site_client_read/run.
+    let deliveredMessage = message;
+    if (kind === 'web' && !siteClientInjected.has(actorSessionId)) {
+      try {
+        const originForClient = await resolveActorOrigin(actorSessionId, instanceId, actorTabId);
+        if (originForClient) {
+          const meta = await siteClientStore.getMeta(originForClient).catch(() => null);
+          if (meta) {
+            siteClientInjected.add(actorSessionId);
+            deliveredMessage = `${buildMintInjection(meta)}\n\n---\n\n${message}`;
+          }
+        }
+      } catch (e) { console.debug('[site-client] mint injection skipped', e); }
+    }
     // DESIGN-18 tab-card anchoring: pin this actor's OWNED tab to the message_actor turn
     // driving it NOW (parentToolUseId), so its inline notice flows to this message's turn
     // (and resurfaces here when re-messaged) rather than to whatever user message is latest
@@ -3210,7 +3908,7 @@ const actorMessaging = makeActorMessaging({
     // DESIGN-17 P1 glass pane: when this turn was triggered by a live message_actor
     // call (parentToolUseId present — absent on a boot redrain), pass a `display`
     // descriptor so the turn driver re-emits the actor's stream as turn/actor-*
-    // events keyed to that card. The orchestrator renders it inline (the subagent
+    // events keyed to that card. The orchestrator renders it inline (the actor
     // live-view, for an actor). Cheap: rendering only — the model-memory the
     // orchestrator keeps is still just the fenced reply (deliver()).
     const display = parentToolUseId
@@ -3228,13 +3926,13 @@ const actorMessaging = makeActorMessaging({
     // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
     // fall back to the in-SW turn below (offscreen unavailable / never started).
     if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
-      const off = await runActorTurnOffscreen({ actorSessionId, message, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
+      const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
       if (off) return off;
     }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
-    await runAgentTurn({ sessionId: actorSessionId, userText: message, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
+    await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
     return fresh
@@ -3421,13 +4119,38 @@ const handleToolsCommand = async (/** @type {string} */ arg) => {
 // Goal mode (the Goal toggle). Autonomy is NOT a stored flip — resolvePermission
 // computes Act+confirm-off from the live run — so start/halt are just the runner
 // surface. resumeGoalRuns re-drives persisted runs after an interactive unlock.
-const startGoalRun = (/** @type {{ sessionId: string, goal: string }} */ req) => /** @type {any} */ (goalRunner)?.start(req);
+// why arm-then-start: prewalk state must be on the session BEFORE the run's
+// first turn renders its system prompt (the planning nudge reads it). Arming
+// is a quiet no-op when the setting is off or no distinct executor resolves.
+const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ req) => {
+  await prewalk.armForRun(req?.sessionId);
+  return /** @type {any} */ (goalRunner)?.start(req);
+};
 // why stop() not halt(): user-initiated cancels (Stop button, steer-takeover,
 // new-chat, archive) must DURABLY end the run — halt() only marks an in-memory
 // run, so a vault-lock-PAUSED run (evicted from the runner's map but kept in the
 // kv mirror for resume) would survive a Stop and resurrect on the next unlock.
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.stop(sid);
 const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
+// Background scheduling: drive a full scheduler catch-up. The SINGLE entry point
+// for every wake (alarm, onStartup, cold boot, vault unlock) so the ordering is
+// defined in ONE place and can't drift per-caller.
+//
+// why resume goal runs FIRST: tick()'s isRunning() guard (which stops a goal-mode
+// routine from firing a second session while its previous run is still going)
+// reads goalRunner.isActive(lastSessionId) — the IN-MEMORY map. After an SW
+// eviction / auto-lock, a paused goal run lives only in the kv mirror until
+// goalRunner.resume() re-adds it, and resume() re-adds AFTER an `await kv.get`. If
+// tick() ran first it would see the routine as not-running and fire a duplicate
+// while resume() re-drives the original — two concurrent runs for one routine.
+// Sequencing resume() → load() → tick() closes that window. Both resume() and
+// load() are idempotent (skip ids already live), so calling this from every wake
+// — even one where goal runs were already resumed — is safe.
+const resumeSchedules = () => Promise.resolve(/** @type {any} */ (goalRunner)?.resume())
+  .catch(() => {})
+  .then(() => /** @type {any} */ (scheduler)?.load())
+  .then(() => /** @type {any} */ (scheduler)?.tick())
+  .catch((e) => console.error('[sw] schedule catch-up failed', e));
 const ensureSession = ensureCurrentSession;
 
 // Message routes live in background/routes/*.js as import-free, deps-injected
@@ -3446,8 +4169,8 @@ const ensureSession = ensureCurrentSession;
 browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // The heap split: the offscreen→SW relays for the ONE agent-loop client — model-call
   // (getSecret + safeFetch added in the handler; the key never left the SW), the
-  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the subagent/
-  // actor card + cost meter). Serves both reasoning subagents and bound actors; a
+  // SW-side pin+gate tool-dispatch, and the fire-and-forget loop-event (→ the actor/
+  // actor card + cost meter). Serves both spawned reasoners and bound actors; a
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
   ...(actorClient?.routes ?? {}),
@@ -3461,6 +4184,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
+    resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -3486,16 +4210,18 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
     applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit,
-    handleSystemCommand, handleToolsCommand, postChatNote, spawnSubagent, requestReview, appClient,
+    handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
     startGoalRun, haltGoalRun, ensureSession,
     // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
     actorMessaging,
-    // PR #134 phase 5: agent/stop also cascades through the live subagent
+    // PR #134 phase 5: agent/stop also cascades through the live actor
     // subtree (children run under their own turn slots now).
-    subagentLifecycle,
+    actorLifecycle,
+    // The debug surface: session/debugBundle + session/contextSnapshots.
+    settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
   }),
   ...makeEngineRoutes({
     vault, auditLog, pushState, browser, vmHttpFetch, appRegistry, vmRegistry, jsRegistry,
@@ -3524,6 +4250,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResume, haltGoalRun,
+    // session/reset (New chat) must stop the abandoned session's live turn AND
+    // cascade to its in-flight actors — same primitives agent/stop uses — so
+    // background web/VM/App work doesn't keep running on the orphaned session.
+    turnSlots, actorMessaging,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
@@ -3543,6 +4273,20 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // Stored under origin:<origin>, decrypted only in withApiCredentials at request
   // time, never shown to the agent. `list` returns origins + header NAME only.
   ...(/** @type {any} */ (originCredentialRoutes)),
+
+  // --- PR #119 code-REPL arm: the web actor's page.<method> bridge route ---
+  // A sealed-worker page.* call → the SAME gated dispatch the tool-call actor
+  // uses, pinned to the actor's owned tab (owner + tab resolved trusted-side).
+  ...(/** @type {any} */ (pageCallRoute)),
+
+  // --- DESIGN-19: the site-client run's ONLY egress (origin-pinned, confirmed) ---
+  // A sealed-worker site.fetch call → the actor's session-scoped webFetch, pinned
+  // to the client's origin (owner + origin resolved trusted-side; cross-origin
+  // refused; non-GET confirmed via the shared web:write key).
+  ...(/** @type {any} */ (siteFetchCallRoute)),
+
+  // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
+  ...(/** @type {any} */ (siteClientRoutes)),
 })));
 
 // The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel
@@ -3716,3 +4460,13 @@ vault.attemptResume().then((resumed) => {
 for (const deadKey of ['ralph.plan.v1', 'ralph.loop.v1']) {
   Promise.resolve(kv.delete(deadKey)).catch(() => {});
 }
+
+// Background scheduling: rehydrate the registered routines on every SW spawn and
+// run a catch-up pass. This is the primary "run it as soon as peerd is back on"
+// junction — a routine whose nextRunAt already passed (browser was off, SW was
+// evicted) fires here. resumeSchedules self-defers while the vault is locked (a
+// firing needs the model key) and the vault/unlock path re-runs it, so calling it
+// unconditionally is safe. It resumes goal runs BEFORE ticking (so a paused
+// goal-mode routine isn't fired twice — see resumeSchedules). The chrome.alarms +
+// onStartup wakes cover the cases where no SW spawn otherwise happens.
+resumeSchedules();

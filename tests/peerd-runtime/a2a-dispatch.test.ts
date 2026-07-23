@@ -3,7 +3,7 @@
 // first-contact signing gate, and inbound routing are provable without a mesh.
 
 import { describe, test, expect } from 'bun:test';
-import { makeMeshDispatch, isA2AEnvelope } from '../../extension/peerd-runtime/subagent/a2a-dispatch.js';
+import { makeMeshDispatch, isA2AEnvelope } from '../../extension/peerd-runtime/actor/a2a-dispatch.js';
 
 const DID = 'did:key:z6MkBob';
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -133,5 +133,63 @@ describe('isA2AEnvelope', () => {
     expect(isA2AEnvelope({ kind: 'ask', reqId: 'r' })).toBe(false);
     expect(isA2AEnvelope(null)).toBe(false);
     expect(isA2AEnvelope('x')).toBe(false);
+  });
+});
+
+// Standing conversations — converse opens a thread (convId minted, turns
+// recorded), say continues it, and both thread the convId onto the wire so
+// the peer's side keeps the same conversation.
+describe('standing conversations (converse / say)', () => {
+  const withRegistry = () => {
+    const turns: any[] = [];
+    const conversations = {
+      open: (did: string, msg: string) => { turns.push({ convId: 'CV1', did, role: 'self', msg }); return { convId: 'CV1' }; },
+      didFor: (cid: string) => (cid === 'CV1' ? DID : null),
+      record: (cid: string, role: string, msg: string) => { turns.push({ convId: cid, role, msg }); return true; },
+    };
+    return { ...harness({ conversations }), turns };
+  };
+
+  test('converse mints a convId, threads it on the wire, records both turns', async () => {
+    const d = withRegistry();
+    const p = d.dispatch('converse', { did: DID, message: 'want to collab?', timeoutMs: 5000 }, { signs: true, allowed: () => true });
+    await tick();
+    // the ask DM carries the convId
+    expect(d.sent[0].env).toMatchObject({ __a2a: 1, kind: 'ask', convId: 'CV1', message: 'want to collab?' });
+    const reqId = d.sent[0].env.reqId;
+    d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId, message: 'yes!', convId: 'CV1' });
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, convId: 'CV1', from: DID, reply: 'yes!' });
+    // self turn (open) + peer turn (the reply) both recorded
+    expect(d.turns.filter((t) => t.role === 'self').length).toBe(1);
+    expect(d.turns.filter((t) => t.role === 'peer' && t.msg === 'yes!').length).toBe(1);
+  });
+
+  test('say continues a known thread; an unknown convId is refused', async () => {
+    const d = withRegistry();
+    const p = d.dispatch('say', { convId: 'CV1', message: 'next step?', timeoutMs: 5000 }, { signs: true, allowed: () => true });
+    await tick();
+    expect(d.sent[0].env).toMatchObject({ kind: 'ask', convId: 'CV1', message: 'next step?' });
+    const reqId = d.sent[0].env.reqId;
+    d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId, message: 'ship it', convId: 'CV1' });
+    expect((await p).reply).toBe('ship it');
+
+    const bad = await d.dispatch('say', { convId: 'NOPE', message: 'x' }, { signs: true, allowed: () => true });
+    expect(bad.ok).toBe(false);
+    expect(bad.error).toContain('no standing conversation');
+  });
+
+  test('converse/say are refused when no registry is wired', async () => {
+    const d = harness(); // no conversations dep
+    const r = await d.dispatch('converse', { did: DID, message: 'hi' }, { signs: true, allowed: () => true });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('not available');
+  });
+
+  test('an inbound ask carrying a convId surfaces it in deliver for the wake path', () => {
+    const d = harness();
+    const out = d.handleInbound(DID, { __a2a: 1, kind: 'ask', reqId: 'x1', message: 'ping', convId: 'PEER-CV' });
+    expect(out.consumed).toBe(false);
+    expect(out.deliver).toMatchObject({ from: DID, kind: 'ask', convId: 'PEER-CV', message: 'ping' });
   });
 });

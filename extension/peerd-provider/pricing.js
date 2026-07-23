@@ -69,6 +69,29 @@ export const DEFAULT_PRICING = Object.freeze({
   'google/gemini-2.0-flash':     Object.freeze({ input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0 }),
   'meta-llama/llama-3.3-70b-instruct': Object.freeze({ input: 0.12, output: 0.3, cacheRead: 0.12, cacheWrite: 0 }),
 
+  // ---- OpenAI (direct api.openai.com — bare ids, no vendor prefix) ----
+  // why bare ids: the direct adapter sends 'gpt-4o' etc., not 'openai/gpt-4o'
+  // (that prefix is the OpenRouter gateway's namespacing). Only the ids with
+  // confident public pricing are listed; the newest flagships resolve to
+  // "estimate unavailable" (honest) until a user sets a pricing override —
+  // the documented escape hatch for prices that move between updates.
+  'gpt-4o':      Object.freeze({ input: 2.5,  output: 10,  cacheRead: 1.25,  cacheWrite: 0 }),
+  'gpt-4o-mini': Object.freeze({ input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0 }),
+  'o4-mini':     Object.freeze({ input: 1.1,  output: 4.4, cacheRead: 0.275, cacheWrite: 0 }),
+
+  // ---- Z.ai GLM (native adapter; bare model ids) ----
+  // Source: docs.z.ai/guides/overview/pricing (2026-07 snapshot, USD / 1M tokens).
+  // Each tier is priced from its own published rate — GLM-4.6 is a distinctly
+  // cheaper tier than the 5.2 flagship, NOT the same rate card. Z.ai reports no
+  // separate cache-write line (0); cacheRead is the published cached-input rate
+  // (GLM-4.6 has no published cached rate, so it carries the 5.2 tier's ~0.19x
+  // ratio applied to its input — an estimate, still far closer than the
+  // flagship's number). GLM-4.5-Air (the web-actor runner) is intentionally
+  // absent — its lower tier is left to user override rather than a guessed
+  // number; an unknown id degrades to an honest "estimate unavailable".
+  'glm-5.2': Object.freeze({ input: 1.4,  output: 4.4,  cacheRead: 0.26, cacheWrite: 0 }),
+  'glm-4.6': Object.freeze({ input: 0.43, output: 1.74, cacheRead: 0.08, cacheWrite: 0 }),
+
   // ---- Ollama (local inference — $0 by construction) ----
   // why: the CostChip prices by model id; without entries the curated
   // local models would read "unknown" instead of the truthful $0. Keys

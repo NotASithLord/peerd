@@ -19,7 +19,11 @@ export const APP_TAB_GROUP_TITLE = 'peerd';
 // Write-layer cap on total app file size. Mirrors the sandbox_create app arm’s
 // MAX_TOTAL_CHARS (the tool pre-checks for a nicer error); this is the
 // backstop every create() caller hits, including the dweb install routes.
-const MAX_APP_TOTAL_CHARS = 2_000_000;
+// why 50M: real dwapps ship WASM + a 3D engine (a game is millions of chars);
+// the dweb loader already accepts 50M/256 files, but this backstop was the
+// true ceiling on every path and capped them at 2M. Raised to match the loader
+// so a WASM-heavy app (Three.js + Rapier + assets) can actually be imported.
+const MAX_APP_TOTAL_CHARS = 50_000_000;
 
 /** @param {string} appId */
 const opfsForApp = (appId) => opfsHelpers(['peerd-apps', appId]);

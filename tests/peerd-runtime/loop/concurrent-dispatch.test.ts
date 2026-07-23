@@ -9,7 +9,7 @@
 //   - any call whose verdict says confirm:true is NEVER raced (serialized
 //     confirms — stacked modals are a UX failure);
 //   - writes are barriers: a read emitted after a write waits for it;
-//   - without a classifier, only spawn_subagent keeps its parallel path.
+//   - without a classifier, only actor_create keeps its parallel path.
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
@@ -172,14 +172,14 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     ]);
   });
 
-  test('confirm-gated calls are NEVER raced — even spawn_subagent serializes its confirms', async () => {
+  test('confirm-gated calls are NEVER raced — even actor_create serializes its confirms', async () => {
     const store = makeStore();
     store.seed('s1');
-    const calls = [{ id: 't_1', name: 'spawn_subagent' }, { id: 't_2', name: 'spawn_subagent' }];
+    const calls = [{ id: 't_1', name: 'actor_create' }, { id: 't_2', name: 'actor_create' }];
     const log: string[] = [];
     const ctx = baseCtx(store, {
       callModel: makeToolModel(calls),
-      tools: [{ name: 'spawn_subagent', description: '', schema: {} }],
+      tools: [{ name: 'actor_create', description: '', schema: {} }],
       // confirmations on: the spawn would confirm → must not race another.
       classifyToolCall: () => CONFIRM_VERDICT,
       toolDispatch: async (call: any) => {
@@ -193,15 +193,15 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(log).toEqual(['start:t_1', 'end:t_1', 'start:t_2', 'end:t_2']);
   });
 
-  test('no classifier injected: spawn_subagent keeps its parallel path, other tools stay serial', async () => {
+  test('no classifier injected: actor_create keeps its parallel path, other tools stay serial', async () => {
     const store = makeStore();
     store.seed('s1');
     // Two spawns → concurrent (the pre-existing behavior).
-    const spawnCalls = [{ id: 't_1', name: 'spawn_subagent' }, { id: 't_2', name: 'spawn_subagent' }];
+    const spawnCalls = [{ id: 't_1', name: 'actor_create' }, { id: 't_2', name: 'actor_create' }];
     const started: string[] = [];
     const ctx = baseCtx(store, {
       callModel: makeToolModel(spawnCalls),
-      tools: [{ name: 'spawn_subagent', description: '', schema: {} }],
+      tools: [{ name: 'actor_create', description: '', schema: {} }],
       toolDispatch: async (call: any) => {
         started.push(call.id);
         if (call.id === 't_1') {
@@ -269,6 +269,41 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     // the partial batch is dropped (no tool_result message appended)...
     expect(s.messages.some((m: any) => Array.isArray(m.toolResults))).toBe(false);
     // ...and the assistant message is marked aborted so resume won't re-drive it.
+    expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
+  });
+
+  test('an abort landing DURING the final dispatch drops the tool-results message', async () => {
+    // The steer-race that bricked sessions in the field: claim() aborts the
+    // old turn and starts the new one immediately, so if the abort lands
+    // while the batch's LAST dispatch is in flight, no per-wave check ever
+    // sees it — the old loop would fall through and append its tool-results
+    // message AFTER the steering turn's messages, leaving a history whose
+    // tool_result no longer follows its tool_use (Anthropic 400s on every
+    // later call). The post-batch guard must catch it and drop the results.
+    const store = makeStore();
+    store.seed('s1');
+    const ac = new AbortController();
+    const ctx = baseCtx(store, {
+      callModel: makeToolModel([{ id: 't_w1', name: 'click' }]),
+      tools: [{ name: 'click', description: '', schema: {} }],
+      classifyToolCall: () => WRITE_VERDICT,
+      signal: ac.signal,
+      toolDispatch: async () => {
+        // The abort arrives while the ONLY (hence final) dispatch runs.
+        ac.abort();
+        await sleep(5);
+        return { ok: true, content: 'r', meta: {} };
+      },
+    });
+
+    const events = await drain(runUserTurn(ctx));
+
+    const s = await store.get('s1');
+    // No tool-results message may be appended after the abort...
+    expect(s.messages.some((m: any) => Array.isArray(m.toolResults))).toBe(false);
+    // ...and the turn ends on a deliberate abort.
+    const stops = events.filter((e: any) => e.type === 'stop');
+    expect(stops.at(-1)?.stopReason).toBe('aborted');
     expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
   });
 

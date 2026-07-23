@@ -9,7 +9,10 @@
 
 import { APP_RUNTIME_NOTE } from './code-style-note.js';
 
-const MAX_TOTAL_CHARS = 2_000_000;
+// Mirrors the write-layer backstop in background/app-client.js — kept aligned
+// with the dweb loader's 50M ceiling so a WASM-heavy dwapp (a game engine, a
+// physics runtime) can be authored/imported, not just a small hand-written app.
+const MAX_TOTAL_CHARS = 50_000_000;
 
 /**
  * Create + open an App from files/html; returns { id, name, kind, entryFile,

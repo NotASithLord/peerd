@@ -20,10 +20,10 @@
 // Pure functions only. The dispatcher wrapper that USES assertReadOnly
 // lives in orchestrator.js (the imperative shell).
 
-// why: spawn_subagent is read-classified nowhere — it's a 'write'
+// why: actor_create is read-classified nowhere — it's a 'write'
 // sideEffect — but we name it explicitly too, so a future re-tagging can't
 // silently hand the reviewer the ability to fan out its own agents.
-const ALWAYS_DENIED = Object.freeze(new Set(['spawn_subagent', 'request_review']));
+const ALWAYS_DENIED = Object.freeze(new Set(['actor_create', 'request_review']));
 
 /**
  * The set of tool names a reviewer may be granted: declared read-only AND

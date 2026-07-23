@@ -145,6 +145,17 @@ const TopBar = {
       // right-align (owner call, 2026-06-12).
       m('.spacer'),
       unlocked ? m('.topbar-actions', [
+        // Watch mode: bring the agent's tab to the foreground and follow it, so
+        // you see the real page it's driving. Opt-in inverse of no-focus-steal;
+        // active state + tooltip carry the meaning (the top bar is icon-only).
+        m('button.icon', {
+          class: state.settings?.watchAgentTab ? 'is-active' : '',
+          title: state.settings?.watchAgentTab
+            ? 'Watching the agent’s tab — click to stop following'
+            : 'Watch the agent’s tab (bring it to the front and follow along)',
+          'aria-pressed': state.settings?.watchAgentTab ? 'true' : 'false',
+          onclick: () => send({ type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab } }),
+        }, '◉'),
         m('button.icon', {
           title: 'Chats',
           onclick: () => m.route.set(
@@ -290,7 +301,14 @@ export const ConfirmModal = {
                   'aria-label': 'Proposed memory contents' },
                 p.op === 'delete' ? '(this deletes the document)' : (p.body || '(empty)')),
             ]
-          : [
+          : prompt.tool === 'a2a_contact' || prompt.tool === 'a2a_reply'
+            ? [
+                m('p.muted', { style: 'margin:0 0 8px;' },
+                  prompt.tool === 'a2a_reply'
+                    ? 'Your dweb agent wants to REPLY to this peer over the mesh, continuing your conversation. "Allow for session" lets it keep replying on this thread (revoke by blocking the peer).'
+                    : 'Your dweb agent wants to MESSAGE this peer on the mesh for the first time. "Allow for session" adds them as an approved contact (revoke by blocking the peer).'),
+              ]
+            : [
               m('p.muted', { style: 'margin:0 0 8px;' },
                 `The agent wants to run ${kind} action.`),
               m('pre.confirm-summary', prompt.summary ?? prompt.tool),

@@ -24,6 +24,22 @@ export { makeTurnDriver } from './loop/turn-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
 export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';
+// Background scheduling: standing Routines that fire unattended on a cadence and
+// catch up as soon as peerd is back on. loop/scheduler.js (runner) + schedule.js
+// (pure math).
+export { makeScheduler, SCHEDULE_ROUTINES_KEY, SCHEDULE_ALARM_NAME } from './loop/scheduler.js';
+// The goal run's plan-of-record (session.todos) — pure list ops + the
+// prompt-facing renderer the SW binds into the goal continuation.
+export { initTodos, checkTodo, addTodo, nextPending, todoProgress, formatTodoBlock, MAX_TODO_ITEMS } from './todo/core.js';
+// Prewalk (loop/prewalk.js): frontier model plans a goal run, a cheap
+// executor inherits the live context at the first landed action. Pure
+// policy — the SW owns the session writes and the run lifecycle.
+export {
+  resolvePrewalkExecutor, armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, PREWALK_NUDGE,
+} from './loop/prewalk.js';
+// The prewalk lifecycle controller — the testable imperative shell the SW
+// binds real IO into (arm / reconcile / maybeSwap / restore).
+export { makePrewalkController } from './loop/prewalk-controller.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.
@@ -87,30 +103,36 @@ export {
 // halt once. All IO injected; the SW's streaming switch stays two lines.
 export { makeTurnCostTracker } from './cost/turn-tracker.js';
 
-// --- subagents (orchestration over sessions; see docs/SUBAGENTS.md) ------
+// --- spawned (orchestration over sessions; see docs/ACTORS.md) ------
 export {
-  makeSpawnSubagent, narrowTools, finalAssistantText,
+  makeSpawnActor, narrowTools, finalAssistantText,
   restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
-} from './subagent/spawn.js';
-// DESIGN-11: async (non-blocking) subagents — spawn returns a handle, the
+} from './actor/spawn.js';
+// DESIGN-11: async (non-blocking) spawned — spawn returns a handle, the
 // result re-enters the parent as a synthetic wake turn. Testable orchestrator.
-export { makeAsyncSubagents } from './subagent/async-subagents.js';
+export { makeAsyncActors } from './actor/async-actors.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
-// instance's actor — the async-subagents shape, specialized).
-export { makeActorMessaging } from './subagent/actor-messaging.js';
+// instance's actor — the async-actors shape, specialized).
+export { makeActorMessaging } from './actor/actor-messaging.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
-export { meshCallToOp, shapeMeshResult } from './subagent/a2a-api.js';
+export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
-} from './subagent/actors-api.js';
-export { makeMeshDispatch } from './subagent/a2a-dispatch.js';
+} from './actor/actors-api.js';
+export { makeMeshDispatch } from './actor/a2a-dispatch.js';
+// Standing peer conversations — the pure thread registry (convId → turns),
+// capped + TTL-evicted; the SW singleton drives inbound routing + reply consent.
+export {
+  createConversationRegistry,
+  MAX_CONVERSATIONS, MAX_TURNS_PER_CONVERSATION, CONVERSATION_TTL_MS,
+} from './actor/conversation-registry.js';
 // PR #134: the trusted-lineage shell walk behind the actor sender gate. Pure
 // (getRecord injected) so the fail-closed trust rules are unit-tested, not just
 // exercised through the SW's inlined walk. The SW passes getRecord = sessions.get.
-export { buildAncestry } from './subagent/delegation-lineage.js';
+export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-17: the WEB actor — the disposable page-driving agent (an
 // `actorType:'web'` actor that owns one tab). Pure core: the tab→session
 // bindings, the action-log rolling-summary prompt, the self-fence.
@@ -119,13 +141,26 @@ export { buildAncestry } from './subagent/delegation-lineage.js';
 export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
-} from './subagent/web-actor.js';
+} from './actor/web-actor.js';
+// DESIGN-19: site clients — per-origin derived API clients. The pure core
+// (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
+// the two-tier store, and the capture digester. See site-clients/index.js.
+export {
+  normalizeSiteOrigin, validateDossier, buildClientWriteProposal,
+  stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
+  createSiteClientStore, digestCapture, redactHeaders,
+} from './site-clients/index.js';
+// PR #119: the host-side handler for the web actor's code-REPL arm — turns a
+// page.<method> RPC (made inside the sealed worker) into the SAME gated tool
+// dispatch the tool-call web actor uses, pinned to the actor's owned tab.
+// resolvePageTab is the pure "adopt the first tab on page.goto" decision.
+export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
 export {
   makeCheapCall, CHEAP_CALL_MAX_STEPS, CHEAP_CALL_MAX_OUTPUT_TOKENS,
-} from './subagent/cheap-call.js';
+} from './actor/cheap-call.js';
 
 // --- edit (SEARCH/REPLACE diff editing + checkpoint/undo) ---------------
 export {
@@ -297,6 +332,9 @@ export {
   describeSource,
   domWalkInjected,
   pullInHintInjected,
+  // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap for site-client capture.
+  installFetchTapInjected,
+  drainFetchTapInjected,
 } from './dom/index.js';
 
 // --- errors -------------------------------------------------------------
@@ -304,3 +342,13 @@ export {
   SessionNotFoundError,
   RuntimeContextIncompleteError,
 } from './errors.js';
+
+// --- observability (the debug surface: bundle export, failure classes,
+// OTel mapping — all pure; the SW route and the side panel consume them) --
+export { classifyFailure, FAILURE_KINDS } from './observability/failure-classify.js';
+export {
+  assembleDebugBundle, childSessionIdsOf, collectFailures,
+  DEBUG_BUNDLE_FORMAT, DEBUG_BUNDLE_VERSION,
+  BUNDLE_MAX_AUDIT_ENTRIES, BUNDLE_MAX_CHILD_SESSIONS,
+} from './observability/debug-bundle.js';
+export { bundleToOtlp, traceIdFromUuid, spanIdFrom } from './observability/otel-export.js';

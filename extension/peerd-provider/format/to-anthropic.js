@@ -237,7 +237,7 @@ export const toAnthropicMessages = (messages, thinkingEnabled = false) => {
       if (typeof tu.id === 'string') causeByToolUseId.set(tu.id, cause);
     }
   }
-  return repairOrphanToolUses(out, causeByToolUseId);
+  return repairOrphanToolUses(repairOrphanToolResults(out), causeByToolUseId);
 };
 
 /**
@@ -261,6 +261,80 @@ const explainStopCause = (m) => {
     return `provider error before dispatch: ${excerpt}`;
   }
   return 'tool dispatch did not complete';
+};
+
+/**
+ * Demote one orphaned tool_result block to plain user-content blocks,
+ * preserving its payload. Nested blocks (text + image from the vision
+ * splice) are valid user content as-is, so they hoist up a level behind
+ * a one-line provenance marker; string content folds into a single text
+ * block with the marker.
+ *
+ * @param {AnthropicBlock} b
+ * @returns {AnthropicBlock[]}
+ */
+const demoteToolResultBlock = (b) => {
+  const marker = `[stale tool_result for ${b.tool_use_id} — its tool_use call `
+    + 'is no longer in the preceding assistant message (that turn was '
+    + 'interrupted or superseded); the tool output is preserved below]';
+  if (Array.isArray(b.content)) {
+    return [{ type: 'text', text: marker }, ...b.content];
+  }
+  const text = typeof b.content === 'string' && b.content.length > 0
+    ? `${marker}\n${b.content}`
+    : marker;
+  return [{ type: 'text', text }];
+};
+
+/**
+ * The INVERSE hazard of repairOrphanToolUses: a `tool_result` block whose
+ * matching `tool_use` is NOT among the tool_use ids of the immediately-
+ * preceding assistant message. The API 400s on it ("unexpected
+ * `tool_use_id` found in `tool_result` blocks"), which bricks the whole
+ * session — every subsequent call replays the same broken history.
+ *
+ * How a session gets here: a steer-live supersede aborts a turn while its
+ * LAST tool dispatch is in flight; the new turn's user message (and
+ * assistant stub) land in the session before the superseded loop unwinds
+ * and appends its tool-results message (the loop-side guard narrows this
+ * race but a persisted-before-the-fix session stays broken); or an actor
+ * session's batched persist partially fails, dropping the assistant
+ * tool_use message but keeping its results.
+ *
+ * Wire-format-only repair, like repairOrphanToolUses: the persisted
+ * session is untouched. Each orphan block is demoted to plain text so the
+ * model still sees the output, just not as a structural tool_result.
+ * Surviving REAL tool_result blocks keep their lead position (the API
+ * requires tool_result blocks before other content in the message).
+ *
+ * @param {AnthropicMessage[]} msgs
+ * @returns {AnthropicMessage[]}
+ */
+const repairOrphanToolResults = (msgs) => {
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+    if (!m.content.some((b) => b?.type === 'tool_result')) continue;
+    const prev = msgs[i - 1];
+    const usable = new Set(
+      prev?.role === 'assistant' && Array.isArray(prev.content)
+        ? prev.content.flatMap((b) =>
+            (b?.type === 'tool_use' && typeof b.id === 'string' ? [b.id] : []))
+        : []);
+    /** @type {AnthropicBlock[]} */
+    const kept = [];
+    /** @type {AnthropicBlock[]} */
+    const demoted = [];
+    for (const b of m.content) {
+      if (b?.type === 'tool_result' && !usable.has(b.tool_use_id ?? '')) {
+        demoted.push(...demoteToolResultBlock(b));
+      } else {
+        kept.push(b);
+      }
+    }
+    if (demoted.length > 0) m.content = [...kept, ...demoted];
+  }
+  return msgs;
 };
 
 /**
@@ -403,7 +477,7 @@ export const usesAdaptiveThinking = (model) => {
 // a single tool_use — observed in the field as a "silent timeout".
 // 64000 is the platform-recommended streaming default and within every
 // current model's streamed output cap. Explicit maxTokens (e.g. the
-// subagent output cap) still wins.
+// actor output cap) still wins.
 export const toAnthropicBody = ({ model, system, messages, tools, maxTokens = 64000, reasoning }) => {
   const thinkingEnabled = !!reasoning?.enabled;
   const wireMessages = toAnthropicMessages(messages, thinkingEnabled);
@@ -445,9 +519,12 @@ export const toAnthropicBody = ({ model, system, messages, tools, maxTokens = 64
     stream: true,
   };
   // Effort (GA on 4.6+/Fable): the only bound on ADAPTIVE thinking depth
-  // (budget_tokens is removed there). Pass-through when the caller sets
-  // it; absent = the platform default (high).
-  if (typeof reasoning?.effort === 'string' && reasoning.effort) {
+  // (budget_tokens is removed there). ONLY the adaptive-shape models accept
+  // output_config.effort — sending it to a PRE-4.6 model (Haiku 4.5, Sonnet
+  // 4.5, the 3.x line) 400s with "does not support the effort parameter", so
+  // gate it on the SAME predicate as the thinking shape. Absent = platform
+  // default (high). Pass-through when the caller sets it on an adaptive model.
+  if (usesAdaptiveThinking(model) && typeof reasoning?.effort === 'string' && reasoning.effort) {
     body.output_config = { effort: reasoning.effort };
   }
   // why: an empty/whitespace system prompt must OMIT the field — the

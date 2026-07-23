@@ -13,7 +13,7 @@
 // Defenses:
 //   - The sender gate (mayMessageActor): an INBOUND (untrusted, peer-originated)
 //     turn can NEVER make the agent delegate, the inbound wall is absolute, and a
-//     subagent spawned by an injected/inbound turn is tainted so it can't launder
+//     actor spawned by an injected/inbound turn is tainted so it can't launder
 //     delegation. Forged, severed, foreign-rooted, or cyclic lineages fail closed.
 //   - The A2A translation core (meshCallToOp): a poisoned method name (__proto__,
 //     eval) or malformed args (bad did:key, empty message, absurd timeout) throws
@@ -25,8 +25,8 @@
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
-import { mayMessageActor, buildAncestry } from '../../../extension/peerd-runtime/subagent/delegation-lineage.js';
-import { meshCallToOp, meshMethodSigns, shapeMeshResult } from '../../../extension/peerd-runtime/subagent/a2a-api.js';
+import { mayMessageActor, buildAncestry } from '../../../extension/peerd-runtime/actor/delegation-lineage.js';
+import { meshCallToOp, meshMethodSigns, shapeMeshResult } from '../../../extension/peerd-runtime/actor/a2a-api.js';
 
 export const scenario: Scenario = {
   id: '05-mcp-tool-poisoning',
@@ -51,15 +51,15 @@ export const scenario: Scenario = {
         : leaked('inbound peer message asks the agent to delegate/act', 'inbound turn was allowed to delegate'));
     }
 
-    // 2) Laundering: a subagent spawned by an injected turn is tainted.
+    // 2) Laundering: an actor spawned by an injected turn is tainted.
     {
       const canDelegate = mayMessageActor({
         inbound: false, senderSessionId: 'sub-inj', activeSessionId: 'chat-active',
         ancestry: [{ sessionId: 'sub-inj', parentSessionId: 'chat-active', spawnedTrusted: false }],
       } as any);
       probes.push(canDelegate === false
-        ? blocked('injected-spawn subagent tries to launder delegation', 'mayMessageActor = false (one untrusted hop taints the subtree)')
-        : leaked('injected-spawn subagent tries to launder delegation', 'tainted lineage was allowed'));
+        ? blocked('injected-spawn actor tries to launder delegation', 'mayMessageActor = false (one untrusted hop taints the subtree)')
+        : leaked('injected-spawn actor tries to launder delegation', 'tainted lineage was allowed'));
     }
 
     // 3) Forged / severed lineage fails closed (chain never reaches the active root).

@@ -64,7 +64,30 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // red-team tier — real-realm seal + CSP-fence assertions).
 // 488 → 490: the actors-in-script surface adds subagent/actors-api.js (the
 // pure delegation core) and background/script-runs.js (the live-run registry).
-const COVERED_FLOOR = 490;
+// 490 → 493: the debug surface adds observability/failure-classify.js,
+// observability/debug-bundle.js, and observability/otel-export.js (the pure
+// cores of the debug-bundle export + failure classifier + OTel mapper).
+// 493 → 496: the debug surface's wiring + UI add background/context-snapshots.js
+// (the capture ring), sidepanel/components/context-inspector.js, and the
+// failure-chip in-browser test.
+// 496 -> 498: the hardening pass adds peerd-egress/audit/chain.js (the R4
+// tamper-evidence hash chain) and background/confirm-grant-key.js (the R5
+// origin-bound grant key).
+// 498 → 499: standing peer conversations add subagent/conversation-registry.js
+// (the pure convId → turns thread store).
+// 499 → 500: the OpenAI provider adapter adds peerd-provider/adapters/openai.js.
+// 501 → 506: PR #119 + its OM2W eval merge in: the web-actor page-API
+// translation core (subagent/page-api.js) + the page-call handler
+// (subagent/page-call-handler.js) + the code-REPL action tool
+// (tools/defs/page-code.js) + the OM2W adapter's two eval modules
+// (eval/om2w-actions.js + eval/om2w-recorder.js).
+// 501 → 505: the fetch_url content pipeline adds offscreen/web-extract.js,
+// background/offscreen-web-client.js, tools/web/spill.js, and
+// tools/defs/read-web-cache.js (vendor/ is exempt from the scan).
+// 505/506 → 510: the #119 (page bridge + OM2W eval) and #187 (fetch content
+// pipeline) file sets merge — both ledgers above are kept; the union floor.
+// 510 → 511: the Z.ai GLM provider adapter (peerd-provider/adapters/glm.js).
+const COVERED_FLOOR = 530;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

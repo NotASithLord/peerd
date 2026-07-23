@@ -11,8 +11,8 @@ and the demo video URL.
 peerd is an AI assistant in the browser side panel. The user types or
 speaks a task; the assistant performs it by reading and interacting
 with web pages, and by running computations in sandboxes (a WebAssembly
-Linux VM and a JavaScript sandbox) that exist entirely inside the
-browser. It is local-first: bring-your-own-API-key, no accounts, no
+Linux VM and a JavaScript sandbox that can also run WebAssembly (WASI)
+programs) that exist entirely inside the browser. It is local-first: bring-your-own-API-key, no accounts, no
 backend, no analytics or telemetry of any kind. The developer operates
 no servers and receives no data.
 
@@ -33,7 +33,7 @@ no servers and receives no data.
 **Demo video** (full agent flow, VM boot, automation, audit log):
 «VIDEO URL»
 
-## Remotely hosted code — none. Pre-answering the four places a scan
+## Remotely hosted code — none. Pre-answering the five places a scan
 will flag:
 
 1. **CheerpX (x86-in-WASM runtime) is fully vendored** in
@@ -66,6 +66,21 @@ will flag:
    no remote fetch of agent-actioned files can happen, even from a
    crafted message. The installer code ships but is unreachable; the
    remote paths return in a later version with their own review.
+5. **WASI modules (`engine-tabs/notebook-tab/notebook-wasi.js`)** — the JavaScript
+   sandbox can run wasm32-wasi programs (e.g. query a SQLite file the
+   user provides, decode an archive) via `WebAssembly.compile`, under
+   the same `wasm-unsafe-eval` CSP allowance the bundled WASM above
+   already uses. The runtime that hosts them is fully vendored and
+   audited (`vendor/browser-wasi-shim/SOURCE.txt`); the module bytes
+   are user-directed data on the same footing as item 2's disk image —
+   and confined strictly tighter than the JS around them: a module's
+   only imports are the bundled shim's WASI syscalls, every descriptor
+   behind those syscalls is constructed by our wrapper (stdin bytes,
+   size-capped stdout/stderr, an in-memory file table built from the
+   call), and it has **no network, DOM, storage, or `chrome.*` reach —
+   no such import exists to link against**. It executes inside the
+   already-sealed Notebook/worker realm described below, bounded by
+   that run's timeout.
 
 ## How the assistant operates pages (no `debugger` in this build)
 
@@ -125,7 +140,7 @@ The Notebook specifically: the `js_notebook` Web Worker runs
 agent-authored code, so its raw network primitives (XHR / WebSocket /
 EventSource / WebTransport, plus native `fetch` recovered off the
 prototype, and any nested `Worker`) are neutralized at the boundary by
-the host page's CSP `connect-src 'self'` (extension/notebook-tab/index.html),
+the host page's CSP `connect-src 'self'` (extension/engine-tabs/notebook-tab/index.html),
 which the worker and its descendants inherit — verified empirically. The
 only egress that leaves the Notebook is the audited `peerd.egress.fetch` bridge,
 which is governed by the open-web `webFetch` gates above.

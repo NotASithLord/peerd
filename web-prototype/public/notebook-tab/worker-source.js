@@ -3,7 +3,7 @@
 //
 // SECURITY-CRITICAL + host-agnostic. This is the ONE place the worker realm is
 // assembled: the realm seal as the FIRST import, the peerd.* capability surface,
-// the postMessage bridges (fetch / opfs / subagent / display), and the entry
+// the postMessage bridges (fetch / opfs / actor / display), and the entry
 // IIFE. BOTH hosts use it — the visible Notebook tab (notebook-tab.js) and the
 // headless offscreen job runner (offscreen/job-runner.js) — so the seal +
 // surface can never diverge between them. Co-located with realm-seal.js +
@@ -147,7 +147,7 @@ globalThis.peerd = {
   },
   // r · runtime (green) — the agent itself. WIRED: runAgent.
   runtime: {
-    runAgent:     (args) => subagentCall(args ?? {}),
+    runAgent:     (args) => actorCall(args ?? {}),
     notifyParent: notWired('runtime.notifyParent'),
     memory:       notWired('runtime.memory'),
   },
@@ -193,12 +193,12 @@ globalThis.__peerd_dynamic_import = async (opfsPath) => {
 };
 
 // --- peerd.runtime.runAgent (embedded agent) proxy ---
-const pendingSubagents = new Map();
-let nextSubagentRid = 1;
-const subagentCall = (args) => new Promise((resolve, reject) => {
-  const rid = nextSubagentRid++;
-  pendingSubagents.set(rid, { resolve, reject });
-  postMessage({ type: 'subagent-request', rid, args });
+const pendingActors = new Map();
+let nextActorRid = 1;
+const actorCall = (args) => new Promise((resolve, reject) => {
+  const rid = nextActorRid++;
+  pendingActors.set(rid, { resolve, reject });
+  postMessage({ type: 'actor-request', rid, args });
 });
 
 // --- peerd.distributed.* (base-network read) proxy ---
@@ -217,10 +217,10 @@ const distributedInfo = () => new Promise((resolve, reject) => {
 self.addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || typeof m !== 'object') return;
-  if (m.type === 'subagent-response') {
-    const p = pendingSubagents.get(m.rid);
+  if (m.type === 'actor-response') {
+    const p = pendingActors.get(m.rid);
     if (!p) return;
-    pendingSubagents.delete(m.rid);
+    pendingActors.delete(m.rid);
     if (m.error) p.reject(new Error(m.error));
     else p.resolve(m.result);
     return;
