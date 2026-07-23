@@ -15,7 +15,6 @@
 
 import { toOpenAiBody } from '../format/to-openai.js';
 import { fromOpenAiStream } from '../format/from-openai.js';
-import { fetchModelWindow } from '../model-window.js';
 import { abortableSleep, fetchInitialResponseWithRetry } from '../connect-timeout.js';
 import {
   ProviderError,
@@ -26,9 +25,6 @@ import {
 import { isUsageLimitResponse, apiErrorMessage } from '../error-classify.js';
 
 const ENDPOINT = 'https://api.openai.com/v1/chat/completions';
-// The public model-list endpoint (same host, allowlisted by <all_urls> + the
-// https: CSP connect-src). Read by the trim trigger's live window lookup.
-const MODELS_ENDPOINT = 'https://api.openai.com/v1/models';
 const VAULT_SECRET_NAME = 'openai_api_key';
 // Connect timeout for the response headers; the SSE body streams untimed.
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -105,7 +101,7 @@ export async function* callOpenAi(args) {
       if (!res.body) {
         throw new ProviderError('openai', 'response has no body (streaming requires it)');
       }
-      yield* fromOpenAiStream(res.body);
+      yield* fromOpenAiStream(res.body, { provider: 'openai' });
       return;
     }
     // Non-2xx: read the body ONCE (drains the socket for reuse), then classify
@@ -152,33 +148,6 @@ const computeBackoffMs = (headers, attempt) => {
 
 export const _computeBackoffMsForTests = computeBackoffMs;
 
-/**
- * Live per-model context window for the trim trigger. OpenAI's /v1/models
- * lists ids but NOT a context_length field, so there is no live window to
- * read; return null and let the caller fall back to its static default. The
- * fetch still validates the key/model exist when a window is genuinely
- * unavailable, matching the OpenRouter fetcher's null-on-absence contract.
- * @param {{ model?: string, getSecret?: (n: string) => Promise<string|null>, safeFetch: any, signal?: AbortSignal }} deps
- */
-export const fetchOpenAiContextWindow = async ({ model, getSecret, safeFetch, signal }) => {
-  if (typeof model !== 'string' || !model) return null;
-  let apiKey = null;
-  try { apiKey = getSecret ? await getSecret(VAULT_SECRET_NAME) : null; }
-  catch { apiKey = null; }
-  if (!apiKey) return null;
-  /** @type {Record<string, string>} */
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
-  return fetchModelWindow({
-    safeFetch,
-    url: MODELS_ENDPOINT,
-    init: { method: 'GET', headers },
-    // /v1/models entries carry no context length — a present model yields no
-    // number, so the extractor always returns null (static default is used).
-    extract: () => null,
-    signal,
-  });
-};
-
 // Curated "popular" seed for the Settings model picker — a small set of
 // current OpenAI ids shown before the user searches. Intersected with the
 // live /v1/models catalog at render time, so an id a given account can't
@@ -206,5 +175,9 @@ export const openaiAdapter = Object.freeze({
   defaultRunnerModel: DEFAULT_RUNNER_MODEL,
   vaultSecretName: VAULT_SECRET_NAME,
   call: callOpenAi,
-  contextWindow: fetchOpenAiContextWindow,
+  // NO contextWindow (issue #173): /v1/models carries no context-length field,
+  // so a live fetcher here could only ever return null — and the catalog's
+  // miss-retries-next-turn cache turned that into a guaranteed-futile
+  // /v1/models round-trip on EVERY turn. Absent, the registry falls back to
+  // the static window table (the documented contract for adapters without it).
 });

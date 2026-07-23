@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from '../../framework.js';
 
-const FIXTURES = '/tests/unit/notebook-tab/fixtures';
+const FIXTURES = '/tests/unit/engine-tabs/notebook-tab/fixtures';
 
 /** @param {string} file */
 const spawnFixture = (file) => new Worker(`${FIXTURES}/${file}`, { type: 'module' });
@@ -82,7 +82,7 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
     // why bare fetch is acceptable: reads our own shipped page source to pin the
     // CSP (not a network egress), same rationale as notebook-seal.test.js.
     // eslint-disable-next-line no-restricted-globals
-    const html = await (await fetch('/notebook-tab/index.html')).text();
+    const html = await (await fetch('/engine-tabs/notebook-tab/index.html')).text();
     const meta = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i);
     expect(meta?.[1]).toBe("connect-src 'none'");
   });
@@ -102,7 +102,7 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
 
   it('the App runner cancels form submits so a hostile bundle cannot navigate out', async () => {
     // eslint-disable-next-line no-restricted-globals
-    const runner = await (await fetch('/app-tab/runner.html')).text();
+    const runner = await (await fetch('/engine-tabs/app-tab/runner.html')).text();
     // The runner intercepts submit events (preventDefault) AND overrides the
     // legacy Form.prototype.submit() that bypasses the event, both navigation
     // leaks out of the sandboxed frame are closed. (meta-refresh stripping is

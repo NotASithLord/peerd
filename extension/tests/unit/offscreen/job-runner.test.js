@@ -79,7 +79,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
   // peerd:wasi END TO END in the real substrate: builtin resolution in the
   // sealed worker, the vendored shim linking, a wasm module actually executing.
   // The module is a hand-assembled wasm32-wasi command (fd_write "hello from
-  // wasm\n" to stdout, proc_exit 0) — regenerate with tests/notebook-tab/
+  // wasm\n" to stdout, proc_exit 0) — regenerate with tests/engine-tabs/notebook-tab/
   // wasi-test-module.ts buildHelloModule('hello from wasm\n').
   it('peerd:wasi runs a wasm32-wasi module inside a headless job', async () => {
     const helloWasmB64 = 'AGFzbQEAAAABEANgBH9/f38Bf2ABfwBgAAACRgIWd2FzaV9zbmFwc2hvdF9wcmV2aWV3MQhmZF93cml0ZQAAFndhc2lfc25hcHNob3RfcHJldmlldzEJcHJvY19leGl0AAEDAgECBQMBAAEHEwIGbWVtb3J5AgAGX3N0YXJ0AAIKIQEfAEEAQRA2AgBBBEEQNgIAQQFBAEEBQQwQABpBABABCwsWAQBBEAsQaGVsbG8gZnJvbSB3YXNtCg==';
@@ -174,6 +174,31 @@ describe('offscreen job-runner (real sealed worker)', () => {
     );
     // globalThis.mesh is only injected when a2a is set → ReferenceError → caught.
     expect(String(r.value)).toBe('no-mesh');
+  });
+
+  it('a2a: abortJob(runId) terminates a live mesh run instead of orphaning it to its timeout (#153)', async () => {
+    // Pre-fix, the a2a lane never carried a runId, so a Stop left the worker
+    // holding a shared headless slot for its full wall-clock. The runner's
+    // runId registration is lane-agnostic; this pins it for a2a specifically,
+    // owner-bound the way the SW job/abort route passes it.
+    const pending = runJob(
+      {
+        code: 'await mesh.ask("did:key:z6MkBob", "long ask"); return "never";',
+        a2a: true, ownerSessionId: 'dweb-sess-1', runId: 'a2a-abort-1', timeoutMs: 30000,
+      },
+      {
+        sendToSW: (type) => new Promise((resolve) => {
+          // the ask hangs (a live peer exchange) until the abort fires
+          if (type === 'a2a/call') setTimeout(() => resolve({ ok: false, error: 'aborted' }), 5000);
+          else resolve({ ok: true });
+        }),
+      },
+    );
+    // give the worker a beat to issue the ask, then Stop
+    await new Promise((res) => setTimeout(res, 400));
+    abortJob('a2a-abort-1', 'dweb-sess-1');
+    const r = await pending;
+    expect(r.error).toContain('aborted');
   });
 
   // ── the actors delegation surface (script orchestration) ─────────────────

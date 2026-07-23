@@ -13,6 +13,7 @@ export const HARDCODED_ALLOWLIST = Object.freeze([
   'https://api.anthropic.com',
   'https://api.openai.com',
   'https://openrouter.ai',      // OpenRouter (OpenAI-compatible gateway)
+  'https://api.z.ai',           // Z.ai GLM (OpenAI-compatible direct API)
   'http://localhost:11434',     // Ollama default
   'http://127.0.0.1:11434',
 ]);

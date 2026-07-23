@@ -24,6 +24,22 @@ export { makeTurnDriver } from './loop/turn-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
 export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';
+// Background scheduling: standing Routines that fire unattended on a cadence and
+// catch up as soon as peerd is back on. loop/scheduler.js (runner) + schedule.js
+// (pure math).
+export { makeScheduler, SCHEDULE_ROUTINES_KEY, SCHEDULE_ALARM_NAME } from './loop/scheduler.js';
+// The goal run's plan-of-record (session.todos) — pure list ops + the
+// prompt-facing renderer the SW binds into the goal continuation.
+export { initTodos, checkTodo, addTodo, nextPending, todoProgress, formatTodoBlock, MAX_TODO_ITEMS } from './todo/core.js';
+// Prewalk (loop/prewalk.js): frontier model plans a goal run, a cheap
+// executor inherits the live context at the first landed action. Pure
+// policy — the SW owns the session writes and the run lifecycle.
+export {
+  resolvePrewalkExecutor, armPrewalk, shouldPrewalkSwap, markPrewalkSwapped, PREWALK_NUDGE,
+} from './loop/prewalk.js';
+// The prewalk lifecycle controller — the testable imperative shell the SW
+// binds real IO into (arm / reconcile / maybeSwap / restore).
+export { makePrewalkController } from './loop/prewalk-controller.js';
 // Long-session context compression: the rolling trim-summary core +
 // the post-turn enrichment shell the SW binds behind the loop's
 // enrichTrimSummary seam.
@@ -126,6 +142,19 @@ export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
 } from './actor/web-actor.js';
+// DESIGN-19: site clients — per-origin derived API clients. The pure core
+// (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
+// the two-tier store, and the capture digester. See site-clients/index.js.
+export {
+  normalizeSiteOrigin, validateDossier, buildClientWriteProposal,
+  stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
+  createSiteClientStore, digestCapture, redactHeaders,
+} from './site-clients/index.js';
+// PR #119: the host-side handler for the web actor's code-REPL arm — turns a
+// page.<method> RPC (made inside the sealed worker) into the SAME gated tool
+// dispatch the tool-call web actor uses, pinned to the actor's owned tab.
+// resolvePageTab is the pure "adopt the first tab on page.goto" decision.
+export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
@@ -303,6 +332,9 @@ export {
   describeSource,
   domWalkInjected,
   pullInHintInjected,
+  // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap for site-client capture.
+  installFetchTapInjected,
+  drainFetchTapInjected,
 } from './dom/index.js';
 
 // --- errors -------------------------------------------------------------

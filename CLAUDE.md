@@ -29,17 +29,18 @@ Each maps to one letter and color in the brand wordmark:
 
 | Letter | Color | Module | Role |
 |---|---|---|---|
-| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic + OpenRouter + Ollama shipped; OpenAI later; local WebGPU deferred) |
+| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM, and keyless Ollama shipped; local WebGPU gated on the resident engine — `registry.js` is the live list) |
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
 | `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. Three kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Apps (opaque-origin iframe). A fourth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute. The sandbox is the isolate; a tab is one way to host it (taxonomy in the `peerd-engine/` code). |
 | `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
 
 The extension *chassis* lives outside these modules: `background/`,
-`offscreen/`, `sidepanel/`, `vm-tab/`, `notebook-tab/`, `app-tab/`,
-`permissions/`, `eval/`, `shared/`, `tests/`, `vendor/`, `icons/`. Each
-`peerd-engine` execution kind owns a dedicated tab page under its
-`*-tab/` directory; `permissions/` hosts user-gesture surfaces such as
+`offscreen/`, `sidepanel/`, `engine-tabs/`, `permissions/`, `eval/`,
+`shared/`, `tests/`, `vendor/`, `icons/`. Each `peerd-engine` execution
+kind owns a dedicated tab page under `engine-tabs/` (`engine-tabs/vm-tab/`,
+`engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) — grouped so the
+three engine host surfaces sit together; `permissions/` hosts user-gesture surfaces such as
 the mic-permission grant page; `eval/` is the live end-to-end eval
 harness. (There is no `content/` directory — DOM work happens via
 injected functions, not a persistent content script.) Outside
@@ -168,7 +169,20 @@ prose orientation is this file, and the rest is the source itself.
       miss. This is built for an AGENT to self-drive a change→verify→fix
       loop: edit, `bun run e2e:verify`, read `result.json` + the
       screenshots, fix, repeat until `ok:true`. (`--functional` skips the
-      per-machine visual baselines; CI runs that via `test:e2e:all`.)
+      visual states; CI runs that via `test:e2e:all`.)
+    - **The visual lane has ONE baseline authority, and it is CI.**
+      macOS and Linux cannot be pixel-compared — most of the panel's text
+      uses the system font stack, so the family changes per OS and
+      paragraphs re-wrap. So baselines are captured and compared only on
+      the pinned runner + pinned Chrome (`scripts/cdp/chrome-version.txt`)
+      and committed under `scripts/cdp/baselines/<authority>/`; the
+      `visual` CI job goes red when the render moves and uploads
+      before/after/diff PNGs. A dev's run still captures and still diffs —
+      against a gitignored self-baseline — but never gates, so the
+      LOOK-at-it loop above is unchanged. Reseed deliberately: dispatch
+      the workflow with `update_visual_baselines`, eyeball every PNG, then
+      commit. Bumping the Chrome pin and reseeding belong in the SAME
+      commit. Details + the measured numbers: `scripts/cdp/visual.mjs`.
 - **UI work runs through the verify loop — never call a rendered change
   done on assertions alone.** When you touch a side-panel / home /
   component surface, iterate edit → `bun run e2e:verify` → read
@@ -221,7 +235,8 @@ exists today:
    the module code). Three are hosted in their own visible tab — WebVM
    (CheerpX), Notebook (sealed JS worker + OPFS), App (opaque-origin
    iframe) — each with a registry in `peerd-engine`, a runtime in its tab
-   page (`vm-tab/`, `notebook-tab/`, `app-tab/`), and a tab tracker + RPC
+   page under `engine-tabs/` (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`,
+   `engine-tabs/app-tab/`), and a tab tracker + RPC
    client in `background/`. The fourth, the **headless worker** (`script`),
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same
@@ -260,9 +275,11 @@ gotchas to know going in:
 - Anthropic provider with streaming, adaptive extended thinking on newer
   models, prompt-cache breakpoints, retry on transient/overload statuses,
   and the `anthropic-dangerous-direct-browser-access` ack — plus an
-  OpenRouter adapter (OpenAI-compatible gateway) and a keyless Ollama
-  adapter (local inference; live `/api/tags` model inventory; GPU-fit
-  model recommendation in Settings) (`peerd-provider/`).
+  OpenRouter adapter (OpenAI-compatible gateway), a direct OpenAI adapter,
+  a Z.ai GLM adapter (OpenAI-compatible direct endpoint), and a keyless
+  Ollama adapter (local inference; live `/api/tags` model inventory; GPU-fit
+  model recommendation in Settings) (`peerd-provider/`). The shipped set is
+  whatever `registry.js` registers — don't take this list as authoritative.
 - Vault with passphrase unlock AND WebAuthn PRF (Touch ID / Windows
   Hello) — same DK from either path (`peerd-egress/vault/`). Idle
   auto-lock ON by default (user-settable); manual Lock button
@@ -406,13 +423,13 @@ land with deliberate design work):
   actors are already trimmed to tight per-kind allow-lists by
   construction (`tools/exposure.js` `actorAllowedTools`, enforced at
   dispatch in `gates.js`) — an actor never sees the full surface.
-- OpenAI provider adapter — the file doesn't exist yet (OpenRouter
-  covers most vendors meanwhile; Ollama shipped 2026-06-12 with its
-  `http://localhost:11434` CSP connect-src entry restored in
-  `manifests/base.json`). The manifest still does NOT pre-declare
-  hosts for unshipped adapters (store policy: never request what the
-  shipped version doesn't use); `<all_urls>` already covers HTTPS API
-  hosts.
+- New provider adapters — the shipped set (Anthropic, OpenRouter, OpenAI,
+  Z.ai GLM, Ollama) lives in `peerd-provider/adapters/`; adding one is a
+  registry entry, not chassis wiring. The manifest still does NOT pre-declare
+  hosts for adapters a given package doesn't ship (store policy: never request
+  what the shipped version doesn't use); `<all_urls>` already covers HTTPS API
+  hosts, and a loopback provider like Ollama needs its own CSP connect-src
+  entry (`manifests/base.json`).
 - The dweb's next reach — A2A's first hop shipped (the `a2a_run` code
   surface above); still ahead is what rides it: standing multi-turn peer
   conversations beyond a single run, richer dwapps, and global discovery

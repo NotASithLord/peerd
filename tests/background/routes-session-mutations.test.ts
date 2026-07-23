@@ -29,6 +29,10 @@ const baseDeps = (over: any = {}) => {
     autoMemory: { maybeExtract: async (id: string, reason: string) => { calls.extract.push([id, reason]); } },
     maybeAutoResume: () => {},
     haltGoalRun: (sid: string) => { calls.halted.push(sid); },
+    // session/reset stops the abandoned session's turn + cascades to its actors.
+    // Defaults = "nothing in flight" so the other reset tests are unaffected.
+    turnSlots: { stop: () => false },
+    actorMessaging: { stopActorsFor: () => [] },
     resolvePermission: async (s: any) => ({ mode: s ? 'act' : 'plan', confirmActions: false }),
     normalizeMode: (m: string) => (m === 'plan' ? 'plan' : 'act'),
     normalizeConfirmActions: (c: any) => c === true,
@@ -74,6 +78,27 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 's2' });
     expect(calls.cacheSet).toEqual({ sessionId: 's2' });
     expect(calls.extract).toEqual([['cur', 'switch']]);
+  });
+  test('reset STOPS the abandoned session\'s turn AND cascades to its in-flight actors', async () => {
+    // The current chat is 'cur' with two actors in flight. "New chat" must abort
+    // the orchestrator turn AND both actor slots — else they run on as zombies
+    // (the OM2W harness wedge). Mirrors agent/stop's cascade.
+    const stopped: string[] = [];
+    const { deps } = baseDeps({
+      turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
+      actorMessaging: { stopActorsFor: (sid: string) => (sid === 'cur' ? ['res-1', 'res-2'] : []) },
+    });
+    await makeSessionMutationRoutes(deps)['session/reset']();
+    expect(stopped).toEqual(['cur', 'res-1', 'res-2']);   // orchestrator first, then its actors
+  });
+  test('reset with nothing in flight does not over-stop', async () => {
+    const stopped: string[] = [];
+    const { deps } = baseDeps({
+      turnSlots: { stop: (sid: string) => { stopped.push(sid); return false; } },
+      actorMessaging: { stopActorsFor: () => [] },
+    });
+    await makeSessionMutationRoutes(deps)['session/reset']();
+    expect(stopped).toEqual(['cur']);   // only the orchestrator slot is probed; no actors
   });
   test('reset + archive halt the chat\'s goal run; switch does NOT', async () => {
     const reset = baseDeps();

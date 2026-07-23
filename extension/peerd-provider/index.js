@@ -7,8 +7,9 @@
 // and never imports adapter modules directly — that keeps runtime
 // agnostic to which providers exist.
 //
-// Shipped: Anthropic + OpenRouter (cloud) and Ollama (local, keyless).
-// Later: OpenAI adapter, local WebGPU inference.
+// Shipped (cloud, BYOK): Anthropic, OpenRouter, OpenAI, Z.ai GLM.
+// Local (keyless): Ollama, plus the WebGPU on-device runner (gated on the
+// resident engine). The registry is the source of truth — see registry.js.
 
 export {
   callModel,
@@ -64,6 +65,8 @@ export {
   OPENAI_POPULAR,
 } from './adapters/openai.js';
 export { ollamaAdapter, DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL } from './adapters/ollama.js';
+// Z.ai GLM — OpenAI-compatible direct endpoint (api.z.ai/api/paas/v4).
+export { glmAdapter, DEFAULT_MODEL as GLM_DEFAULT_MODEL } from './adapters/glm.js';
 // local WebGPU runner (FEATURE-LOCAL-WEBGPU B). setLocalGenerate wires the
 // offscreen engine bridge at SW boot; LOCAL_MODEL_ID is the resident model.
 export {

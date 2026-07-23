@@ -1,0 +1,70 @@
+@mozilla/readability — vendored
+===============================
+Upstream:   https://github.com/mozilla/readability
+Package:    https://www.npmjs.com/package/@mozilla/readability
+Version:    0.6.0
+Source URL: https://registry.npmjs.org/@mozilla/readability/-/readability-0.6.0.tgz
+Tarball SHA-256: 6d3c3cc50dad51b543925deadc66d5b58cd2262d1d585f2ae0a44975627ad919
+Reviewed:   2026-07-07
+License:    Apache-2.0 (in-file header retained; see LICENSE.md in the upstream package)
+
+Why vendored
+------------
+peerd's fetch_url returns raw HTML today — boilerplate eats the 16k token
+budget. Readability is Firefox Reader View's article extractor: given a
+parsed Document it returns the main content (title, byline, content HTML),
+dropping nav/ads/footers. Extraction runs in the OFFSCREEN document
+(offscreen/web-extract.js) — Readability needs a DOM Document, and
+DOMParser is unavailable in the service worker. Client-side extraction is
+peerd's substitute for the hosted "clean content" APIs other agents use
+(BYOK/no-backend forbids those).
+
+Files committed (upstream source, unminified — no minified build is published)
+-------------------------------------------------------------------------------
+  Readability.js             — the extractor (new Readability(doc).parse())
+  Readability-readerable.js  — isProbablyReaderable(doc) pre-check (cheap
+                               heuristic: skip extraction on dashboards /
+                               listings and fall back to raw text)
+
+JSDOMParser.js is deliberately OMITTED: the offscreen document has native
+DOMParser, and JSDOMParser's sloppy-mode IIFE breaks under ES-module strict
+mode. index.js (the CJS entry) is also omitted — we import the two files
+directly.
+
+Modification (the append-export ESM conversion; browser-polyfill pattern)
+--------------------------------------------------------------------------
+Upstream files are committed BYTE-IDENTICAL, then an ES-module export tail
+is APPENDED (a comment + one line each):
+  Readability.js             + `export default Readability;`
+  Readability-readerable.js  + `export default isProbablyReaderable;`
+The upstream `module.exports` tails remain; `typeof module === "object"`
+is false in an ES module, so they are inert.
+
+SHA-256
+-------
+Upstream (pre-append, == bytes in the tarball):
+  Readability.js             34dcab3d0832d0019f02990eed6b6124e029e8c32b9f0c6f2550544ff8dff174
+  Readability-readerable.js  a98d28805804c1986ceed470678a3f409f150ee7f1d227f8c8239c005d21de65
+As committed (with the appended export tail):
+  Readability.js             66abf753559cf89baacf516115a3259a98825399ebc159255cf0065b3b9a899a
+  Readability-readerable.js  5a8fc32e70171edc4fd27a31c614874df9d7d7cc8becfd7920ecff6a149c5819
+
+Subresource Integrity (SHA-384, as committed)
+---------------------------------------------
+  Readability.js             sha384-wYsdgtVvqt67z9W0fz4h8tZis/eKD5WxxaNiHF4FKWVvLe6mcIYrEnhKerwYNscY
+  Readability-readerable.js  sha384-Bgk2SspfpHdSC60nxajfX+ziuQqUn/lFuLX1Y38KgPaUL01YYxZzMYOK4e9CEh0i
+
+Usage notes (why-comments for the integration)
+----------------------------------------------
+- Readability MUTATES the document it parses — always hand it a FRESH
+  DOMParser document per extraction, never a reused one.
+- DOMParser gives the parsed doc the offscreen page's baseURI; inject
+  `<base href="<fetched page URL>">` into the head before parsing so
+  relative links resolve against the fetched origin, not the extension.
+
+Update procedure
+----------------
+1. curl -sL -o r.tgz https://registry.npmjs.org/@mozilla/readability/-/readability-<ver>.tgz
+2. shasum -a 256 r.tgz — record the tarball hash above.
+3. tar xzf r.tgz; copy package/Readability.js + package/Readability-readerable.js.
+4. Re-append the two export tails exactly as above; recompute both hash sets.

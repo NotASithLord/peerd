@@ -30,6 +30,10 @@ import { runActor, abortActor } from './actor-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
+// HTML -> markdown extraction (fetch_url's clean-content path): Readability +
+// Turndown need a DOM Document, which the SW can't build. Self-registers a
+// 'web/extract' message handler.
+import './web-extract.js';
 import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
 import { isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
@@ -37,7 +41,7 @@ import { isTrustedSender } from '/shared/messaging.js';
 // connection lives here so the network outlives any tab.
 import './dweb-base.js';
 // (WebVM used to be hosted here. As of the discrete-VM rework, each
-// WebVM lives in its own browser tab at /vm-tab/index.html and runs
+// WebVM lives in its own browser tab at /engine-tabs/vm-tab/index.html and runs
 // CheerpX in that tab. The offscreen doc keeps the SW keepalive port
 // + the voice transcriber.)
 
@@ -335,6 +339,13 @@ const onJobMessage = (msg, sender, sendResponse) => {
     {
       code: msg.code, timeoutMs: msg.timeoutMs,
       a2a: msg.a2a === true, actors: msg.actors === true,
+      // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
+      siteFetch: typeof msg.siteFetch === 'string' ? msg.siteFetch : '',
+      // caps + ownerSessionId ride from the SW's job/run message (trusted: the
+      // sender gate above). The WORKER never supplies either — job-runner
+      // attaches them from these params and ignores anything in the worker's
+      // own messages.
+      caps: msg.caps,
       ownerSessionId: msg.ownerSessionId, ownerToolUseId: msg.ownerToolUseId, runId: msg.runId,
     },
     { sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }) },

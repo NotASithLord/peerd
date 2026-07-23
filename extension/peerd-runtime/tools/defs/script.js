@@ -183,11 +183,13 @@ export const scriptTool = {
 };
 
 /**
+ * Format a headless run result for the model. Shared with page_code (the web
+ * actor's code-REPL tool, PR #119) — same worker substrate, same result shape.
  * @param {string} code
  * @param {RunResult} r
  * @returns {string}
  */
-const formatRunResult = (code, r) => {
+export const formatRunResult = (code, r) => {
   const lines = [];
   const oneLineCode = code.length > 200 ? `${code.slice(0, 200)}…` : code;
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')} (headless)`);

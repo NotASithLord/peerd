@@ -46,6 +46,17 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // never holds it. With call_api/read_article/web_search/submit_form removed, the
   // web actor (fetch_url + drive-a-tab) is the single entry point for ALL web work.
   'fetch_url',
+  // page_code is the code-surface web actor's action tool (PR #119 A/B arm) —
+  // same boundary as the DOM tools it wraps: page-driving stays off the main agent.
+  'page_code',
+  // read_web_cache pages a SPILLED fetch_url body — the same fetched page
+  // content, so the same web-actor-only tier.
+  'read_web_cache',
+  // DESIGN-19 site clients — per-origin derived API clients. All web-actor-only:
+  // run executes a client (untrusted-provenance code) behind an origin-pinned
+  // fetch; read/capture ingest page/response bytes; write persists them. Same
+  // tier as fetch_url — the orchestrator delegates web work via message_actor.
+  'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
 ]));
 
 /** Is this tool hidden from the main agent (actor-only)? Pure. @param {string} name */
@@ -140,6 +151,22 @@ export const WEB_ACTOR_DOM_TOOLS = Object.freeze([
   'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
 ]);
 
+// PR #119 — the CODE-surface web actor's toolset (the Aside-style A/B arm: the
+// actor WRITES page-driving JS instead of emitting discrete tool calls). The
+// surface is page_code ALONE: the actor perceives AND acts through the page.*
+// API (page.snapshot()/page.content() for perception — still the a11y snapshot,
+// the unchanged axis — and page.goto/click/fill for action), every call routing
+// through the SW 'page/call' route to the SAME gated DOM tools on its owned tab.
+// why NOT also expose direct snapshot/read_page: those resolve the tab from the
+// ACTOR's turn context, which a fresh actor has none of — and a tab adopted
+// mid-turn inside page_code (SW-side) never repins that turn context, so a
+// direct snapshot after a page.goto failed and the actor thrashed. Routing ALL
+// page interaction through page_code keeps ONE consistent tab. (page.snapshot()
+// still dispatches the snapshot tool via the route's inner tools-surface ctx.)
+export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set([
+  'page_code',
+]));
+
 // The POSITIVE allow-list an actor of each kind may call — its own kind's
 // operational surface (mutations + reads + edit_file). Everything else (other
 // kinds' tools, browser/web/memory/spawn tools) is refused for an actor ctx.
@@ -157,7 +184,13 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   // clean DOM-only list. The web actor is the only ctx allowed fetch_url, and
   // the capability strip (spawn.js) keeps it keyless: webFetch survives,
   // getSecret / safeFetch do not.
-  web: Object.freeze(new Set([...WEB_ACTOR_DOM_TOOLS, 'fetch_url'])),
+  // Plus the DESIGN-19 site-client family: run/read/write persist + replay derived
+  // per-origin API clients; site_capture records traffic to derive them (tab only —
+  // an API actor has no tab, so the WEB_API_TOOLS set below drops site_capture).
+  web: Object.freeze(new Set([
+    ...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_web_cache',
+    'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
+  ])),
   // The dweb actor — the mesh's operator (global singleton, handle "dweb").
   // Exactly the dweb family, nothing else: no egress tools, no DOM, no engine
   // mutation — the envoy posture. Its worst case must be a wrong reply, so the
@@ -184,18 +217,29 @@ export const isAllowedForActorType = (name, kind) => actorAllowedTools(kind).has
 // from its allow-set. It keeps only the keyless, tab-free fetch_url. Used by BOTH the
 // gate (refuse a DOM tool for an API backing) and the capability strip (drop the DOM
 // capabilities), so an API actor is genuinely fetch-only, not just gated.
-const WEB_API_TOOLS = Object.freeze(new Set(['fetch_url']));
+// Plus the site-client run/read/write (an API actor CAN persist + replay a client
+// for its fixed origin) — but NOT site_capture, which needs a tab it never has.
+const WEB_API_TOOLS = Object.freeze(new Set([
+  'fetch_url', 'read_web_cache',
+  'site_client_run', 'site_client_read', 'site_client_write',
+]));
 
 /**
  * The Set an actor may call given its kind AND (for a web actor) its backing — the
- * full web toolset for a tab backing, fetch_url-only for an API backing. Pure.
- * @param {string} [kind] @param {'tab' | 'api'} [backing]
+ * full web toolset for a tab backing, fetch_url-only for an API backing. PR #119:
+ * a tab-backed web actor on the CODE surface gets WEB_ACTOR_CODE_TOOLS instead
+ * (action collapses into page_code; perception stays snapshot/read_page). An
+ * absent surface means 'tools' — every existing caller keeps today's set. Pure.
+ * @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface]
  */
-export const actorAllowedToolsFor = (kind, backing) =>
-  (kind === 'web' && backing === 'api') ? WEB_API_TOOLS : actorAllowedTools(kind);
+export const actorAllowedToolsFor = (kind, backing, surface) => {
+  if (kind === 'web' && backing === 'api') return WEB_API_TOOLS;
+  if (kind === 'web' && surface === 'code') return WEB_ACTOR_CODE_TOOLS;
+  return actorAllowedTools(kind);
+};
 
-/** May an actor of `kind`/`backing` call this tool? Pure. @param {string} name @param {string} [kind] @param {'tab' | 'api'} [backing] */
-export const isAllowedForActor = (name, kind, backing) => actorAllowedToolsFor(kind, backing).has(name);
+/** May an actor of `kind`/`backing`/`surface` call this tool? Pure. @param {string} name @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface] */
+export const isAllowedForActor = (name, kind, backing, surface) => actorAllowedToolsFor(kind, backing, surface).has(name);
 
 // Per-tool target-id ARG field — what an actor-gated tool calls its instance
 // target. The actor dispatch wrapper force-injects the bound id here (the
@@ -280,12 +324,13 @@ export const actorWebTabTarget = (args) =>
  * The descriptor list an actor of `kind`/`backing` should SEE — its own toolset.
  * Pure. (The gate is the wall; this keeps the model's advertised list tight so it
  * isn't shown tools it would only get refused for.) DESIGN-18: backing-aware, so an
- * API actor is advertised ONLY fetch_url, matching its lore + the gate.
+ * API actor is advertised ONLY fetch_url, matching its lore + the gate. PR #119:
+ * surface-aware, so a code-surface web actor is advertised only its code toolset.
  * @template {{ name: string }} T
- * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @param {'tab' | 'api'} [backing] @returns {T[]}
+ * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface] @returns {T[]}
  */
-export const actorDescriptors = (descriptors, kind, backing) => {
-  const allow = actorAllowedToolsFor(kind, backing);
+export const actorDescriptors = (descriptors, kind, backing, surface) => {
+  const allow = actorAllowedToolsFor(kind, backing, surface);
   return descriptors.filter((t) => allow.has(t.name));
 };
 
@@ -374,7 +419,12 @@ export const filterByDwebActive = (descriptors, dwebActive) =>
 // a run — otherwise a normal chat would see a "complete the goal" tool with no
 // goal. It's dropped unless the session has a live run; a stray call when it's
 // hidden still dispatches, but the tool's execute() no-ops (see complete-goal.js).
-export const GOAL_ONLY_TOOLS = Object.freeze(new Set(['complete_goal']));
+export const GOAL_ONLY_TOOLS = Object.freeze(new Set([
+  'complete_goal',
+  // The plan-of-record checklist (todo/core.js) — the goal run's spine, and
+  // what a prewalk executor steers by. Same reveal contract as complete_goal.
+  'todo_init', 'todo_check', 'todo_add',
+]));
 
 /** Is this a tool that should appear ONLY during an active goal run? Pure. @param {string} name */
 export const isGoalOnlyTool = (name) => GOAL_ONLY_TOOLS.has(name);

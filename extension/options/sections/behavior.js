@@ -131,6 +131,75 @@ export const BehaviorSection = {
       // never steals focus. open_tab active:false opens quietly when needed.)
 
       m('.settings-divider'),
+      m('h3', 'Prewalk (experimental)'),
+      (() => {
+        const pwOn = state.settings?.prewalkEnabled === true;
+        return [
+          m('p', pwOn
+            ? 'On. Goal runs open on your chat model for the planning phase (explore → commit a todo checklist → first action), then hand the live context to a cheaper executor model for the rest of the run. Spend drops; the plan and progress stay visible in the todo card.'
+            : 'Off. Goal runs stay on your chat model end-to-end. Turning this on makes a goal run plan on your chat model, then continue on a cheaper executor model once its first action lands — same context, lower spend. Benchmark it first in the home page Lab (baseline vs prewalk).'),
+          m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
+            m('button.secondary', {
+              type: 'button',
+              disabled: ui.prewalkBusy,
+              onclick: async () => {
+                if (ui.prewalkBusy) return;
+                ui.prewalkBusy = true; m.redraw();
+                try {
+                  await send({ type: 'settings/update', patch: { prewalkEnabled: !pwOn } });
+                } catch (e) {
+                  console.warn('[options] prewalk toggle failed', e);
+                } finally {
+                  ui.prewalkBusy = false; m.redraw();
+                }
+              },
+            }, ui.prewalkBusy ? '…' : pwOn ? 'Turn off prewalk' : 'Turn on prewalk'),
+          ]),
+          (() => {
+            const engOn = state.settings?.enginePrewalkEnabled === true;
+            return [
+              m('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' }, [
+                m('button.secondary', {
+                  type: 'button',
+                  disabled: ui.enginePrewalkBusy,
+                  onclick: async () => {
+                    if (ui.enginePrewalkBusy) return;
+                    ui.enginePrewalkBusy = true; m.redraw();
+                    try {
+                      await send({ type: 'settings/update', patch: { enginePrewalkEnabled: !engOn } });
+                    } catch (e) {
+                      console.warn('[options] engine prewalk toggle failed', e);
+                    } finally {
+                      ui.enginePrewalkBusy = false; m.redraw();
+                    }
+                  },
+                }, ui.enginePrewalkBusy ? '…' : engOn ? 'Turn off engine-actor prewalk' : 'Turn on engine-actor prewalk'),
+              ]),
+              m('p.hint', engOn
+                ? 'On. VM/Notebook/App actors run their first turn on your chat model, then swap to the executor below — lower cost on multi-turn engine work.'
+                : 'Also apply prewalk to engine actors (VM/Notebook/App): first turn on your chat model to plan against the real instance state, then the cheaper executor for the rest. Benchmark it in the home Lab first.'),
+            ];
+          })(),
+          (pwOn || state.settings?.enginePrewalkEnabled === true) ? [
+            m('.input-row', [
+              m('label', { for: 'prewalk-executor' }, 'Executor model'),
+              m('input', {
+                id: 'prewalk-executor',
+                type: 'text',
+                placeholder: 'empty = provider fast default (e.g. Haiku)',
+                value: state.settings?.prewalkExecutorModel ?? '',
+                onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+                  await send({ type: 'settings/update', patch: { prewalkExecutorModel: e.target.value } });
+                  m.redraw();
+                },
+              }),
+            ]),
+            m('p.hint', 'A model id on the SAME provider as the chat, shared by goal-run and engine-actor prewalk. Leave empty to use the provider’s fast default — the same model the web actor rides.'),
+          ] : null,
+        ];
+      })(),
+
+      m('.settings-divider'),
       m('h3', 'Advanced automation'),
       (() => {
         // Firefox has no chrome.debugger WebExtension API (the build
@@ -194,6 +263,33 @@ export const BehaviorSection = {
           },
         }, ui.devModeBusy ? '…' : devMode ? 'Disable developer mode' : 'Enable developer mode'),
       ]),
+
+      // ── Web actor action surface (PR #119 A/B experiment) ────────────
+      m('.settings-divider'),
+      m('h3', 'Web actor: action surface'),
+      (() => {
+        const surface = state.settings?.webActorActionSurface === 'code' ? 'code' : 'tools';
+        return [
+          m('p', surface === 'code'
+            ? 'EXPERIMENT ON — the web actor drives pages by WRITING JavaScript (a Playwright-style page API in a sealed worker) instead of one tool call per action. Same page tools underneath, same denylist/confirmation/audit gates — this changes how the model expresses actions, not what it may do. Being A/B-measured against the default; flip back if web tasks misbehave.'
+            : 'Default — the web actor drives pages with one tool call per action (click, type, navigate). The experimental alternative has it write short Playwright-style scripts instead; same gates underneath. Used for A/B benchmarking; leave on default unless you\'re experimenting.'),
+          m('.input-row', [
+            m('label', { for: 'web-actor-surface' }, 'Action surface'),
+            m('select', {
+              id: 'web-actor-surface',
+              value: surface,
+              onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
+                await send({ type: 'settings/update', patch: { webActorActionSurface: e.target.value } });
+                m.redraw();
+              },
+            }, [
+              ['tools', 'tool calls — default'],
+              ['code', 'code (Playwright-style) — experiment'],
+            ].map(([value, label]) => m('option', { value }, label))),
+          ]),
+          m('p.hint', 'Applies to the next web-actor turn; an in-flight actor finishes on the surface it started with.'),
+        ];
+      })(),
 
       // ── Resilience ─────────────────────────────────────────────────
       m('.settings-divider'),
@@ -287,6 +383,7 @@ export const BehaviorSection = {
       resetRow(send, [
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'advancedAutomationEnabled', 'devMode',
         'autoResumeInterruptedTurns', 'providerFailoverEnabled', 'providerFallbacks',
+        'prewalkEnabled', 'enginePrewalkEnabled', 'prewalkExecutorModel',
       ]),
     ]);
   },

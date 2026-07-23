@@ -14,6 +14,11 @@
 // reconciliation (range hashes, IBLTs) is a Phase 2+ upgrade with its own
 // measurements — do not grow this file into it speculatively.
 //
+// Those two caps bound the COUNT per exchange; the per-envelope BYTE cap
+// (MAX_GOSSIP_ENVELOPE_BYTES, gossip/topic.js) bounds the other axis —
+// without it a peer's oversized retained topic is re-served through us to
+// everyone who syncs, turning this peer into a bandwidth amplifier.
+//
 // Authenticity: the carrier frames are link-local (their `from` must be
 // the neighbor itself), and every INNER envelope in a response is
 // signature-verified before ingest — a member can serve history, but
@@ -21,7 +26,8 @@
 // mute discipline as the live flood, and never re-broadcast (backfill is
 // point-to-point; peers that want it ask for it).
 
-import { verifyEnvelope } from '../transport/envelope.js';
+import { envelopeBytes, verifyEnvelope } from '../transport/envelope.js';
+import { MAX_GOSSIP_ENVELOPE_BYTES } from './topic.js';
 
 export const SYNC = Object.freeze({ REQ: 2, RESP: 3 }); // ch=4 typs
 
@@ -59,16 +65,39 @@ export const createMemoryTopicStore = () => {
  *   mesh: any,
  *   gossip: any,
  *   store: { put: (t: string, env: any) => void, has: (t: string, sig: string) => boolean, ids: (t: string) => string[], list: (t: string) => any[] },
+ *   maxEnvelopeBytes?: number,
  *   audit?: ((type: string, detail?: any) => void) | null,
  * }} opts
  */
-export const createTopicSync = ({ mesh, gossip, store, audit = null } = /** @type {{ mesh: any, gossip: any, store: any }} */ ({})) => {
+export const createTopicSync = ({
+  mesh,
+  gossip,
+  store,
+  maxEnvelopeBytes = MAX_GOSSIP_ENVELOPE_BYTES,
+  audit = null,
+} = /** @type {{ mesh: any, gossip: any, store: any }} */ ({})) => {
   /** @type {Set<string>} */
   const retained = new Set(); // topics this peer keeps + serves history for
 
+  // why the store gets its OWN check rather than trusting the flooder's: a
+  // retained envelope outlives the frame that carried it — we re-serve it to
+  // every peer that syncs, on every new link, which is exactly the
+  // amplification. This is the only layer that WRITES that history, so it
+  // owns the gate on what gets in, and every retain path below runs through
+  // it (the live tap, the backfill ingest, and the seen-but-unretained
+  // fallback — plus our own publish, which must not ask the room to carry
+  // what the room would refuse).
+  /** @param {string} topic @param {any} env */
+  const admissible = (topic, env) => {
+    const bytes = envelopeBytes(env);
+    if (bytes <= maxEnvelopeBytes) return true;
+    audit?.('sync_env_oversized', { topic, bytes, cap: maxEnvelopeBytes });
+    return false;
+  };
+
   /** @param {string} topic @param {any} env */
   const keep = (topic, env) => {
-    if (retained.has(topic)) store.put(topic, env);
+    if (retained.has(topic) && admissible(topic, env)) store.put(topic, env);
   };
 
   // Live publishes on retained topics get stored as they're delivered.
@@ -103,6 +132,10 @@ export const createTopicSync = ({ mesh, gossip, store, audit = null } = /** @typ
       const { topic, envs } = env.body ?? {};
       if (typeof topic !== 'string' || !retained.has(topic) || !Array.isArray(envs)) return;
       for (const inner of envs) {
+        // why size before signature: verifying is the expensive step, and an
+        // oversized frame is refused whether or not it turns out authentic.
+        // Screening here also covers the muted-fallback store.put below.
+        if (!admissible(topic, inner)) continue;
         // The neighbor relayed it; only the ORIGINAL signature makes it real.
         if (!(await verifyEnvelope(inner))) {
           audit?.('sync_env_invalid', { topic, via });

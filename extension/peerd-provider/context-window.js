@@ -72,6 +72,13 @@ export const DEFAULT_CONTEXT_WINDOWS = Object.freeze({
   'google/gemini-2.0-flash':          1_048_576,
   'meta-llama/llama-3.3-70b-instruct':  131_072,
 
+  // ---- Z.ai GLM (native adapter; bare model ids) ----
+  // Source: docs.z.ai/guides/llm/glm-5.2 — GLM-5.2 ships a 1M lossless context;
+  // GLM-4.6 is 200K, GLM-4.5-Air is 128K. Live value wins when reported.
+  'glm-5.2':     1_000_000,
+  'glm-4.6':       200_000,
+  'glm-4.5-air':   128_000,
+
   // ---- Ollama (local; nominal maxima — live num_ctx wins) ----
   'qwen3:32b': 32_768,
   'qwen3:14b': 32_768,

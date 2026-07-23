@@ -376,6 +376,39 @@ describe('agent loop — runUserTurn', () => {
       expect(asEv(stops[stops.length - 1]).stopReason).toBe('aborted');
     });
 
+    it('Stop mid-dispatch unwinds a NEVER-SETTLING tool call instead of hanging the turn (issue #176)', async () => {
+      // The concrete hang: an un-timed CDP Runtime.evaluate against a hung
+      // page never settles, and wasAborted() is only checked at wave
+      // boundaries — so pre-fix, Stop aborted a controller nobody observed
+      // and this drain() would never return. The dispatch race converts the
+      // abort into a synthesized error result, the wave completes, and the
+      // boundary check ends the turn.
+      const controller = new AbortController();
+      const { sessions, ctx } = buildCtx({
+        callModel: buildToolUsingCallModel(),
+        signal: controller.signal,
+      });
+      let dispatchCalls = 0;
+      ctx.tools = [{ name: 'inspect_storage', description: '', schema: {} }];
+      ctx.toolDispatch = () => new Promise(() => {
+        dispatchCalls += 1;
+        setTimeout(() => controller.abort(), 20);   // Stop lands while the call is parked
+        // never settles — the hung-page promise
+      });
+      const session = await sessions.create();
+      ctx.sessionId = session.sessionId;
+
+      const events = await drain(runUserTurn(asRunCtx(ctx)));   // must terminate
+
+      expect(dispatchCalls).toBe(1);
+      const stops = events.filter((e) => e.type === 'stop');
+      expect(asEv(stops[stops.length - 1]).stopReason).toBe('aborted');
+      // The turn is marked aborted, not left streaming/pending.
+      const stored = present(await sessions.get(session.sessionId));
+      const assistant = msg(stored.messages.find((m) => m.role === 'assistant'));
+      expect(assistant.stopReason).toBe('aborted');
+    });
+
     it('runs consecutive READ-class calls concurrently when a classifier is injected', async () => {
       // Two reads in one turn + ctx.classifyToolCall → both dispatches must
       // be in flight together, results persist in EMITTED order even though

@@ -65,7 +65,17 @@ const DB_NAME = 'peerd';
 // v10 — audit_meta: the audit log's hash-chain head record (R4 tamper
 // evidence). One tiny record ({ key: 'audit_chain_head', id, chain })
 // pinning the newest entry so tail truncation is detectable.
-const DB_VERSION = 10;
+// v11 — web_extract_cache: the spill-and-page store for fetch_url AND
+// read_page mode:'content'. When a read overflows the tool budget, the FULL
+// text is spilled here (records { key, url, format, text, storedAt }) and the
+// model gets a head+tail window plus the exact read_web_cache paging call —
+// instead of silently losing the middle. Unencrypted extension-scoped disk,
+// best-effort, safe to clear at any time. NOTE: unlike vm_http_cache's fetched
+// public bytes, read_page content is the RENDERED DOM of a tab the user may be
+// logged into, so an entry can hold authenticated page text; it is not purged
+// on vault lock (same at-rest posture as session_messages/memory, which also
+// persist plaintext here).
+const DB_VERSION = 11;
 
 /**
  * Open the database. Cached after first call. Re-opens on connection
@@ -102,6 +112,10 @@ export const openDB = () => {
       // v10 — the audit chain head (see DB_VERSION note above).
       if (!db.objectStoreNames.contains('audit_meta')) {
         db.createObjectStore('audit_meta', { keyPath: 'key' });
+      }
+      // v11 — fetch_url's spill-and-page store (see DB_VERSION note above).
+      if (!db.objectStoreNames.contains('web_extract_cache')) {
+        db.createObjectStore('web_extract_cache', { keyPath: 'key' });
       }
       // v3 — the vault blob's new home (records: { key, value }). The
       // blob itself stays ciphertext; this is hygiene, not a security

@@ -129,8 +129,10 @@ Preview package install paths (Firefox is the smoother of the two):
 peerd has **no build step**: you load the `extension/` folder straight
 into Chrome as it is on disk. You need a Chromium-based browser (Chrome,
 Edge, Brave, Arc, …) and a model to talk to: a key from
-[Anthropic](https://console.anthropic.com/) and/or
-[OpenRouter](https://openrouter.ai/keys), or a local
+[Anthropic](https://console.anthropic.com/),
+[OpenRouter](https://openrouter.ai/keys),
+[OpenAI](https://platform.openai.com/api-keys), or
+[Z.ai](https://z.ai/) (GLM) — or a local
 [Ollama](https://ollama.com/) (keyless, no bill, nothing leaves your
 machine). BYOK: any key lives encrypted in a local vault and is only
 ever sent to that provider.
@@ -164,8 +166,9 @@ to your model provider.
 **4. Add your API key(s)**
 
 Open **Settings** (gear icon) → **API keys**. Paste a key for
-**Anthropic** (`sk-ant-…`) and/or **OpenRouter** (`sk-or-…`). You can set
-both at once, each stored independently. Choose a default under
+**Anthropic** (`sk-ant-…`), **OpenRouter** (`sk-or-…`), **OpenAI**
+(`sk-…`), or **Z.ai** (GLM) — set as many as you like, each stored
+independently. Choose a default under
 *Default model for new chats*, and switch the model per chat from the
 picker above the message box.
 
@@ -225,7 +228,7 @@ one top-level module, each owning its public API through `index.js`:
 
 | | Module | Role |
 |---|---|---|
-| **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — Anthropic, OpenRouter, Ollama (streaming, caching, cost, retries) |
+| **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — Anthropic, OpenRouter, OpenAI, Z.ai GLM, Ollama (streaming, caching, cost, retries) |
 | **`e`** · red | [`peerd-egress`](extension/peerd-egress/) | Security — the vault, the egress chokepoint, the denylist, the audit log |
 | **`e`** · amber | [`peerd-engine`](extension/peerd-engine/) | Sandboxes — WebVMs, Notebooks, Apps, and the headless worker |
 | **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/) | The orchestrator — agent loop, tools, the `message_actor` delegation channel, actors, sessions, memory, skills, review, goal mode, voice |
@@ -285,17 +288,18 @@ detail). Each colored letter maps to a top-level module:
 peerd/
 ├── extension/                # the extension itself — load this dir unpacked
 │   ├── manifest.json
-│   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, Ollama; OpenAI later)
+│   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM, Ollama)
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
-│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in <kind>-tab/; the headless script worker in offscreen/.
+│   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in engine-tabs/<kind>-tab/; the headless script worker in offscreen/.
 │   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + actors, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
 │   ├── offscreen/            # chassis: the actor/actor worker heaps, headless script runs, voice, SW keepalive
 │   ├── sidepanel/            # chassis: chat UI (Mithril)
-│   ├── vm-tab/               # chassis: WebVM tab page (CheerpX + bash + xterm)
-│   ├── notebook-tab/         # chassis: Notebook tab page (Web Worker + OPFS)
-│   ├── app-tab/              # chassis: App tab page (stored HTML in sandboxed iframe)
+│   ├── engine-tabs/          # chassis: the three peerd-engine tab-host pages, grouped
+│   │   ├── vm-tab/           #   WebVM tab page (CheerpX + bash + xterm)
+│   │   ├── notebook-tab/     #   Notebook tab page (Web Worker + OPFS)
+│   │   └── app-tab/          #   App tab page (stored HTML in sandboxed iframe)
 │   ├── eval/                 # live end-to-end eval harness (runner.html)
 │   ├── shared/               # base types and utilities (importable everywhere)
 │   ├── tests/                # in-browser test runner — open runner.html
@@ -438,15 +442,15 @@ Thank you to the maintainers of all of these projects.
 
 | Component | Version | License | Used for |
 |---|---|---|---|
-| [CheerpX](https://leaningtech.com/cheerpx/) ([docs](https://cheerpx.io/docs)) | 1.2.8 | Proprietary — license your responsibility¹ | x86 Linux in WebAssembly — the WebVM sandbox runtime (`peerd-engine`, `vm-tab/`) |
-| [xterm.js](https://xtermjs.org/) (`@xterm/xterm` + `@xterm/addon-fit`) | 5.5.0 / 0.10.0 | MIT | In-browser terminal emulator rendering the WebVM's PTY (`vm-tab/`) |
+| [CheerpX](https://leaningtech.com/cheerpx/) ([docs](https://cheerpx.io/docs)) | 1.2.8 | Proprietary — license your responsibility¹ | x86 Linux in WebAssembly — the WebVM sandbox runtime (`peerd-engine`, `engine-tabs/vm-tab/`) |
+| [xterm.js](https://xtermjs.org/) (`@xterm/xterm` + `@xterm/addon-fit`) | 5.5.0 / 0.10.0 | MIT | In-browser terminal emulator rendering the WebVM's PTY (`engine-tabs/vm-tab/`) |
 | [Mithril.js](https://mithril.js.org/) | 2.3.8 | MIT | UI framework for the side panel and Apps |
 | [CodeMirror 6](https://codemirror.net/) (`@codemirror/*`) | 6.x | MIT | Code editor in the App tab (`peerd-engine/editor.js`) |
 | [Moonshine](https://github.com/moonshine-ai/moonshine) (`@moonshine-ai/moonshine-js`) | 0.1.29 | MIT | Local, in-browser speech-to-text for voice input (`peerd-runtime/voice/`) |
 | [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (`onnxruntime-web`) | 1.22.0 | MIT | WASM/WebGPU inference backend Moonshine runs on (`vendor/onnxruntime-web/`) |
 | [Silero VAD](https://github.com/snakers4/silero-vad) (`@ricky0123/vad-web`) | 0.0.24 | MIT | Voice-activity detection / speech endpointing for Moonshine (`vendor/vad-web/`) |
 | [hash-wasm](https://github.com/Daninet/hash-wasm) (Argon2 bundle) | 4.12.0 | MIT | Argon2id KDF deriving the vault's key-encryption key (`peerd-egress/vault/`) |
-| [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim) (`@bjorn3/browser_wasi_shim`) | 0.4.2 | MIT OR Apache-2.0 | WASI preview1 syscall layer behind the `peerd:wasi` builtin — runs wasm32-wasi binaries in the sealed worker (`notebook-tab/notebook-wasi.js`) |
+| [browser_wasi_shim](https://github.com/bjorn3/browser_wasi_shim) (`@bjorn3/browser_wasi_shim`) | 0.4.2 | MIT OR Apache-2.0 | WASI preview1 syscall layer behind the `peerd:wasi` builtin — runs wasm32-wasi binaries in the sealed worker (`engine-tabs/notebook-tab/notebook-wasi.js`) |
 | [webextension-polyfill](https://github.com/mozilla/webextension-polyfill) | 0.12.0 | MPL-2.0 | One promise-based `browser.*` API across Chrome and Firefox |
 | [Transformers.js](https://github.com/huggingface/transformers.js) (`@huggingface/transformers`) | 4.2.0 | Apache-2.0 | WebGPU runtime for the on-device local-inference runner (`offscreen/local-model.js`)² |
 

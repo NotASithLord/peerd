@@ -66,7 +66,19 @@ export function resolveChrome() {
   const explicit = process.env.CHROME_PATH || process.env.CHROME;
   if (explicit && existsSync(explicit)) return explicit;
   const cft = `${process.env.HOME}/.cache/peerd-cft`;
+  // The PINNED cache first (see ensure-chrome-for-testing.mjs). The unversioned
+  // paths stay as trailing fallbacks so an existing dev cache keeps working —
+  // safe because only the CI authority gates on pixels; a local run that picks
+  // up an older build still renders fine for the LOOK-at-it verify loop.
+  const pin = (() => {
+    try { return readFileSync(join(__dirname, 'chrome-version.txt'), 'utf8').trim(); } catch { return ''; }
+  })();
   const candidates = [
+    ...(pin ? [
+      `${cft}/${pin}/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`,
+      `${cft}/${pin}/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`,
+      `${cft}/${pin}/chrome-linux64/chrome`,
+    ] : []),
     `${cft}/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`,
     `${cft}/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`,
     `${cft}/chrome-linux64/chrome`,
@@ -81,6 +93,82 @@ export function resolveChrome() {
     }
   }
   throw new Error('No Chrome binary found. Set CHROME_PATH to Chrome for Testing or Chromium.');
+}
+
+// ---- deterministic capture --------------------------------------------------
+
+// why: the visual lane compares PIXELS, so every knob that varies by machine,
+// GPU or CPU has to be nailed down. Chrome silently ignores switches it does
+// not recognise, so the Linux-only ones are harmless on macOS.
+const DETERMINISM_FLAGS = Object.freeze([
+  '--hide-scrollbars',            // Linux draws classic scrollbars that steal layout width
+  '--force-device-scale-factor=1',
+  '--force-color-profile=srgb',
+  '--disable-lcd-text',           // subpixel AA is platform + GPU dependent; force grayscale
+  '--disable-skia-runtime-opts',  // baseline SIMD, not whatever the runner CPU offers
+  '--disable-partial-raster',
+  '--disable-checker-imaging',
+  '--disable-threaded-animation',
+  '--disable-image-animation-resync',
+  '--font-render-hinting=none',
+  '--lang=en-US',
+]);
+
+// A side-panel-shaped frame. why: with no override, headless Chrome captured at
+// 756x413 — a landscape letterbox the side panel never has in production. The
+// panel stylesheet has NO width media queries, so the capture width IS the
+// design under test; pin it so every machine composes the same layout.
+export const PANEL_METRICS = Object.freeze({ width: 400, height: 900, deviceScaleFactor: 1, mobile: false });
+
+const STABLE_STYLE_ID = 'e2e-visual-stable';
+
+// why NOT `animation:none` (what this used to inject): the wordmark blocks
+// (wmType / wmColor*) and the home path cards (pathFlickerIn) hold their
+// VISIBLE state through a `forwards` / `both` fill. Killing the animation
+// deletes the fill and reverts them to their base rules — transparent, and
+// opacity:0. The pre-2026-07 baselines therefore photographed a blank
+// rectangle where the brand mark belongs, and a home screen with none of its
+// six path cards. prefers-reduced-motion is the settled-state AUTHORITY
+// instead (styles.css maintains @media blocks for exactly this), emulated over
+// CDP before the document boots.
+//
+// What stays here is only what reduced-motion does NOT settle:
+//   - the blinking text caret;
+//   - canvas.code-stream, whose glyphs are placed by Math.random() — under
+//     reduced motion it paints one random static scatter (measured 0.48% drift
+//     at tolerance 8 across launches). It is aria-hidden atmosphere with zero
+//     product signal. Deliberate blind spot: if that canvas ever breaks, the
+//     visual gate will not see it.
+export const VISUAL_STABLE_CSS =
+  '*{caret-color:transparent!important}'
+  + 'canvas.code-stream{display:none!important}';
+
+const stableStyleSource = `(() => {
+  if (document.getElementById(${JSON.stringify(STABLE_STYLE_ID)})) return;
+  const s = document.createElement('style');
+  s.id = ${JSON.stringify(STABLE_STYLE_ID)};
+  s.textContent = ${JSON.stringify(VISUAL_STABLE_CSS)};
+  (document.head || document.documentElement).appendChild(s);
+})()`;
+
+/**
+ * Arm deterministic rendering on a freshly-created (about:blank) target BEFORE
+ * it navigates to the page under test.
+ *
+ * why the ordering matters: sidepanel/components/vault-gate.js reads
+ * matchMedia('(prefers-reduced-motion: reduce)').matches ONCE in oncreate.
+ * Emulating the media query after mount repaints the CSS but leaves that JS in
+ * its animated branch, so the settled state never arrives.
+ * @param {{ send: (m: string, p?: object) => Promise<any> }} page
+ */
+export async function armDeterministicCapture(page) {
+  await page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+  await page.send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+  });
+  await page.send('Emulation.setTimezoneOverride', { timezoneId: 'UTC' }).catch(() => {});
+  await page.send('Emulation.setLocaleOverride', { locale: 'en-US' }).catch(() => {});
+  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
@@ -200,10 +288,14 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   const CHROME = resolveChrome();
   log('chrome:', CHROME);
   const profile = mkdtempSync(join(tmpdir(), 'peerd-e2e-'));
+  // why: a live task can trigger a file download; without redirection Chrome
+  // dumps it into the REAL ~/Downloads. Send them to a temp dir cleaned on exit.
+  const downloadDir = mkdtempSync(join(tmpdir(), 'peerd-dl-'));
 
   const chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
     '--disable-gpu', '--no-sandbox',
+    ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,
     '--remote-debugging-port=0',
     `--disable-extensions-except=${extensionDir}`,
@@ -218,12 +310,22 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
     if (closed) return; closed = true;
     try { chrome?.kill('SIGKILL'); } catch { /* */ }
     try { rmSync(profile, { recursive: true, force: true }); } catch { /* */ }
+    try { rmSync(downloadDir, { recursive: true, force: true }); } catch { /* */ }
   };
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
   const port = await waitForCdpPort(profile);
   log('cdp port:', port);
+
+  // Redirect downloads browser-wide to the temp dir (headless honors this CDP
+  // call where profile Preferences often don't). Best-effort: attach to the
+  // browser target and leave the conn open so the setting persists for the run.
+  try {
+    const ver = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
+    const browserConn = await attach(ver.webSocketDebuggerUrl);
+    await browserConn.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
+  } catch { /* download redirect is best-effort; never block the run on it */ }
 
   // 1) discover peerd's id from its SW target (proves the extension loaded)
   const sw = await waitFor(() => findPeerdSw(port), { budgetMs: READY_BUDGET_MS });
@@ -273,10 +375,15 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   // 3) open the side panel as a normal tab (chrome.sidePanel.open is not
   //    drivable over CDP; the same Mithril app + SW port load fine in a tab).
   const panelUrl = `chrome-extension://${sw.id}/sidepanel/sidepanel.html`;
-  const created = await (await fetch(`http://127.0.0.1:${port}/json/new?${panelUrl}`, { method: 'PUT' })).json();
+  // Create at about:blank FIRST, configure, THEN navigate — the deterministic
+  // capture must be armed before the panel document boots (armDeterministic-
+  // Capture explains why). Same shape openExtPage uses.
+  const created = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
   const page = await attach(created.webSocketDebuggerUrl);
   await page.send('Runtime.enable');
   await page.send('Page.enable');
+  await armDeterministicCapture(page);
+  await page.send('Page.navigate', { url: panelUrl });
 
   const mounted = await waitFor(
     () => evalIn(page, `document.readyState === 'complete' && !!document.querySelector('#app, body > *')`),
@@ -342,20 +449,17 @@ export async function resetSession(ctx) {
 }
 
 /**
- * Freeze animations/transitions and hide the blinking caret so screenshots are
- * identical run-to-run (the brand has spinners + a wordmark typing intro).
- * Idempotent — the <style> rides in <head>, which Mithril's #app re-renders
- * don't touch, so one injection covers every state. Call once before capturing.
+ * Settle the render so screenshots are identical run-to-run.
+ *
+ * The heavy lifting happens in armDeterministicCapture BEFORE the document
+ * boots (emulated prefers-reduced-motion is the settled-state authority — see
+ * VISUAL_STABLE_CSS for why an `animation:none` sledgehammer was wrong). This
+ * is the idempotent top-up for pages already mounted; the <style> rides in
+ * <head>, which Mithril's #app re-renders don't touch.
  * @param {object} ctx
  */
 export async function freezeAnimations(ctx) {
-  await evalIn(ctx.page, `(() => {
-    if (document.getElementById('e2e-no-anim')) return;
-    const s = document.createElement('style');
-    s.id = 'e2e-no-anim';
-    s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
-    document.head.appendChild(s);
-  })()`);
+  await evalIn(ctx.page, stableStyleSource);
 }
 
 /**
