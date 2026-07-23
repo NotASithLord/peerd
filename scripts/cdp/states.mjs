@@ -153,26 +153,50 @@ export const STATES = [
   },
 
   // --- functional: the goal-mode autonomous loop -----------------------------
+  // Also covers the plan-of-record (todo_init/todo_check → the visible
+  // TodoCard) and the sticky Goal toggle (lit "running" while the run drives,
+  // not untoggled on send). The faked model plans, ticks one item, then ends
+  // the run — so the card renders 1/2 and the toggle reads running mid-flight.
   {
     name: 'goal', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => {
-      if (callIndex === 0) return { delayMs: 250, sse: sseText('On it — starting the goal.') };
-      if (callIndex === 1) return { delayMs: 250, sse: sseToolCall('complete_goal', { summary: 'all tidy' }) };
+      if (callIndex === 0) return { delayMs: 200, sse: sseText('On it — planning the goal.') };
+      if (callIndex === 1) return { delayMs: 200, sse: sseToolCall('todo_init', { items: [
+        { text: 'tidy the repo', validation: 'no stray files' },
+        { text: 'verify the build', validation: 'tests pass' },
+      ] }) };
+      if (callIndex === 2) return { delayMs: 200, sse: sseToolCall('todo_check', { id: 1 }) };
+      if (callIndex === 3) return { delayMs: 200, sse: sseToolCall('complete_goal', { summary: 'all tidy' }) };
       return { delayMs: 120, sse: sseText('Goal complete.') };
     },
     async run(ctx, rec) {
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'tidy the repo', goal: true });
       rec.check('goal run started', sent?.ok && sent.handled === 'goal', JSON.stringify(sent));
       const goalBarSeen = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
-      // Snapshot WHILE the bar is up (best-effort — the loop is quick).
+      // The Goal toggle is the run's state light — it must read "running", not
+      // fall back to unlit, the instant the run is live (the fix for "did it
+      // even start?"). Best-effort snapshot while the run drives.
+      const toggleRunning = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.goal-toggle.is-running')`),
+        { budgetMs: 8_000, pollMs: 50 });
+      // The plan-of-record card appears once todo_init lands and ticks to 1/2
+      // after todo_check — the visible checklist that answers "is it working?".
+      const todoSeen = await waitFor(
+        () => evalIn(ctx.page, `/1\\/2/.test(document.querySelector('.todo-card .todo-card-meta')?.textContent || '')`),
+        { budgetMs: 12_000, pollMs: 50 });
       if (goalBarSeen) await rec.shot('goal-bar');
       let out = {};
       await waitFor(async () => { out = await probe(ctx); return !out.goalBar && !out.busy; }, { budgetMs: 25_000 });
       const calls = ctx.modelCallCount();
       rec.check('Goal bar appeared while driving', !!goalBarSeen);
+      rec.check('Goal toggle read "running" while live (sticky, not untoggled)', !!toggleRunning);
+      rec.check('TodoCard rendered the plan and ticked to 1/2 after todo_check', !!todoSeen);
       rec.check('loop drove >1 autonomous turn', calls >= 3, `model calls: ${calls}`);
-      rec.check('complete_goal ended it cleanly (not the cap)', !out.capped && calls < 10, `capped=${out.capped} calls=${calls}`);
+      rec.check('complete_goal ended it cleanly (not the cap)', !out.capped && calls < 12, `capped=${out.capped} calls=${calls}`);
       rec.check('run reaches terminal: Goal bar cleared + idle', out.goalBar === false && out.busy === false);
+      // The finished checklist stays as the run's receipt (does not vanish on end).
+      const todoAfter = await evalIn(ctx.page, `!!document.querySelector('.todo-card')`);
+      rec.check('TodoCard persists after the run as its receipt', !!todoAfter);
       rec.check('submitted goal text round-trips as the first user message', !!out.userText && out.userText.includes('tidy the repo'), JSON.stringify(out.userText));
       await rec.shot('final');
     },

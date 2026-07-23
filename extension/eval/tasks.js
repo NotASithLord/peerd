@@ -1019,12 +1019,46 @@ export const FETCH_TASKS = [
   },
 ];
 
+// --- engine-actor suite: multi-turn VM/Notebook actor work ------------------
+// The suite for the ENGINE-ACTOR prewalk A/B (home/eval-section.js). These
+// tasks force the orchestrator to round-trip a SINGLE long-lived engine actor
+// several times — each step's input is the PREVIOUS step's actual output, so
+// the orchestrator cannot batch them into one message_actor call. That yields
+// turn 1 on the frontier model and turns 2+ on the cheap executor, which is
+// exactly the handoff the A/B measures (watch the per-task `models` trail and
+// runner-$ drop). Scored answer-only — check(state) can't see the actor's
+// transcript, only the value the main agent reports back (recon-confirmed).
+const ENGINE_ACTOR_TASKS = [
+  {
+    id: 'vm-chain',
+    title: 'WebVM — data-dependent 3-step chain',
+    startUrl: null,
+    // 123×456 = 56088 → largest prime factor 41 → 41²+1 = 1682 → factors 2·29·29.
+    // Each step needs the prior step's REAL shell output (a factorization the
+    // agent can't know without running `factor`), so it can't shortcut or batch.
+    prompt: 'Spin up a single Linux VM and keep using that SAME VM for all steps. '
+      + 'Do these in order, running each as its own shell command and reading the '
+      + 'result before moving on: (1) compute 123 multiplied by 456; (2) run `factor` '
+      + 'on that result and take its LARGEST prime factor; (3) square that prime factor, '
+      + 'add 1, and run `factor` on the result. Tell me that final `factor` output.',
+    timeoutMs: 240_000,
+    check: (/** @type {any} */ s) => s.error ? no(`errored: ${s.error}`)
+      : (includesCI(s.answer, '1682') && includesCI(s.answer, '29'))
+          ? ok('completed the 3-step chain (1682 = 2·29·29)')
+          : no(`expected 1682 = 2·29·29, answer="${(s.answer || '').slice(0, 100)}"`),
+  },
+  // edit-file-flow is already a genuine multi-turn Notebook-actor task (create
+  // → run → edit → re-run), so it doubles as an engine-actor swap probe.
+  ...SIMPLE_TASKS.filter((/** @type {any} */ t) => t.id === 'edit-file-flow'),
+];
+
 // The suite registry the eval UI picks from.
 export const SUITES = Object.freeze({
   simple: { id: 'simple', label: 'Simple', tasks: SIMPLE_TASKS },
   robust: { id: 'robust', label: 'Robust', tasks: ROBUST_TASKS },
   'web-actor': { id: 'web-actor', label: 'Web Actor', tasks: WEB_ACTOR_TASKS },
   fetch: { id: 'fetch', label: 'Fetch (content pipeline)', tasks: FETCH_TASKS },
+  'engine-actor': { id: 'engine-actor', label: 'Engine Actor', tasks: ENGINE_ACTOR_TASKS },
 });
 
 // Back-compat: existing importers (runner.js) use TASKS — keep it the simple set.

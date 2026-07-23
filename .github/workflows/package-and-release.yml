@@ -28,6 +28,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      update_visual_baselines:
+        description: 'Recapture the side-panel visual baselines on the CI authority and upload them as an artifact to commit'
+        type: boolean
+        default: false
 
 # why these pins: every action below runs on the Node 24 JS-action runtime
 # (checkout@v5, upload-artifact@v6, setup-chrome@v2, setup-bun@v2 — the first
@@ -206,6 +211,147 @@ jobs:
         # smoke, goal mode, stop, error — against ONE Chrome (env-independent;
         # visual states are excluded here as their baselines are per-machine).
         run: bun run test:e2e:all
+
+  # The VISUAL lane: render the side panel, compare against the committed
+  # baselines, go red when the UI moved. NOT in required checks until it has a
+  # green history (same posture as `inbrowser` / `e2e`).
+  #
+  # why its OWN job rather than a step inside `e2e (side panel)`:
+  #   1. Opposite determinism contracts. The functional lane is deliberately
+  #      environment-independent and tracks whatever Chrome ships; this one
+  #      compares PIXELS, so it pins both the runner image and the Chrome build.
+  #      Folded together, a Chrome text-rasterization bump would red the
+  #      FUNCTIONAL gate — the one we actually want to require for merge.
+  #   2. Red means something different here ("the UI moved, go look") than in
+  #      the functional job ("something is broken"). Two rows keeps that legible.
+  #   3. Different outputs and permissions: this one uploads before/after/diff
+  #      PNGs and writes a PR comment; the functional job does neither.
+  visual:
+    # The reseed suffix is load-bearing: a workflow_dispatch run lands a check
+    # run on the SAME head SHA, and a reseed passes trivially (it rewrites
+    # instead of comparing). A distinct name means a reseed can never satisfy
+    # the gating check. Otherwise this display name stays stable.
+    name: "visual (side panel render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
+    # PINNED, not ubuntu-latest: `latest` migrates between images, and a
+    # freetype/fontconfig bump would re-rasterize every glyph in every baseline.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write   # sticky diff comment; same-repo PRs only
+    env:
+      # This lane is the sole baseline authority — see scripts/cdp/visual.mjs.
+      VISUAL_PLATFORM: linux-x64
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+      # why setup-chrome: installs the system libraries headless Chrome needs.
+      # We then run the PINNED Chrome for Testing build against them.
+      - uses: browser-actions/setup-chrome@v2
+      - name: Read the pinned Chrome for Testing version
+        id: pin
+        run: echo "version=$(cat scripts/cdp/chrome-version.txt)" >> "$GITHUB_OUTPUT"
+      # why cache: the CfT zip is ~150 MB per run, and the key IS the pin, so a
+      # hit is always the exact build the baselines were seeded against.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/peerd-cft/${{ steps.pin.outputs.version }}
+          key: peerd-cft-${{ runner.os }}-${{ steps.pin.outputs.version }}
+      - name: Generate dev manifest
+        run: bun run gen:dev
+      - name: Provision Chrome for Testing (pinned)
+        id: cft
+        run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
+      - name: Render every visual state and compare to the committed baselines
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+          UPDATE_BASELINES: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && '1' || '' }}
+        run: bun run test:e2e:visual
+
+      - name: Write the render report to the job summary
+        if: always()
+        run: |
+          {
+            echo "## visual — side panel render"
+            echo
+            bun scripts/cdp/visual-report.mjs
+            echo
+            echo "Before / after / diff PNGs are attached to this run as the \`visual-diff-…\` artifact."
+            echo
+            echo "If the change is INTENDED: re-run this workflow on your branch with"
+            echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
+            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\` and commit."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Flat triple per state so before/after/diff sort ADJACENTLY for a human —
+      # the raw globs would scatter them across two directories. why the .before
+      # copy: on a capture-SIZE change there IS no diff image, and before+after
+      # is then the only evidence a reviewer gets.
+      - name: Stage the before / after / diff bundle
+        if: failure()
+        run: |
+          mkdir -p visual-review
+          for cur in scripts/cdp/artifacts/*-current.png; do
+            [ -e "$cur" ] || continue
+            n="$(basename "$cur" -current.png)"
+            cp "$cur" "visual-review/$n.after.png"
+            [ -e "scripts/cdp/baselines/linux-x64/$n.png" ] && cp "scripts/cdp/baselines/linux-x64/$n.png" "visual-review/$n.before.png"
+            [ -e "scripts/cdp/artifacts/$n-diff.png" ] && cp "scripts/cdp/artifacts/$n-diff.png" "visual-review/$n.diff.png"
+          done
+          [ -e scripts/cdp/artifacts/result.json ] && cp scripts/cdp/artifacts/result.json visual-review/
+          ls -la visual-review || true
+
+      # Works on FORK PRs too — upload-artifact authenticates with the Actions
+      # runtime token, not GITHUB_TOKEN. This is the fork-safe evidence channel.
+      - name: Upload before / after / diff renders
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: visual-diff-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
+          path: visual-review/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Same-repo PRs only: a fork PR's GITHUB_TOKEN is read-only, so this would
+      # just fail. The summary + artifact above carry the same information and DO
+      # work on forks. This job needs no secrets — keep it on `pull_request`,
+      # never `pull_request_target`.
+      - name: Flag the render change on the PR
+        if: failure() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "<!-- peerd-visual -->"
+            echo "**The side panel renders differently than the committed baselines.**"
+            echo
+            bun scripts/cdp/visual-report.mjs
+            echo
+            echo "Before / after / diff PNGs: **[download the \`visual-diff-…\` artifact]($RUN_URL)**."
+            echo
+            echo "Intended? Actions → package-and-release → **Run workflow** on this branch with"
+            echo "**update_visual_baselines** checked, then unzip \`visual-baselines-linux-x64\` over"
+            echo "\`scripts/cdp/baselines/linux-x64/\` and commit — the before/after then shows inline"
+            echo "in Files changed."
+          } > "$RUNNER_TEMP/visual-comment.md"
+          gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md" --edit-last --create-if-none \
+            || gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md"
+
+      # Reseed mode: hand the fresh baselines back as a downloadable zip. No
+      # token, no push — a HUMAN looks at them and commits them.
+      - name: Upload the reseeded baselines
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: visual-baselines-linux-x64
+          path: scripts/cdp/baselines/linux-x64/*.png
+          if-no-files-found: error
+          retention-days: 7
 
   # The behavioral packaged-build gate. Its OWN job (stable name) on purpose:
   # check:pages is the only tier that loads the REAL pruned artifact and so the

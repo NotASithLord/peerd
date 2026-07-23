@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "peerd (dev)",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "An AI assistant that automates tasks in your browser. Local-first: your own API key, no account, no servers, no tracking.",
   "side_panel": {
     "default_path": "sidepanel/sidepanel.html"
@@ -25,6 +25,7 @@
     "idle",
     "offscreen",
     "notifications",
+    "alarms",
     "debugger"
   ],
   "host_permissions": [
@@ -36,7 +37,7 @@
   },
   "sandbox": {
     "pages": [
-      "app-tab/runner.html"
+      "engine-tabs/app-tab/runner.html"
     ]
   },
   "cross_origin_embedder_policy": {

@@ -36,10 +36,11 @@ Each maps to one letter and color in the brand wordmark:
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Preview channel only |
 
 The extension *chassis* lives outside these modules: `background/`,
-`offscreen/`, `sidepanel/`, `vm-tab/`, `notebook-tab/`, `app-tab/`,
-`permissions/`, `eval/`, `shared/`, `tests/`, `vendor/`, `icons/`. Each
-`peerd-engine` execution kind owns a dedicated tab page under its
-`*-tab/` directory; `permissions/` hosts user-gesture surfaces such as
+`offscreen/`, `sidepanel/`, `engine-tabs/`, `permissions/`, `eval/`,
+`shared/`, `tests/`, `vendor/`, `icons/`. Each `peerd-engine` execution
+kind owns a dedicated tab page under `engine-tabs/` (`engine-tabs/vm-tab/`,
+`engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) — grouped so the
+three engine host surfaces sit together; `permissions/` hosts user-gesture surfaces such as
 the mic-permission grant page; `eval/` is the live end-to-end eval
 harness. (There is no `content/` directory — DOM work happens via
 injected functions, not a persistent content script.) Outside
@@ -168,7 +169,20 @@ prose orientation is this file, and the rest is the source itself.
       miss. This is built for an AGENT to self-drive a change→verify→fix
       loop: edit, `bun run e2e:verify`, read `result.json` + the
       screenshots, fix, repeat until `ok:true`. (`--functional` skips the
-      per-machine visual baselines; CI runs that via `test:e2e:all`.)
+      visual states; CI runs that via `test:e2e:all`.)
+    - **The visual lane has ONE baseline authority, and it is CI.**
+      macOS and Linux cannot be pixel-compared — most of the panel's text
+      uses the system font stack, so the family changes per OS and
+      paragraphs re-wrap. So baselines are captured and compared only on
+      the pinned runner + pinned Chrome (`scripts/cdp/chrome-version.txt`)
+      and committed under `scripts/cdp/baselines/<authority>/`; the
+      `visual` CI job goes red when the render moves and uploads
+      before/after/diff PNGs. A dev's run still captures and still diffs —
+      against a gitignored self-baseline — but never gates, so the
+      LOOK-at-it loop above is unchanged. Reseed deliberately: dispatch
+      the workflow with `update_visual_baselines`, eyeball every PNG, then
+      commit. Bumping the Chrome pin and reseeding belong in the SAME
+      commit. Details + the measured numbers: `scripts/cdp/visual.mjs`.
 - **UI work runs through the verify loop — never call a rendered change
   done on assertions alone.** When you touch a side-panel / home /
   component surface, iterate edit → `bun run e2e:verify` → read
@@ -221,7 +235,8 @@ exists today:
    the module code). Three are hosted in their own visible tab — WebVM
    (CheerpX), Notebook (sealed JS worker + OPFS), App (opaque-origin
    iframe) — each with a registry in `peerd-engine`, a runtime in its tab
-   page (`vm-tab/`, `notebook-tab/`, `app-tab/`), and a tab tracker + RPC
+   page under `engine-tabs/` (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`,
+   `engine-tabs/app-tab/`), and a tab tracker + RPC
    client in `background/`. The fourth, the **headless worker** (`script`),
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same

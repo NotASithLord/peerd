@@ -59,7 +59,7 @@ export const createNotebookRegistry = (deps) =>
     },
   }, deps);
 
-export const NOTEBOOK_TAB_PATH = '/notebook-tab/index.html';
+export const NOTEBOOK_TAB_PATH = '/engine-tabs/notebook-tab/index.html';
 
 /** OPFS subdirectory under the extension origin's root. */
 export const NOTEBOOK_OPFS_ROOT = 'peerd-notebooks';

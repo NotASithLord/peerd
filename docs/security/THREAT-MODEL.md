@@ -52,7 +52,7 @@ between them.
 | Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
 | Offscreen document (`offscreen/`) | Per-actor and per-actor worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
-| Sandbox tabs (`vm-tab/`, `notebook-tab/`, `app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
+| Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
 
 The module map (`p`rovider, `e`gress, `e`ngine, `r`untime, `d`istributed) is in
@@ -282,11 +282,11 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs.
-Code: `notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
+Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, and the manifest sandbox CSP. Red-team: scenario 06,
 with the real-realm proof in
-`extension/tests/unit/notebook-tab/notebook-seal.test.js`,
+`extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js`,
 `extension/tests/unit/offscreen/job-runner.test.js`, and
 `extension/tests/unit/red-team/sandbox-escape.test.js`.
 

@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { opfsHelpers } from '/peerd-engine/index.js';
-import { parseJsonl, toJsonl, dedupeBy } from '/notebook-tab/notebook-std.js';
+import { parseJsonl, toJsonl, dedupeBy } from '/engine-tabs/notebook-tab/notebook-std.js';
 
 const ROOT = ['peerd-notebooks', 'e2e-pda-durability'];
 const FILE = 'records/orders.jsonl';

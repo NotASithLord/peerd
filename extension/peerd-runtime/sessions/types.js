@@ -64,6 +64,19 @@
  * created before the feature; defaulted to an empty tally at read time.
  * @property {import('../cost/accumulator.js').CostTally} [cost]
  *
+ * Goal-run plan-of-record (todo/core.js) — written by the todo_* tools
+ * during a goal run, rendered live by the side panel's todo card (it rides
+ * the ordinary state snapshots), and re-surfaced in every goal continuation
+ * prompt. Absent until a run calls todo_init.
+ * @property {import('../todo/core.js').TodoItem[]} [todos]
+ *
+ * Prewalk state (loop/prewalk.js) — present only while a prewalk-armed goal
+ * run owns this session. phase 'planning' = frontier model, nudge injected;
+ * 'executing' = the first mutating action landed, the session runs on the
+ * executor model from the next turn. Cleared (and the planner model
+ * restored) when the run ends.
+ * @property {import('../loop/prewalk.js').PrewalkState} [prewalk]
+ *
  * Plan/Act permission state, written at create() and flipped
  * mid-session via update() so the choice survives a SW restart
  * (absent-key contract). Records carry only `confirmActions` — read via

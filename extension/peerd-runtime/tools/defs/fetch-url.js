@@ -62,7 +62,7 @@ export const fetchUrlTool = {
     required: ['url'],
     properties: {
       url: { type: 'string', description: 'Absolute URL (must include an http(s) scheme).' },
-      method: { type: 'string', enum: ['GET', 'POST'], description: 'HTTP method. Default GET.' },
+      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method. Default GET. Any non-GET is an outbound write and crosses the shared web:write confirm.' },
       raw: { type: 'boolean', description: 'HTML responses are extracted to clean markdown by default (boilerplate stripped). Pass true to get the raw HTML instead — e.g. when you need markup, attributes, or embedded script/JSON the extraction would drop.' },
       query: { type: 'string', description: 'What you are looking for on this page (a few keywords). When the page is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window — so a mid-page answer is not missed. Omit to get the head+tail window.' },
       headers: {

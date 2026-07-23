@@ -38,6 +38,21 @@ export const createDebuggerPool = () => {
   const attached = new Set();
   /** @type {Map<number, string[]>} per-tab console-event buffer */
   const consoleBufs = new Map();
+  // In-flight Runtime.evaluate rejectors, per tab (issue #176). With
+  // awaitPromise:true an evaluate against a page whose promise never settles
+  // (hung navigation/network) — or a tab that closes / detaches mid-call —
+  // never resolves, parking the agent turn forever. Tab-close and detach
+  // reject every pending evaluate for that tab; a deadline (below) bounds the
+  // hung-page case.
+  /** @type {Map<number, Set<(err: Error) => void>>} */
+  const pendingEvals = new Map();
+  /** @param {number} tabId @param {string} why */
+  const rejectPendingEvals = (tabId, why) => {
+    const set = pendingEvals.get(tabId);
+    if (!set) return;
+    pendingEvals.delete(tabId);
+    for (const reject of set) reject(new Error(`page_exec: ${why}`));
+  };
 
   // why: `chrome.debugger` may not exist in this build at all. It's a
   // CHANNEL-GATED permission — required (install-time) in the preview/dev
@@ -53,6 +68,8 @@ export const createDebuggerPool = () => {
   // which point the namespace necessarily exists (attach itself needs it).
   // Idempotent; the flag makes re-attach cheap.
   let globalListenersBound = false;
+  // DESIGN-19 Tap A: bound once, the first time a Network capture starts.
+  let netListenerBound = false;
   const ensureGlobalListeners = () => {
     if (globalListenersBound) return;
     globalListenersBound = true;
@@ -75,6 +92,7 @@ export const createDebuggerPool = () => {
       console.log('[debugger-pool] detach', source.tabId, reason);
       attached.delete(source.tabId);
       consoleBufs.delete(source.tabId);
+      rejectPendingEvals(source.tabId, `debugger detached (${reason ?? 'unknown'}) mid-evaluate`);
     });
   };
 
@@ -84,6 +102,7 @@ export const createDebuggerPool = () => {
   browser.tabs.onRemoved.addListener((tabId) => {
     attached.delete(tabId);
     consoleBufs.delete(tabId);
+    rejectPendingEvals(tabId, 'the tab closed mid-evaluate');
   });
 
   const attach = async (tabId) => {
@@ -112,6 +131,21 @@ export const createDebuggerPool = () => {
       }
     }
     await browser.debugger.sendCommand({ tabId }, 'Runtime.enable');
+    // why: the driven tab is usually BACKGROUNDED — peerd never steals focus
+    // (DESIGN-12). But Gmail-class pages gate keyboard shortcuts, caret
+    // placement, and focus/blur-driven behavior on document.hasFocus(), which
+    // is false for a background tab. Focus EMULATION makes the page believe
+    // it's focused without raising anything — the no-steal replacement for
+    // Page.bringToFront, which yanked the whole browser window to the OS
+    // foreground on every key dispatch and hijacked the user's focus while
+    // they worked in other apps/windows. Cleared automatically on detach;
+    // re-applied here on every (re-)attach. Best-effort: an engine without
+    // the command just loses the emulation, never the attach.
+    try {
+      await browser.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+    } catch (e) {
+      console.debug('[debugger-pool] focus emulation unavailable', e?.message ?? e);
+    }
     attached.add(tabId);
     console.log('[debugger-pool] attached + Runtime enabled on', tabId);
   };
@@ -124,7 +158,13 @@ export const createDebuggerPool = () => {
     consoleBufs.delete(tabId);
   };
 
-  const evaluate = async (tabId, expression, opts = {}) => {
+  // Deadline for one Runtime.evaluate (issue #176). Generous — an agent
+  // script may legitimately await slow fetches/navigation — but finite, so a
+  // never-settling page promise rejects instead of hanging the dispatch.
+  // Callers can widen per-call via opts.timeoutMs (kept OUT of the CDP params).
+  const EVALUATE_DEADLINE_MS = 120_000;
+
+  const evaluate = async (tabId, expression, { timeoutMs = EVALUATE_DEADLINE_MS, ...opts } = {}) => {
     await attach(tabId);
     // Reset console buffer just before the call so we capture only
     // this evaluate's output. Concurrent evals on the same tab would
@@ -149,21 +189,40 @@ export const createDebuggerPool = () => {
     const wrapped = `(async () => {\n${expression}\n})()`;
     let result;
     try {
-      result = await browser.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-        expression: wrapped,
-        // The IIFE returns a Promise; awaitPromise unwraps it so we
-        // get the actual return value (or thrown rejection) back.
-        awaitPromise: true,
-        returnByValue: true,
-        // Trusted-Types pages (`require-trusted-types-for 'script'`,
-        // e.g. Gmail / Notion / Slack) reject injected script, so
-        // evaluation uses CDP's sanctioned opt-in for user-privileged
-        // tooling — the same channel DevTools uses.
-        allowUnsafeEvalBlockedByCSP: true,
-        // Treat the eval as a user gesture so gesture-gated APIs
-        // (focus, clipboard, fullscreen) work from the script.
-        userGesture: true,
-        ...opts,
+      // Race the CDP call against the deadline and the per-tab rejectors
+      // (tab close / debugger detach) — sendCommand itself never times out,
+      // and awaitPromise pins it on the page's promise. The loser command may
+      // still settle later inside Chrome; its result is dropped.
+      result = await new Promise((resolve, reject) => {
+        const set = pendingEvals.get(tabId) ?? new Set();
+        pendingEvals.set(tabId, set);
+        const timer = setTimeout(() => {
+          fail(new Error(`page_exec: the page script did not settle within ${Math.round(timeoutMs / 1000)}s — hung promise or unresponsive page`));
+        }, timeoutMs);
+        /** @param {Error} e */
+        const fail = (e) => { cleanup(); reject(e); };
+        const cleanup = () => {
+          clearTimeout(timer);
+          set.delete(fail);
+          if (set.size === 0 && pendingEvals.get(tabId) === set) pendingEvals.delete(tabId);
+        };
+        set.add(fail);
+        browser.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+          expression: wrapped,
+          // The IIFE returns a Promise; awaitPromise unwraps it so we
+          // get the actual return value (or thrown rejection) back.
+          awaitPromise: true,
+          returnByValue: true,
+          // Trusted-Types pages (`require-trusted-types-for 'script'`,
+          // e.g. Gmail / Notion / Slack) reject injected script, so
+          // evaluation uses CDP's sanctioned opt-in for user-privileged
+          // tooling — the same channel DevTools uses.
+          allowUnsafeEvalBlockedByCSP: true,
+          // Treat the eval as a user gesture so gesture-gated APIs
+          // (focus, clipboard, fullscreen) work from the script.
+          userGesture: true,
+          ...opts,
+        }).then((/** @type {any} */ r) => { cleanup(); resolve(r); }, fail);
       });
     } finally {
       // Always drain the buffer, even on throw, so the next call starts
@@ -187,15 +246,13 @@ export const createDebuggerPool = () => {
    */
   const dispatchKeys = async (tabId, events) => {
     await attach(tabId);
-    // why: Gmail and friends listen on focusable elements for keyboard
-    // shortcuts. The active element needs to be document.body (or some
-    // non-input element) for shortcuts like `*+u` to register; if the
-    // search box has focus, the keys go to the input instead. The
-    // caller is expected to manage focus, but we ensure the page is
-    // focused first via the focus() RPC.
-    try {
-      await browser.debugger.sendCommand({ tabId }, 'Page.bringToFront');
-    } catch { /* not critical */ }
+    // why NO Page.bringToFront here: it brought the tab's whole browser
+    // window to the OS foreground on EVERY call — an agent typing its way
+    // through a page repeatedly stole the user's focus out of other apps and
+    // windows (the DESIGN-12 no-focus-steal rule applies to key dispatch
+    // too). Gmail-class shortcut handlers that gate on document.hasFocus()
+    // still work: attach() enables focus emulation, so the page believes
+    // it's focused while staying in the background.
     for (const ev of events) {
       const base = {
         key: ev.key,
@@ -429,10 +486,82 @@ export const createDebuggerPool = () => {
     return { ok: true, ...(out?.result?.value ?? { framework: null }) };
   };
 
+  // ── DESIGN-19 Tap A: CDP Network capture ─────────────────────────────────
+  // Record the page's OWN requests while the web actor drives it, on preview/dev
+  // where CDP ships (the same channel gate as every other debugger-pool path). Far
+  // higher fidelity than the scripting fetch/XHR tap (Tap B): sees all requests
+  // incl. workers, with real timing. CREDENTIALS ARE SANITIZED AT THIS BOUNDARY —
+  // request headers are reduced to posture MARKERS (bearer/cookie presence), never
+  // values; response bodies are size-capped samples. Nothing here stores a secret.
+  /** @type {Map<number, Map<string, any>>} per-tab in-flight requests by requestId */
+  const netCaptures = new Map();
+  const RESP_BODY_SAMPLE = 4_000;
+  // Window for in-flight getResponseBody reads to land after Network.disable.
+  const SETTLE_MS = 200;
+
+  const onNetworkEvent = (/** @type {any} */ source, /** @type {string} */ method, /** @type {any} */ params) => {
+    const cap = netCaptures.get(source.tabId);
+    if (!cap) return;
+    if (method === 'Network.requestWillBeSent') {
+      const req = params.request ?? {};
+      const h = req.headers ?? {};
+      // Posture markers ONLY — never the credential value.
+      const hasAuth = Object.keys(h).some((k) => k.toLowerCase() === 'authorization');
+      const bearer = hasAuth && /bearer/i.test(String(h.Authorization ?? h.authorization ?? ''));
+      const hasCookie = Object.keys(h).some((k) => k.toLowerCase() === 'cookie');
+      cap.set(params.requestId, {
+        method: req.method ?? 'GET', url: req.url ?? '',
+        reqHeaders: { ...(bearer ? { authorization: 'Bearer' } : hasAuth ? { authorization: 'present' } : {}), ...(hasCookie ? { cookie: 'present' } : {}) },
+      });
+    } else if (method === 'Network.responseReceived') {
+      const e = cap.get(params.requestId);
+      if (e) { e.status = params.response?.status; e.contentType = params.response?.mimeType; }
+    } else if (method === 'Network.loadingFinished') {
+      const e = cap.get(params.requestId);
+      // Best-effort response body sample for JSON-ish responses (shape sketch fuel).
+      if (e && /json|javascript|text/i.test(e.contentType ?? '')) {
+        browser.debugger.sendCommand({ tabId: source.tabId }, 'Network.getResponseBody', { requestId: params.requestId })
+          .then((/** @type {any} */ r) => {
+            if (!netCaptures.get(source.tabId)) return;   // capture stopped meanwhile
+            const raw = typeof r?.body === 'string' ? (r.base64Encoded ? '' : r.body) : '';
+            if (raw) { try { e.resSample = JSON.parse(raw.slice(0, RESP_BODY_SAMPLE * 4)); } catch { e.resSample = raw.slice(0, RESP_BODY_SAMPLE); } }
+          })
+          .catch(() => {});
+      }
+    }
+  };
+
+  const startNetworkCapture = async (/** @type {number} */ tabId) => {
+    await attach(tabId);
+    ensureGlobalListeners();
+    if (!netListenerBound) {
+      netListenerBound = true;
+      browser.debugger.onEvent.addListener(onNetworkEvent);
+    }
+    netCaptures.set(tabId, new Map());
+    await browser.debugger.sendCommand({ tabId }, 'Network.enable', {}).catch(() => {});
+  };
+
+  const stopNetworkCapture = async (/** @type {number} */ tabId) => {
+    const cap = netCaptures.get(tabId);
+    // why keep the map ALIVE during the settle: getResponseBody promises started on
+    // loadingFinished write their sample back only while `netCaptures.get(tabId)` is
+    // truthy (the onNetworkEvent guard). Deleting first would make every in-flight
+    // sample bail. So: stop new events (Network.disable), give pending body reads a
+    // brief window to land, snapshot, THEN delete. Endpoints survive regardless
+    // (recorded on requestWillBeSent); this only recovers the shape-sketch notes.
+    await browser.debugger.sendCommand({ tabId }, 'Network.disable', {}).catch(() => {});
+    await new Promise((resolve) => { setTimeout(resolve, SETTLE_MS); });
+    const events = cap ? [...cap.values()] : [];
+    netCaptures.delete(tabId);
+    return events;
+  };
+
   return {
     attach, detach, evaluate, dispatchKeys, getAxTree, captureScreenshot,
     clickBackendNode, setValueBackendNode,
     readFrameworkState,
+    startNetworkCapture, stopNetworkCapture,
     isAttached: (tabId) => attached.has(tabId),
   };
 };

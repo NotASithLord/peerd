@@ -55,6 +55,30 @@ export const signEnvelope = async (env, identity) => {
   return { ...env, sig: toBase64(sig) };
 };
 
+/**
+ * Wire size of a frame, in bytes — what forwarding it costs the room.
+ * Measured on the canonical (JCS) form so every peer computes the SAME
+ * number for the same frame; that's the identical serialization the
+ * signature commits to above, so the size is as unforgeable as the sig.
+ *
+ * why Infinity instead of throwing on unserializable input: callers use
+ * this to decide whether to relay, and a frame we cannot measure is a
+ * frame we must not forward — `Infinity > cap` says exactly that without
+ * making every call site carry a try/catch. Unreachable in practice:
+ * canonicalize is also what signs, so an unserializable frame could
+ * never carry a valid signature and verifyEnvelope drops it first.
+ *
+ * @param {unknown} env
+ * @returns {number}
+ */
+export const envelopeBytes = (env) => {
+  try {
+    return utf8(canonicalize(env)).length;
+  } catch {
+    return Infinity;
+  }
+};
+
 /** @param {unknown} env — a wire-decoded frame (validated below) */
 export const verifyEnvelope = async (env) => {
   if (!env || typeof env !== 'object') return false;

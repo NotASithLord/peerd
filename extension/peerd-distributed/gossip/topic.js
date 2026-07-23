@@ -22,7 +22,23 @@
 //   - Per-sender token bucket + per-did mute are the D-9 spam boundary.
 //     The room is consent; the bucket is the ceiling on what consent buys.
 
+import { envelopeBytes } from '../transport/envelope.js';
+
 const PUB = 0; // ch=4 typ — a topic publish
+
+// why a BYTE cap on top of the token bucket: the bucket counts FRAMES, so
+// it is blind to a peer that publishes one multi-megabyte envelope — which
+// every member then re-broadcasts untouched (O(N²) at room scale) and the
+// sync layer retains and re-serves on every new link. Size × fan-out is
+// the amplification, and only a size check sees it.
+//
+// why 32 KiB: gossip payloads are control-plane sized — posts, CRDT
+// deltas, cursors. This is 8× the agent-card ceiling (agent-card.js) and
+// 16× a DHT item (dht/records.js), so it is generous for anything the
+// layer legitimately carries, while bounding a full backfill response
+// (MAX_RESP, gossip/sync.js) to single-digit megabytes. Bulk data does
+// not belong here at any size: it rides chunked signed-bundle transfer.
+export const MAX_GOSSIP_ENVELOPE_BYTES = 32 * 1024;
 
 /**
  * @param {{
@@ -31,6 +47,7 @@ const PUB = 0; // ch=4 typ — a topic publish
  *   seenCap?: number,
  *   ratePerSec?: number,
  *   rateBurst?: number,
+ *   maxEnvelopeBytes?: number,
  *   audit?: ((type: string, detail?: any) => void) | null,
  * }} opts
  */
@@ -42,6 +59,7 @@ export const createGossip = ({
   // CRDT updates + cursors, tight enough that one peer can't bury a room.
   ratePerSec = 20,
   rateBurst = 40,
+  maxEnvelopeBytes = MAX_GOSSIP_ENVELOPE_BYTES,
   audit = null,
 } = /** @type {{ mesh: any }} */ ({})) => {
   /** @typedef {{ from: string, data: any, ts: number, id: any, env: any, via: any }} GossipMsg */
@@ -81,6 +99,13 @@ export const createGossip = ({
     return true;
   };
 
+  /** @param {any} env @param {string} topic */
+  const oversized = (env, topic) => {
+    if (envelopeBytes(env) <= maxEnvelopeBytes) return false;
+    audit?.('gossip_envelope_oversized', { did: env.from, topic, cap: maxEnvelopeBytes });
+    return true;
+  };
+
   /**
    * @param {any} env — a wire-decoded gossip envelope
    * @param {any} via
@@ -102,6 +127,11 @@ export const createGossip = ({
       audit?.('gossip_rate_limited', { did: env.from, topic: env.body.topic });
       return; // dropped AND not re-broadcast: a flood dies at first hop
     }
+    // why after the bucket: measuring canonicalizes the whole frame, so let
+    // the cheap arithmetic check bound how many frames reach the expensive
+    // one. Same disposition as a rate-limited frame — dropped and NOT
+    // re-broadcast, so an oversized publish dies at its first hop.
+    if (oversized(env, env.body.topic)) return;
     deliver(env, via);
     // Forward the same signed frame onward — everyone but where it came from.
     mesh.broadcast(env, via);
@@ -154,6 +184,9 @@ export const createGossip = ({
       if (env.ch !== 4 || env.typ !== PUB) return false;
       if (!env.body || typeof env.body.topic !== 'string') return false;
       if (muted.has(env.from)) return false;
+      // The backfill door gets the same cap as the live one — otherwise a
+      // peer skips the flood and hands us an oversized frame to retain.
+      if (oversized(env, env.body.topic)) return false;
       const fresh = !seen.has(env.sig);
       if (fresh) markSeen(env.sig);
       deliver(env, via);

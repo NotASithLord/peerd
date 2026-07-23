@@ -23,6 +23,10 @@ import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { fetchUrlTool }              from './fetch-url.js';
 import { readWebCacheTool }          from './read-web-cache.js';
+import { siteClientRunTool }         from './site-client-run.js';
+import { siteClientReadTool }        from './site-client-read.js';
+import { siteClientWriteTool }       from './site-client-write.js';
+import { siteCaptureTool }           from './site-capture.js';
 import { actorListTool }             from './actor-list.js';
 import { openTabTool }               from './open-tab.js';
 import { vmBootTool }                 from './vm-boot.js';
@@ -53,6 +57,10 @@ import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
 import { completeGoalTool }            from './complete-goal.js';
+import { scheduleCreateTool }          from './schedule-create.js';
+import { scheduleListTool }            from './schedule-list.js';
+import { scheduleCancelTool }          from './schedule-cancel.js';
+import { todoInitTool, todoCheckTool, todoAddTool } from './todo.js';
 import { dwebShareTool }               from './dweb-share.js';
 import { dwebDiscoverTool }            from './dweb-discover.js';
 import { dwebInstallTool }             from './dweb-install.js';
@@ -81,6 +89,11 @@ export {
   // sessions
   actorListTool,
   openTabTool,
+  // site clients (DESIGN-19 — per-origin derived API clients; web-actor-only)
+  siteClientRunTool,
+  siteClientReadTool,
+  siteClientWriteTool,
+  siteCaptureTool,
   // engine (the one cross-kind create; per-kind ops below)
   sandboxCreateTool,
   // engine (WebVM)
@@ -117,6 +130,13 @@ export {
   requestReviewTool,
   // goal mode (Goal toggle — exposure-gated to active runs only)
   completeGoalTool,
+  // scheduling (background Routines — loop/scheduler.js)
+  scheduleCreateTool,
+  scheduleListTool,
+  scheduleCancelTool,
+  todoInitTool,
+  todoCheckTool,
+  todoAddTool,
   // dweb (network — preview only, exposure-gated off the store build)
   dwebShareTool,
   dwebDiscoverTool,
@@ -165,6 +185,14 @@ export const BUILTIN_TOOLS = Object.freeze([
   // fetch_url's spill-and-page read side — same exposure (web actor only; the
   // cache holds fetched page content).
   readWebCacheTool,
+  // site clients (DESIGN-19) — per-origin derived API clients. All web-actor-only
+  // (hidden from main; allowed for kind:'web' in exposure.js). run executes the
+  // stored client in the sealed worker under an origin-pinned fetch; read inspects
+  // it; write persists it (confirm-gated); capture records traffic to derive it.
+  siteClientRunTool,
+  siteClientReadTool,
+  siteClientWriteTool,
+  siteCaptureTool,
   // engine — sandbox_create is the one cross-kind bootstrap (it folded
   // vm_create/js_create/app_create); the per-kind ops below are all
   // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.
@@ -205,8 +233,16 @@ export const BUILTIN_TOOLS = Object.freeze([
   // review (clean-context read-only reviewer — feature 08)
   requestReviewTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
-  // exposure.js reveals it to the model ONLY while a goal run is active.
+  // exposure.js reveals them to the model ONLY while a goal run is active.
   completeGoalTool,
+  // scheduling — background Routines (loop/scheduler.js). Main-agent tools; not
+  // exposure-gated, so the agent can set up / list / cancel standing tasks.
+  scheduleCreateTool,
+  scheduleListTool,
+  scheduleCancelTool,
+  todoInitTool,
+  todoCheckTool,
+  todoAddTool,
   // dweb (network publish/discover/install — preview only; exposure.js hides
   // these from the agent on the store build, where DWEB_ENABLED is false)
   dwebDiscoverTool,

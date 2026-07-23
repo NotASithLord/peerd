@@ -120,6 +120,12 @@ export const normalizeSettingsPatch = (patch, {
     // off switch is about the background model calls, not writes.
     next.autoMemoryEnabled = patch.autoMemoryEnabled;
   }
+  if (typeof patch.watchAgentTab === 'boolean') {
+    // Watch mode: foreground + follow the agent's tab (background/watch-mode.js).
+    // The SW's onSettingsChanged foregrounds the current agent tab the moment
+    // this flips on; each later agent tab touch follows while it stays on.
+    next.watchAgentTab = patch.watchAgentTab;
+  }
   if (typeof patch.confirmWebWrites === 'boolean') {
     // #53: anti-exfil gate. When OFF, non-GET web egress (fetch_url + the WebVM
     // bridge) is auto-approved (risk-acknowledged); ON (default) confirms.
@@ -150,6 +156,22 @@ export const normalizeSettingsPatch = (patch, {
     // chat's provider). The settings KEY stays `runnerModel` for continuity
     // with saved settings; resolveRunnerModel reads this pin.
     next.runnerModel = patch.runnerModel.trim().slice(0, 200);
+  }
+  if (typeof patch.prewalkEnabled === 'boolean') {
+    // Prewalk (loop/prewalk.js): frontier model plans a goal run, a cheap
+    // executor inherits the live context at the first landed action.
+    next.prewalkEnabled = patch.prewalkEnabled;
+  }
+  if (typeof patch.enginePrewalkEnabled === 'boolean') {
+    // Engine-actor prewalk: VM/Notebook/App actors run turn 1 on the frontier
+    // model, then swap to the cheap executor for the rest of their life.
+    next.enginePrewalkEnabled = patch.enginePrewalkEnabled;
+  }
+  if (typeof patch.prewalkExecutorModel === 'string') {
+    // Prewalk executor pin. '' = the provider's fast default
+    // (defaultRunnerModel); non-empty = a SAME-PROVIDER model id — the same
+    // contract as runnerModel above.
+    next.prewalkExecutorModel = patch.prewalkExecutorModel.trim().slice(0, 200);
   }
   // Idle vault auto-lock interval (ms). 0 = never; otherwise clamp to a
   // sane range [1min, 24h]. The caller applies this to the live vault so

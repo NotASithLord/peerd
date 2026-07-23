@@ -10,6 +10,78 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-19
+
+### Added
+- **Watch mode.** A top-bar toggle that brings the agent's current tab
+  to the foreground and follows it as the agent moves between tabs, so
+  you can watch the real page live with the chat docked beside it. The
+  agent normally drives its tab in the background and never steals
+  focus; this is the opt-in inverse for when you want to see it work.
+  Off by default, both channels.
+- **Routines: background scheduling.** A standing task can now run in
+  the background on a cadence, on an interval ("every 6h") or at a
+  daily local time, even with the side panel closed. New
+  `schedule_create` / `schedule_list` / `schedule_cancel` tools; each
+  firing runs in its own fresh session as an autonomous goal loop (or a
+  single turn). A routine that came due while peerd was locked or the
+  browser was off fires once as soon as peerd is back on, never as a
+  burst, and nothing fires while the vault is locked.
+- **Prewalk (experimental, off by default).** A goal run can open on
+  the frontier chat model, which writes a todo plan and lands the first
+  action, then hand the live context to a cheaper executor model that
+  grinds out the rest. Comes with a session-persisted todo checklist
+  the goal prompt re-surfaces on every continuation (rendered as a live
+  card that ticks as the run works), a sticky Goal toggle that stays
+  lit for the whole run (clicking it stops the run), and Lab A/B arms
+  that measure spend, pass rate, and speed baseline-vs-prewalk. VM,
+  Notebook, and App actors get the same swap under their own toggle:
+  the first turn plans on the frontier model against real instance
+  state, later turns run on the cheap executor.
+- **Site clients.** The web actor can derive, persist, and replay a
+  per-origin API client (a prose dossier plus a JS module) so future
+  work against a site calls its API directly instead of re-driving the
+  DOM. A client is treated as an unreliable cache: verified on use,
+  self-healed on failure, and saving one always crosses a user confirm.
+  It executes in the sealed keyless worker with exactly one outward
+  edge, a fetch pinned to the client's own origin. Capture-assisted
+  derivation works on every channel, with credentials redacted to
+  posture markers at the boundary.
+- **Query-relevant excerpts for oversized pages.** `fetch_url` and
+  `read_page` take an optional `query`; when a long page overflows the
+  window, the model now sees the passages that best match what it was
+  looking for (BM25-ranked, reassembled in document order) instead of a
+  blind head-and-tail slice. The full text stays stored and pageable
+  via `read_web_cache`, and without a query behavior is unchanged.
+
+### Changed
+- **The web actor finishes the action and reports the substance.** Two
+  prompt additions targeting the two most common failure shapes in the
+  benchmark taxonomy: stopping one step short of the required action,
+  and finding the answer but replying with a pointer instead of stating
+  it. Measured +6.7 points on Online-Mind2Web against a matched control
+  on both models tested.
+
+### Fixed
+- **Agent typing no longer steals OS focus.** Key dispatch raised the
+  driven tab's window to the foreground on every call, continuously
+  yanking focus from whatever you were doing. The tab now gets CDP
+  focus emulation instead: the page believes it is focused, so
+  shortcut handlers still work, but the window is never raised.
+- **A hung tool call can no longer wedge a turn forever.** Every tool
+  dispatch now races the turn's Stop signal and a hard deadline, the
+  CDP evaluate leaf gets its own timeout, and a watchdog force-releases
+  the turn slot after a grace period, so Stop works mid-dispatch
+  instead of only between tool waves.
+- **Stop now terminates an in-flight `a2a_run`.** The mesh-code worker
+  used to keep running to its wall clock after the turn aborted,
+  holding one of the shared headless job slots for up to two minutes.
+- **The OpenAI adapter no longer makes a futile network call every
+  turn.** It fetched `/v1/models` each turn to read a context-window
+  field that endpoint does not have, so the call could only ever return
+  nothing; the static window table (which always supplied the real
+  value anyway) is now used directly.
+
 ## [0.2.7] - 2026-07-10
 
 ### Added
