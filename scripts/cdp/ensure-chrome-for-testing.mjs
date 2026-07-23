@@ -13,12 +13,21 @@
 // The harness also auto-discovers this cache dir, so locally `bun run e2e:chrome`
 // once is enough.
 
-import { mkdirSync, existsSync, writeFileSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, existsSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
-const CACHE = join(homedir(), '.cache', 'peerd-cft');
+// why PINNED rather than whatever Stable happens to be: the visual lane
+// compares PIXELS, and a Chrome release can re-rasterize text. Bumping
+// chrome-version.txt is a deliberate, reviewable act that must land in the SAME
+// commit as reseeded baselines. The version keys the cache dir too, so a pinned
+// run never silently inherits a previously-downloaded floating build.
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const PINNED_VERSION = readFileSync(join(HERE, 'chrome-version.txt'), 'utf8').trim();
+
+const CACHE = join(homedir(), '.cache', 'peerd-cft', PINNED_VERSION);
 
 // CfT platform key + the binary path inside the unzipped tree.
 function platform() {
@@ -36,14 +45,17 @@ const binPath = join(CACHE, bin);
 if (existsSync(binPath)) { console.log(binPath); process.exit(0); }
 
 mkdirSync(CACHE, { recursive: true });
-const meta = await (await fetch('https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json')).json();
-const stable = meta.channels.Stable;
-const dl = stable.downloads.chrome.find((d) => d.platform === key);
-if (!dl) throw new Error(`no Chrome for Testing download for ${key}`);
-console.error(`[cft] Stable ${stable.version} (${key}) -> ${dl.url}`);
+const url = `https://storage.googleapis.com/chrome-for-testing-public/${PINNED_VERSION}/${key}/chrome-${key}.zip`;
+console.error(`[cft] pinned ${PINNED_VERSION} (${key}) -> ${url}`);
 
 const zipPath = join(CACHE, `chrome-${key}.zip`);
-const buf = Buffer.from(await (await fetch(dl.url)).arrayBuffer());
+const res = await fetch(url);
+if (!res.ok) {
+  throw new Error(`Chrome for Testing ${PINNED_VERSION} (${key}) not downloadable: HTTP ${res.status}. `
+    + 'Check the version in scripts/cdp/chrome-version.txt against '
+    + 'https://googlechromelabs.github.io/chrome-for-testing/');
+}
+const buf = Buffer.from(await res.arrayBuffer());
 writeFileSync(zipPath, buf);
 console.error(`[cft] downloaded ${(buf.length / 1e6).toFixed(1)} MB; unzipping...`);
 const r = spawnSync('unzip', ['-q', '-o', zipPath, '-d', CACHE], { stdio: ['ignore', 'ignore', 'inherit'] });
