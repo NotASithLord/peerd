@@ -10,11 +10,22 @@
 // SW). The exposure gate refuses this tool on an actor session, so an actor
 // can't recursively message another actor.
 
+// why a wall-clock cap on the orchestrator's opt-in await: the orchestrator's
+// turn has NO timeout of its own (only user Stop), so a slow or hung web
+// delegation awaited in-band would block the turn indefinitely. At the cap the
+// await DEGRADES TO ASYNC — the actor is NOT cancelled, it keeps working and its
+// reply lands as the usual later-turn fenced note — so the user gets a prompt
+// "still working" answer instead of a frozen turn. A few minutes: long enough
+// that most primary web tasks resolve in-band, short enough to never read as
+// hung. Ephemeral children don't use this — their awaitSignal is their own
+// wall-clock cap, and they have no later turn to degrade to.
+const ORCHESTRATOR_AWAIT_CAP_MS = 3 * 60_000;
+
 /**
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
@@ -68,7 +79,7 @@ export const messageActorTool = {
       },
       await: {
         type: 'boolean',
-        description: 'WAIT for the actor\'s reply IN THIS turn and receive its summarized (fenced) substance as this tool\'s result, instead of the default fire-and-continue (reply on a LATER turn). Set true for ONE primary task whose answer you need now to respond to the user — so you reply with the substance, not an "I\'ll report back" deferral. Leave false (default) to fan out several actors in parallel, or when you will act on the reply on a later turn. Ignored for an ephemeral actor (whose reply always returns here) and for a sandbox oneShot.',
+        description: 'WAIT for the actor\'s reply IN THIS turn and receive its summarized (fenced) substance as this tool\'s result, instead of the default fire-and-continue (reply on a LATER turn). Set true for ONE primary task whose answer you need now to respond to the user — so you reply with the substance, not an "I\'ll report back" deferral. Leave false (default) to fan out several actors in parallel, or when you will act on the reply on a later turn. If the actor takes more than a few minutes, the wait ends with a "still working" note and its reply lands on a later turn instead (it is never dropped). An ephemeral actor\'s reply always returns here regardless of this flag.',
       },
     },
     required: ['to', 'message'],
@@ -112,6 +123,14 @@ export const messageActorTool = {
       // caller's wall-clock timeout / Stop / cancel, so a hung actor turn can't
       // park the await past its budget (#1/#3).
       awaitSignal: c.abortSignal,
+      // The orchestrator opt-in (await:true from a NON-ephemeral sender) gets a
+      // wall-clock cap that DEGRADES TO ASYNC — its turn signal has no timeout of
+      // its own, so without this a slow web delegation would block the turn until
+      // Stop. Gated to a long-lived sender: an ephemeral child (kind:'spawned')
+      // has no later turn to degrade to, so it keeps the abort-only semantics and
+      // relies on its own wall-clock awaitSignal.
+      degradeToAsync: args?.await === true && c.session?.kind !== 'spawned',
+      awaitCapMs: ORCHESTRATOR_AWAIT_CAP_MS,
     });
     // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
     return res.ok

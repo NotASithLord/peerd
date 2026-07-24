@@ -72,6 +72,28 @@ describe('message_actor — case 6: strict boolean coercions', () => {
     await messageActorTool.execute({ to: 'web', message: 'hi', await: 'yes' }, loose.ctx);
     expect(loose.seen.req.awaitReply).toBe(false); // 'yes' !== true
   });
+
+  test('degradeToAsync is set ONLY for the orchestrator opt-in, never an ephemeral child', async () => {
+    // The wall-clock cap degrades to a later-turn wake — valid only for a sender
+    // that HAS a later turn. An ephemeral child (kind:'spawned') has none, so it
+    // must never degrade even though it awaits, or its reply would be dropped.
+    const orch = recordingCtx({ session: { sessionId: 's', kind: 'main' } });
+    await messageActorTool.execute({ to: 'web', message: 'hi', await: true }, orch.ctx);
+    expect(orch.seen.req.degradeToAsync).toBe(true);
+    expect(typeof orch.seen.req.awaitCapMs).toBe('number');
+    expect(orch.seen.req.awaitCapMs).toBeGreaterThan(0);
+
+    // A spawned child awaits (awaitReply true) but must NOT degrade.
+    const child = recordingCtx({ session: { sessionId: 's', kind: 'spawned' } });
+    await messageActorTool.execute({ to: 'web', message: 'hi' }, child.ctx);
+    expect(child.seen.req.awaitReply).toBe(true);
+    expect(child.seen.req.degradeToAsync).toBe(false);
+
+    // The orchestrator's DEFAULT (async, no opt-in) does not degrade either.
+    const asyncMain = recordingCtx({ session: { sessionId: 's', kind: 'main' } });
+    await messageActorTool.execute({ to: 'web', message: 'hi' }, asyncMain.ctx);
+    expect(asyncMain.seen.req.degradeToAsync).toBe(false);
+  });
 });
 
 describe('message_actor — case 7: pass-through of args + ctx fields', () => {

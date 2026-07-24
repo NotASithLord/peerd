@@ -170,6 +170,83 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     await tick();
     expect(reentries.length).toBe(0);
   });
+
+  test('await unwinds on a LIVE mid-flight abort (signal fires WHILE the turn runs) and stops the delegate', async () => {
+    // The already-aborted case above tests the queued-before-start path; this
+    // pins the RUNNING path — the abort arrives after the turn is in flight, so
+    // stopActorForAwait must slot-cancel the actor this await is waiting on.
+    let stopArgs: unknown[] | null = null;
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),                 // hangs — only the abort can settle it
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { fn(); },
+        advanceQueue: () => {},
+        stop: (...a: unknown[]) => { stopArgs = a; return true; },
+      },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true, awaitSignal: ac.signal,
+    });
+    await tick();                                                // let the turn queue + start running
+    ac.abort();                                                  // fire the abort MID-FLIGHT
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('aborted');
+    expect(stopArgs).not.toBeNull();                            // the running delegate was slot-cancelled
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('the orchestrator await DEGRADES TO ASYNC at the wall-clock cap — reply re-routes to a later turn, not dropped', async () => {
+    // The orchestrator's turn signal has no wall-clock; the cap is that bound.
+    // At the cap the actor is NOT cancelled — the await returns a truthful "still
+    // working" note and the eventual reply must land as a later-turn wake.
+    let resolveTurn: () => void = () => {};
+    const turnDone = new Promise<void>((res) => { resolveTurn = res; });
+    const { messageActor, reentries } = harness({
+      runActorTurn: async () => { await turnDone; return { result: 'the late price is $42' }; },
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { fn(); }, advanceQueue: () => {}, stop: () => true },
+    });
+    const r = await messageActor({
+      to: 'app-1', message: 'find the price', senderSessionId: 'chat-1',
+      awaitReply: true, degradeToAsync: true, awaitCapMs: 5,
+    });
+    // capped out: a NON-failed "still working" note comes back NOW
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('still working');
+    // the actor was not cancelled, so nothing has re-entered yet
+    expect(reentries.length).toBe(0);
+    // now the actor finishes — its reply must arrive as a later-turn wake (deliver), never dropped
+    resolveTurn();
+    await tick(); await tick();
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].userText).toContain('<u origin="app-1">the late price is $42</u>');
+  });
+
+  test('the cap is NOT armed without degradeToAsync (ephemeral path keeps abort-only semantics)', async () => {
+    // An ephemeral child passes awaitCapMs-less, degradeToAsync-less: even if a
+    // cap value leaked in, it must not degrade — a child has no later turn, so
+    // degrading would DROP its reply. Proof: a hung turn resolves ONLY via abort
+    // (failed), never via a cap-degrade "still working" (which would be ok:true).
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { fn(); }, advanceQueue: () => {}, stop: () => true },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1',
+      awaitReply: true, awaitSignal: ac.signal, awaitCapMs: 5,       // cap value present…
+      // …but degradeToAsync omitted → the cap must stay disarmed.
+    });
+    await new Promise((r) => setTimeout(r, 20));                     // outlast the 5ms cap
+    ac.abort();
+    const r = await p;
+    expect(r.ok).toBe(false);                                        // resolved by ABORT, not a cap-degrade
+    expect(r.error).toContain('aborted');
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
 });
 
 describe('message_actor — error path still wakes the sender', () => {

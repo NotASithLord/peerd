@@ -339,8 +339,8 @@ export const makeActorMessaging = (deps) => {
   //
   // Bookkeeping is keyed by rootSessionId (phase 4/5): the lineage root shares
   // one budget and one Stop generation, whoever in the tree actually sent.
-  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean) => void }} o */
-  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, via, onReply }) => {
+  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean) => void, deliverInstead?: () => boolean }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, via, onReply, deliverInstead }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(rootSessionId, actorSessionId);
     // Keyed on actorSessionId, NOT instanceId — must match the live-path track
@@ -405,7 +405,17 @@ export const makeActorMessaging = (deps) => {
       // free-form/error bodies were previously clamped at the callsite — apply the
       // single RESULT_CHARS ceiling here for every path.
       outBody = outBody.slice(0, RESULT_CHARS);
-      if (onReply) { onReply(bare ? outBody : replyText(instanceId, kind, name, outBody, outFailed), outFailed); return; }
+      // deliverInstead() true = the awaiting caller already resolved by its
+      // wall-clock cap (degrade-to-async): the actor kept working, so its now-
+      // arrived reply must route to the sender's LATER turn (deliver) instead of
+      // an onReply the caller has stopped listening on — otherwise the reply is
+      // dropped. Only the orchestrator opt-in await sets this (it has a later
+      // turn); an ephemeral child never does (no later turn to wake).
+      //
+      // Ordering note (rebase onto #255): validation + the RESULT_CHARS clamp run
+      // FIRST, so a degraded reply that lands on the later turn is the same
+      // validated, bounded body the awaiting caller would have received.
+      if (onReply && !(deliverInstead && deliverInstead())) { onReply(bare ? outBody : replyText(instanceId, kind, name, outBody, outFailed), outFailed); return; }
       deliver(senderSessionId, instanceId, kind, name, outBody, outFailed, via);
     };
     // Serialize on the ACTOR's slot — runWhenIdle runs the turn the moment the
@@ -455,17 +465,23 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitCapMs?: number, degradeToAsync?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
    *   awaitReply — the ACTOR reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'spawned'` sender.
+   *   degradeToAsync + awaitCapMs — the orchestrator opt-in await's wall-clock
+   *   cap. When degradeToAsync is true and the cap elapses before the reply, the
+   *   await resolves with a non-failed "still working" note WITHOUT cancelling the
+   *   actor, and the eventual reply routes to the sender's later turn (deliver).
+   *   Only a long-lived sender (has a later turn) sets these; an ephemeral child
+   *   never does (its awaitSignal is its own wall-clock, and it has no later turn).
    *   awaitSignal — the awaiting actor's AbortSignal (its wall-clock timeout
    *   / cancel). Only meaningful with awaitReply: the await races the reply
    *   against it so an aborted child unblocks instead of parking on a hung actor.
    * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
    */
   const messageActor = async (req) => {
-    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, via, bareReply } = req;
+    const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, awaitCapMs, degradeToAsync, via, bareReply } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
     }
@@ -632,15 +648,36 @@ export const makeActorMessaging = (deps) => {
         // trackActor/clear bookkeeping stays symmetric even on abort (its onReply
         // just no-ops by then).
         let done = false;
+        // Set true when the wall-clock cap fires: the awaited turn keeps running
+        // (NOT cancelled), so its later reply must route to the sender's next turn
+        // via deliver() — settle() reads this getter. Only the orchestrator opt-in
+        // arms the cap (degradeToAsync), and only it HAS a later turn to wake.
+        let degraded = false;
+        let capTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
         const onAbort = () => {
           if (done) return;                                 // stale abort after the reply → no-op
           stopActorForAwait(correlationId, actor.actorSessionId);
           const notice = 'the request was aborted (timeout or cancel) before the actor replied.';
           finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, true), failed: true });
         };
+        // The await wall-clock cap → DEGRADE TO ASYNC. why distinct from onAbort:
+        // Stop/cancel means "stop the work"; a too-slow reply does NOT — the actor
+        // is still making progress, so we DON'T stopActorForAwait. We unblock the
+        // orchestrator turn NOW with a truthful, non-failed note, flip `degraded`
+        // so the eventual reply lands as the sender's later-turn wake (deliver),
+        // and let the actor finish. This is the bound the orchestrator's turn
+        // signal lacks (no wall-clock — only Stop), the "parked forever" case the
+        // reviewer flagged; the reply is re-routed, never dropped.
+        const onCap = () => {
+          if (done) return;
+          degraded = true;
+          const notice = `the ${kind} actor is still working; its reply will arrive as a fenced note on a later turn.`;
+          finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, false), failed: false });
+        };
         const finish = (/** @type {{ text: string, failed: boolean }} */ v) => {
           if (done) return;
           done = true;
+          if (capTimer) { clearTimeout(capTimer); capTimer = null; }
           try { awaitSignal?.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
           resolve(v);
         };
@@ -652,10 +689,17 @@ export const makeActorMessaging = (deps) => {
           correlationId, senderSessionId: sender, rootSessionId, actor, message,
           parentToolUseId: toolUseId, oneShot: oneShot === true, bare: bareReply === true,
           onReply: (text, failed) => finish({ text, failed }),
+          deliverInstead: () => degraded,
         });
         if (awaitSignal) {
           if (awaitSignal.aborted) onAbort();               // already aborted → resolve now
           else awaitSignal.addEventListener('abort', onAbort, { once: true });
+        }
+        // Arm the cap only for the orchestrator opt-in (degradeToAsync + a positive
+        // cap). An ephemeral child passes neither — its awaitSignal IS its wall-clock,
+        // and it has no later turn, so degrading it would DROP the reply.
+        if (degradeToAsync === true && typeof awaitCapMs === 'number' && awaitCapMs > 0 && !done) {
+          capTimer = setTimeout(onCap, awaitCapMs);
         }
       });
       return settled.failed
