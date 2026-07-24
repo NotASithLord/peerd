@@ -29,7 +29,11 @@ const main = () => {
   // silently clobber that — we compare the freshly-generated output to
   // what's COMMITTED (HEAD), and restore the user's bytes afterward so
   // preflight is non-destructive either way.
-  const genFiles = ['extension/manifest.json', 'extension/shared/channel-config.js']
+  // why the badge too: CI's drift step diffs all three generated files; the
+  // badge changes whenever the tscheck coverage denominator moves (it did when
+  // web/public joined the scan), and preflight passing while CI fails on badge
+  // drift is exactly the out-of-sync trap this mirror exists to prevent.
+  const genFiles = ['extension/manifest.json', 'extension/shared/channel-config.js', 'badges/tscheck.json']
     .map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
   run('regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev']);
@@ -44,10 +48,11 @@ const main = () => {
   genFiles.forEach((f, i) => writeFileSync(f, before[i]));
   if (drift) {
     console.error(
-      '\npreflight FAILED: extension/manifest.json or shared/channel-config.js '
-      + 'differs from `bun run gen:dev` output vs HEAD. Run `bun run gen:dev` '
-      + 'and commit the regenerated files (sources: manifests/*.json, '
-      + 'packaging/default-settings.mjs).',
+      '\npreflight FAILED: a generated file (extension/manifest.json, '
+      + 'shared/channel-config.js, or badges/tscheck.json) differs from '
+      + '`bun run gen:dev` output vs HEAD. Run `bun run gen:dev` and commit '
+      + 'the regenerated files (sources: manifests/*.json, '
+      + 'packaging/default-settings.mjs, the // @ts-check coverage scan).',
     );
     process.exit(1);
   }
@@ -59,6 +64,12 @@ const main = () => {
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
+  // Web target: stage it fresh from source, then prove the tree is import-closed
+  // (nothing curated reaches pruned chassis; the browser-polyfill shim is in
+  // place). This is what makes the web tree safely inherit upstream — an escape
+  // introduced upstream fails here instead of rotting the staged library silently.
+  run('web target build (from live source)', 'bun', ['run', 'package:web']);
+  run('web import-closure boundary', 'bun', ['run', 'check:web']);
   run('bun tests', 'bun', ['test', './tests']);
   if (args.matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);

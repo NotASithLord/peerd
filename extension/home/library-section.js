@@ -36,9 +36,13 @@ import m from '/vendor/mithril/mithril.js';
  */
 
 // p·cyan e·red e·amber r·green d·magenta — each app's avatar gets ONE brand
-// hue. why deterministic (hash of id) rather than the per-session-random peer
-// colors: an app sits still in the grid, so its color should be stable across
-// refreshes and reloads — a quiet identity, not a flicker.
+// hue. why hash a DURABLE identity (seed key / content hash / name, never
+// the per-install instance id): an app's color is a quiet identity, so it
+// must survive reinstalls and agree with Discover (which hashes the
+// content-stable dwapp_id). Hashing the instance id rerolled the hue on
+// every install — the same app wore a different color per profile and per
+// home tab, and the seeded commons app flickered the home-fulltab visual
+// baseline in CI.
 const BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
 /** @param {string} [key] */
 const colorOf = (key) => {
@@ -46,6 +50,8 @@ const colorOf = (key) => {
   for (const ch of String(key || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return BRAND[h % BRAND.length];
 };
+/** @param {App} app — the durable color key; see the why on BRAND above */
+const colorKeyOf = (app) => app.dweb?.seed || app.dweb?.hash || app.name || app.id;
 
 /** @param {number} [ms] */
 const fmtWhen = (ms) => {
@@ -423,7 +429,7 @@ export const LibrarySection = {
 
     return m('.library-card', { key: app.id }, [
       m('.library-head', [
-        m('.library-avatar', { style: `background:${colorOf(app.id || app.name)}`, 'aria-hidden': 'true' }, (app.name || '?').trim().charAt(0) || '?'),
+        m('.library-avatar', { style: `background:${colorOf(colorKeyOf(app))}`, 'aria-hidden': 'true' }, (app.name || '?').trim().charAt(0) || '?'),
         m('div', { style: 'flex:1; min-width:0;' }, [
           renaming
             ? m('input', {

@@ -2,9 +2,9 @@
 // AND the badge generator (gen-tscheck-badge.ts) so both report the same
 // number from one implementation.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { EXTENSION_DIR } from './lib.ts';
+import { EXTENSION_DIR, REPO_ROOT } from './lib.ts';
 
 // Deliberately-ES5 injected-into-page bodies (see eslint.config.js): serialized
 // via .toString() and re-evaluated in a target page's classic-script world, so
@@ -39,9 +39,16 @@ const hasDirective = (src: string): boolean =>
 
 export interface TscheckCoverage { count: number; total: number; pct: number; }
 
-/** Scan the extension for // @ts-check coverage. Pure read; no side effects. */
+/** Scan the extension + the web shell for // @ts-check coverage. Pure read;
+ *  no side effects. why web/public too: it is in tsconfig's include and rides
+ *  the same opt-in ratchet — the scan must match the checked set or the floor
+ *  can never grow to protect web files. */
 export const computeCoverage = (): TscheckCoverage => {
-  const files = walk(EXTENSION_DIR).filter((f) => !ES5_INJECTED.has(relative(EXTENSION_DIR, f)));
+  const webShell = join(REPO_ROOT, 'web', 'public');
+  const files = [
+    ...walk(EXTENSION_DIR).filter((f) => !ES5_INJECTED.has(relative(EXTENSION_DIR, f))),
+    ...(existsSync(webShell) ? walk(webShell) : []),
+  ];
   const count = files.filter((f) => hasDirective(readFileSync(f, 'utf8'))).length;
   const total = files.length;
   return { count, total, pct: (count / total) * 100 };

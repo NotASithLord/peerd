@@ -16,26 +16,31 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { EXTENSION_DIR, parseArgs, type Channel } from './lib.ts';
+import { EXTENSION_DIR, parseArgs, CONFIG_CHANNELS, type ConfigChannel } from './lib.ts';
 import { defaults } from './default-settings.mjs';
 
 const DEV_OUT = join(EXTENSION_DIR, 'shared', 'channel-config.js');
 
-export const flattenDefaults = (channel: Channel): Record<string, unknown> => {
+export const flattenDefaults = (channel: ConfigChannel): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
   for (const [key, perChannel] of Object.entries(defaults)) {
     const channels = Object.keys(perChannel);
     for (const c of channels) {
-      if (c !== 'store' && c !== 'preview') {
+      if (!(CONFIG_CHANNELS as readonly string[]).includes(c)) {
         throw new Error(`default-settings: key "${key}" has unknown channel "${c}"`);
       }
     }
+    // why the web→store fallback: the web tree inherits the store posture per
+    // key unless a key declares an explicit `web` value — so the schema doesn't
+    // triple every entry (the "don't proliferate divergence" rule above the
+    // defaults), and a new store key reaches the web build automatically.
     if (channel in perChannel) out[key] = (perChannel as any)[channel];
+    else if (channel === 'web' && 'store' in perChannel) out[key] = (perChannel as any).store;
   }
   return out;
 };
 
-export const genChannelConfigSource = (channel: Channel): string => {
+export const genChannelConfigSource = (channel: ConfigChannel): string => {
   const flat = flattenDefaults(channel);
   const entries = Object.entries(flat)
     .map(([k, v]) => `  ${k}: ${JSON.stringify(v)},`)
@@ -69,8 +74,8 @@ ${'}'});
 
 const main = () => {
   const args = parseArgs(process.argv.slice(2));
-  const channel = String(args.channel ?? 'preview') as Channel;
-  if (channel !== 'store' && channel !== 'preview') throw new Error(`bad --channel=${channel}`);
+  const channel = String(args.channel ?? 'preview') as ConfigChannel;
+  if (!(CONFIG_CHANNELS as readonly string[]).includes(channel)) throw new Error(`bad --channel=${channel}`);
   const out = args.out ? String(args.out) : DEV_OUT;
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, genChannelConfigSource(channel));
