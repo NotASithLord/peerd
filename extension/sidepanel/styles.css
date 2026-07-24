@@ -10,53 +10,114 @@
 @import url('/shared/fonts.css');
 
 :root {
-  /* --- brand palette (locked per peerd.ai) ---
-   * These map 1:1 to the five wordmark blocks AND the five module colors:
-   *   cyan    → p / peerd-provider
-   *   red     → e / peerd-egress
-   *   amber   → e / peerd-engine
-   *   green   → r / peerd-runtime
-   *   magenta → d / the dweb module (preview packages)
-   * Treat as immutable. Semantic tokens below reference them; nothing
-   * else in the file should hardcode these hex values.
-   */
-  --cyan:    #00B7EB;
-  --red:     #EF4444;
-  --amber:   #F59E0B;
-  --green:   #22C55E;
-  --magenta: #D946EF;
-  --white:   #FAFAFA;
+  /* === design-system tokens (the "Peerd UI redesign" system, RESOLVED) ===
+   * why this vocabulary: the redesign board authors every screen against these
+   * names, so they are the canonical token set going forward. The legacy names
+   * used across the rest of this file are kept as ALIASES at the bottom of this
+   * block, so existing rules keep resolving while surfaces migrate onto the new
+   * names one stage at a time. Light values here; the dark override follows.
+   *
+   * --- brand palette (LOCKED per peerd.ai — treat as immutable) ---
+   * The five carriers map 1:1 to the wordmark blocks AND the module colors:
+   *   p cyan → peerd-provider · e red → peerd-egress · e amber → peerd-engine
+   *   r green → peerd-runtime · d magenta → the dweb module (preview packages).
+   * These are the ONLY color carriers; surfaces stay grayscale. Nothing else
+   * in the file should hardcode these hex values — reference the tokens. */
+  --p:  #00B7EB;
+  --er: #EF4444;
+  --am: #F59E0B;
+  --gr: #22C55E;
+  --mg: #D946EF;
+  --w:  #FAFAFA;   /* letter-on-wordmark / on-dark ink */
 
-  /* --- surfaces (light) --- */
-  --bg:           #ffffff;
-  --bg-elev:      #f7f7f7;
-  --fg:           #1a1a1a;
-  --fg-muted:     #6b6b6b;
-  --border:       #e0e0e0;
+  /* --- surfaces (light): grayscale, flat elevation --- */
+  --bg:     #ffffff;   /* e0 · flush */
+  --elev:   #f7f7f7;   /* e1 · card */
+  --elev2:  #f0f0f0;   /* e2 · menu/popover */
+  --text:   #1a1a1a;
+  --muted:  #6b6b6b;
+  --border: #e0e0e0;
+  --code:   rgba(0,0,0,.055);
+  --selbg:  rgba(0,0,0,.10);
 
-  /* --- semantic tokens point at brand colors --- */
-  --accent:       var(--cyan);
-  --accent-fg:    var(--white);
-  --danger:       var(--red);
-  --warn:         var(--amber);
-  --ok:           var(--green);
+  /* --- semantic ink. why the *-ink pair: the flat token is the fill/mark; the
+   * -ink variant is darkened for AA-legible TEXT on a light surface (danger is
+   * the retired second red, now brand red darkened via one value). Dark mode
+   * needs no darkening, so there the pair collapses. --- */
+  --accent:     var(--p);
+  --accent-ink: #0089ac;
+  --on-accent:  var(--w);
+  --danger:     var(--er);
+  --danger-ink: #d23b3b;
+  --warn:       var(--am);
+  --warn-ink:   #c07d08;
+  --ok:         var(--gr);
+  --ok-ink:     #1a9c4b;
 
-  --radius:       6px;
-  --gap:          12px;
+  /* the user's voice — a faint cyan "operator" tint on the user bubble (EXPLORE
+   * 1a, the sanctioned-accent swap for the retired legacy indigo) */
+  --youtint: #ecf8fc;
+
+  /* --- corner scale: chips/icons · controls/bubbles · cards/modals · full-tab
+   * (7 & 9 retired) --- */
+  --r1: 4px;
+  --r2: 6px;
+  --r3: 8px;
+  --r4: 10px;
+
+  /* --- elevation shadows (neutral, never colored) --- */
+  --sh-menu:  0 6px 22px rgba(0,0,0,.12), 0 1px 3px rgba(0,0,0,.08);
+  --sh-modal: 0 18px 50px rgba(0,0,0,.22), 0 2px 8px rgba(0,0,0,.10);
+
+  /* --- type: wordmark (Geist Mono) · mono chrome (JetBrains Mono) · body sans.
+   * Families are vendored locally in /shared/fonts.css — never a CDN. --- */
+  --wm:   'Geist Mono', ui-monospace, monospace;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  /* --- legacy aliases → new tokens. why kept: 47 brand-color + 33 --radius
+   * references across this file predate the redesign vocabulary; aliasing lets
+   * them resolve unchanged while surfaces migrate off them stage by stage.
+   * Remove an alias only once its last consumer is gone. --- */
+  --cyan:      var(--p);
+  --red:       var(--er);
+  --amber:     var(--am);
+  --green:     var(--gr);
+  --magenta:   var(--mg);
+  --white:     var(--w);
+  --bg-elev:   var(--elev);
+  --fg:        var(--text);
+  --fg-muted:  var(--muted);
+  --accent-fg: var(--on-accent);
+  --radius:    var(--r2);
+  --gap:       12px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    /* Surfaces synced to peerd.ai base/panel/paper. The brand color
-     * tokens above (cyan / red / amber / green / magenta) are saturated
-     * enough to render against either background; no per-mode overrides
-     * needed for them. */
-    --bg:        #0B0D0E;
-    --bg-elev:   #15181A;
-    --fg:        #E8E6E1;
-    --fg-muted:  #9a9a9a;
-    --border:    #353535;
-    --accent-fg: #0B0D0E;
+    /* Surfaces synced to peerd.ai base/panel/paper. The five brand carriers are
+     * saturated enough to render on either background, so they don't re-declare;
+     * only the grayscale surfaces + the ink variants that stop needing to darken
+     * flip here. */
+    --bg:      #0B0D0E;
+    --elev:    #15181A;
+    --elev2:   #1c2124;
+    --text:    #E8E6E1;
+    --muted:   #9a9a9a;
+    --border:  #353535;
+    --code:    rgba(255,255,255,.07);
+    --selbg:   rgba(255,255,255,.16);
+
+    --accent-ink: var(--p);   /* no darkening needed on dark */
+    --on-accent:  #0B0D0E;
+    --danger-ink: var(--er);
+    --warn-ink:   var(--am);
+    --ok-ink:     var(--gr);
+
+    --youtint: #0c2a31;
+
+    --sh-menu:  0 6px 24px rgba(0,0,0,.55), 0 1px 3px rgba(0,0,0,.4);
+    --sh-modal: 0 22px 60px rgba(0,0,0,.65), 0 2px 10px rgba(0,0,0,.5);
   }
 }
 
@@ -284,6 +345,21 @@ html, body, #app {
   align-items: center;
   margin: 8px 0 20px;
 }
+/* The sealed-surface mark above the wordmark (redesign Screen 1): a quiet
+   bordered chip, grayscale per the brand rule. */
+.vault-lockmark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--r3);
+  background: var(--elev);
+  color: var(--muted);
+}
+.vault-lockmark .ic { display: block; }
 .brand-version {
   margin-top: 8px;
   font-family: var(--font-mono);
@@ -566,25 +642,26 @@ html, body, #app {
 .planact-modes {
   display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--r1);
   overflow: hidden;
   background: var(--bg);
 }
 .planact-mode {
-  font-size: 12px;
-  line-height: 1;
-  padding: 3px 9px;
+  font: 600 10.5px/1 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 6px 10px;
   border: none;
   background: transparent;
-  color: var(--fg-muted);
+  color: var(--muted);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .planact-mode.is-active {
-  /* Act = accent (warm action); Plan inherits the muted look. The active
-     pill reads as "this is what the agent can do right now." */
-  background: var(--accent);
-  color: var(--accent-fg);
+  /* Active segment fills with the ink/surface invert — monochrome by the
+     brand rule, reads as "this is what the agent can do right now". */
+  background: var(--text);
+  color: var(--bg);
 }
 .planact-mode:focus-visible {
   outline: 2px solid var(--accent);
@@ -594,19 +671,20 @@ html, body, #app {
    pills, so its ON state wears the SAME accent as the active Act pill —
    consistency over the strict monochrome rule here (owner call). */
 .planact-confirm {
-  font-size: 12px;
-  line-height: 1;
-  padding: 3px 9px;
-  border-radius: 999px;
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.03em;
+  padding: 5px 8px;
+  border-radius: var(--r1);
   border: 1px solid var(--border);
   background: var(--bg);
-  color: var(--fg-muted);
+  color: var(--muted);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .planact-confirm.is-on {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
 }
 .planact-confirm:focus-visible {
   outline: 2px solid var(--accent);
@@ -619,13 +697,13 @@ html, body, #app {
    appearance:none drops the native select chrome so it reads as a pill;
    it's still a real <select>, so keyboard/AT behavior is native. */
 .effort-dial {
-  font-size: 12px;
-  line-height: 1;
-  padding: 3px 9px;
-  border-radius: 999px;
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: 0.03em;
+  padding: 5px 8px;
+  border-radius: var(--r1);
   border: 1px solid var(--border);
   background: var(--bg);
-  color: var(--fg-muted);
+  color: var(--muted);
   appearance: none;
   -webkit-appearance: none;
   cursor: pointer;
@@ -640,20 +718,21 @@ html, body, #app {
    controls; the ARMED state wears the shared accent (consistency with the
    active Act / Confirm pills — owner call for this row). */
 .goal-toggle {
-  font-size: 12px;
-  line-height: 1;
-  padding: 3px 9px;
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.03em;
+  padding: 5px 8px;
   margin-left: 6px;
-  border-radius: 999px;
+  border-radius: var(--r1);
   border: 1px solid var(--border);
   background: var(--bg);
-  color: var(--fg-muted);
+  color: var(--muted);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .goal-toggle.is-on {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
 }
 .goal-toggle:focus-visible {
   outline: 2px solid var(--accent);
@@ -803,23 +882,29 @@ button.linklike:hover { color: var(--fg); }
 }
 
 /* --- top bar actions --- */
-.topbar-actions { display: flex; gap: 4px; }
+.topbar-actions { display: flex; gap: 6px; }
 button.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: transparent;
-  color: var(--fg);
+  color: var(--muted);   /* icon strokes are quiet until hover */
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 13px;
+  border-radius: var(--r1);
   cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
 }
-button.icon:hover { background: var(--bg); }
+button.icon:hover { background: var(--elev2); color: var(--text); }
+button.icon .ic { display: block; }
 /* Active toggle (watch mode on): filled monochrome — invert fg/bg, no new accent
    color (brand rule: grayscale surfaces, the five brand marks are the only color). */
 button.icon.is-active {
-  background: var(--fg);
+  background: var(--text);
   color: var(--bg);
-  border-color: var(--fg);
+  border-color: var(--text);
 }
 
 /* --- chat view layout --- */
@@ -848,8 +933,8 @@ button.icon.is-active {
   padding: 8px 10px;
   background: rgba(196, 48, 48, 0.08);
   border: 1px solid var(--danger);
-  color: var(--danger);
-  border-radius: var(--radius);
+  color: var(--danger-ink);
+  border-radius: var(--r2);
   font-size: 13px;
 }
 .error-banner button { padding: 4px 10px; font-size: 12px; }
@@ -862,12 +947,12 @@ button.icon.is-active {
   padding: 8px 10px;
   background: rgba(245, 158, 11, 0.10);
   border: 1px solid var(--warn);
-  color: var(--warn);
-  border-radius: var(--radius);
+  color: var(--warn-ink);
+  border-radius: var(--r2);
   font-size: 13px;
 }
 .rate-limit-banner .rl-spinner {
-  animation: peerd-spin 1.02s linear infinite;
+  animation: peerd-spin 0.85s linear infinite;
   display: inline-block;
 }
 @keyframes peerd-spin { to { transform: rotate(360deg); } }
@@ -902,16 +987,22 @@ button.icon.is-active {
 }
 .message .bubble {
   padding: 10px 12px;
-  border-radius: var(--radius);
-  background: var(--bg-elev);
+  border-radius: var(--r2);
+  background: var(--elev);
   border: 1px solid var(--border);
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* The user's voice — "operator cyan" (redesign EXPLORE 1a): a faint cyan tint +
+   a 2px accent rail, replacing the retired legacy indigo. Cyan already means
+   "your intent" (Plan/Act, primary actions), so it stays within the sanctioned
+   accent set rather than introducing a sixth color. */
 .message-user .bubble {
-  background: rgba(74, 95, 208, 0.08);
-  border-color: rgba(74, 95, 208, 0.35);
+  background: var(--youtint);
+  border-color: var(--border);
+  border-left: 2px solid var(--accent);
 }
+.message-user .role { color: var(--accent-ink); }
 /* An actor's reply surfaced as its own bubble (the trickle-up). Quiet, on the
    agent side of the conversation — same elevated grey as assistant bubbles with
    a hairline inset to read as "delivered from elsewhere"; grayscale per the
@@ -1011,9 +1102,9 @@ button.icon.is-active {
  * provider color (reasoning comes from the model/provider). Muted,
  * italic body so it reads as "internal monologue", not the answer. */
 .reasoning {
-  border-left: 2px solid var(--cyan);
-  background: rgba(0, 183, 235, 0.05);
-  border-radius: 4px;
+  border-left: 2px solid var(--accent);
+  background: var(--elev);
+  border-radius: 0 var(--r2) var(--r2) 0;
   overflow: hidden;
 }
 .reasoning-header {
@@ -1080,7 +1171,7 @@ button.icon.is-active {
 }
 .tool-call {
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r3);
   background: var(--bg-elev);
   font-size: 12.5px;
   overflow: hidden;
@@ -1126,7 +1217,7 @@ button.icon.is-active {
   height: 10px;
   border-radius: 0;
   background: none;
-  color: var(--ok);
+  color: var(--ok-ink);
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
@@ -1142,7 +1233,7 @@ button.icon.is-active {
 .tool-status-dot.dot-failed  { background: var(--danger); }
 .tool-status-dot.dot-pending {
   background: var(--ok);
-  animation: peerd-dot-pulse 1.2s ease-in-out infinite;
+  animation: peerd-dot-pulse 0.85s ease-out infinite;
 }
 /* aborted-turn tool: a static, muted dot — no pulse, a terminal resting state. */
 .tool-call.tool-cancelled { opacity: 0.6; }
@@ -1167,7 +1258,7 @@ button.icon.is-active {
 
 /* Expanded detail body — the §02 lineage + result live here now, so the
  * collapsed chip stays a single quiet line. */
-.tool-detail { border-top: 1px dashed var(--border); }
+.tool-detail { border-top: 1px solid var(--border); }
 
 .tool-lineage {
   padding: 6px 10px;
@@ -1194,12 +1285,14 @@ button.icon.is-active {
 
 .primitive-badge {
   display: inline-block;
-  padding: 1px 8px;
-  border-radius: 999px;
+  padding: 2px 7px;
+  border-radius: var(--r1);
   font-size: 10.5px;
   font-weight: 600;
   color: white;
-  letter-spacing: 0.04em;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 /* Module-colored badge backgrounds. One class per peerd module; the
  * primitive→module mapping lives in message-list.js. */
@@ -1237,14 +1330,14 @@ button.icon.is-active {
 
 .tool-result {
   padding: 0 10px 10px;
-  border-top: 1px dashed var(--border);
+  border-top: 1px solid var(--border);
 }
 .tool-result-content {
   margin: 8px 0 0;
-  padding: 8px 10px;
+  padding: 9px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r2);
   font-family: var(--font-mono);
   font-size: 11px;
   white-space: pre-wrap;
@@ -1360,12 +1453,12 @@ button.icon.is-active {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg-elev);
+  border-radius: var(--r4);   /* the composer reads as a card/modal surface */
+  background: var(--elev);
   padding: 10px 10px 6px;
   transition: border-color 0.15s ease;
 }
-.composer:focus-within { border-color: var(--fg-muted); }
+.composer:focus-within { border-color: var(--accent); }
 .composer textarea {
   width: 100%;
   box-sizing: border-box;
@@ -1391,7 +1484,7 @@ button.icon.is-active {
 .composer-row .stop {
   padding: 4px 10px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r2);
   background: transparent;
   color: var(--danger);
   font-size: 12px;
@@ -1537,10 +1630,10 @@ button.icon.is-active {
   right: 0;
   max-height: 240px;
   overflow-y: auto;
-  background: var(--bg-elev);
+  background: var(--elev2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  border-radius: var(--r3);
+  box-shadow: var(--sh-menu);
   z-index: 20;
   padding: 4px;
 }
@@ -1554,17 +1647,17 @@ button.icon.is-active {
   flex-direction: column;
   gap: 1px;
   padding: 6px 9px;
-  border-radius: 4px;
+  border-radius: var(--r1);
   cursor: pointer;
   /* gated below on prefers-reduced-motion */
   transition: background 0.1s ease;
 }
-.palette-option.active { background: var(--accent); color: var(--accent-fg); }
-.palette-option.active .palette-detail { color: var(--accent-fg); opacity: 0.85; }
+.palette-option.active { background: var(--youtint); }
+.palette-option.active .palette-detail { color: var(--fg-muted); }
 .palette-option.disabled { opacity: 0.45; cursor: not-allowed; }
 .palette-label { font-size: 13px; display: flex; gap: 6px; align-items: baseline; }
 .palette-sigil { color: var(--accent); font-weight: 600; }
-.palette-option.active .palette-sigil { color: var(--accent-fg); }
+.palette-option.active .palette-sigil { color: var(--accent-ink); }
 .palette-detail {
   font-size: 11px;
   color: var(--fg-muted);
@@ -1613,12 +1706,12 @@ button.icon.is-active {
   display: flex;
   align-items: stretch;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
+  border-radius: var(--r3);
+  background: var(--elev);
 }
 .session-row.active {
   border-color: var(--accent);
-  background: rgba(74, 95, 208, 0.08);
+  background: var(--youtint);
 }
 
 .session-main {
@@ -1932,14 +2025,14 @@ button.icon.is-active {
   padding: 6px 10px;
   font-size: 12px;
 }
-.goal-bar-label { font-weight: 600; }
-.goal-bar-meta { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.goal-bar-label { font-weight: 600; font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em; }
+.goal-bar-meta { color: var(--fg-muted); font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .goal-bar-text {
   color: var(--fg-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   max-width: 16ch;
 }
-.goal-bar-stop { font-size: 11px; padding: 2px 10px; }
+.goal-bar-stop { font-family: var(--mono); font-size: 11px; padding: 4px 9px; border-radius: var(--r1); }
 
 /* Todo card (components/todo-card.js) — the goal run's visible
    plan-of-record. Same calm bordered-card voice as .goal-bar: grayscale,
@@ -1947,7 +2040,7 @@ button.icon.is-active {
    height so a full 12-item plan can't crowd the transcript. */
 .todo-card {
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r3);
   background: var(--bg-elev);
   padding: 8px 10px;
   font-size: 12px;
@@ -1960,8 +2053,8 @@ button.icon.is-active {
    bottom margin so it doesn't leave trailing space. */
 .todo-card--done .todo-card-head { margin-bottom: 0; }
 .todo-card-title { font-weight: 600; }
-.todo-card-meta { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
-.todo-card-live { color: var(--fg-muted); font-size: 11px; margin-left: auto; }
+.todo-card-meta { color: var(--fg-muted); font-family: var(--mono); font-size: 10px; font-variant-numeric: tabular-nums; border: 1px solid var(--border); border-radius: var(--r1); padding: 3px 6px; }
+.todo-card-live { color: var(--fg-muted); font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase; margin-left: auto; }
 .todo-list {
   list-style: none;
   margin: 0; padding: 0;
@@ -1972,13 +2065,13 @@ button.icon.is-active {
 .todo-item { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .todo-box {
   flex: none;
-  width: 13px; height: 13px;
-  border: 1px solid var(--fg-muted);
-  border-radius: 3px;
-  font-size: 10px; line-height: 12px; text-align: center;
+  width: 15px; height: 15px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--r1);
+  font-size: 10px; line-height: 14px; text-align: center;
   color: var(--fg);
 }
-.todo-item.is-done .todo-box { background: var(--fg-muted); color: var(--bg); border-color: var(--fg-muted); }
+.todo-item.is-done .todo-box { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .todo-item.is-done .todo-text { color: var(--fg-muted); text-decoration: line-through; }
 .todo-item.is-next .todo-text { font-weight: 600; }
 .todo-text {
@@ -1989,7 +2082,7 @@ button.icon.is-active {
    a bordered elevated card, grayscale, the brand spinner the only color. */
 .async-task-bar {
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r3);
   background: var(--bg-elev);
   padding: 8px 10px;
   font-size: 12px;
@@ -2000,15 +2093,16 @@ button.icon.is-active {
 .async-task-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .async-task-name {
   flex: 0 1 auto; min-width: 0;
+  font-family: var(--mono); font-weight: 600; font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.async-task-status { color: var(--fg-muted); flex: 0 0 auto; }
+.async-task-status { color: var(--fg-muted); font-family: var(--mono); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 .async-task-tail {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--fg-muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--mono);
+  font-size: 10px;
 }
 
 /* Plan/Act selector row above the input bar */
@@ -2404,9 +2498,9 @@ button.icon.is-active {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  background: var(--bg-elev);
+  background: var(--elev);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r3);   /* card in the redesign corner scale */
   padding: 14px 10px 12px;
   min-height: 104px;
   cursor: pointer;
@@ -2580,14 +2674,19 @@ button.icon.is-active {
    accent-button fill. Half the old size; just the running dollar total. */
 .cost-chip {
   margin-right: auto;
-  font-size: 9px;
-  line-height: 1;
-  color: var(--fg-muted);
+  font: 500 10.5px/1 var(--mono);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--r1);
+  padding: 5px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .cost-chip-dollars { font-variant-numeric: tabular-nums; }
-.cost-chip-live { color: var(--accent, #00B7EB); }
+.cost-chip-live { color: var(--ok-ink); }
 .cost-chip--halt { color: var(--danger); }
 
 /* --- Logs: cumulative usage line --------------------------------------- */
@@ -2661,10 +2760,10 @@ button.icon.is-active {
   bottom: calc(100% + 4px);
   display: flex;
   flex-direction: column;
-  background: var(--bg-elev);
+  background: var(--elev2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  border-radius: var(--r3);
+  box-shadow: var(--sh-menu);
   z-index: 30;
   min-width: 200px;
 }

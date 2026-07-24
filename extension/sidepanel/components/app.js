@@ -18,6 +18,15 @@ import { CHANNEL } from '/shared/channel-config.js';
 /** @typedef {(msg: object) => Promise<any>} Send */
 /** @typedef {Record<string, ((...args: any[]) => any) | undefined>} UiActions */
 
+// Icon from the redesign mono-stroke set (sprite in sidepanel.html). why a
+// helper: every chrome glyph is now one drawn symbol referenced by id, so the
+// stroke inherits currentColor + theme for free and renders identically across
+// platforms (the old unicode glyphs did not).
+/** @param {string} name @param {number} [size] */
+const icon = (name, size = 16) =>
+  m('svg.ic', { width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    m('use', { href: `#ic-${name}` }));
+
 export const App = {
   /**
    * @param {{ attrs: {
@@ -155,25 +164,25 @@ const TopBar = {
             : 'Watch the agent’s tab (bring it to the front and follow along)',
           'aria-pressed': state.settings?.watchAgentTab ? 'true' : 'false',
           onclick: () => send({ type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab } }),
-        }, '◉'),
+        }, icon('target')),
         m('button.icon', {
           title: 'Chats',
           onclick: () => m.route.set(
             m.route.get() === '/chats' ? '/chat' : '/chats'),
-        }, '☰'),
+        }, icon('menu')),
         m('button.icon', {
           title: 'New chat',
           onclick: async () => {
             await send({ type: 'session/reset' });
             m.route.set('/chat');
           },
-        }, '+'),
+        }, icon('plus')),
         // Home — opens the full-tab HOME page (a primary surface, distinct from
         // Settings; focus-or-create so it doesn't pile up duplicate tabs).
         m('button.icon', {
           title: 'Home',
           onclick: () => openHome(),
-        }, '⌂'),
+        }, icon('home')),
         // why: settings + context (memory/activity/denylist/skills/hooks)
         // moved to the full-tab options page — the panel is the pure
         // conversation surface. One ⚙ replaces the old ▤/⚙ pair;
@@ -182,7 +191,7 @@ const TopBar = {
         m('button.icon', {
           title: 'Settings',
           onclick: () => openOptions(),
-        }, '⚙'),
+        }, icon('set')),
         // Close the panel. The toolbar action now opens Home rather than
         // toggling the panel shut, so the panel needs its own dismiss — this
         // reuses the SW's sidepanel/close (disable+re-arm; Chrome-only, no-op
@@ -190,7 +199,7 @@ const TopBar = {
         m('button.icon', {
           title: 'Close panel',
           onclick: () => send({ type: 'sidepanel/close' }),
-        }, '✕'),
+        }, icon('x')),
       ]) : null,
     ]);
   },
