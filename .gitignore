@@ -53,10 +53,13 @@ web-ext-artifacts/
 /tmp/
 *.log
 # Per-run output of the e2e verify loop (screenshots + result.json + diff
-# images), regenerated every `bun run e2e:verify`. The committed REFERENCE
-# images live in scripts/cdp/baselines/<platform>/ — those are tracked (they are
-# the visual-test reference AND what the gallery renders).
+# images), regenerated every `bun run e2e:verify`.
 scripts/cdp/artifacts/
+# Visual baselines: ONLY the CI authority (linux-x64) is committed — it gates AND
+# feeds the committed gallery. Any other platform's dir (e.g. a dev's mac) is a
+# local, non-gating self-baseline and is never committed. See scripts/cdp/visual.mjs.
+scripts/cdp/baselines/*
+!scripts/cdp/baselines/linux-x64
 # Per-run benchmark scorecards (commit-tagged JSON from `bun run eval:bench`).
 # Local + tied to YOUR model/key/page state; pick one as a baseline by path.
 scripts/cdp/bench-results/

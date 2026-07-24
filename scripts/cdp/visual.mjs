@@ -20,16 +20,17 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 // ---- baselines: committed per platform, GATED on one authority --------------
 //
-// Every platform writes its baselines to a COMMITTED dir `baselines/<platform>/`
-// — they are the repo's reference screens and the source the gallery renders
-// from, so a human can see every view (light + dark) straight from the repo.
+// Baselines write to `baselines/<platform>/`, but only ONE platform's dir is
+// COMMITTED: the CI authority (linux-x64). It is the gate AND the source the
+// committed gallery renders from. Any other platform (a dev's mac) writes a
+// gitignored self-baseline for the eye — it never gates and is never committed.
 //
-// But only ONE platform GATES. why: macOS and Linux cannot be pixel-compared.
-// ~96% of the panel's text uses the `-apple-system, system-ui, …` stack, which
-// resolves to a DIFFERENT family per OS — advance widths change, paragraphs
-// re-wrap. That is layout drift, not edge noise, and no tolerance admits it
-// while still catching a real change. So CI (linux-x64) is the gate; a dev's mac
-// run still captures + diffs its own committed set for the eye, but never fails.
+// why one authority: macOS and Linux cannot be pixel-compared. ~96% of the
+// panel's text uses the `-apple-system, system-ui, …` stack, which resolves to a
+// DIFFERENT family per OS — advance widths change, paragraphs re-wrap. That is
+// layout drift, not edge noise, and no tolerance admits it while still catching
+// a real change. So the reference is captured + committed on CI (via the reseed
+// workflow_dispatch), and a mac run compares locally without gating.
 export const VISUAL_AUTHORITY = 'linux-x64';
 export const VISUAL_PLATFORM = process.env.VISUAL_PLATFORM || `${process.platform}-${process.arch}`;
 export const IS_AUTHORITY = VISUAL_PLATFORM === VISUAL_AUTHORITY;
