@@ -835,6 +835,16 @@ export const STATES = [
       await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
       await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.sessions-list .session-row')`), { budgetMs: 8_000, pollMs: 50 });
+      // why: the active row's `${messageCount} msgs` is written from the
+      // persisted session record, which lags the assistantText+!busy signal by
+      // one message-store write — the just-finished turn can render "1 msg"
+      // (user only) before the assistant message lands, a stable per-run race
+      // that flips the top row's count vs the committed baseline. Wait for the
+      // count to settle to its true post-turn value (2) so the snapshot is
+      // deterministic. (Not a clock/timestamp issue — the time-ago is stable.)
+      await waitFor(() => evalIn(ctx.page,
+        `/\\b2 msgs\\b/.test(document.querySelector('.sessions-list .session-row')?.textContent || '')`),
+        { budgetMs: 8_000, pollMs: 50 });
       await rec.visual('sessions-list');
       // Return to the chat view for later states.
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
