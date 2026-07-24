@@ -18,24 +18,24 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// ---- the baseline authority -------------------------------------------------
+// ---- baselines: committed per platform, GATED on one authority --------------
 //
-// why ONE platform owns the committed baselines: macOS and Linux cannot be
-// pixel-compared. ~96% of the side panel's rendered text uses the
-// `-apple-system, system-ui, …` stack, which resolves to a DIFFERENT family per
-// OS — so advance widths change, so paragraphs re-wrap. That is layout drift,
-// not edge noise, and no tolerance admits it while still catching a real UI
-// change. So baselines are captured and compared on the CI runner only.
+// Baselines write to `baselines/<platform>/`, but only ONE platform's dir is
+// COMMITTED: the CI authority (linux-x64). It is the gate AND the source the
+// committed gallery renders from. Any other platform (a dev's mac) writes a
+// gitignored self-baseline for the eye — it never gates and is never committed.
 //
-// Off-authority runs (a dev's mac) still capture and still diff — against a
-// gitignored self-baseline — so the agent verify loop can LOOK at the render
-// and see what moved. They just never gate.
+// why one authority: macOS and Linux cannot be pixel-compared. ~96% of the
+// panel's text uses the `-apple-system, system-ui, …` stack, which resolves to a
+// DIFFERENT family per OS — advance widths change, paragraphs re-wrap. That is
+// layout drift, not edge noise, and no tolerance admits it while still catching
+// a real change. So the reference is captured + committed on CI (via the reseed
+// workflow_dispatch), and a mac run compares locally without gating.
 export const VISUAL_AUTHORITY = 'linux-x64';
 export const VISUAL_PLATFORM = process.env.VISUAL_PLATFORM || `${process.platform}-${process.arch}`;
 export const IS_AUTHORITY = VISUAL_PLATFORM === VISUAL_AUTHORITY;
-export const BASELINE_DIR = IS_AUTHORITY
-  ? join(HERE, 'baselines', VISUAL_AUTHORITY)
-  : join(HERE, 'baselines-local', VISUAL_PLATFORM);
+export const BASELINES_ROOT = join(HERE, 'baselines');
+export const BASELINE_DIR = join(BASELINES_ROOT, VISUAL_PLATFORM);
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 

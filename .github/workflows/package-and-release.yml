@@ -81,6 +81,21 @@ jobs:
             echo '::error::A generated file (manifest.json, channel-config.js, or badges/tscheck.json) is out of sync with its generator — run `bun run gen:dev` and commit.'
             exit 1
           }
+      # The committed visual gallery ("brief") must always reflect the committed
+      # baselines — it is regenerated FROM them, so a reseed that forgets to
+      # rebuild it would ship a stale brief. Skips cleanly until the authority
+      # baselines are first committed (nothing to render yet).
+      - name: Gallery in sync with baselines
+        run: |
+          if [ -d scripts/cdp/baselines/linux-x64 ]; then
+            bun run gallery
+            git diff --exit-code scripts/cdp/gallery.html || {
+              echo '::error::scripts/cdp/gallery.html is out of sync with the committed baselines — run `bun run gallery` and commit.'
+              exit 1
+            }
+          else
+            echo 'no linux-x64 baselines committed yet — skipping gallery drift check'
+          fi
 
   # Additive job — existing job names above/below are referenced by
   # branch-protection required checks; this one can be added to that
@@ -231,7 +246,7 @@ jobs:
     # run on the SAME head SHA, and a reseed passes trivially (it rewrites
     # instead of comparing). A distinct name means a reseed can never satisfy
     # the gating check. Otherwise this display name stays stable.
-    name: "visual (side panel render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
+    name: "visual (render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
     # PINNED, not ubuntu-latest: `latest` migrates between images, and a
     # freetype/fontconfig bump would re-rasterize every glyph in every baseline.
     runs-on: ubuntu-24.04
@@ -275,7 +290,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## visual — side panel render"
+            echo "## visual — UI render (side panel + full tab, light + dark)"
             echo
             bun scripts/cdp/visual-report.mjs
             echo
@@ -283,7 +298,8 @@ jobs:
             echo
             echo "If the change is INTENDED: re-run this workflow on your branch with"
             echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
-            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\` and commit."
+            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\` +"
+            echo "\`scripts/cdp/gallery.html\` and commit."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Flat triple per state so before/after/diff sort ADJACENTLY for a human —
@@ -328,7 +344,7 @@ jobs:
         run: |
           {
             echo "<!-- peerd-visual -->"
-            echo "**The side panel renders differently than the committed baselines.**"
+            echo "**The UI renders differently than the committed baselines.**"
             echo
             bun scripts/cdp/visual-report.mjs
             echo
@@ -336,20 +352,26 @@ jobs:
             echo
             echo "Intended? Actions → package-and-release → **Run workflow** on this branch with"
             echo "**update_visual_baselines** checked, then unzip \`visual-baselines-linux-x64\` over"
-            echo "\`scripts/cdp/baselines/linux-x64/\` and commit — the before/after then shows inline"
-            echo "in Files changed."
+            echo "\`scripts/cdp/baselines/linux-x64/\` + \`scripts/cdp/gallery.html\` and commit — the"
+            echo "before/after then shows inline in Files changed."
           } > "$RUNNER_TEMP/visual-comment.md"
           gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md" --edit-last --create-if-none \
             || gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md"
 
-      # Reseed mode: hand the fresh baselines back as a downloadable zip. No
-      # token, no push — a HUMAN looks at them and commits them.
-      - name: Upload the reseeded baselines
+      # Reseed mode: regenerate the gallery from the fresh baselines so the two
+      # stay in lockstep, then hand BOTH back as a downloadable zip. No token, no
+      # push — a HUMAN looks at them and commits baselines/linux-x64/ + gallery.html.
+      - name: Regenerate the gallery from the fresh baselines
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
+        run: bun run gallery
+      - name: Upload the reseeded baselines + gallery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
         uses: actions/upload-artifact@v6
         with:
           name: visual-baselines-linux-x64
-          path: scripts/cdp/baselines/linux-x64/*.png
+          path: |
+            scripts/cdp/baselines/linux-x64/*.png
+            scripts/cdp/gallery.html
           if-no-files-found: error
           retention-days: 7
 
