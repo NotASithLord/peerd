@@ -158,6 +158,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   instanceId?: string,
    *   actorType?: 'webvm' | 'notebook' | 'app' | 'web' | 'dweb',
    *   backing?: 'tab' | 'api',
+   *   review?: boolean,
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -177,6 +178,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     instanceId,
     actorType,
     backing,
+    review,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -214,6 +216,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // egress, prompt, no-tab) reads turnSession.backing, so dropping it here silently
       // makes an API actor behave as a tab actor.
       ...(backing ? { backing } : {}),
+      // #160: the review-exemption marker. MUST be persisted: the offscreen
+      // tool-dispatch route rebuilds a review child's ctx from the RECORD alone
+      // and re-stamps exposure:'review' from this field — dropping it here (like
+      // backing above) silently makes the reviewer's three instance reads
+      // refused on the offscreen path. SW-only: spawn.js sets it from the trusted
+      // review orchestrator, never a worker/model arg. Persist only when true so
+      // every other child stays absent (fail-closed).
+      ...(review === true ? { review: true } : {}),
     };
     await idb.put(STORE, record);
     return present(record, []);

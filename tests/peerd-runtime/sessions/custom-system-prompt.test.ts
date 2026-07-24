@@ -41,6 +41,31 @@ const makeStore = () => {
   });
 };
 
+describe('session store — review marker (#160)', () => {
+  // why a REAL create→get round-trip, not a mocked record: the #160 offscreen
+  // relay rebuilds a review child's ctx from the PERSISTED record and stamps
+  // exposure from rec.review. A first cut passed `review:true` to create() but
+  // the field wasn't in create()'s whitelist, so it was silently dropped and
+  // the exemption was dead on the offscreen (Chrome) path — invisible to the
+  // relay test because that test hand-fed the record via a mocked sessions.get.
+  // This pins the persistence create() must provide for that stamp to fire.
+  test('create persists review:true and round-trips through get', async () => {
+    const store = makeStore();
+    const child = await store.create({ kind: 'spawned', review: true });
+    expect(child.review).toBe(true);
+    expect((await store.get(child.sessionId))!.review).toBe(true);
+  });
+
+  test('review is absent unless explicitly true (fail-closed, strict boolean)', async () => {
+    const store = makeStore();
+    const plain = await store.create({ kind: 'spawned' });
+    expect('review' in plain).toBe(false);
+    // a non-true value never persists a truthy marker
+    const loose = await store.create({ kind: 'spawned', review: /** @type any */ ('yes') as any });
+    expect('review' in loose).toBe(false);
+  });
+});
+
 describe('session store — customSystemPrompt', () => {
   test('create persists a non-empty block and omits everything else', async () => {
     const store = makeStore();

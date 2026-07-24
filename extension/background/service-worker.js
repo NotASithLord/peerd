@@ -239,7 +239,7 @@ import {
   makeAsyncActors,
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
-  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors, buildAncestry,
+  makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
@@ -1918,6 +1918,9 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // adopted tab or undefined (0-tab state); buildToolContext fails closed on a stale id.
   ownedTabFor: (/** @type {string} */ sid) => webActorTabBindings.tabFor(sid),
   EXPOSURE_ACTOR,
+  // #160: lets the tool-dispatch route re-stamp a review child's exemption
+  // marker from its persisted record (see offscreen-actor-client.js).
+  EXPOSURE_REVIEW,
   recordModelCall: contextSnapshots.record,
   // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
   // defined below, read at call time — same pattern as ownedTabFor). why: the

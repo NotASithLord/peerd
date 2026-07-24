@@ -495,6 +495,14 @@ export const makeSpawnActor = (deps) => {
       // ctx from THIS list and re-checks every relayed call against it — the actor
       // analog of the actor instance-pin. The worker's call args are never trusted.
       grantedTools: [...allowedNames],
+      // #160: persist the review marker so the OFFSCREEN relay can re-stamp
+      // exposure:'review' when it rebuilds this child's ctx (the
+      // 'actor/tool-dispatch' route only has the session record — the in-SW
+      // fallback below stamps from this closure's `review` directly, so without
+      // this field the exemption was dead on the primary offscreen platform).
+      // Still SW-only: written here from the trusted spawn req at create;
+      // a worker or model arg can never reach it.
+      ...(review ? { review: true } : {}),
       // PR #134 phase 3 — the trusted-lineage hop verdict, stamped SERVER-SIDE
       // at create so the chain is never model-supplied. Trusted ONLY when the
       // spawning turn explicitly proved itself non-inbound; an inbound spawn

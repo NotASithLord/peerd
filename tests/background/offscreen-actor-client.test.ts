@@ -115,6 +115,47 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
     expect(out.result.restrictedTo.sort()).toEqual(['read_memory', 'script']);
   });
 
+  // #160: the review exemption must fire on the LIVE relay path — the gate tests
+  // hand-build {exposure} ctxs, which is how the "stamped only on the in-SW
+  // fallback" regression stayed invisible. These pin the relay's own logic:
+  // given a record with review:true it stamps, otherwise it doesn't. The OTHER
+  // half — that create() actually persists review so a real record carries it —
+  // is pinned in sessions/custom-system-prompt.test.ts (a real create→get
+  // round-trip); the two together close the gap, since a mocked get here can't
+  // prove the store keeps the field.
+  test('a REVIEW child re-stamps exposure from the PERSISTED record', async () => {
+    let seenCtx: any = null;
+    const client = makeOffscreenActorClient(subDeps({
+      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['js_read_file'], review: true }) },
+      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
+      EXPOSURE_REVIEW: 'review',
+    }));
+    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'js_read_file', args: {} } });
+    expect(out.ok).toBe(true);
+    expect(seenCtx.exposure).toBe('review');
+  });
+
+  test('a NON-review spawned child gets NO exposure from the relay (fail-closed)', async () => {
+    let seenCtx: any = null;
+    const client = makeOffscreenActorClient(subDeps({
+      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
+      EXPOSURE_REVIEW: 'review',
+    }));
+    await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'script', args: {} } });
+    expect(seenCtx.exposure).toBeUndefined();
+  });
+
+  test('a truthy-but-not-true review field stamps nothing (strict boolean, like the record write)', async () => {
+    let seenCtx: any = null;
+    const client = makeOffscreenActorClient(subDeps({
+      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script'], review: 'yes' }) },
+      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
+      EXPOSURE_REVIEW: 'review',
+    }));
+    await client.routes['actor/tool-dispatch']({ actorSessionId: 's1', call: { name: 'script', args: {} } });
+    expect(seenCtx.exposure).toBeUndefined();
+  });
+
   test('an UNGRANTED tool the worker asks for is REFUSED before any dispatch (never trust the worker)', async () => {
     let dispatched = false;
     const client = makeOffscreenActorClient(subDeps({ dispatchToolCall: async () => { dispatched = true; return { ok: true }; } }));
