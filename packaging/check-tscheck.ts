@@ -87,7 +87,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 505/506 → 510: the #119 (page bridge + OM2W eval) and #187 (fetch content
 // pipeline) file sets merge — both ledgers above are kept; the union floor.
 // 510 → 511: the Z.ai GLM provider adapter (peerd-provider/adapters/glm.js).
-const COVERED_FLOOR = 531;
+// 530 → 534: the security-boundary arc's four pure cores —
+// actor/reply-schema.js (#241), actor/ugc-registry.js (#242),
+// tools/egress-heuristics.js (#243), dom/cdr.js (#244).
+const COVERED_FLOOR = 534;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
