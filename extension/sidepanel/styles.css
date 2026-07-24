@@ -668,8 +668,9 @@ html, body, #app {
   outline-offset: -2px;
 }
 /* The confirm-actions toggle. Sits in the same control row as the Plan/Act
-   pills, so its ON state wears the SAME accent as the active Act pill —
-   consistency over the strict monochrome rule here (owner call). */
+   pills; its ON state inverts monochrome (text-on-bg) to match the active
+   Act pill — no accent, per the brand rule (the redesign retired the old
+   cyan-accent active states across this row). */
 .planact-confirm {
   font: 500 10px/1 var(--mono);
   letter-spacing: 0.03em;
@@ -714,9 +715,9 @@ html, body, #app {
 }
 
 /* Goal toggle (mode row) — arms the next send to start an autonomous goal
-   run instead of a single turn. Same pill family as the planact
-   controls; the ARMED state wears the shared accent (consistency with the
-   active Act / Confirm pills — owner call for this row). */
+   run instead of a single turn. Same pill family as the planact controls;
+   the ARMED state inverts monochrome (text-on-bg) like the active Act /
+   Confirm pills — no accent, per the brand rule. */
 .goal-toggle {
   font: 500 10px/1 var(--mono);
   letter-spacing: 0.03em;
