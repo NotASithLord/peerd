@@ -273,6 +273,9 @@ const ACTION_CLASS_LABEL = {
  * @property {string} [actionClass]
  * @property {string} [sideEffect]
  * @property {string} [summary]
+ * @property {string} [note]   why this call is being confirmed when the reason
+ *   is something other than the ordinary Plan/Act policy (the #242 UGC-zone
+ *   rule today). Plain prose, rendered verbatim.
  * @property {string} [tool]
  * @property {string[]} [origins]
  */
@@ -320,6 +323,15 @@ export const ConfirmModal = {
             : [
               m('p.muted', { style: 'margin:0 0 8px;' },
                 `The agent wants to run ${kind} action.`),
+              // why: an optional one-sentence reason, shown only when the
+              // confirm was forced by something OTHER than the ordinary
+              // Plan/Act policy — today the #242 UGC-zone rule. It sits ABOVE
+              // the call summary because it is the part the user has to weigh;
+              // the summary is the detail. Absent → the card renders exactly as
+              // it always has.
+              prompt.note
+                ? m('p.muted', { style: 'margin:0 0 8px;' }, prompt.note)
+                : null,
               m('pre.confirm-summary', prompt.summary ?? prompt.tool),
             ],
         origins.length

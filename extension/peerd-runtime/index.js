@@ -265,7 +265,7 @@ export {
   HOOKS_STORAGE_KEY,
   runPreToolUse, runPostToolUse, selectHooks, hookMatches,
   compileUserHook, parseHookMarkdown,
-  DEFAULT_HOOKS, egressAllowlistHook,
+  DEFAULT_HOOKS, egressAllowlistHook, egressTripwireHook,
 } from './tools/hooks/index.js';
 
 // --- transfer (settings export/import; dual-distribution §10) -----------

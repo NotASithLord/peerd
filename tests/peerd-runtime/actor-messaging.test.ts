@@ -357,7 +357,7 @@ describe('message_actor — deterministic schema-validated reply (#241)', () => 
   // A WEB actor (kind 'web') is UNTRUSTED web content; with the flag on, its
   // reply must be a strict JSON envelope validated before it reaches the sender.
   const webSchema = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) => harness({
-    schemaValidatedReplies: true,
+    schemaValidatedReplies: () => true,
     resolveActor: async () => ({ instanceId: '42', kind: 'web', actorSessionId: 'web-res-1', name: undefined, tabId: 42 }),
     ...over,
   });
@@ -413,7 +413,7 @@ describe('message_actor — deterministic schema-validated reply (#241)', () => 
 
   test('with the flag OFF, a web actor reply passes through free-form (default, unchanged)', async () => {
     const { messageActor, reentries } = webSchema({
-      schemaValidatedReplies: false,
+      schemaValidatedReplies: () => false,
       runActorTurn: async () => ({ result: 'the price is $42' }),   // not JSON
     });
     await messageActor({ to: '42', message: 'x', senderSessionId: 'chat-1' });
@@ -425,7 +425,7 @@ describe('message_actor — deterministic schema-validated reply (#241)', () => 
     // app-1 → kind 'app' (harness default): compute output keeps the free-form
     // path; only web/api ingest untrusted web content.
     const { messageActor, reentries } = harness({
-      schemaValidatedReplies: true,
+      schemaValidatedReplies: () => true,
       runActorTurn: async () => ({ result: 'built the thing' }),   // not JSON, must pass through
     });
     await messageActor({ to: 'app-1', message: 'x', senderSessionId: 'chat-1' });

@@ -8,24 +8,47 @@
 // authored by an attacker, but the origin's cookies belong to the user. So the
 // prompt-injection payload arrives WITH the authority to act on it.
 //
-// This module is ONLY the deterministic CLASSIFIER: given a URL, is its origin
-// a known UGC zone? Classification is a static lookup, never a channel probe —
-// same input, same answer, offline, forever.
+// This module is the deterministic CLASSIFIER plus the one PURE PREDICATE built
+// on it. Classification is a static lookup, never a channel probe — same input,
+// same answer, offline, forever.
 //
-// THE INTENDED CONTRACT (wired in a DELIBERATE follow-up, NOT here): a web actor
-// pointed at a `ugc` zone is handed `surface:'read'` — an additive downscale to
-// read-only DOM tools with the authenticated write/click surface withheld until
-// the orchestrator does an origin-pinned read→write hand-off. This file makes NO
-// exposure/gate/origin-pin decision; it only labels the zone. The exposure
-// change, gate enforcement, and the read→write hand-off land separately (they
-// touch tools/exposure.js + tools/gates.js, deliberately out of scope here).
+// THE ENFORCEMENT (ugcWriteConfirm below, wired in tools/dispatcher.js): a
+// non-read BROWSER-SESSION action on a page classified `ugc` always asks the
+// user, even when confirmations are toggled OFF. It puts a human on the exact
+// keystroke an injected comment would want to drive.
+//
+// why a forced CONFIRM and not a hard read-only downscale (the shape first
+// sketched here): "reply to this GitHub issue" and "update the Jira ticket" are
+// real, wanted work, and a hard block turns the most valuable surface peerd has
+// into a dead end — users would just turn the protection off. A confirm keeps
+// the flow and moves the decision to the one party the injected page cannot
+// impersonate. It also mirrors a precedent already in the tree: memory tools
+// self-confirm unconditionally (tools/dispatcher.js `selfConfirms`) for exactly
+// this lethal-trifecta reason.
+//
+// why it is not the whole answer: a confirm is only as good as what the user
+// sees. It is layered WITH the offscreen heap fence (untrusted reasoning never
+// holds the vault DK), the CDR read boundary (dom/cdr.js), and the egress
+// tripwire (tools/egress-heuristics.js) — none of which depend on a human
+// reading carefully.
+//
+// THE COST, stated plainly: posting one comment is a type + a click, so it is
+// TWO prompts, not one. We take that rather than invent a per-turn "act on this
+// page" grant, because (a) it is exactly what a user who switches
+// confirmations ON already lives with on every site — the same machinery, one
+// posture, no bespoke second concept — and (b) an actor session deliberately
+// accumulates NO standing grants (background/service-worker.js `ephemeral`),
+// which is the property that makes this confirm meaningful at all. If the
+// prompting proves annoying in the field, a per-turn per-origin grant is the
+// designed follow-up; speculating it now would trade a real guarantee for a
+// convenience nobody has asked for yet.
 //
 // FAIL-OPEN is correct. An unmatched URL classifies as `standard`, and a missed
-// zone merely skips the additive read-only downscale — it opens no hole that
-// wasn't already open, it just declines to add protection we didn't recognize we
-// needed. The registry is EXTENSIBLE: adding a zone is one frozen entry, and a
-// too-narrow list under-protects (safe) rather than over-restricts (breaks web
-// work on ordinary sites).
+// zone merely skips the added confirm — it opens no hole that wasn't already
+// open, it just declines to add protection we didn't recognize we needed. The
+// registry is EXTENSIBLE: adding a zone is one frozen entry, and a too-narrow
+// list under-protects (safe) rather than over-restricts (nags on ordinary
+// sites, which is how a security prompt gets trained away).
 
 // why: reuse the egress-side canonicalizer rather than re-deriving origin rules.
 // It lowercases the host, drops default ports, and REJECTS anything that isn't a
@@ -161,4 +184,44 @@ export const classifyUrl = (url) => {
     }
   }
   return { zone: 'standard' };
+};
+
+// Browser-session tools that MOVE somewhere rather than act on the page in
+// front of them. why exempt: the risk this predicate addresses is an injected
+// page driving the actor's AUTHENTICATED WRITE surface — the click, the
+// keystroke, the script that posts as the user. Going somewhere else is not
+// that, it is how the actor finishes reading and leaves; confirming it would
+// nag on ordinary link-following and train the prompt away, which costs more
+// than it buys. The navigation vectors have their own layers: the denylist
+// (origin gate) for where, and the egress tripwire
+// (tools/hooks/defaults/egress-tripwire.js) for a URL carrying scraped bytes.
+const NAVIGATION_TOOLS = new Set(['navigate', 'open_tab', 'close_tab']);
+
+/**
+ * Does this tool call need the forced UGC confirmation?
+ *
+ * Takes PRIMITIVES, not a ctx — the caller reads the four values off the live
+ * tool context, so this stays a pure function that can be exhaustively tested
+ * without a dispatcher. Returns the matched `ruleId` (so the caller can say WHY
+ * it is asking) or null for "no opinion".
+ *
+ * The rule, in one line: a non-read `tab` action, that is not just navigation,
+ * on a page classified `ugc`. The zone is decided from the URL of the page the
+ * call ACTS ON — not the destination — because the authority being borrowed is
+ * that page's session.
+ *
+ * @param {object} call
+ * @param {string} call.toolName            The tool's registered name.
+ * @param {string} [call.primitive]         tool.primitive.
+ * @param {string} [call.sideEffect]        tool.sideEffect ('read' | 'write' | 'mutate_external').
+ * @param {string} [call.url]               URL of the tab the call acts on (ctx.activeTab.url).
+ * @returns {string | null}                 The matched UGC ruleId, or null.
+ */
+export const ugcWriteConfirm = ({ toolName, primitive, sideEffect, url }) => {
+  if (primitive !== 'tab' || sideEffect === 'read') return null;
+  if (NAVIGATION_TOOLS.has(toolName)) return null;
+  // why the `?? ''` rather than an early return: classifyUrl already fails open
+  // on garbage, so one path handles "no tab yet", "about:blank", and a real URL.
+  const { zone, ruleId } = classifyUrl(url ?? '');
+  return zone === 'ugc' ? (ruleId ?? 'ugc') : null;
 };

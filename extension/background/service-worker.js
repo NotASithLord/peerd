@@ -969,6 +969,15 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
     // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
     ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
+    // #241: the PROMPT half of the deterministic schema boundary. The turn driver
+    // reads it off this ctx to decide which rule (3) the actor's system prompt
+    // carries (loop/system-prompt.js SCHEMA_REPLY_RULE). It comes from the SAME
+    // setting that arms the validator in actorMessaging below, read LIVE on both
+    // sides — that is what keeps the two halves one switch. Stamped for every ctx
+    // (not just actors) because it costs nothing and the turn driver only forwards
+    // it on an actor turn; narrowing to the kinds that validate lives in
+    // actorBlock, next to the rule it selects.
+    schemaReply: settingsStore.get().schemaValidatedReplies === true,
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -3730,8 +3739,14 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     const actorSurface = (kind === 'web' && rec.backing !== 'api')
       ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
       : undefined;
+    // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
+    // runs through this path, so a schemaReply stamped only in buildToolContext
+    // would arm the validator while the actor was never told the format — every
+    // web reply dropped. Read from the SAME setting, at the same moment, as the
+    // getter injected into actorMessaging below.
+    const schemaReply = settingsStore.get().schemaValidatedReplies === true;
     const systemPrompt = await renderSystemPrompt({
-      actorType: kind, backing: rec.backing, instanceId, actorSurface,
+      actorType: kind, backing: rec.backing, instanceId, actorSurface, schemaReply,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
     });
     const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
@@ -3958,6 +3973,11 @@ const actorMessaging = makeActorMessaging({
     buildAncestry({ sessionId, getRecord: (/** @type {string} */ id) => sessions.get(id) }),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
+  // #241 — the VALIDATOR half. A getter, not a boolean: this factory runs once at
+  // SW boot, so a boolean would freeze at its boot value and ignore the user
+  // flipping the setting. Reading it here, per reply, from the same store that
+  // stamps the actor's prompt rule is what makes the two halves one switch.
+  schemaValidatedReplies: () => settingsStore.get().schemaValidatedReplies === true,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),
   mailbox: actorMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),

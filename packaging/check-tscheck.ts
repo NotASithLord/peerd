@@ -90,7 +90,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 530 → 534: the security-boundary arc's four pure cores —
 // actor/reply-schema.js (#241), actor/ugc-registry.js (#242),
 // tools/egress-heuristics.js (#243), dom/cdr.js (#244).
-const COVERED_FLOOR = 534;
+const COVERED_FLOOR = 537;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

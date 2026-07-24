@@ -3,9 +3,7 @@
 // boundary (issue #244).
 //
 // PURE (text in -> scrubbed text out), so it is fully unit-testable without a
-// browser — same posture as ax-serialize.js. The imperative wiring (calling
-// this from the injected readers) is a deliberate FOLLOW-UP; this file is only
-// the scrubber.
+// browser — same posture as ax-serialize.js.
 //
 // THREAT MODEL. A page can carry bytes that are INVISIBLE to the human who
 // approved the read but fully VISIBLE to the model that reads the serialized
@@ -19,14 +17,31 @@
 //
 // WHERE CDR SITS. This is the PRE-PASS, not the fence. The data/instruction
 // boundary — tainting page text as DATA the model must not obey — is already
-// wrapUntrusted's job (tools/prompt-wrap.js). CDR composes IN FRONT of it:
+// wrapUntrusted's job (tools/prompt-wrap.js). CDR composes IN FRONT of it, so
+// we deliberately add no competing wrapper — a second fence would just be a
+// thing to keep in sync with the real one. CDR removes the invisible bytes;
+// wrapUntrusted fences whatever visible text remains. Defense in depth, each
+// layer with one job.
 //
-//     wrapUntrusted({ origin, tool, body: disarmText(snapshot) })
+// TWO EXPORTS, because the fence is not only used for page markup.
 //
-// so we deliberately export ONLY disarmText and add no competing wrapper —
-// a second fence would just be a thing to keep in sync with the real one.
-// CDR removes the invisible bytes; wrapUntrusted fences whatever visible text
-// remains. Defense in depth, each layer with one job.
+//   disarmText(raw)    the UNIVERSAL sweep — invisible + control bytes only.
+//                      Wired INSIDE wrapUntrusted (tools/prompt-wrap.js), so
+//                      it covers every fenced body automatically and a new
+//                      web-sourced tool cannot forget it.
+//   disarmMarkup(raw)  disarmText PLUS HTML-comment removal. Applied only
+//                      where the body is known to be page MARKUP (fetch_url,
+//                      read_page's content mode, read_web_cache).
+//
+// why the split, concretely: wrapUntrusted fences ~27 callsites and only some
+// carry page text. The rest carry SOURCE CODE and DIFFS — js_read_file,
+// app_read_file, site_client_read, request_review's diff, a2a_run output. The
+// invisible/control sweep is safe on all of them (a literal zero-width byte in
+// source is the trojan-source attack, not a feature worth preserving). The
+// HTML-comment pass is NOT: it would silently eat `<!-- ... -->` out of an HTML
+// file the model is about to edit and write back, corrupting the user's file
+// from a security pass they never asked for. So the destructive pass stays
+// opt-in at the markup producers, and the safe one goes universal.
 //
 // OUT OF SCOPE (noted, not done here). Stripping nodes hidden by CSS
 // (`display:none`, off-screen positioning, `aria-hidden`) needs the RENDER
@@ -124,24 +139,22 @@ const INVISIBLES_RE = new RegExp(
 // why: HTML comments are never painted, so any instruction inside one is
 // invisible to the human and visible to the model. We strip well-formed
 // `<!-- ... -->` pairs REGARDLESS of surrounding context — including inside
-// code-looking text. This can eat a literal comment a user is genuinely
-// reading in a code snippet; that is the deliberate security default at the
-// READ boundary (a page-text snapshot is data to reason over, not source to
-// preserve verbatim). An UNCLOSED `<!--` is left as-is: with no `-->` it can
-// smuggle nothing, so removing it would only mangle innocent text.
+// code-looking text. That destructiveness is exactly why this pass is NOT in
+// the universal sweep: see disarmMarkup below for where it is safe to apply.
+// An UNCLOSED `<!--` is left as-is: with no `-->` it can smuggle nothing, so
+// removing it would only mangle innocent text.
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/gu;
 
 /**
- * Disarm serialized page text: strip content invisible to a human but visible
- * to the model, leaving all legitimate visible text untouched. Returns '' for
- * a non-string so callers can pass a possibly-undefined snapshot.
+ * The UNIVERSAL sweep: strip bytes that are invisible to a human but visible
+ * to the model, leaving every legitimate visible character untouched. Returns
+ * '' for a non-string so callers can pass a possibly-undefined body.
  *
- * Order matters. Invisible/control bytes are removed FIRST, so an obfuscated
- * comment marker (e.g. `<!--` interleaved with zero-width separators, a
- * variation selector, or a NUL byte) is reassembled into a plain `<!--` and
- * then caught by the comment pass.
+ * Safe on ANY fenced body — page text, source code, diffs — because every
+ * character it removes is one that renders as nothing. That is what lets it
+ * live inside wrapUntrusted and cover all fenced content by construction.
  *
- * @param {unknown} raw  serialized page text (a11y snapshot or markdown)
+ * @param {unknown} raw  any untrusted text body
  * @returns {string}
  */
 export const disarmText = (raw) => {
@@ -155,7 +168,21 @@ export const disarmText = (raw) => {
     // 3. Remaining invisible format chars (zero-width, bidi, tags, other Cf).
     .replace(INVISIBLES_RE, '')
     // 4. Control-byte runs (invisible separators), preserving TAB/LF/CR.
-    .replace(CONTROL_RE, '')
-    // 5. HTML comments — now that any obfuscating invisibles are gone.
-    .replace(HTML_COMMENT_RE, '');
+    .replace(CONTROL_RE, '');
 };
+
+/**
+ * The MARKUP sweep: disarmText plus HTML-comment removal. Apply ONLY where the
+ * body is known to be page markup the model reads as data and never writes
+ * back — fetch_url, read_page's content mode, read_web_cache.
+ *
+ * Order matters, and it is the reason this composes rather than duplicating:
+ * disarmText runs FIRST, so a comment marker obfuscated with zero-width
+ * separators, a variation selector, or a NUL byte spliced between its
+ * characters is reassembled into a plain `<!--` and only then caught by the
+ * comment pass.
+ *
+ * @param {unknown} raw  serialized page markup / markdown
+ * @returns {string}
+ */
+export const disarmMarkup = (raw) => disarmText(raw).replace(HTML_COMMENT_RE, '');

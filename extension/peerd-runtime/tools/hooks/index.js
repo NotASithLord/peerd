@@ -30,4 +30,4 @@ export {
   parseHookMarkdown,
 } from './compile.js';
 
-export { DEFAULT_HOOKS, egressAllowlistHook } from './defaults/index.js';
+export { DEFAULT_HOOKS, egressAllowlistHook, egressTripwireHook } from './defaults/index.js';

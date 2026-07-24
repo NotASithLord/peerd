@@ -87,7 +87,7 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, advanceQueue?: (sessionId: string) => void, stop?: (sessionId: string) => boolean }} deps.turnSlots
  * @param {() => Promise<string | null>} deps.getActiveSessionId
  * @param {(sessionId: string) => Promise<Array<import('./delegation-lineage.js').LineageHop>>} [deps.getAncestry]
- * @param {boolean} [deps.schemaValidatedReplies] issue 241 - force an untrusted (web/api) actor's reply through the strict JSON envelope validator before it reaches the orchestrator. Default false (free-form fenced path).
+ * @param {() => boolean} [deps.schemaValidatedReplies] issue 241 - force an untrusted (web/api) actor's reply through the strict JSON envelope validator before it reaches the orchestrator. Read PER REPLY (a getter, not a boolean) so flipping the setting takes effect without an SW restart. Default `() => false` (free-form fenced path).
  *   Build the sender's lineage chain (sender-first toward the root) from the
  *   session store — the shell walk mayMessageActor/messageProvenance read.
  *   Default returns [] — FAIL-CLOSED: without a chain only the foreground chat
@@ -110,12 +110,17 @@ export const makeActorMessaging = (deps) => {
     resolveActor, runActorTurn, reenter, turnSlots,
     getActiveSessionId, isVaultLocked, wrapUntrusted,
     getAncestry = async () => [],
-    // #241 — when true, an untrusted actor's (web/api) reply must be a strict
-    // JSON envelope, validated by deterministic code before it reaches the
+    // #241 — when this reads true, an untrusted actor's (web/api) reply must be a
+    // strict JSON envelope, validated by deterministic code before it reaches the
     // orchestrator; a non-conforming reply is DROPPED for a fixed notice. Default
-    // OFF (the free-form fenced path) until the actor prompt-side emits the
-    // envelope; SW-injected from a setting.
-    schemaValidatedReplies = false,
+    // OFF (the free-form fenced path).
+    //
+    // why a GETTER and not a boolean: deps are destructured ONCE, at construction,
+    // and makeActorMessaging is built at SW boot. A boolean would freeze at its
+    // boot value and silently ignore the user flipping the setting. The prompt
+    // half has the same property for free (ctx.schemaReply is stamped per turn),
+    // so reading per reply is what keeps the two halves ONE switch.
+    schemaValidatedReplies = () => false,
     appendAudit = async () => {}, now = Date.now, caps = {}, log = () => {},
     mailbox = { append: async () => {}, remove: async () => {}, load: async () => [] },
   } = deps;
@@ -373,7 +378,7 @@ export const makeActorMessaging = (deps) => {
       // CODE (re-fenced at the script boundary), a different contract. A
       // non-conforming reply is dropped for a fixed, content-free notice — the
       // rejected bytes never reach the orchestrator as free text.
-      if (schemaValidatedReplies && !failed && !bare && SCHEMA_VALIDATED_KINDS.has(kind)) {
+      if (schemaValidatedReplies() && !failed && !bare && SCHEMA_VALIDATED_KINDS.has(kind)) {
         const v = validateActorReply(rawBody);
         if (v.ok) { outBody = renderValidatedReply(v.value); outFailed = v.value.status === 'failed'; }
         else {

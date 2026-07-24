@@ -19,6 +19,7 @@
 import { fetchUrl } from '../web/primitives.js';
 import { originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
+import { disarmMarkup } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
 
@@ -127,16 +128,35 @@ export const fetchUrlTool = {
       // page (readerable:false), a missing client (Firefox — no offscreen
       // doc), or an extraction error all fall back to today's raw behavior —
       // extraction is an optimization, never a gate on the fetch.
-      let workingBody = res.body;
+      // CDR (dom/cdr.js) runs HERE, on the whole body, BEFORE anything derived
+      // from it exists. why here and not later: everything below measures or
+      // slices this string — excerptRelevant/windowText report character
+      // offsets, and webCache.put stores the text read_web_cache pages back.
+      // Disarming after windowing would make those offsets describe pre-strip
+      // text and would leave undisarmed bytes sitting in the cache. The MARKUP
+      // sweep (comments too, not just the invisible bytes wrapUntrusted always
+      // strips) because a fetched body is page markup: an instruction inside
+      // `<!-- -->` is invisible to the human who approved the fetch and fully
+      // visible to the model. Applies to raw:true as well — the comment is the
+      // vector regardless of who asked for the markup.
+      let workingBody = disarmMarkup(res.body);
       let format = 'raw';
       let title = null;
       const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | null | undefined} */ (
         /** @type {any} */ (ctx).webOffscreenClient);
       if (args.raw !== true && /text\/html|application\/xhtml/i.test(ct) && webClient?.extractMarkdown) {
         try {
-          const ex = await webClient.extractMarkdown({ html: res.body, url: res.finalUrl || args.url });
-          if (ex.readerable && typeof ex.markdown === 'string' && ex.markdown.trim()) {
-            workingBody = ex.markdown;
+          const ex = await webClient.extractMarkdown({ html: workingBody, url: res.finalUrl || args.url });
+          // Disarmed AGAIN after extraction, and it is not belt-and-braces:
+          // extraction PARSES the HTML, so `&#8203;` — plain ASCII the first
+          // sweep correctly left alone — is decoded into a literal zero-width
+          // byte on the way out. The entity is the smuggling channel; this pass
+          // is the one that closes it. Emptiness is judged AFTER the strip, so a
+          // "page" that is nothing but invisible bytes falls back to raw rather
+          // than shipping a blank markdown body.
+          const markdown = disarmMarkup(ex.markdown);
+          if (ex.readerable && markdown.trim()) {
+            workingBody = markdown;
             format = 'markdown';
             title = ex.title ?? null;
           }
