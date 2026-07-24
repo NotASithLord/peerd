@@ -87,7 +87,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 505/506 → 510: the #119 (page bridge + OM2W eval) and #187 (fetch content
 // pipeline) file sets merge — both ledgers above are kept; the union floor.
 // 510 → 511: the Z.ai GLM provider adapter (peerd-provider/adapters/glm.js).
-const COVERED_FLOOR = 530;
+// 530 → 531: the CDR read-boundary scrubber (peerd-runtime/dom/cdr.js) — the
+// pure text-disarm core for issue #244.
+const COVERED_FLOOR = 531;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
