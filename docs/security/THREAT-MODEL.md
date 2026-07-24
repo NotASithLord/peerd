@@ -418,10 +418,14 @@ evaluating peerd should know. Each cites where it lives in the code.
   Which hosts the extension may actually fetch or script is a runtime concern (the egress
   allowlist and denylist), so a bug that bypasses the runtime gate has full-web reach at
   the browser layer. (`manifests/base.json`.)
-- R10. The soft-injection defense has no regression harness. The structural fence
-  (`neutralizeFence`) is tested, but the "treat inside as data" framing lives in the
-  system-prompt text, so a template edit that weakens it would pass CI. The red-team
-  benchmark (scenario 08) tests the gates, not the prompt text.
+- R10. The soft-injection defense has limited regression coverage. The structural
+  fence (`neutralizeFence`) is tested, and a regression test now asserts the
+  system-prompt still carries the load-bearing untrusted-content framing
+  (`tests/peerd-runtime/system-prompt-framing.test.ts`), so a template edit that
+  strips that framing fails CI. What is still not covered: whether that framing is
+  actually persuasive to the model. The framing is a soft defense; the structural
+  defenses (the keyless heap, the gates) are the real story. The red-team benchmark
+  (scenario 08) tests the gates, not the prompt text.
   (`peerd-provider/system-prompt.txt`, `peerd-runtime/loop/system-prompt.js`.)
 - R11. Key extractability and open-web exfil. The key is generated `extractable:true`
   because `SubtleCrypto.wrapKey` requires it, so a bug holding the key reference could
@@ -445,7 +449,16 @@ Every invariant INV-1 through INV-8 is checked by an executable probe in
 function with hostile input and records whether the defense held. It runs under
 `bun test ./tests/red-team`, which is a CI gate, and publishes a result matrix to
 [`RED-TEAM-RESULTS.md`](./RED-TEAM-RESULTS.md) via `bun run red-team:report`. The
-real-realm escapes (scenario 06) are also proven in the in-browser CDP suite.
+real-realm escapes (scenario 06) are verified in the in-browser CDP suite.
+
+Read this as evidence, not proof. These are runnable probes for the core
+invariants above, not a complete adversarial audit. Most run at the unit level
+against the real defense functions; they show that a specific capability path is
+denied. They do not show that arbitrary real-world injection workflows cannot
+manipulate the user, poison memory, mislead a confirmation, or induce an action
+that no gate blocks. Those gaps are named in section 8, not claimed closed. The
+honest posture is: peerd has a formal threat model and CI-gated red-team probes
+for its core security invariants, not that it is immune to prompt injection.
 
 ---
 

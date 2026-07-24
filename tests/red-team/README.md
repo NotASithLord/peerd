@@ -6,6 +6,27 @@ real defense function with hostile input, and records whether the defense held. 
 scenarios run in CI, and re-running them re-checks the claim against the current
 code.
 
+## What this is, and what it is not
+
+This is evidence, not proof. The suite is a set of runnable security probes for
+peerd's core invariants. It is not a complete adversarial audit.
+
+- Most probes run at the **unit level**: they import the real production defense
+  function (the egress allowlist, the denylist matcher, the SSRF guard, the
+  capability strip, the gate functions, the realm seal, the bundle verifier) and
+  drive it with hostile input. That proves a specific capability path is denied.
+- The real Worker and iframe realm escapes cannot run in a Bun process; they are
+  verified in the in-browser CDP suite (see scenario 06's `verifiedBy`).
+- What the suite does **not** prove: that arbitrary real-world prompt-injection
+  workflows cannot manipulate the user, poison durable memory, mislead a
+  confirmation prompt, or induce a bad action that is not itself blocked by a
+  gate. Those are architectural and UX questions; the threat model names the
+  relevant residual risks (R1–R11) rather than claiming they are closed.
+
+The honest posture is: peerd has a formal threat model and CI-gated red-team
+probes for its core security invariants. It is not a claim that peerd is immune
+to prompt injection.
+
 ## Contents
 
 | File | Role |

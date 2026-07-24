@@ -59,7 +59,11 @@ environment in the first place. Every page action reports back what it
 actually changed on the live page (a navigation or a mutation summary),
 so success is judged from observed effect, not from the model's
 assumption. This isolation is the core of peerd's security model, not an
-add-on. (More at [peerd.ai](https://peerd.ai).)
+add-on. (More at [peerd.ai](https://peerd.ai).) The security model is
+documented and testable: see the formal threat model
+([`docs/security/THREAT-MODEL.md`](docs/security/THREAT-MODEL.md)) and the
+CI-gated red-team suite ([`tests/red-team/`](tests/red-team/), results in
+[`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md)).
 
 **Status: 0.x, experimental beta.** The initial feature buildout is
 complete and integrated, but the surface is still
@@ -272,11 +276,36 @@ WebAuthn unlock, V8 isolates, SRI) and the live DOM decide what actually
 happens. Full detail in [`SECURITY.md`](SECURITY.md) and the
 `peerd-egress` / `peerd-runtime` code.
 
+## Threat model and red-team suite
+
+peerd's security model is documented and testable, not only asserted. The
+formal **threat model**
+([`docs/security/THREAT-MODEL.md`](docs/security/THREAT-MODEL.md)) defines the
+actors, trust boundaries, assets, adversaries, numbered invariants, and known
+residual risks. A **red-team suite** ([`tests/red-team/`](tests/red-team/))
+turns those invariants into runnable probes: each drives a real defense function
+with hostile input and records whether it held. It runs in CI and covers API-key
+exfiltration, induced cross-origin fetches, summarizing secrets into model
+context, SSRF, sandbox escape, hostile peer bundles, and A2A / tool-poisoning
+analogs. The live pass/fail matrix is regenerated into
+[`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md) by
+`bun run red-team:report`.
+
+Read this honestly: these are runnable security probes for peerd's core
+invariants, not a complete adversarial audit. Most probes run at the unit level
+against the real defense functions; the real Worker and iframe realm escapes are
+verified in the in-browser suite. The threat model is explicit about what is out
+of scope and about the residual risks that remain (for example, the Chrome-only
+heap split, memory poisoning, trusted skill bodies, and origin-blind confirm
+grants). See [`tests/red-team/README.md`](tests/red-team/README.md) for how to
+run and extend the suite.
+
 ## Documentation
 
 The code is the spec. Read `CLAUDE.md` for orientation, each module's
 `index.js` for its public API, and the code itself for the rest.
-`SECURITY.md` covers the trust boundaries; `docs/store/` holds the
+`SECURITY.md` and [`docs/security/`](docs/security/) cover the trust boundaries,
+the formal threat model, and the red-team results; `docs/store/` holds the
 store-listing and compliance material.
 
 ## Repo layout
