@@ -37,6 +37,7 @@ const ORDER = [
   'initial-screen', 'idle-unlocked', 'completed-turn', 'multi-turn-transcript',
   'busy-thinking', 'mode-plan', 'tool-card-expanded', 'goal-running',
   'error-turn', 'sessions-list',
+  'home-fulltab', 'options-fulltab',
 ];
 const LABELS = {
   'initial-screen': ['Vault gate', 'First-run setup — the lock mark crowns the wordmark.'],
@@ -49,7 +50,11 @@ const LABELS = {
   'goal-running': ['Goal running', 'Goal bar, plan-todo card, tool-call cards.'],
   'error-turn': ['Failed turn', 'The error banner + failure-class chip.'],
   'sessions-list': ['Chats', 'The sessions list — active row highlighted.'],
+  'home-fulltab': ['Home (full tab)', 'The large in-browser view — nav rail, app library.'],
+  'options-fulltab': ['Settings (full tab)', 'The full-tab options page — providers, security, memory.'],
 };
+// States captured at the wide (full-tab) viewport rather than the 400px panel.
+const WIDE = new Set(['home-fulltab', 'options-fulltab']);
 
 const uri = (state, theme) => {
   const f = join(dir, `${state}.${theme}.png`);
@@ -61,20 +66,23 @@ const states = [...ORDER.filter((s) => present.has(s)), ...[...present].filter((
 
 const card = (state, i) => {
   const [name, blurb] = LABELS[state] || [state, ''];
-  const light = uri(state, 'light');
-  const dark = uri(state, 'dark');
-  const shot = (src, theme) => src
-    ? `<figure class="shot shot--${theme}"><figcaption>${theme}</figcaption><img src="${src}" alt="${name} (${theme})" width="400" height="900" loading="lazy"></figure>`
-    : `<div class="shot shot--missing">no ${theme} capture</div>`;
+  const wide = WIDE.has(state);
+  const shot = (theme) => {
+    const src = uri(state, theme);
+    return src
+      ? `<figure class="shot shot--${theme}"><figcaption>${theme}</figcaption><img src="${src}" alt="${name} (${theme})" loading="lazy"></figure>`
+      : `<div class="shot shot--missing">no ${theme} capture</div>`;
+  };
   return `
-    <section class="state">
+    <section class="state${wide ? ' state--wide' : ''}">
       <header class="state-head">
         <span class="num">${String(i + 1).padStart(2, '0')}</span>
         <span class="state-name">${name}</span>
         <code class="state-id">${state}</code>
+        ${wide ? '<span class="tag-wide">full tab · 1280</span>' : ''}
         <span class="state-blurb">${blurb}</span>
       </header>
-      <div class="pair">${shot(light, 'light')}${shot(dark, 'dark')}</div>
+      <div class="pair${wide ? ' pair--wide' : ''}">${shot('light')}${shot('dark')}</div>
     </section>`;
 };
 
@@ -110,7 +118,10 @@ const html = `<title>peerd — visual gallery</title>
   .state-name { font-size:16px; font-weight:600; }
   .state-id { font-family:var(--mono); font-size:11px; color:var(--muted); background:var(--tagbg); padding:2px 6px; border-radius:4px; }
   .state-blurb { grid-column:1 / -1; font-size:12.5px; color:var(--muted); }
+  .tag-wide { font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius:4px; padding:2px 6px; }
   .pair { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  /* Full-tab captures are 1280 wide — stack them so each reads at full width. */
+  .pair--wide { grid-template-columns:1fr; gap:22px; }
   .shot { margin:0; display:flex; flex-direction:column; gap:6px; }
   .shot figcaption { font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
   .shot img { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:10px; }

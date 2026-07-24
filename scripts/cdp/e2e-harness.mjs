@@ -193,6 +193,66 @@ export async function setEmulatedTheme(page, theme) {
   });
 }
 
+// The full-tab (large in-browser) viewport. why 1280×900: the full-tab surfaces
+// (home SPA, options) lay out a nav rail + a max-880px content column, so a
+// laptop-width frame renders them the way a real tab does — not the 400px panel.
+export const WIDE_METRICS = Object.freeze({ width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+
+/**
+ * Capture ANY attached page as a PNG buffer. Two headless-Chrome gotchas:
+ * (1) bringToFront — headless composites only the foregrounded target, so the
+ *     capture needs it active; (2) the nudge pump — a frozen (reduced-motion)
+ *     page idles the compositor and captureScreenshot then waits forever, so a
+ *     sub-pixel translateZ toggle on the root (invisible in 2D, verified 0.00000
+ *     diff) keeps frames flowing until the capture resolves.
+ * @param {{ send: (m: string, p?: object) => Promise<any> }} page
+ * @returns {Promise<Buffer>}
+ */
+export async function capturePage(page) {
+  await page.send('Page.bringToFront').catch(() => {});
+  let pumping = true;
+  let toggle = false;
+  const pump = (async () => {
+    while (pumping) {
+      toggle = !toggle;
+      await page.send('Runtime.evaluate', {
+        expression: `(() => { const e = document.documentElement; if (e) e.style.transform = 'translateZ(${toggle ? '0.0001px' : '0px'})'; })()`,
+      }).catch(() => {});
+      await sleep(50);
+    }
+  })();
+  try {
+    const r = await page.send('Page.captureScreenshot', { format: 'png' });
+    return Buffer.from(r.data, 'base64');
+  } finally { pumping = false; await pump; }
+}
+
+/**
+ * Open an extension page at a WIDE viewport with the deterministic capture armed
+ * BEFORE it boots (device metrics + light theme + the stable stylesheet), then
+ * wait for its Mithril mount. Returns the page handle; the caller screenshots
+ * it (both themes) and closes it. Used for the full-tab / large-view baselines.
+ * @param {object} ctx  from launchPeerd
+ * @param {string} path  extension-relative, e.g. 'home/home.html'
+ * @param {{ metrics?: object }} [opts]
+ */
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS } = {}) {
+  const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
+  const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
+  const page = await attach(created.webSocketDebuggerUrl);
+  await page.send('Runtime.enable');
+  await page.send('Page.enable');
+  await page.send('Emulation.setDeviceMetricsOverride', metrics);
+  await setEmulatedTheme(page, 'light');
+  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
+  await page.send('Page.navigate', { url });
+  const mounted = await waitFor(
+    () => evalIn(page, `document.readyState === 'complete' && !!document.querySelector('#app > *')`),
+    { budgetMs: READY_BUDGET_MS });
+  if (!mounted) { try { page.close(); } catch { /* */ } throw new Error(`wide page never mounted: ${path}`); }
+  return page;
+}
+
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
 async function attach(wsUrl, onEvent) {
   const ws = new WebSocket(wsUrl);
@@ -414,35 +474,7 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   if (!mounted) { cleanup(); throw new Error('side panel never mounted'); }
   log('side panel mounted');
 
-  // Capture the panel as a PNG buffer. Two headless-Chrome gotchas handled:
-  // (1) bringToFront ONCE (lazily) — headless composites only the foregrounded
-  //     target, so the first capture needs it active; calling it before EVERY
-  //     capture hangs the next captureScreenshot. Activate once.
-  // (2) the nudge pump — visualCheck freezes animations for a deterministic
-  //     shot, but a frozen page idles the compositor and captureScreenshot then
-  //     waits forever for a frame. Toggling a sub-pixel translateZ on the root
-  //     (invisible in 2D, so the pixels are unaffected — verified 0.00000 diff)
-  //     forces the compositor to keep producing frames until the capture
-  //     resolves. Without this, capturing a perpetual-spinner screen deadlocks.
-  let broughtToFront = false;
-  const screenshot = async () => {
-    if (!broughtToFront) { await page.send('Page.bringToFront'); broughtToFront = true; }
-    let pumping = true;
-    let toggle = false;
-    const pump = (async () => {
-      while (pumping) {
-        toggle = !toggle;
-        await page.send('Runtime.evaluate', {
-          expression: `(() => { const e = document.documentElement; if (e) e.style.transform = 'translateZ(${toggle ? '0.0001px' : '0px'})'; })()`,
-        }).catch(() => {});
-        await sleep(50);
-      }
-    })();
-    try {
-      const r = await page.send('Page.captureScreenshot', { format: 'png' });
-      return Buffer.from(r.data, 'base64');
-    } finally { pumping = false; await pump; }
-  };
+  const screenshot = () => capturePage(page);
 
   return {
     sw, swConn, page, port, profile, screenshot,

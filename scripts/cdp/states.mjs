@@ -18,7 +18,7 @@
 // screenshot to look at and a structured pass/fail with the "why".
 
 import { createServer } from 'node:http';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, PASSPHRASE } from './e2e-harness.mjs';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, openWidePage, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -640,6 +640,38 @@ export const STATES = [
       await evalIn(ctx.page, `document.querySelector('.tool-call-header')?.click()`);
       await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.tool-detail')`), { budgetMs: 5_000, pollMs: 50 });
       await rec.visual('tool-card-expanded');
+    },
+  },
+
+  // --- visual (WIDE): the full-tab home SPA — the large in-browser view -------
+  // Opened as its own browser tab (1280 wide), not the 400px side panel. The
+  // vault is already unlocked in the SW, so home boots to its SPA.
+  {
+    name: 'home-fulltab', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html');
+      try {
+        // Wait past the boot vault-gate/onboarding flash to the home surface.
+        await waitFor(() => evalIn(page,
+          `!!document.querySelector('.home-shell, .home-rail, .empty-state--home, .path-menu--home')`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await rec.visualPage('home-fulltab', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): the full-tab options / settings page --------------------
+  {
+    name: 'options-fulltab', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('#app')?.children.length > 0`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await rec.visualPage('options-fulltab', page);
+      } finally { try { page.close(); } catch { /* */ } }
     },
   },
 
