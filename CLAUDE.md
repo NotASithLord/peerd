@@ -169,7 +169,20 @@ prose orientation is this file, and the rest is the source itself.
       miss. This is built for an AGENT to self-drive a change→verify→fix
       loop: edit, `bun run e2e:verify`, read `result.json` + the
       screenshots, fix, repeat until `ok:true`. (`--functional` skips the
-      per-machine visual baselines; CI runs that via `test:e2e:all`.)
+      visual states; CI runs that via `test:e2e:all`.)
+    - **The visual lane has ONE baseline authority, and it is CI.**
+      macOS and Linux cannot be pixel-compared — most of the panel's text
+      uses the system font stack, so the family changes per OS and
+      paragraphs re-wrap. So baselines are captured and compared only on
+      the pinned runner + pinned Chrome (`scripts/cdp/chrome-version.txt`)
+      and committed under `scripts/cdp/baselines/<authority>/`; the
+      `visual` CI job goes red when the render moves and uploads
+      before/after/diff PNGs. A dev's run still captures and still diffs —
+      against a gitignored self-baseline — but never gates, so the
+      LOOK-at-it loop above is unchanged. Reseed deliberately: dispatch
+      the workflow with `update_visual_baselines`, eyeball every PNG, then
+      commit. Bumping the Chrome pin and reseeding belong in the SAME
+      commit. Details + the measured numbers: `scripts/cdp/visual.mjs`.
 - **UI work runs through the verify loop — never call a rendered change
   done on assertions alone.** When you touch a side-panel / home /
   component surface, iterate edit → `bun run e2e:verify` → read
