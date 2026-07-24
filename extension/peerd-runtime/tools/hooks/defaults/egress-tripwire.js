@@ -35,8 +35,11 @@
 // tested exhaustively without a dispatcher.
 //
 // A TRIPWIRE, NOT A FLOOR. It errs hard toward allow and is layered UNDER the
-// real containment (#241's schema boundary, #242's UGC downscale, the offscreen
-// heap fence). Read egress-heuristics.js before trusting it with anything.
+// one unconditional containment there is: the offscreen HEAP FENCE, which
+// bounds what a hijacked actor knows in the first place. #242's forced confirm
+// covers authenticated WRITES, not navigation; #241 constrains the actor's
+// reply, not tool args, and ships off. Read egress-heuristics.js's KNOWN
+// RESIDUALS before trusting this with anything.
 
 import { inspectTabToolCall } from '../../egress-heuristics.js';
 
@@ -72,9 +75,14 @@ export const egressTripwireHook = {
     const { args, toolName } = inv;
     const ctx = /** @type {import('/shared/tool-types.js').ToolContext & TripwireHookCtx} */ (inv.ctx);
     const tool = ctx.getToolMeta?.(toolName);
-    // why: scope is EXACTLY the set egress-allowlist exempts. Everything else
-    // already goes through the allowlist + safeFetch, so inspecting it here
-    // would add false-block risk for no coverage.
+    // why primitive:'tab' and not more: these are the calls that drive the
+    // user's OWN logged-in browser session, which the allowlist exempts on
+    // purpose (reaching your logged-in apps is the thesis) and which no
+    // network-layer check ever sees. Be honest that this is not the allowlist's
+    // whole exemption: it also skips any tool whose sideEffect is not
+    // mutate_external, so fetch_url (primitive 'web') is inspected by NEITHER.
+    // A path-shaped blob is blocked via navigate and allowed via fetch_url —
+    // an asymmetry to close by widening this scope, not a claim to paper over.
     if (tool?.primitive !== 'tab') {
       return { action: 'allow', reason: 'egress-tripwire: not a browser-session tool, skipped' };
     }

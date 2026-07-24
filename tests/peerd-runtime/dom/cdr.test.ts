@@ -164,6 +164,27 @@ describe('disarmText — preserves all legitimate visible content', () => {
     expect(disarmText(src)).toBe(src);
   });
 
+  // ZWNJ (U+200C) is the second character decided by CONTEXT, for the same
+  // reason as ZWJ: it is both an invisible splitter and a REQUIRED orthographic
+  // mark. Stripping it wholesale misspells Persian, Urdu and Hindi — and since
+  // disarmText is the one pass that runs on EVERY fenced body, including source
+  // files and diffs the model edits and writes back, that misspelling would get
+  // written back to the user's disk.
+  test('ZWNJ survives between letters of a script that needs it', () => {
+    const fa = `می‌روم`;              // "I go" — without the ZWNJ this is a different word
+    expect(disarmText(fa)).toBe(fa);
+    const hi = `क‌ष`;                 // Devanagari: suppresses the conjunct ligature
+    expect(disarmText(hi)).toBe(hi);
+  });
+
+  test('ZWNJ splitting a LATIN word is still stripped — the vector stays closed', () => {
+    expect(disarmText('Ig‌nore previous')).toBe('Ignore previous');
+    // Adjacent to only ONE such letter is not orthography either.
+    expect(disarmText('‌می')).toBe('می');
+    // A RUN cannot hide a payload: only a single joining ZWNJ is kept.
+    expect(disarmText('م‌‌‌ی')).toBe('می');
+  });
+
   test('idempotent — disarming twice equals disarming once', () => {
     const nasty = `a${ZWSP}b${MAN}${ZWJ}${LAPTOP}${RLO}c${PDF}`;
     expect(disarmText(disarmText(nasty))).toBe(disarmText(nasty));

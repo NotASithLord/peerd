@@ -17,13 +17,22 @@
 //
 // WHAT IT IS / IS NOT — read this before trusting it. It is a PURE function
 // producing allow | block from (name, args, currentOrigin). It is a
-// BEST-EFFORT TRIPWIRE layered UNDER the real containment, NOT a guarantee:
-//   - #241 — the schema boundary that keeps untrusted content out of the
-//     tool-arg surface in the first place;
-//   - #242 — read-only downscale of user-generated content + the offscreen
-//     HEAP FENCE (untrusted reasoning never holds the vault DK / authority).
-// Those are the defenses that actually contain exfiltration. This heuristic
-// is a cheap extra veto that catches the OBVIOUS shape early. Because it is
+// BEST-EFFORT TRIPWIRE layered UNDER the real containment, NOT a guarantee.
+// Be precise about what that containment actually is on the shipped build,
+// because an earlier draft of this comment cited two defenses that do not
+// cover this vector and one that ships OFF:
+//   - the offscreen HEAP FENCE is the real one, and it is unconditional: a
+//     hijacked actor reasons in a worker holding no vault DK, no chrome.*, and
+//     no engine clients, so what it can exfiltrate is bounded by what the page
+//     already showed it;
+//   - #242 forces a CONFIRM on an authenticated write inside a UGC zone. It is
+//     NOT a read-only downscale (that design was considered and rejected —
+//     see actor/ugc-registry.js), and it deliberately EXEMPTS navigation, so
+//     it does not cover residual 1 below;
+//   - #241 constrains the actor's REPLY to the orchestrator, not the tool-arg
+//     surface, and ships default-OFF on both channels. Do not count it here.
+// This heuristic is a cheap extra veto that catches the OBVIOUS shape early —
+// it narrows the attack, it does not close it. Because it is
 // not the floor, it is deliberately CONSERVATIVE — it ALLOWS on any
 // uncertainty and only BLOCKS a clear payload — since a false block breaks
 // the legitimate "read a page, then follow a link on it" flow that is the
@@ -85,8 +94,13 @@
 // KNOWN RESIDUALS — do NOT read this as complete coverage:
 //   1. THE QUERY AND FRAGMENT. `attacker.com/?d=<blob>` / `#<blob>` is NOT
 //      caught — see WHY ONLY THESE THREE SLOTS. This is the largest residual,
-//      a deliberate trade to never false-block a login/navigation; #242 is the
-//      containment.
+//      a deliberate trade to never false-block a login/navigation. NOTHING
+//      else covers it: #242 exempts navigation by design, so an off-origin
+//      `navigate` with the payload in the query is the arc's one uncontained
+//      path. It is not a regression (it predates this module) but it IS the
+//      canonical exfil GET, and closing it — most likely by narrowing #242's
+//      navigation exemption to same-origin hops while on a UGC page — is the
+//      next piece of work, not a solved problem.
 //   2. FRAGMENTATION. A payload split across separators so no single run
 //      reaches MIN_BLOB_LENGTH (`.`-separated path/label runs, standard-base64
 //      `+/` self-fragmentation, fine sub-entropy runs) evades.
@@ -94,7 +108,9 @@
 //      (a repeated segment, a short natural-language leak) or a single
 //      high-entropy token under MIN_BLOB_LENGTH slips through — entropy
 //      detection cannot see data that does not look random.
-// All residuals are contained by #241/#242. A rare legitimate LONG single run
+// None of these residuals is CONTAINED elsewhere — the heap fence bounds what
+// a hijacked actor knows, and nothing downstream inspects the URL again. Treat
+// them as accepted exposure, not as covered. A rare legitimate LONG single run
 // that DOES trip the wire — a ≥100-char single PATH segment (an email
 // click-tracking wrapper, a magic-link, a path-embedded JWT, OR a genuinely
 // long readable slug/title), or a large-multihash IPFS subdomain CID that

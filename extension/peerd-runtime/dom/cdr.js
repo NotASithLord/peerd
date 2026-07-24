@@ -30,8 +30,10 @@
 //                      it covers every fenced body automatically and a new
 //                      web-sourced tool cannot forget it.
 //   disarmMarkup(raw)  disarmText PLUS HTML-comment removal. Applied only
-//                      where the body is known to be page MARKUP (fetch_url,
-//                      read_page's content mode, read_web_cache).
+//                      where the body is known to be page MARKUP — read_page's
+//                      content mode, and fetch_url on an html/xml response
+//                      (fetch_url reads APIs too, and on JSON `<!--` is
+//                      visible content, not a hidden comment).
 //
 // why the split, concretely: wrapUntrusted fences ~27 callsites and only some
 // carry page text. The rest carry SOURCE CODE and DIFFS — js_read_file,
@@ -58,12 +60,40 @@
 // `\\u`-escaped strings (never literal invisible bytes) so this source file
 // stays pure ASCII and readable in review.
 
-// why: classic zero-width smuggling — ZWSP (U+200B) / ZWNJ (U+200C) split a
-// word so the model reads a token the human never sees; WORD JOINER (U+2060)
-// and the BYTE ORDER MARK (U+FEFF) are zero-advance too; SOFT HYPHEN (U+00AD)
-// is invisible unless a line breaks there. (ZWJ U+200D is handled separately —
-// it is also a real emoji joiner.)
-const ZERO_WIDTH = '\\u200B\\u200C\\u2060\\uFEFF\\u00AD';
+// why: classic zero-width smuggling — ZWSP (U+200B) splits a word so the model
+// reads a token the human never sees; WORD JOINER (U+2060) and the BYTE ORDER
+// MARK (U+FEFF) are zero-advance too; SOFT HYPHEN (U+00AD) is invisible unless
+// a line breaks there. (ZWJ U+200D and ZWNJ U+200C are handled separately —
+// each doubles as a legitimate mark: the emoji joiner, and Persian/Indic
+// orthography.)
+const ZERO_WIDTH = '\\u200B\\u2060\\uFEFF\\u00AD';
+
+// Scripts in which ZWNJ is ORTHOGRAPHY, not decoration. Persian/Urdu (Arabic
+// script) uses it to stop a cursive join — `می‌روم` without it is `میروم`, a
+// different, wrong spelling; the Indic scripts use it to suppress a conjunct
+// ligature. This is not an exhaustive Unicode list, it is the set where
+// dropping the character CHANGES THE WORD a reader sees.
+const ZWNJ_SCRIPTS = '\\p{Script=Arabic}\\p{Script=Devanagari}\\p{Script=Bengali}'
+  + '\\p{Script=Gurmukhi}\\p{Script=Gujarati}\\p{Script=Oriya}\\p{Script=Tamil}'
+  + '\\p{Script=Telugu}\\p{Script=Kannada}\\p{Script=Malayalam}\\p{Script=Sinhala}'
+  + '\\p{Script=Myanmar}\\p{Script=Thaana}';
+
+// Zero-width NON-joiner, decided by CONTEXT — the same shape as ZWJ_RE below,
+// and for the same reason. why it cannot just be stripped: this module's
+// contract is that every non-Latin script survives byte-for-byte, and the
+// universal sweep is the ONE pass that runs on every fenced body — including
+// source files and diffs the model is about to edit and write back. Stripping
+// U+200C wholesale silently misspells Persian, Urdu and Hindi text on the way
+// into the model, which is a correctness bug that would surface as the agent
+// "helpfully" writing the misspelling back.
+//
+// KEEP a single ZWNJ only when it sits BETWEEN two letters of a script that
+// uses it; strip it everywhere else. That is what closes the vector: an
+// attacker cannot use it to split a Latin word, and inside Arabic-script text
+// the hidden token would have to be Arabic-script too — visible to the human
+// reading the same bytes. Leading capture + lookahead, no lookbehind, matching
+// the house pattern.
+const ZWNJ_RE = new RegExp(`([${ZWNJ_SCRIPTS}])\\u200C(?=[${ZWNJ_SCRIPTS}])|\\u200C`, 'gu');
 
 // why: bidi overrides/isolates (U+202A-202E LRE/RLE/PDF/LRO/RLO, U+2066-2069
 // LRI/RLI/FSI/PDI) let author bytes render in a DIFFERENT visual order than
@@ -132,7 +162,7 @@ const VARIATION_SELECTOR_RE = new RegExp(
 // (already handled). why: `v`-flag set subtraction is the only way to say
 // "all format chars EXCEPT the one that doubles as an emoji joiner".
 const INVISIBLES_RE = new RegExp(
-  `[[${ZERO_WIDTH}${BIDI_CONTROLS}${TAG_BLOCK}\\p{Cf}]--[\\u200D]]`,
+  `[[${ZERO_WIDTH}${BIDI_CONTROLS}${TAG_BLOCK}\\p{Cf}]--[\\u200D\\u200C]]`,
   'gv',
 );
 
@@ -162,6 +192,9 @@ export const disarmText = (raw) => {
   return raw
     // 1. Zero-width joiners: strip the standalone ones, keep emoji joiners.
     .replace(ZWJ_RE, (match, emoji) => (emoji ? match : ''))
+    // 1b. Zero-width NON-joiners: keep the ones doing orthographic work inside
+    //     Persian/Indic text, strip the rest. Same contextual shape as (1).
+    .replace(ZWNJ_RE, (match, letter) => (letter ? match : ''))
     // 2. Variation selectors: strip smuggling VS, keep one emoji-presentation
     //    VS15/VS16 after a pictograph. Same emoji-aware phase as ZWJ.
     .replace(VARIATION_SELECTOR_RE, (match, emoji) => (emoji ? match : ''))
@@ -174,7 +207,8 @@ export const disarmText = (raw) => {
 /**
  * The MARKUP sweep: disarmText plus HTML-comment removal. Apply ONLY where the
  * body is known to be page markup the model reads as data and never writes
- * back — fetch_url, read_page's content mode, read_web_cache.
+ * back — read_page's content mode, and fetch_url once it has checked the
+ * response's content type.
  *
  * Order matters, and it is the reason this composes rather than duplicating:
  * disarmText runs FIRST, so a comment marker obfuscated with zero-width

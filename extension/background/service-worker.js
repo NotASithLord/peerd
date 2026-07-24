@@ -2144,7 +2144,16 @@ const confirmAction = async (prompt) => {
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
-  const answer = await confirmCoordinator.confirm(/** @type {any} */ (prompt));
+  // ...and TELL THE PANEL, so it can stop offering a button that grants
+  // nothing. why this became load-bearing with #242: before the UGC override, a
+  // default-config user (confirmActions OFF) never saw an actor confirm at all,
+  // so the dead "Allow for session" was unreachable. Now it is the second thing
+  // they see on a GitHub issue, twice per comment — a control that looks like
+  // the way to stop the prompting and silently isn't. The downgrade itself is
+  // correct and stays; what was wrong was offering the choice.
+  const answer = await confirmCoordinator.confirm(/** @type {any} */ (
+    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
+  ));
   if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
@@ -3977,6 +3986,13 @@ const actorMessaging = makeActorMessaging({
   // SW boot, so a boolean would freeze at its boot value and ignore the user
   // flipping the setting. Reading it here, per reply, from the same store that
   // stamps the actor's prompt rule is what makes the two halves one switch.
+  // KNOWN, ACCEPTED WINDOW: the prompt half samples at turn start and this
+  // samples at settle, so toggling the setting DURING a live actor turn can
+  // arm the validator against a prompt that never carried the rule (or the
+  // reverse). Cost is one dropped, re-delegable reply, on a default-off
+  // experimental flag, and it needs a human clicking the checkbox inside the
+  // turn. Latching per turn would cost more machinery than the failure is
+  // worth; sampling per reply is what makes the toggle take effect at all.
   schemaValidatedReplies: () => settingsStore.get().schemaValidatedReplies === true,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),
   mailbox: actorMailbox,

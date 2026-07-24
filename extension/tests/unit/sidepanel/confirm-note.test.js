@@ -62,13 +62,25 @@ describe('sidepanel.confirm note (issue 242)', () => {
     } finally { unmount(); }
   });
 
-  it('the answer buttons are unchanged by the note — the decision stays the same three', () => {
-    // A forced confirm must not quietly remove "Allow for session"; the session
-    // downgrade for actors happens in the grant cache, not by hiding the button.
+  it('the note alone does not change the buttons', () => {
     const { root, unmount } = mount({ ...base, note: NOTE });
     try {
       const labels = [...root.querySelectorAll('.peerd-modal-actions button')].map((b) => b.textContent);
       expect(labels).toEqual(['Reject', 'Allow for session', 'Allow once']);
+    } finally { unmount(); }
+  });
+
+  it('an EPHEMERAL prompt drops "Allow for session" — a button that grants nothing', () => {
+    // DESIGN-17 downgrades an actor's yes_session to yes_once server-side, so on
+    // an actor confirm that button never created a standing grant. Before #242 a
+    // default-config user never saw an actor confirm at all; now they see one
+    // twice per comment, and a control that reads as "stop asking me" and
+    // silently does nothing is worse than no control — they stop looking for a
+    // real way out.
+    const { root, unmount } = mount({ ...base, note: NOTE, ephemeral: true });
+    try {
+      const labels = [...root.querySelectorAll('.peerd-modal-actions button')].map((b) => b.textContent);
+      expect(labels).toEqual(['Reject', 'Allow once']);
     } finally { unmount(); }
   });
 });

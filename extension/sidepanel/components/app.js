@@ -276,6 +276,9 @@ const ACTION_CLASS_LABEL = {
  * @property {string} [note]   why this call is being confirmed when the reason
  *   is something other than the ordinary Plan/Act policy (the #242 UGC-zone
  *   rule today). Plain prose, rendered verbatim.
+ * @property {boolean} [ephemeral]  this answer cannot become a standing grant —
+ *   DESIGN-17 downgrades an actor's yes_session to yes_once. Set by the SW so
+ *   the card does not offer a button that would do nothing.
  * @property {string} [tool]
  * @property {string[]} [origins]
  */
@@ -339,7 +342,14 @@ export const ConfirmModal = {
           : null,
         m('.peerd-modal-actions', [
           m('button.secondary', { type: 'button', onclick: () => answer('no') }, 'Reject'),
-          isMemory
+          // why prompt.ephemeral hides it rather than disabling it: an actor's
+          // yes_session is downgraded to yes_once server-side (DESIGN-17 — an
+          // actor can be steered by untrusted output across turns, so a standing
+          // grant would silence the next prompt). Offering the button anyway
+          // gives the user a control that reads as "stop asking me" and does
+          // nothing — worse than not offering it, because they stop looking for
+          // another way out.
+          isMemory || prompt.ephemeral
             ? null
             : m('button.secondary', { type: 'button', onclick: () => answer('yes_session') }, 'Allow for session'),
           m('button', { type: 'button', onclick: () => answer('yes_once') }, isMemory ? 'Save' : 'Allow once'),

@@ -37,6 +37,12 @@ const ALLOWED_KEYS = new Set(['status', 'summary', 'actionTaken', 'data']);
 // Bounds: a hijacked actor must not be able to blow the orchestrator's context
 // with a huge blob, and the envelope's own shape is small. These are caps, not
 // the reply budget (the caller still clamps to RESULT_CHARS upstream).
+//
+// KEEP THESE ABOVE WHAT THE PROMPT ASKS FOR. Over-length REJECTS the whole
+// envelope rather than trimming it, so a cap the actor is aiming at is a cap it
+// will sometimes cross, and the user loses a completed report to a formatting
+// technicality. SCHEMA_REPLY_RULE (loop/system-prompt.js) asks for ~6000 chars
+// against the 8192 here — the headroom is the point, and the two move together.
 const MAX_SUMMARY = 8 * 1024;
 const MAX_ACTION = 512;
 const MAX_DATA_CHARS = 16 * 1024;

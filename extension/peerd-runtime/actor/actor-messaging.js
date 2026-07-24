@@ -65,6 +65,19 @@ import { validateActorReply, renderValidatedReply, REPLY_VALIDATION_FAILED } fro
 // deterministic schema boundary when it's enabled. Engine sandboxes (vm/notebook/
 // app) return the agent's OWN compute and keep the free-form path; the web + API
 // actors ingest hostile page/response bytes — those are the ones to structure.
+//
+// Two honest notes on this set, so the next reader doesn't mistake it for a
+// finished policy:
+//   - 'api' is belt-and-braces. An API integration resolves to kind 'web' with
+//     backing 'api' (the SW's actor resolver), so nothing reaches here as 'api'
+//     today. It stays because the PROMPT half narrows on actorType === 'web',
+//     which covers both backings — dropping 'api' would make the two halves
+//     disagree the moment a resolver changes.
+//   - 'dweb' is deliberately ABSENT and arguably should not be. The dweb actor
+//     ingests inbound peer DMs and A2A output — as untrusted as page bytes.
+//     It is excluded only because it is preview-only and its reply shape has
+//     not been exercised against the envelope; extending the set is a follow-up
+//     that needs its own prompt half, not a one-word edit here.
 const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
 
 /**

@@ -19,11 +19,21 @@
 import { fetchUrl } from '../web/primitives.js';
 import { originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { disarmMarkup } from '../../dom/cdr.js';
+import { disarmMarkup, disarmText } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
 
 const MAX_BODY_CHARS = 16_000;   // hard cap to avoid context-blast on huge payloads
+
+// Is this response body actually MARKUP — i.e. is `<!-- -->` a comment the
+// renderer hides, rather than four visible characters? Only a yes earns the
+// destructive comment pass. Broader than the html/xhtml test used for
+// extraction below, because XML and SVG hide comments too while being no use
+// to Readability. Missing/garbage content-type falls to NO: the safe sweep
+// still runs, and under-disarming a body wrapUntrusted will fence anyway beats
+// silently deleting a span of someone's JSON.
+const isMarkupType = (/** @type {string} */ ct) =>
+  /(text\/html|application\/xhtml|(text|application)\/(\w+\+)?xml|image\/svg)/i.test(ct);
 // Headers that would smuggle a session / credential into a "sessionless" call.
 // Stripped unconditionally (case-insensitive). The keyless actor has no
 // credential to begin with; this is the wall against a laundered injection
@@ -133,13 +143,20 @@ export const fetchUrlTool = {
       // slices this string — excerptRelevant/windowText report character
       // offsets, and webCache.put stores the text read_web_cache pages back.
       // Disarming after windowing would make those offsets describe pre-strip
-      // text and would leave undisarmed bytes sitting in the cache. The MARKUP
-      // sweep (comments too, not just the invisible bytes wrapUntrusted always
-      // strips) because a fetched body is page markup: an instruction inside
-      // `<!-- -->` is invisible to the human who approved the fetch and fully
-      // visible to the model. Applies to raw:true as well — the comment is the
+      // text and would leave undisarmed bytes sitting in the cache.
+      //
+      // WHICH sweep is decided by the content type, and that is load-bearing.
+      // The invisible/control sweep is safe on anything. The COMMENT pass is
+      // destructive by design (cdr.js HTML_COMMENT_RE), so it may only touch a
+      // body that really is markup: on JSON or text/plain `<!--` is ordinary
+      // visible content, and a well-formed pair spanning two attacker-supplied
+      // fields would delete everything between them — inverting CDR's whole
+      // guarantee from "the model sees what the human sees" into "the model
+      // sees less". fetch_url reads APIs at least as often as it reads pages,
+      // so this branch is the common case, not the edge one. raw:true still
+      // gets the comment pass when the body IS html — the comment is the
       // vector regardless of who asked for the markup.
-      let workingBody = disarmMarkup(res.body);
+      let workingBody = isMarkupType(ct) ? disarmMarkup(res.body) : disarmText(res.body);
       let format = 'raw';
       let title = null;
       const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | null | undefined} */ (

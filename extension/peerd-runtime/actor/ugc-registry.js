@@ -59,9 +59,9 @@ import { normalizeApiOrigin } from './web-actor.js';
 
 /**
  * The result of classifying a URL's origin against the UGC-zone registry.
- * `zone:'ugc'` carries the matching `ruleId` (the entry's `id`) for audit and so
- * the follow-up wiring can attribute WHY a downscale happened; `zone:'standard'`
- * omits it. The typed contract the exposure/gate follow-up consumes.
+ * `zone:'ugc'` carries the matching `ruleId` (the entry's `id`) so the dispatcher
+ * can attribute WHY it forced a confirmation — it rides the lineage reason and
+ * both audit events; `zone:'standard'` omits it.
  *
  * @typedef {object} TrustZoneResult
  * @property {'ugc' | 'standard'} zone  Which trust zone the origin+path fall in.
