@@ -77,6 +77,12 @@ const APP_VERSION = (() => {
  */
 const BrandHeader = {
   view: () => m('.vault-brand', [
+    // A lock-mark chip crowns the gate (redesign Screen 1) — the one place the
+    // panel says "this surface is sealed" before the wordmark. Decorative;
+    // the real lock state lives in the SW.
+    m('.vault-lockmark', { 'aria-hidden': 'true' },
+      m('svg.ic', { width: 19, height: 19, viewBox: '0 0 24 24' },
+        m('use', { href: '#ic-lock' }))),
     m('.wordmark.wordmark--intro.wordmark--hero', {
       'aria-label': 'peerd',
       role: 'img',
