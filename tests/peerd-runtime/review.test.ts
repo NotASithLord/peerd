@@ -18,17 +18,38 @@ import {
 } from '../../extension/peerd-runtime/review/diff.js';
 import { buildReviewTask } from '../../extension/peerd-runtime/review/prompt.js';
 
-// A registry mirroring the real mix: read tools + write/mutate tools +
-// the always-denied orchestration tools.
+// A registry mirroring the REAL mix, using REAL tool names and their REAL
+// sideEffect tags. why real names: the previous fixture used invented ones
+// (`inspect_storage`) and asserted `app_read_file` IS grantable — the opposite
+// of what the live pipeline does (filterActorSurface drops it). A fixture that
+// asserts fiction is worse than no fixture: it is how issue #160 came to be
+// filed on a false premise, and how the grant below went unpinned entirely.
+//
+// NOTE the entries tagged `read` that are NOT safe for a reviewer — fetch_url
+// above all (arbitrary url + method + body). They are here precisely so the
+// tests below prove they never reach the reviewer.
 const DESCRIPTORS = [
+  // read-tagged AND on the reviewer's allowlist
+  { name: 'inspect', sideEffect: 'read' },
+  { name: 'read_memory', sideEffect: 'read' },
+  { name: 'actor_list', sideEffect: 'read' },
+  { name: 'now', sideEffect: 'read' },
+  // read-tagged but NOT for a reviewer — egress / page / instance reach
+  { name: 'fetch_url', sideEffect: 'read' },          // arbitrary url+method+body
   { name: 'read_page', sideEffect: 'read' },
   { name: 'query_dom', sideEffect: 'read' },
-  { name: 'app_read_file', sideEffect: 'read' },
-  { name: 'inspect_storage', sideEffect: 'read' },
+  { name: 'read_web_cache', sideEffect: 'read' },
+  { name: 'site_client_run', sideEffect: 'read' },
+  { name: 'dweb_discover', sideEffect: 'read' },
+  { name: 'js_read_file', sideEffect: 'read' },       // actor-only tier (#159)
+  { name: 'app_read_file', sideEffect: 'read' },      // actor-only tier (#159)
+  { name: 'app_list_files', sideEffect: 'read' },     // actor-only tier (#159)
+  // writes / mutations
   { name: 'click', sideEffect: 'write' },
   { name: 'navigate', sideEffect: 'write' },
   { name: 'page_exec', sideEffect: 'write' },
   { name: 'app_write_file', sideEffect: 'write' },
+  { name: 'message_actor', sideEffect: 'write' },
   { name: 'submit_form', sideEffect: 'mutate_external' },
   { name: 'actor_create', sideEffect: 'write' },
   { name: 'request_review', sideEffect: 'read' }, // read-classified, but self-denied
@@ -37,9 +58,9 @@ const DESCRIPTORS = [
 // ---- read-only enforcement ------------------------------------------------
 
 describe('readOnlyToolNames', () => {
-  test('keeps only read tools and drops orchestration tools', () => {
+  test('grants only names on the positive allowlist', () => {
     const names = readOnlyToolNames(DESCRIPTORS);
-    expect(names).toEqual(['read_page', 'query_dom', 'app_read_file', 'inspect_storage']);
+    expect(names.sort()).toEqual(['actor_list', 'inspect', 'now', 'read_memory'].sort());
   });
 
   test('EXPOSES NO write or mutate_external tools to the reviewer', () => {
@@ -47,25 +68,43 @@ describe('readOnlyToolNames', () => {
     for (const d of DESCRIPTORS) {
       if (d.sideEffect !== 'read') expect(names.has(d.name)).toBe(false);
     }
-    // explicit: none of the dangerous tools leak in
-    for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create']) {
+    for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create', 'message_actor']) {
       expect(names.has(w)).toBe(false);
     }
   });
 
+  // THE load-bearing one. `sideEffect:'read'` means "does not mutate", NOT
+  // "cannot exfiltrate" — fetch_url is read-tagged and takes an attacker-chosen
+  // url/method/body. Before the positive allowlist, this module (whose own header
+  // says the reviewer must not hold an exfiltration channel) would have handed it
+  // over; the save came from an unrelated filter two modules away, untested.
+  test('read-tagged EGRESS tools are never granted (read !== non-exfiltrating)', () => {
+    const names = new Set(readOnlyToolNames(DESCRIPTORS));
+    for (const t of ['fetch_url', 'read_web_cache', 'site_client_run', 'dweb_discover']) {
+      expect(names.has(t)).toBe(false);
+    }
+  });
+
+  test('a NEW read-tagged tool is ungrantable until deliberately allowlisted (fails closed)', () => {
+    const withNewTool = [...DESCRIPTORS, { name: 'some_future_read_tool', sideEffect: 'read' }];
+    expect(readOnlyToolNames(withNewTool)).not.toContain('some_future_read_tool');
+  });
+
   test('always-denied tools are excluded even when read-classified', () => {
-    // request_review is sideEffect:'read' but must never be handed to a reviewer
     expect(readOnlyToolNames(DESCRIPTORS)).not.toContain('request_review');
   });
 });
 
 describe('isReadOnlyTool (call-time defense in depth)', () => {
-  test('allows read tools, refuses write/mutate/unknown', () => {
-    expect(isReadOnlyTool('read_page', DESCRIPTORS)).toBe(true);
+  test('allows allowlisted read tools, refuses write/mutate/unknown/off-list', () => {
+    expect(isReadOnlyTool('inspect', DESCRIPTORS)).toBe(true);
     expect(isReadOnlyTool('click', DESCRIPTORS)).toBe(false);
     expect(isReadOnlyTool('submit_form', DESCRIPTORS)).toBe(false);
     expect(isReadOnlyTool('actor_create', DESCRIPTORS)).toBe(false);
     expect(isReadOnlyTool('hallucinated_tool', DESCRIPTORS)).toBe(false); // fail closed
+    // off the allowlist but read-tagged → still refused at call time
+    expect(isReadOnlyTool('fetch_url', DESCRIPTORS)).toBe(false);
+    expect(isReadOnlyTool('read_page', DESCRIPTORS)).toBe(false);
   });
 });
 
@@ -254,7 +293,9 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
 
     // the reviewer was granted exactly the read-only set
     const granted = new Set(calls[0].tools);
-    expect([...granted].sort()).toEqual(['app_read_file', 'inspect_storage', 'query_dom', 'read_page']);
+    // The reviewer's grant is the positive allowlist ∩ read-tagged — NOT
+    // "everything read-tagged" (which would have included fetch_url).
+    expect([...granted].sort()).toEqual(['actor_list', 'inspect', 'now', 'read_memory']);
     // ASSERT: no write/mutate/orchestration tool exposed
     for (const w of ['click', 'navigate', 'page_exec', 'app_write_file', 'submit_form', 'actor_create', 'request_review']) {
       expect(granted.has(w)).toBe(false);
@@ -290,11 +331,11 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
     const requestReview = makeRequestReview({
       spawnActor: spawn,
       getToolDescriptors: () => DESCRIPTORS,
-      // feature 03 says only read_page is permitted in this mode
-      permissions: { readOnlyTools: () => ['read_page'] },
+      // feature 03 says only `inspect` is permitted in this mode
+      permissions: { readOnlyTools: () => ['inspect'] },
     });
     await requestReview({ parentSessionId: 'p-1', before: { 'a.js': '1' }, after: { 'a.js': '2' } });
-    expect(calls[0].tools).toEqual(['read_page']); // intersection, narrowed further
+    expect(calls[0].tools).toEqual(['inspect']); // intersection, narrowed further
   });
 
   test('uses the feature-02 checkpoints adapter when no explicit diff', async () => {
@@ -341,5 +382,68 @@ describe('makeRequestReview (clean-context, read-only, structured)', () => {
     expect(out.ok).toBe(false);
     expect(out.parseError).toBe('no_json_block');
     expect(out.summary!.verdict).toBe('comment'); // well-formed fallback shape
+  });
+});
+
+// ---- the reviewer's grant, pinned through the REAL pipeline ----------------
+//
+// These two exist because the near-miss above was invisible: `read-only.js`
+// documents itself as the lethal-trifecta guard, `fetch_url` passed its filter
+// cleanly, and the only thing that actually kept it out was
+// mainAgentDescriptors — a CONTEXT-HYGIENE policy list two modules away, with
+// nothing behind it and no test on it. If someone un-hides fetch_url for
+// unrelated product reasons, these fail loudly instead of arming the reviewer.
+//
+// (The live registry can't be imported here — tools/defs/index.js refuses to
+// load outside a browser extension — so we drive the REAL filters with a
+// realistic descriptor set. The positive allowlist covers what a fixture can't:
+// tools nobody thought to list.)
+describe('reviewer grant — through the real narrowing pipeline', () => {
+  test('the spawn pipeline drops every egress + actor-only read, not just the allowlist', async () => {
+    const { mainAgentDescriptors, filterActorSurface } = await import('../../extension/peerd-runtime/tools/exposure.js');
+    const { narrowTools } = await import('../../extension/peerd-runtime/actor/spawn.js');
+
+    // What spawn.js actually computes as the grantable universe, then intersects
+    // the reviewer's request against.
+    const grantable = filterActorSurface(mainAgentDescriptors(DESCRIPTORS as any));
+    const granted = new Set(
+      narrowTools(grantable as any, { tools: readOnlyToolNames(DESCRIPTORS), allowRecursion: false })
+        .map((t: any) => t.name),
+    );
+
+    // No egress reaches the reviewer, by ANY route.
+    for (const t of ['fetch_url', 'read_web_cache', 'site_client_run', 'dweb_discover']) {
+      expect(granted.has(t)).toBe(false);
+    }
+    // No mutation, no delegation, no self-recursion.
+    for (const t of ['click', 'app_write_file', 'submit_form', 'message_actor', 'actor_create', 'request_review']) {
+      expect(granted.has(t)).toBe(false);
+    }
+    // Instance reads are actor-only today (#159) — this is exactly what issue
+    // #160 proposes to re-add, deliberately and by name. Until then: absent.
+    for (const t of ['js_read_file', 'app_read_file', 'app_list_files']) {
+      expect(granted.has(t)).toBe(false);
+    }
+  });
+
+  // The DURABLE one: assert on surviving CAPABILITIES, not tool names. Any
+  // egress-capable tool must register a closure in CAPABILITY_CONSUMERS to work
+  // AT ALL — that isn't optional, it's how a tool gets its capability. So this
+  // catches a future egress tool automatically, with no list to remember.
+  test('the reviewer ctx holds NO outward closure (egress/delegation/secrets)', async () => {
+    const { CAPABILITY_CONSUMERS, restrictCtxCapabilities } = await import('../../extension/peerd-runtime/actor/spawn.js');
+
+    // A ctx carrying every known capability, then stripped to the reviewer's grant.
+    const fullCtx = Object.fromEntries(Object.keys(CAPABILITY_CONSUMERS).map((k) => [k, 'closure']));
+    const granted = new Set(readOnlyToolNames(DESCRIPTORS));
+    const survivors = new Set(Object.keys(restrictCtxCapabilities(fullCtx as any, granted as any)));
+
+    for (const cap of [
+      'getSecret', 'safeFetch', 'webFetch', 'webCache', 'dweb',
+      'messageActor', 'spawnActor', 'spawnActorAsync',
+      'siteClients', 'jsOffscreenClient',
+    ]) {
+      expect(survivors.has(cap)).toBe(false);
+    }
   });
 });
