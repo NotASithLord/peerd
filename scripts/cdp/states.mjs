@@ -520,6 +520,129 @@ export const STATES = [
     },
   },
 
+  // --- visual: the mode row in Plan mode (segmented Plan/Act + chips) ---------
+  {
+    name: 'mode-plan', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('planning only') }),
+    async run(ctx, rec) {
+      // The mode row renders once a session exists — send one turn, then flip
+      // to Plan so the segmented control shows its active-Plan state.
+      await rpc(ctx.page, { type: 'agent/send', text: 'what would you do?' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      await rpc(ctx.page, { type: 'permission/set', mode: 'plan' });
+      await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim() === 'Plan'`),
+        { budgetMs: 8_000, pollMs: 50 });
+      await rec.visual('mode-plan');
+      // Restore Act so later states start from the default mode.
+      await rpc(ctx.page, { type: 'permission/set', mode: 'act' });
+    },
+  },
+
+  // --- visual: a goal run mid-flight (goal bar + plan todo card) --------------
+  {
+    name: 'goal-running', kind: 'visual', phase: 'post-unlock',
+    // Set up the plan, tick one item, then HANG so the goal bar + todo card
+    // stay on screen for the capture (resetSession aborts the pending call
+    // before the next state).
+    responder: (callIndex) => {
+      if (callIndex === 0) return { delayMs: 150, sse: sseText('On it — planning.') };
+      if (callIndex === 1) return { delayMs: 150, sse: sseToolCall('todo_init', { items: [
+        { text: 'read the failing test output', validation: 'root cause named' },
+        { text: 'reproduce in a linux VM', validation: 'repro confirmed' },
+        { text: 'patch the retry wrapper', validation: 'gate no longer raw' },
+      ] }) };
+      if (callIndex === 2) return { delayMs: 150, sse: sseToolCall('todo_check', { id: 1 }) };
+      return { delayMs: 60_000, sse: sseText('working…') };
+    },
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'fix the failing test', goal: true });
+      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
+      await waitFor(() => evalIn(ctx.page,
+        `/1\\/3/.test(document.querySelector('.todo-card .todo-card-meta')?.textContent || '')`),
+        { budgetMs: 12_000, pollMs: 50 });
+      await rec.visual('goal-running');
+    },
+  },
+
+  // --- visual: a failed turn (error banner + failure-class chip) --------------
+  {
+    name: 'error-turn', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { message: 'e2e injected provider error', type: 'invalid_request_error' } }) }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'trigger an error' });
+      await waitFor(async () => { const o = await probe(ctx); return o.errorText && !o.busy; }, { budgetMs: 25_000 });
+      await rec.visual('error-turn');
+    },
+  },
+
+  // --- visual: a multi-exchange transcript (bubbles carry across turns) -------
+  {
+    name: 'multi-turn-transcript', kind: 'visual', phase: 'post-unlock',
+    responder: (callIndex) => ({ sse: sseText(callIndex === 0
+      ? 'The egress gate blocked api.payments.io — it is on your denylist. Want me to spin a VM and reproduce?'
+      : 'Reproduced in a fresh Linux VM. The call throws before the retry wrapper, so the gate surfaces raw.') }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'check the failing egress gate on the payments call' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      await rpc(ctx.page, { type: 'agent/send', text: 'yes, reproduce it' });
+      await waitFor(() => evalIn(ctx.page,
+        `[...document.querySelectorAll('.message-assistant .bubble')].some((b) => /Reproduced/.test(b.textContent))`),
+        { budgetMs: 20_000 });
+      await waitFor(async () => { const o = await probe(ctx); return !o.busy; }, { budgetMs: 20_000 });
+      await rec.visual('multi-turn-transcript');
+    },
+  },
+
+  // --- visual: a turn mid-flight (thinking orb + Stop) ------------------------
+  {
+    name: 'busy-thinking', kind: 'visual', phase: 'post-unlock',
+    // Hold before the first token so the pre-stream thinking state stays up;
+    // resetSession aborts the pending call before the next state.
+    responder: () => ({ delayMs: 60_000, sse: sseText('…') }),
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'plan a fix for the failing test' });
+      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 10_000, pollMs: 50 });
+      await rec.visual('busy-thinking');
+    },
+  },
+
+  // --- visual: the sessions / chats list -------------------------------------
+  {
+    name: 'sessions-list', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // Two chats so the list has rows to show, then open the chats view.
+      await rpc(ctx.page, { type: 'agent/send', text: 'summarize the three PRs I opened today' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      await rpc(ctx.page, { type: 'session/reset' });
+      await rpc(ctx.page, { type: 'agent/send', text: 'spin up a linux VM and run uname -a' });
+      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
+      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.sessions-list .session-row')`), { budgetMs: 8_000, pollMs: 50 });
+      await rec.visual('sessions-list');
+      // Return to the chat view for later states.
+      await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
+    },
+  },
+
+  // --- visual: an expanded tool-call card (the lineage body) -----------------
+  {
+    name: 'tool-card-expanded', kind: 'visual', phase: 'post-unlock',
+    responder: (callIndex) => callIndex === 0
+      ? { sse: sseToolCall('read_page', { url: 'https://docs.rs/tokio' }) }
+      : { sse: sseText('The page loaded — 214 sections indexed.') },
+    async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'agent/send', text: 'read the tokio docs' });
+      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.tool-call')`), { budgetMs: 20_000, pollMs: 50 });
+      await waitFor(async () => { const o = await probe(ctx); return !o.busy; }, { budgetMs: 20_000 });
+      // Expand the card's detail body.
+      await evalIn(ctx.page, `document.querySelector('.tool-call-header')?.click()`);
+      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.tool-detail')`), { budgetMs: 5_000, pollMs: 50 });
+      await rec.visual('tool-card-expanded');
+    },
+  },
+
   // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.ask) ----
   // The actors-in-script surface end to end: the model writes ONE script whose
   // code awaits actors.ask('web', …); the ask relays offscreen-worker → SW

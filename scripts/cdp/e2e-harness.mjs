@@ -163,12 +163,34 @@ const stableStyleSource = `(() => {
  */
 export async function armDeterministicCapture(page) {
   await page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
-  await page.send('Emulation.setEmulatedMedia', {
-    features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
-  });
+  await setEmulatedTheme(page, 'light');
   await page.send('Emulation.setTimezoneOverride', { timezoneId: 'UTC' }).catch(() => {});
   await page.send('Emulation.setLocaleOverride', { locale: 'en-US' }).catch(() => {});
   await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
+}
+
+// The two themes every visual state is captured in. why both: the design ships
+// light AND dark, and the theme is PURE CSS (no sidepanel JS reads
+// prefers-color-scheme), so a state's dark variant is a media re-emulation +
+// re-shot, no page reload. Baselines are `<name>.light.png` / `<name>.dark.png`.
+export const THEMES = Object.freeze(['light', 'dark']);
+
+/**
+ * Pin reduced-motion (always) + the color scheme. why pin the scheme: headless
+ * Chrome otherwise follows the OS appearance, so a dev machine that auto-switches
+ * to dark at night captures dark and every light baseline reads as a ~99% diff.
+ * setEmulatedMedia re-evaluates the CSS media queries live, so switching this
+ * mid-run restyles the visible surfaces without a reload.
+ * @param {{ send: (m: string, p?: object) => Promise<any> }} page
+ * @param {'light'|'dark'} theme
+ */
+export async function setEmulatedTheme(page, theme) {
+  await page.send('Emulation.setEmulatedMedia', {
+    features: [
+      { name: 'prefers-reduced-motion', value: 'reduce' },
+      { name: 'prefers-color-scheme', value: theme },
+    ],
+  });
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
