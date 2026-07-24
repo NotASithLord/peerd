@@ -1,0 +1,321 @@
+// @ts-check
+// egress-heuristics — best-effort detection of the DOM-data→URL
+// exfiltration shape in TAB-TOOL arguments. A TRIPWIRE, not a proof.
+//
+// WHY THIS EXISTS (#243). The egress-allowlist PreToolUse hook
+// (tools/hooks/defaults/egress-allowlist.js) governs the agent's OWN
+// outbound fetches, but EXEMPTS every primitive:'tab' tool — those act on
+// the user's logged-in browser, which is peerd's whole thesis. That
+// exemption is a gap: a prompt-injected turn can smuggle scraped page data
+// OUT through a tab tool by navigating (or typing) to a URL that carries the
+// data — `attacker.com/?data=<scraped>`, `attacker.com/<scraped>`,
+// `attacker.com/#<scraped>`, `https://<scraped>@attacker.com/` (userinfo,
+// sent as an Authorization: Basic header), or `https://<scraped>.attacker.com/`
+// (DNS-label exfil — the host leaks to the attacker's authoritative DNS +
+// TLS SNI + Host header). The URL is off-origin and the tab stack never
+// looked at it. This module is the ARGS-half tripwire for that shape.
+//
+// WHAT IT IS / IS NOT — read this before trusting it. It is a PURE function
+// producing allow | block from (name, args, currentOrigin). It is a
+// BEST-EFFORT TRIPWIRE layered UNDER the real containment, NOT a guarantee:
+//   - #241 — the schema boundary that keeps untrusted content out of the
+//     tool-arg surface in the first place;
+//   - #242 — read-only downscale of user-generated content + the offscreen
+//     HEAP FENCE (untrusted reasoning never holds the vault DK / authority).
+// Those are the defenses that actually contain exfiltration. This heuristic
+// is a cheap extra veto that catches the OBVIOUS shape early. Because it is
+// not the floor, it is deliberately CONSERVATIVE — it ALLOWS on any
+// uncertainty and only BLOCKS a clear payload — since a false block breaks
+// the legitimate "read a page, then follow a link on it" flow that is the
+// whole point of a browser agent.
+//
+// DETECTION MODEL — a single DOMINANT high-entropy run over the off-origin
+// http(s) destination's three LOW-FALSE-POSITIVE slots: USERINFO, HOSTNAME,
+// and PATH. Split each into runs of the URL-SAFE alphabet `A-Za-z0-9_-` (so
+// `+`, `/`, `.`, `=`, `&`, space … are run boundaries), keep runs whose local
+// entropy clears the bar, and BLOCK when the LONGEST such run reaches
+// MIN_BLOB_LENGTH. A scraped-DOM payload dumped into one of these slots is one
+// long contiguous token — a shape that has essentially NO legitimate
+// population in userinfo or hostname, and only rare ones in a path.
+//
+// WHY ONLY THESE THREE SLOTS — the query and fragment are DELIBERATELY NOT
+// scanned. That is the load-bearing decision, learned the hard way: the query
+// and fragment are where legitimate long high-entropy tokens LIVE, and they
+// are INDISTINGUISHABLE from an exfil blob by length or entropy —
+//   • an OIDC `id_token` (a base64url JWT, often 300–800 chars) returned in
+//     the fragment by the implicit/hybrid flow;
+//   • a SAML `SAMLRequest` (DEFLATE + standard base64), 200–800 chars;
+//   • base64url SPA continuation / pagination tokens on every infinite scroll;
+//   • presigned-URL signatures (a GCS V4 `X-Goog-Signature` is 512 hex chars).
+// Scanning the query/fragment would FALSE-BLOCK federated login and ordinary
+// SPA navigation — a prime-directive violation for a browser agent (this
+// module errs toward allow; a false block breaks the user's browsing, a false
+// negative is backstopped by #241/#242). Userinfo and hostname carry no such
+// legitimate blobs, and a path is normally `/`-segmented into short pieces, so
+// those three slots flag the exfil shape without breaking real flows.
+//
+// HONEST about what spares a path: NOT readability — it is the `/` boundaries
+// and the 100-char length bar. Readable English runs ~4.0 bits/char, well over
+// the 3.5 gate, so a SINGLE `/`-segment of ≥100 chars is flagged whether it is
+// a base64 blob or a hyphen/underscore-joined slug. Real slugs/titles cluster
+// at 70–95 chars and pass; a rare ≥100-char single readable segment does not.
+// That, plus a large-multihash IPFS subdomain CID collapsing past 100 in the
+// host, is the accepted-cost false block below — legitimacy does not exempt a
+// run, only its length and the `/`·`.` boundaries do.
+//
+// WHY URL-SAFE alphabet, and why the HOSTNAME is dot-collapsed:
+//   - base64url + hex are the URL-SAFE encodings a WORKING URL exfil uses
+//     (they survive transit intact). `+`/`/` are run BOUNDARIES because they
+//     are URL/form-structural — which lets a deep READABLE path split per `/`
+//     segment (no false block). A STANDARD base64 (`btoa`, `+/`) blob thus
+//     self-fragments and is a residual, but that is moot here: it would only
+//     matter in the query/fragment, which we do not scan anyway.
+//   - the hostname is scanned with its DOTS REMOVED (labels concatenated) so a
+//     payload chunked across DNS labels (`<h1>.<h2>.<h3>.attacker.com`, each
+//     ≤63 by protocol) re-fuses into one run instead of evading on the dots. A
+//     normal hostname collapses to a short / low-entropy string, never tripped.
+//
+// WHY DOMINANT-RUN AND NOT SUMMED VOLUME. Measuring only the LONGEST run (not
+// the sum) is what keeps a path that legitimately carries several independent
+// high-entropy segments from being blocked for their combined length; only a
+// single dumped blob trips it. (Summing was an earlier revision; it and query-
+// scanning both false-blocked OAuth/OIDC-family flows, which is why neither
+// survives.)
+//
+// KNOWN RESIDUALS — do NOT read this as complete coverage:
+//   1. THE QUERY AND FRAGMENT. `attacker.com/?d=<blob>` / `#<blob>` is NOT
+//      caught — see WHY ONLY THESE THREE SLOTS. This is the largest residual,
+//      a deliberate trade to never false-block a login/navigation; #242 is the
+//      containment.
+//   2. FRAGMENTATION. A payload split across separators so no single run
+//      reaches MIN_BLOB_LENGTH (`.`-separated path/label runs, standard-base64
+//      `+/` self-fragmentation, fine sub-entropy runs) evades.
+//   3. LOW-ENTROPY or SMALL payloads. Data whose OWN entropy is under the gate
+//      (a repeated segment, a short natural-language leak) or a single
+//      high-entropy token under MIN_BLOB_LENGTH slips through — entropy
+//      detection cannot see data that does not look random.
+// All residuals are contained by #241/#242. A rare legitimate LONG single run
+// that DOES trip the wire — a ≥100-char single PATH segment (an email
+// click-tracking wrapper, a magic-link, a path-embedded JWT, OR a genuinely
+// long readable slug/title), or a large-multihash IPFS subdomain CID that
+// collapses past 100 chars in the HOST — is the accepted cost of catching the
+// contiguous-blob shape; #242 is the real containment.
+//
+// SCOPE. Tab-tool ARGS only. It does NOT cover the page-emitted
+// `<img src="attacker.com/?d=…">` beacon vector: that data leaves via the
+// page's own network stack, not a tab-tool arg, so no arg-inspection can see
+// it. Beacons need a declarativeNetRequest layer — a separate follow-up.
+
+/** @typedef {{ action: 'allow' } | { action: 'block', reason: string }} EgressVerdict */
+
+/**
+ * The description of a tab-tool call to inspect. Args are the raw,
+ * model-supplied tool arguments; currentOrigin is the origin of the tab the
+ * call would act on (absent before any page has loaded).
+ * @typedef {Object} TabToolCall
+ * @property {string} [name]
+ * @property {Record<string, unknown> | null | undefined} [args]
+ * @property {string | null | undefined} [currentOrigin]
+ */
+
+// Arg fields that can carry a destination URL across the tab tools. `url`
+// is navigate's destination; `text`/`value` are what `type` sets (an exfil
+// vector only when the typed value itself parses as an absolute URL, e.g.
+// pasted into an address-bar-like field). Non-URL values (ordinary search
+// strings) simply fail the URL parse below and are ignored.
+const URL_ARG_FIELDS = ['url', 'text', 'value', 'href'];
+
+// Only http(s) destinations can carry a working cross-origin GET exfil.
+// data:/blob:/javascript: are navigate-rejected anyway (navigate.js) and
+// carry no host to exfiltrate TO — skip them.
+const HTTP_SCHEMES = new Set(['http:', 'https:']);
+
+// why: 100 chars in ONE surviving high-entropy run. A scraped-DOM payload
+// worth moving is far larger and lands as one contiguous token; ordinary
+// off-origin values (a search term, a page/share id, a single content hash,
+// an OAuth code_challenge/state, a git SHA, an IPFS CID) each stay well under
+// this in any single run. The bar is set high on purpose so ordinary links
+// pass untouched — this is a tripwire beneath #241/#242, not the sole gate,
+// so it errs hard toward allow.
+const MIN_BLOB_LENGTH = 100;
+
+// why: a run must clear this per-character entropy to count. URL-safe encoded
+// data is high-entropy (base64url ~5–6 bits, random hex ~3.9); low-variety
+// strings — a zero-padded id, an 'aaaa…' padding block, a pure-digit timestamp
+// (log2 10 ≈ 3.32), a short natural word — fall below 3.5 and are DROPPED
+// before they can count as a payload run. Note the SIDE EFFECT that this
+// replaces a hard length floor: entropy over a short run is mechanically low
+// (a distinct-char run of length N caps at log2 N, so ~≤11 chars can't clear
+// 3.5), so short benign runs self-exclude.
+const MIN_RUN_ENTROPY_BITS = 3.5;
+
+// The run alphabet — base64url + hex. `+`/`/`/`.`/`=`/`&`/space are run
+// BOUNDARIES (see "WHY URL-SAFE-ONLY" in the header). A maximal span of these
+// chars is one run; anything else splits it.
+const RUN_SPLIT = /[^A-Za-z0-9_-]+/;
+
+/**
+ * Shannon entropy of a string in bits per character. High for encoded
+ * arbitrary data, low for repetitive or narrow-alphabet strings.
+ * @param {string} str
+ * @returns {number}
+ */
+const shannonEntropyBits = (str) => {
+  if (!str) return 0;
+  /** @type {Map<string, number>} */
+  const counts = new Map();
+  for (const ch of str) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let bits = 0;
+  for (const count of counts.values()) {
+    const p = count / str.length;
+    bits -= p * Math.log2(p);
+  }
+  return bits;
+};
+
+/**
+ * Percent-decode, never throwing. why: a malformed `%` sequence must degrade
+ * to the raw string, never crash the inspector.
+ * @param {string} str
+ * @returns {string}
+ */
+const safeDecode = (str) => {
+  try { return decodeURIComponent(str); } catch { return str; }
+};
+
+/**
+ * The three LOW-FALSE-POSITIVE payload-bearing slots of a URL, decoded into the
+ * canonical form the run scanner reads. why each (and why NOT query/fragment —
+ * see the header's "WHY ONLY THESE THREE SLOTS"):
+ *  - userinfo (username/password): `https://<blob>@host/` ships the blob as an
+ *    Authorization: Basic header to the attacker host. No legit blob lives here.
+ *  - hostname with DOTS REMOVED: re-fuses a payload chunked across DNS labels
+ *    so `<h1>.<h2>.<h3>.attacker.com` is one run, not per-label sub-100 runs.
+ *    A normal hostname collapses to a short/low-entropy string.
+ *  - path (plain percent-decode; `+` is literal in a path). `/` splits it into
+ *    segments, so only a lone ≥100-char high-entropy segment trips it — readable
+ *    or opaque; readability does not exempt a run, its length does.
+ * @param {URL} url
+ * @returns {string[]}
+ */
+const payloadSlots = (url) => [
+  safeDecode(url.username),
+  safeDecode(url.password),
+  url.hostname.replace(/\./g, ''),
+  safeDecode(url.pathname),
+];
+
+/**
+ * Length of the LONGEST run (across the slots) whose local entropy clears
+ * MIN_RUN_ENTROPY_BITS. MAX not SUM — a URL carrying several independent
+ * high-entropy values (an OAuth PKCE authorize URL) is not blocked for their
+ * combined length; only a single dumped blob trips it. See "WHY DOMINANT-RUN".
+ * @param {string[]} slots
+ * @returns {number}
+ */
+const largestExfilRun = (slots) => {
+  let longest = 0;
+  for (const slot of slots) {
+    for (const run of slot.split(RUN_SPLIT)) {
+      // why `run.length <= longest` first: a run that cannot raise the max is
+      // irrelevant, so skip the entropy math for it (never changes the verdict).
+      if (!run || run.length <= longest) continue;
+      if (shannonEntropyBits(run) < MIN_RUN_ENTROPY_BITS) continue;
+      longest = run.length;
+    }
+  }
+  return longest;
+};
+
+/**
+ * Parse an origin, returning null if unparseable. why: a missing/garbled
+ * currentOrigin must not throw — it degrades to "treat as off-origin and
+ * inspect", never a crash.
+ * @param {string} value
+ * @returns {string | null}
+ */
+const safeOrigin = (value) => {
+  try { return new URL(value).origin; } catch { return null; }
+};
+
+/**
+ * Collect the URL-bearing arg values from a tab-tool call.
+ * @param {Record<string, unknown> | null | undefined} args
+ * @returns {string[]}
+ */
+const collectCandidateUrls = (args) => {
+  if (!args || typeof args !== 'object') return [];
+  /** @type {string[]} */
+  const out = [];
+  for (const field of URL_ARG_FIELDS) {
+    const value = /** @type {Record<string, unknown>} */ (args)[field];
+    if (typeof value === 'string' && value.trim()) out.push(value.trim());
+  }
+  return out;
+};
+
+/**
+ * Inspect a tab-tool call for the DOM-data→URL exfiltration shape.
+ *
+ * Returns `{ action: 'block', reason }` when the call would navigate/type an
+ * OFF-origin http(s) URL whose userinfo, hostname, or path carries a single
+ * URL-safe-encoded high-entropy run of ≥ MIN_BLOB_LENGTH characters — a
+ * contiguous dumped blob. Everything else is `{ action: 'allow' }`, including
+ * same-origin targets, plain off-origin links (incl. deep readable paths), a
+ * blob in the QUERY or FRAGMENT (the largest documented residual — those slots
+ * are not scanned; see the header), non-URL typed text, empty/short args, a
+ * lone sub-threshold token, fragmented / low-entropy payloads, and any call
+ * made before a page has loaded.
+ *
+ * NEVER THROWS — a pure inspector on a hot path. Any non-object `call`
+ * (including `null`) degrades to allow, matching every other odd-input path.
+ *
+ * The `reason` is CONTENT-FREE by construction — it never interpolates the
+ * URL, the blob, or any other attacker-controlled bytes. why: reasons are
+ * audited and read back UN-fenced; echoing attacker bytes into an audit log
+ * that a human or the agent later re-reads would reopen the injection channel
+ * this gate exists to close. It also does NOT claim to catch the residuals —
+ * see KNOWN RESIDUALS in the header.
+ *
+ * @param {TabToolCall | null} [call]
+ * @returns {EgressVerdict}
+ */
+export const inspectTabToolCall = (call) => {
+  // why: the default param only covers `undefined`; a caller that represents
+  // an absent record as `null` must not crash the destructure. Any non-object
+  // is "nothing to inspect" → allow.
+  const safeCall = (call && typeof call === 'object') ? call : {};
+  const { args, currentOrigin } = safeCall;
+  const candidates = collectCandidateUrls(args);
+  if (!candidates.length) return { action: 'allow' };
+
+  // why: no current origin means no page has loaded on this tab yet (e.g.
+  // the web actor's first navigation from a tabless start). Nothing has been
+  // scraped, so there is nothing to exfiltrate — allow. Exfil presupposes a
+  // page already read, which always leaves a currentOrigin behind.
+  if (!currentOrigin) return { action: 'allow' };
+  const here = safeOrigin(currentOrigin);
+
+  for (const raw of candidates) {
+    let url;
+    try { url = new URL(raw); }
+    catch { continue; } // unparseable / relative → not a working exfil vector
+    if (!HTTP_SCHEMES.has(url.protocol)) continue;
+    // Same-origin is trivially allowed: sending data back to the site the
+    // agent is already on is not cross-origin exfiltration. (If currentOrigin
+    // was unparseable, `here` is null and we treat every target as off-origin
+    // — inspect it; we still only block on a clear payload.)
+    if (here && url.origin === here) continue;
+    if (largestExfilRun(payloadSlots(url)) >= MIN_BLOB_LENGTH) {
+      return {
+        action: 'block',
+        // why: content-free — see the doc comment above. Names the SHAPE,
+        // never the bytes, and claims only "likely", not a guarantee.
+        reason: 'egress-heuristics: off-origin tab navigation carrying a high-entropy '
+          + 'encoded payload in the URL userinfo/host/path — the likely '
+          + 'DOM-data exfiltration shape',
+      };
+    }
+  }
+  return { action: 'allow' };
+};
