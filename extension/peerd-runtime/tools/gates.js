@@ -44,7 +44,7 @@ import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain,
   EXPOSURE_ACTOR, isActorOnlyTool, isAllowedForActor, actorTargetId, isDwebTool,
-  actorWebTabTarget,
+  actorWebTabTarget, isReviewExemptRead,
 } from './exposure.js';
 import {
   decideAction,
@@ -130,7 +130,15 @@ const personaGate = (tool, _args, ctx) => {
 export const actorTierGate = (tool, args, ctx) => {
   if (ctx?.exposure !== EXPOSURE_ACTOR) {
     if (isActorOnlyTool(tool.name)) {
-      return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
+      // #160 review exemption — the ONE hole in this wall. A SW-stamped review
+      // ctx (spawn.js sets it; the model cannot reach it, actor_create builds
+      // its spawn request from an explicit field whitelist) may hold the three
+      // instance READS so a code review can open the files around a diff. Both
+      // axes are positive: the marker AND the name. Every other actor-only tool
+      // — every write, every other ctx — refuses exactly as before.
+      if (!isReviewExemptRead(tool.name, ctx?.exposure)) {
+        return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
+      }
     }
     // Dweb tools are the DWEB ACTOR's family (owner call 2026-07-04): refused
     // for every non-actor ctx, unconditionally — the wall behind the

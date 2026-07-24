@@ -58,6 +58,7 @@
  * @property {string} [instanceId]            the instance (engine id), the owned tabId (String), or — for a DESIGN-18 API actor — the owned ORIGIN
  * @property {'webvm' | 'notebook' | 'app' | 'web' | 'dweb'} [actorType]  webvm/notebook/app = engine kinds; web = a browser tab OR (DESIGN-18) an API origin; dweb = the mesh operator (global singleton)
  * @property {'tab' | 'api'} [backing]         DESIGN-18: a `web` actor's backing — 'tab' (default; absent = tab) drives a DOM at a MUTABLE origin; 'api' owns ONE FIXED origin, fetch-only, no tab ever
+ * @property {boolean} [review]               issue 160: the review-exemption marker. Set server-side at create() by spawn.js (from the trusted review orchestrator, never a model/worker arg); the offscreen tool-dispatch route re-stamps ctx.exposure='review' from it so the reviewer's three instance reads are admitted on the offscreen path, not just the in-SW fallback.
  *
  * Cost/usage telemetry (feature 06). Accumulated client-side from
  * provider `usage` events × the local pricing table. Absent on sessions

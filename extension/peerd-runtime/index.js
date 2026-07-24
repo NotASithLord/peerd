@@ -197,6 +197,9 @@ export {
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
   // DESIGN-17: the actor capability tier vocabulary.
   EXPOSURE_ACTOR, ACTOR_ONLY_TOOLS, isActorOnlyTool,
+  // #160: the review-exemption marker — the SW injects it into the offscreen
+  // relay so a review child's persisted flag re-stamps ctx.exposure there.
+  EXPOSURE_REVIEW,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
   actorAllowedToolsFor, isAllowedForActor,

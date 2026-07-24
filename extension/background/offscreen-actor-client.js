@@ -33,6 +33,11 @@
  *   mid-turn navigate that adopts a tab (0→1) is seen by the NEXT tool call. undefined
  *   for engine/API actors (no tab) and the 0-tab web state.
  * @param {string} deps.EXPOSURE_ACTOR
+ * @param {string} [deps.EXPOSURE_REVIEW]  issue 160 - the review-exemption marker. A review
+ *   child's session record carries `review:true` (persisted SW-side at spawn); the
+ *   tool-dispatch route re-stamps ctx.exposure from it so the tier gate admits the
+ *   three instance reads on the offscreen path too, not just the in-SW fallback.
+ *   Optional and fail-closed: not injected → nothing is ever stamped.
  * @param {() => number} [deps.now]
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
@@ -44,7 +49,7 @@
  */
 export const makeOffscreenActorClient = ({
   ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
-  sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, now = Date.now,
+  sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, now = Date.now,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
 }) => {
@@ -167,7 +172,17 @@ export const makeOffscreenActorClient = ({
           const sig = signalBySession.get(/** @type {string} */ (actorSessionId));
           // Stamp the child lineage on every audit its tools emit (parity with spawn.js's taggedAudit).
           const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, actorSessionId, depth: rec.depth } });
-          const ctx = restrictCtxCapabilities({ ...base, audit, ...(sig ? { abortSignal: sig } : {}) }, granted);
+          // #160: re-stamp the review-exemption marker from the PERSISTED record
+          // (spawn.js writes rec.review SW-side at create; no worker or model arg
+          // can reach it). why here: this route rebuilds ctx from the record alone,
+          // so without the stamp the tier gate saw exposure undefined and refused
+          // the three instance reads — the exemption only worked on the in-SW
+          // fallback path. Fail-closed: rec.review !== true, or no injected
+          // EXPOSURE_REVIEW, stamps nothing.
+          const ctx = restrictCtxCapabilities({
+            ...base, audit, ...(sig ? { abortSignal: sig } : {}),
+            ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
+          }, granted);
           const result = await dispatchToolCall(call, ctx);
           return { ok: true, result };
         }

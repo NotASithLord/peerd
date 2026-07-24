@@ -142,6 +142,47 @@ export const ACTOR_ONLY_TOOLS = Object.freeze(new Set(
 /** Is this a tiered instance tool (actor-only, off the main agent)? Pure. @param {string} name */
 export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
 
+// ── the review exemption (#160) ─────────────────────────────────────────────
+// The ONE hole in the actor-only wall, and it is deliberately shaped so it
+// cannot become two.
+//
+// The problem: #159 tiered the instance READS actor-only alongside the writes,
+// so the clean-context reviewer (request_review) — which is a SPAWNED child,
+// not an actor — can no longer open the files surrounding a diff. Reviews of
+// App/Notebook code became diff-only, which makes them materially worse.
+//
+// Why an exemption is safe HERE and nowhere else: the reviewer already runs in
+// a keyless offscreen heap (the same class of heap an actor uses), holds NO
+// outward closure at all (verified in review.test.ts: no safeFetch/webFetch/
+// dweb/messageActor/spawnActor survives its capability strip), cannot recurse,
+// and is ephemeral. So the isolation premise the tier defends — instance bytes
+// stay out of the orchestrator's key-holding heap — is upheld either way. What
+// the exemption widens is the reviewer's own untrusted-input blast radius (from
+// "the diff" to "the diff plus instance files"), which is the honest trade and
+// is bounded by having no channel out.
+//
+// READS ONLY, BY NAME. Not "the reviewer is exempt from the tier" and not "for
+// review, narrow from the full registry" — either of those would hand over
+// fetch_url / read_page / site_client_run in the same stroke and actually build
+// the exfiltration channel this whole design denies. Three names, derived from
+// the per-kind sets so a rename can't silently orphan the entry.
+export const EXPOSURE_REVIEW = 'review';
+
+export const REVIEW_INSTANCE_READS = Object.freeze(new Set(
+  ['js_read_file', 'app_read_file', 'app_list_files']
+    .filter((n) => ACTOR_ONLY_TOOLS.has(n)),
+));
+
+/**
+ * May this ctx hold this actor-only tool by way of the review exemption? Pure.
+ * Positively scoped on BOTH axes: the SW-stamped review marker AND the
+ * three-name read set. Anything else is refused exactly as before.
+ *
+ * @param {string} name @param {string | undefined} exposure
+ */
+export const isReviewExemptRead = (name, exposure) =>
+  exposure === EXPOSURE_REVIEW && REVIEW_INSTANCE_READS.has(name);
+
 // DESIGN-17 web actor — the DOM toolset it owns. This list is the sole source
 // of truth for that set. why these and not page_eval/page_exec: the web actor
 // ingests untrusted page text, so it must not also wield code-exec — the
