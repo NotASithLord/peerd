@@ -74,6 +74,15 @@ jobs:
         run: bun run check:imports
       - name: Doc path references (top-level docs point at real files)
         run: bun run check:docpaths
+      # The web target: stage it fresh from live source, then prove the
+      # assembled tree is import-closed (check-web-boundary auto-runs inside
+      # package:web; the explicit second run keeps the gate visible in logs).
+      # This is what lets the web tree inherit upstream safely — an escape
+      # introduced by a PR fails HERE instead of rotting the staged library.
+      - name: Web target build (from live source)
+        run: bun run package:web
+      - name: Web import-closure boundary
+        run: bun run check:web
       - name: Generated-file drift (dev manifest + channel-config + tscheck badge)
         run: |
           bun run gen:dev

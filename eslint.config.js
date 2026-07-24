@@ -403,4 +403,16 @@ export default [
     files: ['extension/engine-tabs/notebook-tab/notebook-neutralizers.js'],
     rules: { 'prefer-arrow-callback': 'off' },
   },
+
+  // --- web/ shell: the web target's smoke host (web/public/, overlaid on
+  // the staged library tree — see packaging/web-target.ts). Same base rules
+  // apply; one sanctioned relaxation: the service worker is the page's
+  // fetch chokepoint (it IS the cache layer; safeFetch is an agent-context
+  // tool, meaningless in a SW fetch handler), and it runs in a worker
+  // global scope.
+  {
+    files: ['web/public/sw.js'],
+    languageOptions: { globals: { ...globals.serviceworker } },
+    rules: { 'no-restricted-globals': 'off' },
+  },
 ];

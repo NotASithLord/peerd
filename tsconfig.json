@@ -55,7 +55,8 @@
   // Vendor is third-party (own SOURCE.txt, never // @ts-check'd); its
   // .d.ts sidecars still load when imported. The deliberately-ES5
   // injected-into-page bodies are never annotated, so checkJs:false
-  // already leaves them untouched.
-  "include": ["tests/**/*.ts", "extension/**/*.js"],
+  // already leaves them untouched. web/public (the web target's smoke
+  // shell) rides the same opt-in ratchet as the extension.
+  "include": ["tests/**/*.ts", "extension/**/*.js", "web/public/**/*.js"],
   "exclude": ["extension/vendor/**"]
 }

@@ -23,7 +23,7 @@ import { cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync } fr
 import { join, relative, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  REPO_ROOT, EXTENSION_DIR, ARTIFACTS_DIR,
+  REPO_ROOT, EXTENSION_DIR, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE,
   CHANNELS, BROWSERS, type Channel, type Browser,
   readVersion, parseArgs,
 } from './lib.ts';
@@ -31,8 +31,7 @@ import { generateManifest } from './gen-manifest.ts';
 import { genChannelConfigSource } from './gen-channel-config.ts';
 import { verifyStoreArtifact } from './verify-store-artifact.ts';
 import { signPreviewArtifact } from './sign.ts';
-
-const STORE_LOADER_TEMPLATE = join(REPO_ROOT, 'packaging', 'templates', 'dweb-loader.store.js');
+import { buildWebTarget } from './package-web.ts';
 
 // Paths (relative to extension/) that never ship in ANY artifact.
 // why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
@@ -122,6 +121,12 @@ const main = async () => {
 
   for (const [channel, browser] of pairs) {
     await packageArtifact({ channel, browser, version, sign, verify });
+  }
+  // --all means EVERY destination: after the 2×2 extension matrix, stage +
+  // verify the web target too (a staged library tree, not a zip — no browser
+  // or signing axis, so it lives outside the pair loop).
+  if (args.all === true || (!args.channel && !args.browser)) {
+    await buildWebTarget();
   }
   console.log('done.');
 };
