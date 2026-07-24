@@ -24,7 +24,7 @@
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchPeerd, unlockAndReady, resetSession, freezeAnimations, log } from './e2e-harness.mjs';
+import { launchPeerd, unlockAndReady, resetSession, freezeAnimations, setEmulatedTheme, capturePage, THEMES, sleep, log } from './e2e-harness.mjs';
 import { STATES } from './states.mjs';
 import {
   compareToBaseline, decodePng, writeDiffImage, BASELINE_DIR, UPDATE_BASELINES,
@@ -62,21 +62,23 @@ const makeRecorder = (ctx, state) => {
       screenshots.push({ label, path: relative(ROOT, file) });
       return png;
     },
-    async visual(name, opts = {}) {
-      const png = await ctx.screenshot();
-      const curFile = join(ARTIFACTS, `${name}-current.png`);
+    // Compare + record ONE captured variant (a state × theme). Shared by the
+    // panel-sized `visual` and the wide-page `visualPage`.
+    _record(variant, base, theme, png, opts) {
+      const curFile = join(ARTIFACTS, `${variant}-current.png`);
       writeFileSync(curFile, png);
-      const v = compareToBaseline(name, png, { update: UPDATE_BASELINES, ...opts });
+      const v = compareToBaseline(variant, png, { update: UPDATE_BASELINES, ...opts });
       const entry = {
-        name, ratio: Number(v.ratio.toFixed(5)), threshold: v.threshold,
+        name: variant, base, theme,
+        ratio: Number(v.ratio.toFixed(5)), threshold: v.threshold,
         pass: v.pass, rawPass: v.rawPass ?? v.pass, gated: v.gated ?? true,
         platform: VISUAL_PLATFORM, wrote: v.wrote, current: relative(ROOT, curFile),
       };
       // why keyed on rawPass, not pass: off-authority `pass` is forced true, but
       // the diff image is exactly what that lane exists to produce.
       if (!v.wrote && v.dimsMatch && !entry.rawPass) {
-        const baseFile = join(BASELINE_DIR, `${name}.png`);
-        const diffFile = join(ARTIFACTS, `${name}-diff.png`);
+        const baseFile = join(BASELINE_DIR, `${variant}.png`);
+        const diffFile = join(ARTIFACTS, `${variant}-diff.png`);
         writeDiffImage(decodePng(readFileSync(baseFile)), decodePng(png), diffFile, opts);
         entry.baseline = relative(ROOT, baseFile);
         entry.diff = relative(ROOT, diffFile);
@@ -85,7 +87,27 @@ const makeRecorder = (ctx, state) => {
       const status = v.wrote ? 'baseline written'
         : entry.rawPass ? `OK ${(v.ratio * 100).toFixed(2)}%`
           : `DIFF ${(v.ratio * 100).toFixed(2)}% > ${(v.threshold * 100).toFixed(2)}%${entry.gated ? '' : ' (off-authority, not gating)'}`;
-      log(`  ${entry.rawPass ? 'PASS' : entry.gated ? 'FAIL' : 'note'}  [${state.name}] visual:${name} — ${status}`);
+      log(`  ${entry.rawPass ? 'PASS' : entry.gated ? 'FAIL' : 'note'}  [${state.name}] visual:${variant} — ${status}`);
+    },
+    // Capture the side panel in BOTH themes. Each becomes its own baseline
+    // `<name>.<theme>.png`, so the gate and the gallery both see light + dark.
+    // Restores light after so any later interaction runs in the default theme.
+    async visual(name, opts = {}) {
+      for (const theme of THEMES) {
+        await setEmulatedTheme(ctx.page, theme);
+        await sleep(80); // let the CSS media switch repaint before the shot
+        this._record(`${name}.${theme}`, name, theme, await ctx.screenshot(), opts);
+      }
+      await setEmulatedTheme(ctx.page, 'light');
+    },
+    // The same dual-theme capture for an arbitrary WIDE page (full-tab surfaces:
+    // the home SPA, options) opened via openWidePage — the large in-browser view.
+    async visualPage(name, page, opts = {}) {
+      for (const theme of THEMES) {
+        await setEmulatedTheme(page, theme);
+        await sleep(80);
+        this._record(`${name}.${theme}`, name, theme, await capturePage(page), opts);
+      }
     },
     result() {
       const ok = checks.every((c) => c.pass) && visuals.every((v) => v.pass);

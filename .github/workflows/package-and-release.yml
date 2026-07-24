@@ -81,6 +81,21 @@ jobs:
             echo '::error::A generated file (manifest.json, channel-config.js, or badges/tscheck.json) is out of sync with its generator — run `bun run gen:dev` and commit.'
             exit 1
           }
+      # The committed visual gallery ("brief") must always reflect the committed
+      # baselines — it is regenerated FROM them, so a reseed that forgets to
+      # rebuild it would ship a stale brief. Skips cleanly until the authority
+      # baselines are first committed (nothing to render yet).
+      - name: Gallery in sync with baselines
+        run: |
+          if [ -d scripts/cdp/baselines/linux-x64 ]; then
+            bun run gallery
+            git diff --exit-code scripts/cdp/gallery.html || {
+              echo '::error::scripts/cdp/gallery.html is out of sync with the committed baselines — run `bun run gallery` and commit.'
+              exit 1
+            }
+          else
+            echo 'no linux-x64 baselines committed yet — skipping gallery drift check'
+          fi
 
   # Additive job — existing job names above/below are referenced by
   # branch-protection required checks; this one can be added to that
@@ -231,14 +246,14 @@ jobs:
     # run on the SAME head SHA, and a reseed passes trivially (it rewrites
     # instead of comparing). A distinct name means a reseed can never satisfy
     # the gating check. Otherwise this display name stays stable.
-    name: "visual (side panel render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
+    name: "visual (render)${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && ' (reseed baselines)' || '' }}"
     # PINNED, not ubuntu-latest: `latest` migrates between images, and a
     # freetype/fontconfig bump would re-rasterize every glyph in every baseline.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
-      pull-requests: write   # sticky diff comment; same-repo PRs only
+      contents: write        # push before/after montages to the visual-diffs branch
+      pull-requests: write   # inline-image diff comment; same-repo PRs only
     env:
       # This lane is the sole baseline authority — see scripts/cdp/visual.mjs.
       VISUAL_PLATFORM: linux-x64
@@ -275,7 +290,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## visual — side panel render"
+            echo "## visual — UI render (side panel + full tab, light + dark)"
             echo
             bun scripts/cdp/visual-report.mjs
             echo
@@ -283,7 +298,8 @@ jobs:
             echo
             echo "If the change is INTENDED: re-run this workflow on your branch with"
             echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
-            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\` and commit."
+            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\` +"
+            echo "\`scripts/cdp/gallery.html\` and commit."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Flat triple per state so before/after/diff sort ADJACENTLY for a human —
@@ -315,41 +331,75 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Same-repo PRs only: a fork PR's GITHUB_TOKEN is read-only, so this would
-      # just fail. The summary + artifact above carry the same information and DO
-      # work on forks. This job needs no secrets — keep it on `pull_request`,
-      # never `pull_request_target`.
-      - name: Flag the render change on the PR
+      # Same-repo PRs only: a fork PR's GITHUB_TOKEN is read-only, so pushing the
+      # montages + commenting would fail. The summary + artifact above carry the
+      # same information and DO work on forks. Keep this on `pull_request`, never
+      # `pull_request_target` (untrusted head, write token = unsafe).
+      #
+      # Publishes each changed screen's before|after montage to the `visual-diffs`
+      # branch (orphan; images only, never merges to main) under pr<N>/<sha>/, then
+      # posts a PR comment that embeds them by raw URL — so before/after renders
+      # INLINE, no artifact download. Keyed by head sha so re-runs bust GitHub's
+      # image cache; the PR's old sha dir is replaced each run to bound growth.
+      - name: Publish before/after montages + inline PR comment
         if: failure() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          {
-            echo "<!-- peerd-visual -->"
-            echo "**The side panel renders differently than the committed baselines.**"
-            echo
-            bun scripts/cdp/visual-report.mjs
-            echo
-            echo "Before / after / diff PNGs: **[download the \`visual-diff-…\` artifact]($RUN_URL)**."
-            echo
-            echo "Intended? Actions → package-and-release → **Run workflow** on this branch with"
-            echo "**update_visual_baselines** checked, then unzip \`visual-baselines-linux-x64\` over"
-            echo "\`scripts/cdp/baselines/linux-x64/\` and commit — the before/after then shows inline"
-            echo "in Files changed."
-          } > "$RUNNER_TEMP/visual-comment.md"
+          set -e
+          short="${HEAD_SHA:0:12}"
+          montage="$RUNNER_TEMP/montage"
+          bun scripts/cdp/visual-compare.mjs \
+            --before scripts/cdp/baselines/linux-x64 --after scripts/cdp/artifacts --out "$montage"
+
+          # Publish to the visual-diffs branch via an authenticated clone. why a
+          # separate clone: the main checkout is on the PR head; this branch is
+          # orphan and unrelated. Fall back to creating it if it doesn't exist yet.
+          auth="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          pub="$RUNNER_TEMP/visual-diffs"
+          git clone --branch visual-diffs --single-branch --depth 1 "$auth" "$pub" 2>/dev/null || {
+            git clone --depth 1 "$auth" "$pub"
+            git -C "$pub" checkout --orphan visual-diffs
+            git -C "$pub" rm -rqf . || true
+            printf '# peerd visual diffs\n\nCI-published before/after montages for review. Orphan branch (never merges to main); images only under `pr<N>/<sha>/`.\n' > "$pub/README.md"
+          }
+          rm -rf "$pub/pr${PR}"
+          mkdir -p "$pub/pr${PR}/$short"
+          cp "$montage"/*.before-after.png "$pub/pr${PR}/$short/"
+          git -C "$pub" add -A
+          git -C "$pub" -c user.name='github-actions[bot]' \
+            -c user.email='github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "visual diffs: PR #${PR} @ $short"
+          # A racing run on another PR can advance the branch; rebase-retry once.
+          git -C "$pub" push origin visual-diffs || {
+            git -C "$pub" pull --rebase origin visual-diffs && git -C "$pub" push origin visual-diffs
+          }
+
+          base="https://raw.githubusercontent.com/${REPO}/visual-diffs/pr${PR}/$short"
+          bun scripts/cdp/visual-review-comment.mjs \
+            --base-url "$base" --run-url "$RUN_URL" --montage-dir "$montage" > "$RUNNER_TEMP/visual-comment.md"
           gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md" --edit-last --create-if-none \
             || gh pr comment "$PR" --body-file "$RUNNER_TEMP/visual-comment.md"
 
-      # Reseed mode: hand the fresh baselines back as a downloadable zip. No
-      # token, no push — a HUMAN looks at them and commits them.
-      - name: Upload the reseeded baselines
+      # Reseed mode: regenerate the gallery from the fresh baselines so the two
+      # stay in lockstep, then hand BOTH back as a downloadable zip. No token, no
+      # push — a HUMAN looks at them and commits baselines/linux-x64/ + gallery.html.
+      - name: Regenerate the gallery from the fresh baselines
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
+        run: bun run gallery
+      - name: Upload the reseeded baselines + gallery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
         uses: actions/upload-artifact@v6
         with:
           name: visual-baselines-linux-x64
-          path: scripts/cdp/baselines/linux-x64/*.png
+          path: |
+            scripts/cdp/baselines/linux-x64/*.png
+            scripts/cdp/gallery.html
           if-no-files-found: error
           retention-days: 7
 
