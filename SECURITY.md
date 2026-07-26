@@ -66,6 +66,29 @@ Understanding the boundaries helps you scope a report:
   runs keyless in the shared loop until it lands.)
 - **Policy-gated tool dispatch** with a local, append-only audit log. The
   current policy checks and hooks live in `peerd-runtime/tools/`.
+- **What the model reads is what you could have seen.** Bytes that are
+  invisible to a person but legible to a model — zero-width runs, bidi
+  overrides, Unicode tag characters, HTML comments — are stripped before
+  page text reaches the model, at both read boundaries and inside the
+  untrusted-content fence itself. Text in every script survives, including
+  the zero-width non-joiner Persian, Urdu and the Indic scripts need
+  (`peerd-runtime/dom/cdr.js`).
+- **Acting as you, on a page strangers wrote, takes you.** On sites where
+  third parties author the content — issue trackers, shared docs, social
+  feeds — an authenticated write asks you first, **even if you turned
+  confirmations off**. Reading is exempt; so is navigating away
+  (`peerd-runtime/actor/ugc-registry.js`).
+- **An exfil-shaped navigation is blocked.** A tab tool sending a long,
+  scraped-looking blob to another origin in the URL is refused. Best
+  effort: it catches the obvious shape, not everything, and it deliberately
+  does not scan query strings, because that is where legitimate login
+  tokens live (`peerd-runtime/tools/egress-heuristics.js`).
+
+Two things this list does **not** claim. A web actor is pinned to a tab,
+not to a site, so a redirect can still move it to another origin — that is
+residual risk R12 and is being closed in issue #251. And the strict
+structural reply format for web actors ships **off** by default (R14). The
+threat model states both plainly rather than counting them as defenses.
 - **Sandboxed execution.** WebVM (CheerpX, network only via the egress
   wrappers), JS Sandbox (realm-sealed Web Worker), App (opaque-origin
   sandboxed iframe).
