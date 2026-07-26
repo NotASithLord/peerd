@@ -142,6 +142,13 @@ export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
 } from './actor/web-actor.js';
+// issue 251: authority segmented by origin. A web actor is ROAMING (browses
+// freely, holds nothing) or BOUND (owns one credentialed origin, like the API
+// actor above). Two pure cores: which origins the user has an identity on, and
+// what happens when a tab LANDS somewhere. Exported here because the enforcement
+// points that will consume them live outside this module (background/).
+export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
+export { decideLanding, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
 // the two-tier store, and the capture digester. See site-clients/index.js.
