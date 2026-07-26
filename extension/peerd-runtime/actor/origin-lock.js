@@ -19,9 +19,16 @@
 // `site_client_*` tools, none of which pass through `resolveTargetTab`. Their
 // credential scope is `ctx.activeTab.origin`, read live — so a page that
 // redirects itself to a credentialed origin moves that scope with no tool call
-// to judge, and those tools can spend it before any DOM tool re-enters the
-// chokepoint. Closing that means judging inside the egress boundary too, which
-// is follow-up work, not something this file quietly already does.
+// to judge, and those tools could spend it before any DOM tool re-entered the
+// chokepoint.
+//
+// `makeCredentialScope` below is the answer to that, and it is a DIFFERENT shape
+// on purpose: synchronous, so it can sit inside the credential-scope getter the
+// egress wrapper already reads live on every request. It withholds the scope
+// rather than refusing the call, so it can only ever narrow what the pre-#251
+// code handed over. What remains uncovered is a SESSIONLESS cross-origin fetch,
+// which is exactly what those tools do today when off-origin — no authority to
+// take away.
 //
 // WHAT THIS DOES NOT DO, and must not silently appear to. On a `handoff` it
 // records the successor origin and ends the actor — it does NOT mint the bound
@@ -30,7 +37,7 @@
 // actor. If a future change makes this file forward actor-authored text into a
 // handoff, the segmentation becomes decorative and #251's whole point is lost.
 
-import { decideLanding } from './landing-rule.js';
+import { decideLanding, mayHoldCredentials } from './landing-rule.js';
 import { classifyOriginSensitivity } from './origin-sensitivity.js';
 
 /**
@@ -117,5 +124,54 @@ export const makeJudgeLanding = (deps) => {
       ...(verdict.handoffTo ? { handoffTo: verdict.handoffTo } : {}),
     });
     return verdict;
+  };
+};
+
+/**
+ * Build the SYNCHRONOUS credential-scope getter the web actor's egress wrapper
+ * reads on every request.
+ *
+ * The SW today does `withSessionScopedCredentials(webFetch, () => ctx.activeTab?.origin)`.
+ * This wraps that getter: same value when the lock is content for the actor to
+ * be spending a session there, `undefined` — meaning sessionless — when it is
+ * not. Undefined is already the wrapper's "no session" case, so nothing
+ * downstream needs to learn a new shape.
+ *
+ * why this cannot reuse `judgeLanding`: that function is async (it persists) and
+ * it MUTATES state (it spends excursion budget). A credential-scope getter is
+ * called synchronously, possibly several times per request, and must be free of
+ * consequences. So the policy is asked in its read-only form (`mayHoldCredentials`)
+ * and nothing here writes.
+ *
+ * @param {object} deps
+ * @param {() => ActorOriginState | null} deps.getState
+ * @param {() => string | undefined} deps.getOrigin  the live scope, normally `ctx.activeTab?.origin`
+ * @param {(origin: string) => boolean} [deps.isUgcZone]
+ * @param {(origin: string) => boolean} [deps.hasVaultSecret]
+ * @param {() => ReadonlySet<string> | ReadonlyMap<string, any>} [deps.getLearned]
+ * @returns {() => string | undefined}
+ */
+export const makeCredentialScope = (deps) => {
+  const { getState, getOrigin, isUgcZone, hasVaultSecret, getLearned } = deps;
+  return () => {
+    const origin = getOrigin();
+    if (!origin) return undefined;
+    const state = getState();
+    // No state means the lock does not apply to this context — the same
+    // "decided once in the SW" rule as judgeLanding. Hand back the unmodified
+    // scope so a non-locked actor behaves exactly as it did before #251.
+    if (!state) return origin;
+    const sensitivity = classifyOriginSensitivity(origin, {
+      isUgcZone, hasVaultSecret, learned: getLearned?.(),
+    });
+    return mayHoldCredentials({
+      mode: state.mode,
+      ownedOrigin: state.ownedOrigin ?? null,
+      excursion: state.excursion ?? null,
+      origin,
+      originIsSensitive: sensitivity.sensitive,
+    })
+      ? origin
+      : undefined;
   };
 };

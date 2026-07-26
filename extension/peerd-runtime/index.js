@@ -148,8 +148,15 @@ export {
 // what happens when a tab LANDS somewhere. Exported here because the enforcement
 // points that will consume them live outside this module (background/).
 export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
-export { decideLanding, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
-export { makeJudgeLanding } from './actor/origin-lock.js';
+export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
+export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
+// …and the three pieces the SW needs to make the lock live: where the state
+// lives (cached + serialized + persisted), which origins are dedicated identity
+// providers (the one narrow exemption), and what the orchestrator is told when
+// an actor is stopped — text authored HERE, never by the actor or the page.
+export { makeOriginStateStore } from './actor/origin-state-store.js';
+export { isKnownIdp, knownIdpSeeds } from './actor/idp-registry.js';
+export { describeLandingStop } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
 // the two-tier store, and the capture digester. See site-clients/index.js.

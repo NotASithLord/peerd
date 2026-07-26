@@ -254,6 +254,12 @@ import {
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
+  // issue 251: the origin lock. The pure rule + classifier live in
+  // peerd-runtime; these are the four pieces the SW binds together to make it
+  // live — the state store, the judge, the synchronous credential-scope
+  // narrowing, and the report a stop turns into.
+  makeOriginStateStore, makeJudgeLanding, makeCredentialScope,
+  isKnownIdp, describeLandingStop,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
@@ -772,6 +778,138 @@ const loadDenylist = async () => {
 /** @type {Promise<void>} */
 const denylistReady = loadDenylist();
 
+// ---------------------------------------------------------------------------
+// issue 251 — the origin lock, made live.
+// ---------------------------------------------------------------------------
+//
+// Everything that DECIDES lives in peerd-runtime (the rule, the classifier, the
+// IdP seeds, the report). What is here is the part only the SW can do: say WHICH
+// actors are locked, keep their state, and turn a stop into something the
+// orchestrator can act on.
+//
+// WHICH ACTORS ARE LOCKED, decided once, here, rather than re-litigated per
+// call: a TAB-BACKED WEB ACTOR, and nothing else.
+//
+//   * the orchestrator          — drives the user's own foreground tab on the
+//                                 user's own instruction. Locking it would mean
+//                                 peerd refusing to look at the page you are on.
+//   * the three engine kinds    — act on an instance, never a tab. No landing.
+//   * the dweb actor            — no tab either.
+//   * an API actor (backing:'api') — already bound to ONE fixed origin by
+//                                 `withApiCredentials`, which is the same
+//                                 property this lock exists to create. Adding a
+//                                 second mechanism would be duplication, not
+//                                 defence.
+//
+// A context with no state is UNLOCKED, and that is the pre-#251 behaviour rather
+// than a refusal — see the fail-open note in origin-lock.js for why failing
+// closed there would break the product rather than harden it.
+
+/**
+ * The vault's `origin:<origin>` secrets, cached as a Set for the SYNCHRONOUS
+ * sensitivity check. `classifyOriginSensitivity` needs `hasVaultSecret(origin)`
+ * to answer without awaiting — it runs inside a credential-scope getter — but
+ * `vault.listSecretNames()` is async AND throws when locked.
+ *
+ * why a cache rather than resolving per context build: an origin the user stored
+ * a key for is sensitive whether or not the vault happens to be unlocked right
+ * now, and a locked vault must not silently DOWNGRADE an origin to ordinary.
+ * Once seen, an origin stays in the set for this SW lifetime; the refresh only
+ * ever adds. (An origin whose key the user deletes therefore stays classified
+ * sensitive until the SW restarts — the safe direction, and the reason this
+ * doesn't clear.)
+ * @type {Set<string>}
+ */
+const keyedOrigins = new Set();
+const refreshKeyedOrigins = async () => {
+  try {
+    const names = await vault.listSecretNames();
+    for (const name of names) {
+      const origin = originFromSecretName(name);
+      if (origin) keyedOrigins.add(origin);
+    }
+  } catch { /* locked — keep what we have; never shrink */ }
+};
+refreshKeyedOrigins();
+vault.subscribe(() => { if (!vault.isLocked()) refreshKeyedOrigins(); });
+
+/**
+ * Per-actor origin state, cached in the heap and persisted on the actor's own
+ * session record.
+ *
+ * why the session record and not chrome.storage.session: `ownedOrigin` and the
+ * excursion counters are the actor's authority, and they must survive a service
+ * worker eviction mid-task. The record is already this actor's durable identity
+ * (it is where `instanceId`, `backing` and its memory live), so the state rides
+ * the thing whose lifetime it shares. The store elides no-op writes, so the
+ * common "still where you were" verdict costs no IDB traffic.
+ */
+const originStates = makeOriginStateStore({
+  load: async (sessionId) => {
+    const rec = await sessions.get(sessionId).catch(() => null);
+    return /** @type {any} */ (rec?.originState ?? null);
+  },
+  save: async (sessionId, state) => { await sessions.update(sessionId, { originState: state }); },
+  onError: (message, error) => console.warn('[origin-lock]', message, error),
+});
+
+/** The sensitivity signals, in the shape the classifier takes. */
+const sensitivitySignals = () => ({
+  // #242's UGC registry is the other SEED and lands on its own branch; when it
+  // merges, `isUgcZone` is wired in here and nothing else changes. Until then
+  // the vault-secret seed carries the classification on its own, which is a
+  // smaller set than the design assumes — named here rather than left to be
+  // discovered by someone wondering why github.com wasn't caught.
+  hasVaultSecret: (/** @type {string} */ origin) => keyedOrigins.has(origin),
+});
+
+/**
+ * A stop, en route to the orchestrator.
+ *
+ * The lock ending an actor is only half a defence: an actor that stops with no
+ * explanation looks to the orchestrator exactly like one that failed, and the
+ * likely next move is to try again. So the stop is RECORDED here and read back
+ * by the message_actor reply path, which returns it in place of the generic
+ * "stopped before it produced a reply".
+ *
+ * The recorded text comes from `describeLandingStop` — ours, origins only, no
+ * path, no query, nothing the actor or the page wrote. See that file for why
+ * that constraint is the load-bearing one.
+ * @type {Map<string, string>}
+ */
+const landingStopReports = new Map();
+
+/** Build the two lock closures for one actor session. Null for an unlocked kind. */
+const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) => {
+  if (!actorSessionId) return null;
+  const getState = () => originStates.read(actorSessionId);
+  return {
+    getState,
+    judgeLanding: makeJudgeLanding({
+      getState,
+      saveState: (patch) => originStates.write(actorSessionId, patch),
+      onStop: (event) => {
+        landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+        auditLog.append({
+          type: 'actor_origin_stop',
+          sessionId: actorSessionId,
+          // The audit trail keeps the FULL landing url (unlike the report): it is
+          // local, append-only, and read by a human investigating — exactly the
+          // place the detail belongs, and the one place it can't be read by a model.
+          details: { action: event.action, from: event.from, to: event.to, handoffTo: event.handoffTo ?? null },
+        }).catch(() => {});
+        // End the actor's whole turn, not just this tool call. A refusal alone
+        // leaves the loop free to try the next tool against the same tab.
+        try { turnSlots.stop(actorSessionId); } catch (e) { console.warn('[origin-lock] stop failed', e); }
+      },
+      isIdp: isKnownIdp,
+      ...sensitivitySignals(),
+    }),
+    makeScope: (/** @type {() => string | undefined} */ getOrigin) =>
+      makeCredentialScope({ getState, getOrigin, ...sensitivitySignals() }),
+  };
+};
+
 /**
  * Resolve the Plan/Act permission { mode, confirmActions } for a session
  * (Feature 03; tiers collapsed to one boolean 2026-06-12). Resolution
@@ -1286,9 +1424,30 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       });
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
     } else if (actorType === 'web') {
+      // issue 251 — THE LOCK GOES LIVE HERE, for exactly this kind: a tab-backed
+      // web actor. Hydrating BEFORE the ctx is handed out is deliberate: the
+      // store's sync read returns null until then, and null means "unlocked", so
+      // a lazy hydrate would make the lock's absence the silent default on
+      // exactly the first tool call of a turn — the call most likely to be the
+      // one that matters.
+      // ROAMING is the seed for anything that never declared otherwise. It is
+      // the weaker of the two modes — it holds no authority — so an actor whose
+      // record predates the field, or whose mint path forgot to set it, starts
+      // with less rather than more. `mintWebSession` writes the same value
+      // explicitly; this is the backstop, not the source.
+      await originStates.hydrate(sessionId, /** @type {any} */ ({ mode: 'roaming' }));
+      const lock = originLockFor(sessionId);
+      resCtx.judgeLanding = lock?.judgeLanding;
+      // The session-credential scope, NARROWED by the same policy. `ctx.activeTab.origin`
+      // IS the scope — read live on every request — so a page that redirects itself onto
+      // a credentialed origin moves the scope with no tool call in between to judge. The
+      // getter answers synchronously and can only ever withhold, so the ordinary
+      // same-origin case is byte-for-byte what it was before #251.
       resCtx.webFetch = withSessionScopedCredentials(
         webFetch,
-        () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
+        lock
+          ? lock.makeScope(() => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin)
+          : () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
       );
       // navigate adopts the actor's tab MID-TURN (0->1). It re-pins through this setter
       // — which closes over the SHARED resCtx — NOT a direct activeTab= on the per-call
@@ -3114,6 +3273,14 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+    // issue 251 — the mode is decided at MINT, which is the only point that
+    // knows why this actor exists. Everything peerd mints today browses on the
+    // user's behalf without owning a site, so everything today is ROAMING; a
+    // BOUND actor is minted by the handoff path, where the successor's origin
+    // is known up front. Tab-backed web actors only: an API actor is already
+    // pinned to one origin by its egress wrapper, and the engine kinds and the
+    // dweb actor have no tab to land anywhere.
+    ...(actorType === 'web' && backing !== 'api' ? { originState: { mode: 'roaming' } } : {}),
   });
   bind(created.sessionId);
   auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: actorType, backing: backing ?? 'tab' } }).catch(() => {});
@@ -3177,6 +3344,10 @@ const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOve
   if (actorSessionId && !(await sessions.get(actorSessionId))) {
     webActorRegistry.drop(ownerChatId);
     persistWebActors();
+    // issue 251: the durable state died with the record, so the heap copy is now
+    // the only thing asserting an owned origin — and the id will be reused by
+    // nothing, so keeping it is pure leak. Drop it with the binding.
+    originStates.forget(actorSessionId);
     actorSessionId = null;
   }
   if (!actorSessionId) actorSessionId = await mintOnce(`web-actor:${ownerChatId}`, () => mintWebActor(ownerChatId));
@@ -3925,6 +4096,27 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
+    // issue 251 — clear any report left over from an earlier turn BEFORE running,
+    // so a stop can only ever be attributed to the turn that caused it. A stale
+    // report surfacing on a later, unrelated message would be a lie in the one
+    // place the orchestrator is being asked to trust us.
+    landingStopReports.delete(actorSessionId);
+    /**
+     * If the origin lock stopped this actor mid-turn, its own reply is not the
+     * answer — the report is. Overriding UNCONDITIONALLY is the point: a stopped
+     * actor may still have emitted text, and text written after the moment we
+     * decided it was somewhere it shouldn't be is exactly what must not reach the
+     * orchestrator. `stopped:true` marks the delivery failed, so the reply arrives
+     * as "this did not work, here is why" rather than as a result.
+     * @param {{ result: string, stopped?: boolean }} reply
+     * @returns {{ result: string, stopped?: boolean }}
+     */
+    const withLandingStop = (reply) => {
+      const report = landingStopReports.get(actorSessionId);
+      if (!report) return reply;
+      landingStopReports.delete(actorSessionId);
+      return { result: report, stopped: true };
+    };
     // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
     // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
     // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
@@ -3933,7 +4125,7 @@ const actorMessaging = makeActorMessaging({
     // fall back to the in-SW turn below (offscreen unavailable / never started).
     if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
       const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
-      if (off) return off;
+      if (off) return withLandingStop(off);
     }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
@@ -3941,9 +4133,9 @@ const actorMessaging = makeActorMessaging({
     await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
-    return fresh
+    return withLandingStop(fresh
       ? { result: fresh }
-      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true });
   },
   reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,

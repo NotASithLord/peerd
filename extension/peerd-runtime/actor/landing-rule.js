@@ -264,3 +264,59 @@ export const decideLanding = (state) => {
   // reports which via environment_changed.
   return { action: 'end', reason: 'this helper works only on one site, and the tab left it' };
 };
+
+/**
+ * MAY THIS ACTOR SPEND THE USER'S SESSION AT `origin` RIGHT NOW?
+ *
+ * The same policy as above, asked of the CREDENTIAL rather than of the tool
+ * call — and the reason it is a second function instead of a second branch is
+ * that the two questions are asked at different times by different code.
+ *
+ * decideLanding runs when a DOM tool resolves a tab. But `ctx.activeTab.origin`
+ * is ALSO the web actor's session-credential scope: the SW wraps its webFetch
+ * with `withSessionScopedCredentials(webFetch, () => ctx.activeTab?.origin)`,
+ * read live on every request. So the moment a page redirects itself onto a
+ * credentialed origin, the actor's fetch scope moves there too — with no tool
+ * call in between for decideLanding to judge. `fetch_url`, `read_web_cache` and
+ * the `site_client_*` tools never pass through resolveTargetTab, so they can
+ * spend that scope before any DOM tool re-enters the chokepoint.
+ *
+ * This closes that window because it is SYNCHRONOUS and can therefore sit
+ * directly inside the scope getter, where an async judge cannot. It is a
+ * narrowing, never a widening: it can only withhold a scope the pre-#251 code
+ * would have handed over.
+ *
+ * why an excursion does NOT re-open the scope: signing in is a DOM flow — typing
+ * into a form on the IdP's page — and the browser attaches that origin's own
+ * cookies regardless. Letting peerd's fetch ALSO ride the user's session at an
+ * origin the actor doesn't own would hand the corridor a capability the corridor
+ * was never for.
+ *
+ * @param {object} state
+ * @param {'roaming' | 'bound'} state.mode
+ * @param {string | null} [state.ownedOrigin]
+ * @param {Excursion | null} [state.excursion]
+ * @param {unknown} state.origin           the scope being asked for
+ * @param {boolean} state.originIsSensitive from classifyOriginSensitivity
+ * @returns {boolean}
+ */
+export const mayHoldCredentials = (state) => {
+  const { mode, ownedOrigin = null, excursion = null, origin, originIsSensitive } = state;
+  if (mode !== 'roaming' && mode !== 'bound') return false;   // fail closed, as above
+  const { kind, origin: scope } = locate(origin);
+  // Nothing to scope. The getter's own `?? undefined` handles it; answering
+  // false here would be the same outcome by a less obvious route.
+  if (kind !== 'named') return false;
+
+  if (mode === 'roaming') {
+    // The whole definition of roaming: it browses, it holds nothing. On an
+    // ordinary site there is no user session worth the name, so scoping cookies
+    // to it costs nothing and keeps same-site fetches working as they do today.
+    return !originIsSensitive;
+  }
+
+  // Bound: exactly the one origin it owns, and only once it owns one.
+  if (!ownedOrigin) return false;
+  if (excursion) return false;
+  return sameOrigin(scope, ownedOrigin);
+};

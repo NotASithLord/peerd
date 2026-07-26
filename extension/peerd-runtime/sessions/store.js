@@ -159,6 +159,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
    *   actorType?: 'webvm' | 'notebook' | 'app' | 'web' | 'dweb',
    *   backing?: 'tab' | 'api',
    *   review?: boolean,
+   *   originState?: import('../actor/origin-lock.js').ActorOriginState,
    * }} [opts]
    * @returns {Promise<Session>}
    */
@@ -179,6 +180,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
     actorType,
     backing,
     review,
+    originState,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const record = {
@@ -224,6 +226,13 @@ export const createSessionStore = ({ idb, now = Date.now, makeId }) => {
       // review orchestrator, never a worker/model arg. Persist only when true so
       // every other child stays absent (fail-closed).
       ...(review === true ? { review: true } : {}),
+      // issue 251: a tab-backed web actor's origin authority — its mode, the
+      // origin it owns, and its excursion counters. MUST be persisted, for the
+      // same reason as `backing` above: a service worker eviction mid-task would
+      // otherwise hand the next turn an actor with no owned origin and a fresh
+      // excursion budget, which is a bound actor silently becoming unbounded.
+      // Absent on every kind that has no tab to land anywhere.
+      ...(originState && typeof originState === 'object' ? { originState } : {}),
     };
     await idb.put(STORE, record);
     return present(record, []);
