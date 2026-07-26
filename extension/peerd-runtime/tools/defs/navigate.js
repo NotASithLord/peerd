@@ -158,10 +158,29 @@ export const navigateTool = {
     // repinActiveTab); for an already-owned tab, ctx.activeTab is the same object the
     // shallow copy shares — both mutate in place. resolveTargetTab's in-execute denylist
     // re-check is still the second wall on the landing.
+    //
+    // issue 251 — the re-stamp STOPS AT AN ORIGIN BOUNDARY, and this is the
+    // single most important line in this file. Following a redirect and then
+    // updating the pin to the landing origin is what LAUNDERS an open redirect:
+    // the actor asked for a benign URL, the server 302'd it to an attacker
+    // origin, and peerd then recorded that origin as the one the actor owns.
+    // #243's tripwire cannot see it (it inspects args.url, which was clean) and
+    // the denylist is a blocklist, so an unknown origin passes. Keeping the pin
+    // on the origin the actor OWNS means the next tool call's landing check
+    // (resolveTargetTab → judgeLanding) compares against the truth and ends the
+    // actor, instead of comparing the attacker's origin against itself and
+    // waving it through. Same-origin path changes still re-stamp, which is all
+    // the freshness the original rationale actually needed.
     const pin = adoptedPin ?? c.activeTab;
     if (pin && pin.id === tabId && finalTab?.url) {
-      pin.url = finalTab.url;
-      pin.origin = originOfUrl(finalTab.url) ?? pin.origin;
+      const landed = originOfUrl(finalTab.url);
+      const adopting = adoptedPin && !pin.origin;   // a fresh tab has no origin yet
+      if (adopting || !pin.origin || landed === pin.origin) {
+        pin.url = finalTab.url;
+        pin.origin = landed ?? pin.origin;
+      }
+      // else: left the owned origin. Leave the pin telling the truth about what
+      // this actor owns; judgeLanding ends it on the next call.
     }
     // A freshly-adopted web-actor tab is a peerd-opened web page, same as open_tab —
     // give it the agent-tab card (the landed URL as its label, not a blank "a tab") and
