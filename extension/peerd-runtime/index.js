@@ -141,6 +141,10 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
+  // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a
+  // tab. Distinct from the bare-origin API handle on purpose: that one is
+  // fetch-only and can never log in.
+  SITE_ACTOR_PREFIX, siteHandleFor, parseSiteHandle,
 } from './actor/web-actor.js';
 // issue 251: authority segmented by origin. A web actor is ROAMING (browses
 // freely, holds nothing) or BOUND (owns one credentialed origin, like the API
@@ -155,6 +159,7 @@ export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
 // providers (the one narrow exemption), and what the orchestrator is told when
 // an actor is stopped — text authored HERE, never by the actor or the page.
 export { makeOriginStateStore } from './actor/origin-state-store.js';
+export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
 export { isKnownIdp, knownIdpSeeds } from './actor/idp-registry.js';
 export { describeLandingStop } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core

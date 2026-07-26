@@ -304,19 +304,51 @@ export const mayHoldCredentials = (state) => {
   const { mode, ownedOrigin = null, excursion = null, origin, originIsSensitive } = state;
   if (mode !== 'roaming' && mode !== 'bound') return false;   // fail closed, as above
   const { kind, origin: scope } = locate(origin);
-  // Nothing to scope. The getter's own `?? undefined` handles it; answering
-  // false here would be the same outcome by a less obvious route.
-  if (kind !== 'named') return false;
+  // Not a web page at all (blank, about:, an extension page). Nothing to scope.
+  if (kind === 'none') return false;
 
   if (mode === 'roaming') {
+    // A real page whose host we cannot CANONICALIZE — an IDN whose punycode TLD
+    // the normalizer's tail rule rejects, a single-label intranet name, a
+    // trailing-dot FQDN. Roaming is allowed to be there (the classifier refuses
+    // to call such a host sensitive, so `landingIsSensitive` is false and
+    // decideLanding continues), and roaming holds nothing worth withholding.
+    //
+    // why this branch exists at all, found by adversarial review: without it,
+    // `https://пример.рф` and `http://wiki/` fell to a blanket refusal and a
+    // roaming actor silently got LOGGED-OUT content on an ordinary public site
+    // it was entitled to use — no error, no audit entry, just a 401 body. The
+    // comment next door claimed the ordinary case was unchanged, and for those
+    // hosts it was not. The caller compares scope against the request origin
+    // itself, so handing back the raw value restores exactly the pre-#251
+    // behaviour without widening anything.
+    if (kind === 'unnamed') return true;
     // The whole definition of roaming: it browses, it holds nothing. On an
     // ordinary site there is no user session worth the name, so scoping cookies
     // to it costs nothing and keeps same-site fetches working as they do today.
     return !originIsSensitive;
   }
 
+  // Bound, and the host cannot be named. It is provably NOT the owned origin,
+  // which is nameable by construction — the same reasoning decideLanding uses to
+  // end the actor outright.
+  if (kind !== 'named') return false;
+
   // Bound: exactly the one origin it owns, and only once it owns one.
   if (!ownedOrigin) return false;
-  if (excursion) return false;
-  return sameOrigin(scope, ownedOrigin);
+  // The owned origin is allowed unconditionally — INCLUDING mid-excursion.
+  //
+  // why the excursion check comes second, which is the opposite of a first
+  // draft: this function is synchronous and therefore cannot discharge an
+  // excursion, while `decideLanding` (which can) only runs on a tool call. So a
+  // tab that has already come home sits with a stale open corridor until the
+  // next DOM tool judges it. Refusing the owned origin during that window broke
+  // the actor's session on the one site it is definitionally allowed to use —
+  // and bought nothing, since a corridor never widened what "home" means.
+  if (sameOrigin(scope, ownedOrigin)) return true;
+  // Off-origin, corridor or not. An excursion is a DOM flow — typing into a form
+  // on the IdP's page — and the browser attaches that origin's own cookies
+  // regardless. Letting peerd's fetch also ride the user's session somewhere the
+  // actor does not own would hand the corridor a capability it was never for.
+  return false;
 };

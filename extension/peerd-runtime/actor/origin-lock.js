@@ -137,6 +137,16 @@ export const makeJudgeLanding = (deps) => {
  * not. Undefined is already the wrapper's "no session" case, so nothing
  * downstream needs to learn a new shape.
  *
+ * WHERE THE BEHAVIOUR ACTUALLY CHANGES, stated because a narrowing fails safe
+ * but not visibly, and an earlier draft of this comment claimed more than it
+ * should have. A ROAMING actor is unchanged everywhere it was allowed to be,
+ * including on hosts `normalizeApiOrigin` cannot canonicalize — an IDN, a
+ * single-label intranet name, a trailing-dot FQDN — because refusing those
+ * bought nothing and cost the actor a logged-out page with no error to explain
+ * it. What a roaming actor loses is its session on a SENSITIVE origin, which is
+ * the whole point. A BOUND actor loses it everywhere except the one origin it
+ * owns, which is also the whole point.
+ *
  * why this cannot reuse `judgeLanding`: that function is async (it persists) and
  * it MUTATES state (it spends excursion budget). A credential-scope getter is
  * called synchronously, possibly several times per request, and must be free of

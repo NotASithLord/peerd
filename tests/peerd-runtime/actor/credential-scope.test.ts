@@ -57,15 +57,25 @@ describe('bound holds a session only on the origin it owns', () => {
     expect(scopeFor({ mode: 'bound', ownedOrigin: null }, 'https://app.test')).toBeUndefined();
   });
 
-  test('an in-flight excursion does NOT re-open the scope', () => {
+  const excursion = { returnTo: 'https://app.test', openedAt: 'https://idp.test', lastLanding: 'https://idp.test', budget: 3, deadline: 9e9 };
+
+  test('an in-flight excursion does NOT open the scope at the IdP', () => {
     // Signing in is a DOM flow — typing into a form — and the browser attaches
     // the IdP's own cookies regardless. Letting peerd's fetch ALSO ride the
     // user's session at an origin the actor does not own would hand the corridor
     // a capability the corridor was never for.
-    const excursion = { returnTo: 'https://app.test', openedAt: 'https://idp.test', lastLanding: 'https://idp.test', budget: 3, deadline: 9e9 };
     expect(scopeFor({ ...owned, excursion }, 'https://idp.test')).toBeUndefined();
-    // …not even back home while the corridor is still open.
-    expect(scopeFor({ ...owned, excursion }, 'https://app.test')).toBeUndefined();
+  });
+
+  test('…but the OWNED origin keeps its scope even mid-excursion', () => {
+    // Found by adversarial review, and the reason is a timing one. This getter is
+    // synchronous and therefore cannot discharge an excursion; only decideLanding
+    // can, and that runs on a tool call. So a tab that has already navigated home
+    // sits with a stale open corridor until the next DOM tool judges it. Refusing
+    // home during that window broke the actor's session on the one site it is
+    // definitionally allowed to use — and bought nothing, because a corridor
+    // never widened what "home" means.
+    expect(scopeFor({ ...owned, excursion }, 'https://app.test')).toBe('https://app.test');
   });
 });
 
@@ -78,9 +88,31 @@ describe('fail closed on anything unrecognizable', () => {
     expect(scopeFor({}, 'https://app.test')).toBeUndefined();
   });
 
-  test('an origin that cannot be named withholds', () => {
-    for (const origin of ['http://192.168.1.9', 'https://evil.test.', 'about:blank', 'not-a-url']) {
+  test('a non-page location withholds', () => {
+    for (const origin of ['about:blank', 'not-a-url', 'data:text/html,x']) {
       expect(scopeFor({ mode: 'roaming' }, origin)).toBeUndefined();
+    }
+  });
+
+  test('a REAL page whose host cannot be canonicalized keeps its scope while ROAMING', () => {
+    // Found by adversarial review, and a genuine regression the first version
+    // shipped: an IDN, a single-label intranet name and a trailing-dot FQDN all
+    // fail `normalizeApiOrigin`, so a blanket refusal handed a roaming actor
+    // LOGGED-OUT content on ordinary public sites it was entitled to use — no
+    // error, no audit entry, just a 401 body. Roaming is allowed to be there
+    // (the classifier will not call such a host sensitive either) and holds
+    // nothing worth withholding, so this restores the pre-#251 behaviour exactly.
+    for (const origin of ['http://192.168.1.9', 'https://evil.test.', 'http://wiki', 'https://xn--e1afmkfd.xn--p1ai']) {
+      expect(scopeFor({ mode: 'roaming' }, origin)).toBe(origin);
+    }
+  });
+
+  test('…but a BOUND actor still withholds on one, because it is provably not home', () => {
+    // The owned origin is nameable by construction, so a host that cannot be
+    // named is definitionally somewhere else — the same reasoning decideLanding
+    // uses to end the actor outright.
+    for (const origin of ['http://192.168.1.9', 'https://evil.test.', 'http://wiki']) {
+      expect(scopeFor({ mode: 'bound', ownedOrigin: 'https://app.test' }, origin)).toBeUndefined();
     }
   });
 

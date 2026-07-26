@@ -73,17 +73,29 @@ describe('nothing attacker-controlled survives into the report', () => {
 });
 
 describe('the report is useful, not just safe', () => {
-  test('a handoff tells the orchestrator the handle and to write its OWN goal', () => {
+  test('a handoff names the SUCCESSOR HANDLE, not just the site', () => {
+    // Naming the origin alone leaves the orchestrator to guess how to reach it —
+    // and the obvious guess (the bare origin) resolves to the fetch-only API
+    // integration, which cannot log in or click. The handoff has to say
+    // site:<origin> or it routes the work to an actor that cannot do it.
     const text = describeLandingStop({
       action: 'handoff', reason: 'r', from: null,
       to: 'https://github.com/x', handoffTo: 'https://github.com',
     });
-    expect(text).toContain('https://github.com');
-    expect(text).toMatch(/write the goal yourself/i);
+    expect(text).toContain('site:https://github.com');
+    expect(text).toMatch(/message_actor/);
+  });
+
+  test('a handoff tells the orchestrator to write its OWN goal', () => {
+    const text = describeLandingStop({
+      action: 'handoff', reason: 'r', from: null,
+      to: 'https://github.com/x', handoffTo: 'https://github.com',
+    });
+    expect(text).toMatch(/write its goal yourself/i);
     // The instruction NOT to reconstruct the page's content is the point: a
     // handoff that carried the roaming actor's framing would make the
     // segmentation decorative.
-    expect(text).toMatch(/should be reconstructed|from what the user asked/i);
+    expect(text).toMatch(/should be guessed at|from what the user asked/i);
   });
 
   test('an end says both origins and refuses to guess who moved the tab', () => {

@@ -15,13 +15,28 @@
 // THREE PROPERTIES THIS FILE EXISTS TO GUARANTEE, each of which was a real hole
 // in the design before it had a home:
 //
-//   1. WRITES ARE SERIALIZED. The tool loop runs READ-class calls CONCURRENTLY
-//      (loop/tool-batch.js partitionToolBatch), and every DOM tool judges its
-//      landing. Two concurrent judges doing read-modify-write on the same actor
-//      would both observe `excursionsUsed: 0` and both store 1 — the lifetime
-//      cap silently doubling. A promise chain per store makes each write see the
-//      previous one's result. (The SW's actor mailbox serializes for the same
-//      reason and the same way; this is that pattern, not a new one.)
+//   1. THE READ-MODIFY-WRITE IS ATOMIC, and it is worth being precise about WHY,
+//      because an earlier version of this comment credited the wrong mechanism
+//      and a reviewer relying on it would have drawn the wrong boundary.
+//
+//      The tool loop runs READ-class calls CONCURRENTLY (loop/tool-batch.js
+//      partitionToolBatch) and every DOM tool judges its landing, so two judges
+//      can be in flight for one actor. They cannot interleave because
+//      `makeJudgeLanding` has NO await between `getState()` and `saveState()`,
+//      and `write()` below does its compare-and-assign synchronously. Single-
+//      threaded JS does the rest. It is NOT the promise chain that protects
+//      this — the chain orders the DURABLE writes only.
+//
+//      *** DO NOT INTRODUCE AN AWAIT into that span. *** Making the classifier
+//      async, or awaiting an audit append inside the judge, would let two
+//      concurrent judges both read `excursionsUsed: 0` and both store 1 —
+//      doubling MAX_EXCURSIONS, whose entire job is to be un-refreshable.
+//
+//      The chain is keyed PER SESSION, not per store. A global chain would make
+//      every actor's `judgeLanding` await every other actor's IDB write — and
+//      the injected save is `sessions.update`, which re-reads the whole session
+//      — so one slow save in one chat would stall the DOM tools of every web
+//      actor in every other chat.
 //
 //   2. THE CACHE IS UPDATED BEFORE THE AWAIT. The shell's next sync `getState`
 //      may happen before the storage write resolves. Applying the patch to the
@@ -83,20 +98,16 @@ const changesSomething = (state, patch) => Object.entries(patch).some(([key, nex
  * Build a store.
  *
  * @param {object} deps
- * @param {(sessionId: string) => Promise<ActorOriginState | null>} deps.load
- *   read the durable copy. Called at most once per session per store lifetime.
  * @param {(sessionId: string, state: ActorOriginState) => Promise<void>} deps.save
  *   write the WHOLE state (not the patch) — the caller owns merging, so a
  *   storage layer that can only put a full record works unchanged.
  * @param {(message: string, error: unknown) => void} [deps.onError]
  */
-export const makeOriginStateStore = ({ load, save, onError }) => {
+export const makeOriginStateStore = ({ save, onError }) => {
   /** @type {Map<string, ActorOriginState>} */
   const cache = new Map();
-  /** @type {Map<string, Promise<ActorOriginState>>} */
-  const hydrating = new Map();
-  /** @type {Promise<unknown>} */
-  let chain = Promise.resolve();
+  /** Per-SESSION durable-write chains — see property 1. @type {Map<string, Promise<unknown>>} */
+  const chains = new Map();
 
   const report = (/** @type {string} */ message, /** @type {unknown} */ error) => {
     if (onError) onError(message, error);
@@ -104,45 +115,51 @@ export const makeOriginStateStore = ({ load, save, onError }) => {
   };
 
   /**
-   * Make sure this actor's state is in the cache, loading it once if needed.
-   * Concurrent callers share one load (the `hydrating` map) — without it, two
-   * tool calls racing on a cold cache would each load and each cache, and the
-   * loser's writes would land on an object nobody reads afterwards.
+   * Make sure this actor's state is in the cache, seeding it from the DURABLE
+   * record the caller already holds.
+   *
+   * why the caller supplies the durable state instead of this file loading it:
+   * every call site (buildToolContext, the site-client egress route) has already
+   * read the actor's session record for other reasons, so a load here would be a
+   * second read AND a second failure mode. That failure mode was not neutral —
+   * adversarial review caught it: a load that threw fell back to the seed, and
+   * the seed is `roaming`, so a transient storage error QUIETLY DEMOTED a bound
+   * actor to roaming. For the credential scope that is a WIDENING (bound may
+   * spend its session on one origin; roaming may spend it on any non-sensitive
+   * one), which is the wrong direction for an error path. With no load there is
+   * no such path: the record is either read successfully by the caller or the
+   * caller never gets far enough to build a context.
+   *
+   * SYNCHRONOUS, and that matters too — there is no await between "decide to
+   * lock" and "the lock is readable", so no window exists in which read()
+   * returns null (== unlocked) for an actor that is already running tools.
+   *
+   * The cache WINS over a re-seed: it is written by verdicts and is therefore
+   * never staler than the record.
    *
    * @param {string} sessionId
-   * @param {ActorOriginState} seed  used when nothing is stored yet
-   * @returns {Promise<ActorOriginState>}
+   * @param {ActorOriginState | null | undefined} durable  the record's stored state
+   * @returns {ActorOriginState}
    */
-  const hydrate = (sessionId, seed) => {
+  const hydrate = (sessionId, durable) => {
     const cached = cache.get(sessionId);
-    if (cached) return Promise.resolve(cached);
-    const inFlight = hydrating.get(sessionId);
-    if (inFlight) return inFlight;
-    const p = (async () => {
-      let stored = null;
-      try { stored = await load(sessionId); }
-      catch (e) { report('state load failed — falling back to the seed', e); }
-      // why the seed WINS on mode: the seed is what the mint decided this actor
-      // is, and a stored record from an older shape may have no mode at all.
-      // decideLanding fails closed on an unknown mode, so a hydrate that lost it
-      // would end every actor rather than merely forget a budget.
-      const state = { ...seed, ...(stored ?? {}), mode: stored?.mode ?? seed.mode };
-      // Re-check: a concurrent hydrate may have landed while we awaited.
-      const raced = cache.get(sessionId);
-      if (raced) return raced;
-      cache.set(sessionId, state);
-      return state;
-    })().finally(() => { hydrating.delete(sessionId); });
-    hydrating.set(sessionId, p);
-    return p;
+    if (cached) return cached;
+    // Fail CLOSED on a stored record whose mode we don't recognize — including
+    // one written before the field existed. Not by inventing a mode: `decideLanding`
+    // already ends an actor whose mode is unknown, so passing the bad value
+    // through is what makes that guard fire instead of silently bypassing it.
+    const state = /** @type {ActorOriginState} */ (
+      durable && typeof durable === 'object' ? { ...durable } : { mode: 'roaming' }
+    );
+    cache.set(sessionId, state);
+    return state;
   };
 
   /**
    * The SYNC read the lock's `getState` uses. Null means "not hydrated", which
    * the shell reads as "no lock" — so a caller MUST hydrate before it can rely
-   * on the lock applying. That is why hydration happens at context-build time
-   * (which is already async) rather than lazily at judge time: making the
-   * failure mode "no lock" would be a silent one.
+   * on the lock applying. Hydration is synchronous precisely so that "must" is
+   * easy to satisfy: there is no await to forget and no window to lose.
    *
    * @param {string} sessionId
    * @returns {ActorOriginState | null}
@@ -164,20 +181,30 @@ export const makeOriginStateStore = ({ load, save, onError }) => {
     if (!changesSomething(state, patch)) return Promise.resolve();
     Object.assign(state, patch);
     const snapshot = { ...state };
-    chain = chain
+    // why the snapshot and not `state`: the chain runs later, by which time a
+    // subsequent verdict may have mutated the live object. Persisting the value
+    // as it was AT THIS VERDICT keeps the durable record a sequence of real
+    // states rather than a smear of two.
+    const next = (chains.get(sessionId) ?? Promise.resolve())
       .then(() => save(sessionId, snapshot))
+      // Caught HERE so one actor's storage failure cannot poison its own next
+      // write, let alone anyone else's.
       .catch((e) => report('state save failed — this actor is heap-only until the next write', e));
-    return chain.then(() => undefined);
+    chains.set(sessionId, next);
+    return next.then(() => undefined);
   };
 
-  /** Drop an actor's cached state (its tab closed, its session was archived). */
-  const forget = (/** @type {string} */ sessionId) => { cache.delete(sessionId); };
+  /** Drop an actor's cached state (its session vanished). */
+  const forget = (/** @type {string} */ sessionId) => {
+    cache.delete(sessionId);
+    chains.delete(sessionId);
+  };
 
   /** Test seam: has anything been hydrated for this actor? */
   const isHydrated = (/** @type {string} */ sessionId) => cache.has(sessionId);
 
-  /** Test seam: await every queued durable write. */
-  const settled = () => chain.then(() => undefined, () => undefined);
+  /** Test seam: await every queued durable write, across all sessions. */
+  const settled = () => Promise.all([...chains.values()]).then(() => undefined, () => undefined);
 
   return Object.freeze({ hydrate, read, write, forget, isHydrated, settled });
 };
