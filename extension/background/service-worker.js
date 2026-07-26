@@ -4703,6 +4703,30 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
   }),
   ...makeDenylistRoutes({ denylistStore, auditLog }),
+  // issue 251 — a READ-ONLY inspection route for the e2e verify loop.
+  //
+  // why a route at all: the two properties that matter most about the lock are
+  // invisible from the transcript. "The refused tab was released" and "this
+  // origin was learned" are internal state, and an e2e that cannot see them can
+  // only assert that something stopped — not that the actor recovered, which is
+  // the difference between a working feature and a bricked web actor.
+  //
+  // Read-only and additive: it reveals whether an origin is known and whether
+  // the chat's web actor currently owns a tab. It grants nothing, and it is not
+  // reachable by the model — routes are the side panel's surface, and the tool
+  // dispatcher has no path to them.
+  'debug/originLock': async (/** @type {{ origin?: string }} */ msg = {}) => {
+    const origin = normalizeApiOrigin(msg.origin);
+    const chatId = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+    const actorSessionId = chatId ? webActorRegistry.resolve(chatId) : null;
+    return {
+      ok: true,
+      learned: origin ? learnedOrigins.snapshot().has(origin) : false,
+      keyed: origin ? keyedOrigins.has(origin) : false,
+      ownedTabId: actorSessionId ? (webActorTabBindings.tabFor(actorSessionId) ?? null) : null,
+      originState: actorSessionId ? (originStates.read(actorSessionId) ?? null) : null,
+    };
+  },
   ...makeSettingsRoutes({
     vault, auditLog, pushState, kv, memory, settingsStore,
     normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
