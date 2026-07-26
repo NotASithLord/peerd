@@ -148,7 +148,7 @@ export {
 // what happens when a tab LANDS somewhere. Exported here because the enforcement
 // points that will consume them live outside this module (background/).
 export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
-export { decideLanding, EXCURSION_BUDGET, EXCURSION_MS } from './actor/landing-rule.js';
+export { decideLanding, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
 // the two-tier store, and the capture digester. See site-clients/index.js.

@@ -10,7 +10,7 @@
 // got there, because the rule genuinely cannot tell and must not need to.
 
 import { describe, test, expect } from 'bun:test';
-import { decideLanding, EXCURSION_BUDGET, EXCURSION_MS } from '../../../extension/peerd-runtime/actor/landing-rule.js';
+import { decideLanding, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from '../../../extension/peerd-runtime/actor/landing-rule.js';
 
 const OWNED = 'https://app.test';
 const bound = (over: any = {}) => decideLanding({ mode: 'bound', ownedOrigin: OWNED, landingIsSensitive: false, now: 1_000, ...over });
@@ -69,42 +69,128 @@ describe('bound — the origin lock', () => {
   test('a blank/unusable location is not a violation', () => {
     // Transient (a tab mid-load, about:blank). Ending an actor over it would
     // be a self-inflicted flake; the caller's null-tab handling owns this.
-    for (const l of ['about:blank', '', 'chrome-extension://x/p.html']) {
+    for (const l of ['about:blank', '', 'chrome-extension://x/p.html', 'data:text/html,hi', 'javascript:0']) {
       expect(bound({ landing: l }).action).toBe('continue');
     }
+  });
+
+  // REGRESSION, and it was the worst bug in the first draft of this file.
+  // normalizeApiOrigin's host rule exists so an ADDRESSED origin can't collide
+  // with the literal 'web' or a numeric tabId — it is not a "where is this tab"
+  // predicate. Reusing it as one folded every host below into "no page loaded"
+  // and told a bound actor to CONTINUE on an attacker-controlled page. These all
+  // load fine in a browser.
+  test.each([
+    ['https://evil.com./pwn'],        // trailing-dot FQDN
+    ['http://192.168.1.9/admin'],     // IPv4 literal
+    ['https://[2001:db8::1]/'],       // IPv6 literal
+    ['http://localhost:8888/lab'],    // loopback
+    ['https://intranet/'],            // single-label intranet host
+    ['https://evil_x.com/'],          // underscore label
+  ])('a real page we cannot canonicalize (%s) is FOREIGN, not "no page"', (landing) => {
+    expect(bound({ landing }).action).toBe('end');
+  });
+
+  test('an unnameable FIRST landing cannot be adopted as an owned origin', () => {
+    // Otherwise a bound actor could be pinned to something the rule that later
+    // judges it is unable to express.
+    const v = decideLanding({ mode: 'bound', ownedOrigin: null, landing: 'http://192.168.1.9/', landingIsSensitive: false });
+    expect(v.action).toBe('end');
+  });
+
+  test('the first landing REPORTS what to adopt, so the caller never re-derives it', () => {
+    // The obvious helper over there (originOfUrl) canonicalizes differently on
+    // exactly the hosts above; a caller deriving its own would disagree with
+    // the rule that later judges it.
+    const v = decideLanding({ mode: 'bound', ownedOrigin: null, landing: 'HTTPS://App.test:443/x', landingIsSensitive: true });
+    expect(v.adoptOrigin).toBe('https://app.test');
+  });
+});
+
+describe('fail-closed on a bad mode', () => {
+  test.each([[undefined], ['Bound'], ['web'], [null], [42]])('mode %p ends the actor', (mode) => {
+    // An actor record predating the field, a storage.session JSON round-trip, or
+    // a typo in the SW ctx rebuild must not silently disable this whole core.
+    const v = decideLanding({ mode: mode as any, landing: 'https://bank.test', landingIsSensitive: true });
+    expect(v.action).toBe('end');
   });
 });
 
 describe('auth excursions — the OAuth solve', () => {
+  const IDP = 'https://accounts.google.com';
+  const inFlight = (over: any = {}) => ({ returnTo: OWNED, openedAt: IDP, lastLanding: IDP, budget: 2, deadline: 99_999, ...over });
+
   test('landing on a known IdP opens a bounded excursion instead of ending', () => {
-    const v = bound({ landing: 'https://accounts.google.com', landingIsSensitive: true, landingIsIdp: true });
+    const v = bound({ landing: IDP, landingIsSensitive: true, landingIsIdp: true });
     expect(v.action).toBe('continue');
-    expect(v.excursion).toEqual({ returnTo: OWNED, budget: EXCURSION_BUDGET, deadline: 1_000 + EXCURSION_MS });
+    expect(v.excursion).toEqual({
+      returnTo: OWNED, openedAt: IDP, lastLanding: IDP,
+      budget: EXCURSION_BUDGET, deadline: 1_000 + EXCURSION_MS,
+    });
   });
 
-  test('an in-flight excursion spends budget on each further hop', () => {
-    const ex = { returnTo: OWNED, budget: 2, deadline: 99_999 };
-    const v = bound({ landing: 'https://idp-step2.test', excursion: ex });
+  test('an in-flight excursion spends budget when it actually MOVES', () => {
+    const v = bound({ landing: 'https://idp-step2.test', excursion: inFlight() });
     expect(v.action).toBe('continue');
     expect(v.excursion?.budget).toBe(1);
   });
 
-  test('an exhausted budget ends the actor', () => {
-    const v = bound({ landing: 'https://idp-step9.test', excursion: { returnTo: OWNED, budget: 0, deadline: 99_999 } });
+  test('repeated calls on the SAME page do not spend budget', () => {
+    // This function runs per tool call (resolveTargetTab is on every DOM tool),
+    // not per navigation. A single-page login — snapshot, type, click, snapshot
+    // — would otherwise burn the budget standing still and end the actor
+    // mid-sign-in. The budget is denominated in navigations, so it must only
+    // decrement on one.
+    const v = bound({ landing: IDP, landingIsSensitive: true, excursion: inFlight() });
+    expect(v.excursion?.budget).toBe(2);
+  });
+
+  test('an exhausted budget ends the actor on the next move', () => {
+    const v = bound({ landing: 'https://idp-step9.test', excursion: inFlight({ budget: 0 }) });
     expect(v.action).toBe('end');
   });
 
   test('an expired deadline ends the actor even with budget left', () => {
-    // why both: budget only decrements on navigation, so a tab parked
-    // mid-excursion would otherwise hold the exception open indefinitely.
-    const v = bound({ landing: 'https://idp.test', excursion: { returnTo: OWNED, budget: 9, deadline: 500 }, now: 1_000 });
+    const v = bound({ landing: 'https://idp.test', excursion: inFlight({ budget: 9, deadline: 500 }), now: 1_000 });
     expect(v.action).toBe('end');
   });
 
   test('returning to the owned origin discharges it — the only good ending', () => {
-    const v = bound({ landing: OWNED, excursion: { returnTo: OWNED, budget: 1, deadline: 99_999 } });
+    const v = bound({ landing: OWNED, excursion: inFlight({ budget: 1 }) });
     expect(v.action).toBe('continue');
     expect(v.excursion).toBeUndefined();          // cleared, not carried
+  });
+
+  test('a blank read mid-excursion carries it through rather than discharging it', () => {
+    // Absence of the field means "cleared" to the caller, so a tab caught
+    // mid-load must not silently end a sign-in in progress.
+    const ex = inFlight();
+    expect(bound({ landing: 'about:blank', excursion: ex }).excursion).toEqual(ex);
+  });
+
+  test('an open corridor is NOT a window onto other credentialed sites', () => {
+    // The bound path ignoring landingIsSensitive was the design gap: a docs-site
+    // actor could be bounced onto an IdP, then walked to mail or a bank for four
+    // free hops. A roaming actor — which holds nothing — gets a hard handoff on
+    // its first sensitive landing, so the actor that DOES carry authority must
+    // not get a softer rule.
+    const v = bound({ landing: 'https://bank.test/transfer', landingIsSensitive: true, excursion: inFlight() });
+    expect(v.action).toBe('end');
+  });
+
+  test('...but the IdP that opened it stays reachable, because an IdP is credentialed by nature', () => {
+    // Which is why the exemption is keyed on openedAt rather than a blanket
+    // "refuse every sensitive hop" that would break every real sign-in.
+    const v = bound({ landing: `${IDP}/signin/step2`, landingIsSensitive: true, excursion: inFlight() });
+    expect(v.action).toBe('continue');
+  });
+
+  test('the lifetime cap survives discharge, so the corridor cannot be refreshed', () => {
+    // Discharging at home clears the corridor, so a per-leg budget alone lets a
+    // hostile page loop home → IdP → hops → home forever, buying a fresh budget
+    // and deadline every two navigations. Bounded per leg, unbounded per task.
+    const v = bound({ landing: IDP, landingIsSensitive: true, landingIsIdp: true, excursionsUsed: MAX_EXCURSIONS });
+    expect(v.action).toBe('end');
   });
 
   test('an excursion cannot be opened toward a NON-IdP', () => {
