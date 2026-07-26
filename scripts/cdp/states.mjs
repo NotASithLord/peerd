@@ -120,6 +120,35 @@ let harvestOrchTurn = 0;
 let harvestDelegated = false;
 let harvestFixtureUrl = '';
 
+// --- issue 251: the origin lock, end to end --------------------------------
+//
+// The unit tiers can prove the RULE and the STORE. What only this tier can prove
+// is that a roaming web actor really is stopped by the live stack — real service
+// worker, real actor loop, real tab, real DOM walk — and that the orchestrator is
+// told something it can act on.
+//
+// The fixture is a SIGN-IN page, and that is the point rather than set dressing:
+// nothing marks its origin sensitive up front. The actor walks the page, the walk
+// sees `input[type=password]`, the classifier learns the origin, and the NEXT
+// landing check hands off. So this state exercises the learned signal and the
+// enforcement together — which is the only way to find out whether they agree.
+//
+// It is served on `*.localhost` (Chrome resolves it to loopback) because
+// `normalizeApiOrigin` refuses a bare IP literal, so a 127.0.0.1 fixture could
+// never be classified sensitive and the lock could never fire on it.
+const LOGIN_HTML = `<!doctype html><html><head><title>Acme — Sign in</title></head><body>
+<h1>Sign in to Acme</h1>
+<form><label>Email <input type="email" name="email"></label>
+<label>Password <input type="password" name="password"></label>
+<button type="submit">Sign in</button></form>
+</body></html>`;
+const PLAIN_HTML = `<!doctype html><html><head><title>Acme — Public docs</title></head><body>
+<h1>Public docs</h1><p>Nothing here needs an account.</p></body></html>`;
+let lockActorTurn = 0;
+let lockDelegated = false;
+let lockReportBody = '';
+let lockFixtureUrl = '';
+
 export const STATES = [
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
   {
@@ -319,6 +348,113 @@ export const STATES = [
           harvestActorSawPage.includes('Coffee Mug') && harvestActorSawPage.includes('12.00'),
           harvestActorSawPage.slice(0, 220));
         rec.check('the harvested on-device answer renders', (out.bubbles || []).some((b) => /35\.50/.test(b)), JSON.stringify(out.bubbles));
+        await rec.shot('final');
+      } finally {
+        server.close();
+      }
+    },
+  },
+
+  // --- functional: issue 251 — the origin lock stops a roaming actor ----------
+  {
+    name: 'origin-lock', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      // The WEB ACTOR sub-loop. Drive it onto the sign-in page and then have it
+      // keep working there. The FIRST snapshot is what teaches the classifier
+      // (the walk sees the password field); the SECOND tool call is the one the
+      // lock refuses — so the actor must be told to do something after looking.
+      if (body.includes('<actor_agent>')) {
+        const t = lockActorTurn++;
+        if (t === 0) return { sse: sseToolCall('navigate', { url: `${lockFixtureUrl}login` }) };
+        if (t === 1) return { sse: sseToolCall('snapshot', {}) };
+        if (t === 2) return { sse: sseToolCall('snapshot', {}) };
+        // If the lock works, the actor never reaches this — its turn is ended and
+        // its reply is replaced by the report. Producing a confident answer here
+        // is deliberate: it means a FAILURE of the lock shows up as this text
+        // reaching the orchestrator, rather than as a silent pass.
+        return { sse: sseText('LOCK-DID-NOT-FIRE: I read the signed-in page.') };
+      }
+      // ORCHESTRATOR: delegate once, then capture the request that carries the
+      // actor's reply — which is where the report has to appear.
+      if (!lockDelegated) {
+        lockDelegated = true;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: `Open ${lockFixtureUrl}login and tell me what is on it` }) };
+      }
+      // A lock stop delivers as a FAILED reply, whose lead is "could not complete
+      // your request" — not the success wording. Match both so this state cannot
+      // pass vacuously by simply never seeing a reply at all.
+      if (body.includes('could not complete your request') || body.includes('you messaged has replied')) {
+        if (!lockReportBody) lockReportBody = body;
+        return { sse: sseText('The helper was stopped at that site.') };
+      }
+      return { sse: sseText('Delegated; awaiting the reply.') };
+    },
+    async run(ctx, rec) {
+      lockActorTurn = 0;
+      lockDelegated = false;
+      lockReportBody = '';
+      const server = createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(String(req.url).includes('login') ? LOGIN_HTML : PLAIN_HTML);
+      });
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      const port = /** @type {{ port: number }} */ (server.address()).port;
+      // Chrome maps *.localhost to loopback (RFC 6761), and unlike a bare IP this
+      // is a host normalizeApiOrigin will canonicalize — so it can be classified.
+      lockFixtureUrl = `http://acme.localhost:${port}/`;
+      const fixtureOrigin = `http://acme.localhost:${port}`;
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Look at the Acme sign-in page for me.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        await waitFor(() => lockReportBody.length > 0, { budgetMs: 45_000, pollMs: 100 });
+        await ctx.page.send('Page.bringToFront').catch(() => {});
+
+        // THE LOAD-BEARING ASSERTION: the actor was stopped, and what reached the
+        // orchestrator is peerd's report — not the actor's own account of the page.
+        // Requiring the body to be NON-EMPTY matters: an earlier version of this
+        // check passed while nothing had arrived at all, which is the failure mode
+        // a security test can least afford.
+        rec.check('a reply actually reached the orchestrator', lockReportBody.length > 0);
+        rec.check('the roaming actor was STOPPED at the credentialed origin (its own answer never arrived)',
+          lockReportBody.length > 0 && !lockReportBody.includes('LOCK-DID-NOT-FIRE'),
+          lockReportBody.slice(0, 300));
+        rec.check('the orchestrator is told a helper was stopped',
+          /was stopped when the tab arrived at|helper was stopped/i.test(lockReportBody),
+          lockReportBody.slice(0, 300));
+        // The successor has to be the SITE handle. The bare origin resolves to the
+        // fetch-only API integration, which cannot log in or click — naming it
+        // would route every handoff to an actor structurally unable to do the work.
+        rec.check('the report names the site: successor handle',
+          lockReportBody.includes(`site:${fixtureOrigin}`),
+          lockReportBody.slice(0, 400));
+        // Origins only. The landing URL is the one string an attacker controls at
+        // that moment, so a path or query reaching the orchestrator would be a
+        // free text channel out of a possibly-hijacked actor.
+        //
+        // Scoped to the REPORT, not the whole request: the body carries the full
+        // conversation, including the orchestrator's own earlier message_actor
+        // call, which legitimately contains the /login URL the USER's task named.
+        // Asserting over everything conflated "the report leaked the path" with
+        // "the orchestrator said it first", and failed on the innocent one.
+        const leadAt = lockReportBody.indexOf('could not complete your request');
+        const reportOnly = leadAt >= 0 ? lockReportBody.slice(leadAt, leadAt + 4000) : '';
+        rec.check('the report itself was located in the reply', reportOnly.length > 0);
+        rec.check('the report carries the ORIGIN only — no path from the refused page',
+          reportOnly.length > 0 && !/acme\.localhost:\\?\/*\d*\/?login/.test(reportOnly) && !reportOnly.includes('/login'),
+          reportOnly.slice(0, 600));
+
+        // RECOVERY: the stop released the tab, so the same web actor still works.
+        // Without the release, navigate judges the tab's CURRENT url first and is
+        // refused on the very landing it is trying to leave — every later web
+        // request in the chat gets the same handoff report, forever.
+        const state = await rpc(ctx.page, { type: 'debug/originLock', origin: fixtureOrigin }).catch(() => null);
+        rec.check('the refused tab was RELEASED (the actor is not bricked on it)',
+          !state || state.ownedTabId == null,
+          JSON.stringify(state));
+        rec.check('the origin was LEARNED from the password field on the page',
+          !state || state.learned === true,
+          JSON.stringify(state));
         await rec.shot('final');
       } finally {
         server.close();

@@ -39,7 +39,12 @@ import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
  * yields null, which every caller already surfaces as a refusal.
  *
  * @param {{ tabId?: number }} args
- * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void }} ctx
+ * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null> }} ctx
+ *
+ * `judgeLanding` (issue 251) is the origin lock, injected by the SW so this
+ * file stays free of actor state and the policy stays pure and unit-tested
+ * (`peerd-runtime/actor/landing-rule.js`). Absent — a non-actor context, or an
+ * actor kind with no tab — means no lock, which is the pre-251 behaviour.
  */
 export const resolveTargetTab = async (args, ctx) => {
   let tab = null;
@@ -62,6 +67,25 @@ export const resolveTargetTab = async (args, ctx) => {
   }
   if (!tab) return null;
   if (isDenylistedTab(tab.url, ctx.denylist)) return null;
+  // issue 251 — THE ORIGIN LOCK, enforced here and only here.
+  //
+  // why this chokepoint and not the gate stack: gates are pure and synchronous
+  // and run on `args`, but the question is "where did the tab actually END UP",
+  // which needs the live read this function has already done. A gate checking
+  // args.url is defeated by any 302 — and navigate.js used to re-stamp the pin
+  // to the landing origin, laundering an open redirect into an owned one. Every
+  // DOM tool funnels through here, so one check covers the whole DOM surface.
+  //
+  // CAVEAT, found by adversarial review and worth keeping in front of the next
+  // reader: null here means BOTH "no tab" and "refused", and navigate.js used to
+  // read the first meaning and adopt a fresh tab — turning a refusal into a new
+  // credentialed tab. It now guards on the pin. Any future caller that reacts to
+  // null by CREATING something must make the same distinction; "every caller
+  // treats null as a refusal" was asserted here once and was not true.
+  if (ctx.judgeLanding) {
+    const verdict = await ctx.judgeLanding(tab.url);
+    if (verdict && verdict.action !== 'continue') return null;
+  }
   // The loop just targeted THIS tab by id (navigate/click/type/read/… on a tab
   // the agent opened) — update the "current agent tab" card so it tracks where
   // the agent is working. Only when explicitly addressed (args.tabId): operating

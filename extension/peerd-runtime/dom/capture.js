@@ -23,7 +23,7 @@
 // something to paper over with a weaker observation.
 
 import { serializeAxTree } from './ax-serialize.js';
-import { domWalkInjected } from './walk-injected.js';
+import { domWalkInjected, hasPasswordFieldInjected } from './walk-injected.js';
 
 /**
  * Capture a snapshot of a tab via CDP or the DOM-walk fallback.
@@ -40,9 +40,15 @@ import { domWalkInjected } from './walk-injected.js';
  * so the CDP path reports `capped: false`. Callers surface BOTH so the model
  * can't mistake a partial tree for a complete one.
  *
+ * `hasPasswordField` (issue 251) is the origin-sensitivity signal, NOT model-facing:
+ * it never reaches the snapshot text, only the classifier that decides whether an
+ * origin is one the user has an identity on. `null` means unknown — a probe that
+ * could not run — and must never be read as `false`.
+ *
  * @returns {Promise<
  *   { ok: true, source: 'cdp'|'dom-walk', text: string, refs: object[],
- *     truncated: boolean, capped: boolean, nodeCount: number, refCount: number }
+ *     truncated: boolean, capped: boolean, nodeCount: number, refCount: number,
+ *     hasPasswordField: boolean | null }
  *   | { ok: false, source: 'cdp'|'dom-walk'|'none', error: string }>}
  */
 export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
@@ -59,7 +65,20 @@ export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
     } catch (e) {
       return { ok: false, source: 'cdp', error: `axtree_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
-    return { ok: true, source: 'cdp', capped: false, ...serializeAxTree(nodes, { budget }) };
+    // issue 251 — the password-field signal, which the a11y tree cannot carry
+    // (a password input and a search box are both role `textbox`). One extra
+    // injection, and a cheap one next to a full tree fetch. `null` on any
+    // failure means UNKNOWN, never false: the classifier must not read "we could
+    // not look" as "there is nothing here".
+    let hasPasswordField = /** @type {boolean | null} */ (null);
+    if (typeof scripting?.executeScript === 'function') {
+      try {
+        const probe = await scripting.executeScript({ target: { tabId: tab.id }, func: hasPasswordFieldInjected });
+        const v = probe?.[0]?.result;
+        if (typeof v === 'boolean') hasPasswordField = v;
+      } catch { hasPasswordField = null; }
+    }
+    return { ok: true, source: 'cdp', capped: false, hasPasswordField, ...serializeAxTree(nodes, { budget }) };
   }
 
   if (typeof scripting?.executeScript !== 'function') {
@@ -89,7 +108,14 @@ export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
       error: `dom_walk_failed: ${walk?.error ?? 'no result from the injected walk'}`,
     };
   }
-  return { ok: true, source: 'dom-walk', capped: !!walk.capped, ...serializeAxTree(walk.nodes, { budget }) };
+  return {
+    ok: true,
+    source: 'dom-walk',
+    capped: !!walk.capped,
+    // The walk reports it inline — free, since it is already in the page.
+    hasPasswordField: typeof walk.hasPasswordField === 'boolean' ? walk.hasPasswordField : null,
+    ...serializeAxTree(walk.nodes, { budget }),
+  };
 };
 
 /**

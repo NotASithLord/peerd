@@ -117,7 +117,21 @@ export const navigateTool = {
     // local ref (adoptedPin === the shared object) to re-stamp the landed origin below.
     /** @type {{ id: number, windowId?: number, url: string, origin: string } | null} */
     let adoptedPin = null;
-    if (!tab?.id && typeof c.adoptWebTab === 'function') {
+    // issue 251 — ADOPT ONLY FROM THE GENUINE 0-TAB STATE. resolveTargetTab
+    // returns null for two very different reasons: "this actor owns no tab yet"
+    // and "the origin lock (or the denylist) REFUSED the tab it owns". Adopting
+    // on the second turns a refusal into a brand-new tab the actor may drive
+    // anywhere — and because adoption re-pins ctx.activeTab, which IS the
+    // session-credential scope, every 'end' verdict would buy another
+    // credentialed tab. `c.activeTab?.id` is the discriminator: an actor in the
+    // real 0-tab state has no pin at all.
+    //
+    // why this is called out rather than quietly fixed: the previous commit's
+    // comment in dom-helpers.js claimed "every caller already treats null as a
+    // refusal, so the fail-closed shape is free". That was FALSE for the one
+    // caller that can create a tab, and an adversarial review proved it by
+    // execution. The chokepoint is only fail-closed once this guard exists.
+    if (!tab?.id && !c.activeTab?.id && typeof c.adoptWebTab === 'function') {
       let adopted;
       try { adopted = await c.adoptWebTab(); }
       catch (e) { return { ok: false, error: `tab_open_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? 'could not open a tab'}` }; }
@@ -158,10 +172,52 @@ export const navigateTool = {
     // repinActiveTab); for an already-owned tab, ctx.activeTab is the same object the
     // shallow copy shares — both mutate in place. resolveTargetTab's in-execute denylist
     // re-check is still the second wall on the landing.
+    //
+    // issue 251 — THE PIN TRACKS REALITY, ALWAYS. A draft of this PR froze it at
+    // the actor's owned origin on an off-origin landing, reasoning that the
+    // re-stamp is what launders an open redirect. That was wrong twice over, and
+    // an adversarial review caught it:
+    //
+    //   1. This pin IS the credential scope. service-worker.js wires
+    //      `webFetch = withSessionScopedCredentials(webFetch, () => ctx.activeTab?.origin)`
+    //      and peerd-egress reads that getter LIVE on every fetch to decide
+    //      `credentials:'include'`. Freezing it at the owned origin leaves a
+    //      hijacked actor sitting on the attacker's page still holding
+    //      CREDENTIALED reach into the origin it left — strictly worse than the
+    //      laundering it was meant to stop.
+    //   2. It is also what the confirm prompt, the origin gate, and the audit
+    //      log report. A frozen pin tells the user "on github.com" while the
+    //      tool acts on evil.test. A security change must not make the record
+    //      lie.
+    //
+    // The origin LOCK does not need this and never did: what an actor OWNS is
+    // separate state (actor/origin-lock.js), and decideLanding compares the live
+    // tab URL against that, never against the pin. Reality here, ownership
+    // there, and the two are allowed to disagree — the disagreement is exactly
+    // what the lock detects on the next tool call.
     const pin = adoptedPin ?? c.activeTab;
     if (pin && pin.id === tabId && finalTab?.url) {
       pin.url = finalTab.url;
       pin.origin = originOfUrl(finalTab.url) ?? pin.origin;
+    }
+    // issue 251 — JUDGE THE LANDING WE JUST CAUSED. resolveTargetTab judged the
+    // tab's PRE-navigation URL; this is the only place in the tree that sees a
+    // landing at the moment it is created, and it is exactly case (2) of the
+    // landing rule's own enumeration — "that navigation 302s somewhere else, no
+    // tool call for the hop". Without this the lock is structurally ONE TOOL
+    // CALL LATE: the actor lands on a credentialed origin, the pin (and with it
+    // the session-credential scope) follows, and the refusal only fires if the
+    // actor happens to make another DOM tool call — which it need not, because
+    // fetch_url and the site_client_* tools never pass through resolveTargetTab.
+    //
+    // Ordering: AFTER the re-stamp, so the pin tells the truth in the audit and
+    // the confirm even on a refusal, and so a same-origin path change is judged
+    // against reality.
+    if (c.judgeLanding && finalTab?.url) {
+      const verdict = await c.judgeLanding(finalTab.url);
+      if (verdict && verdict.action !== 'continue') {
+        return { ok: false, error: `origin_lock: ${verdict.reason ?? 'this task was stopped'}` };
+      }
     }
     // A freshly-adopted web-actor tab is a peerd-opened web page, same as open_tab —
     // give it the agent-tab card (the landed URL as its label, not a blank "a tab") and

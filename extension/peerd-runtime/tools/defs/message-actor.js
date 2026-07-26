@@ -54,7 +54,7 @@ export const messageActorTool = {
     properties: {
       to: {
         type: 'string',
-        description: 'Who to address: "web" for general web work (the web actor picks fetch-vs-render — prefer this for open-ended web tasks); an API integration\'s ORIGIN (a bare host like "api.github.com" or a full origin) for repeated, focused work against ONE API — it is fetch-only, keyless, origin-locked, and ACCUMULATES what it learns about that API across messages; a specific open page\'s tabId; OR a vm/notebook/app instance id. Every addressable handle (tabId, instance id, formed origin) is listed by actor_list. An actor is minted on first message; an API integration auto-forms the first time you address its origin.',
+        description: 'Who to address: "web" for general web work (the web actor picks fetch-vs-render — prefer this for open-ended web tasks); "site:<origin>" (e.g. "site:https://github.com") for work ON ONE SITE THE USER HAS AN ACCOUNT ON — that helper opens and drives a real tab but works on that site and nowhere else, so it can sign in and act normally where the general web helper is not allowed to go; an API integration\'s ORIGIN (a bare host like "api.github.com" or a full origin) for repeated, focused work against ONE API — fetch-only, keyless, origin-locked, and it ACCUMULATES what it learns about that API across messages; a specific open page\'s tabId; OR a vm/notebook/app instance id. Every addressable handle (tabId, instance id, formed origin) is listed by actor_list. An actor is minted on first message; an API integration and a site helper both auto-form the first time you address them.',
       },
       message: {
         type: 'string',
