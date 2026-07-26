@@ -7,11 +7,21 @@
 // reports what happened. All IO is injected, so the shell is testable without a
 // browser and the SW's wiring stays a few lines.
 //
-// ONE ENFORCEMENT POINT. `makeJudgeLanding` produces the `judgeLanding` that
-// `resolveTargetTab` calls on every DOM tool. That is deliberately the only
-// place: it is the single chokepoint every DOM tool funnels through, and it has
-// already done the live `tabs.get()`, so it is the only place that knows where
-// the tab ACTUALLY IS rather than where something asked it to go.
+// WHERE IT IS ENFORCED, AND WHERE IT IS NOT. `makeJudgeLanding` produces the
+// `judgeLanding` called from two places: `resolveTargetTab` (every DOM tool, on
+// the tab's current URL) and `navigate` (again, on the URL it just landed on —
+// the only point in the tree that observes a landing as it is created, which is
+// what catches a 302 nobody made a tool call for).
+//
+// That covers the DOM surface. It does NOT cover every way the actor's session
+// authority can be spent, and an earlier draft of this header wrongly implied it
+// did. The web actor also holds `fetch_url`, `read_web_cache` and the
+// `site_client_*` tools, none of which pass through `resolveTargetTab`. Their
+// credential scope is `ctx.activeTab.origin`, read live — so a page that
+// redirects itself to a credentialed origin moves that scope with no tool call
+// to judge, and those tools can spend it before any DOM tool re-enters the
+// chokepoint. Closing that means judging inside the egress boundary too, which
+// is follow-up work, not something this file quietly already does.
 //
 // WHAT THIS DOES NOT DO, and must not silently appear to. On a `handoff` it
 // records the successor origin and ends the actor — it does NOT mint the bound
