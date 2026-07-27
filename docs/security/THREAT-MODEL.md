@@ -459,21 +459,24 @@ evaluating peerd should know. Each cites where it lives in the code.
   public host is not prevented by the allowlist. It is mitigated only by the
   keyless-web-actor architecture (INV-3). (`peerd-egress/vault/keys.js`, and the header of
   `peerd-egress/fetch/safe-fetch.js`.)
-- R12. A web actor's owned origin is mutable, so an open redirect can retask it. A tab
-  actor is pinned to a TAB, not an origin, and `tools/defs/navigate.js` re-stamps that
-  pin to wherever the tab lands after redirects — deliberately, so the next tool sees
-  the live origin. The consequence is that an open redirect on any site the actor may
-  visit moves it to an attacker origin with the pin updated to match, and a page-driven
-  redirect (meta refresh, JS) does it with no tool call to inspect at all. The remaining
-  wall is the denylist, which is a blocklist, so an unknown origin passes. INV-10 and
-  INV-11 do not cover this: the egress tripwire inspects `navigate` ARGUMENTS, and a
-  redirect changes the LANDING. Already named next door for the credential-injection
-  design (`peerd-egress/fetch/origin-credentials.js`, "the owned-origin
-  SSRF/open-redirect residual is accepted + named in the spec"); it becomes load-bearing
-  once anything is built on origin identity. Being closed in issue #251, which segments
-  web actors into roaming (no authority, cannot enter a credentialed site) and bound
-  (owns one origin, cannot leave it) and judges the LANDING rather than the request.
-  (`peerd-runtime/actor/web-actor.js` line ~136 states the mutability outright.)
+- R12. CLOSED (issue #251), and what replaced it is worth stating precisely because the
+  original wording was about a pin. A web actor is still pinned to a TAB rather than an
+  origin, and `tools/defs/navigate.js` still re-stamps that pin to wherever the tab
+  lands — deliberately, because that pin IS the session-credential scope, and freezing
+  it would leave a retasked actor holding credentialed reach into the origin it just
+  left while the confirm prompts, the origin gate and the audit log all named the wrong
+  site. What changed is that the pin is no longer the only thing consulted. Every web
+  actor now carries an ORIGIN STATE — roaming (browses, holds no authority, may not
+  enter a site the user has an identity on) or bound (owns one origin, may not leave
+  it) — and the LANDING is judged at the DOM chokepoint every tool funnels through, plus
+  inside `navigate` itself, which is the one place that observes a landing as it is
+  created. That collapses all three ways a tab's origin can change (a tool call, a 302
+  with no tool call, a page redirecting itself) into one check no redirect chain walks
+  around. The same policy is asked synchronously inside the credential-scope getter, so
+  a self-redirect onto a credentialed origin cannot be spent by `fetch_url`,
+  `read_web_cache` or `site_client_*` in the window before a DOM tool re-enters the
+  chokepoint. (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
+  `tools/defs/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
 - R13. The egress tripwire does not scan the query string or fragment, so the canonical
   exfil GET is uncovered. `attacker.test/?d=<blob>` is not inspected, because that is
   where legitimate long high-entropy values live — OIDC `id_token`s, SAML requests,
@@ -490,14 +493,33 @@ evaluating peerd should know. Each cites where it lives in the code.
   drives the validator directly for that reason. Turning it on by default waits on field
   evidence that the format holds. (`packaging/default-settings.mjs`
   `schemaValidatedReplies`.)
-- R15. Sensitive-origin classification is a list, and lists are incomplete. The origin
-  work in #251 decides "is this a site the user has an identity on" from a curated
-  registry, origins with a stored credential, and two learned signals (a password field
-  observed, a write confirmed). It fails open, so an unlisted credentialed site — a
-  bank, webmail, an internal tool — is treated as ordinary until a signal fires, and the
-  FIRST visit to any such site is therefore unprotected by construction. Detecting
-  credentials directly would need the `cookies` permission, which is not requested for
-  the same reason `webNavigation` is not.
+- R15. Sensitive-origin classification is a list, and lists are incomplete. #251 decides
+  "is this a site the user has an identity on" from a curated registry (#242's UGC
+  hosts, asked at origin level), origins with a stored credential, and two signals
+  LEARNED from ordinary use — a password field seen on a page, and a write the user
+  approved. It fails open, so an unlisted credentialed site is treated as ordinary until
+  a signal fires. In practice the password-field signal fires on the first page walk of
+  any sign-in surface, so the exposure is narrower than "until you configure something";
+  but the FIRST landing on a site whose login the actor never sees is unprotected by
+  construction, and nothing un-learns, so an origin stays classified until the profile
+  is reset. Detecting credentials directly would need the `cookies` permission, which is
+  not requested for the same reason `webNavigation` is not.
+- R16. The identity-provider list is the one place a bound actor may leave its origin,
+  and it is deliberately short — a host qualifies only if signing in is essentially all
+  it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
+  because admitting them would hand a bound actor a budgeted corridor onto the whole
+  site. The cost is a real one: a bound actor sent through "sign in with GitHub" ENDS.
+  That is the safe failure, but it is a failure, and whether it happens often enough to
+  change the trade is a question for use rather than for this document.
+  (`peerd-runtime/actor/idp-registry.js`.)
+- R17. A handoff names a successor the orchestrator may address, and the origin in it is
+  chosen by whatever moved the tab — which on a hostile page is the attacker. The
+  successor is a BOUND TAB actor (`site:<origin>`), which holds no stored key, so it is
+  not an authority upgrade over what user-directed work on that site would already have;
+  and the report conditions the successor explicitly on the user's own request having
+  been about that site. But the report is first-party text the orchestrator is meant to
+  trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
+  the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
 
 Candidates for future red-team scenarios, from the partially-defended surfaces above:
 R2 memory poisoning and R3 skill-body smuggling. (R4 chain tampering, R5 grant

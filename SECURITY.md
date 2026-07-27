@@ -84,11 +84,20 @@ Understanding the boundaries helps you scope a report:
   does not scan query strings, because that is where legitimate login
   tokens live (`peerd-runtime/tools/egress-heuristics.js`).
 
-Two things this list does **not** claim. A web actor is pinned to a tab,
-not to a site, so a redirect can still move it to another origin — that is
-residual risk R12 and is being closed in issue #251. And the strict
-structural reply format for web actors ships **off** by default (R14). The
-threat model states both plainly rather than counting them as defenses.
+- **A helper that browses the web can't walk into your accounts.** Every web
+  helper is either *roaming* — it browses freely and holds no authority — or
+  *bound* to exactly one site it may not leave. A roaming helper that reaches a
+  site you have an account on stops instead of continuing, and peerd checks
+  where the tab actually ENDED UP rather than where something asked it to go, so
+  a redirect can't smuggle it in. Which sites count grows as you use peerd: a
+  sign-in page it walks, or a write you approve, teaches it
+  (`peerd-runtime/actor/landing-rule.js`).
+
+Two things this list does **not** claim. Knowing which sites you have an account
+on is a list, and lists are incomplete — the first visit to a site peerd has
+never seen a login page for is unprotected (R15). And the strict structural
+reply format for web actors ships **off** by default (R14). The threat model
+states both plainly rather than counting them as defenses.
 - **Sandboxed execution.** WebVM (CheerpX, network only via the egress
   wrappers), JS Sandbox (realm-sealed Web Worker), App (opaque-origin
   sandboxed iframe).

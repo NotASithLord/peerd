@@ -260,7 +260,7 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  isKnownIdp, describeLandingStop,
+  isKnownIdp, describeLandingStop, isUgcHost,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
@@ -903,10 +903,13 @@ const noteLearnedOrigin = (rawOrigin, reason) => {
 
 /** The sensitivity signals, in the shape the classifier takes. */
 const sensitivitySignals = () => ({
-  // #242's UGC registry is the other SEED and lands on its own branch; when it
-  // merges, `isUgcZone` is wired in here and nothing else changes. Named rather
-  // than left to be discovered by someone wondering why github.com wasn't
-  // caught on this branch.
+  // SEED 1 — #242's curated UGC registry, asked at ORIGIN level (isUgcHost, not
+  // classifyUrl). #242 is path-scoped because it gates one WRITE on a page
+  // strangers authored; the lock asks whether the user has an IDENTITY here,
+  // and a session does not stop at a path boundary.
+  isUgcZone: isUgcHost,
+  // SEED 2 — the user stored a credential for it. Definitionally credentialed:
+  // they authored the fact.
   hasVaultSecret: (/** @type {string} */ origin) => keyedOrigins.has(origin),
   getLearned: () => learnedOrigins.snapshot(),
 });

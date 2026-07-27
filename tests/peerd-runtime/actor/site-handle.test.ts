@@ -85,3 +85,38 @@ describe('the handle is safe to put in trusted text', () => {
     expect(handle).not.toMatch(/[\n\r<>[\]]/);
   });
 });
+
+// --- issue 251 x #242: the seed the two features share ----------------------
+import { isUgcHost } from '../../../extension/peerd-runtime/actor/ugc-registry.js';
+
+describe('the UGC registry, asked at ORIGIN level', () => {
+  test('a UGC host is sensitive on EVERY path, not just the content sub-paths', () => {
+    // #242's own classifier is path-scoped because it gates one WRITE on a page
+    // strangers authored — /settings is genuinely not that. The origin lock asks
+    // a different question: does the user have an identity here, i.e. is there a
+    // session a roaming actor must not hold. Sessions do not stop at a path.
+    expect(isUgcHost('https://github.com')).toBe(true);
+    expect(isUgcHost('https://docs.google.com')).toBe(true);
+    expect(isUgcHost('https://acme.atlassian.net')).toBe(true);
+  });
+
+  test('an ordinary site is not a UGC host', () => {
+    for (const o of ['https://example.com', 'https://blog.test', 'https://news.ycombinator.com']) {
+      expect(isUgcHost(o)).toBe(false);
+    }
+  });
+
+  test('lookalikes do not match', () => {
+    // The host patterns are anchored; a suffix that merely contains the name
+    // must not inherit the whole registry entry.
+    for (const o of ['https://github.com.evil.test', 'https://notgithub.com', 'https://atlassian.net.evil.test']) {
+      expect(isUgcHost(o)).toBe(false);
+    }
+  });
+
+  test('junk and unnameable origins fail open', () => {
+    for (const o of ['', 'not-a-url', 'http://192.168.1.9', 'about:blank']) {
+      expect(isUgcHost(o as any)).toBe(false);
+    }
+  });
+});

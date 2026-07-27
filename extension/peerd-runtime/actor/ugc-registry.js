@@ -225,3 +225,36 @@ export const ugcWriteConfirm = ({ toolName, primitive, sideEffect, url }) => {
   const { zone, ruleId } = classifyUrl(url ?? '');
   return zone === 'ugc' ? (ruleId ?? 'ugc') : null;
 };
+
+/**
+ * Is this ORIGIN's host a UGC zone at all — ignoring the path?
+ *
+ * issue 251 wants a different question from the one the rest of this file
+ * answers, and the difference is the whole reason this is a separate export
+ * rather than a call to `classifyUrl`.
+ *
+ * `classifyUrl` is PATH-scoped because #242 gates one WRITE: acting as the user
+ * on a page strangers authored. Whether `/settings` is UGC is a real question
+ * there, and the answer is no.
+ *
+ * The origin lock asks whether the user has an IDENTITY here, because what it
+ * decides is whether a roaming actor may hold this site's SESSION — and a
+ * session does not stop at a path boundary. Every host in this registry is by
+ * construction a site people have accounts on; that is what made its content
+ * attacker-authorable in the first place. So the host alone is the signal, and
+ * `github.com/settings` is exactly as much "a site you are logged into" as
+ * `github.com/acme/repo/issues/1`.
+ *
+ * Fail-open like everything else here: an origin we cannot canonicalize is not
+ * a UGC host.
+ *
+ * @param {string} origin  a canonical origin (or anything normalizeApiOrigin accepts)
+ * @returns {boolean}
+ */
+export const isUgcHost = (origin) => {
+  const canonical = normalizeApiOrigin(origin);
+  if (!canonical) return false;
+  let host;
+  try { host = new URL(canonical).hostname.toLowerCase(); } catch { return false; }
+  return UGC_RULES.some((rule) => rule.hostPattern.test(host));
+};

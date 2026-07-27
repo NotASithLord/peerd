@@ -160,6 +160,10 @@ export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
 // an actor is stopped — text authored HERE, never by the actor or the page.
 export { makeOriginStateStore } from './actor/origin-state-store.js';
 export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
+// #242's UGC registry, asked at ORIGIN level — the seed the origin lock wants.
+// A UGC host is by construction a site people have accounts on; that is what
+// made its content attacker-authorable in the first place.
+export { isUgcHost } from './actor/ugc-registry.js';
 export { isKnownIdp, knownIdpSeeds } from './actor/idp-registry.js';
 export { describeLandingStop } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
