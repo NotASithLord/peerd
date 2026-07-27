@@ -2399,24 +2399,29 @@ const sessionConfirmGrants = new Map();
  */
 const confirmAction = async (prompt) => {
   const sid = prompt.sessionId ?? null;
-  // issue 251 — the second LEARNED signal, applied to EVERY approved web:write.
+  // issue 251 — the second LEARNED signal: the user AFFIRMED acting as themselves
+  // on this origin, so remember that the origin is one they have an identity on.
   //
-  // Approving a write to an origin is the user saying, in as many words, "yes,
-  // act as me there". Remembering it is what lets the sensitivity list grow from
-  // real use instead of staying at whatever the curated seeds happened to know.
+  // Fired ONLY on a real answer from the user, and the earlier draft that fired
+  // it on the other two approving exits was wrong on its own terms. Those exits
+  // are the `confirmWebWrites`-off auto-approve and the session-grant cache, and
+  // neither is a decision about THIS origin:
   //
-  // why a helper called at each approving exit rather than one line before the
-  // final return: this function has THREE ways to say yes, and two of them
-  // return early — the confirmWebWrites-off auto-approve and the session-grant
-  // cache. A single hook at the bottom would miss both, and missing the first is
-  // the one that matters: turning confirmations off must not also turn off
-  // learning. (A first draft of this did exactly that; the comment claimed
-  // otherwise, which is worse than the gap.)
+  //   * auto-approve is page-driven. An injected actor could POST to any origin
+  //     it liked and thereby mark it sensitive — page-controlled security state,
+  //     and the failure is real if unglamorous: sites the user never chose become
+  //     unreachable to roaming helpers, which reads as peerd randomly breaking.
+  //   * the grant cache is a REPLAY of an approval already learned from.
+  //
+  // The signal's whole justification is "they affirmed it", so it fires exactly
+  // where that is true. Origins the auto-approve path would have taught are still
+  // caught by the password-field signal on the first page walk.
   //
   // Only on approval — a DECLINED write says the opposite, and recording it
   // would make refusing to act on a site the thing that marks it as yours.
-  const learnApprovedWrite = () => {
+  const learnUserApprovedWrite = (/** @type {string} */ ans) => {
     if (prompt.tool !== WEB_WRITE_CONFIRM_KEY) return;
+    if (ans !== 'yes_once' && ans !== 'yes_session') return;
     for (const origin of prompt.origins ?? []) noteLearnedOrigin(origin, 'confirmed-write');
   };
   // Web-write gate (shared key for fetch_url + the WebVM bridge): when the user
@@ -2424,7 +2429,6 @@ const confirmAction = async (prompt) => {
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.
   if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
-    learnApprovedWrite();
     return 'yes_once';
   }
   // R5 (origin-bound grants): "approve for this session" means this tool ON
@@ -2443,7 +2447,6 @@ const confirmAction = async (prompt) => {
     try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
   }
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
-    learnApprovedWrite();
     return 'yes_session';
   }
   // ...and TELL THE PANEL, so it can stop offering a button that grants
@@ -2465,7 +2468,7 @@ const confirmAction = async (prompt) => {
   // allowlist decision, the peer did shown to the user), whose raw answer survives
   // so a2aResolveConsent can honor "Allow for session" vs "Allow once". Decision is
   // the pure downgradesActorConfirm (background/a2a-consent.js), unit-tested.
-  if (answer === 'yes_once' || answer === 'yes_session') learnApprovedWrite();
+  learnUserApprovedWrite(answer);
   return downgradesActorConfirm(prompt.tool, ephemeral, answer) ? 'yes_once' : answer;
 };
 
@@ -3515,6 +3518,32 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
     webActorTabBindings.drop(tabId);
     persistWebBindings();
     actorSessionId = null;
+  }
+  // issue 251 — RE-BIND when the tab has moved on since this actor was minted.
+  //
+  // A tab actor is BOUND to the origin the tab had when it was first addressed
+  // (mintWebActorForTab), which is right for the turn it was addressed in and
+  // wrong for every turn after. Without this, a user who reads one page, then
+  // browses that same tab somewhere else and asks again, gets a helper bound to
+  // the site they LEFT — refused on its first tool call, with a report about a
+  // page they are no longer looking at. The binding is durable and the tab is
+  // long-lived, so that state persists for as long as the tab does.
+  //
+  // Addressing a tab is an authorization for THAT TAB AS IT IS NOW, so a fresh
+  // addressing re-derives the binding. This does NOT loosen the lock: the
+  // re-bind happens only here, between turns, on an explicit address. Inside a
+  // turn the actor still cannot leave its origin, which is the property that
+  // stops a hijacked page from moving it.
+  if (actorSessionId) {
+    const rec = await sessions.get(actorSessionId).catch(() => null);
+    const owned = /** @type {any} */ (rec)?.originState?.ownedOrigin ?? null;
+    const live = tab.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+    if (owned && live && owned !== live) {
+      webActorTabBindings.drop(tabId);
+      persistWebBindings();
+      originStates.forget(actorSessionId);
+      actorSessionId = null;
+    }
   }
   if (!actorSessionId) actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId));
   // why no `name` from the page: a tab's title/url are attacker-CONTROLLED

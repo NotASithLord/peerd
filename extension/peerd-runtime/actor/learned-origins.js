@@ -65,6 +65,8 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
   /** @type {Promise<unknown>} */
   let chain = Promise.resolve();
   let ready = false;
+  /** Did a signal land while the boot read was still in flight? */
+  let pendingDuringHydrate = false;
 
   const report = (/** @type {string} */ m, /** @type {unknown} */ e) => {
     if (onError) onError(m, e);
@@ -78,15 +80,35 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
    */
   const hydrate = async () => {
     if (ready) return;
+    let all = null;
     try {
-      const all = await load();
-      for (const [origin, reason] of Object.entries(all ?? {})) {
-        if (ALLOWED.has(reason)) learned.set(origin, /** @type {SensitivityReason} */ (reason));
-      }
+      all = await load();
     } catch (e) {
       report('load failed — starting with nothing learned', e);
     }
+    // MERGE, never replace, and mark ready only after. A signal can land while
+    // this read is in flight — the boot read is async and the very first page
+    // walk is not — and an earlier draft let that happen in the worst possible
+    // way: `note()` would fire, save a snapshot of a nearly-empty Map, and the
+    // durable set the read was about to deliver would be gone. Setting only the
+    // keys we do not already hold keeps the live observation (which is fresher)
+    // and restores everything else.
+    for (const [origin, reason] of Object.entries(all ?? {})) {
+      if (ALLOWED.has(reason) && !learned.has(origin)) {
+        learned.set(origin, /** @type {SensitivityReason} */ (reason));
+      }
+    }
     ready = true;
+    // If anything was noted DURING the load, its snapshot was written without
+    // the restored entries. Re-save once so the durable copy matches the merged
+    // set rather than the racing writer's partial view.
+    if (pendingDuringHydrate) {
+      pendingDuringHydrate = false;
+      const snapshot = Object.fromEntries(learned);
+      chain = chain
+        .then(() => save(snapshot))
+        .catch((e) => report('post-hydrate save failed', e));
+    }
   };
 
   /**
@@ -118,6 +140,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
       return false;
     }
     learned.set(origin, reason);
+    if (!ready) pendingDuringHydrate = true;
     try { onLearn?.(origin, reason); } catch { /* best-effort */ }
     const snapshot = Object.fromEntries(learned);
     chain = chain

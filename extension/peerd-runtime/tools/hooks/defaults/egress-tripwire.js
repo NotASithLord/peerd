@@ -61,11 +61,11 @@ export const egressTripwireHook = {
   // why: rendered verbatim in the Context → Hooks tab. Says what it catches AND
   // what it does not, so a user reading the list does not mistake a best-effort
   // tripwire for a guarantee.
-  description: 'Blocks a browser-session tool from navigating or typing an '
-    + 'off-origin URL that carries a high-entropy encoded payload in its '
-    + 'userinfo, host, or path — the DOM-data exfiltration shape. Best-effort '
-    + 'tripwire, not a guarantee. Built-in code, registered at boot; cannot be '
-    + 'disabled or removed.',
+  description: 'Blocks a page-driving tool — or a web helper\'s own fetch — from '
+    + 'sending an off-origin URL that carries a high-entropy encoded payload in its '
+    + 'userinfo, host, or path: the DOM-data exfiltration shape. Does NOT scan the '
+    + 'query string, where legitimate login tokens live. Best-effort tripwire, not a '
+    + 'guarantee. Built-in code, registered at boot; cannot be disabled or removed.',
   // why: just after egress-allowlist (10) — both are network vetoes and belong
   // ahead of softer policy/observability hooks, and running second keeps the
   // allowlist (the hard floor) as the first thing a blocked call reports.
@@ -75,15 +75,31 @@ export const egressTripwireHook = {
     const { args, toolName } = inv;
     const ctx = /** @type {import('/shared/tool-types.js').ToolContext & TripwireHookCtx} */ (inv.ctx);
     const tool = ctx.getToolMeta?.(toolName);
-    // why primitive:'tab' and not more: these are the calls that drive the
-    // user's OWN logged-in browser session, which the allowlist exempts on
-    // purpose (reaching your logged-in apps is the thesis) and which no
-    // network-layer check ever sees. Be honest that this is not the allowlist's
-    // whole exemption: it also skips any tool whose sideEffect is not
-    // mutate_external, so fetch_url (primitive 'web') is inspected by NEITHER.
-    // A path-shaped blob is blocked via navigate and allowed via fetch_url —
-    // an asymmetry to close by widening this scope, not a claim to paper over.
-    if (tool?.primitive !== 'tab') {
+    // WHICH CALLS ARE INSPECTED, and why it is two cases rather than one.
+    //
+    //  1. primitive:'tab' — anything driving the user's OWN logged-in browser
+    //     session. The allowlist exempts these on purpose (reaching your
+    //     logged-in apps is the thesis) and no network-layer check ever sees
+    //     them, so this hook is the only thing looking.
+    //
+    //  2. primitive:'web' FROM AN ACTOR — fetch_url and friends. This used to be
+    //     skipped, and the asymmetry was named right here rather than fixed: a
+    //     path-shaped blob was blocked via `navigate` and allowed via
+    //     `fetch_url`, which is the same exfiltration through a door left open.
+    //     Adversarial review found it independently, which is a fair sign that a
+    //     comment admitting a hole is not the same as handling it.
+    //
+    // why only from an ACTOR for case 2: the tripwire's whole premise is that a
+    // page was READ and its data is now being sent somewhere. Under the heap
+    // split only actors ingest raw page content — the orchestrator sees fenced
+    // summaries — so an orchestrator fetch has nothing scraped to leak, and
+    // inspecting it would add false positives (its own long API URLs) against no
+    // threat. The scope follows the premise instead of being drawn wider "just
+    // in case", which is what would eventually get the hook disabled.
+    const isTabTool = tool?.primitive === 'tab';
+    const isActorWebTool = tool?.primitive === 'web'
+      && /** @type {{ exposure?: string }} */ (ctx).exposure === 'actor';
+    if (!isTabTool && !isActorWebTool) {
       return { action: 'allow', reason: 'egress-tripwire: not a browser-session tool, skipped' };
     }
     const verdict = inspectTabToolCall({

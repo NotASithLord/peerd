@@ -133,3 +133,47 @@ describe('the cap', () => {
     expect(store.size()).toBe(MAX_LEARNED);
   });
 });
+
+describe('the boot read races the first page walk', () => {
+  test('a signal noted DURING hydration is not lost, and does not lose the stored set', async () => {
+    // The load is async; the first DOM walk is not. An earlier draft let note()
+    // fire mid-load and save a snapshot of a nearly-empty Map — clobbering the
+    // durable set the read was about to deliver.
+    let releaseLoad: (v: any) => void = () => {};
+    const gate = new Promise((r) => { releaseLoad = r; });
+    const saves: Array<Record<string, string>> = [];
+    const store = makeLearnedOrigins({
+      load: async () => { await gate; return { 'https://stored.test': 'confirmed-write' }; },
+      save: async (all) => { saves.push({ ...all }); },
+      onError: () => {},
+    });
+    const hydrating = store.hydrate();
+    store.note('https://live.test', 'password-field');   // lands mid-load
+    releaseLoad(null);
+    await hydrating;
+    await store.settled();
+    // Both survive.
+    expect(store.snapshot().get('https://live.test')).toBe('password-field');
+    expect(store.snapshot().get('https://stored.test')).toBe('confirmed-write');
+    // And the LAST durable write holds both, not the racing writer's view.
+    expect(saves.at(-1)).toEqual({
+      'https://live.test': 'password-field',
+      'https://stored.test': 'confirmed-write',
+    });
+  });
+
+  test('a live observation WINS over a stale stored reason for the same origin', async () => {
+    let releaseLoad: (v: any) => void = () => {};
+    const gate = new Promise((r) => { releaseLoad = r; });
+    const store = makeLearnedOrigins({
+      load: async () => { await gate; return { 'https://x.test': 'confirmed-write' }; },
+      save: async () => {},
+      onError: () => {},
+    });
+    const hydrating = store.hydrate();
+    store.note('https://x.test', 'password-field');
+    releaseLoad(null);
+    await hydrating;
+    expect(store.snapshot().get('https://x.test')).toBe('password-field');
+  });
+});
