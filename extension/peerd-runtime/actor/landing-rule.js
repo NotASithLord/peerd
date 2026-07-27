@@ -137,6 +137,26 @@ const locate = (landing) => {
 };
 
 /**
+ * Is `landing` the same site as `owned`, differing ONLY by a leading `www.`?
+ *
+ * Scheme and port must match exactly — a www-fold is a host convention, never a
+ * licence to change protocol or port. Both directions are accepted because sites
+ * canonicalize in both (apex→www is the common one; www→apex happens too).
+ *
+ * @param {string | null} landing
+ * @param {string | null} owned
+ */
+const isWwwFold = (landing, owned) => {
+  if (!landing || !owned) return false;
+  let a; let b;
+  try { a = new URL(landing); b = new URL(owned); } catch { return false; }
+  if (a.protocol !== b.protocol || a.port !== b.port) return false;
+  const x = a.hostname.toLowerCase();
+  const y = b.hostname.toLowerCase();
+  return x === `www.${y}` || y === `www.${x}`;
+};
+
+/**
  * Decide what happens now that the tab is at `landing`.
  *
  * @param {object} state
@@ -145,6 +165,10 @@ const locate = (landing) => {
  * @param {unknown} state.landing               where the tab actually is now
  * @param {boolean} state.landingIsSensitive    from classifyOriginSensitivity
  * @param {boolean} [state.landingIsIdp]        is the landing a known identity provider
+ * @param {boolean} [state.provisional]      was `ownedOrigin` ASKED FOR rather than
+ *   OBSERVED? True for a `site:<origin>` actor, whose origin the orchestrator
+ *   spelled; false for a handoff successor, whose origin a roaming actor was
+ *   already on. Only a provisional origin may settle onto its own www-fold.
  * @param {Excursion | null} [state.excursion]  in-flight excursion, if any
  * @param {number} [state.excursionsUsed]       how many this actor has opened
  * @param {number} [state.now]                  injected clock
@@ -154,6 +178,7 @@ export const decideLanding = (state) => {
   const {
     mode, ownedOrigin = null, landing, landingIsSensitive,
     landingIsIdp = false, excursion = null, excursionsUsed = 0, now = 0,
+    provisional = false,
   } = state;
 
   // FAIL CLOSED on an unrecognized mode. why this is not paranoia: an actor
@@ -194,6 +219,39 @@ export const decideLanding = (state) => {
     return kind === 'named'
       ? { action: 'continue', reason: 'first landing defines the owned site', adoptOrigin: /** @type {string} */ (landingOrigin) }
       : { action: 'end', reason: 'this page has no address peerd can pin work to' };
+  }
+
+  // A PROVISIONAL owned origin — one that was ASKED FOR rather than OBSERVED —
+  // may settle onto the www-fold of itself on its very first landing.
+  //
+  // why this exists at all: `site:<origin>` is a handle the orchestrator SPELLS,
+  // from the user's words or its own guess, so the origin is a request. Loading
+  // `https://reddit.com` lands on `https://www.reddit.com`, which is ordinary
+  // web behaviour and not an attack — but sameOrigin says no, and the actor
+  // ended. Worse, the binding is durable, so retrying the same handle resumed
+  // the same session pinned to the same unreachable origin: a permanent dead end
+  // for that chat, one orphaned tab per attempt. Adversarial review found it and
+  // was right that it would be hit on the first commonly-named site.
+  //
+  // why ONLY the www fold, and not "same registrable domain": working out the
+  // registrable domain needs a public-suffix list we do not ship, and the cheap
+  // approximation (share the last two labels) is actively wrong on `co.uk` —
+  // `bbc.co.uk` and `evil.co.uk` would look like the same site. The apex↔www
+  // pair is the case that actually bites, and it is decidable with no list and
+  // no ambiguity. Anything else still ends, and the report names where the tab
+  // landed so the orchestrator can re-address it deliberately.
+  //
+  // The HANDOFF path is unaffected either way: `handoffTo` is the origin a
+  // roaming actor was already ON, so it is an observation and this branch is a
+  // no-op for it.
+  if (provisional && kind === 'named' && !sameOrigin(landingOrigin, ownedOrigin)) {
+    if (isWwwFold(landingOrigin, ownedOrigin)) {
+      return {
+        action: 'continue',
+        reason: 'the site redirected to its canonical host',
+        adoptOrigin: /** @type {string} */ (landingOrigin),
+      };
+    }
   }
 
   // A real page we cannot name is FOREIGN to a bound actor: it is provably not

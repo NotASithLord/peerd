@@ -120,5 +120,19 @@ export const describeLandingStop = (event) => {
       + `way to tell which, so it treats both the same way.`,
     ``,
     unknownWork,
+    // Name the landed origin as an ADDRESSABLE handle. Without this the `end`
+    // branch was a cul-de-sac: a site that redirects to a host the orchestrator
+    // did not spell (an apex going to www, a locale host) stopped the helper and
+    // gave no way forward, so the same wrong handle would just be retried. The
+    // condition is the same one the handoff branch carries — this is only worth
+    // doing if the destination is where the user's own request pointed.
+    ...(landed.startsWith('http')
+      ? [
+        ``,
+        `If ${landed} is where the user's request actually pointed — a site often `
+          + `redirects to its canonical host — that site has its own helper: `
+          + `message_actor to "${siteHandleFor(landed)}". If it is not, do not open one there.`,
+      ]
+      : []),
   ].join('\n');
 };

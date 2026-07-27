@@ -220,3 +220,58 @@ describe('the reasons are for humans', () => {
     }
   });
 });
+
+// --- the www fold: a spelled origin vs the one the site actually serves ------
+describe('a PROVISIONAL owned origin settles onto its own www-fold', () => {
+  const bound = (over: any = {}) => decideLanding({
+    mode: 'bound', ownedOrigin: 'https://reddit.com', landingIsSensitive: false, ...over,
+  } as any);
+
+  test('apex → www is adopted, not ended', () => {
+    // `site:<origin>` is a handle the orchestrator SPELLS from the user's words,
+    // so the origin is a request. Loading https://reddit.com lands on
+    // https://www.reddit.com — ordinary web behaviour, not an attack. Before
+    // this, the actor ended AND the durable binding made the handle a permanent
+    // dead end for the chat, one orphaned tab per retry.
+    const v = bound({ provisional: true, landing: 'https://www.reddit.com/r/x' });
+    expect(v.action).toBe('continue');
+    expect(v.adoptOrigin).toBe('https://www.reddit.com');
+  });
+
+  test('www → apex is adopted too — sites canonicalize both ways', () => {
+    const v = decideLanding({
+      mode: 'bound', ownedOrigin: 'https://www.example.com', provisional: true,
+      landing: 'https://example.com/', landingIsSensitive: false,
+    } as any);
+    expect(v.action).toBe('continue');
+    expect(v.adoptOrigin).toBe('https://example.com');
+  });
+
+  test('anything that is NOT the www fold still ends', () => {
+    // The allowance is exactly one host convention, not "same-ish site". A
+    // registrable-domain rule would need a public-suffix list we do not ship,
+    // and its cheap approximation is wrong on co.uk.
+    for (const landing of [
+      'https://evil.com/', 'https://reddit.com.evil.test/', 'https://old.reddit.com/',
+      'https://www.reddit.co.uk/', 'http://www.reddit.com/',
+    ]) {
+      expect(bound({ provisional: true, landing }).action).toBe('end');
+    }
+  });
+
+  test('a different PORT is not a www fold', () => {
+    expect(bound({ provisional: true, landing: 'https://www.reddit.com:8443/' }).action).toBe('end');
+  });
+
+  test('WITHOUT provisional, the same www redirect ends — an observed origin is not a guess', () => {
+    // A handoff successor's origin is where a roaming actor already WAS, so it
+    // needs no allowance; giving one would widen the handoff path for free.
+    expect(bound({ landing: 'https://www.reddit.com/' }).action).toBe('end');
+  });
+
+  test('a provisional actor that lands exactly where it was told just continues', () => {
+    const v = bound({ provisional: true, landing: 'https://reddit.com/r/x' });
+    expect(v.action).toBe('continue');
+    expect(v.adoptOrigin).toBeUndefined();
+  });
+});

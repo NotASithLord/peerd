@@ -996,6 +996,29 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         if (current) {
           const parkedTab = webActorTabBindings.tabFor(actorSessionId);
           if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
+          // A SITE actor whose very first landing was refused is a dead handle:
+          // its owned origin is one the site does not actually serve, and the
+          // binding is durable, so retrying the same handle resumed the same
+          // doomed session and opened another orphaned tab. Dropping the binding
+          // makes a retry MINT afresh — which, with the www-fold allowance, is
+          // usually all that was needed. Only on the FIRST landing: after that
+          // the origin is settled and an actor that wandered off it should stay
+          // stopped rather than quietly re-home itself somewhere new.
+          const st = originStates.read(actorSessionId);
+          if (st?.provisional) {
+            // The store's key is `${chatId} ${origin}` (one space; neither half
+            // can contain one), so splitting on the FIRST space recovers the pair.
+            let dropped = false;
+            for (const [key, sid] of siteActorBindings.entries()) {
+              if (sid !== actorSessionId) continue;
+              const gap = key.indexOf(' ');
+              if (gap < 0) continue;
+              siteActorBindings.drop(key.slice(0, gap), key.slice(gap + 1));
+              dropped = true;
+            }
+            if (dropped) persistSiteActors();
+            originStates.forget(actorSessionId);
+          }
         }
         auditLog.append({
           type: 'actor_origin_stop',
@@ -3424,8 +3447,8 @@ const actorMailbox = {
 // inherited field is a one-site edit, not two that can silently drift.
 // why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
-/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb', ownedOrigin?: string }} o */
-const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web', ownedOrigin }) => {
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb', ownedOrigin?: string, provisionalOrigin?: boolean }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web', ownedOrigin, provisionalOrigin }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -3468,7 +3491,14 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
     // weaker of the two — it holds no authority — so the default is the safe one
     // and boundness has to be asked for explicitly.
     ...(actorType === 'web' && backing !== 'api'
-      ? { originState: ownedOrigin ? { mode: 'bound', ownedOrigin } : { mode: 'roaming' } }
+      ? {
+        originState: ownedOrigin
+          // `provisional` marks an origin that was ASKED FOR rather than
+          // OBSERVED, so the first landing may settle it onto the site's own
+          // www-fold instead of ending. See decideLanding.
+          ? { mode: 'bound', ownedOrigin, ...(provisionalOrigin ? { provisional: true } : {}) }
+          : { mode: 'roaming' },
+      }
       : {}),
   });
   bind(created.sessionId);
@@ -3624,6 +3654,10 @@ const mintSiteActor = async (/** @type {string} */ ownerChatId, /** @type {strin
   instanceId: siteHandleFor(origin),
   ownerChatId,
   ownedOrigin: origin,
+  // The orchestrator SPELLED this origin from the user's words or its own
+  // guess, so it is a request, not an observation — `https://reddit.com` really
+  // does land on `https://www.reddit.com`.
+  provisionalOrigin: true,
   bind: (sessionId) => { siteActorBindings.bind(ownerChatId, origin, sessionId); persistSiteActors(); },
 });
 

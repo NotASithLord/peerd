@@ -44,6 +44,9 @@ import { classifyOriginSensitivity } from './origin-sensitivity.js';
  * @typedef {object} ActorOriginState
  * @property {'roaming' | 'bound'} mode
  * @property {string | null} [ownedOrigin]
+ * @property {boolean} [provisional]  was ownedOrigin ASKED FOR rather than
+ *   OBSERVED (a `site:<origin>` handle the orchestrator spelled)? Cleared the
+ *   moment a real landing settles it. See decideLanding's provisional branch.
  * @property {import('./landing-rule.js').Excursion | null} [excursion]
  * @property {number} [excursionsUsed]
  */
@@ -93,6 +96,7 @@ export const makeJudgeLanding = (deps) => {
       landingIsIdp: isIdp?.(url) === true,
       excursion: state.excursion ?? null,
       excursionsUsed: state.excursionsUsed ?? 0,
+      provisional: state.provisional === true,
       now: now(),
     });
 
@@ -105,7 +109,19 @@ export const makeJudgeLanding = (deps) => {
       // would keep a spent corridor alive forever. Always assign.
       /** @type {Partial<ActorOriginState>} */
       const patch = { excursion: verdict.excursion ?? null };
-      if (verdict.adoptOrigin && !state.ownedOrigin) patch.ownedOrigin = verdict.adoptOrigin;
+      // Adopt on a first landing (no owned origin yet) AND on the one other
+      // case the rule returns adoptOrigin for: a PROVISIONAL origin settling
+      // onto its own www-fold. Guarding on `!state.ownedOrigin` alone silently
+      // dropped that second case, which would have left the rule agreeing to
+      // continue while the state kept pointing at the origin the site had just
+      // redirected away from — the same dead end, one step later.
+      if (verdict.adoptOrigin && (!state.ownedOrigin || state.provisional)) {
+        patch.ownedOrigin = verdict.adoptOrigin;
+      }
+      // A NAMED landing settles the question of what this actor owns, so the
+      // origin stops being a guess. Cleared on any continue past that point —
+      // 'no page loaded' is not a landing and must not consume the allowance.
+      if (state.provisional && verdict.reason !== 'no page loaded') patch.provisional = false;
       // Count an excursion when one OPENS — the lifetime cap is what stops the
       // corridor being refreshed by bouncing home, so it must not be reset by
       // the same discharge that clears the corridor.

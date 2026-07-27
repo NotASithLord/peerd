@@ -123,3 +123,38 @@ describe('excursions — the state that must survive', () => {
     expect(saved[0].excursion).toBeNull();
   });
 });
+
+describe('provisional origins — the shell half', () => {
+  test('a www-fold adoption is WRITTEN BACK even though ownedOrigin was already set', async () => {
+    // The adopt guard used to be `!state.ownedOrigin`, which silently dropped
+    // this second adopt case: the rule agreed to continue while the state kept
+    // pointing at the origin the site had just redirected away from — the same
+    // dead end, one step later.
+    const state: any = { mode: 'bound', ownedOrigin: 'https://reddit.com', provisional: true };
+    const { judge, saved } = harness(state);
+    const v = await judge('https://www.reddit.com/r/x');
+    expect(v?.action).toBe('continue');
+    expect(saved[0].ownedOrigin).toBe('https://www.reddit.com');
+    expect(state.ownedOrigin).toBe('https://www.reddit.com');
+  });
+
+  test('a real landing CLEARS provisional, so the allowance is once-only', async () => {
+    const state: any = { mode: 'bound', ownedOrigin: 'https://app.test', provisional: true };
+    const { judge } = harness(state);
+    await judge('https://app.test/start');
+    expect(state.provisional).toBe(false);
+    // …and a later redirect elsewhere now ends, as a settled bound actor should.
+    const v = await judge('https://www.app.test/x');
+    expect(v?.action).toBe('end');
+  });
+
+  test("'no page loaded' does NOT consume the allowance", async () => {
+    // A blank tab mid-load is not a landing. Spending the one-shot allowance on
+    // it would end the actor on the redirect that follows.
+    const state: any = { mode: 'bound', ownedOrigin: 'https://reddit.com', provisional: true };
+    const { judge } = harness(state);
+    await judge('about:blank');
+    expect(state.provisional).toBe(true);
+    expect((await judge('https://www.reddit.com/'))?.action).toBe('continue');
+  });
+});
