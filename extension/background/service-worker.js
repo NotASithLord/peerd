@@ -260,7 +260,7 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  isKnownIdp, describeLandingStop, isUgcHost,
+  isKnownIdp, describeLandingStop, originPhrase, isUgcHost,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
@@ -1027,7 +1027,20 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
           // local, append-only, and read by a human investigating — exactly the
           // place the detail belongs, and the one place it can't be read by a model.
           details: {
-            action: event.action, from: event.from, to: event.to, handoffTo: event.handoffTo ?? null,
+            action: event.action,
+            from: event.from,
+            // NARROWED to an origin, exactly like the report — NOT the full
+            // landing URL, which an earlier version wrote here reasoning that
+            // the audit is "local, append-only, and read by a human ... the one
+            // place it can't be read by a model". That was wrong: `inspect`
+            // exposes audit_log to the MAIN agent and returns entries verbatim
+            // (only actor ERROR bodies are redacted). A hostile page that
+            // redirects a bound actor to an attacker-chosen URL therefore got
+            // ~2MB of attacker text into the orchestrator's context the moment
+            // it inspected its own audit trail — the exact channel
+            // origin-lock-report.js exists to close, reopened one door over.
+            to: originPhrase(event.to),
+            handoffTo: event.handoffTo ?? null,
             // Marks a landing observed after its turn ended — kept because a
             // stale judge firing is itself worth being able to see.
             ...(current ? {} : { staleTurn: true }),

@@ -14,6 +14,7 @@ import { scenario as s06 } from './scenarios/06-sandbox-escape.ts';
 import { scenario as s07 } from './scenarios/07-ssrf-private-network.ts';
 import { scenario as s08 } from './scenarios/08-prompt-injection-benchmark.ts';
 import { scenario as s09 } from './scenarios/09-page-content-injection.ts';
+import { scenario as s10 } from './scenarios/10-origin-retasking.ts';
 
 // Ordered to mirror the threat model's adversary walk and the task brief.
-export const CATALOG: readonly Scenario[] = [s01, s02, s03, s04, s05, s06, s07, s08, s09];
+export const CATALOG: readonly Scenario[] = [s01, s02, s03, s04, s05, s06, s07, s08, s09, s10];

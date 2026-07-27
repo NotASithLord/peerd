@@ -7,11 +7,21 @@
 // reports what happened. All IO is injected, so the shell is testable without a
 // browser and the SW's wiring stays a few lines.
 //
-// WHERE IT IS ENFORCED, AND WHERE IT IS NOT. `makeJudgeLanding` produces the
-// `judgeLanding` called from two places: `resolveTargetTab` (every DOM tool, on
-// the tab's current URL) and `navigate` (again, on the URL it just landed on —
-// the only point in the tree that observes a landing as it is created, which is
-// what catches a 302 nobody made a tool call for).
+// WHERE IT IS ENFORCED, AND WHERE IT IS NOT. The RULE, stated structurally so it
+// survives the code growing: `judgeLanding` is called wherever a tool resolves or
+// observes a tab's LIVE url. Today that is three places —
+//
+//   * `resolveTargetTab` — every DOM tool, on the tab's current URL
+//   * `navigate` — again, on the URL it just landed on; the only point in the
+//     tree that observes a landing as it is CREATED, which is what catches a 302
+//     nobody made a tool call for
+//   * `site_capture` — which needs the tabId rather than the Tab and so does not
+//     pass through the resolver at all
+//
+// The list is enumerated because it must be kept in sync, and named as three
+// because an earlier version of this header said "two" after the third had
+// already been added in the same arc — a map that is wrong is worse than no map,
+// since the next reader will trust it about what is unjudged.
 //
 // That covers the DOM surface. It does NOT cover every way the actor's session
 // authority can be spent, and an earlier draft of this header wrongly implied it

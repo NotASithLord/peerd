@@ -12,8 +12,23 @@
 // user sees ("report.pdf") differs from what the model reads ("fdp.troper"),
 // tag-block characters that smuggle plain ASCII with zero visual footprint.
 // Each is a prompt-injection vector. CDR strips them, surgically — normal
-// whitespace, punctuation, every non-Latin script, and emoji (INCLUDING
+// whitespace, punctuation, the LETTERS of every script, and emoji (INCLUDING
 // multi-codepoint ZWJ emoji sequences) survive byte-for-byte.
+//
+// KNOWN COLLATERAL, because "every non-Latin script survives byte-for-byte" is
+// what this said before and it was not true. The universal sweep takes the whole
+// General_Category=Cf block, and a handful of Cf characters are ORTHOGRAPHIC
+// marks belonging to the scripts it promises to leave alone — verified by
+// running disarmText: ARABIC NUMBER SIGN (U+0600), SYRIAC ABBREVIATION MARK
+// (U+070F), KAITHI NUMBER SIGN (U+110BD), MONGOLIAN VOWEL SEPARATOR (U+180E).
+// They are stripped.
+//
+// That is the RIGHT call and it is the reason the claim is narrowed rather than
+// the sweep: these are invisible by construction, so each one is exactly the
+// covert channel this module exists to close, and exempting them would trade a
+// real vector for a rendering nicety. What was wrong was the sentence, not the
+// behaviour. The two Cf characters that ARE exempted (U+200C, U+200D) earn it by
+// being load-bearing for spelling in living scripts — see ZWNJ_RE below.
 //
 // WHERE CDR SITS. This is the PRE-PASS, not the fence. The data/instruction
 // boundary — tainting page text as DATA the model must not obey — is already
@@ -79,8 +94,8 @@ const ZWNJ_SCRIPTS = '\\p{Script=Arabic}\\p{Script=Devanagari}\\p{Script=Bengali
   + '\\p{Script=Myanmar}\\p{Script=Thaana}';
 
 // Zero-width NON-joiner, decided by CONTEXT — the same shape as ZWJ_RE below,
-// and for the same reason. why it cannot just be stripped: this module's
-// contract is that every non-Latin script survives byte-for-byte, and the
+// and for the same reason. why it cannot just be stripped: unlike the Cf marks
+// named in the header as accepted collateral, this one CHANGES SPELLING, and the
 // universal sweep is the ONE pass that runs on every fenced body — including
 // source files and diffs the model is about to edit and write back. Stripping
 // U+200C wholesale silently misspells Persian, Urdu and Hindi text on the way

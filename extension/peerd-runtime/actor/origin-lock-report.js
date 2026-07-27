@@ -44,6 +44,12 @@ import { siteHandleFor } from './web-actor.js';
 /**
  * Narrow a URL to just its origin, or to a phrase when it has none we can name.
  *
+ * EXPORTED because the audit trail needs the identical narrowing. That is not a
+ * convenience: `inspect(audit_log)` is on the MAIN agent's surface and returns
+ * entries verbatim, so a full landing URL written into an audit detail is
+ * readable by the orchestrator — reopening this file's whole reason for existing
+ * through a different door. One narrowing function, used at both exits.
+ *
  * why the fallback is a PHRASE and not the raw string: the inputs that fail here
  * are exactly the hostile ones (an IP literal, a `data:` URL, junk), so echoing
  * them would defeat the point of narrowing in the first place.
@@ -51,7 +57,7 @@ import { siteHandleFor } from './web-actor.js';
  * @param {unknown} url
  * @returns {string}
  */
-const originPhrase = (url) => {
+export const originPhrase = (url) => {
   let u;
   try { u = new URL(String(url ?? '')); } catch { return 'a page with no address'; }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'a page that is not a website';

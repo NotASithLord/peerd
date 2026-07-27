@@ -24,9 +24,12 @@
 //   - #241 ships default-OFF, so its case drives the validator directly and the
 //     claim is scoped to "when armed" (see the case comment).
 //   - the origin-retasking vector (an open redirect moving a bound actor to an
-//     attacker origin) is NOT here: its defense is issue #251, which is not on
-//     this branch. Adding a probe for a defense that does not exist would
-//     score a hole as covered.
+//     attacker origin) is not here because it has its OWN scenario now:
+//     10-origin-retasking.ts. When this comment was written #251 was not on the
+//     branch and a probe would have scored a hole as covered; once it landed,
+//     the same sentence quietly understated the corpus instead. Adversarial
+//     review caught the staleness — a scoping note is only honest while the
+//     scope it describes is still true.
 
 import {
   type Scenario, type Probe, blocked, leaked, summarize,

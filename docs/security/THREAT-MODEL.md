@@ -313,7 +313,7 @@ in the same context that holds the authority.
 Code: the gate stack and heap split cited above. Red-team: scenario 08, which includes
 the side-by-side comparison.
 
-### INV-10. What the model reads is what a human could have seen
+### INV-12. What the model reads is what a human could have seen
 Page bytes that are invisible to a person but legible to a model — zero-width and
 soft-hyphen runs, bidi overrides, the Unicode Tags block, variation-selector
 sequences, HTML comments — are removed before the text reaches the model. The strip
@@ -328,7 +328,7 @@ where `<!--` is visible content.
 Code: `peerd-runtime/dom/cdr.js`, wired at `tools/prompt-wrap.js`,
 `tools/defs/fetch-url.js`, `tools/defs/read-page.js`. Red-team: scenario 09.
 
-### INV-11. Borrowing the user's identity on a page strangers wrote takes the user
+### INV-13. Borrowing the user's identity on a page strangers wrote takes the user
 An authenticated write on an origin where third parties author the content (issue
 trackers, shared docs, social feeds) requires the user to confirm, **even when
 confirmations are disabled** — which is the product default, and therefore the only
@@ -482,7 +482,7 @@ evaluating peerd should know. Each cites where it lives in the code.
   where legitimate long high-entropy values live — OIDC `id_token`s, SAML requests,
   presigned-URL signatures — and scanning them would false-block federated login, which
   is a worse failure for a browser agent than the leak it prevents. Navigation is also
-  exempt from INV-11 by design. The INTERSECTION of those two individually-reasonable
+  exempt from INV-13 by design. The INTERSECTION of those two individually-reasonable
   exemptions is an off-origin navigation carrying a payload in the query, which is the
   arc's stated target and is not closed. Not a regression — identical before the arc.
   (`peerd-runtime/tools/egress-heuristics.js`, KNOWN RESIDUALS.)
@@ -531,8 +531,14 @@ and the R6 block in tests/peerd-runtime/transfer/transfer.test.ts.)
 
 ## 9. Testability: the red-team suite
 
-Every invariant INV-1 through INV-11 is checked by an executable probe in
-[`tests/red-team/`](../../tests/red-team/). Each scenario drives the real defense
+Every SCENARIO-GATED invariant is checked by an executable probe in
+[`tests/red-team/`](../../tests/red-team/) — the corpus declares which, and
+`bun run red-team:report` regenerates the matrix, so the mapping lives in the
+suite rather than in a range hard-coded here (CLAUDE.md: prose must not pin
+dynamic facts). The invariants under "Additional invariants (not scenario-gated,
+enforced in code)" are, as that heading says, enforced by lint, packaging checks
+and unit tests instead — they have no red-team probe and are not claimed to.
+Each scenario drives the real defense
 function with hostile input and records whether the defense held. It runs under
 `bun test ./tests/red-team`, which is a CI gate, and publishes a result matrix to
 [`RED-TEAM-RESULTS.md`](./RED-TEAM-RESULTS.md) via `bun run red-team:report`. The

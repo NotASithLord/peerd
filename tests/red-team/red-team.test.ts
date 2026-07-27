@@ -37,6 +37,7 @@ describe('peerd red-team suite', () => {
       '07-ssrf-private-network',
       '08-prompt-injection-benchmark',
       '09-page-content-injection',
+      '10-origin-retasking',
     ]);
   });
 
