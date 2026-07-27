@@ -165,6 +165,12 @@ const MIN_BLOB_LENGTH = 100;
 // 3.5), so short benign runs self-exclude.
 const MIN_RUN_ENTROPY_BITS = 3.5;
 
+// The share of a run's characters that must be `-`/`_` for it to read as WORDS
+// rather than payload. Prose slugs measure ~9–16%; base64url spends 2 of its 64
+// symbols on them (~3%); hex and base32 have none. Set below the prose floor so
+// an unusually long-worded headline still reads as prose. See looksLikeProse.
+const MIN_PROSE_SEPARATOR_RATIO = 0.075;
+
 // The run alphabet — base64url + hex. `+`/`/`/`.`/`=`/`&`/space are run
 // BOUNDARIES (see "WHY URL-SAFE-ONLY" in the header). A maximal span of these
 // chars is one run; anything else splits it.
@@ -222,6 +228,48 @@ const payloadSlots = (url) => [
 ];
 
 /**
+ * A run that clears the entropy gate but is an ARTICLE SLUG, not a payload.
+ *
+ * WHY THIS EXISTS. `-` and `_` are inside the run alphabet (base64url needs
+ * them), so a hyphen-joined headline is ONE run — and a long enough one clears
+ * every other test. Measured against the shipped module, these all blocked:
+ *
+ *   /world/2026/jul/12/scientists-say-the-newly-discovered-species-of-deep-sea-…
+ *   /2026/07/12/openai-and-anthropic-announce-a-joint-safety-framework-for-…
+ *
+ * A user asking peerd to read a news article got "likely DOM-data
+ * exfiltration". That is the failure that gets a security feature turned off:
+ * it fires on the most ordinary thing a browser agent does.
+ *
+ * THE DISCRIMINATOR, and why it is not entropy. Prose and encoded data overlap
+ * on entropy once a slug carries ids or dates (a real LinkedIn slug measures
+ * 4.63 bits; random base32 bottoms out at 4.61), so no threshold separates
+ * them. What does separate them is SHAPE: prose is words joined by separators,
+ * so `-`/`_` make up ~9–16% of its characters, while base64url spends only
+ * 2 of its 64 symbols on them (~3%) and hex and base32 have none at all.
+ *
+ * So a run is prose when it is BOTH word-shaped (separator-dense) and not
+ * extreme-entropy. Both halves are needed: separator density alone
+ * false-negatives on a slug of unusually long words, and entropy alone
+ * false-positives on a slug full of numeric ids.
+ *
+ * Measured on the corpus in the tests: 0 false positives across realistic
+ * slugs (news, docs, product titles, social permalinks), 0.02% of random
+ * base64url missed, 0% of base32 and hex missed.
+ *
+ * @param {string} run
+ * @returns {boolean}
+ */
+const looksLikeProse = (run) => {
+  // Hex is the one encoded form with NO separators and LOW entropy, so it would
+  // otherwise slip through the density test below. Nothing written by a person
+  // is a hundred unbroken hex digits.
+  if (/^[0-9a-f]+$/i.test(run)) return false;
+  const separators = (run.match(/[-_]/g) ?? []).length;
+  return (separators / run.length) >= MIN_PROSE_SEPARATOR_RATIO;
+};
+
+/**
  * Length of the LONGEST run (across the slots) whose local entropy clears
  * MIN_RUN_ENTROPY_BITS. MAX not SUM — a URL carrying several independent
  * high-entropy values (an OAuth PKCE authorize URL) is not blocked for their
@@ -237,6 +285,7 @@ const largestExfilRun = (slots) => {
       // irrelevant, so skip the entropy math for it (never changes the verdict).
       if (!run || run.length <= longest) continue;
       if (shannonEntropyBits(run) < MIN_RUN_ENTROPY_BITS) continue;
+      if (looksLikeProse(run)) continue;
       longest = run.length;
     }
   }
@@ -305,12 +354,24 @@ export const inspectTabToolCall = (call) => {
   const candidates = collectCandidateUrls(args);
   if (!candidates.length) return { action: 'allow' };
 
-  // why: no current origin means no page has loaded on this tab yet (e.g.
-  // the web actor's first navigation from a tabless start). Nothing has been
-  // scraped, so there is nothing to exfiltrate — allow. Exfil presupposes a
-  // page already read, which always leaves a currentOrigin behind.
-  if (!currentOrigin) return { action: 'allow' };
-  const here = safeOrigin(currentOrigin);
+  // NO CURRENT ORIGIN MEANS "we don't know where this actor has been", NOT
+  // "it has been nowhere".
+  //
+  // An earlier version returned allow here, on the stated reasoning that "exfil
+  // presupposes a page already read, which always leaves a currentOrigin
+  // behind". That is false in this codebase, and adversarial review demonstrated
+  // it: the chat's web actor is minted with ZERO tabs and reads pages with
+  // `fetch_url`, which needs no tab — so `ctx.activeTab` is undefined, the hook
+  // passes null, and every exfil-shaped navigate was waved through in exactly
+  // the state where the actor HAD just scraped a page. It also made the
+  // fetch_url widening in the hook inert for the case it was written for.
+  //
+  // Falling through instead costs nothing: with no origin to compare against,
+  // `here` is null and every target reads as off-origin, which is the same
+  // treatment an unparseable origin already got two lines below. A block still
+  // requires a clear payload shape, so an ordinary first navigation is
+  // unaffected.
+  const here = currentOrigin ? safeOrigin(currentOrigin) : null;
 
   for (const raw of candidates) {
     let url;
