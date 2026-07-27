@@ -4764,6 +4764,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
       keyed: origin ? keyedOrigins.has(origin) : false,
       ownedTabId: actorSessionId ? (webActorTabBindings.tabFor(actorSessionId) ?? null) : null,
       originState: actorSessionId ? (originStates.read(actorSessionId) ?? null) : null,
+      // The SITE actor for this origin, if the chat has formed one. Its mode is
+      // the property that distinguishes a real handoff successor from a roaming
+      // helper that merely happens to be on the right page.
+      siteActorState: (() => {
+        const sid = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
+        return sid ? (originStates.read(sid) ?? null) : null;
+      })(),
     };
   },
   ...makeSettingsRoutes({

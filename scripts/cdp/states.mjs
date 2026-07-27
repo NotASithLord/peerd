@@ -144,6 +144,12 @@ const LOGIN_HTML = `<!doctype html><html><head><title>Acme — Sign in</title></
 </body></html>`;
 const PLAIN_HTML = `<!doctype html><html><head><title>Acme — Public docs</title></head><body>
 <h1>Public docs</h1><p>Nothing here needs an account.</p></body></html>`;
+let siteActorTurn = 0;
+let siteDelegated = false;
+let siteReplyBody = '';
+let siteActorSawPage = '';
+let siteFixtureUrl = '';
+let siteFixtureOrigin = '';
 let lockActorTurn = 0;
 let lockDelegated = false;
 let lockReportBody = '';
@@ -455,6 +461,79 @@ export const STATES = [
         rec.check('the origin was LEARNED from the password field on the page',
           !state || state.learned === true,
           JSON.stringify(state));
+        await rec.shot('final');
+      } finally {
+        server.close();
+      }
+    },
+  },
+
+  // --- functional: issue 251 — the SITE actor the handoff points at -----------
+  //
+  // The origin-lock state proves a roaming actor is STOPPED and that the report
+  // names `site:<origin>`. That is only half a feature: a handoff that names a
+  // successor nobody can address is a dead end dressed up as a route. This drives
+  // the other half — the orchestrator follows the instruction, and the bound
+  // helper actually does the work on the site the roaming one was refused.
+  {
+    name: 'site-actor', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>')) {
+        if (body.includes('Members only')) siteActorSawPage = body;
+        const t = siteActorTurn++;
+        if (t === 0) return { sse: sseToolCall('navigate', { url: `${siteFixtureUrl}account` }) };
+        if (t === 1) return { sse: sseToolCall('read_page', {}) };
+        return { sse: sseText('The account page says: Members only — balance 42.') };
+      }
+      if (!siteDelegated) {
+        siteDelegated = true;
+        // Address the SITE handle directly, exactly as the handoff report tells
+        // the orchestrator to. `site:` must beat the bare-origin branch in
+        // resolveActor, or this reaches the fetch-only API integration instead.
+        return { sse: sseToolCall('message_actor', { to: `site:${siteFixtureOrigin}`, message: `Read the account page at ${siteFixtureUrl}account and tell me the balance` }) };
+      }
+      if (body.includes('you messaged has replied') || body.includes('could not complete your request')) {
+        if (!siteReplyBody) siteReplyBody = body;
+        return { sse: sseText('The balance is 42.') };
+      }
+      return { sse: sseText('Delegated; awaiting the reply.') };
+    },
+    async run(ctx, rec) {
+      siteActorTurn = 0;
+      siteDelegated = false;
+      siteReplyBody = '';
+      siteActorSawPage = '';
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(`<!doctype html><html><head><title>Acme account</title></head><body>
+<h1>Members only</h1><p>Your balance is 42.</p></body></html>`);
+      });
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      const port = /** @type {{ port: number }} */ (server.address()).port;
+      siteFixtureUrl = `http://acct.localhost:${port}/`;
+      siteFixtureOrigin = `http://acct.localhost:${port}`;
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'What is my Acme balance?' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        await waitFor(() => siteReplyBody.length > 0, { budgetMs: 45_000, pollMs: 100 });
+        await ctx.page.send('Page.bringToFront').catch(() => {});
+
+        rec.check('the site: handle RESOLVED to a real actor that ran a turn',
+          siteActorTurn >= 2, `actor turns: ${siteActorTurn}`);
+        // Load-bearing: a fetch-only API integration has NO DOM tools, so read_page
+        // returning the page's own text proves the handle reached a TAB-backed
+        // helper — the distinction the whole `site:` prefix exists to make.
+        rec.check('it is TAB-backed — it really drove a page (read_page returned the live text)',
+          siteActorSawPage.includes('Members only'), siteActorSawPage.slice(0, 200));
+        rec.check('the reply reached the orchestrator as a SUCCESS, not a lock stop',
+          siteReplyBody.includes('you messaged has replied'), siteReplyBody.slice(0, 200));
+
+        const state = await rpc(ctx.page, { type: 'debug/originLock', origin: siteFixtureOrigin }).catch(() => null);
+        rec.check('the site actor is BOUND to that origin, not roaming',
+          !state || state.siteActorState?.mode === 'bound', JSON.stringify(state));
+        rec.check('and it owns exactly that origin',
+          !state || state.siteActorState?.ownedOrigin === siteFixtureOrigin, JSON.stringify(state));
         await rec.shot('final');
       } finally {
         server.close();
