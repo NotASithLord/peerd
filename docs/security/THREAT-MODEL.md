@@ -320,9 +320,13 @@ sequences, HTML comments — are removed before the text reaches the model. The 
 runs at both read boundaries and inside the untrusted-data fence itself, so a new
 web-sourced tool cannot forget it, and it runs TWICE around HTML extraction, because
 extraction parses the document and turns `&#8203;` — seven ordinary ASCII characters
-on the way in — into a real zero-width byte on the way out. Legitimate content is not
-collateral: every non-Latin script survives, including the ZWNJ that Persian, Urdu and
-the Indic scripts require orthographically, and the comment-removal pass is applied
+on the way in — into a real zero-width byte on the way out. Legitimate content is
+LARGELY not collateral: the LETTERS of every script survive, including the ZWNJ that
+Persian, Urdu and the Indic scripts require orthographically. A handful of
+General_Category=Cf ORTHOGRAPHIC marks are accepted collateral and named in
+`cdr.js` — they are invisible by construction, so each is exactly the covert channel
+this invariant exists to close. Text hidden with CSS is out of scope entirely: those
+are ordinary visible characters. The comment-removal pass is applied
 only where a comment is genuinely a comment (markup), never to JSON or plain text
 where `<!--` is visible content.
 Code: `peerd-runtime/dom/cdr.js`, wired at `tools/prompt-wrap.js`,

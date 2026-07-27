@@ -63,22 +63,32 @@
 // legitimate blobs, and a path is normally `/`-segmented into short pieces, so
 // those three slots flag the exfil shape without breaking real flows.
 //
-// HONEST about what spares a path: NOT readability — it is the `/` boundaries
-// and the 100-char length bar. Readable English runs ~4.0 bits/char, well over
-// the 3.5 gate, so a SINGLE `/`-segment of ≥100 chars is flagged whether it is
-// a base64 blob or a hyphen/underscore-joined slug. Real slugs/titles cluster
-// at 70–95 chars and pass; a rare ≥100-char single readable segment does not.
-// That, plus a large-multihash IPFS subdomain CID collapsing past 100 in the
-// host, is the accepted-cost false block below — legitimacy does not exempt a
-// run, only its length and the `/`·`.` boundaries do.
+// WHAT SPARES A PATH: the `/` boundaries, the 100-char length bar, AND — since
+// the prose rule landed — the SHAPE of the run. This paragraph used to say the
+// opposite ("NOT readability ... real slugs cluster at 70-95 chars and pass"),
+// and both halves were wrong: Guardian and TechCrunch permalinks routinely
+// exceed 100 characters in one hyphen-joined run, so a user asking peerd to
+// read the news got "likely DOM-data exfiltration". Readability now DOES exempt
+// a run, decided by separator density rather than by entropy — see
+// looksLikeProse for why entropy cannot make that call and what the measured
+// error rates are. A large-multihash IPFS subdomain CID collapsing past 100 in
+// the host remains an accepted-cost false block.
 //
 // WHY URL-SAFE alphabet, and why the HOSTNAME is dot-collapsed:
 //   - base64url + hex are the URL-SAFE encodings a WORKING URL exfil uses
 //     (they survive transit intact). `+`/`/` are run BOUNDARIES because they
 //     are URL/form-structural — which lets a deep READABLE path split per `/`
 //     segment (no false block). A STANDARD base64 (`btoa`, `+/`) blob thus
-//     self-fragments and is a residual, but that is moot here: it would only
-//     matter in the query/fragment, which we do not scan anyway.
+//     self-fragments and is a REAL residual: measured against this module, a
+//     150-char standard-base64 blob in the PATH blocks only ~11% of the time
+//     (the tail where 100+ consecutive chars happen to avoid both symbols),
+//     versus ~100% for base64url and hex. An earlier version of this comment
+//     called it "moot ... it would only matter in the query/fragment, which we
+//     do not scan anyway" — which is wrong, because the path IS scanned
+//     (payloadSlots below) and the path is where a URL exfil actually goes.
+//     Named properly because the obvious fix — dropping `+`/`/` from RUN_SPLIT
+//     — would re-break the long-readable-path false block that the prose rule
+//     in looksLikeProse and the article-slug tests exist to prevent.
 //   - the hostname is scanned with its DOTS REMOVED (labels concatenated) so a
 //     payload chunked across DNS labels (`<h1>.<h2>.<h3>.attacker.com`, each
 //     ≤63 by protocol) re-fuses into one run instead of evading on the dots. A
