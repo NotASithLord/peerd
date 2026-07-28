@@ -26,7 +26,7 @@ describe('peerd red-team suite', () => {
     });
   }
 
-  test('the catalog covers all eight brief scenarios', () => {
+  test('the catalog covers every scenario, in order', () => {
     expect(CATALOG.map((s) => s.id)).toEqual([
       '01-api-key-exfiltration',
       '02-cross-origin-fetch',
@@ -36,6 +36,8 @@ describe('peerd red-team suite', () => {
       '06-sandbox-escape',
       '07-ssrf-private-network',
       '08-prompt-injection-benchmark',
+      '09-page-content-injection',
+      '10-origin-retasking',
     ]);
   });
 

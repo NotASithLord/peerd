@@ -141,7 +141,31 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
+  // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a
+  // tab. Distinct from the bare-origin API handle on purpose: that one is
+  // fetch-only and can never log in.
+  SITE_ACTOR_PREFIX, siteHandleFor, parseSiteHandle,
 } from './actor/web-actor.js';
+// issue 251: authority segmented by origin. A web actor is ROAMING (browses
+// freely, holds nothing) or BOUND (owns one credentialed origin, like the API
+// actor above). Two pure cores: which origins the user has an identity on, and
+// what happens when a tab LANDS somewhere. Exported here because the enforcement
+// points that will consume them live outside this module (background/).
+export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
+export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
+export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
+// …and the three pieces the SW needs to make the lock live: where the state
+// lives (cached + serialized + persisted), which origins are dedicated identity
+// providers (the one narrow exemption), and what the orchestrator is told when
+// an actor is stopped — text authored HERE, never by the actor or the page.
+export { makeOriginStateStore } from './actor/origin-state-store.js';
+export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
+// #242's UGC registry, asked at ORIGIN level — the seed the origin lock wants.
+// A UGC host is by construction a site people have accounts on; that is what
+// made its content attacker-authorable in the first place.
+export { isUgcHost } from './actor/ugc-registry.js';
+export { isKnownIdp, knownIdpSeeds } from './actor/idp-registry.js';
+export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
 // the two-tier store, and the capture digester. See site-clients/index.js.
@@ -265,7 +289,7 @@ export {
   HOOKS_STORAGE_KEY,
   runPreToolUse, runPostToolUse, selectHooks, hookMatches,
   compileUserHook, parseHookMarkdown,
-  DEFAULT_HOOKS, egressAllowlistHook,
+  DEFAULT_HOOKS, egressAllowlistHook, egressTripwireHook,
 } from './tools/hooks/index.js';
 
 // --- transfer (settings export/import; dual-distribution §10) -----------

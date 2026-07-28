@@ -13,6 +13,7 @@
 // serializes the function body and runs it from scratch.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
+import { disarmMarkup } from '../../dom/cdr.js';
 import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 
@@ -73,8 +74,17 @@ export const readPageTool = {
         try {
           const grabbed = (await scripting.executeScript({ target: { tabId: tab.id }, func: readOuterHtmlInjected }))[0]?.result;
           if (grabbed?.html) {
-            const ex = await webClient.extractMarkdown({ html: grabbed.html, url: grabbed.url || tab.url });
-            if (ex.readerable && typeof ex.markdown === 'string' && ex.markdown.trim()) {
+            // CDR (dom/cdr.js) on the way in AND on the way out. In: the grabbed
+            // DOM is page markup, so the MARKUP sweep (comments too) applies.
+            // Out: extraction PARSES that markup, decoding `&#8203;` — plain
+            // ASCII the first sweep correctly left alone — into a literal
+            // zero-width byte, so the second pass is what closes the entity
+            // channel. Both run BEFORE any windowing or caching below, because
+            // the paging footer reports character offsets into this string and
+            // webCache stores it for read_web_cache to page back later.
+            const ex = await webClient.extractMarkdown({ html: disarmMarkup(grabbed.html), url: grabbed.url || tab.url });
+            const markdown = disarmMarkup(ex.markdown);
+            if (ex.readerable && markdown.trim()) {
               const origin = originOfUrl(grabbed.url || tab.url);
               const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
                 /** @type {any} */ (ctx).webCache);
@@ -82,8 +92,8 @@ export const readPageTool = {
               // (markdown is always prose here); else the head+tail window. Same
               // spill contract — full markdown stored + pageable either way.
               const query = typeof args.query === 'string' ? args.query.trim() : '';
-              const excerpt = query ? excerptRelevant(ex.markdown, query, CONTENT_BODY_CHARS) : null;
-              const win = windowText(ex.markdown, CONTENT_BODY_CHARS);
+              const excerpt = query ? excerptRelevant(markdown, query, CONTENT_BODY_CHARS) : null;
+              const win = windowText(markdown, CONTENT_BODY_CHARS);
               let text = excerpt ? excerpt.excerpt : win.window;
               const truncated = excerpt ? excerpt.excerpted : win.windowed;
               /** @type {string | null} */
@@ -91,13 +101,13 @@ export const readPageTool = {
               if (truncated && webCache?.key && webCache?.put) {
                 const cacheKey = webCache.key();
                 try {
-                  await webCache.put({ key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: ex.markdown });
+                  await webCache.put({ key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: markdown });
                   footer = excerpt
                     ? excerptFooter({ key: cacheKey, total: excerpt.total, passagesShown: excerpt.passagesShown, passagesTotal: excerpt.passagesTotal, query })
                     : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
                 } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
               } else if (truncated && !webCache) {
-                text = ex.markdown.slice(0, CONTENT_BODY_CHARS);
+                text = markdown.slice(0, CONTENT_BODY_CHARS);
               }
               const fenced = wrapUntrusted({
                 origin, tool: 'read_page',

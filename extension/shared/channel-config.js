@@ -39,6 +39,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   spendLimitUsd: 0,
   pricingOverrides: {},
   confirmWebWrites: true,
+  schemaValidatedReplies: false,
   autoMemoryEnabled: true,
   autoResumeInterruptedTurns: true,
   providerFailoverEnabled: true,

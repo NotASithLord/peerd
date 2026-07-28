@@ -246,7 +246,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // an API actor's lore name the ONE origin it owns.
       // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
       // buildToolContext from the setting — the prompt teaches page.* for 'code'.
-      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface } : {}),
+      // #241: schemaReply rides the SAME stamp — buildToolContext sets it from the
+      // setting that arms the reply validator, so an actor is never told to emit
+      // the envelope by a build that wouldn't validate it (or vice versa).
+      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply } : {}),
     // why await: renderSystemPrompt is async — concatenating the un-awaited
     // promise would bake "[object Promise]" into the prompt.
     })) + prewalkBlock;

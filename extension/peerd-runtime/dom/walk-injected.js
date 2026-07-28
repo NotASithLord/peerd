@@ -206,6 +206,29 @@ export function domWalkInjected() {
   var visited = 0;
   var capped = false;
 
+  // issue 251 — does this page have a password field? One boolean, read straight
+  // off the document rather than from the walk below.
+  //
+  // why not from the walk: it skips hidden elements and stops at a node cap, so
+  // a sign-in modal that has not been opened yet — the common shape on a site
+  // whose login lives behind a button — would be missed exactly where the signal
+  // is most wanted.
+  //
+  // why reporting a hidden field is safe: this says only that the SITE has
+  // accounts. It never carries what is IN the field; valueOf() below still masks
+  // password values, and nothing about this boolean reaches the model — it goes
+  // to the origin classifier, not into the snapshot text.
+  //
+  // Known miss: querySelector does not pierce shadow roots, so a login form
+  // inside a closed or open shadow tree is invisible here. Fail-open, same as
+  // the classifier it feeds.
+  var hasPasswordField = false;
+  try {
+    hasPasswordField = !!document.querySelector('input[type="password"]');
+  } catch (e) {
+    hasPasswordField = false;
+  }
+
   // DFS with an explicit stack (mirrors ax-serialize) so deep pages can't
   // blow the call stack. Each frame: element + the nodeId of its nearest
   // EMITTED ancestor — non-semantic wrappers don't create nodes, their
@@ -261,5 +284,33 @@ export function domWalkInjected() {
     pushChildren(el, parentNodeId);
   }
 
-  return { ok: true, nodes: nodes, refElementCount: els.size, capped: capped };
+  return {
+    ok: true, nodes: nodes, refElementCount: els.size, capped: capped,
+    hasPasswordField: hasPasswordField,
+  };
+}
+
+/**
+ * The same one boolean, on its own — for the CDP path, whose a11y tree cannot
+ * tell a password input from any other textbox (both are role `textbox`).
+ *
+ * why a second injection rather than folding it into the tree fetch: CDP hands
+ * back an accessibility tree, and the accessibility tree deliberately does not
+ * distinguish these. The alternative was to let the signal exist only on the
+ * DOM-walk channel, which would mean the origin lock learned less on the
+ * platform where it has the MOST capability — precisely backwards.
+ *
+ * Deliberately ES5 and self-contained: chrome.scripting serializes this source
+ * and re-evaluates it in the page's classic-script world, so it can close over
+ * nothing. See the header of dom-helpers.js.
+ *
+ * @returns {boolean}
+ */
+export function hasPasswordFieldInjected() {
+  'use strict';
+  try {
+    return !!document.querySelector('input[type="password"]');
+  } catch (e) {
+    return false;
+  }
 }

@@ -254,6 +254,13 @@ import {
   // DESIGN-18: API-actor core — the origin-keyed bindings, the origin normalizer
   // (addressing + same-origin-lock anchor), and the "what I learned" self-fence.
   makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary,
+  siteHandleFor, parseSiteHandle,
+  // issue 251: the origin lock. The pure rule + classifier live in
+  // peerd-runtime; these are the four pieces the SW binds together to make it
+  // live — the state store, the judge, the synchronous credential-scope
+  // narrowing, and the report a stop turns into.
+  makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
+  isKnownIdp, describeLandingStop, originPhrase, isUgcHost,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
@@ -648,7 +655,24 @@ const gitCredentialRoutes = makeGitCredentialRoutes({
 const originCredentialRoutes = makeOriginCredentialRoutes({
   vault,
   isLockedError: (e) => e instanceof VaultLockedError,
-  audit: (e) => { auditLog.append(e).catch(() => {}); },
+  audit: (e) => {
+    auditLog.append(e).catch(() => {});
+    // issue 251: storing a key for an origin is the strongest "I have an account
+    // here" signal there is, and on this branch it is the ONLY seed the origin
+    // lock has. Learn it the moment it happens.
+    //
+    // why here and not by re-listing the vault: the lock's sensitivity check is
+    // synchronous, so it reads a cached Set that was filled at boot and on
+    // unlock. Adversarial review found the gap that leaves — add a credential
+    // mid-session and the origin stays classified ORDINARY for the whole service
+    // worker lifetime, which is exactly when a user is most likely to have just
+    // set one up and immediately try to use it. Keying off the audit event the
+    // route already emits means a future change to that route cannot silently
+    // skip this. (Removal deliberately does NOT un-learn — see keyedOrigins.)
+    if (e?.type === 'origin_credential_added' && typeof e?.details?.origin === 'string') {
+      keyedOrigins.add(e.details.origin);
+    }
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -771,6 +795,272 @@ const loadDenylist = async () => {
 };
 /** @type {Promise<void>} */
 const denylistReady = loadDenylist();
+
+// ---------------------------------------------------------------------------
+// issue 251 — the origin lock, made live.
+// ---------------------------------------------------------------------------
+//
+// Everything that DECIDES lives in peerd-runtime (the rule, the classifier, the
+// IdP seeds, the report). What is here is the part only the SW can do: say WHICH
+// actors are locked, keep their state, and turn a stop into something the
+// orchestrator can act on.
+//
+// WHICH ACTORS ARE LOCKED, decided once, here, rather than re-litigated per
+// call: a TAB-BACKED WEB ACTOR, and nothing else.
+//
+//   * the orchestrator          — drives the user's own foreground tab on the
+//                                 user's own instruction. Locking it would mean
+//                                 peerd refusing to look at the page you are on.
+//   * the three engine kinds    — act on an instance, never a tab. No landing.
+//   * the dweb actor            — no tab either.
+//   * an API actor (backing:'api') — already bound to ONE fixed origin by
+//                                 `withApiCredentials`, which is the same
+//                                 property this lock exists to create. Adding a
+//                                 second mechanism would be duplication, not
+//                                 defence.
+//
+// A context with no state is UNLOCKED, and that is the pre-#251 behaviour rather
+// than a refusal — see the fail-open note in origin-lock.js for why failing
+// closed there would break the product rather than harden it.
+
+/**
+ * The vault's `origin:<origin>` secrets, cached as a Set for the SYNCHRONOUS
+ * sensitivity check. `classifyOriginSensitivity` needs `hasVaultSecret(origin)`
+ * to answer without awaiting — it runs inside a credential-scope getter — but
+ * `vault.listSecretNames()` is async AND throws when locked.
+ *
+ * why a cache rather than resolving per context build: an origin the user stored
+ * a key for is sensitive whether or not the vault happens to be unlocked right
+ * now, and a locked vault must not silently DOWNGRADE an origin to ordinary.
+ * Once seen, an origin stays in the set for this SW lifetime; the refresh only
+ * ever adds. (An origin whose key the user deletes therefore stays classified
+ * sensitive until the SW restarts — the safe direction, and the reason this
+ * doesn't clear.)
+ * @type {Set<string>}
+ */
+const keyedOrigins = new Set();
+const refreshKeyedOrigins = async () => {
+  try {
+    const names = await vault.listSecretNames();
+    for (const name of names) {
+      const origin = originFromSecretName(name);
+      if (origin) keyedOrigins.add(origin);
+    }
+  } catch { /* locked — keep what we have; never shrink */ }
+};
+refreshKeyedOrigins();
+vault.subscribe(() => { if (!vault.isLocked()) refreshKeyedOrigins(); });
+
+/**
+ * Per-actor origin state, cached in the heap and persisted on the actor's own
+ * session record.
+ *
+ * why the session record and not chrome.storage.session: `ownedOrigin` and the
+ * excursion counters are the actor's authority, and they must survive a service
+ * worker eviction mid-task. The record is already this actor's durable identity
+ * (it is where `instanceId`, `backing` and its memory live), so the state rides
+ * the thing whose lifetime it shares. The store elides no-op writes, so the
+ * common "still where you were" verdict costs no IDB traffic.
+ */
+const originStates = makeOriginStateStore({
+  save: async (sessionId, state) => { await sessions.update(sessionId, { originState: state }); },
+  onError: (message, error) => console.warn('[origin-lock]', message, error),
+});
+
+/**
+ * The origins peerd has LEARNED the user has an account on — grown from
+ * ordinary use, because the two curated seeds will never be a complete list of
+ * where someone is signed in.
+ *
+ * Durable in kv: this is the part of the classifier that gets better the longer
+ * peerd is used, and throwing it away on every service-worker eviction would
+ * mean it never got better at all.
+ */
+const learnedOrigins = makeLearnedOrigins({
+  load: async () => /** @type {any} */ (await kv.get('learnedOrigins.v1')),
+  save: async (all) => { await kv.set('learnedOrigins.v1', all); },
+  // Audit the FIRST time an origin is learned. why: this list silently changes
+  // what peerd will and won't let a helper do, so a user asking "why did it
+  // refuse to open that site" deserves a record naming the signal and the moment.
+  onLearn: (origin, reason) => {
+    auditLog.append({ type: 'origin_learned_sensitive', details: { origin, reason } }).catch(() => {});
+  },
+  onError: (message, error) => console.warn('[learned-origins]', message, error),
+});
+learnedOrigins.hydrate();
+
+/**
+ * Record a learned signal. Canonicalizes here — ONE place — because the
+ * classifier looks the origin up through the same normalizer, and a mismatch
+ * would be a silent miss rather than an error.
+ * @param {string | null | undefined} rawOrigin
+ * @param {'password-field' | 'confirmed-write'} reason
+ */
+const noteLearnedOrigin = (rawOrigin, reason) => {
+  const origin = normalizeApiOrigin(rawOrigin);
+  if (origin) learnedOrigins.note(origin, reason);
+};
+
+/** The sensitivity signals, in the shape the classifier takes. */
+const sensitivitySignals = () => ({
+  // SEED 1 — #242's curated UGC registry, asked at ORIGIN level (isUgcHost, not
+  // classifyUrl). #242 is path-scoped because it gates one WRITE on a page
+  // strangers authored; the lock asks whether the user has an IDENTITY here,
+  // and a session does not stop at a path boundary.
+  isUgcZone: isUgcHost,
+  // SEED 2 — the user stored a credential for it. Definitionally credentialed:
+  // they authored the fact.
+  hasVaultSecret: (/** @type {string} */ origin) => keyedOrigins.has(origin),
+  getLearned: () => learnedOrigins.snapshot(),
+});
+
+/**
+ * A stop, en route to the orchestrator.
+ *
+ * The lock ending an actor is only half a defence: an actor that stops with no
+ * explanation looks to the orchestrator exactly like one that failed, and the
+ * likely next move is to try again. So the stop is RECORDED here and read back
+ * by the message_actor reply path, which returns it in place of the generic
+ * "stopped before it produced a reply".
+ *
+ * The recorded text comes from `describeLandingStop` — ours, origins only, no
+ * path, no query, nothing the actor or the page wrote. See that file for why
+ * that constraint is the load-bearing one.
+ * @type {Map<string, string>}
+ */
+const landingStopReports = new Map();
+
+/**
+ * A monotonic token per actor TURN, and the reason it has to exist.
+ *
+ * Aborting an offscreen actor run unwinds the worker but does NOT cancel the
+ * SW-side tool dispatch it was waiting on — the 'actor/tool-dispatch' route
+ * threads no abort signal for a bound actor. `navigate` can therefore still be
+ * inside its 30-second load wait when the turn that issued it has already ended,
+ * and its judge deliberately runs AFTER that wait. Adversarial review traced
+ * what followed: the orphaned judge fires, writes a report keyed by bare
+ * actorSessionId, and calls turnSlots.stop on that session — which by then is
+ * the NEXT turn, about something else entirely. That turn is aborted and its
+ * reply replaced with a report about a navigation it never made.
+ *
+ * The token makes a stop attributable. A judge built for turn N can only stop
+ * turn N and only file a report for turn N; once N is over it is inert.
+ * @type {Map<string, number>}
+ */
+const landingTurnTokens = new Map();
+let landingTurnSeq = 0;
+/** Open a fresh turn token for an actor. Called where the turn is claimed. */
+const beginLandingTurn = (/** @type {string} */ actorSessionId) => {
+  landingTurnSeq += 1;
+  landingTurnTokens.set(actorSessionId, landingTurnSeq);
+  return landingTurnSeq;
+};
+
+/** Build the two lock closures for one actor session. Null for an unlocked kind. */
+const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) => {
+  if (!actorSessionId) return null;
+  const getState = () => originStates.read(actorSessionId);
+  // The turn this lock belongs to, captured at CONTEXT-BUILD time — the moment
+  // the dispatch it will judge was authorized.
+  const myTurn = landingTurnTokens.get(actorSessionId) ?? null;
+  const isCurrentTurn = () => myTurn === null || landingTurnTokens.get(actorSessionId) === myTurn;
+  return {
+    getState,
+    judgeLanding: makeJudgeLanding({
+      getState,
+      saveState: (patch) => originStates.write(actorSessionId, patch),
+      onStop: (event) => {
+        // A judge that outlived its turn may not stop anything and may not file
+        // anything. It still records the landing in the audit trail below — the
+        // observation was real even when the turn it belonged to is gone.
+        const current = isCurrentTurn();
+        if (current) landingStopReports.set(actorSessionId, describeLandingStop(/** @type {any} */ (event)));
+        // RELEASE THE TAB. Without this the stop is self-sealing and the actor is
+        // dead for good, which adversarial review demonstrated end to end:
+        //
+        //   navigate is the actor's ONLY way to change its tab's URL, and it
+        //   calls resolveTargetTab FIRST — which judges the tab's CURRENT url.
+        //   After a stop the tab is parked on the refused origin, so every later
+        //   navigate is refused on the landing it is trying to leave. The next
+        //   request in the chat — about anything at all — gets the same handoff
+        //   report, forever. For a per-tab actor it outlives the chat entirely.
+        //
+        // Dropping the binding puts the actor back in the genuine 0-tab state,
+        // where navigate's adopt path opens a fresh tab. That is a RECOVERY, not
+        // a loosening: the new tab starts blank and its first landing is judged
+        // like any other, so a bound actor still cannot leave its origin and a
+        // roaming one still cannot enter a credentialed site. The refused tab
+        // itself is left open and untouched — the user may well want to look at
+        // it, and closing a tab out from under someone to enforce a policy they
+        // did not see would be its own kind of wrong.
+        if (current) {
+          const parkedTab = webActorTabBindings.tabFor(actorSessionId);
+          if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
+          // A SITE actor whose very first landing was refused is a dead handle:
+          // its owned origin is one the site does not actually serve, and the
+          // binding is durable, so retrying the same handle resumed the same
+          // doomed session and opened another orphaned tab. Dropping the binding
+          // makes a retry MINT afresh — which, with the www-fold allowance, is
+          // usually all that was needed. Only on the FIRST landing: after that
+          // the origin is settled and an actor that wandered off it should stay
+          // stopped rather than quietly re-home itself somewhere new.
+          const st = originStates.read(actorSessionId);
+          if (st?.provisional) {
+            // The store's key is `${chatId} ${origin}` (one space; neither half
+            // can contain one), so splitting on the FIRST space recovers the pair.
+            let dropped = false;
+            for (const [key, sid] of siteActorBindings.entries()) {
+              if (sid !== actorSessionId) continue;
+              const gap = key.indexOf(' ');
+              if (gap < 0) continue;
+              siteActorBindings.drop(key.slice(0, gap), key.slice(gap + 1));
+              dropped = true;
+            }
+            if (dropped) persistSiteActors();
+            originStates.forget(actorSessionId);
+          }
+        }
+        auditLog.append({
+          type: 'actor_origin_stop',
+          sessionId: actorSessionId,
+          // The audit trail keeps the FULL landing url (unlike the report): it is
+          // local, append-only, and read by a human investigating — exactly the
+          // place the detail belongs, and the one place it can't be read by a model.
+          details: {
+            action: event.action,
+            from: event.from,
+            // NARROWED to an origin, exactly like the report — NOT the full
+            // landing URL, which an earlier version wrote here reasoning that
+            // the audit is "local, append-only, and read by a human ... the one
+            // place it can't be read by a model". That was wrong: `inspect`
+            // exposes audit_log to the MAIN agent and returns entries verbatim
+            // (only actor ERROR bodies are redacted). A hostile page that
+            // redirects a bound actor to an attacker-chosen URL therefore got
+            // ~2MB of attacker text into the orchestrator's context the moment
+            // it inspected its own audit trail — the exact channel
+            // origin-lock-report.js exists to close, reopened one door over.
+            to: originPhrase(event.to),
+            handoffTo: event.handoffTo ?? null,
+            // Marks a landing observed after its turn ended — kept because a
+            // stale judge firing is itself worth being able to see.
+            ...(current ? {} : { staleTurn: true }),
+          },
+        }).catch(() => {});
+        // End the actor's whole TURN, not just this tool call: a refusal alone
+        // leaves the loop free to try the next tool against the same tab. Only
+        // ever OUR turn — see landingTurnTokens for the turn this would
+        // otherwise have aborted by accident.
+        if (current) {
+          try { turnSlots.stop(actorSessionId); } catch (e) { console.warn('[origin-lock] stop failed', e); }
+        }
+      },
+      isIdp: isKnownIdp,
+      ...sensitivitySignals(),
+    }),
+    makeScope: (/** @type {() => string | undefined} */ getOrigin) =>
+      makeCredentialScope({ getState, getOrigin, ...sensitivitySignals() }),
+  };
+};
 
 /**
  * Resolve the Plan/Act permission { mode, confirmActions } for a session
@@ -969,6 +1259,15 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // 'tools' for its inner mapped-tool dispatch); otherwise it's the live setting.
     // The gate reads ctx.actorSurface to pick the allow-set; absent = 'tools'.
     ...(effectiveActorSurface ? { actorSurface: effectiveActorSurface } : {}),
+    // #241: the PROMPT half of the deterministic schema boundary. The turn driver
+    // reads it off this ctx to decide which rule (3) the actor's system prompt
+    // carries (loop/system-prompt.js SCHEMA_REPLY_RULE). It comes from the SAME
+    // setting that arms the validator in actorMessaging below, read LIVE on both
+    // sides — that is what keeps the two halves one switch. Stamped for every ctx
+    // (not just actors) because it costs nothing and the turn driver only forwards
+    // it on an actor turn; narrowing to the kinds that validate lives in
+    // actorBlock, next to the rule it selects.
+    schemaReply: settingsStore.get().schemaValidatedReplies === true,
     // DESIGN-17: the WEB actor SELF-FENCES its own rolling summary. Its whole
     // accumulation is untrusted-provenance (every byte derives from page content),
     // so when the agent loop folds the trim-summary back into history it wraps it
@@ -1182,6 +1481,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // does NOT get the render hook (only a tab-backed web actor lazily adopts a tab).
     ...(actorType === 'web' && actorBacking !== 'api' ? { adoptWebTab: () => adoptWebTab(sessionId) } : {}),
     scripting: browser.scripting,
+    // issue 251: the snapshot tool calls this when the page it just walked had a
+    // password field. Injected rather than imported so the tool stays free of
+    // storage, and present on every context — the orchestrator's own snapshots
+    // teach the classifier exactly as well as an actor's, and there is no reason
+    // to learn less from the one the user drove themselves.
+    noteLearnedOrigin,
     // DESIGN-18 P2: actor_list reads this for its integration rows — the chat's API integrations
     // (formed ∪ keyed). Referenced lazily (defined later, called at turn time, like
     // adoptWebTab). Only the orchestrator calls it (the gate refuses it for actors).
@@ -1286,9 +1591,29 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       });
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
     } else if (actorType === 'web') {
+      // issue 251 — THE LOCK GOES LIVE HERE, for exactly this kind: a tab-backed
+      // web actor. Hydrating BEFORE the ctx is handed out is deliberate: the
+      // store's sync read returns null until then, and null means "unlocked", so
+      // a lazy hydrate would make the lock's absence the silent default on
+      // exactly the first tool call of a turn — the call most likely to be the
+      // one that matters.
+      // Seeded from the RECORD we already read above — not from a second load
+      // inside the store. Adversarial review found why that matters: a load that
+      // threw fell back to `roaming`, so a transient storage error quietly
+      // DEMOTED a bound actor, which for the credential scope is a widening.
+      originStates.hydrate(sessionId, /** @type {any} */ (activeSession?.originState));
+      const lock = originLockFor(sessionId);
+      resCtx.judgeLanding = lock?.judgeLanding;
+      // The session-credential scope, NARROWED by the same policy. `ctx.activeTab.origin`
+      // IS the scope — read live on every request — so a page that redirects itself onto
+      // a credentialed origin moves the scope with no tool call in between to judge. The
+      // getter answers synchronously and can only ever withhold, so the ordinary
+      // same-origin case is byte-for-byte what it was before #251.
       resCtx.webFetch = withSessionScopedCredentials(
         webFetch,
-        () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
+        lock
+          ? lock.makeScope(() => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin)
+          : () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
       );
       // navigate adopts the actor's tab MID-TURN (0->1). It re-pins through this setter
       // — which closes over the SHARED resCtx — NOT a direct activeTab= on the per-call
@@ -2110,6 +2435,31 @@ const sessionConfirmGrants = new Map();
  */
 const confirmAction = async (prompt) => {
   const sid = prompt.sessionId ?? null;
+  // issue 251 — the second LEARNED signal: the user AFFIRMED acting as themselves
+  // on this origin, so remember that the origin is one they have an identity on.
+  //
+  // Fired ONLY on a real answer from the user, and the earlier draft that fired
+  // it on the other two approving exits was wrong on its own terms. Those exits
+  // are the `confirmWebWrites`-off auto-approve and the session-grant cache, and
+  // neither is a decision about THIS origin:
+  //
+  //   * auto-approve is page-driven. An injected actor could POST to any origin
+  //     it liked and thereby mark it sensitive — page-controlled security state,
+  //     and the failure is real if unglamorous: sites the user never chose become
+  //     unreachable to roaming helpers, which reads as peerd randomly breaking.
+  //   * the grant cache is a REPLAY of an approval already learned from.
+  //
+  // The signal's whole justification is "they affirmed it", so it fires exactly
+  // where that is true. Origins the auto-approve path would have taught are still
+  // caught by the password-field signal on the first page walk.
+  //
+  // Only on approval — a DECLINED write says the opposite, and recording it
+  // would make refusing to act on a site the thing that marks it as yours.
+  const learnUserApprovedWrite = (/** @type {string} */ ans) => {
+    if (prompt.tool !== WEB_WRITE_CONFIRM_KEY) return;
+    if (ans !== 'yes_once' && ans !== 'yes_session') return;
+    for (const origin of prompt.origins ?? []) noteLearnedOrigin(origin, 'confirmed-write');
+  };
   // Web-write gate (shared key for fetch_url + the WebVM bridge): when the user
   // has turned confirmWebWrites OFF, non-GET egress is auto-approved — their
   // explicit, risk-acknowledged choice. The session-grant cache still applies
@@ -2135,7 +2485,16 @@ const confirmAction = async (prompt) => {
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
-  const answer = await confirmCoordinator.confirm(/** @type {any} */ (prompt));
+  // ...and TELL THE PANEL, so it can stop offering a button that grants
+  // nothing. why this became load-bearing with #242: before the UGC override, a
+  // default-config user (confirmActions OFF) never saw an actor confirm at all,
+  // so the dead "Allow for session" was unreachable. Now it is the second thing
+  // they see on a GitHub issue, twice per comment — a control that looks like
+  // the way to stop the prompting and silently isn't. The downgrade itself is
+  // correct and stays; what was wrong was offering the choice.
+  const answer = await confirmCoordinator.confirm(/** @type {any} */ (
+    downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
+  ));
   if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
@@ -2145,6 +2504,7 @@ const confirmAction = async (prompt) => {
   // allowlist decision, the peer did shown to the user), whose raw answer survives
   // so a2aResolveConsent can honor "Allow for session" vs "Allow once". Decision is
   // the pure downgradesActorConfirm (background/a2a-consent.js), unit-tested.
+  learnUserApprovedWrite(answer);
   return downgradesActorConfirm(prompt.tool, ephemeral, answer) ? 'yes_once' : answer;
 };
 
@@ -2907,12 +3267,30 @@ const siteFetchCallRoute = {
       // A tab actor: scope to the owned tab's LIVE origin (matches the pin when the
       // actor is on that site; a mismatch is naturally sessionless at the boundary).
       const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
-      let tabOrigin = pin;
+      // FAIL CLOSED when there is no readable tab. This used to default to `pin`
+      // — i.e. to `siteOrigin`, which the MODEL supplies — so a web actor with no
+      // tab (the 0-tab fetch state, or a tab that just closed) got a CREDENTIALED
+      // fetch to any origin it cared to name. Adversarial review found it; it is
+      // the precise escalation the session scope exists to prevent, arriving
+      // through the scope's own default. Undefined means sessionless, which is
+      // what "we do not know where this actor is" should always have meant.
+      let tabOrigin = /** @type {string | undefined} */ (undefined);
       if (typeof ownedTabId === 'number') {
         const t = await browser.tabs.get(ownedTabId).catch(() => null);
         if (t?.url) tabOrigin = originOfTabUrl(/** @type {string} */ (t.url));
       }
-      scopedFetch = withSessionScopedCredentials(webFetch, () => tabOrigin);
+      // issue 251 — and narrowed by the origin lock, the SAME policy
+      // buildToolContext applies to this actor's own webFetch. Without this the
+      // route was a way around the lock rather than a peer of it: origin-lock.js
+      // named site_client_* as uncovered, and a relay that quietly kept the
+      // wider scope would have made that note the only thing standing between a
+      // hijacked actor and the user's session.
+      originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
+      const lock = originLockFor(ownerSessionId);
+      scopedFetch = withSessionScopedCredentials(
+        webFetch,
+        lock ? lock.makeScope(() => tabOrigin) : () => tabOrigin,
+      );
     }
     // Strip tool-supplied credential headers (a laundered injection forging one) —
     // the real same-origin cookies come from the jar via the boundary.
@@ -3082,8 +3460,8 @@ const actorMailbox = {
 // inherited field is a one-site edit, not two that can silently drift.
 // why inherit the owner chat's tool MANIFEST: a browse-only chat's web actor is held
 // to the read DOM tools (+ fetch_url, a read), so the gate refuses click/type for it.
-/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb' }} o */
-const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web' }) => {
+/** @param {{ instanceId: string, ownerChatId: string | null, bind: (sessionId: string) => void, backing?: 'tab' | 'api', actorType?: 'web' | 'dweb', ownedOrigin?: string, provisionalOrigin?: boolean }} o */
+const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorType = 'web', ownedOrigin, provisionalOrigin }) => {
   const ownerChat = ownerChatId ? await sessions.get(ownerChatId) : null;
   const perm = await resolvePermission(/** @type {any} */ (ownerChat));
   // why: the web actor is peerd's page reader/operator — a narrow, high-frequency,
@@ -3114,17 +3492,62 @@ const mintWebSession = async ({ instanceId, ownerChatId, bind, backing, actorTyp
     permissionMode: perm.mode,
     confirmActions: perm.confirmActions,
     ...(ownerChat?.toolManifest !== undefined ? { toolManifest: ownerChat.toolManifest } : {}),
+    // issue 251 — the mode is decided at MINT, which is the only point that
+    // knows why this actor exists. Everything peerd mints today browses on the
+    // user's behalf without owning a site, so everything today is ROAMING; a
+    // BOUND actor is minted by the handoff path, where the successor's origin
+    // is known up front. Tab-backed web actors only: an API actor is already
+    // pinned to one origin by its egress wrapper, and the engine kinds and the
+    // dweb actor have no tab to land anywhere.
+    // BOUND when the mint site knew which origin this actor exists to work on
+    // (the handoff path, `site:<origin>`); ROAMING otherwise. Roaming is the
+    // weaker of the two — it holds no authority — so the default is the safe one
+    // and boundness has to be asked for explicitly.
+    ...(actorType === 'web' && backing !== 'api'
+      ? {
+        originState: ownedOrigin
+          // `provisional` marks an origin that was ASKED FOR rather than
+          // OBSERVED, so the first landing may settle it onto the site's own
+          // www-fold instead of ending. See decideLanding.
+          ? { mode: 'bound', ownedOrigin, ...(provisionalOrigin ? { provisional: true } : {}) }
+          : { mode: 'roaming' },
+      }
+      : {}),
   });
   bind(created.sessionId);
   auditLog.append({ type: 'actor_minted', sessionId: created.sessionId, details: { instanceId, kind: actorType, backing: backing ?? 'tab' } }).catch(() => {});
   return created.sessionId;
 };
 
-const mintWebActorForTab = async (/** @type {number} */ tabId) => mintWebSession({
-  instanceId: String(tabId),
-  ownerChatId: /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId')),
-  bind: (sessionId) => { webActorTabBindings.bind(tabId, sessionId); persistWebBindings(); },
-});
+// issue 251 — a PER-TAB actor is minted BOUND to that tab's current origin, not
+// roaming, and this is the case the roaming default gets wrong.
+//
+// A per-tab actor exists because someone addressed a SPECIFIC open page — from
+// actor_list, or a tab the orchestrator itself opened, or the page the user is
+// looking at right now and just asked about. That page is the job. Roaming would
+// mean asking "what is this dashboard showing?" about a site you have an account
+// on gets refused on the actor's very first snapshot, with a report explaining
+// that helpers browsing the open web may not go where peerd would act as you —
+// about the page you are sitting on and explicitly asked about. Adversarial
+// review found that; the wiring comment's exemption reasoning ("the user's own
+// tab") had quietly assumed the orchestrator reads that page, but the DOM tools
+// are actor-only, so every such read goes through this actor.
+//
+// Binding is also STRICTLY TIGHTER than roaming here, not a carve-out: this
+// actor may work on that one origin and is stopped the moment the tab leaves it.
+// What it loses is permission to wander, which a tab-addressed actor never
+// needed. A tab with no nameable origin (blank, chrome://) gets no ownedOrigin,
+// so it adopts on first landing — the ordinary bound path.
+const mintWebActorForTab = async (/** @type {number} */ tabId) => {
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  const ownedOrigin = tab?.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+  return mintWebSession({
+    instanceId: String(tabId),
+    ownerChatId: /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId')),
+    ...(ownedOrigin ? { ownedOrigin } : {}),
+    bind: (sessionId) => { webActorTabBindings.bind(tabId, sessionId); persistWebBindings(); },
+  });
+};
 
 // Resolve (+ lazy-mint) the web actor that owns `tabId`. FAIL CLOSED: the tab
 // must still exist (a web actor with no tab is unreachable, and we must never
@@ -3138,6 +3561,32 @@ const resolveWebActorForTab = async (/** @type {number} */ tabId) => {
     webActorTabBindings.drop(tabId);
     persistWebBindings();
     actorSessionId = null;
+  }
+  // issue 251 — RE-BIND when the tab has moved on since this actor was minted.
+  //
+  // A tab actor is BOUND to the origin the tab had when it was first addressed
+  // (mintWebActorForTab), which is right for the turn it was addressed in and
+  // wrong for every turn after. Without this, a user who reads one page, then
+  // browses that same tab somewhere else and asks again, gets a helper bound to
+  // the site they LEFT — refused on its first tool call, with a report about a
+  // page they are no longer looking at. The binding is durable and the tab is
+  // long-lived, so that state persists for as long as the tab does.
+  //
+  // Addressing a tab is an authorization for THAT TAB AS IT IS NOW, so a fresh
+  // addressing re-derives the binding. This does NOT loosen the lock: the
+  // re-bind happens only here, between turns, on an explicit address. Inside a
+  // turn the actor still cannot leave its origin, which is the property that
+  // stops a hijacked page from moving it.
+  if (actorSessionId) {
+    const rec = await sessions.get(actorSessionId).catch(() => null);
+    const owned = /** @type {any} */ (rec)?.originState?.ownedOrigin ?? null;
+    const live = tab.url ? normalizeApiOrigin(originOfTabUrl(/** @type {string} */ (tab.url))) : null;
+    if (owned && live && owned !== live) {
+      webActorTabBindings.drop(tabId);
+      persistWebBindings();
+      originStates.forget(actorSessionId);
+      actorSessionId = null;
+    }
   }
   if (!actorSessionId) actorSessionId = await mintOnce(`web:${tabId}`, () => mintWebActorForTab(tabId));
   // why no `name` from the page: a tab's title/url are attacker-CONTROLLED
@@ -3177,6 +3626,10 @@ const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOve
   if (actorSessionId && !(await sessions.get(actorSessionId))) {
     webActorRegistry.drop(ownerChatId);
     persistWebActors();
+    // issue 251: the durable state died with the record, so the heap copy is now
+    // the only thing asserting an owned origin — and the id will be reused by
+    // nothing, so keeping it is pure leak. Drop it with the binding.
+    originStates.forget(actorSessionId);
     actorSessionId = null;
   }
   if (!actorSessionId) actorSessionId = await mintOnce(`web-actor:${ownerChatId}`, () => mintWebActor(ownerChatId));
@@ -3189,6 +3642,73 @@ const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOve
   // name left undefined (like resolveWebActorForTab): a tab title is page-controlled,
   // and the actor's trusted identity is the literal 'web', not page-derived prose.
   return { instanceId: 'web', kind: 'web', actorSessionId, tabId };
+};
+
+// issue 251 — the (chat, origin)→session bindings for SITE actors, the same shape
+// and the same ephemerality as the API-actor store next door (a routing cache;
+// the durable truth is the session record, reconnected via findActorSession).
+// A SEPARATE store rather than a shared one because the two are different actors
+// for the same origin — a fetch-only integration and a tab-driving bound helper —
+// and collapsing them would make addressing one silently reach the other.
+const siteActorBindings = makeApiActorBindings();
+const SITE_ACTOR_KEY = 'siteActorBindings';
+const persistSiteActors = persistRegistry(SITE_ACTOR_KEY, siteActorBindings);
+hydrateRegistry(SITE_ACTOR_KEY, siteActorBindings);
+
+// Mint a SITE actor: a tab-backed web actor BOUND to `origin` from birth.
+//
+// why the mode is decided HERE and not on first landing: a bound actor with no
+// owned origin adopts whatever it lands on first, which is fine for an actor
+// somebody deliberately pointed at a site, and NOT fine for the handoff case —
+// the whole point there is that the roaming actor was somewhere it shouldn't be,
+// so "wherever it ends up" is precisely the wrong thing to trust. Stamping the
+// origin at mint means the first landing is CHECKED rather than adopted.
+const mintSiteActor = async (/** @type {string} */ ownerChatId, /** @type {string} */ origin) => mintWebSession({
+  instanceId: siteHandleFor(origin),
+  ownerChatId,
+  ownedOrigin: origin,
+  // The orchestrator SPELLED this origin from the user's words or its own
+  // guess, so it is a request, not an observation — `https://reddit.com` really
+  // does land on `https://www.reddit.com`.
+  provisionalOrigin: true,
+  bind: (sessionId) => { siteActorBindings.bind(ownerChatId, origin, sessionId); persistSiteActors(); },
+});
+
+// Resolve (+ lazy-mint) the SITE actor a chat owns for `origin`. Mirrors
+// resolveApiActor: reconnect to the durable session on a binding miss before
+// minting, so a service-worker death doesn't strand the actor's accumulated
+// state — which for a bound actor includes its excursion counters, i.e. part of
+// its authority, not just its memory.
+const resolveSiteActor = async (/** @type {string} */ origin, /** @type {string | null | undefined} */ ownerOverride) => {
+  const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+  if (!ownerChatId) return null;
+  const handle = siteHandleFor(origin);
+  let actorSessionId = siteActorBindings.resolve(ownerChatId, origin);
+  if (actorSessionId && !(await sessions.get(actorSessionId))) {
+    siteActorBindings.drop(ownerChatId, origin);
+    persistSiteActors();
+    originStates.forget(actorSessionId);
+    actorSessionId = null;
+  }
+  if (!actorSessionId) {
+    const reconnected = await sessions.findActorSession({ parentSessionId: ownerChatId, instanceId: handle, actorType: 'web' });
+    if (reconnected) {
+      siteActorBindings.bind(ownerChatId, origin, reconnected);
+      persistSiteActors();
+      actorSessionId = reconnected;
+    }
+  }
+  if (!actorSessionId) actorSessionId = await mintOnce(`site:${ownerChatId}:${origin}`, () => mintSiteActor(ownerChatId, origin));
+  // The owned tab (0-or-1), verified live — same contract as the roaming web
+  // actor. With none, the actor is in the 0-tab state and navigate adopts one.
+  let tabId = webActorTabBindings.tabFor(actorSessionId);
+  if (tabId != null && !(await browser.tabs.get(tabId).catch(() => null))) {
+    webActorTabBindings.drop(tabId); persistWebBindings(); tabId = undefined;
+  }
+  // instanceId IS the handle — it carries a scheme and a colon but no newline or
+  // bracket (normalizeApiOrigin canonicalized it), so it is safe in the trusted
+  // lead, exactly like the API actor's origin.
+  return { instanceId: handle, kind: 'web', actorSessionId, tabId };
 };
 
 // DESIGN-18 — lazily mint an API actor (a fetch-only origin actor) for (chat, origin).
@@ -3730,8 +4250,14 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     const actorSurface = (kind === 'web' && rec.backing !== 'api')
       ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
       : undefined;
+    // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
+    // runs through this path, so a schemaReply stamped only in buildToolContext
+    // would arm the validator while the actor was never told the format — every
+    // web reply dropped. Read from the SAME setting, at the same moment, as the
+    // getter injected into actorMessaging below.
+    const schemaReply = settingsStore.get().schemaValidatedReplies === true;
     const systemPrompt = await renderSystemPrompt({
-      actorType: kind, backing: rec.backing, instanceId, actorSurface,
+      actorType: kind, backing: rec.backing, instanceId, actorSurface, schemaReply,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
     });
     const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
@@ -3855,6 +4381,13 @@ const actorMessaging = makeActorMessaging({
     if (/^\d+$/.test(String(instanceId))) {
       return resolveWebActorForTab(Number(instanceId));
     }
+    // issue 251: a SITE actor — a web actor BOUND to one origin, WITH a tab. The
+    // successor a handoff names. Checked BEFORE the bare-origin branch below
+    // because both spellings mention an origin and only the prefix distinguishes
+    // them; getting the order wrong would silently hand every handoff a
+    // fetch-only integration that cannot log in or click.
+    const siteOrigin = parseSiteHandle(instanceId);
+    if (siteOrigin) return resolveSiteActor(siteOrigin, opts.senderSessionId);
     // DESIGN-18: an API integration is addressed by its ORIGIN (a bare host or a full
     // URL). normalizeApiOrigin canonicalizes it and REJECTS anything that isn't a public
     // dotted host — so 'web', a tabId, and engine ids (vm-/notebook-/app-, no dot) all
@@ -3925,6 +4458,36 @@ const actorMessaging = makeActorMessaging({
     // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
     // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
     const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
+    // issue 251 — clear any report left over from an earlier turn BEFORE running,
+    // so a stop can only ever be attributed to the turn that caused it. A stale
+    // report surfacing on a later, unrelated message would be a lie in the one
+    // place the orchestrator is being asked to trust us.
+    //
+    // The delete alone is NOT enough, and adversarial review is the reason this
+    // sentence exists: it only clears reports written before the turn starts,
+    // while the dangerous one is written AFTER — by a navigate still inside its
+    // 30-second load wait when the previous turn was aborted, whose judge runs
+    // when it finally resolves. Opening a turn token makes that judge inert: it
+    // captured the old token at context-build time, so it can neither file a
+    // report against this turn nor abort it.
+    landingStopReports.delete(actorSessionId);
+    beginLandingTurn(actorSessionId);
+    /**
+     * If the origin lock stopped this actor mid-turn, its own reply is not the
+     * answer — the report is. Overriding UNCONDITIONALLY is the point: a stopped
+     * actor may still have emitted text, and text written after the moment we
+     * decided it was somewhere it shouldn't be is exactly what must not reach the
+     * orchestrator. `stopped:true` marks the delivery failed, so the reply arrives
+     * as "this did not work, here is why" rather than as a result.
+     * @param {{ result: string, stopped?: boolean }} reply
+     * @returns {{ result: string, stopped?: boolean }}
+     */
+    const withLandingStop = (reply) => {
+      const report = landingStopReports.get(actorSessionId);
+      if (!report) return reply;
+      landingStopReports.delete(actorSessionId);
+      return { result: report, stopped: true };
+    };
     // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
     // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
     // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
@@ -3933,7 +4496,7 @@ const actorMessaging = makeActorMessaging({
     // fall back to the in-SW turn below (offscreen unavailable / never started).
     if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
       const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
-      if (off) return off;
+      if (off) return withLandingStop(off);
     }
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
@@ -3941,9 +4504,9 @@ const actorMessaging = makeActorMessaging({
     await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
-    return fresh
+    return withLandingStop(fresh
       ? { result: fresh }
-      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true });
   },
   reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,
@@ -3958,6 +4521,18 @@ const actorMessaging = makeActorMessaging({
     buildAncestry({ sessionId, getRecord: (/** @type {string} */ id) => sessions.get(id) }),
   isVaultLocked: () => vault.isLocked(),
   wrapUntrusted,
+  // #241 — the VALIDATOR half. A getter, not a boolean: this factory runs once at
+  // SW boot, so a boolean would freeze at its boot value and ignore the user
+  // flipping the setting. Reading it here, per reply, from the same store that
+  // stamps the actor's prompt rule is what makes the two halves one switch.
+  // KNOWN, ACCEPTED WINDOW: the prompt half samples at turn start and this
+  // samples at settle, so toggling the setting DURING a live actor turn can
+  // arm the validator against a prompt that never carried the rule (or the
+  // reverse). Cost is one dropped, re-delegable reply, on a default-off
+  // experimental flag, and it needs a human clicking the checkbox inside the
+  // turn. Latching per turn would cost more machinery than the failure is
+  // worth; sampling per reply is what makes the toggle take effect at all.
+  schemaValidatedReplies: () => settingsStore.get().schemaValidatedReplies === true,
   appendAudit: (/** @type {any} */ e) => auditLog.append(e),
   mailbox: actorMailbox,
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
@@ -4243,6 +4818,37 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
   }),
   ...makeDenylistRoutes({ denylistStore, auditLog }),
+  // issue 251 — a READ-ONLY inspection route for the e2e verify loop.
+  //
+  // why a route at all: the two properties that matter most about the lock are
+  // invisible from the transcript. "The refused tab was released" and "this
+  // origin was learned" are internal state, and an e2e that cannot see them can
+  // only assert that something stopped — not that the actor recovered, which is
+  // the difference between a working feature and a bricked web actor.
+  //
+  // Read-only and additive: it reveals whether an origin is known and whether
+  // the chat's web actor currently owns a tab. It grants nothing, and it is not
+  // reachable by the model — routes are the side panel's surface, and the tool
+  // dispatcher has no path to them.
+  'debug/originLock': async (/** @type {{ origin?: string }} */ msg = {}) => {
+    const origin = normalizeApiOrigin(msg.origin);
+    const chatId = /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
+    const actorSessionId = chatId ? webActorRegistry.resolve(chatId) : null;
+    return {
+      ok: true,
+      learned: origin ? learnedOrigins.snapshot().has(origin) : false,
+      keyed: origin ? keyedOrigins.has(origin) : false,
+      ownedTabId: actorSessionId ? (webActorTabBindings.tabFor(actorSessionId) ?? null) : null,
+      originState: actorSessionId ? (originStates.read(actorSessionId) ?? null) : null,
+      // The SITE actor for this origin, if the chat has formed one. Its mode is
+      // the property that distinguishes a real handoff successor from a roaming
+      // helper that merely happens to be on the right page.
+      siteActorState: (() => {
+        const sid = (origin && chatId) ? siteActorBindings.resolve(chatId, origin) : null;
+        return sid ? (originStates.read(sid) ?? null) : null;
+      })(),
+    };
+  },
   ...makeSettingsRoutes({
     vault, auditLog, pushState, kv, memory, settingsStore,
     normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,

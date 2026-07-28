@@ -180,6 +180,20 @@ export const defaults = {
   // risk-acknowledged choice in Settings. GET reads are never gated.
   confirmWebWrites: { store: true, preview: true },
 
+  // #241 — force an UNTRUSTED actor's reply (the web/API kinds, the ones that
+  // ingest hostile page bytes) through a strict JSON envelope that deterministic
+  // code validates before the orchestrator sees it. Turns a SOFT prompt fence
+  // into a STRUCTURAL boundary: the actor cannot emit free text adjacent to the
+  // fence markers, so a "double-escape" payload has no channel.
+  //
+  // OFF on both channels for now, and deliberately so: it changes the web
+  // actor's output CONTRACT (prompt half + validator are one switch —
+  // peerd-runtime/loop/system-prompt.js SCHEMA_REPLY_RULE arms with it), and a
+  // model that drifts from the envelope has its reply dropped. It ships wired
+  // and one flip from live so it can be exercised end-to-end; the default moves
+  // only after that field evidence, not before.
+  schemaValidatedReplies: { store: false, preview: false },
+
   // Auto-memory: when a session wraps up (archive / switch-away with
   // real substance), a cheap clean-context call proposes durable-note
   // SUGGESTIONS the user approves in Context → Memory — nothing is

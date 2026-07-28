@@ -131,6 +131,13 @@ export const normalizeSettingsPatch = (patch, {
     // bridge) is auto-approved (risk-acknowledged); ON (default) confirms.
     next.confirmWebWrites = patch.confirmWebWrites;
   }
+  if (typeof patch.schemaValidatedReplies === 'boolean') {
+    // #241: an untrusted (web/api) actor's reply must be a strict JSON envelope,
+    // validated deterministically before it reaches the orchestrator. Flips BOTH
+    // halves at once — the actor's prompt rule and the validator — because either
+    // half alone is broken (see packaging/default-settings.mjs).
+    next.schemaValidatedReplies = patch.schemaValidatedReplies;
+  }
   if (typeof patch.autoResumeInterruptedTurns === 'boolean') {
     // #72: auto-resume a turn the SW reclaimed mid-flight (only genuine
     // infrastructure interruptions; a user Stop is never resumed).

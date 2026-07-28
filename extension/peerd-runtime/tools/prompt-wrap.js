@@ -21,6 +21,7 @@
 // adding a new web-sourced tool.
 
 import { escapeAttr } from '/shared/util.js';
+import { disarmText } from '../dom/cdr.js';
 
 // All fence tag names this module manages. Any occurrence of one of these
 // (open OR close, tolerant of internal whitespace and case) inside an
@@ -53,6 +54,25 @@ export const neutralizeFence = (body) =>
 /**
  * Wrap a text body in the canonical untrusted-content tag.
  *
+ * The body is DISARMED before it is fenced (dom/cdr.js): bytes that are
+ * invisible to the human who approved the read but fully visible to the model
+ * — zero-width joiners spelling a hidden instruction, bidi overrides that
+ * reorder what the text says, Unicode tag-block characters smuggling plain
+ * ASCII, control bytes — are stripped here.
+ *
+ * why HERE and not at each producer: this function is already the one place
+ * every untrusted body must pass through, and the header above states that as
+ * the design property ("impossible to forget when adding a new web-sourced
+ * tool"). Hanging CDR off the same chokepoint inherits that guarantee instead
+ * of starting a second list of callsites to keep in sync. The two passes are
+ * siblings with one job each and no overlap: disarmText removes bytes that
+ * render as NOTHING, neutralizeFence defangs the delimiter an attacker would
+ * use to break OUT of the fence.
+ *
+ * Deliberately the UNIVERSAL sweep only. The markup-specific pass (HTML
+ * comments) is destructive on source code and diffs, which are also fenced
+ * here, so it stays opt-in at the markup producers via disarmMarkup.
+ *
  * @param {Object} args
  * @param {string} args.origin
  * @param {string} args.tool
@@ -64,7 +84,7 @@ export const wrapUntrusted = ({ origin, tool, body, retrievedAt }) => {
   const ts = retrievedAt ?? new Date().toISOString();
   return (
     `<untrusted_web_content origin="${escapeAttr(origin)}" ` +
-    `tool="${escapeAttr(tool)}" retrieved_at="${ts}">\n${neutralizeFence(body)}\n` +
+    `tool="${escapeAttr(tool)}" retrieved_at="${ts}">\n${neutralizeFence(disarmText(body))}\n` +
     `</untrusted_web_content>`
   );
 };

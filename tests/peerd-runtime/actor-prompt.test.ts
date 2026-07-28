@@ -226,6 +226,74 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
   });
 });
 
+// security-arc issue 241: the PROMPT half of the deterministic reply boundary.
+//
+// The validator half (actor-messaging) DROPS a reply that isn't a conforming
+// JSON envelope. So this is not a nicety: an actor armed with the validator but
+// never told the format fails on EVERY reply. These tests pin the two properties
+// that keep the halves one switch — the rule appears exactly where the validator
+// runs (SCHEMA_VALIDATED_KINDS = web/api, both of which are actorType 'web'),
+// and the flag survives the real renderSystemPrompt call site.
+describe('the schema-reply rule (issue 241)', () => {
+  const SCHEMA_MARK = 'must be ONE JSON object and nothing else';
+  const FREE_MARK = 'complete, self-contained report';
+
+  test('a web actor with the flag ON gets the strict-envelope rule (3)', () => {
+    const block = actorBlock('web', 'tab', undefined, 'tools', true);
+    expect(block.includes(SCHEMA_MARK)).toBe(true);
+    expect(block.includes(FREE_MARK)).toBe(false);
+    // The consequence, not just the format — this is what stops the model from
+    // helpfully wrapping the object in a ```json fence.
+    expect(block.includes('DISCARDED')).toBe(true);
+  });
+
+  test('an API-backed web actor gets it too — it is the same untrusted kind', () => {
+    // actor-messaging validates kinds 'web' AND 'api'; both are actorType 'web'
+    // here, distinguished only by backing. Narrowing on backing would arm the
+    // validator for the API actor while telling it nothing.
+    const block = actorBlock('web', 'api', 'https://api.stripe.com', 'tools', true);
+    expect(block.includes(SCHEMA_MARK)).toBe(true);
+  });
+
+  test('the flag OFF (and unset) leaves the free-form rule in place', () => {
+    for (const flag of [false, undefined]) {
+      const block = actorBlock('web', 'tab', undefined, 'tools', flag);
+      expect(block.includes(FREE_MARK)).toBe(true);
+      expect(block.includes(SCHEMA_MARK)).toBe(false);
+    }
+  });
+
+  test('engine actors never get it, flag on or off', () => {
+    // A sandbox reply is the agent's OWN compute coming back, not page bytes;
+    // there is nothing untrusted to fence, so it keeps the cheaper free-form
+    // path. If this ever inverts, the validator has to change with it.
+    for (const kind of ['webvm', 'notebook', 'app', 'dweb']) {
+      const block = actorBlock(kind, 'tab', 'i1', 'tools', true);
+      expect(block.includes(SCHEMA_MARK)).toBe(false);
+      expect(block.includes(FREE_MARK)).toBe(true);
+    }
+  });
+
+  test('the code-surface web actor still gets it — the surface is not the boundary', () => {
+    // page.* in a REPL changes HOW it works, not what it reports back through.
+    const block = actorBlock('web', 'tab', undefined, 'code', true);
+    expect(block.includes(SCHEMA_MARK)).toBe(true);
+  });
+
+  // REGRESSION GUARD, same shape as DESIGN-18 above: actorBlock takes schemaReply
+  // as its FIFTH positional param, so a call site that forgets it silently ships
+  // the free-form rule while the SW arms the validator — every web reply dropped,
+  // and nothing in the unit tier would notice.
+  test('renderSystemPrompt threads schemaReply through to the rule', async () => {
+    _setTemplateForTests('BASE PROMPT');
+    const on = await renderSystemPrompt({ actorType: 'web', backing: 'tab', schemaReply: true });
+    expect(on.includes(SCHEMA_MARK)).toBe(true);
+    const off = await renderSystemPrompt({ actorType: 'web', backing: 'tab' });
+    expect(off.includes(SCHEMA_MARK)).toBe(false);
+    expect(off.includes(FREE_MARK)).toBe(true);
+  });
+});
+
 // PR #134: an actor is an EPHEMERAL ACTOR. Its block joins the <actor_agent>
 // family (one vocabulary) but differs from a bound actor: it owns no instance
 // and — the inverted rule — it MAY message_actor.

@@ -56,6 +56,29 @@
 
 import { escapeAttr } from '/shared/util.js';
 import { ASYNC_ACTOR_ACTORS, mayMessageActor, messageProvenance } from './delegation-lineage.js';
+// #241 — the deterministic schema boundary for an untrusted actor's reply.
+// Pure policy (no IO), imported directly like the other pure helpers here; the
+// FLAG that turns it on is injected (schemaValidatedReplies), SW-side.
+import { validateActorReply, renderValidatedReply, REPLY_VALIDATION_FAILED } from './reply-schema.js';
+
+// The actor kinds whose reply is UNTRUSTED web content and so must cross the
+// deterministic schema boundary when it's enabled. Engine sandboxes (vm/notebook/
+// app) return the agent's OWN compute and keep the free-form path; the web + API
+// actors ingest hostile page/response bytes — those are the ones to structure.
+//
+// Two honest notes on this set, so the next reader doesn't mistake it for a
+// finished policy:
+//   - 'api' is belt-and-braces. An API integration resolves to kind 'web' with
+//     backing 'api' (the SW's actor resolver), so nothing reaches here as 'api'
+//     today. It stays because the PROMPT half narrows on actorType === 'web',
+//     which covers both backings — dropping 'api' would make the two halves
+//     disagree the moment a resolver changes.
+//   - 'dweb' is deliberately ABSENT and arguably should not be. The dweb actor
+//     ingests inbound peer DMs and A2A output — as untrusted as page bytes.
+//     It is excluded only because it is preview-only and its reply shape has
+//     not been exercised against the envelope; extending the set is a follow-up
+//     that needs its own prompt half, not a one-word edit here.
+const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
 
 /**
  * @param {Object} deps
@@ -77,6 +100,7 @@ import { ASYNC_ACTOR_ACTORS, mayMessageActor, messageProvenance } from './delega
  * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, advanceQueue?: (sessionId: string) => void, stop?: (sessionId: string) => boolean }} deps.turnSlots
  * @param {() => Promise<string | null>} deps.getActiveSessionId
  * @param {(sessionId: string) => Promise<Array<import('./delegation-lineage.js').LineageHop>>} [deps.getAncestry]
+ * @param {() => boolean} [deps.schemaValidatedReplies] issue 241 - force an untrusted (web/api) actor's reply through the strict JSON envelope validator before it reaches the orchestrator. Read PER REPLY (a getter, not a boolean) so flipping the setting takes effect without an SW restart. Default `() => false` (free-form fenced path).
  *   Build the sender's lineage chain (sender-first toward the root) from the
  *   session store — the shell walk mayMessageActor/messageProvenance read.
  *   Default returns [] — FAIL-CLOSED: without a chain only the foreground chat
@@ -99,6 +123,17 @@ export const makeActorMessaging = (deps) => {
     resolveActor, runActorTurn, reenter, turnSlots,
     getActiveSessionId, isVaultLocked, wrapUntrusted,
     getAncestry = async () => [],
+    // #241 — when this reads true, an untrusted actor's (web/api) reply must be a
+    // strict JSON envelope, validated by deterministic code before it reaches the
+    // orchestrator; a non-conforming reply is DROPPED for a fixed notice. Default
+    // OFF (the free-form fenced path).
+    //
+    // why a GETTER and not a boolean: deps are destructured ONCE, at construction,
+    // and makeActorMessaging is built at SW boot. A boolean would freeze at its
+    // boot value and silently ignore the user flipping the setting. The prompt
+    // half has the same property for free (ctx.schemaReply is stamped per turn),
+    // so reading per reply is what keeps the two halves ONE switch.
+    schemaValidatedReplies = () => false,
     appendAudit = async () => {}, now = Date.now, caps = {}, log = () => {},
     mailbox = { append: async () => {}, remove: async () => {}, load: async () => [] },
   } = deps;
@@ -338,10 +373,40 @@ export const makeActorMessaging = (deps) => {
     // the fence is re-applied at the script-RESULT boundary, the one place the
     // bytes meet a model (script.js usedActors fencing). Model-facing resolves
     // (an actor's awaitReply) keep the formatted text.
-    /** @param {string} body @param {boolean} failed */
-    const settle = (body, failed) => {
-      if (onReply) { onReply(bare ? body : replyText(instanceId, kind, name, body, failed), failed); return; }
-      deliver(senderSessionId, instanceId, kind, name, body, failed, via);
+    // `rawBody` is the actor's UNCLAMPED result (the RESULT_CHARS bound is applied
+    // below, per path). why unclamped in: the schema path must see the FULL JSON —
+    // clamping first could truncate a valid envelope mid-string, corrupting it into
+    // a false "did not match format" reject. The schema's own field caps
+    // (reply-schema.js) are the size bound for the validated path; the free-form
+    // and error paths keep the RESULT_CHARS clamp on the way out.
+    /** @param {string} rawBody @param {boolean} failed */
+    const settle = (rawBody, failed) => {
+      let outBody = rawBody;
+      let outFailed = failed;
+      // #241 — the deterministic schema boundary. An untrusted actor (web/api)
+      // must return a strict JSON envelope; validate it HERE, before it crosses
+      // to the orchestrator, and hand up only the fields WE re-render. why not on
+      // `failed`: that body is a runtime error notice WE composed, not actor
+      // output. why not `bare`: the script/a2a surface resolves raw bytes into
+      // CODE (re-fenced at the script boundary), a different contract. A
+      // non-conforming reply is dropped for a fixed, content-free notice — the
+      // rejected bytes never reach the orchestrator as free text.
+      if (schemaValidatedReplies() && !failed && !bare && SCHEMA_VALIDATED_KINDS.has(kind)) {
+        const v = validateActorReply(rawBody);
+        if (v.ok) { outBody = renderValidatedReply(v.value); outFailed = v.value.status === 'failed'; }
+        else {
+          outBody = REPLY_VALIDATION_FAILED;
+          outFailed = true;
+          // reason is a fixed, content-free string (reply-schema.js) — safe to audit.
+          appendAudit({ type: 'actor_reply_rejected', details: { instanceId, kind, reason: v.reason } }).catch(() => {});
+        }
+      }
+      // Bound the OUTPUT: the validated body is already field-cap-bounded, the
+      // free-form/error bodies were previously clamped at the callsite — apply the
+      // single RESULT_CHARS ceiling here for every path.
+      outBody = outBody.slice(0, RESULT_CHARS);
+      if (onReply) { onReply(bare ? outBody : replyText(instanceId, kind, name, outBody, outFailed), outFailed); return; }
+      deliver(senderSessionId, instanceId, kind, name, outBody, outFailed, via);
     };
     // Serialize on the ACTOR's slot — runWhenIdle runs the turn the moment the
     // actor is idle (never interrupting an in-flight actor turn). A thrown/
@@ -380,7 +445,9 @@ export const makeActorMessaging = (deps) => {
       Promise.resolve(runActorTurn({ actorSessionId, message, actorTabId: tabId, instanceId, kind, parentToolUseId, name, oneShot }))
         .then((res) => {
           log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
-          return settle((res?.result || '(the actor produced no text reply)').slice(0, RESULT_CHARS), res?.stopped === true);
+          // Unclamped in — settle applies the RESULT_CHARS ceiling per path, AFTER
+          // schema validation (#241) so a valid envelope isn't truncated mid-JSON.
+          return settle(res?.result || '(the actor produced no text reply)', res?.stopped === true);
         })
         .catch((e) => settle(`the actor turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
         .finally(clear);

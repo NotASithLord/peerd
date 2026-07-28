@@ -82,6 +82,17 @@ export const snapshotTool = {
     // Register the refs so a later click/type({ref}) on this tab resolves them.
     domRefs?.setSnapshot?.(tab.id, refs);
     const origin = originOfUrl(tab.url);
+    // issue 251 — LEARN, don't tell. A password field on this page means the
+    // site has accounts, which is what decides whether a roaming actor may be
+    // here at all. It goes to the origin classifier and NOWHERE near the
+    // snapshot text: the model has no use for it and every reason not to know
+    // which origins peerd treats as the user's. Strictly `=== true`, because
+    // `null` from the capture means the probe could not run — unknown, not
+    // absent. Best-effort: a learning failure must never fail a snapshot.
+    if (cap.hasPasswordField === true) {
+      try { /** @type {any} */ (ctx).noteLearnedOrigin?.(origin, 'password-field'); }
+      catch { /* best-effort */ }
+    }
     // why: `capped` (DOM-walk node-count limit) is a DIFFERENT truncation
     // from `truncated` (char budget) — a capped tree stops mid-DOM, so the
     // model must not read a missing element as "absent". Surface it always.

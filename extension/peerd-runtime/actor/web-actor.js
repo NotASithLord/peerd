@@ -168,6 +168,46 @@ export const normalizeApiOrigin = (input) => {
 };
 
 /**
+ * issue 251 — the handle for a SITE actor: a web actor BOUND to one origin,
+ * with a real tab.
+ *
+ * why a distinct handle rather than reusing the bare origin: addressing a bare
+ * origin already means something — a DESIGN-18 API integration, which is
+ * fetch-only and never opens a tab. Both are "an actor bound to one origin", and
+ * that is exactly why they must not share a spelling: one can log in and click,
+ * the other cannot, and the orchestrator has to be able to ask for the right one.
+ * `site:` is the prefix because it reads as what it is.
+ *
+ * This is the successor a HANDOFF names. A roaming actor that reaches a site the
+ * user has an account on stops; the orchestrator addresses `site:<origin>` and
+ * writes a fresh goal. The prefix carries no authority of its own — being bound
+ * is a property of the minted actor's state, not of how it was spelled.
+ */
+export const SITE_ACTOR_PREFIX = 'site:';
+
+/** `https://github.com` → `site:https://github.com`. @param {string} origin */
+export const siteHandleFor = (origin) => `${SITE_ACTOR_PREFIX}${origin}`;
+
+/**
+ * The inverse, and the ROUTING gate: a handle → the canonical origin it names,
+ * or null if this isn't a site handle at all.
+ *
+ * Canonicalizes through normalizeApiOrigin, so `site:GitHub.com` and
+ * `site:https://github.com:443/x` reach the same actor. A host that normalizer
+ * refuses (an IP, localhost, a single-label name) yields null: a bound actor's
+ * whole identity is an origin peerd can name and later compare against, and one
+ * it cannot name is one it could never enforce.
+ *
+ * @param {unknown} input
+ * @returns {string | null}
+ */
+export const parseSiteHandle = (input) => {
+  const s = String(input ?? '').trim();
+  if (s.slice(0, SITE_ACTOR_PREFIX.length).toLowerCase() !== SITE_ACTOR_PREFIX) return null;
+  return normalizeApiOrigin(s.slice(SITE_ACTOR_PREFIX.length));
+};
+
+/**
  * The (ownerChatId, origin)→session binding store for API actors. Chat-scoped (v1
  * memory is per-chat) and origin-keyed (the origin is the durable handle). Flat
  * composite key so it serializes to chrome.storage.session as Array<[string,string]>

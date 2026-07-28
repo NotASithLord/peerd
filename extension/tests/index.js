@@ -43,6 +43,7 @@ import './unit/peerd-runtime/dom-walk.test.js';
 import './unit/peerd-runtime/page-eval.test.js';
 import './unit/peerd-runtime/page-exec.test.js';
 import './unit/peerd-runtime/page-keys.test.js';
+import './unit/peerd-runtime/default-hooks.test.js';
 import './unit/peerd-runtime/prompt-wrap.test.js';
 import './unit/peerd-runtime/system-prompt.test.js';
 import './unit/peerd-runtime/tool-manifests.test.js';
@@ -97,6 +98,7 @@ import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/failure-chip.test.js';
+import './unit/sidepanel/confirm-note.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

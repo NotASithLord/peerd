@@ -17,6 +17,7 @@ import { getTool } from './registry.js';
 import { GATES } from './gates.js';
 import { listHooks } from './hooks/registry.js';
 import { runPreToolUse, runPostToolUse } from './hooks/runner.js';
+import { ugcWriteConfirm } from '../actor/ugc-registry.js';
 import {
   decideAction,
   DEFAULT_CONFIRM_ACTIONS,
@@ -58,6 +59,44 @@ const summarizeCall = (name, args) => {
     return `${k}: ${val}`;
   });
   return `${name}({ ${parts.join(', ')} })`;
+};
+
+// The one sentence the #242 confirm card adds. why this wording: it names the
+// property that makes the page dangerous (someone else wrote it) and the
+// property that makes the action dangerous (it runs as you), in the user's
+// words, with no jargon and no security theatre. It does NOT claim an attack is
+// happening — most of the time there isn't one, and a prompt that cries wolf is
+// a prompt that gets clicked through.
+const UGC_CONFIRM_NOTE = 'This page can contain text written by other people, '
+  + 'and this action would run with your signed-in access to it.';
+
+/**
+ * The URL of the page a browser-session call is about to act on, read LIVE.
+ *
+ * why not just ctx.activeTab.url: that pin is stamped when the turn's context is
+ * built and re-stamped by navigate(), but a same-origin SPA hop moves the page
+ * with no tool call at all — the actor clicks from a repo root into an issue and
+ * the pin still says the root. The UGC registry classifies on PATH, so a stale
+ * pin silently under-protects exactly the case #242 exists for. One
+ * tabs.get() is the honest read.
+ *
+ * Never throws and never blocks the dispatch: a failed read falls back to the
+ * pin, and a missing pin to ''. classifyUrl fails open on both.
+ *
+ * @param {ToolContext} ctx
+ * @returns {Promise<string>}
+ */
+const liveTabUrl = async (ctx) => {
+  const pin = ctx.activeTab;
+  if (!pin?.id) return pin?.url ?? '';
+  try {
+    // ctx.tabs is the opaque `Object` contract slot; narrow to the one read.
+    const tabsApi = /** @type {{ get?: (id: number) => Promise<{ url?: string }> }} */ (ctx.tabs);
+    const live = await tabsApi?.get?.(pin.id);
+    return live?.url || pin.url || '';
+  } catch {
+    return pin.url ?? '';
+  }
 };
 
 /** @typedef {import('/shared/tool-types.js').ToolCall} ToolCall */
@@ -179,7 +218,31 @@ export const dispatchToolCall = async (call, ctx) => {
   const permMode = normalizeMode(ctx.permission?.mode);
   const permConfirm = ctx.permission?.confirmActions ?? DEFAULT_CONFIRM_ACTIONS;
   const verdict = decideAction({ mode: permMode, confirmActions: permConfirm, tool });
-  if (verdict.allowed && verdict.confirm && !selfConfirms) {
+
+  // ---- The UGC-zone forced confirmation (#242) ---------------------------
+  // A non-read browser-session action on a page that hosts THIRD-PARTY content
+  // (a GitHub issue, a Jira ticket, a Reddit thread — actor/ugc-registry.js) is
+  // the lethal trifecta at its sharpest: the text steering the agent was written
+  // by a stranger, and the cookies it would act with belong to the user. So this
+  // asks EVEN WHEN confirmActions is off. That override is deliberate: the
+  // toggle expresses "I trust this agent to act unattended", which is a
+  // statement about the AGENT, and on a UGC page the instruction under
+  // consideration did not come from the agent. Same reasoning as `selfConfirms`
+  // above, which is why memory keeps its own always-on prompt and is excluded
+  // here rather than double-prompted.
+  //
+  // Skipped entirely when the policy already blocked the call — no reason to
+  // read a tab for an action that is not going to run.
+  const ugcRuleId = verdict.allowed && !selfConfirms
+    ? ugcWriteConfirm({
+      toolName: call.name,
+      primitive: tool.primitive,
+      sideEffect: tool.sideEffect,
+      url: await liveTabUrl(ctx),
+    })
+    : null;
+
+  if (verdict.allowed && (verdict.confirm || ugcRuleId) && !selfConfirms) {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
     let answer = 'no';
@@ -195,6 +258,12 @@ export const dispatchToolCall = async (call, ctx) => {
         actionClass: verdict.actionClass,
         origins: safeOrigins(tool, args, ctx),
         summary: summarizeCall(call.name, args),
+        // why the note and not a longer summary: summarizeCall truncates every
+        // string arg to 40 chars, so the card can't show the payload anyway —
+        // what it CAN do is tell the user the one fact they can't see, which is
+        // that this page is attacker-authorable. Absent on an ordinary confirm,
+        // so the card is unchanged for the common case.
+        note: ugcRuleId ? UGC_CONFIRM_NOTE : undefined,
         sessionId: ctx.session?.sessionId ?? null,
       });
     } catch {
@@ -203,14 +272,19 @@ export const dispatchToolCall = async (call, ctx) => {
     const approved = answer === 'yes_once' || answer === 'yes_session';
     if (confirmEntry) {
       confirmEntry.allowed = approved;
-      confirmEntry.reason = approved
+      // why the ruleId rides in the reason: the lineage chip in the transcript
+      // renders `${gate}: ${reason}` as its tooltip (sidepanel/components/
+      // message-list.js), so attributing the zone here surfaces WHICH rule
+      // forced the prompt with no new UI and no new plumbing.
+      const how = ugcRuleId ? ` [ugc zone: ${ugcRuleId}]` : '';
+      confirmEntry.reason = (approved
         ? (answer === 'yes_session' ? 'approved by user (session)' : 'approved by user')
-        : 'rejected by user';
+        : 'rejected by user') + how;
     }
     if (!approved) {
       ctx.audit({
         type: 'tool_rejected',
-        details: { tool: call.name, gate: 'confirmation', answer },
+        details: { tool: call.name, gate: 'confirmation', answer, ugcZone: ugcRuleId ?? undefined },
       }).catch(() => {});
       return {
         ok: false,
@@ -226,7 +300,7 @@ export const dispatchToolCall = async (call, ctx) => {
     }
     ctx.audit({
       type: 'tool_confirmed',
-      details: { tool: call.name, answer },
+      details: { tool: call.name, answer, ugcZone: ugcRuleId ?? undefined },
     }).catch(() => {});
   }
 

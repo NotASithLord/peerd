@@ -44,9 +44,23 @@ export const siteCaptureTool = {
     const capture = /** @type {{ start?: (o: object) => Promise<any>, stop?: (o: object) => Promise<any> } | undefined} */ (
       /** @type {any} */ (ctx).siteCapture);
     if (!capture?.start || !capture?.stop) return { ok: false, error: 'site_capture_unavailable' };
-    const tab = /** @type {{ id?: number, origin?: string } | undefined} */ (ctx.activeTab);
+    const tab = /** @type {{ id?: number, origin?: string, url?: string } | undefined} */ (ctx.activeTab);
     if (!tab?.id || !tab.origin) {
       return { ok: false, error: 'no_owned_tab: open the site first (navigate), then start capture.' };
+    }
+    // issue 251 — the origin lock. This tool is the one that drives and reads a
+    // tab WITHOUT going through resolveTargetTab (it needs the tabId, not the Tab),
+    // so the DOM chokepoint does not cover it and adversarial review flagged the
+    // hole: a hijacked actor whose tab had moved to a credentialed origin could
+    // start a capture there and read every request the page makes. Judging the
+    // live location here closes it at the same policy the DOM tools use.
+    const judge = /** @type {{ judgeLanding?: (url: string) => Promise<{ action: string, reason?: string } | null> }} */ (
+      /** @type {any} */ (ctx)).judgeLanding;
+    if (judge) {
+      const verdict = await judge(tab.url || tab.origin);
+      if (verdict && verdict.action !== 'continue') {
+        return { ok: false, error: `origin_lock: ${verdict.reason ?? 'this task was stopped'}` };
+      }
     }
     // Same-origin (+ obvious api. sibling) scope for the digest — third-party
     // analytics noise is dropped. The tab's LIVE origin is authoritative.

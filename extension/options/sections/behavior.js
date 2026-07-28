@@ -85,6 +85,34 @@ export const BehaviorSection = {
       ])(state.settings?.confirmWebWrites !== false),
 
       m('.settings-divider'),
+      // #241 — the deterministic reply boundary for the web/API actors. Framed
+      // for the user in terms of the CONSEQUENCE (a garbled report is thrown
+      // away rather than passed along), not the mechanism, because the mechanism
+      // is a JSON schema and nobody chooses a security posture on that basis.
+      // OFF by default on both channels while it earns field evidence.
+      ((schemaOn) => [
+        m('h3', 'Strict replies from web helpers'),
+        m('p', schemaOn
+          ? 'ON — when a web helper finishes reading a page, it must hand its report back in a fixed structure that peerd checks before the main agent ever sees it. A report that does not fit is thrown away and the agent is told only that it was unreadable. This closes the gap where a page could smuggle text past the “this is data, not instructions” fence by imitating it. The tradeoff: if the model wanders off the format, you lose that report and have to ask again.'
+          : 'OFF — a web helper reports back in plain prose, marked as untrusted data. That marking is a strong hint to the model, not a wall. Turn this on to make it a wall, at the cost of occasionally losing a report the model formatted wrong. Experimental.'),
+        m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
+          m('button.secondary', {
+            type: 'button',
+            disabled: ui.schemaReplyBusy,
+            onclick: async () => {
+              if (ui.schemaReplyBusy) return;
+              ui.schemaReplyBusy = true; m.redraw();
+              try {
+                await send({ type: 'settings/update', patch: { schemaValidatedReplies: !schemaOn } });
+              } finally {
+                ui.schemaReplyBusy = false; m.redraw();
+              }
+            },
+          }, ui.schemaReplyBusy ? '…' : schemaOn ? 'Turn off strict replies' : 'Turn on strict replies'),
+        ]),
+      ])(state.settings?.schemaValidatedReplies === true),
+
+      m('.settings-divider'),
       m('h3', 'Reasoning'),
       m('p', reasoningEnabled
         ? 'The model streams its chain-of-reasoning before each answer, shown as a collapsible “Reasoning” section in chat. Costs a little extra latency and tokens per turn.'
@@ -381,7 +409,8 @@ export const BehaviorSection = {
       })(),
 
       resetRow(send, [
-        'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'advancedAutomationEnabled', 'devMode',
+        'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'schemaValidatedReplies',
+        'advancedAutomationEnabled', 'devMode',
         'autoResumeInterruptedTurns', 'providerFailoverEnabled', 'providerFallbacks',
         'prewalkEnabled', 'enginePrewalkEnabled', 'prewalkExecutorModel',
       ]),

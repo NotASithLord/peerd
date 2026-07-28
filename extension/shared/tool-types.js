@@ -187,6 +187,12 @@
  * @property {SideEffect} sideEffect
  * @property {string} [actionClass]   Plan/Act action class driving the prompt
  *                                    (workspace_write | shell | external)
+ * @property {string} [note]          one plain sentence saying WHY this call is
+ *   being confirmed, when the reason is something other than the ordinary
+ *   Plan/Act policy — e.g. the #242 UGC-zone forced confirm. Rendered verbatim
+ *   above the call summary. why a free-form line and not a code: the user is
+ *   the audience, and the only thing that makes a confirm worth showing is that
+ *   it explains itself.
  * @property {string | null} [sessionId]   chat the prompt belongs to — lets the
  *                                    coordinator decline a session's pending
  *                                    confirms when its turn is aborted
