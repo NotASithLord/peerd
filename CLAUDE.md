@@ -252,7 +252,9 @@ exists today:
    addressable handle), and replies re-enter it fenced on a later
    turn — it never blocks. The web actor (`actor/web-actor.js`) is
    the single entry point for web work: it picks between a sessionless,
-   denylist-gated `fetch_url` and opening + driving a tab. Dweb tools
+   denylist-gated `fetch_url` and opening + driving a tab, and it is
+   ORIGIN-SEGMENTED — roaming or bound to one origin, under the origin
+   lock (see the security-boundary bullet below). Dweb tools
    are invisible where `DWEB_ENABLED` is false. Plus sessions, clock
    (temporal grounding), actor orchestrator, voice (Moonshine WASM
    + Web Speech fallback).
@@ -355,6 +357,32 @@ gotchas to know going in:
   audit. The legacy permission-mode axis was REMOVED
   2026-06-12 — Plan/Act + the denylist carry the safety weight; Plan
   permits pure URL loads only, never clicks (enforced in `gates.js`).
+- The security boundary around web work — the web actor is
+  **origin-segmented**. Every web actor is either ROAMING (browses
+  freely, holds no credentialed authority) or BOUND to exactly one
+  origin it may not leave; the orchestrator addresses a bound one as
+  `site:<origin>`. The lock judges the URL the tab ACTUALLY LANDED ON,
+  never the one something asked for, so an unobserved redirect cannot
+  smuggle a roaming actor onto a credentialed origin — a roaming actor
+  that lands on a sensitive origin STOPS and reports a handoff instead
+  of continuing. Which origins count as sensitive is part curated seed,
+  part LEARNED from ordinary use (a walked password field, an approved
+  write, any origin with a stored key). Credential scope is derived,
+  never model-named, and can only narrow. Pure cores in
+  `peerd-runtime/actor/` (`landing-rule.js`, `origin-lock.js`,
+  `origin-sensitivity.js`, `learned-origins.js`, `ugc-registry.js`,
+  `reply-schema.js`); enforcement at the DOM chokepoint in the
+  dispatcher and the SW's site-fetch/call routes. Alongside it: **CDR
+  disarm** (`peerd-runtime/dom/cdr.js`) strips zero-width runs, bidi
+  overrides and Unicode tag characters from page text before the model
+  reads it, leaving Persian/Urdu/Indic intact; a **UGC-zone** forced
+  confirmation on acting-as-the-user on pages strangers wrote, which
+  fires even with confirmations off; and an **exfil-shaped-URL
+  tripwire** (`tools/egress-heuristics.js`) on both navigations and the
+  actor's own fetch. All of it is best-effort ABOVE the real
+  containment, which is still the offscreen heap fence — the residuals
+  are written down honestly in `docs/security/THREAT-MODEL.md`, and
+  `docs/security/RED-TEAM-RESULTS.md` is generated, not hand-maintained.
 - The feature buildout — memory, edit + checkpoints, Plan/Act,
   composer (slash commands + @-refs), goal mode (autonomous loop), cost
   telemetry, skills, review actor, and hooks — all integrated.
