@@ -121,7 +121,8 @@ if (!root) throw new Error('options: #app missing from HTML');
 // route to the default (/providers), which reads as a dead nav item. (That is
 // exactly why git-credentials + api-integrations were un-clickable.)
 const SECTIONS = ['providers', 'behavior', 'voice', 'skills', 'hooks',
-  'memory', 'costs', 'transfer', 'vault', 'api-integrations', 'denylist', 'activity'];
+  'memory', 'costs', 'transfer', 'vault', 'api-integrations', 'denylist',
+  'learned-sites', 'activity'];
 const Root = {
   view: () => {
     const section = (m.route.get().replace(/^\//, '').split(/[/?]/)[0]) || 'providers';

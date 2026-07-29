@@ -86,6 +86,33 @@ describe('the report is useful, not just safe', () => {
     expect(text).toMatch(/message_actor/);
   });
 
+  test('a handoff offers the SESSIONLESS read first, before the credentialed helper', () => {
+    // Most refused work is reading something public on a site the user happens to
+    // have an account on. fetch_url carries no cookies, so it needs no authority
+    // at all - a stop should not escalate to a credentialed helper before that has
+    // been tried. Ordering matters: the cheap route has to be read first.
+    const text = describeLandingStop({
+      action: 'handoff', reason: 'r', from: null,
+      to: 'https://github.com/x', handoffTo: 'https://github.com',
+    });
+    expect(text).toMatch(/fetch_url/);
+    expect(text).toMatch(/no cookies and no session|carries no cookies/i);
+    expect(text.indexOf('fetch_url')).toBeLessThan(text.indexOf('site:https://github.com'));
+  });
+
+  test('the sessionless offer still carries NO path from the refused page', () => {
+    // The new paragraph must not become the leak the rest of the report avoids:
+    // it tells the orchestrator to use the URL the USER gave, and never repeats
+    // the landing URL it was refused on.
+    const text = describeLandingStop({
+      action: 'handoff', reason: 'r', from: null,
+      to: 'https://github.com/secret-path?token=abc', handoffTo: 'https://github.com',
+    });
+    expect(text).not.toContain('secret-path');
+    expect(text).not.toContain('token=abc');
+    expect(text).toMatch(/URL the\s+USER gave/i);
+  });
+
   test('a handoff tells the orchestrator to write its OWN goal', () => {
     const text = describeLandingStop({
       action: 'handoff', reason: 'r', from: null,
