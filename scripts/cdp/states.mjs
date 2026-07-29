@@ -890,6 +890,88 @@ export const STATES = [
     },
   },
 
+  // --- visual: the STANDALONE TAB PAGES ---------------------------------------
+  //
+  // Coverage audit finding: every visual baseline photographed the side panel,
+  // home or options, so five shipped pages — the three engine tabs, the mic
+  // permission grant, and the eval runner — had NO pixel guard at all. These are
+  // the cheap half of that gap: each renders fully with no instance, no seeding
+  // and no model traffic, so they cost one openWidePage + a selector wait.
+  //
+  // The engine tabs are captured in their HARD-FAIL state, opened with no URL
+  // hash. That is deliberate rather than a shortcut: the fail card IS the screen
+  // a user meets when an id is stale, an image pin mismatches, or cross-origin
+  // isolation is unavailable, and it is the only explanation they get for why
+  // their VM/Notebook/App did not start. It is also the one state reachable
+  // without booting CheerpX. The booted terminal / editor / render states remain
+  // uncovered and want their own states with a seeded instance.
+  {
+    name: 'vm-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed, #boot-stage' });
+      try {
+        // The boot log stamps each line with the WALL CLOCK, so this baseline
+        // would differ on every single run and the state would flap forever.
+        // Pin it to a fixed time rather than hiding the line — the timestamp's
+        // presence and position are part of what the baseline should guard, its
+        // value is not. (The harness's UTC timezone override does not help: the
+        // problem is the time advancing, not the zone.)
+        await evalIn(page, `(() => {
+          for (const el of document.querySelectorAll('#boot-log, #boot-log *')) {
+            for (const n of el.childNodes) {
+              if (n.nodeType === 3) n.textContent = n.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00');
+            }
+          }
+          return true;
+        })()`);
+        await rec.visualPage('vm-tab-failed', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'notebook-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // notebook-tab replaces <body> wholesale with its red no-id paragraph, so
+      // the probe cannot look for a page id — `body > p` is what actually lands.
+      const page = await openWidePage(ctx, 'engine-tabs/notebook-tab/index.html', { ready: 'body > p, #notebook-boot' });
+      try { await rec.visualPage('notebook-tab-failed', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'app-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed, #boot-msg' });
+      try { await rec.visualPage('app-tab-failed', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'mic-permission', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // A plain page with no hash, params or state — its whole value is its copy,
+      // which is precisely what a pixel baseline protects.
+      const page = await openWidePage(ctx, 'permissions/mic.html', { ready: 'button, h1' });
+      try { await rec.visualPage('mic-permission', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'eval-runner', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // Dev-only and pruned from the store package, but it is a dense control
+      // panel that renders fully at rest and is easy to break with a grid change.
+      const page = await openWidePage(ctx, 'eval/runner.html', { ready: 'button, select' });
+      try { await rec.visualPage('eval-runner', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.ask) ----
   // The actors-in-script surface end to end: the model writes ONE script whose
   // code awaits actors.ask('web', …); the ask relays offscreen-worker → SW
