@@ -53,6 +53,12 @@ describe('normalizeSettingsPatch — booleans + enums', () => {
     expect(norm({ reasoningEffort: 'high' })).toEqual({ reasoningEffort: 'high' });
     expect(norm({ reasoningEffort: 'ultra' })).toEqual({});
   });
+  test('frontDoorView gated to panel|home; anything else dropped', () => {
+    expect(norm({ frontDoorView: 'panel' })).toEqual({ frontDoorView: 'panel' });
+    expect(norm({ frontDoorView: 'home' })).toEqual({ frontDoorView: 'home' });
+    expect(norm({ frontDoorView: 'popup' })).toEqual({});
+    expect(norm({ frontDoorView: true })).toEqual({});
+  });
 });
 
 describe('normalizeSettingsPatch — providers + models', () => {

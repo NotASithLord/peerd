@@ -25,6 +25,35 @@ export const BehaviorSection = {
     const confirmsOn = state.session?.permission?.confirmActions === true;
 
     return m('div', [
+      // The front door (background/panel-affordance.js): which surface the
+      // toolbar icon opens. 'panel' is the default — the chat lands next to
+      // the page you're on instead of taking over a whole tab.
+      m('h3', 'Toolbar button'),
+      (() => {
+        const frontDoor = state.settings?.frontDoorView === 'home' ? 'home' : 'panel';
+        return [
+          m('p', frontDoor === 'panel'
+            ? 'Clicking the peerd toolbar button opens the chat in the side panel (sidebar on Firefox), next to the page you\'re on. The full-page home is still there — open it from the panel, or switch the default below.'
+            : 'Clicking the peerd toolbar button opens the full-page home tab. Once home is open, the button pulls the chat into the side panel instead. Switch the default below to open the side panel directly.'),
+          m('.input-row', [
+            m('label', { for: 'front-door-view' }, 'Opens'),
+            m('select', {
+              id: 'front-door-view',
+              value: frontDoor,
+              onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
+                await send({ type: 'settings/update', patch: { frontDoorView: e.target.value } });
+                m.redraw();
+              },
+            }, [
+              ['panel', 'side panel — default'],
+              ['home', 'full-page home'],
+            ].map(([value, label]) => m('option', { value }, label))),
+          ]),
+          m('p.hint', 'The keyboard shortcut (Cmd+Shift+P on Mac, Alt+Shift+P elsewhere) always toggles the side panel, whichever default you pick.'),
+        ];
+      })(),
+
+      m('.settings-divider'),
       // peerd ACTS by default (acting on the browser is the point). This
       // is the optional seatbelt: flip it on to confirm each side-effect.
       m('h3', 'Confirm before actions'),
@@ -381,6 +410,7 @@ export const BehaviorSection = {
       })(),
 
       resetRow(send, [
+        'frontDoorView',
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'advancedAutomationEnabled', 'devMode',
         'autoResumeInterruptedTurns', 'providerFailoverEnabled', 'providerFallbacks',
         'prewalkEnabled', 'enginePrewalkEnabled', 'prewalkExecutorModel',

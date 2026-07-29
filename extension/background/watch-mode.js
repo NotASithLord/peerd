@@ -23,7 +23,8 @@
  *    becoming a standing licence to grab focus.
  *
  *  - `panelOpen` — a SIDE-PANEL port specifically. why not "any peerd surface":
- *    the full-page home is peerd's front door (the toolbar icon opens it) and its
+ *    the full-page home is a primary parked surface (the toolbar icon still
+ *    opens it under frontDoorView:'home') and its
  *    port SELF-RECONNECTS after every service-worker respawn, so a home tab parked
  *    in a background window keeps "a surface is open" true forever — which is the
  *    resting state for lots of users, and would have let an unattended 3am Routine

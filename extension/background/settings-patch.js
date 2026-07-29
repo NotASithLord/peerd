@@ -126,6 +126,12 @@ export const normalizeSettingsPatch = (patch, {
     // this flips on; each later agent tab touch follows while it stays on.
     next.watchAgentTab = patch.watchAgentTab;
   }
+  // The front door: which surface the toolbar icon opens — 'panel' (side
+  // panel / sidebar, the default) or 'home' (the original full-page-first
+  // model). Only these two; anything else is ignored (defaults win → 'panel').
+  if (patch.frontDoorView === 'panel' || patch.frontDoorView === 'home') {
+    next.frontDoorView = patch.frontDoorView;
+  }
   if (typeof patch.confirmWebWrites === 'boolean') {
     // #53: anti-exfil gate. When OFF, non-GET web egress (fetch_url + the WebVM
     // bridge) is auto-approved (risk-acknowledged); ON (default) confirms.

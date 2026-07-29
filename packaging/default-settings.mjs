@@ -133,6 +133,15 @@ export const defaults = {
   // channels: watching is a per-moment choice, not a default posture.
   watchAgentTab: { store: false, preview: false },
 
+  // Which surface the toolbar icon opens — peerd's front door
+  // (background/panel-affordance.js). 'panel' (owner call, 2026-07-29): the
+  // chat pulls into the side panel / sidebar NEXT TO the page the user is on;
+  // the full-page home taking over a whole tab on first click (often straight
+  // into the vault gate) read as heavyweight. 'home' restores the original
+  // full-page-first model (DESIGN-12): home first, panel once home is open.
+  // A friction preference, not a safety posture — identical on both channels.
+  frontDoorView: { store: 'panel', preview: 'panel' },
+
   // Web actor model override. '' is NO override — the web actor resolves to
   // the active provider's fast default (Haiku on Anthropic via
   // adapter.defaultRunnerModel; resolveRunnerModel), NOT the chat model. So out

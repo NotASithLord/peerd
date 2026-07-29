@@ -8,8 +8,10 @@
 // "Pop to the side" hands the chat to the window-global side panel so it
 // follows you across tabs while the agent drives the browser.
 //
-// Opened from the side-panel header (▦) or the toolbar icon. Settings is a link
-// from the rail (configuration stays distinct from the home surface).
+// Opened from the side-panel header (▦) — or the toolbar icon, when the
+// frontDoorView setting is 'home' (the default front door is the side panel).
+// Settings is a link from the rail (configuration stays distinct from the
+// home surface).
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
