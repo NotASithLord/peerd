@@ -166,6 +166,26 @@ export function compareToBaseline(name, pngBuffer, { update = false, threshold =
   const exists = existsSync(file);
   if (update || !exists) {
     mkdirSync(BASELINE_DIR, { recursive: true });
+    // why a RESEED compares before it writes: Chrome's PNG encoder is not
+    // byte-stable across runs, so a reseed rewrote EVERY baseline even when
+    // nothing rendered differently. Measured on this repo, one reseed touched 22
+    // of 24 files at a 0.0000% pixel diff — pure re-encoding. Git keeps each of
+    // those copies forever, so the history cost of a reseed was the size of the
+    // whole set rather than of what actually moved, and the diff buried the real
+    // change in noise a reviewer then has to hand-verify.
+    //
+    // tolerance 0, deliberately: the question here is "is this literally the same
+    // image", not "is this within the gate's noise budget". A pixel that genuinely
+    // moved by 1 should still be written, so the committed baseline is always the
+    // exact bytes the authority most recently rendered.
+    if (exists) {
+      const prev = decodePng(readFileSync(file));
+      const next = decodePng(pngBuffer);
+      const same = comparePixels(prev, next, { tolerance: 0 });
+      if (same.dimsMatch && same.ratio === 0) {
+        return { name, wrote: false, unchanged: true, missing: false, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: IS_AUTHORITY, threshold };
+      }
+    }
     writeFileSync(file, pngBuffer);
     return { name, wrote: true, missing: !exists, dimsMatch: true, ratio: 0, pass: true, rawPass: true, gated: IS_AUTHORITY, threshold };
   }

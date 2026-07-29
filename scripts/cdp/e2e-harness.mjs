@@ -537,7 +537,11 @@ export async function visualCheck(ctx, checks, name, opts = {}) {
   await freezeAnimations(ctx);
   const png = await ctx.screenshot();
   const v = compareToBaseline(name, png, { update: UPDATE_BASELINES, ...opts });
-  if (v.wrote) {
+  if (v.unchanged) {
+    // A reseed that changed nothing should SAY so — otherwise "baseline updated"
+    // on 24 files implies 24 real changes to look at.
+    checks.check(`visual: ${name} — unchanged, not rewritten`, true);
+  } else if (v.wrote) {
     checks.check(`visual: ${name} — baseline ${v.missing ? 'created' : 'updated'} (skipped compare)`, true);
   } else if (!v.dimsMatch) {
     checks.check(`visual: ${name} — dimensions match the baseline`, false);
