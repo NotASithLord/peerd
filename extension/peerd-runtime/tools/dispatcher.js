@@ -18,6 +18,7 @@ import { GATES } from './gates.js';
 import { listHooks } from './hooks/registry.js';
 import { runPreToolUse, runPostToolUse } from './hooks/runner.js';
 import { ugcWriteConfirm } from '../actor/ugc-registry.js';
+import { describeToolActivity, displayOrigin } from '../actor/activity-label.js';
 import {
   decideAction,
   DEFAULT_CONFIRM_ACTIONS,
@@ -115,6 +116,10 @@ const liveTabUrl = async (ctx) => {
  * @typedef {ToolContext & {
  *   hooks?: import('./hooks/runner.js').Hook[],
  *   permission?: { mode?: string, confirmActions?: boolean },
+ *   onToolActivity?: {
+ *     begin: (tabId: number, label: string, origin: string) => unknown,
+ *     end: (tabId: number) => unknown,
+ *   } | null,
  * }} DispatchContext
  */
 
@@ -353,10 +358,33 @@ export const dispatchToolCall = async (call, ctx) => {
   // to its own stream entry; without an id the chunks have no anchor
   // and the renderer drops them.
   const execCtx = { ...ctx, toolUseId: call.id };
+
+  // ---- In-page activity indicator ----------------------------------------
+  // why here and not in each tab tool: this is the one place every page-acting
+  // call passes through, on every path (main turn, bound actor, the offscreen
+  // actor relay whose ctx the SW rebuilds). Wiring it per-tool would mean a tool
+  // added later silently going dark.
+  //
+  // why FIRE-AND-FORGET rather than awaited: `begin` is an executeScript round
+  // trip into a page that may be busy, unresponsive, or refusing injection. The
+  // user asked for the action, not for the decoration — a cosmetic surface must
+  // never delay it, and must never be able to fail it. Both calls swallow.
+  const activity = tool.primitive === 'tab' ? ctx.onToolActivity : null;
+  const activityTabId = typeof args?.tabId === 'number' ? args.tabId : ctx.activeTab?.id;
+  if (activity && typeof activityTabId === 'number') {
+    const phrase = describeToolActivity(call.name, args, { isTabTool: true });
+    if (phrase) {
+      Promise.resolve(activity.begin(activityTabId, phrase, displayOrigin(ctx.activeTab?.origin))).catch(() => {});
+    }
+  }
+
   const start = performance.now();
   try {
     const result = await tool.execute(args, execCtx);
     const durationMs = Math.round(performance.now() - start);
+    if (activity && typeof activityTabId === 'number') {
+      Promise.resolve(activity.end(activityTabId)).catch(() => {});
+    }
     ctx.audit({
       type: 'tool_executed',
       details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, durationMs },
@@ -388,6 +416,12 @@ export const dispatchToolCall = async (call, ctx) => {
     return enriched;
   } catch (e) {
     const durationMs = Math.round(performance.now() - start);
+    // why the failure path settles the indicator too: a tool that throws would
+    // otherwise leave the pill frozen on "Typing…" forever, which reads as a
+    // hang — the exact misreading this whole surface exists to prevent.
+    if (activity && typeof activityTabId === 'number') {
+      Promise.resolve(activity.end(activityTabId)).catch(() => {});
+    }
     const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
     ctx.audit({
       type: 'tool_failed',

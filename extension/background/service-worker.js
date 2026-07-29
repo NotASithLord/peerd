@@ -282,6 +282,7 @@ import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
+import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import {
   createVmRegistry,
@@ -1005,6 +1006,10 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         if (current) {
           const parkedTab = webActorTabBindings.tabFor(actorSessionId);
           if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
+          // The stop hands this tab back to the user (they may want to look at
+          // it), so peerd's group + pill come off with the binding. Without this
+          // a refused tab stays in peerd's group forever, still looking driven.
+          if (typeof parkedTab === 'number') pageActivity.release(parkedTab).catch(() => {});
           // A SITE actor whose very first landing was refused is a dead handle:
           // its owned origin is one the site does not actually serve, and the
           // binding is durable, so retrying the same handle resumed the same
@@ -1139,6 +1144,16 @@ const todoChains = new Map();
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
+// The in-page activity indicator, one per service worker. Holds the set of tabs
+// it has marked so release() only ever undoes its own grouping — a tab the user
+// grouped themselves is none of its business. Best-effort throughout; on Firefox
+// browser.tabGroups is undefined and the group half quietly no-ops.
+const pageActivity = createPageActivityReporter({
+  tabs: browser.tabs,
+  tabGroups: /** @type {any} */ (browser).tabGroups,
+  scripting: browser.scripting,
+});
+
 const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
@@ -1315,6 +1330,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // action confirms. { mode: 'plan'|'act', confirmActions: boolean }.
     permission,
     activeTab,
+    // The in-page activity indicator (background/page-activity.js). The
+    // dispatcher calls begin/end around every `primitive:'tab'` call, so the
+    // tab peerd is driving marks itself in the tab strip and says what it is
+    // doing. Threaded here rather than imported by the dispatcher so the IO
+    // stays injected and every non-SW dispatch path (tests, the offscreen
+    // worker's own ctx) simply has no indicator.
+    onToolActivity: pageActivity,
     // why: the bound actor orchestrator. The actor_create tool calls
     // ctx.spawnActor(...) to decompose a task into a child session
     // that runs the same loop. Wired below; see makeSpawnActor.
@@ -4229,6 +4251,11 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
 // so the two concerns stay independent.
 browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   if (webActorTabBindings.drop(tabId)) persistWebBindings();
+  // The tab is gone, so both halves of the indicator are moot — but the
+  // reporter still holds the id in its marked set, and tab ids are reused
+  // within a session. Release drops it so a LATER tab that inherits the id
+  // isn't mistaken for one peerd already grouped.
+  pageActivity.release(tabId).catch(() => {});
 });
 
 // Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
@@ -4352,6 +4379,13 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   } finally {
     release();
+    // The turn is over, so the pill comes down — leaving it up through the idle
+    // gap would say "peerd is working" while nothing is happening, which is the
+    // same misreading in the opposite direction. The tab GROUP stays: the actor
+    // still owns this tab and will be back on the next turn, and shuffling it in
+    // and out of the strip every exchange would be its own annoyance.
+    const drivenTabId = webActorTabBindings.tabFor(actorSessionId);
+    if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
   }
 };
 
