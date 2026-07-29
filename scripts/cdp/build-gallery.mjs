@@ -1,23 +1,35 @@
 #!/usr/bin/env bun
-// Build the visual gallery — a self-contained HTML page showing every visual
-// state in light AND dark, straight from the committed baselines. Open it from
-// the repo to SEE the whole side-panel surface; it doubles as the human-facing
-// index of what the visual-regression gate covers.
+// Build the visual gallery — a MARKDOWN page showing every visual state in light
+// AND dark, straight from the committed baselines. It doubles as the
+// human-facing index of what the visual-regression gate covers.
 //
 //   bun scripts/cdp/build-gallery.mjs [--platform <name>]
 //
 // Reads scripts/cdp/baselines/<platform>/<state>.<theme>.png (default platform:
-// the CI authority if present, else this machine's). Images are embedded as
-// data URIs so the single committed gallery.html needs no server and no loose
-// asset paths. Regenerate + commit whenever the baselines are reseeded.
+// the CI authority if present, else this machine's).
+//
+// why MARKDOWN and not the self-contained HTML page this used to emit: GitHub
+// serves a committed .html file as SOURCE TEXT, so the one place people actually
+// read the repo was the one place the gallery could not be seen — it needed
+// raw.githack or a local checkout. Markdown renders natively in the repo browser
+// AND from a PR comment link, which is what makes the CI link worth posting.
+//
+// The cost of the swap, stated plainly: images are now RELATIVE PATHS rather than
+// embedded data URIs, so the file only resolves inside the repo. That is the
+// right trade when the audience is someone reading github.com, but it does mean
+// the gallery is no longer one portable artifact you can hand to somebody.
+//
+// Regenerate + commit whenever the baselines are reseeded. CI enforces that with
+// a drift gate (`bun run gallery` + `git diff --exit-code`), so this file can
+// never quietly disagree with the images the gate actually compares against.
 
-import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VISUAL_AUTHORITY, VISUAL_PLATFORM, BASELINES_ROOT } from './visual.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OUT = join(HERE, 'gallery.html');
+const OUT = join(HERE, 'GALLERY.md');
 
 const platformArg = (process.argv.find((a) => a.startsWith('--platform=')) || '').split('=')[1];
 // Prefer the explicit arg, then the committed authority set (what CI gates on),
@@ -30,9 +42,8 @@ if (!platform) {
 }
 const dir = join(BASELINES_ROOT, platform);
 
-// Group <state>.<theme>.png → { state: { light, dark } }, in a curated order so
-// the gallery reads as a tour of the app (gate → home → a turn → richer states)
-// rather than alphabetical.
+// A curated order so the gallery reads as a tour of the app (gate → home → a
+// turn → richer states) rather than alphabetical.
 const ORDER = [
   'initial-screen', 'idle-unlocked', 'completed-turn', 'multi-turn-transcript',
   'busy-thinking', 'mode-plan', 'tool-card-expanded', 'goal-running',
@@ -56,11 +67,6 @@ const LABELS = {
 // States captured at the wide (full-tab) viewport rather than the 400px panel.
 const WIDE = new Set(['home-fulltab', 'options-fulltab']);
 
-const uri = (state, theme) => {
-  const f = join(dir, `${state}.${theme}.png`);
-  return existsSync(f) ? `data:image/png;base64,${readFileSync(f).toString('base64')}` : null;
-};
-
 const present = new Set(readdirSync(dir).filter((f) => f.endsWith('.png')).map((f) => f.replace(/\.(light|dark)\.png$/, '')));
 // why .sort() on the tail: ORDER is the curated tour, but anything NOT in it kept
 // readdirSync order — which is the filesystem's, not a defined one. A macOS dev
@@ -71,92 +77,59 @@ const present = new Set(readdirSync(dir).filter((f) => f.endsWith('.png')).map((
 // deliberately; this only decides where the un-curated ones land.)
 const states = [...ORDER.filter((s) => present.has(s)), ...[...present].filter((s) => !ORDER.includes(s)).sort()];
 
-const card = (state, i) => {
-  const [name, blurb] = LABELS[state] || [state, ''];
-  const wide = WIDE.has(state);
-  const shot = (theme) => {
-    const src = uri(state, theme);
-    return src
-      ? `<figure class="shot shot--${theme}"><figcaption>${theme}</figcaption><img src="${src}" alt="${name} (${theme})" loading="lazy"></figure>`
-      : `<div class="shot shot--missing">no ${theme} capture</div>`;
-  };
-  return `
-    <section class="state${wide ? ' state--wide' : ''}">
-      <header class="state-head">
-        <span class="num">${String(i + 1).padStart(2, '0')}</span>
-        <span class="state-name">${name}</span>
-        <code class="state-id">${state}</code>
-        ${wide ? '<span class="tag-wide">full tab · 1280</span>' : ''}
-        <span class="state-blurb">${blurb}</span>
-      </header>
-      <div class="pair${wide ? ' pair--wide' : ''}">${shot('light')}${shot('dark')}</div>
-    </section>`;
+/** Path as written into the Markdown — relative to GALLERY.md, so it resolves in the repo browser. */
+const shotPath = (state, theme) => {
+  const rel = `baselines/${platform}/${state}.${theme}.png`;
+  return existsSync(join(dir, `${state}.${theme}.png`)) ? rel : null;
 };
 
-const html = `<title>peerd — visual gallery</title>
-<style>
-  :root {
-    --p:#00B7EB; --er:#EF4444; --am:#F59E0B; --gr:#22C55E; --mg:#D946EF;
-    --page:#e9eaec; --card:#ffffff; --ink:#191b1c; --muted:#63696b; --line:#dcdee0;
-    --accent:#0089ac; --tagbg:rgba(0,0,0,.055);
-    --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
-    --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --page:#0B0D0E; --card:#15181A; --ink:#E8E6E1; --muted:#8d9295; --line:#282c2e; --accent:#00B7EB; --tagbg:rgba(255,255,255,.06); }
-  }
-  :root[data-theme="light"] { --page:#e9eaec; --card:#ffffff; --ink:#191b1c; --muted:#63696b; --line:#dcdee0; --accent:#0089ac; --tagbg:rgba(0,0,0,.055); }
-  :root[data-theme="dark"] { --page:#0B0D0E; --card:#15181A; --ink:#E8E6E1; --muted:#8d9295; --line:#282c2e; --accent:#00B7EB; --tagbg:rgba(255,255,255,.06); }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--page); color:var(--ink); font-family:var(--sans); line-height:1.5; -webkit-font-smoothing:antialiased; }
-  .wrap { max-width:1000px; margin:0 auto; padding:40px 28px 80px; }
-  .wordmark { display:flex; align-items:center; margin-bottom:14px; }
-  .wordmark b { display:inline-flex; align-items:center; justify-content:center; width:30px; height:34px; color:#FAFAFA; font:700 20px var(--mono); border-radius:3px; margin-right:3px; }
-  .wordmark b:nth-child(1){ background:var(--p); border-radius:5px 3px 3px 5px; }
-  .wordmark b:nth-child(2){ background:var(--er); } .wordmark b:nth-child(3){ background:var(--am); }
-  .wordmark b:nth-child(4){ background:var(--gr); } .wordmark b:nth-child(5){ background:var(--mg); border-radius:3px 5px 5px 3px; margin-right:0; }
-  .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); }
-  h1 { margin:6px 0 0; font-size:22px; font-weight:600; letter-spacing:-.01em; }
-  .meta { margin-top:12px; font-family:var(--mono); font-size:12px; color:var(--muted); display:flex; gap:16px; flex-wrap:wrap; }
-  .meta b { color:var(--ink); font-weight:500; }
-  .states { display:flex; flex-direction:column; gap:38px; margin-top:34px; }
-  .state-head { display:grid; grid-template-columns:auto auto 1fr; align-items:baseline; gap:10px; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
-  .num { font-family:var(--mono); font-size:14px; font-weight:700; color:var(--muted); }
-  .state-name { font-size:16px; font-weight:600; }
-  .state-id { font-family:var(--mono); font-size:11px; color:var(--muted); background:var(--tagbg); padding:2px 6px; border-radius:4px; }
-  .state-blurb { grid-column:1 / -1; font-size:12.5px; color:var(--muted); }
-  .tag-wide { font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius:4px; padding:2px 6px; }
-  .pair { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-  /* Full-tab captures are 1280 wide — stack them so each reads at full width. */
-  .pair--wide { grid-template-columns:1fr; gap:22px; }
-  .shot { margin:0; display:flex; flex-direction:column; gap:6px; }
-  .shot figcaption { font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
-  .shot img { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:10px; }
-  .shot--light img { background:#fff; } .shot--dark img { background:#0B0D0E; }
-  .shot--missing { display:grid; place-items:center; min-height:200px; border:1px dashed var(--line); border-radius:10px; font-family:var(--mono); font-size:12px; color:var(--muted); }
-  footer { margin-top:48px; padding-top:20px; border-top:1px solid var(--line); font-family:var(--mono); font-size:11.5px; color:var(--muted); }
-  @media (max-width:640px) { .pair { grid-template-columns:1fr; } }
-</style>
-<div class="wrap">
-  <header>
-    <div class="wordmark" aria-label="peerd"><b>p</b><b>e</b><b>e</b><b>r</b><b>d</b></div>
-    <span class="eyebrow">visual gallery</span>
-    <h1>Side panel — every view, light &amp; dark</h1>
-    <div class="meta">
-      <span><b>${states.length}</b> states · <b>${states.length * 2}</b> screens</span>
-      <span>baselines · <b>${platform}</b></span>
-      <span>generated from <code>scripts/cdp/baselines/</code> — the visual-test reference set</span>
-    </div>
-  </header>
-  <div class="states">
-${states.map(card).join('')}
-  </div>
-  <footer>
-    Each screen is the live side panel rendered through the E2E harness at a pinned Chrome build
-    and viewport — the exact images the visual-regression gate compares against. Add a state in
-    scripts/cdp/states.mjs, reseed, then regenerate: bun scripts/cdp/build-gallery.mjs.
-  </footer>
-</div>`;
+// why an HTML <img> rather than `![alt](src)`: GitHub honours the width
+// attribute, and the panel captures are 400×900 — at natural size they dominate
+// the page and light/dark can't sit side by side. Markdown image syntax has no
+// width control, and GitHub renders inline HTML inside tables fine.
+const section = (state, i) => {
+  const [name, blurb] = LABELS[state] || [state, ''];
+  const wide = WIDE.has(state);
+  const width = wide ? 460 : 380;
+  const img = (theme) => {
+    const src = shotPath(state, theme);
+    return src ? `<img src="${src}" alt="${name} (${theme})" width="${width}">` : `_no ${theme} capture_`;
+  };
+  return [
+    `### ${String(i + 1).padStart(2, '0')} · ${name}`,
+    '',
+    `\`${state}\`${wide ? ' · `full tab · 1280`' : ''}${blurb ? ` — ${blurb}` : ''}`,
+    '',
+    '| light | dark |',
+    '| --- | --- |',
+    `| ${img('light')} | ${img('dark')} |`,
+    '',
+  ].join('\n');
+};
 
-writeFileSync(OUT, html);
-console.log(`wrote ${OUT} — ${states.length} states × 2 themes from baselines/${platform} (${(html.length / 1024).toFixed(0)} KB)`);
+const md = [
+  '# peerd — visual gallery',
+  '',
+  `**${states.length} states · ${states.length * 2} screens · baselines \`${platform}\`**`,
+  '',
+  'Every screen below is the live UI rendered through the E2E harness at a pinned',
+  'Chrome build and viewport — the exact images the visual-regression gate compares',
+  'against.',
+  '',
+  '> **Generated file.** Add a state in [`states.mjs`](states.mjs), reseed the',
+  '> baselines (dispatch the workflow with `update_visual_baselines`), then',
+  '> regenerate with `bun run gallery` and commit. CI fails if this drifts from',
+  '> the committed baselines.',
+  '',
+  '---',
+  '',
+  ...states.map(section),
+  '---',
+  '',
+  '<sub>Generated by <code>scripts/cdp/build-gallery.mjs</code> from <code>scripts/cdp/baselines/</code>.',
+  'Do not edit by hand — run <code>bun run gallery</code>.</sub>',
+  '',
+].join('\n');
+
+writeFileSync(OUT, md);
+console.log(`wrote ${OUT} — ${states.length} states × 2 themes from baselines/${platform} (${(md.length / 1024).toFixed(1)} KB)`);
