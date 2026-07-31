@@ -62,7 +62,14 @@ const uri = (state, theme) => {
 };
 
 const present = new Set(readdirSync(dir).filter((f) => f.endsWith('.png')).map((f) => f.replace(/\.(light|dark)\.png$/, '')));
-const states = [...ORDER.filter((s) => present.has(s)), ...[...present].filter((s) => !ORDER.includes(s))];
+// why .sort() on the tail: ORDER is the curated tour, but anything NOT in it kept
+// readdirSync order — which is the filesystem's, not a defined one. A macOS dev
+// and the Linux CI authority enumerate the same directory differently, so the
+// committed gallery drifted against a regeneration whose content was otherwise
+// identical, and the drift gate failed on state ordering alone. Sorting makes the
+// tail deterministic everywhere. (Adding a state to ORDER still places it
+// deliberately; this only decides where the un-curated ones land.)
+const states = [...ORDER.filter((s) => present.has(s)), ...[...present].filter((s) => !ORDER.includes(s)).sort()];
 
 const card = (state, i) => {
   const [name, blurb] = LABELS[state] || [state, ''];
