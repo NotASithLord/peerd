@@ -90,7 +90,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 530 → 534: the security-boundary arc's four pure cores —
 // actor/reply-schema.js (#241), actor/ugc-registry.js (#242),
 // tools/egress-heuristics.js (#243), dom/cdr.js (#244).
-const COVERED_FLOOR = 545;
+// 545/547 → 548: the learned-origins un-learn surface (#262) and the Activity
+// origin-lock rows (#282) land together — both ledgers are kept and the floor
+// is their union, the same shape as the 505/506 → 510 merge above.
+const COVERED_FLOOR = 548;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

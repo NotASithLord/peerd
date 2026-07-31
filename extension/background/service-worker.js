@@ -331,6 +331,7 @@ import { makeSessionRoutes } from './routes/sessions.js';
 import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
 import { makeDenylistRoutes } from './routes/denylist.js';
+import { makeLearnedOriginRoutes } from './routes/learned-origins.js';
 import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
@@ -884,6 +885,14 @@ const learnedOrigins = makeLearnedOrigins({
   // refuse to open that site" deserves a record naming the signal and the moment.
   onLearn: (origin, reason) => {
     auditLog.append({ type: 'origin_learned_sensitive', details: { origin, reason } }).catch(() => {});
+  },
+  // The inverse, from Settings. Recorded per-origin even for a bulk clear: the
+  // learn entries name origins, so the un-learn entries must too or the log
+  // cannot be read as a history of one site's protection.
+  onForget: (origins) => {
+    for (const origin of origins) {
+      auditLog.append({ type: 'origin_unlearned_sensitive', details: { origin } }).catch(() => {});
+    }
   },
   onError: (message, error) => console.warn('[learned-origins]', message, error),
 });
@@ -4818,6 +4827,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
   }),
   ...makeDenylistRoutes({ denylistStore, auditLog }),
+  // The settings view of the LEARNED origin set (+ the only un-learn path).
+  // Settings-surface only: routes are unreachable from the tool dispatcher, so
+  // no agent or page-fed actor can erase its own containment.
+  // why no auditLog: the STORE's onForget hook appends the audit entry, so
+  // passing one here would double-record every removal (meta test: the deps
+  // object must match what the module destructures).
+  ...makeLearnedOriginRoutes({ learnedOrigins, normalizeApiOrigin }),
   // issue 251 — a READ-ONLY inspection route for the e2e verify loop.
   //
   // why a route at all: the two properties that matter most about the lock are

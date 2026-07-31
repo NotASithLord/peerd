@@ -22,12 +22,20 @@
 // reasoning that kept `webNavigation` out. Both signals here are byproducts of
 // data we already hold.
 //
-// WHAT LEARNING CAN AND CANNOT DO HERE. It can only ever mark an origin as MORE
-// protected. There is no path in this file that makes an origin ordinary, and
-// that asymmetry is deliberate: a false positive costs a handoff, a false
-// negative costs a roaming actor loose on a site the user is logged into. The
-// same asymmetry is why nothing here forgets — see `note` for the one real cost
-// of that, stated rather than buried.
+// WHAT LEARNING CAN AND CANNOT DO HERE. No AUTOMATIC path in this file makes an
+// origin ordinary again, and that asymmetry is deliberate: a false positive
+// costs a handoff, a false negative costs a roaming actor loose on a site the
+// user is logged into. That is why the cap refuses to learn rather than evicting
+// (see `note`), and why nothing decays.
+//
+// `forget`/`clear` are the ONE exception, and only because the caller is the
+// user, not a heuristic. The whole store is a guess AT a fact the user knows for
+// certain — whether they have an account somewhere — so a person saying "not
+// this one" is better evidence than the password field we inferred it from, and
+// refusing to accept it does not make anyone safer: it just leaves a wrong guess
+// permanent and invisible. What must never call these is anything acting on
+// page-derived input; the SW exposes them on the settings routes only, which the
+// agent and its actors cannot reach.
 //
 // PURE-ISH: an in-memory Map is the read path (the classifier's check is
 // synchronous), durable storage is injected and write-only-behind. Nothing here
@@ -57,9 +65,12 @@ export const MAX_LEARNED = 500;
  * @param {(origin: string, reason: SensitivityReason) => void} [deps.onLearn]
  *   fired the first time an origin is learned — the SW turns this into an audit
  *   entry, so a user can see WHY a site started being treated as theirs.
+ * @param {(origins: string[]) => void} [deps.onForget]
+ *   fired when the USER un-learns origins. Audited for the same reason as
+ *   onLearn, and louder: this one removes a protection.
  * @param {(message: string, error: unknown) => void} [deps.onError]
  */
-export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
+export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) => {
   /** @type {Map<string, SensitivityReason>} */
   const learned = new Map();
   /** @type {Promise<unknown>} */
@@ -67,6 +78,18 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
   let ready = false;
   /** Did a signal land while the boot read was still in flight? */
   let pendingDuringHydrate = false;
+  /**
+   * Origins the USER un-learned before the boot read landed.
+   *
+   * why tombstones: `hydrate` MERGES (it must — see there), so without this a
+   * forget that raced the boot read would be silently undone by the very next
+   * line of storage, and the user would watch a row they deleted come back.
+   * Consulted only while !ready, then dropped.
+   * @type {Set<string>}
+   */
+  const tombstones = new Set();
+  /** Same race, for `clear`: the boot read must bring back NOTHING, not just the rows we had seen. */
+  let clearedDuringHydrate = false;
 
   const report = (/** @type {string} */ m, /** @type {unknown} */ e) => {
     if (onError) onError(m, e);
@@ -78,8 +101,9 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
    * which means "nothing learned yet" — the fail-open direction the classifier
    * already documents, and the only honest answer when we cannot read our notes.
    */
-  const hydrate = async () => {
-    if (ready) return;
+  /** The single in-flight boot read, so concurrent callers share it. @type {Promise<void> | null} */
+  let hydrating = null;
+  const runHydrate = async () => {
     let all = null;
     try {
       all = await load();
@@ -93,12 +117,17 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
     // durable set the read was about to deliver would be gone. Setting only the
     // keys we do not already hold keeps the live observation (which is fresher)
     // and restores everything else.
-    for (const [origin, reason] of Object.entries(all ?? {})) {
-      if (ALLOWED.has(reason) && !learned.has(origin)) {
+    // `clearedDuringHydrate` / `tombstones`: a user un-learn that raced this read
+    // wins over what the read brings back. Anything else would resurrect a row
+    // the user just deleted.
+    for (const [origin, reason] of Object.entries(clearedDuringHydrate ? {} : (all ?? {}))) {
+      if (ALLOWED.has(reason) && !learned.has(origin) && !tombstones.has(origin)) {
         learned.set(origin, /** @type {SensitivityReason} */ (reason));
       }
     }
     ready = true;
+    tombstones.clear();
+    clearedDuringHydrate = false;
     // If anything was noted DURING the load, its snapshot was written without
     // the restored entries. Re-save once so the durable copy matches the merged
     // set rather than the racing writer's partial view.
@@ -109,6 +138,42 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
         .then(() => save(snapshot))
         .catch((e) => report('post-hydrate save failed', e));
     }
+  };
+
+  /**
+   * Idempotent AND awaitable. The SW kicks this at boot without awaiting (the
+   * classifier's read path is synchronous and fails open, so learning must not
+   * wait on IO) — but a caller that needs the REAL set, rather than "whatever has
+   * loaded so far", has to be able to wait for it. The settings routes do: on a
+   * cold service worker the boot read has not resolved when the first message
+   * arrives, and an un-awaited `clear()` there reported success while forgetting
+   * nothing, because the map it measured was empty. Memoized rather than
+   * re-entrant so a second caller joins the in-flight read instead of starting a
+   * competing one.
+   * @returns {Promise<void>}
+   */
+  const hydrate = () => {
+    if (ready) return Promise.resolve();
+    if (!hydrating) hydrating = runHydrate();
+    return hydrating;
+  };
+
+  /**
+   * Write the current set through, behind the same serialized chain every
+   * mutation shares. A snapshot is taken SYNCHRONOUSLY (before the await) so two
+   * mutations in the same tick cannot save each other's half-state.
+   * @param {string[]} [removed] origins this write un-learned, for the tombstones
+   *   + the audit hook. Empty for `note`.
+   */
+  const persist = (removed = []) => {
+    if (!ready) {
+      pendingDuringHydrate = true;
+      for (const origin of removed) tombstones.add(origin);
+    }
+    const snapshot = Object.fromEntries(learned);
+    chain = chain
+      .then(() => save(snapshot))
+      .catch((e) => report('save failed — this change is heap-only until the next write', e));
   };
 
   /**
@@ -140,12 +205,8 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
       return false;
     }
     learned.set(origin, reason);
-    if (!ready) pendingDuringHydrate = true;
     try { onLearn?.(origin, reason); } catch { /* best-effort */ }
-    const snapshot = Object.fromEntries(learned);
-    chain = chain
-      .then(() => save(snapshot))
-      .catch((e) => report('save failed — this origin is heap-only until the next write', e));
+    persist();
     return true;
   };
 
@@ -157,9 +218,59 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onError }) => {
    */
   const snapshot = () => learned;
 
+  /**
+   * A serializable copy, sorted by origin — what the settings list renders.
+   * why a copy and not `snapshot()`: this one crosses a message boundary, and
+   * handing the live Map to a caller that might hold it would let a UI bug
+   * mutate the classifier's own state.
+   * @returns {Array<{ origin: string, reason: SensitivityReason }>}
+   */
+  const entries = () => [...learned.entries()]
+    .map(([origin, reason]) => ({ origin, reason }))
+    .sort((a, b) => a.origin.localeCompare(b.origin));
+
+  /**
+   * USER-INITIATED un-learn of one origin. See the header for why this exists
+   * when eviction deliberately does not.
+   * @param {string | null | undefined} origin canonical (URL.origin), as `note`
+   * @returns {boolean} whether anything was forgotten
+   */
+  const forget = (origin) => {
+    if (!origin || typeof origin !== 'string') return false;
+    if (!learned.delete(origin)) return false;
+    try { onForget?.([origin]); } catch { /* best-effort */ }
+    persist([origin]);
+    return true;
+  };
+
+  /**
+   * USER-INITIATED un-learn of everything. why offer it at all: the list is
+   * unreadable in bulk once it is long, and "start over" is the only honest
+   * remedy for a profile whose marks the user no longer trusts. Re-learning
+   * begins immediately from ordinary use, so this loses no capability.
+   * @returns {number} how many origins were forgotten
+   */
+  const clear = () => {
+    // BEFORE the empty check, not after. Pre-hydrate the map can be empty while
+    // storage holds rows, so an early return here would leave nothing suppressed
+    // and the boot read would restore everything the user just cleared. Callers
+    // that need an accurate COUNT await hydrate() first (the settings routes do);
+    // this branch is the belt to that braces, and it still empties storage.
+    if (!ready) {
+      clearedDuringHydrate = true;
+      if (learned.size === 0) { persist([]); return 0; }
+    }
+    if (learned.size === 0) return 0;
+    const forgotten = [...learned.keys()];
+    learned.clear();
+    try { onForget?.(forgotten); } catch { /* best-effort */ }
+    persist(forgotten);
+    return forgotten.length;
+  };
+
   /** Test/settings seam. */
   const size = () => learned.size;
   const settled = () => chain.then(() => undefined, () => undefined);
 
-  return Object.freeze({ hydrate, note, snapshot, size, settled });
+  return Object.freeze({ hydrate, note, snapshot, entries, forget, clear, size, settled });
 };
