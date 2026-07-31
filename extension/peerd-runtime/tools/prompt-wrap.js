@@ -88,3 +88,30 @@ export const wrapUntrusted = ({ origin, tool, body, retrievedAt }) => {
     `</untrusted_web_content>`
   );
 };
+
+/**
+ * Harden a page-controlled label (a tab's document.title) for a TRUSTED tool
+ * result - one that is NOT fenced, and so has no envelope telling the model to
+ * treat it as data.
+ *
+ * why it lives here rather than beside one caller: two tool surfaces hand the
+ * orchestrator page-authored titles (actor_list's `name`, inspect's
+ * session_access `title`), and they had drifted - one hardened, one raw
+ * `truncate` - which is exactly how the un-hardened one becomes the way in. One
+ * definition next to the other untrusted-text primitives keeps them from
+ * drifting again.
+ *
+ * The order matters: collapse whitespace (kills the newline vector), disarm
+ * (strips the invisible-Unicode and bidi bytes escaping leaves intact), truncate,
+ * and only then escape - escaping last means the cut can never split an entity
+ * in half.
+ *
+ * @param {string | undefined | null} title
+ * @param {number} [max]
+ * @returns {string}
+ */
+export const safeTitle = (title, max = 60) => {
+  const collapsed = disarmText(String(title ?? '').replace(/\s+/g, ' ').trim());
+  const cut = collapsed.length <= max ? collapsed : `${collapsed.slice(0, max - 1)}…`;
+  return escapeAttr(cut);
+};

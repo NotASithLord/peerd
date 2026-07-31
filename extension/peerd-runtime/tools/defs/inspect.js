@@ -13,6 +13,7 @@
 import { serializeListResult } from './columnar.js';
 import { executeByKind, kindEnum } from './kind-dispatch.js';
 import { originOfUrl } from './dom-helpers.js';
+import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
 import { clamp } from '/shared/util.js';
 // why the DEEP path (not the /peerd-egress/index.js barrel): the barrel pulls
 // the vault/storage surface, which loads browser-polyfill and throws under Bun.
@@ -117,7 +118,10 @@ const inspectSessionAccess = async (_args, ctx) => {
       // originOfUrl (dom-helpers) so the internal-page rendering (chrome://,
       // about:) agrees with actor_list + the origin gates for the same tab.
       origin: originOfUrl(t.url),
-      title: truncate(t.title, 60),
+      // The page CHOSE this string. This result is trusted and unfenced, so it
+      // gets the same hardening actor_list gives the same field - a bare
+      // truncate left newlines, angle brackets and invisible-Unicode intact.
+      title: safeTitle(t.title),
       active: t.active,
       url: redactSensitivePath(t.url),
     }));
@@ -191,13 +195,28 @@ const inspectAuditLog = async (args, ctx) => {
   const all = await idb.getAll('audit_log');
   const filtered = types ? all.filter((e) => types.has(e.type)) : all;
   const sorted = filtered.sort((a, b) => b.when - a.when).slice(0, limit);
+  // FENCE the entries. redactActorError above closes ONE laundering path (an
+  // actor's echoed error text); it is not the only one. Every successful fetch is
+  // audited with its full path (peerd-egress/fetch/web-fetch.js), and that path is
+  // chosen by whoever the actor was talking to — so a prompt-injected actor can
+  // write arbitrary prose into the log by requesting it as a URL, and this facet
+  // hands it to the MAIN agent verbatim. Fencing is the same answer the rest of
+  // the codebase gives for bytes it did not author: wrapUntrusted marks it as data
+  // and runs it through disarmText, which also strips the invisible-Unicode and
+  // bidi vectors that plain JSON escaping leaves intact.
+  //
+  // The counts stay OUTSIDE the fence: they are peerd's own, and a reader (human
+  // or model) should be able to trust "how many entries exist" without weighing it
+  // as untrusted input.
+  const counts = JSON.stringify({ returned: sorted.length, totalInStore: all.length }, null, 2);
+  const entries = JSON.stringify(sorted.map(redactActorError), null, 2);
   return {
     ok: true,
-    content: JSON.stringify({
-      returned: sorted.length,
-      totalInStore: all.length,
-      entries: sorted.map(redactActorError),
-    }, null, 2),
+    content: `${counts}\n${wrapUntrusted({
+      origin: 'audit_log',
+      tool: 'inspect',
+      body: entries,
+    })}`,
   };
 };
 
