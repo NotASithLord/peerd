@@ -13,7 +13,7 @@
 import { serializeListResult } from './columnar.js';
 import { executeByKind, kindEnum } from './kind-dispatch.js';
 import { originOfUrl } from './dom-helpers.js';
-import { wrapUntrusted } from '../prompt-wrap.js';
+import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
 import { clamp } from '/shared/util.js';
 // why the DEEP path (not the /peerd-egress/index.js barrel): the barrel pulls
 // the vault/storage surface, which loads browser-polyfill and throws under Bun.
@@ -118,7 +118,10 @@ const inspectSessionAccess = async (_args, ctx) => {
       // originOfUrl (dom-helpers) so the internal-page rendering (chrome://,
       // about:) agrees with actor_list + the origin gates for the same tab.
       origin: originOfUrl(t.url),
-      title: truncate(t.title, 60),
+      // The page CHOSE this string. This result is trusted and unfenced, so it
+      // gets the same hardening actor_list gives the same field - a bare
+      // truncate left newlines, angle brackets and invisible-Unicode intact.
+      title: safeTitle(t.title),
       active: t.active,
       url: redactSensitivePath(t.url),
     }));
