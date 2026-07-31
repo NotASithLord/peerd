@@ -42,6 +42,15 @@ const EVENT_META = {
   memory_suggestion_dismissed:{ label: 'memory suggestion dismissed', level: 'info' },
   trim_summary_enriched:      { label: 'history summary updated', level: 'info' },
   cheap_call_skipped:         { label: 'background call skipped', level: 'info' },
+  // The origin lock (#255). These are the entries that answer "why did peerd
+  // refuse to open that site" - the exact question the learned set makes a user
+  // ask - and without a label they rendered as a bare `origin_learned_sensitive`
+  // slug with no origin attached. `origin_unlearned_sensitive` is written by the
+  // Settings un-learn (#262); labelling it here is harmless before that lands,
+  // since unknown types already fall back to a raw-label row.
+  origin_learned_sensitive:   { label: 'site treated as yours',  level: 'info' },
+  origin_unlearned_sensitive: { label: 'site no longer yours',   level: 'warn' },
+  actor_origin_stop:          { label: 'web helper stopped',     level: 'warn' },
   // dweb (preview-only) — the high-signal, user-facing events. Internal
   // mesh/gossip diagnostics carry the dweb_ prefix too and fall back to a
   // raw-label/info row (the `?? { label: e.type, level: 'info' }` below).
@@ -75,6 +84,9 @@ const detailLine = (entry) => {
   // way denylist events show their pattern.
   if (d.id) bits.push(d.id);
   if (d.gate) bits.push(`gate=${d.gate}`);
+  // The origin leads: on an origin-lock row it IS the content ("site treated as
+  // yours" says nothing without it), and elsewhere it reads as the subject.
+  if (d.origin) bits.push(d.origin);
   if (d.reason) bits.push(d.reason);
   if (d.provider) bits.push(d.provider);
   if (d.primitive) bits.push(d.primitive);
@@ -93,6 +105,14 @@ const detailLine = (entry) => {
       bits.push(d.tier ? `${d.mode}/${d.tier}` : d.mode);
     }
   }
+  // why: an origin-lock row without its origin is unreadable - "site treated as
+  // yours" tells you nothing about WHICH site, and that is the whole content of
+  // the event. `to` is already narrowed to an origin phrase by the report layer
+  // (origin-lock-report.js originPhrase), so no path leaks in here.
+  if (d.handoffTo) bits.push(`→ ${d.handoffTo}`);
+  else if (d.to) bits.push(`→ ${d.to}`);
+  if (d.action) bits.push(d.action);
+  if (typeof d.count === 'number') bits.push(`${d.count} site(s)`);
   if (typeof d.durationMs === 'number') bits.push(`${d.durationMs}ms`);
   return bits.join(' · ');
 };
