@@ -59,7 +59,15 @@ export const siteClientWriteTool = {
   sideEffect: 'write',
   // IDB write, no web origin touched here — the origin/egress gates have nothing
   // to check. The safety is the confirm round-trip below.
-  origins: () => [],
+  // Declare the target origin so the gates that already exist actually fire on it:
+  // `origins: () => []` told the denylist hook there was nothing to check, so a
+  // site client for a denylisted origin could be read/written while every other
+  // path to that origin was refused. site_client_run already declared it - these
+  // two had drifted.
+  origins: (args) => {
+    const o = normalizeSiteOrigin(args?.origin);
+    return o ? [o] : [];
+  },
 
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
@@ -107,7 +115,9 @@ export const siteClientWriteTool = {
       summary: `${proposal.op} site client ${origin} — persists ${proposal.bodyBytesAfter}B of `
         + `RUNNABLE JS (was ${proposal.bodyBytesBefore}B) + ${proposal.dossier.endpoints.length} endpoint(s) `
         + `(+${proposal.endpointDelta.added}/−${proposal.endpointDelta.removed}). Review the module before allowing.`,
-      origins: [],
+      // Name the origin on the card: a confirm that lists no origin cannot be
+      // audited against one, and this write persists runnable JS for that site.
+      origins: [origin],
       sessionId: ctx.session?.sessionId ?? null,
     });
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
