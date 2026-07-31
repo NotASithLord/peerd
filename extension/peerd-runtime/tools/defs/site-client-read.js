@@ -27,7 +27,15 @@ export const siteClientReadTool = {
     },
   },
   sideEffect: 'read',
-  origins: () => [],
+  // Declare the target origin so the gates that already exist actually fire on it:
+  // `origins: () => []` told the denylist hook there was nothing to check, so a
+  // site client for a denylisted origin could be read/written while every other
+  // path to that origin was refused. site_client_run already declared it - these
+  // two had drifted.
+  origins: (args) => {
+    const o = normalizeSiteOrigin(args?.origin);
+    return o ? [o] : [];
+  },
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
     if (!origin) return { ok: false, error: `bad_origin: ${args?.origin}` };

@@ -46,10 +46,20 @@ export const readWebCacheTool = {
   origins: () => [],
   execute: async (args, ctx) => {
     if (typeof args?.key !== 'string' || !args.key) return { ok: false, error: 'key_required' };
-    const webCache = /** @type {{ get?: (key: string) => Promise<{ key: string, url?: string, format?: string, text: string } | undefined> } | undefined} */ (
+    const webCache = /** @type {{ get?: (key: string) => Promise<{ key: string, url?: string, format?: string, text: string, ownerSessionId?: string | null } | undefined> } | undefined} */ (
       /** @type {any} */ (ctx).webCache);
     if (!webCache?.get) return { ok: false, error: 'web_cache_unavailable' };
     const rec = await webCache.get(args.key).catch(() => undefined);
+    // The key is the ONLY thing standing between a caller and these bytes, and the
+    // store is global to the service worker - so a key that leaked into another
+    // actor's context (a reply, a shared transcript) would hand it a credentialed
+    // fetch from an origin its own lock refuses. Scope the read to whoever spilled
+    // it. why not fail-closed on an UNSTAMPED record: entries written before this
+    // check exist in live profiles and page-out within 40 spills; refusing them
+    // would break paging mid-turn on upgrade for no attacker-reachable gain.
+    if (rec && rec.ownerSessionId != null && rec.ownerSessionId !== (ctx.session?.sessionId ?? null)) {
+      return { ok: false, error: `not_your_cache_entry: ${args.key} was spilled by a different actor. Re-run the read yourself (fetch_url) rather than paging someone else's fetch.` };
+    }
     if (!rec || typeof rec.text !== 'string') {
       return { ok: false, error: `no_such_key: ${args.key} — the cache entry may have been evicted; re-run the read that produced it (fetch_url, or read_page mode:'content' for a tab you've already rendered — don't fetch_url a page you can still see).` };
     }

@@ -603,7 +603,7 @@ let webCacheSeq = 0;
 const webCache = {
   /** Mint a new time-ordered cache key. */
   key: () => `wc-${Date.now().toString(36)}-${(webCacheSeq += 1).toString(36)}`,
-  /** @param {{ key: string, url?: string, format?: string, text: string, storedAt?: number }} record */
+  /** @param {{ key: string, url?: string, format?: string, text: string, storedAt?: number, ownerSessionId?: string | null }} record */
   put: async (record) => {
     await idb.put(WEB_EXTRACT_CACHE_STORE, { storedAt: Date.now(), ...record });
     // Best-effort eviction: keys sort chronologically (time-prefixed), so
