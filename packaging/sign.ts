@@ -57,14 +57,52 @@ const signFirefoxXpi = async (xpiArtifact: string, stagingDir: string): Promise<
   // web-ext is a pinned devDependency now; bun install provides the bin.
   const webExt = join(REPO_ROOT, 'node_modules', '.bin', 'web-ext');
   if (!existsSync(webExt)) throw new Error('node_modules/.bin/web-ext missing — run `bun install`');
-  execFileSync(webExt, [
-    'sign',
-    `--source-dir=${stagingDir}`,
-    `--artifacts-dir=${amoOut}`,
-    '--channel=unlisted',
-    `--api-key=${issuer}`,
-    `--api-secret=${secret}`,
-  ], { stdio: 'inherit', timeout: 15 * 60 * 1000 });
+  // why the retry: web-ext mints a FRESH JWT per poll request, and builds each
+  // one from two INDEPENDENT clock reads — setIssuedAt() then
+  // setExpirationTime('300seconds') in its submit-addon.js. When those two
+  // reads straddle a second boundary the token carries exp - iat = 301, and
+  // AMO rejects anything above its 300s ceiling
+  // (MAX_APIKEY_JWT_AUTH_TOKEN_LIFETIME) with "JWT exp (expiration) is too
+  // long". It is an independent dice roll on every request, so a long approval
+  // poll eventually loses one; that is what cost the v0.3.0 release.
+  //
+  // Retrying is only correct BECAUSE the staging dir survives between
+  // attempts: web-ext parks the upload id in <sourceDir>/.amo-upload-uuid and
+  // reuses it whenever the channel and the xpi's CRC hash still match, so a
+  // second attempt RESUMES the existing upload instead of posting a new one.
+  // (Its own build ignores '**/.*', so that dotfile never perturbs the hash.)
+  // Without this, the first stumble is terminal: the version is already on
+  // AMO, and every retry then dies on "Version X already exists" until someone
+  // burns a version number.
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      execFileSync(webExt, [
+        'sign',
+        `--source-dir=${stagingDir}`,
+        `--artifacts-dir=${amoOut}`,
+        '--channel=unlisted',
+        `--api-key=${issuer}`,
+        `--api-secret=${secret}`,
+      ], { stdio: 'inherit', timeout: 15 * 60 * 1000 });
+      break;
+    } catch (e) {
+      if (attempt === attempts) {
+        throw new Error(
+          `web-ext sign failed after ${attempts} attempts: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}\n`
+          + 'If the log says "Version X already exists", the upload landed on AMO but the\n'
+          + 'download did not: fetch the signed .xpi from the AMO developer hub and attach\n'
+          + 'it to the release, or bump the version. Any other cause is worth a real look\n'
+          + 'before re-running, since the retries above already resumed the same upload.',
+        );
+      }
+      console.warn(
+        `WARN sign: web-ext sign attempt ${attempt}/${attempts} failed; retrying. `
+        + 'The staged dir is intact, so this resumes the existing AMO upload '
+        + '(.amo-upload-uuid) rather than submitting a second one.',
+      );
+    }
+  }
 
   const signed = readdirSync(amoOut).find((f) => f.endsWith('.xpi'));
   if (!signed) throw new Error('web-ext sign reported success but produced no .xpi');

@@ -13,6 +13,7 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { domWalkInjected, createRefRegistry } from '/peerd-runtime/index.js';
+import { hasPasswordFieldInjected } from '/peerd-runtime/dom/walk-injected.js';
 import { snapshotTool, clickTool, typeTool } from '/peerd-runtime/tools/defs/index.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -253,6 +254,111 @@ describe('snapshot → click/type over walk refs — full chain', () => {
       expect(r.ok).toBe(true);
       expect(contentOf(r)).toContain('~ ');                 // Send changed state
       expect(contentOf(r)).toContain('- link "Help"');
+    });
+  });
+});
+
+// The password-field signal (issue 251) — the ONE bit the walk reports to the
+// origin classifier, and the only input to "does the user have an account here"
+// that the DOM can supply. Both entry points are covered because they are
+// separate ES5 copies by necessity (an injected body closes over nothing), so
+// they can drift apart silently.
+//
+// The load-bearing case is `new-password`. Measured on the live web, the Stack
+// Exchange network ships a hidden SIGNUP modal on every page; treating that as
+// "you have an account here" locked a roaming helper out of stackoverflow.com
+// after a single ordinary read, permanently and invisibly.
+describe('dom walk — the password-field signal', () => {
+  /**
+   * A fixture with NO password field of its own, so each test controls exactly
+   * what is in the document. why its own helper: the shared FIXTURE_HTML above
+   * carries `#dw-secret`, which would make every case below trivially true.
+   * @param {string} html
+   * @param {(host: HTMLElement) => Promise<void> | void} fn
+   */
+  const withInputs = async (html, fn) => {
+    const host = document.createElement('div');
+    host.id = 'pw-signal-fixture';
+    host.innerHTML = html;
+    document.body.appendChild(host);
+    try { await fn(host); }
+    finally { host.remove(); }
+  };
+
+  it('no password field anywhere: both entry points say false', async () => {
+    await withInputs('<input type="text" name="q">', () => {
+      expect(domWalkInjected().hasPasswordField).toBe(false);
+      expect(hasPasswordFieldInjected()).toBe(false);
+    });
+  });
+
+  it('a bare password field marks the origin', async () => {
+    await withInputs('<input type="password" name="pass">', () => {
+      expect(domWalkInjected().hasPasswordField).toBe(true);
+      expect(hasPasswordFieldInjected()).toBe(true);
+    });
+  });
+
+  it('autocomplete="current-password" marks the origin — that IS a sign-in box', async () => {
+    await withInputs('<input type="password" autocomplete="current-password">', () => {
+      expect(domWalkInjected().hasPasswordField).toBe(true);
+      expect(hasPasswordFieldInjected()).toBe(true);
+    });
+  });
+
+  it('a HIDDEN sign-in box still marks the origin (the deliberate case)', async () => {
+    // why this test exists: the obvious fix for the signup false positive is to
+    // skip fields that are not rendered, and it would break this — a login modal
+    // behind a button is hidden AND is a real signal. It is the reason the signal
+    // reads the document rather than the walk.
+    await withInputs('<div style="display:none"><input type="password" autocomplete="current-password"></div>', () => {
+      expect(domWalkInjected().hasPasswordField).toBe(true);
+      expect(hasPasswordFieldInjected()).toBe(true);
+    });
+  });
+
+  it('autocomplete="new-password" ALONE does NOT mark the origin — it is a signup form', async () => {
+    // The shipped Stack Exchange shape, reduced: a hidden signup modal whose
+    // password field is for CREATING an account the user does not have.
+    await withInputs(
+      '<form action="/users/signup" style="visibility:hidden">'
+      + '<input type="email" name="email">'
+      + '<input type="password" name="password" autocomplete="new-password">'
+      + '</form>',
+      () => {
+        expect(domWalkInjected().hasPasswordField).toBe(false);
+        expect(hasPasswordFieldInjected()).toBe(false);
+      },
+    );
+  });
+
+  it('an identifier sibling does NOT rescue a signup form', async () => {
+    // why called out: requiring the password field to sit in a form that also has
+    // an identifier input was the mitigation origin-sensitivity.js weighed and did
+    // not take. It would NOT have fixed this — the signup form has an email field.
+    await withInputs(
+      '<form><input type="text" name="email"><input type="password" autocomplete="new-password"></form>',
+      () => {
+        expect(domWalkInjected().hasPasswordField).toBe(false);
+      },
+    );
+  });
+
+  it('a signup form ALONGSIDE a sign-in box still marks the origin', async () => {
+    await withInputs(
+      '<input type="password" autocomplete="new-password">'
+      + '<input type="password" autocomplete="current-password">',
+      () => {
+        expect(domWalkInjected().hasPasswordField).toBe(true);
+        expect(hasPasswordFieldInjected()).toBe(true);
+      },
+    );
+  });
+
+  it('the token is matched case-insensitively', async () => {
+    await withInputs('<input type="password" autocomplete="NEW-PASSWORD">', () => {
+      expect(domWalkInjected().hasPasswordField).toBe(false);
+      expect(hasPasswordFieldInjected()).toBe(false);
     });
   });
 });
