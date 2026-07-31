@@ -10,6 +10,74 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-31
+
+### Added
+- **The security boundary arc.** Web helpers are now origin-segmented:
+  each one is either roaming, browsing freely while holding no
+  authority, or bound to exactly one origin. The landing rule judges
+  where the tab actually ended up, so a redirect cannot smuggle a
+  roaming helper onto a credentialed origin. Sensitive origins are
+  learned rather than only listed: a curated seed, any origin with a
+  stored key, plus two signals from ordinary use, a walked password
+  field and an approved write. Page text is disarmed before it reaches
+  the model, with zero-width runs, bidi overrides, and Unicode tag
+  characters stripped, leaving Persian, Urdu, and Indic text
+  unaffected. Acting as you on a page strangers wrote asks first, even
+  with confirmations off, and an exfiltration tripwire watches both the
+  navigation and the actor's own fetch, including in the zero-tab
+  state. Accepted residuals are written down in the security docs as
+  R14 through R17.
+- **The Claude redesign.** The side panel gets a design-token system, a
+  mono-stroke SVG icon set, the operator-cyan user bubble, a segmented
+  monochrome Plan/Act row, restyled tool, reasoning, todo, and goal
+  cards, and a sealed-surface lock mark on the vault gate. The brand
+  rule holds: the five color carriers plus failure red are still the
+  only color on the surface.
+- **The reviewer can read the files around a diff.** The clean-context
+  review actor may now call `js_read_file`, `app_read_file`, and
+  `app_list_files` through a positively scoped exemption admitted for
+  exactly those three names and no wider, on the Chrome offscreen path
+  as well as the in-service-worker fallback. The grant is a positive
+  allowlist intersected with the read-tagged set, so it fails closed
+  for every future tool, and the reviewer's summary comes back fenced
+  as untrusted.
+- **A web build target.** `bun run package:web` cuts the library form of
+  the packaging core, with `bun run check:web` gating its boundary in
+  preflight and CI. No demo shell, and no `peerd-distributed`, a
+  posture that is pinned by test.
+
+### Changed
+- **Apps can be 50M chars, up from 2M.** The write-layer backstop was
+  the real ceiling on every App path, `sandbox_create`, `.peerd`
+  import, and `dweb_install` alike, even though the dweb loader already
+  accepted 50M across 256 files. A real dwapp ships a WASM runtime plus
+  a 3D engine, and binary assets ride as base64 today, so 2M made the
+  big ones un-importable by any route.
+
+### Fixed
+- **Watch mode no longer steals focus when nobody is watching.** An
+  adversarial audit found four ways the follow could pull your window
+  over. A parked home tab satisfied "a peerd surface is open" forever,
+  so only a side-panel port counts now. The browser could be hauled in
+  front of another application, so a Chrome-focus gate was added. The
+  "already in front" no-op check was dead after any service-worker
+  respawn and never matched in the two-window layout watch mode
+  encourages, so it is now resolved from live tab state per call. And
+  every settings write re-fired the follow, so picking a model hours
+  later teleported you onto a long-dead agent tab. The follow now fires
+  only when the agent tab actually changes.
+- **A single oversized gossip envelope can no longer amplify across the
+  mesh.** The token bucket counts frames, so it was blind to one huge
+  envelope, which every member re-broadcasts untouched and the sync
+  layer then retains and re-serves to every peer on every new link. A
+  32 KiB per-envelope cap is now enforced at every door an envelope can
+  arrive through, our own publish included, and the size check runs
+  before signature verification. Preview channel only.
+- **A Library avatar keeps its color.** The hue hashed the per-install
+  instance id, so an identity changed color on reinstall. It now
+  hashes a durable identity instead.
+
 ## [0.2.8] - 2026-07-19
 
 ### Added
