@@ -358,6 +358,9 @@ export {
   captureSnapshot,
   describeSource,
   domWalkInjected,
+  activityOverlayInjected,
+  clearActivityOverlayInjected,
+  ACTIVITY_OVERLAY_ID,
   pullInHintInjected,
   // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap for site-client capture.
   installFetchTapInjected,

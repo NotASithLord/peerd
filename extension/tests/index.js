@@ -40,6 +40,7 @@ import './unit/peerd-runtime/dispatcher.test.js';
 import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';
 import './unit/peerd-runtime/dom-walk.test.js';
+import './unit/peerd-runtime/activity-overlay.test.js';
 import './unit/peerd-runtime/page-eval.test.js';
 import './unit/peerd-runtime/page-exec.test.js';
 import './unit/peerd-runtime/page-keys.test.js';

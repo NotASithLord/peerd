@@ -93,7 +93,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 545/547 → 548: the learned-origins un-learn surface (#262) and the Activity
 // origin-lock rows (#282) land together — both ledgers are kept and the floor
 // is their union, the same shape as the 505/506 → 510 merge above.
-const COVERED_FLOOR = 548;
+// 548 → 549: the in-page activity indicator's two checked cores (#259) —
+// actor/activity-label.js and background/page-activity.js. The injected
+// overlay body itself is ES5 and exempt, so it does not count.
+const COVERED_FLOOR = 549;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

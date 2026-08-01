@@ -13,6 +13,7 @@ import { EXTENSION_DIR, REPO_ROOT } from './lib.ts';
 export const ES5_INJECTED = new Set<string>([
   'peerd-runtime/dom/walk-injected.js',
   'peerd-runtime/dom/framework-state.js',
+  'peerd-runtime/dom/activity-overlay-injected.js',
   'peerd-runtime/dom/pull-in-hint-injected.js',
   'background/debugger-pool.js',
   'peerd-runtime/tools/defs/watch-changes.js',

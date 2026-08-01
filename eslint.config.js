@@ -349,6 +349,7 @@ export default [
   {
     files: [
       'extension/peerd-runtime/dom/walk-injected.js',
+      'extension/peerd-runtime/dom/activity-overlay-injected.js',
       'extension/peerd-runtime/dom/framework-state.js',
       'extension/peerd-runtime/dom/pull-in-hint-injected.js',
       'extension/peerd-runtime/dom/fetch-tap-injected.js',

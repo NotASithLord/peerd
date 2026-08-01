@@ -19,6 +19,15 @@ export { summarizeMutations } from './action-result.js';
 // (walk-injected.js) — same serializer, same ref contract.
 export { captureSnapshot, describeSource } from './capture.js';
 export { domWalkInjected } from './walk-injected.js';
+
+// The in-page activity indicator injected into the tab the web actor drives.
+// Exported from the module surface because the SW-side shell that schedules it
+// (background/page-activity.js) lives outside peerd-runtime.
+export {
+  activityOverlayInjected,
+  clearActivityOverlayInjected,
+  ACTIVITY_OVERLAY_ID,
+} from './activity-overlay-injected.js';
 // The "pull peerd in" reminder injected into a regular web page peerd opens
 // (informational only — no SW route; docs/PULL-IN-PEERD-WEB-SCOPE.md).
 export { pullInHintInjected } from './pull-in-hint-injected.js';
