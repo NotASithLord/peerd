@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**12 states · 24 screens · baselines `linux-x64`**
+**17 states · 34 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -108,6 +108,46 @@ against.
 | light | dark |
 | --- | --- |
 | <img src="baselines/linux-x64/options-fulltab.light.png" alt="Settings (full tab) (light)" width="460"> | <img src="baselines/linux-x64/options-fulltab.dark.png" alt="Settings (full tab) (dark)" width="460"> |
+
+### 13 · app-tab-failed
+
+`app-tab-failed`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/app-tab-failed.light.png" alt="app-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/app-tab-failed.dark.png" alt="app-tab-failed (dark)" width="380"> |
+
+### 14 · eval-runner
+
+`eval-runner`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/eval-runner.light.png" alt="eval-runner (light)" width="380"> | <img src="baselines/linux-x64/eval-runner.dark.png" alt="eval-runner (dark)" width="380"> |
+
+### 15 · mic-permission
+
+`mic-permission`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/mic-permission.light.png" alt="mic-permission (light)" width="380"> | <img src="baselines/linux-x64/mic-permission.dark.png" alt="mic-permission (dark)" width="380"> |
+
+### 16 · notebook-tab-failed
+
+`notebook-tab-failed`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/notebook-tab-failed.light.png" alt="notebook-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/notebook-tab-failed.dark.png" alt="notebook-tab-failed (dark)" width="380"> |
+
+### 17 · vm-tab-failed
+
+`vm-tab-failed`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/vm-tab-failed.light.png" alt="vm-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/vm-tab-failed.dark.png" alt="vm-tab-failed (dark)" width="380"> |
 
 ---
 
