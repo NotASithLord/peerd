@@ -96,7 +96,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 548 → 549: the in-page activity indicator's two checked cores (#259) —
 // actor/activity-label.js and background/page-activity.js. The injected
 // overlay body itself is ES5 and exempt, so it does not count.
-const COVERED_FLOOR = 549;
+// 549 → 551: ratchet hygiene at the 0.4.0 release, not new annotation work.
+// The 548 and 549 steps were each derived from a conflicting base rather than
+// from a fresh scan, so the floor was left trailing the real count by two.
+// Taking the reported number locks the existing gain in.
+const COVERED_FLOOR = 551;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

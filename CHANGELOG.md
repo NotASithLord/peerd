@@ -10,6 +10,59 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
+### Added
+- **The toolbar button opens the side panel.** Clicking peerd used to
+  take over a whole tab with the full-page home, so the first click of
+  a session landed on a full-tab vault gate instead of next to the page
+  you were already on. It now opens the side panel (the sidebar on
+  Firefox) by default, and Settings, Behavior, Toolbar button switches
+  it back to the full-page home. On Chrome the choice is mirrored into
+  the browser's own action-click behavior, so the panel opens natively
+  before the service worker even wakes and the default can never race a
+  cold start. One consequence of that native path: for panel users the
+  icon becomes a toggle, which is the platform convention. The keyboard
+  shortcut still always toggles the panel, whichever default you pick.
+- **You can see which tab peerd is driving, and what it is doing in
+  it.** The driven page joins a collapsible peerd tab group for as long
+  as peerd owns it, so a glance at the tab strip says which tab is not
+  yours to touch right now. Inside that page, a small corner pill names
+  the current action, shows the origin, and carries a Stop button,
+  softening to "Thinking..." between calls so a slow step never reads
+  as a hang. The pill is invisible to peerd itself, by three
+  independent measures, and its wording comes from a fixed vocabulary:
+  never the text being typed, never page-authored labels or selectors,
+  and only the host of a navigation rather than the full URL.
+- **The orchestrator can wait for a delegation when it needs the
+  answer to speak.** `message_actor` takes an opt-in `await`, which
+  resolves the actor's fenced reply into the tool result so peerd
+  answers in the same turn instead of ending on "I'll report back".
+  Delegation stays async by default, which is still the only shape that
+  fans out. The wait is bounded: past a wall-clock cap it degrades back
+  to the ordinary later-turn reply without cancelling the actor, so a
+  slow delegation is never a lost one. Stop still ends delegated work,
+  and steering mid-wait now keeps the actor running and lands its reply
+  on the turn you steered into, rather than discarding the work.
+
+### Changed
+- **The visual gallery is Markdown and rides every pull request.**
+  GitHub serves a committed `.html` file as source text, so the gallery
+  was unreadable in the one place people actually browse the repo. It
+  is now `scripts/cdp/GALLERY.md`, which renders natively, and the
+  visual job posts a single sticky comment on every PR linking it with
+  a drift verdict, rather than speaking up only when the render broke.
+  Contributor-facing only; nothing in the extension changes.
+
+### Fixed
+- The in-page activity pill is taken down at the end of an actor turn
+  on Firefox too, where turns run in the service worker rather than an
+  offscreen worker. It previously outlived the turn there, parked on
+  "Thinking..." indefinitely.
+- peerd's system prompt described delegation as always asynchronous,
+  which contradicted the new opt-in wait on the same decision and left
+  the model with two conflicting statements of the delegation contract.
+
 ## [0.3.0] - 2026-07-31
 
 ### Added
