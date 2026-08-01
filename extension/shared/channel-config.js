@@ -32,6 +32,7 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   openrouterModels: [],
   advancedAutomationEnabled: true,
   watchAgentTab: false,
+  frontDoorView: "panel",
   runnerModel: "",
   prewalkEnabled: false,
   enginePrewalkEnabled: false,

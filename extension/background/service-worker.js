@@ -2386,10 +2386,13 @@ const closeSidePanel = async () => {
 // calls noteAgentTab/scheduleWebTabHint/broadcastAgentTab/showWebTabHint from
 // its tool-context + port wiring, and setTabAnchor from the actor-turn start.
 const {
-  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab,
+  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab, syncFrontDoorBehavior,
 } = makeTabAffordances({
   browser, uiPorts, denylistStore, closeSidePanel,
   isWatchOn: () => settingsStore.get().watchAgentTab === true,
+  // Sync read (no await) — the front-door decision must run inside the
+  // click gesture or sidePanel.open() drops its activation.
+  getFrontDoorView: () => (settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel'),
 });
 
 // Confirmation coordinator. The dispatcher's async confirmation step
@@ -3780,6 +3783,10 @@ const onSettingsChanged = (/** @type {any} */ patch) => {
   // long-dead agent tab. normalizeSettingsPatch only emits keys the caller actually
   // sent, so the key's PRESENCE here is exactly "the user just touched the toggle".
   if (patch?.watchAgentTab === true) focusAgentTab();
+  // Front door: re-mirror the choice into Chrome's native action-click
+  // behavior the moment it changes (key PRESENCE = the user just touched it —
+  // normalizeSettingsPatch only emits keys the caller actually sent).
+  if (patch?.frontDoorView) syncFrontDoorBehavior();
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
 // clear the SW-side membership flag for a clean re-join on the next start.
@@ -4917,11 +4924,16 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...(/** @type {any} */ (siteClientRoutes)),
 })));
 
-// The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel
-// in) lives in background/tab-affordances.js alongside the agent-tab card and
-// web-tab hint — it owns the sync-gesture pull-in and its listeners.
+// The toolbar icon + Alt+Shift+P front door (open the panel or home, per the
+// frontDoorView setting) lives in background/tab-affordances.js alongside the
+// agent-tab card and web-tab hint — it owns the sync-gesture pull-in and its
+// listeners.
 loadUserEndpoints();
-loadSettings();
+// why the chained mirror: it must apply AFTER hydration (the store serves
+// channel defaults until load() lands), and Chrome persists the behavior
+// browser-side, so by the time a click wakes a future cold SW the native
+// open already reflects the user's real choice.
+loadSettings().then(() => syncFrontDoorBehavior()).catch(() => {});
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears
