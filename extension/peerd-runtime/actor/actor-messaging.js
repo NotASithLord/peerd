@@ -11,9 +11,13 @@
 // synthetic wake, and a per-sender runaway guard. Functional core / imperative shell:
 // every IO surface is injected, so the spawn → run → reply flow is unit-testable.
 //
-// ONE reply shape for EVERY kind (web included). The orchestrator NEVER blocks: it
-// hands a task to an actor and gets woken with the reply on a later turn via
-// deliver()/runWhenIdle — the actor model, uniformly. The actor's own turn slot
+// ONE reply shape for EVERY kind (web included). The orchestrator does not block BY
+// DEFAULT: it hands a task to an actor and gets woken with the reply on a later turn
+// via deliver()/runWhenIdle — the actor model, uniformly. The one exception is the
+// opt-in `await:true` (message_actor), which resolves the fenced reply into the tool
+// result so the orchestrator can answer in the SAME turn instead of deferring; it is
+// bounded by a wall-clock cap that degrades back to the later-turn wake, so even the
+// blocking shape cannot park a turn indefinitely or drop a reply. The actor's own turn slot
 // serializes its turns (one actor per tab/instance); deliver() wrapUntrusted-
 // fences the reply, so a web actor's page-derived reply is fenced like any other
 // untrusted content. (Web used to be a sync-await special case — collapsed into
@@ -60,6 +64,29 @@ import { ASYNC_ACTOR_ACTORS, mayMessageActor, messageProvenance } from './delega
 // Pure policy (no IO), imported directly like the other pure helpers here; the
 // FLAG that turns it on is injected (schemaValidatedReplies), SW-side.
 import { validateActorReply, renderValidatedReply, REPLY_VALIDATION_FAILED } from './reply-schema.js';
+import { ABORT_STEER } from '../loop/turn-slots.js';
+
+/**
+ * The reason a turn's abort signal carries, when it carries one.
+ *
+ * why a helper rather than reading `signal.reason` inline: awaitSignal is
+ * duck-typed — the real one is an AbortSignal, but spawn.js and the tests pass
+ * stubs that implement only `aborted` + the listener pair, where the property is
+ * absent entirely.
+ *
+ * Only an explicit ABORT_STEER opts into the degrade path. Everything else falls
+ * through to cancel: an untagged `abort()` (whose reason is the platform's own
+ * AbortError), ABORT_STOP, and a stub's undefined alike. That direction is the
+ * safe one — cancelling is what every abort meant before reasons existed, so a
+ * caller this file has not been taught about keeps the old semantics rather than
+ * silently leaving an actor running that the user meant to kill.
+ *
+ * @param {{ reason?: unknown } | null | undefined} signal
+ * @returns {unknown}
+ */
+const abortReasonOf = (signal) => {
+  try { return signal?.reason; } catch { return undefined; }
+};
 
 // The actor kinds whose reply is UNTRUSTED web content and so must cross the
 // deterministic schema boundary when it's enabled. Engine sandboxes (vm/notebook/
@@ -465,7 +492,7 @@ export const makeActorMessaging = (deps) => {
   };
 
   /**
-   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitCapMs?: number, degradeToAsync?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
+   * @param {{ to?: string, message?: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitCapMs?: number, degradeToAsync?: boolean, via?: string, bareReply?: boolean, awaitSignal?: { aborted: boolean, reason?: unknown, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void } }} req
    *   awaitReply — the ACTOR reply mode (PR #134): resolve the fenced reply
    *   into this call's result instead of a later-turn wake. Set by the
    *   message_actor tool for a `kind:'spawned'` sender.
@@ -597,8 +624,10 @@ export const makeActorMessaging = (deps) => {
     trackIntent(rootSessionId, intentK);
     appendAudit({ type: 'actor_message', details: { to: instanceId, kind, senderSessionId, rootSessionId, lineagePath: provenance.lineagePath, ...(typeof via === 'string' ? { via } : {}) } }).catch(() => {});
 
-    // ASYNC for EVERY long-lived sender — web included. The orchestrator never
-    // blocks: it hands a task to the actor and gets woken with the reply on a
+    // ASYNC for EVERY long-lived sender — web included — unless the caller opted
+    // into `await:true`, which takes the awaitReply branch below instead. On THIS
+    // path the orchestrator does not block: it hands a task
+    // to the actor and gets woken with the reply on a
     // later turn (the actor model, uniformly). Persist the correlation to the
     // durable mailbox FIRST (await the write so the record is on disk before any
     // actor side effect begins — closing the accept→persist window an SW death
@@ -656,6 +685,20 @@ export const makeActorMessaging = (deps) => {
         let capTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
         const onAbort = () => {
           if (done) return;                                 // stale abort after the reply → no-op
+          // A STEER is not a cancel. The turn slot aborts on Stop AND on a steer
+          // (a second message into the same chat supersedes the streaming turn),
+          // and both arrive on this one signal. Stop means "end the delegated
+          // work" — #134's semantics, kept. A steer means the user ADDED a
+          // message; they did not ask for the web actor mid-fetch to be thrown
+          // away, and before await:true existed that reply survived a steer and
+          // landed on a later turn. So a steer takes the SAME exit as the
+          // wall-clock cap: don't stop the actor, mark the correlation degraded,
+          // and let the reply wake the sender's next turn — which, on a steer,
+          // is the very turn the user just started. Only for a sender that HAS
+          // a later turn (degradeToAsync, i.e. the orchestrator opt-in); an
+          // ephemeral child has none, so degrading it would drop the reply and
+          // it keeps the cancel.
+          if (degradeToAsync === true && abortReasonOf(awaitSignal) === ABORT_STEER) { onCap(); return; }
           stopActorForAwait(correlationId, actor.actorSessionId);
           const notice = 'the request was aborted (timeout or cancel) before the actor replied.';
           finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, true), failed: true });
