@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeActorMessaging } from '../../extension/peerd-runtime/actor/actor-messaging.js';
+import { ABORT_STEER, ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
 
 // A flush for the fire-and-forget runWhenIdle → runActorTurn → deliver chain.
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -131,6 +132,214 @@ describe('message_actor — happy path + correlation', () => {
     await tick();
     // true threads through; an absent flag normalizes to false (never undefined).
     expect(seen).toEqual([true, false]);
+  });
+});
+
+describe('message_actor — awaitReply (in-band reply mode)', () => {
+  test('await resolves the fenced reply INTO the tool result — no later-turn wake', async () => {
+    const { messageActor, reentries, turnsRun } = harness();
+    // The orchestrator opts into an in-band await for a single primary task.
+    const r = await messageActor({
+      to: 'app-1', message: 'get the price', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    // The actor turn still ran on the actor session, exactly like the async path.
+    expect(turnsRun).toEqual([{ actorSessionId: 'res-1', message: 'get the price' }]);
+    // The substance came back HERE, fenced — the caller answers with it directly,
+    // instead of ending its turn on an "I'll report back" deferral.
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('<u origin="app-1">built the thing</u>');
+    // …and it did NOT re-enter the sender on a later turn (that's the async path).
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('await unwinds on the abort signal (Stop / turn timeout) with a failure result', async () => {
+    // A hung actor turn that never replies — the exact "parked forever" case the
+    // race exists to prevent. The already-aborted signal must resolve the await now.
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { fn(); }, advanceQueue: () => {}, stop: () => true },
+    });
+    const ac = new AbortController();
+    ac.abort();
+    const r = await messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true, awaitSignal: ac.signal,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('aborted');
+    // No later-turn wake fires for an awaited call, even on abort.
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('await unwinds on a LIVE mid-flight abort (signal fires WHILE the turn runs) and stops the delegate', async () => {
+    // The already-aborted case above tests the queued-before-start path; this
+    // pins the RUNNING path — the abort arrives after the turn is in flight, so
+    // stopActorForAwait must slot-cancel the actor this await is waiting on.
+    let stopArgs: unknown[] | null = null;
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),                 // hangs — only the abort can settle it
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { fn(); },
+        advanceQueue: () => {},
+        stop: (...a: unknown[]) => { stopArgs = a; return true; },
+      },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true, awaitSignal: ac.signal,
+    });
+    await tick();                                                // let the turn queue + start running
+    ac.abort();                                                  // fire the abort MID-FLIGHT
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('aborted');
+    expect(stopArgs).not.toBeNull();                            // the running delegate was slot-cancelled
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('the orchestrator await DEGRADES TO ASYNC at the wall-clock cap — reply re-routes to a later turn, not dropped', async () => {
+    // The orchestrator's turn signal has no wall-clock; the cap is that bound.
+    // At the cap the actor is NOT cancelled — the await returns a truthful "still
+    // working" note and the eventual reply must land as a later-turn wake.
+    let resolveTurn: () => void = () => {};
+    const turnDone = new Promise<void>((res) => { resolveTurn = res; });
+    const { messageActor, reentries } = harness({
+      runActorTurn: async () => { await turnDone; return { result: 'the late price is $42' }; },
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { fn(); }, advanceQueue: () => {}, stop: () => true },
+    });
+    const r = await messageActor({
+      to: 'app-1', message: 'find the price', senderSessionId: 'chat-1',
+      awaitReply: true, degradeToAsync: true, awaitCapMs: 5,
+    });
+    // capped out: a NON-failed "still working" note comes back NOW
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('still working');
+    // the actor was not cancelled, so nothing has re-entered yet
+    expect(reentries.length).toBe(0);
+    // now the actor finishes — its reply must arrive as a later-turn wake (deliver), never dropped
+    resolveTurn();
+    await tick(); await tick();
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].userText).toContain('<u origin="app-1">the late price is $42</u>');
+  });
+
+  test('the cap is NOT armed without degradeToAsync (ephemeral path keeps abort-only semantics)', async () => {
+    // An ephemeral child passes awaitCapMs-less, degradeToAsync-less: even if a
+    // cap value leaked in, it must not degrade — a child has no later turn, so
+    // degrading would DROP its reply. Proof: a hung turn resolves ONLY via abort
+    // (failed), never via a cap-degrade "still working" (which would be ok:true).
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),
+      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { fn(); }, advanceQueue: () => {}, stop: () => true },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1',
+      awaitReply: true, awaitSignal: ac.signal, awaitCapMs: 5,       // cap value present…
+      // …but degradeToAsync omitted → the cap must stay disarmed.
+    });
+    await new Promise((r) => setTimeout(r, 20));                     // outlast the 5ms cap
+    ac.abort();
+    const r = await p;
+    expect(r.ok).toBe(false);                                        // resolved by ABORT, not a cap-degrade
+    expect(r.error).toContain('aborted');
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('a STEER mid-await degrades instead of cancelling — the actor keeps working and its reply lands on the later turn', async () => {
+    // The turn slot aborts on Stop AND on a steer (a second message into the same
+    // chat supersedes the streaming turn), on ONE signal. Before the abort carried
+    // a reason they were indistinguishable, so a user typing a follow-up while the
+    // orchestrator was parked on await:true destroyed the web actor's in-flight
+    // work with no notice to anyone — where pre-await that reply survived the steer
+    // and landed later. A steer must take the cap's exit, not the cancel's.
+    let stopArgs: unknown[] | null = null;
+    let resolveTurn: () => void = () => {};
+    const turnDone = new Promise<void>((res) => { resolveTurn = res; });
+    const { messageActor, reentries } = harness({
+      runActorTurn: async () => { await turnDone; return { result: 'the late price is $42' }; },
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { fn(); },
+        advanceQueue: () => {},
+        stop: (...a: unknown[]) => { stopArgs = a; return true; },
+      },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'find the price', senderSessionId: 'chat-1',
+      awaitReply: true, degradeToAsync: true, awaitSignal: ac.signal,
+    });
+    await tick();                                                    // turn in flight
+    ac.abort(ABORT_STEER);                                           // the user typed a follow-up
+    const r = await p;
+    // The await unblocks NOW, non-failed, with the same note the cap gives.
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('still working');
+    // …and critically, the delegate was NOT slot-cancelled.
+    expect(stopArgs).toBeNull();
+    expect(reentries.length).toBe(0);
+    // Its reply then arrives as the ordinary later-turn wake — never dropped.
+    resolveTurn();
+    await tick(); await tick();
+    expect(reentries.length).toBe(1);
+    expect(reentries[0].userText).toContain('<u origin="app-1">the late price is $42</u>');
+  });
+
+  test('a STOP mid-await still cancels the delegate (a steer must not have widened Stop)', async () => {
+    // The other half of the reason gate, revert-proofed: routing EVERY abort to
+    // the degrade path would silently break #134's Stop semantics ("Stop ends
+    // delegated work"), and the steer test above would still pass.
+    let stopArgs: unknown[] | null = null;
+    const { messageActor, reentries } = harness({
+      runActorTurn: () => new Promise(() => {}),
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { fn(); },
+        advanceQueue: () => {},
+        stop: (...a: unknown[]) => { stopArgs = a; return true; },
+      },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'find the price', senderSessionId: 'chat-1',
+      awaitReply: true, degradeToAsync: true, awaitSignal: ac.signal,
+    });
+    await tick();
+    ac.abort(ABORT_STOP);
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('aborted');
+    expect(stopArgs).not.toBeNull();                                 // Stop still slot-cancels
+    await tick();
+    expect(reentries.length).toBe(0);
+  });
+
+  test('an UNTAGGED abort keeps the cancel path (fail-safe for stub signals)', async () => {
+    // awaitSignal is duck-typed and several callers pass stubs with no `reason`.
+    // A missing reason must read as "cancel" — the meaning every abort had before
+    // reasons existed — rather than silently degrading into a blocked-forever actor.
+    let stopArgs: unknown[] | null = null;
+    const { messageActor } = harness({
+      runActorTurn: () => new Promise(() => {}),
+      turnSlots: {
+        runWhenIdle: (_sid: string, fn: () => void) => { fn(); },
+        advanceQueue: () => {},
+        stop: (...a: unknown[]) => { stopArgs = a; return true; },
+      },
+    });
+    const ac = new AbortController();
+    const p = messageActor({
+      to: 'app-1', message: 'x', senderSessionId: 'chat-1',
+      awaitReply: true, degradeToAsync: true, awaitSignal: ac.signal,
+    });
+    await tick();
+    ac.abort();                                                      // no reason
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('aborted');
+    expect(stopArgs).not.toBeNull();
   });
 });
 

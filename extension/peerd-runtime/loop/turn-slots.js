@@ -28,6 +28,18 @@
 // service worker is the imperative shell that binds these slots to the
 // agent loop, the side-panel port, and auto-memory's busy gate.
 
+// WHY the abort carries a REASON. Both paths below abort the same controller, but
+// they mean opposite things to work the turn had delegated: Stop means "end it", a
+// steer means "also do this" — the user added a message, they did not ask for the
+// web actor mid-fetch to be thrown away. A bare abort() is indistinguishable at the
+// listener, so an awaited delegation had to treat every abort as a cancel and
+// destroyed in-flight actor work on a steer. These reasons let a listener tell them
+// apart (actor-messaging.js routes a steer through degrade-to-async instead of
+// cancelling). Plain strings, compared by identity-free equality: the signal crosses
+// no worker boundary, but a string survives one and an Error subclass would not.
+export const ABORT_STOP = 'peerd:stop';
+export const ABORT_STEER = 'peerd:steer';
+
 /**
  * @returns {{
  *   claim: (sessionId: string) => { controller: AbortController, release: () => void },
@@ -95,7 +107,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
       // turn already streaming there. onAbort decline-settles the superseded
       // turn's pending confirm (if any) so it doesn't run the cancelled action.
       const superseded = slots.get(sessionId);
-      if (superseded) { superseded.abort(); onAbort?.(sessionId); }
+      if (superseded) { superseded.abort(ABORT_STEER); onAbort?.(sessionId); }
       const controller = new AbortController();
       slots.set(sessionId, controller);
       return {
@@ -114,7 +126,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     stop(sessionId) {
       const controller = slots.get(sessionId);
       if (!controller) return false;
-      controller.abort();
+      controller.abort(ABORT_STOP);
       onAbort?.(sessionId); // decline any confirm this turn is parked on
       // A well-behaved turn observes the abort and release()s within ms; a
       // hung one never does — reap it so Stop actually frees the session.
