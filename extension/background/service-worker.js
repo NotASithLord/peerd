@@ -4551,7 +4551,18 @@ const actorMessaging = makeActorMessaging({
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
-    await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
+    try {
+      await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
+    } finally {
+      // why here too: runActorTurnOffscreen takes the pill down in its own
+      // finally, but this is the IN-SW fallback the offscreen path returns null
+      // for (Firefox has no offscreen API). Without it the pill outlives the
+      // turn on Firefox and sits on "Thinking…" forever — peerd saying it is
+      // working while nothing is happening, the exact misreading the indicator
+      // exists to prevent. The GROUP still stays; only the pill comes down.
+      const drivenTabId = webActorTabBindings.tabFor(actorSessionId);
+      if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
+    }
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
     return withLandingStop(fresh
