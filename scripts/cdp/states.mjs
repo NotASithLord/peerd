@@ -18,7 +18,7 @@
 // screenshot to look at and a structured pass/fail with the "why".
 
 import { createServer } from 'node:http';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openWidePage, PASSPHRASE } from './e2e-harness.mjs';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, openWidePage, sleep, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -917,7 +917,7 @@ export const STATES = [
         // presence and position are part of what the baseline should guard, its
         // value is not. (The harness's UTC timezone override does not help: the
         // problem is the time advancing, not the zone.)
-        await evalIn(page, `(() => {
+        const pinClock = () => evalIn(page, `(() => {
           for (const el of document.querySelectorAll('#boot-log, #boot-log *')) {
             for (const n of el.childNodes) {
               if (n.nodeType === 3) n.textContent = n.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00');
@@ -925,7 +925,34 @@ export const STATES = [
           }
           return true;
         })()`);
-        await rec.visualPage('vm-tab-failed', page);
+
+        // TWO different nondeterminisms live in this one card, and pinning only
+        // ever addressed the first:
+        //
+        //   the VALUE of each timestamp — pinClock above; and
+        //   HOW MANY lines exist when we shoot. `ready` fires on the failed
+        //   boot-card, but the boot keeps appending for a little longer, so the
+        //   capture could catch N or N+1 lines depending on runner speed.
+        //
+        // The second is what actually made this state flap on main (a dark-only
+        // drift, because dark is the SECOND capture — a line landing between the
+        // two shots reached dark alone, carrying an unpinned clock with it).
+        // So: wait for the log to stop growing before shooting anything, and
+        // re-pin before EACH theme via beforeShot, which closes the window
+        // between the two captures rather than just the one before the first.
+        // waitFor returns null on budget exhaustion rather than throwing. That is
+        // the right shape here: a log that never settles should still produce a
+        // shot (and a visible diff) rather than failing the whole state with a
+        // timeout that says nothing about the render.
+        const logLength = () => evalIn(page, `document.getElementById('boot-log')?.textContent?.length ?? 0`);
+        await waitFor(async () => {
+          const a = await logLength();
+          await sleep(120);
+          return a === await logLength();
+        }, { budgetMs: 5000 });
+
+        await pinClock();
+        await rec.visualPage('vm-tab-failed', page, { beforeShot: pinClock });
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
