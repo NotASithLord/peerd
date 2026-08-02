@@ -59,10 +59,10 @@ export const makeDenylistNetGuard = ({ dnr, getPatterns, getTabIds, buildUpdate,
     // why fingerprint rather than always call: tab lifecycle churn (open, close,
     // re-bind, re-bind again) fires many syncs that describe the SAME rule, and
     // updateSessionRules is a real IPC round trip. Cleared on failure so a retry
-    // is never skipped.
-    const fingerprint = rule
-      ? `${rule.condition.requestDomains.join(',')}|${rule.condition.tabIds.join(',')}`
-      : '';
+    // is never skipped. Over the WHOLE addRules array, not just the block rule —
+    // the IdP allow rule rides alongside it, and a fingerprint blind to a rule is
+    // a fingerprint that can skip a write that rule needed.
+    const fingerprint = JSON.stringify(update.addRules);
     if (applied === fingerprint) return;
     try {
       await dnr.updateSessionRules(update);

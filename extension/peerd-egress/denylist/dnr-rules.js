@@ -44,6 +44,31 @@ import { normalizeDenylistPattern } from './denylist.js';
 export const DENYLIST_RULE_ID = 1;
 
 /**
+ * The companion ALLOW rule's id, at a higher priority than the block — the
+ * sign-in corridor.
+ *
+ * why it exists: the origin lock (peerd-runtime/actor/landing-rule.js) lets a
+ * BOUND actor's tab leave its owned origin exactly once, for an identity
+ * provider, on a budgeted excursion. Several of those providers — okta.com,
+ * auth0.com, duosecurity.com, appleid.apple.com — are also denylist entries, and
+ * that overlap is deliberate on both sides: the denylist stops the AGENT from
+ * driving a login box, while the excursion rule keeps the tab usable so the
+ * SIGN-IN can still happen and the actor can resume when the tab comes home.
+ *
+ * A blanket network block would collapse that distinction — the login page would
+ * not render at all, so not even the person at the keyboard could complete it.
+ * The allow rule keeps the corridor open at the network layer ONLY. It grants
+ * the agent nothing: `isDenylistedTab` still refuses every DOM tool on such a
+ * tab and the origin gate still refuses a navigate to it, so what the agent may
+ * DO on an IdP page is unchanged — only whether the bytes arrive for the human.
+ *
+ * The exempt set is INJECTED (peerd-runtime owns the IdP registry, and egress
+ * sits below runtime — it must not reach up for it). Widening that registry is a
+ * security decision that belongs in one place, and this file is not it.
+ */
+export const DENYLIST_ALLOW_RULE_ID = 2;
+
+/**
  * Resource types the block rule covers. Enumerated EXPLICITLY rather than left
  * to the default: implementations differ on whether an omitted `resourceTypes`
  * includes `main_frame`, and main_frame is the one that matters most here. The
@@ -124,20 +149,60 @@ export const buildDenylistBlockRule = ({ domains, tabIds, ruleId = DENYLIST_RULE
 };
 
 /**
+ * Build the ALLOW rule that keeps the sign-in corridor open (see
+ * DENYLIST_ALLOW_RULE_ID). Same tab scoping as the block rule, one priority
+ * step above it, so it wins wherever the two overlap.
+ *
+ * Only ever emitted alongside a block rule — an allow rule on its own would be
+ * a no-op, and emitting one anyway would put a rule in front of a user who has
+ * no block in effect.
+ *
+ * @param {Object} input
+ * @param {readonly string[]} input.domains  exempt domains (the IdP registry)
+ * @param {readonly number[]} input.tabIds
+ * @param {number} [input.ruleId]
+ * @returns {object | null}
+ */
+export const buildIdpAllowRule = ({ domains, tabIds, ruleId = DENYLIST_ALLOW_RULE_ID }) => {
+  const tabs = [...new Set((tabIds ?? []).filter((t) => Number.isInteger(t) && t >= 0))];
+  const exempt = [...new Set((domains ?? []).filter((d) => typeof d === 'string' && d.includes('.')))].sort();
+  if (!exempt.length || !tabs.length) return null;
+  return {
+    id: ruleId,
+    priority: 2,
+    action: { type: 'allow' },
+    condition: {
+      requestDomains: exempt,
+      tabIds: tabs,
+      resourceTypes: [...DENYLIST_RESOURCE_TYPES],
+    },
+  };
+};
+
+/**
  * The full `updateSessionRules` argument for the current state. Always removes
- * the rule id first so the call is idempotent and self-healing: whatever the
+ * both rule ids first so the call is idempotent and self-healing: whatever the
  * previous state was (stale tab list, stale domains, nothing at all), applying
- * this leaves exactly one correct rule, or none.
+ * this leaves a correct pair of rules, or none.
  *
  * @param {Object} input
  * @param {readonly string[]} input.patterns  the live denylist
  * @param {readonly number[]} input.tabIds
+ * @param {readonly string[]} [input.exemptDomains]  IdP domains that stay
+ *   reachable inside a driven tab — injected, see DENYLIST_ALLOW_RULE_ID.
  * @param {number} [input.ruleId]
+ * @param {number} [input.allowRuleId]
  * @returns {{ removeRuleIds: number[], addRules: object[] }}
  */
-export const denylistSessionRuleUpdate = ({ patterns, tabIds, ruleId = DENYLIST_RULE_ID }) => {
-  const rule = buildDenylistBlockRule({
+export const denylistSessionRuleUpdate = ({
+  patterns, tabIds, exemptDomains = [], ruleId = DENYLIST_RULE_ID, allowRuleId = DENYLIST_ALLOW_RULE_ID,
+}) => {
+  const block = buildDenylistBlockRule({
     domains: denylistBlockDomains(patterns ?? []), tabIds, ruleId,
   });
-  return { removeRuleIds: [ruleId], addRules: rule ? [rule] : [] };
+  const allow = block ? buildIdpAllowRule({ domains: exemptDomains, tabIds, ruleId: allowRuleId }) : null;
+  return {
+    removeRuleIds: [ruleId, allowRuleId],
+    addRules: [block, allow].filter((rule) => rule !== null),
+  };
 };

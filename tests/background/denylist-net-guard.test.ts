@@ -51,7 +51,7 @@ describe('denylist-net-guard — rule sync', () => {
     const { guard } = guardOver(dnr, ['chase.com'], []);
     await guard.sync();
     expect(dnr.calls[0].addRules).toEqual([]);
-    expect(dnr.calls[0].removeRuleIds).toHaveLength(1);
+    expect(dnr.calls[0].removeRuleIds).toHaveLength(2);   // block + the IdP allow rule
   });
 
   test('a repeat sync with unchanged state does not re-call the API', async () => {

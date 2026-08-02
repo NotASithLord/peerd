@@ -260,7 +260,7 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  isKnownIdp, describeLandingStop, originPhrase, isUgcHost,
+  isKnownIdp, knownIdpSeeds, describeLandingStop, originPhrase, isUgcHost,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
@@ -835,9 +835,29 @@ const drivenTabIds = () => {
   }
   return [...ids];
 };
+// The IdP registry as bare domains for the allow rule: the vendor SUFFIXES
+// verbatim (requestDomains already means "this domain and its subdomains", which
+// is exactly what a per-customer `acme.okta.com` needs) plus the hostname of
+// each exact origin. Computed once — the registry is a frozen constant.
+const idpExemptDomains = (() => {
+  const seeds = knownIdpSeeds();
+  const hosts = seeds.origins
+    .map((origin) => { try { return new URL(origin).hostname; } catch { return null; } })
+    .filter((host) => typeof host === 'string');
+  return [...new Set([...seeds.suffixes, .../** @type {string[]} */ (hosts)])];
+})();
+
 const denylistNetGuard = makeDenylistNetGuard({
   dnr: /** @type {any} */ (globalThis).chrome?.declarativeNetRequest,
-  buildUpdate: denylistSessionRuleUpdate,
+  // The IdP carve-out. The origin lock lets a bound actor's tab leave its owned
+  // origin exactly once, for a sign-in, and several identity providers are also
+  // denylist entries — an overlap both halves intend (the denylist stops the
+  // AGENT driving a login box; the excursion keeps the tab usable so the PERSON
+  // can finish signing in and the actor can resume). A blanket network block
+  // would break that, so the rule pair exempts exactly the IdP registry — which
+  // stays the single authority on what counts as one. No authority is granted:
+  // isDenylistedTab still refuses every DOM tool on such a tab.
+  buildUpdate: (/** @type {any} */ input) => denylistSessionRuleUpdate({ ...input, exemptDomains: idpExemptDomains }),
   getPatterns: () => denylistStore.patterns(),
   getTabIds: drivenTabIds,
   audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },

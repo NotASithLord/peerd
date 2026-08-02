@@ -2,8 +2,10 @@ import { describe, test, expect } from 'bun:test';
 import {
   denylistBlockDomains,
   buildDenylistBlockRule,
+  buildIdpAllowRule,
   denylistSessionRuleUpdate,
   DENYLIST_RULE_ID,
+  DENYLIST_ALLOW_RULE_ID,
   DENYLIST_RESOURCE_TYPES,
 } from '../../extension/peerd-egress/denylist/dnr-rules.js';
 
@@ -74,13 +76,46 @@ describe('buildDenylistBlockRule — never unscoped', () => {
 describe('denylistSessionRuleUpdate — idempotent reconcile', () => {
   test('always removes the rule id first, so applying it is self-healing', () => {
     const update = denylistSessionRuleUpdate({ patterns: ['chase.com'], tabIds: [1] });
-    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID]);
+    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID]);
     expect(update.addRules).toHaveLength(1);
   });
   test('with no driven tabs it is a pure removal', () => {
     const update = denylistSessionRuleUpdate({ patterns: ['chase.com'], tabIds: [] });
-    expect(update).toEqual({ removeRuleIds: [DENYLIST_RULE_ID], addRules: [] });
+    expect(update).toEqual({ removeRuleIds: [DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID], addRules: [] });
   });
+  test('exempt IdP domains ride along as a higher-priority allow rule', () => {
+    const update: any = denylistSessionRuleUpdate({
+      patterns: ['*.okta.com', 'chase.com'], tabIds: [4], exemptDomains: ['okta.com'],
+    });
+    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID]);
+    const [block, allow] = update.addRules;
+    expect(block.action.type).toBe('block');
+    expect(allow.action.type).toBe('allow');
+    // The corridor only works if allow OUTRANKS block where they overlap.
+    expect(allow.priority).toBeGreaterThan(block.priority);
+    expect(allow.condition.requestDomains).toEqual(['okta.com']);
+    expect(allow.condition.tabIds).toEqual([4]);
+    // The block rule is NOT narrowed — the allow rule is what carves it out, so
+    // the denylist entry still exists for every other consumer to reason about.
+    expect(block.condition.requestDomains).toContain('okta.com');
+  });
+
+  test('no exempt domains → no allow rule (nothing extra in front of the user)', () => {
+    const update = denylistSessionRuleUpdate({ patterns: ['chase.com'], tabIds: [4] });
+    expect(update.addRules).toHaveLength(1);
+  });
+
+  test('an allow rule is never emitted without a block rule to carve out', () => {
+    // No driven tabs → no block; the allow rule must not appear on its own.
+    expect(denylistSessionRuleUpdate({ patterns: ['chase.com'], tabIds: [], exemptDomains: ['okta.com'] }).addRules)
+      .toEqual([]);
+    // No denylist at all → same.
+    expect(denylistSessionRuleUpdate({ patterns: [], tabIds: [4], exemptDomains: ['okta.com'] }).addRules)
+      .toEqual([]);
+    expect(buildIdpAllowRule({ domains: ['okta.com'], tabIds: [] })).toBeNull();
+    expect(buildIdpAllowRule({ domains: [], tabIds: [4] })).toBeNull();
+  });
+
   test('the real seed denylist collapses to a workable domain count', async () => {
     const seed = await Bun.file('extension/peerd-egress/denylist/default.json').json();
     const patterns: string[] = Object.values(seed.categories).flat() as string[];
