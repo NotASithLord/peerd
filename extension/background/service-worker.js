@@ -267,7 +267,7 @@ import {
   assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
-import { flattenCategorisedDenylist, normalizeDenylistPattern } from '/peerd-egress/index.js';
+import { flattenCategorisedDenylist, normalizeDenylistPattern, denylistSessionRuleUpdate } from '/peerd-egress/index.js';
 
 import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
@@ -314,6 +314,7 @@ import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
 import { makeDenylistStore } from './denylist-store.js';
+import { makeDenylistNetGuard } from './denylist-net-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
@@ -794,9 +795,53 @@ const loadDenylist = async () => {
   }
   await denylistStore.load(seed);
   console.log('[sw] denylist loaded —', denylistStore.patterns().length, 'patterns');
+  // The backstop's rule set is derived from the list, so it has to be rebuilt
+  // the moment the list exists (a live SW restart can find tabs already driven).
+  denylistNetGuard.sync();
 };
 /** @type {Promise<void>} */
 const denylistReady = loadDenylist();
+
+// ── the denylist's NETWORK-level backstop ──────────────────────────────────
+//
+// The gates above are decision-time: they judge a URL the agent hands us. They
+// cannot see what a page does on its OWN initiative — a driven tab that
+// `location =`s onto a bank reaches the bank's DOM through a tool call that
+// never named the bank, so no gate ever got a URL to refuse. Same gap in an App
+// sandbox, whose agent-authored code reaches the network without passing
+// webFetch at all. declarativeNetRequest closes it below the page: one
+// session-scoped rule, blocking denylisted domains in the tabs peerd is
+// CURRENTLY DRIVING and nowhere else. See background/denylist-net-guard.js and
+// peerd-egress/denylist/dnr-rules.js.
+//
+// Deliberately a BACKSTOP, not a replacement: the JS gates still produce the
+// refusal the model reads and the audit entry the user sees. Where DNR is
+// unavailable (Firefox's partial implementation) the guard is a no-op and
+// behavior is exactly what it was before.
+const drivenTabIds = () => {
+  /** @type {Set<number>} */
+  const ids = new Set();
+  // Tabs a web actor owns — the ones it navigates and reads the DOM of.
+  for (const [tabId] of webActorTabBindings.entries()) ids.add(tabId);
+  // Engine tabs. The WebVM's network already proxies through webFetch and the
+  // Notebook worker is sealed, so App tabs are the ones with a real un-gated
+  // network edge — but scoping all three keeps the rule uniform and costs a
+  // rule condition entry, not a check per request.
+  for (const tracker of [vmTabTracker, jsTabTracker, appTabTracker]) {
+    for (const instanceId of tracker.listLive()) {
+      const tabId = tracker.getTabId(instanceId);
+      if (typeof tabId === 'number') ids.add(tabId);
+    }
+  }
+  return [...ids];
+};
+const denylistNetGuard = makeDenylistNetGuard({
+  dnr: /** @type {any} */ (globalThis).chrome?.declarativeNetRequest,
+  buildUpdate: denylistSessionRuleUpdate,
+  getPatterns: () => denylistStore.patterns(),
+  getTabIds: drivenTabIds,
+  audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
+});
 
 // ---------------------------------------------------------------------------
 // issue 251 — the origin lock, made live.
@@ -2712,19 +2757,24 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
 // chrome.tabs.onRemoved.
 browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!isTrustedSender(sender)) return false;
+  // Each tab-ready is a new tabId entering the driven set, so each one resyncs
+  // the denylist network backstop (idempotent; a no-op when nothing moved).
   if (msg?.type === 'vm/tab-ready') {
     if (typeof msg.vmId !== 'string' || sender?.tab?.id == null) return false;
     vmTabTracker.onTabReady(msg.vmId, sender.tab.id);
+    denylistNetGuard.sync();
     return false;
   }
   if (msg?.type === 'js/tab-ready') {
     if (typeof msg.notebookId !== 'string' || sender?.tab?.id == null) return false;
     jsTabTracker.onTabReady(msg.notebookId, sender.tab.id);
+    denylistNetGuard.sync();
     return false;
   }
   if (msg?.type === 'app/tab-ready') {
     if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
     appTabTracker.onTabReady(msg.appId, sender.tab.id);
+    denylistNetGuard.sync();
     return false;
   }
   return false;
@@ -2747,6 +2797,10 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
+  // ...and drop it out of the network backstop's tab scope. Tab ids are REUSED
+  // within a browser session, so a stale entry would silently apply the block
+  // to whatever unrelated tab inherits the id.
+  denylistNetGuard.sync();
 });
 
 // Invalidate a tab's DOM-nav refs when it starts navigating — the
@@ -3153,16 +3207,28 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // one of these is a routing cache whose durable truth lives on the session record.
 const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
   () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
-const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) => {
+// Returns the load promise (never rejects) so a caller whose state DEPENDS on
+// the rehydrated entries — the net guard's driven-tab set — can chain onto it
+// instead of guessing at the timing.
+const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) =>
   Promise.resolve(sessionCache.sessionGet(key))
     .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
     .catch(() => {});
-};
 
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
-const persistWebBindings = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
-hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+const persistWebBindingsOnly = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+// why compose the net-guard sync in HERE rather than at each call site: every
+// mutation of the tab bindings — bind, drop, re-bind, the onRemoved prune —
+// already funnels through persistWebBindings, so this is the one place that
+// sees the driven-tab set change. A sync is idempotent and skips when nothing
+// moved, so the extra call on a no-op mutation costs nothing.
+const persistWebBindings = () => { persistWebBindingsOnly(); denylistNetGuard.sync(); };
+// Rehydration restores bindings without going through persistWebBindings (an
+// SW restart finds tabs still being driven), so the guard is told once the load
+// lands — not before, or it would re-derive the same empty set it started with.
+hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings)
+  .then(() => denylistNetGuard.sync());
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -4240,6 +4306,10 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
   if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
   webActorTabBindings.bind(tabId, actorSessionId);
   persistWebBindings();
+  // AWAIT the network backstop before handing the tab back: the caller's very
+  // next act is to navigate it. persistWebBindings already kicked the sync off;
+  // this only waits for its turn in the queue, and it never rejects.
+  await denylistNetGuard.sync();
   noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
   return { tabId, windowId: created?.windowId };
 };
@@ -4878,7 +4948,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
   }),
-  ...makeDenylistRoutes({ denylistStore, auditLog }),
+  // denylistNetGuard: an edit changes what the network backstop blocks, so the
+  // rule is rebuilt on every edit — including the removal path, where a stale
+  // rule would keep blocking a site the user just unblocked.
+  ...makeDenylistRoutes({ denylistStore, auditLog, denylistNetGuard }),
   // The settings view of the LEARNED origin set (+ the only un-learn path).
   // Settings-surface only: routes are unreachable from the tool dispatcher, so
   // no agent or page-fed actor can erase its own containment.
@@ -5084,6 +5157,9 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
     await appTabTracker.bootstrap();
     console.log('[sw] instance registries initialized — live tabs:',
       { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), app: appTabTracker.listLive() });
+    // An SW restart re-adopts engine tabs that never stopped running, so the
+    // network backstop's tab scope has to be rebuilt from what bootstrap found.
+    denylistNetGuard.sync();
   } catch (e) {
     console.error('[sw] instance init failed', e);
   }

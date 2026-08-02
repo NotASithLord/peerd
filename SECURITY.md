@@ -51,7 +51,13 @@ Understanding the boundaries helps you scope a report:
 - **Egress chokepoint.** All network calls route through
   `peerd-egress/fetch/`: `safeFetch` (a hardcoded provider allowlist for
   model calls) and `webFetch` (SSRF guard + a denylist of sensitive
-  origins, no redirects). There is no other egress path.
+  origins, no redirects). There is no other egress path. The denylist also
+  has a network-level backstop (`peerd-egress/denylist/dnr-rules.js` +
+  `background/denylist-net-guard.js`): a `declarativeNetRequest` rule that
+  blocks denylisted domains inside the tabs peerd is currently driving —
+  and only those, never your own browsing — so a page that navigates
+  ITSELF onto a sensitive site is refused below the page, where no
+  decision-time gate can see it.
 - **Untrusted-content boundary (the heap split).** The main agent never
   sees raw page content: page/DOM work is delegated to a per-tab **web
   actor** — a separate agent loop that, on Chrome, runs in its OWN Worker

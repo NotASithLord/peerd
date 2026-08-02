@@ -100,7 +100,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // The 548 and 549 steps were each derived from a conflicting base rather than
 // from a fresh scan, so the floor was left trailing the real count by two.
 // Taking the reported number locks the existing gain in.
-const COVERED_FLOOR = 551;
+// 551 → 553: the denylist's declarativeNetRequest backstop adds two checked
+// files — peerd-egress/denylist/dnr-rules.js (the pure patterns → rule mapping)
+// and background/denylist-net-guard.js (the session-rule sync shell).
+const COVERED_FLOOR = 553;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
