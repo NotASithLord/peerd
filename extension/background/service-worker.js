@@ -260,7 +260,7 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  isKnownIdp, knownIdpSeeds, describeLandingStop, originPhrase, isUgcHost,
+  isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
@@ -835,17 +835,10 @@ const drivenTabIds = () => {
   }
   return [...ids];
 };
-// The IdP registry as bare domains for the allow rule: the vendor SUFFIXES
-// verbatim (requestDomains already means "this domain and its subdomains", which
-// is exactly what a per-customer `acme.okta.com` needs) plus the hostname of
-// each exact origin. Computed once — the registry is a frozen constant.
-const idpExemptDomains = (() => {
-  const seeds = knownIdpSeeds();
-  const hosts = seeds.origins
-    .map((origin) => { try { return new URL(origin).hostname; } catch { return null; } })
-    .filter((host) => typeof host === 'string');
-  return [...new Set([...seeds.suffixes, .../** @type {string[]} */ (hosts)])];
-})();
+// The IdP registry as bare domains for the allow rule — derived NEXT TO the
+// registry (knownIdpDomains) so a registry edit moves the excursion rule and
+// this carve-out together. Computed once; the registry is a frozen constant.
+const idpExemptDomains = knownIdpDomains();
 
 const denylistNetGuard = makeDenylistNetGuard({
   dnr: /** @type {any} */ (globalThis).chrome?.declarativeNetRequest,
@@ -1226,6 +1219,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
   // dispatch, spawned actors) routes through here, so all are covered.
   await denylistReady;
+  // Same shape, one layer down: never dispatch a tool while the DNR backstop
+  // trails the driven-tab set. Most binding paths kick the sync without awaiting
+  // it (bind() is a sync callback), so an actor's FIRST tool call could
+  // otherwise race the rule landing — adoptWebTab awaits, but the site-actor
+  // path (addressing an existing tab) did not. Awaiting here closes every such
+  // race structurally. Cheap: a no-change sync short-circuits on the
+  // fingerprint, and the promise never rejects.
+  await denylistNetGuard.sync();
   // why: the override lets the actor orchestrator build a context
   // bound to a CHILD session id instead of the chat's current one. With
   // no override this is identical to the original behaviour (the active

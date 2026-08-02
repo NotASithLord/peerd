@@ -126,6 +126,11 @@ describe('denylistSessionRuleUpdate — idempotent reconcile', () => {
     // comfortably inside one rule's condition.
     expect(domains.length).toBeLessThan(patterns.length);
     expect(domains).toContain('chase.com');
+    // okta.com IS in the blocked set — the IdP registry's carve-out restores its
+    // reachability via the higher-priority allow rule, not by narrowing this
+    // list. The composition invariant lives in tests/meta/denylist-idp-corridor:
+    // an earlier revision of THIS test pinned the bare containment with no
+    // carve-out anywhere, i.e. encoded the broken sign-in corridor as expected.
     expect(domains).toContain('okta.com');
   });
 });
