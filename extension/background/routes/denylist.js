@@ -12,7 +12,11 @@
  * @returns {Record<string, (msg?: any) => Promise<any>>}
  */
 export const makeDenylistRoutes = (deps) => {
-  const { denylistStore, auditLog } = deps;
+  // denylistNetGuard: the denylist's NETWORK-level backstop (a DNR rule built
+  // from the list — background/denylist-net-guard.js). An edit changes what that
+  // rule must block, so both mutating routes resync it. Injected like every other
+  // collaborator; this file still imports nothing.
+  const { denylistStore, auditLog, denylistNetGuard } = deps;
 
   // The shared { patterns, added, disabled } reply every denylist route returns.
   const snapshot = () => {
@@ -30,6 +34,7 @@ export const makeDenylistRoutes = (deps) => {
     'denylist/add': async ({ pattern }) => {
       const r = await denylistStore.add(pattern);
       if (!r.ok) return r;
+      denylistNetGuard.sync();
       auditLog.append({ type: 'denylist_added', details: { pattern: r.pattern, seed: r.seed } }).catch(() => {});
       return snapshot();
     },
@@ -40,6 +45,7 @@ export const makeDenylistRoutes = (deps) => {
     'denylist/remove': async ({ pattern }) => {
       const r = await denylistStore.remove(pattern);
       if (!r.ok) return r;
+      denylistNetGuard.sync();
       auditLog.append({ type: 'denylist_removed', details: { pattern: r.pattern, seed: r.seed } }).catch(() => {});
       return snapshot();
     },

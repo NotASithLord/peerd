@@ -26,6 +26,7 @@
     "offscreen",
     "notifications",
     "alarms",
+    "declarativeNetRequest",
     "debugger"
   ],
   "host_permissions": [

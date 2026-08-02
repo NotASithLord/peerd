@@ -105,3 +105,33 @@ export const knownIdpSeeds = () => Object.freeze({
   origins: Object.freeze([...IDP_ORIGINS]),
   suffixes: IDP_SUFFIXES,
 });
+
+/**
+ * The registry as bare DOMAINS, for a consumer whose match primitive is
+ * "this domain and its subdomains" — today the denylist's DNR backstop, whose
+ * `requestDomains` semantics are exactly that. Suffixes pass through verbatim
+ * (a per-customer `acme.okta.com` is a subdomain of `okta.com`); exact origins
+ * contribute their hostname.
+ *
+ * why here and not derived at the consumer: this list is the sign-in corridor's
+ * NETWORK-layer carve-out — an entry keeps an identity provider reachable
+ * inside an agent-driven tab that the denylist otherwise blocks. Deriving it
+ * next to the registry keeps ONE membership decision feeding every layer: a
+ * registry edit moves the excursion rule and the carve-out together, and the
+ * corridor test (denylist × registry) pins that they cannot drift apart.
+ *
+ * NOTE the deliberate widening this consumer accepts: `isKnownIdp` refuses
+ * http and non-default ports; a domain grant cannot express either refinement.
+ * Both refusals are about what the AGENT may treat as a sign-in landing —
+ * network reachability for the human is the coarser question, and coarser is
+ * safe here because reachable-but-refused is exactly the pre-DNR posture.
+ *
+ * @returns {string[]} deduped, sorted
+ */
+export const knownIdpDomains = () => {
+  const domains = new Set(IDP_SUFFIXES);
+  for (const origin of IDP_ORIGINS) {
+    try { domains.add(new URL(origin).hostname); } catch { /* registry is static; unreachable */ }
+  }
+  return [...domains].sort();
+};
