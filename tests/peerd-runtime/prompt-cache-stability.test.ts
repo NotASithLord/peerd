@@ -1,7 +1,7 @@
 // Design 01 — prompt-cache stability.
 //
 // The bug this pins: the volatile `<time>now …</time>` block used to be
-// substituted INTO the system string, so the ~5k-token cached system block was a
+// substituted INTO the system string, so the (large) cached system block was a
 // cache MISS on every turn (seconds-resolution). The fix relocates all per-turn
 // volatile bytes (temporal + active tab) to a leading <context> MESSAGE that
 // lands AFTER the system + tool cache breakpoints, leaving the main system
@@ -134,5 +134,29 @@ describe('to-anthropic — breakpoints land on system + last tool, not the conte
     // Different volatile context, byte-identical cached system prefix.
     expect(withCtxA.system[0].text).toBe(withCtxB.system[0].text);
     expect(withCtxA.system[0].cache_control).toEqual(withCtxB.system[0].cache_control);
+  });
+
+  test('turn-1 wire shape: the <context> survives collapse into the following user message and the breakpoint lands on the merged block', () => {
+    // The REAL production shape on turn 1: the leading context user-string is
+    // immediately followed by the actual user message. The converter collapses
+    // adjacent same-role plain strings, so both fold into ONE user message — the
+    // <context> fence must survive the merge and the last-message breakpoint must
+    // attach to the merged block.
+    const ctx = buildTemporalContext({ temporalBlock: '<time>now 2026-08-03T12:00:00Z</time>' });
+    const body = toAnthropicBody({
+      model: 'claude-x', system: 'S', tools,
+      messages: [
+        { role: 'user', content: ctx, id: 'ctx', when: 1 },
+        { role: 'user', content: 'do the thing', id: 'u1', when: 2 },
+      ],
+    });
+    expect(body.messages.length).toBe(1); // two user strings collapsed into one
+    const merged = body.messages[0];
+    // last message → wrapped into a text block carrying the breakpoint
+    expect(Array.isArray(merged.content)).toBe(true);
+    const block = merged.content[0];
+    expect(block.text.includes('<context>')).toBe(true); // fence survived the merge
+    expect(block.text.includes('do the thing')).toBe(true); // real user text present
+    expect(block.cache_control).toEqual(EPHEMERAL);
   });
 });

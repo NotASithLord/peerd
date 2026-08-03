@@ -147,12 +147,9 @@ export const renderSystemPrompt = async (ctx) => {
     out += sessionInstructionsBlock(ctx.customSystemPrompt.trim());
   }
   // why: the ephemeral <active_tab> reorientation NO LONGER rides the system
-  // string — it (like the temporal block) is per-turn-volatile, and any volatile
-  // byte in the cached system block busts its prompt cache every turn (design 01).
-  // The orchestrator now emits both as a leading <context> MESSAGE via
-  // buildTemporalContext, which lands after the system/tool cache breakpoints. So
-  // the main system string is byte-stable within a session and its ~5k-token
-  // prefix finally caches.
+  // string — it, like the temporal block, is per-turn-volatile and rides the
+  // leading <context> message instead (design 01 — see buildTemporalContext for
+  // the full rationale).
   // The appended ACTOR PROMPT — one family, two kinds (both <actor_agent>):
   //   - EPHEMERAL actor (an actor): taskOverride set, owns no instance,
   //     fire-once, may itself message_actor. See ephemeralActorBlock.
@@ -193,10 +190,13 @@ const activeTabBlock = ({ url, title }) => [
  * cache every turn (the `<time>now …</time>` block changes at seconds
  * resolution). Relocating them to a leading `user`-role <context> message in the
  * stream — which lands AFTER the system + tool cache breakpoints — keeps the
- * system string byte-stable within a session, so its ~5k-token prefix caches at
- * the 10% read rate instead of re-billing at full input price each turn
- * (design 01). Pure: the caller passes the pre-built temporal block + the live
- * active tab; no clock read here.
+ * system string byte-stable within a session, so the largest cacheable prefix
+ * (system + tools) reads from cache instead of re-billing at full input price
+ * each turn (design 01). Pure: the caller passes the pre-built temporal block +
+ * the live active tab; no clock read here.
+ *
+ * CANONICAL rationale for design 01 lives here; other sites point back with a
+ * one-line reference rather than restating it.
  *
  * The content is FENCE-NEUTRAL trusted context (a timestamp + the user's current
  * tab URL/title). The tab is low-trust — its own <active_tab> framing tells the

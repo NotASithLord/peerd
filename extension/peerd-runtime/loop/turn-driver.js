@@ -226,6 +226,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // here (temporalBlock + the foreground tab), handed to the loop, prepended each
   // step. An actor keeps its temporal block embedded in its own per-turn prompt
   // (see getSystemPrompt), so it takes no context message — '' skips the injection.
+  // Residual invalidator: memoryBlock (above) is keyed to the LIVE foreground
+  // origin, so the system prefix is byte-stable per (session x foreground
+  // workspace) — a mid-session origin switch re-renders the memory block and
+  // costs one cache write before it caches again. Acceptable; the volatile
+  // seconds-clock (the real per-turn bust) is what moved out.
   const contextMessage = isActor
     ? ''
     : buildTemporalContext({ temporalBlock, activeTab: activeTabContext });
@@ -541,10 +546,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // history. Normal sends pass resume=false.
       resume,
       // design 01: the per-turn ephemeral <context> message (temporal + active
-      // tab). The loop prepends it as message[0] each step — after the cached
-      // system/tool breakpoints — so the byte-stable system prefix caches while
-      // this volatile content still reaches the model. '' (actors) → not passed.
-      ...(contextMessage ? { contextMessage } : {}),
+      // tab), prepended as message[0] each step. '' (actors) → the loop's own
+      // length>0 guard skips the injection.
+      contextMessage,
       // why: already validated + shaped by loop/attachments.js in
       // agent/send (text payloads inlined there). The loop ships the
       // bytes this turn and persists the stripped metadata shape.

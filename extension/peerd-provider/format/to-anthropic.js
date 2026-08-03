@@ -440,22 +440,28 @@ export const usesAdaptiveThinking = (model) => {
  *
  *   1. system prompt        — stable across the whole conversation
  *   2. tool definitions     — stable across the whole conversation
- *   3. message history      — stable across all turns BEFORE the
- *                              current user message (see below)
+ *   3. message history      — the whole message prefix, up to and
+ *                              including the last message (see below)
  *
  * Without breakpoint (3), every previously-streamed assistant message
  * and every previously-emitted tool_result block gets re-billed at
- * 100% on every turn — and tool_result content (a `read_page` body,
+ * 100% on every step — and tool_result content (a `read_page` body,
  * a `vm_boot` stdout dump) is where the volume actually lives. With
- * (3), only the newest user message + the new assistant turn are
- * fresh; everything before is cached at ~10% cost.
+ * (3), only the newest content is fresh; everything before is cached.
  *
  * Placement of (3): on the LAST message in the converted-Anthropic
  * shape. Cache breakpoints mark everything UP TO and INCLUDING the
- * block they sit on as cacheable. Putting it on the last message
- * means the entire prior conversation (including the just-appended
- * user message that triggered this call) lands in cache for the
- * NEXT turn.
+ * block they sit on as cacheable.
+ *
+ * Scope (design 01): the orchestrator prepends a per-turn-volatile
+ * <context> message (clock + active tab) as message[0], so the message
+ * prefix diverges at its FIRST byte every turn — breakpoint (3) therefore
+ * only pays off WITHIN a turn (the context message is byte-identical across
+ * the tool-loop steps of one turn, so each step reads the prior step's
+ * history from cache), not turn-to-turn. Cross-turn, the stable win is the
+ * system + tools prefix (breakpoints 1-2, which precede message[0]). Reviving
+ * cross-turn history caching would mean keeping message[0] byte-stable — out
+ * of scope for design 01, which mandated the leading context message.
  *
  * @param {Object} args
  * @param {string} args.model
