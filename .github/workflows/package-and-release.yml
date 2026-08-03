@@ -532,9 +532,15 @@ jobs:
       - name: Rebuild and assert byte-identical artifact
         run: |
           set -euo pipefail
-          sha256sum artifacts/*.zip artifacts/*.xpi 2>/dev/null | sort > first.sums
+          # nullglob: each matrix cell produces only .zip (chrome) OR .xpi
+          # (firefox) — without it the unmatched pattern reaches sha256sum
+          # as a literal and fails the step under pipefail.
+          shopt -s nullglob
+          artifacts=(artifacts/*.zip artifacts/*.xpi)
+          [ ${#artifacts[@]} -gt 0 ] || { echo '::error::no artifact produced to digest'; exit 1; }
+          sha256sum "${artifacts[@]}" | sort > first.sums
           bun packaging/package.ts --channel=${{ matrix.channel }} --browser=${{ matrix.browser }} --no-sign --skip-verify
-          sha256sum artifacts/*.zip artifacts/*.xpi 2>/dev/null | sort > second.sums
+          sha256sum "${artifacts[@]}" | sort > second.sums
           diff first.sums second.sums || {
             echo '::error::packaging is not reproducible — two builds of the same tree produced different bytes'
             exit 1
