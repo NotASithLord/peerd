@@ -10,11 +10,34 @@
  * @typedef {{ id: string, pass: boolean, detail?: string, error?: string|null,
  *   steps?: number, tokens?: number, durationMs?: number, tools?: string[],
  *   inputTokens?: number, outputTokens?: number, cacheReadTokens?: number,
- *   cacheWriteTokens?: number, costUsd?: number, runnerCostUsd?: number }} TaskResult
+ *   cacheWriteTokens?: number, costUsd?: number, runnerCostUsd?: number,
+ *   toolCalls?: number, toolErrors?: number, wastedTurns?: number,
+ *   toolErrorsByName?: Record<string, number>, wastedByKind?: Record<string, number>,
+ *   toolResults?: Array<{ name: string, ok: boolean }> }} TaskResult
  */
 
 /** @param {number} n @param {number} [dp] */
 const round = (n, dp = 2) => { const f = 10 ** dp; return Math.round(n * f) / f; };
+
+/**
+ * Sum the per-task `toolErrorsByName` maps into one suite rollup — which
+ * tool failed, and how often, across the whole run. Ignores rows without the
+ * field (early-return rows), so it's safe on a mixed result set.
+ * @param {TaskResult[]} results
+ * @returns {Record<string, number>}
+ */
+const rollupErrorsByName = (results) => {
+  /** @type {Record<string, number>} */
+  const out = {};
+  for (const r of results) {
+    const byName = r.toolErrorsByName;
+    if (!byName || typeof byName !== 'object') continue;
+    for (const [name, n] of Object.entries(byName)) {
+      if (typeof n === 'number') out[name] = (out[name] ?? 0) + n;
+    }
+  }
+  return out;
+};
 
 /**
  * Average a numeric field across results, ignoring missing values.
@@ -66,6 +89,22 @@ export const aggregate = (results) => {
     // offload isn't free, it's relocated). Field name stays `runnerTokens` for
     // continuity with the emitted actor-cost events + the runnerModel A/B.
     avgRunnerTokens: avg(results, 'runnerTokens'),
+    // Tool-outcome metrics (design 5): the harness can finally tell a call that
+    // SUCCEEDED from one that FAILED, so an efficiency regression shows as data.
+    // These sit ALONGSIDE passRate (the ground truth) — never replace it.
+    avgToolErrors: avg(results, 'toolErrors'),
+    avgToolCalls: avg(results, 'toolCalls'),
+    // errors / total calls, summed suite-wide (not a mean of per-row rates) so a
+    // task with more calls weighs proportionally. A fraction in [0,1]; 0 when no
+    // calls ran. why sum/sum: a single-call task erroring shouldn't move the rate
+    // as much as a 20-call task erroring five times.
+    toolErrorRate: (() => {
+      const errs = results.reduce((n, r) => n + (Number(r.toolErrors) || 0), 0);
+      const calls = results.reduce((n, r) => n + (Number(r.toolCalls) || 0), 0);
+      return calls ? round(errs / calls, 4) : 0;
+    })(),
+    avgWastedTurns: avg(results, 'wastedTurns'),
+    toolErrorsByName: rollupErrorsByName(results),
     avgCostUsd: avg(results, 'costUsd', 5),                         // MAIN-loop $ (the chat model orchestrating) from the local pricing table
     // The RUNNER's own $ — the model under A/B test. $0 for a local/on-device
     // runner (priced at the zero-rate card), real $ for a cloud runner. This is
@@ -118,6 +157,123 @@ export const compare = (before, after) => {
     costUsdDelta: d('avgCostUsd', 5),
     stepsDelta: d('avgSteps'),
     durationMsDelta: d('avgDurationMs'),
+    // Tool-outcome deltas (design 5) — negative = the fix reduced errors / wasted
+    // work. A bench guard can block on toolErrorsDelta > 0 (opt-in, see
+    // run-eval-bench.mjs) so a change that fixes pass-rate but doubles retries is
+    // still visible.
+    toolErrorsDelta: d('avgToolErrors'),
+    toolErrorRateDelta: d('toolErrorRate', 4),
+    wastedTurnsDelta: d('avgWastedTurns'),
+  };
+};
+
+// --- wasted-turn heuristics (design 5b) ----------------------------------
+//
+// "Wasted turn" has no ground truth without a human, so this is an honest
+// PROXY: three named, conservative heuristics over the task's tool transcript,
+// each with a documented blind spot. The count is for spotting EFFICIENCY
+// regressions build-over-build (did a fix make the agent thrash more?) — never
+// a correctness signal (passRate stays the ground truth). Each heuristic is a
+// separate key in `byKind` so a noisy one can be read (or ignored) on its own;
+// `total` sums them and CAN double-count (a same-target read reissued with
+// identical args trips both repeated-identical-call and truncation-forced-
+// reread) — that overlap is deliberate, the two measure different intents.
+
+/**
+ * A single tool call in the transcript: the tool name, the raw input (for
+ * identity/target hashing), the outcome (true = ok, false = errored, undefined
+ * = never resolved), and — when design 4's paged marker lands — whether the
+ * RESULT was truncated. All optional but `name`.
+ * @typedef {{ name: string, input?: unknown, ok?: boolean, truncated?: boolean }} ToolCall
+ */
+
+// Read-ish tools whose repeat-on-the-same-target is the truncation-reread
+// signal. A HEURISTIC allowlist — it drifts as tools are added; a read tool
+// missing here is a false NEGATIVE (undercounts), never a false positive.
+const READ_TOOLS = new Set(['read_file', 'read_memory', 'fetch_url', 'read_web_cache', 'read_state']);
+// Arg keys tried, in order, as a read's "primary target" (the thing re-read).
+const PRIMARY_ARG_KEYS = ['path', 'url', 'file', 'target', 'query', 'id', 'handle'];
+
+/**
+ * Order-independent JSON key for an args object, so `{a:1,b:2}` and `{b:2,a:1}`
+ * hash the same. Pure; recurses through arrays/objects.
+ * @param {unknown} v @returns {string}
+ */
+const stableStringify = (v) => {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  const obj = /** @type {Record<string, unknown>} */ (v);
+  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+};
+
+/**
+ * The primary target of a read call — the first present of PRIMARY_ARG_KEYS,
+ * else the whole args key. Looser than a full-args hash on purpose: a paging
+ * reread that only bumped an offset still shares a target.
+ * @param {unknown} input
+ */
+const primaryArg = (input) => {
+  if (!input || typeof input !== 'object') return stableStringify(input);
+  const obj = /** @type {Record<string, unknown>} */ (input);
+  for (const k of PRIMARY_ARG_KEYS) if (k in obj) return `${k}=${stableStringify(obj[k])}`;
+  return stableStringify(obj);
+};
+
+/**
+ * Count wasted turns over a tool transcript. Pure (values in, values out) so
+ * it's Bun-testable against synthetic transcripts. Returns a `total` plus the
+ * per-heuristic `byKind` breakdown.
+ * @param {ToolCall[]} transcript
+ * @returns {{ total: number, byKind: { repeatedIdenticalCall: number, errorThenRetry: number, truncationForcedReread: number } }}
+ */
+export const wastedTurns = (transcript) => {
+  const calls = Array.isArray(transcript) ? transcript : [];
+
+  // repeated-identical-call: the SAME {tool, full-args} issued more than once —
+  // each extra copy is a retry that changed nothing. blind spot: a legitimately
+  // idempotent repeat (polling a status that changed server-side, re-reading a
+  // page that updated) reads as waste — we can't see the world between calls.
+  /** @type {Map<string, number>} */
+  const identity = new Map();
+  for (const c of calls) {
+    const key = `${c.name} ${stableStringify(c.input ?? null)}`;
+    identity.set(key, (identity.get(key) ?? 0) + 1);
+  }
+  let repeatedIdenticalCall = 0;
+  for (const n of identity.values()) if (n > 1) repeatedIdenticalCall += n - 1;
+
+  // error-then-retry: a failed call immediately followed by the SAME tool on the
+  // next step (the model reacting to a bad error by re-poking it). blind spot:
+  // only the IMMEDIATE next step and only the same tool NAME — a retry after an
+  // intervening tool, or via a different tool, is invisible (undercounts).
+  let errorThenRetry = 0;
+  for (let i = 0; i < calls.length - 1; i++) {
+    if (calls[i].ok === false && calls[i + 1].name === calls[i].name) errorThenRetry++;
+  }
+
+  // truncation-forced-reread: a READ tool re-issued against the same primary
+  // target. Approximation — design 4's paged/truncation marker isn't wired yet,
+  // so we can't confirm the FIRST read was actually truncated; absent that
+  // marker every same-target reread counts. When entries carry `truncated`, we
+  // tighten to rereads FOLLOWING a truncated read. blind spot: over-counts a
+  // deliberate fresh reread of changed content; overlaps repeated-identical-call.
+  /** @type {Map<string, { truncated: boolean | undefined }>} */
+  const readTargets = new Map();
+  let truncationForcedReread = 0;
+  for (const c of calls) {
+    if (!READ_TOOLS.has(c.name)) continue;
+    const key = `${c.name} ${primaryArg(c.input)}`;
+    const prev = readTargets.get(key);
+    // prev.truncated===undefined → no marker available, approximate (count it);
+    // ===true → prior read was truncated, a genuine forced reread; ===false →
+    // prior read was complete, this reread isn't truncation-forced (skip).
+    if (prev && prev.truncated !== false) truncationForcedReread++;
+    readTargets.set(key, { truncated: c.truncated });
+  }
+
+  return {
+    total: repeatedIdenticalCall + errorThenRetry + truncationForcedReread,
+    byKind: { repeatedIdenticalCall, errorThenRetry, truncationForcedReread },
   };
 };
 
