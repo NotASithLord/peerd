@@ -4,7 +4,7 @@
 // paging contract honest live here.
 
 import { describe, test, expect } from 'bun:test';
-import { windowText, pagingFooter, pageSlice, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
+import { windowText, pagingFooter, pageSlice, pageStatusLine, SPILL_PAGE_CHARS, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
 
 describe('windowText', () => {
   test('text at or under the budget passes through whole', () => {
@@ -53,6 +53,27 @@ describe('pageSlice', () => {
     expect(pageSlice(text, 8, 100).slice).toBe('ij');        // limit past the end → to end
     expect(pageSlice(text, 99, 3)).toMatchObject({ slice: '', remaining: 0 });  // offset past end
     expect(pageSlice(text, 0, 0).slice).toBe('a');           // degenerate limit → at least 1 char
+  });
+});
+
+describe('pageStatusLine (the shared offset/limit paging footer)', () => {
+  test('mid-text: names how much remains and the exact next call', () => {
+    const page = pageSlice('z'.repeat(100), 0, 40);   // offset 0, end 40, remaining 60
+    const line = pageStatusLine({ page, nextArgs: '{ "key": "k1", "offset": 40 }' });
+    expect(line).toContain('chars 0–40 of 100');
+    expect(line).toContain('60 remain');
+    expect(line).toContain('next: { "key": "k1", "offset": 40 }.');
+  });
+
+  test('final slice: end-of-text instead of a next-call hint', () => {
+    const page = pageSlice('z'.repeat(100), 90, 50);   // remaining 0
+    const line = pageStatusLine({ page, nextArgs: '{ "path": "f", "offset": 100 }' });
+    expect(line).toContain('end of stored text');
+    expect(line).not.toContain('next:');
+  });
+
+  test('the shared slice size is one constant (page in == page out)', () => {
+    expect(SPILL_PAGE_CHARS).toBe(16_000);
   });
 });
 

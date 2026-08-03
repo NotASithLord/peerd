@@ -17,12 +17,13 @@
 //     agent's own bytes and re-enters raw.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { pageSlice } from '../web/spill.js';
+import { pageSlice, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 // Same per-call ceiling as read_web_cache — one page of cache reads like one
-// fetch. Exported: script's spill footer interpolates it so the advertised
-// ceiling can never drift from the enforced one.
-export const MAX_SLICE_CHARS = 16_000;
+// fetch — and the ONE shared paging slice size (web/spill.js). Exported:
+// script's spill footer interpolates it so the advertised ceiling can never
+// drift from the enforced one.
+export const MAX_SLICE_CHARS = SPILL_PAGE_CHARS;
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readRunCacheTool = {
@@ -74,14 +75,14 @@ export const readRunCacheTool = {
       total: page.total,
       value: page.slice,
     }, null, 2);
-    const status = page.remaining > 0
-      ? `[paging] chars ${page.offset}–${page.end} of ${page.total}; ${page.remaining} remain — next: { "key": "${rec.key}", "offset": ${page.end} }.`
-      : `[paging] chars ${page.offset}–${page.end} of ${page.total}; end of stored text.`;
+    const status = pageStatusLine({ page, nextArgs: `{ "key": "${rec.key}", "offset": ${page.end} }` });
     // Fence exactly as the run's own output was fenced — the stored flag, not a
     // re-derivation. The paging status is tool-authored → outside the fence.
     const shown = rec.fenced
       ? wrapUntrusted({ origin: rec.originLabel || 'script', tool: 'read_run_cache', body })
       : body;
-    return { ok: true, content: `${shown}\n${status}` };
+    // paged: the loop redacts this at PAGED_MAX_CHARS, not the 8k backstop — the
+    // slice the model asked for survives intact (else half of every page is lost).
+    return { ok: true, content: `${shown}\n${status}`, paged: true };
   },
 };

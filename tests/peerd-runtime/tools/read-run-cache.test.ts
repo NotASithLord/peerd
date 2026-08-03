@@ -40,6 +40,9 @@ describe('read_run_cache', () => {
     const afterFence = r.content!.split('</untrusted_web_content>')[1];
     expect(afterFence).toContain('[paging]');
     expect(afterFence).toContain('"offset": 30');   // the next-call hint continues where this slice ended
+    // paged: the loop redacts the slice at the larger paged ceiling, not the 8k
+    // backstop, so the page the model asked for survives intact.
+    expect((r as { paged?: boolean }).paged).toBe(true);
   });
 
   test('an UNFENCED record (pure-compute run) re-enters raw — the agent\'s own bytes', async () => {

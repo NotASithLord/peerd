@@ -14,11 +14,11 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { originOfUrl } from './dom-helpers.js';
-import { pageSlice } from '../web/spill.js';
+import { pageSlice, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 // Same per-call ceiling as fetch_url's body budget — one page of cache reads
-// like one fetch.
-const MAX_SLICE_CHARS = 16_000;
+// like one fetch — and the ONE shared paging slice size (web/spill.js).
+const MAX_SLICE_CHARS = SPILL_PAGE_CHARS;
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readWebCacheTool = {
@@ -80,9 +80,9 @@ export const readWebCacheTool = {
         body: page.slice,
       }, null, 2),
     });
-    const status = page.remaining > 0
-      ? `[paging] chars ${page.offset}–${page.end} of ${page.total}; ${page.remaining} remain — next: { "key": "${rec.key}", "offset": ${page.end} }.`
-      : `[paging] chars ${page.offset}–${page.end} of ${page.total}; end of stored text.`;
-    return { ok: true, content: `${fenced}\n${status}` };
+    const status = pageStatusLine({ page, nextArgs: `{ "key": "${rec.key}", "offset": ${page.end} }` });
+    // paged: the loop redacts this at PAGED_MAX_CHARS, not the 8k backstop — the
+    // slice the model asked for survives intact (else half of every page is lost).
+    return { ok: true, content: `${fenced}\n${status}`, paged: true };
   },
 };

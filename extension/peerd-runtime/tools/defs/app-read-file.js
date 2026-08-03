@@ -7,6 +7,7 @@
 // orchestrator's trusted context. Reads stay global; the fence pays for it.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
+import { pageSlice, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const appReadFileTool = {
@@ -14,14 +15,17 @@ export const appReadFileTool = {
   primitive: 'app',
   description: [
     'Read a single file from an App\'s OPFS subtree. Returns UTF-8 text.',
-    'Use to inspect current content before patching. Without `appId`,',
-    'targets the chat\'s current app.',
+    'Use to inspect current content before patching. A large file returns a',
+    'bounded slice plus a paging note — re-call with offset to read on (no',
+    're-truncation). Without `appId`, targets the chat\'s current app.',
   ].join(' '),
   schema: {
     type: 'object',
     properties: {
       appId: { type: 'string' },
       path: { type: 'string' },
+      offset: { type: 'number', description: 'Start character offset. Default 0.' },
+      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
     },
     required: ['path'],
   },
@@ -41,14 +45,25 @@ export const appReadFileTool = {
         path: args.path,
         sessionId: ctx.session?.sessionId,
       });
-      return {
-        ok: true,
-        content: wrapUntrusted({
-          origin: `app:${args.appId ?? 'current'}/${args.path}`,
-          tool: 'app_read_file',
-          body: content,
-        }),
-      };
+      // Self-paging (the infinite-reread fix, mirroring js_read_file): the OPFS
+      // file is the durable backing, so a big read returns a bounded slice and
+      // the footer re-calls THIS tool at a new offset — no spill store, no
+      // main-agent reader the app actor could not reach (off the actor tier).
+      const limit = Math.min(typeof args.limit === 'number' && args.limit > 0 ? args.limit : SPILL_PAGE_CHARS, SPILL_PAGE_CHARS);
+      const page = pageSlice(content, typeof args.offset === 'number' ? args.offset : 0, limit);
+      const shown = wrapUntrusted({
+        origin: `app:${args.appId ?? 'current'}/${args.path}`,
+        tool: 'app_read_file',
+        body: page.slice,
+      });
+      const nextArgs = args.appId
+        ? `{ "appId": "${args.appId}", "path": "${args.path}", "offset": ${page.end} }`
+        : `{ "path": "${args.path}", "offset": ${page.end} }`;
+      const footer = (page.remaining > 0 || page.offset > 0)
+        ? `\n${pageStatusLine({ page, nextArgs })}`
+        : '';
+      // paged: redacted at PAGED_MAX_CHARS so the requested slice survives.
+      return { ok: true, content: `${shown}${footer}`, paged: true };
     } catch (e) {
       return { ok: false, error: `app_read_file_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

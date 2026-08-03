@@ -33,6 +33,8 @@
 // UI can look them up; for V1 we accept "see it once when it
 // happens, see the metadata afterwards" as the right cost.
 
+import { SPILL_PAGE_CHARS } from '../tools/web/spill.js';
+
 const DATA_URL_RE = /data:(image\/[a-z+.-]+);base64,[A-Za-z0-9+/=]+/g;
 
 // Default truncation threshold. Picked to bound the worst-case
@@ -40,6 +42,19 @@ const DATA_URL_RE = /data:(image\/[a-z+.-]+);base64,[A-Za-z0-9+/=]+/g;
 // that legitimately return more than 8000 chars should already be
 // paginating; this is a backstop.
 const DEFAULT_MAX_CHARS = 8000;
+
+// The ceiling for an EXPLICITLY-PAGED reader result (read_web_cache /
+// read_run_cache and the self-paging file reads set result.paged). why a
+// separate, larger ceiling: those tools return ONE deliberately-sized slice the
+// model ASKED for (SPILL_PAGE_CHARS) — re-cutting it at the 8k backstop would
+// defeat the very paging that exists to deliver it (half of every recovered
+// page was silently re-elided before this). The margin over SPILL_PAGE_CHARS
+// clears the fixed framing a full slice carries — the untrusted-fence tags, the
+// JSON envelope, and the tool-authored status line — so a full page survives
+// INTACT rather than losing its tail (and its footer) to the backstop. The
+// firehose guard is upstream: only a result flagged `paged` reaches this
+// ceiling, and each paging tool self-caps its slice at SPILL_PAGE_CHARS.
+export const PAGED_MAX_CHARS = SPILL_PAGE_CHARS + 2000;
 
 /**
  * Apply both redactions to a tool_result content string.

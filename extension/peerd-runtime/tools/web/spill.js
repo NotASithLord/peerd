@@ -19,6 +19,28 @@ const HEAD_FRACTION = 0.75;
 // not an archive. Lives here so the twins can't silently drift apart.
 export const SPILL_CACHE_MAX_ENTRIES = 40;
 
+// The ONE per-call paging slice size, shared by every offset/limit reader:
+// read_web_cache, read_run_cache, AND the self-paging file reads (js_read_file /
+// app_read_file page the OPFS file itself). One constant so the advertised cap,
+// the enforced slice, and the loop's paged-result redact ceiling
+// (loop/redact.js PAGED_MAX_CHARS, which imports this) can never drift apart —
+// a page in is a page out.
+export const SPILL_PAGE_CHARS = 16_000;
+
+/**
+ * The tool-authored paging status line for an offset/limit page read — the
+ * shape every offset-paging reader shares (read_web_cache / read_run_cache and
+ * the self-paging file reads). TRUSTED: it rides OUTSIDE the untrusted fence and
+ * carries ONLY caller-computed positions, never the paged bytes. `nextArgs` is
+ * the exact next call that continues from where this slice stopped.
+ *
+ * @param {{ page: { offset: number, end: number, total: number, remaining: number }, nextArgs: string }} p
+ * @returns {string}
+ */
+export const pageStatusLine = ({ page, nextArgs }) => (page.remaining > 0
+  ? `[paging] chars ${page.offset}–${page.end} of ${page.total}; ${page.remaining} remain — next: ${nextArgs}.`
+  : `[paging] chars ${page.offset}–${page.end} of ${page.total}; end of stored text.`);
+
 /**
  * Window an oversized text: head + tail with an elision marker between.
  * Text at or under the budget is returned whole (windowed:false).
