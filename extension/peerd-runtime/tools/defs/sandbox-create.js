@@ -34,27 +34,28 @@ export const SANDBOX_KIND_HANDLERS = Object.freeze({
 export const sandboxCreateTool = {
   name: 'sandbox_create',
   primitive: 'engine',
+  // why the per-kind HOW-TO isn't here: the description is the every-turn
+  // routing surface — enough to PICK a kind, no more. The deep operating lore
+  // (charts, iframe runtime, file-by-file growth) rides each kind's
+  // create-RESULT note (NOTEBOOK_NOTE / APP_RUNTIME_NOTE) and the owning
+  // actor's prompt, disclosed once when the agent actually commits to that kind.
   description: [
     'Create a SANDBOX — an isolated execution instance in its own background',
     'tab — and get back its id. Pick `kind` by the job:',
-    '"webvm" = a full Linux VM with bash, a persistent disk, and POSIX tools',
-    '(compilers, python, git) — heavyweight, boots in seconds.',
-    '"notebook" = a fresh-run JS IDE with a file tree, sealed realm, and OPFS',
-    'scratch — lightweight (~hundreds of ms). ✅ JSON processing, parsers,',
-    'numerical work, and DATA ANALYSIS with charts + tables (peerd:std renders',
-    'bar/line/scatter/heatmap as SVG, no DOM needed) — a data chart or explained',
-    'analysis wants a notebook, NOT an app.',
+    '"webvm" = a full Linux VM (bash, persistent disk, POSIX tools — compilers,',
+    'python, git); heavyweight, boots in seconds.',
+    '"notebook" = a fresh-run JS IDE (file tree, sealed realm, OPFS scratch);',
+    'lightweight. ✅ JSON/parsing/numerical work and DATA ANALYSIS with charts +',
+    'tables — a chart or explained analysis wants a notebook, NOT an app.',
     '"app" = a user-facing multi-file HTML app in a sandboxed iframe (full DOM,',
-    'no extension access). ✅ "build a TODO app / calculator / interactive',
-    'dashboard". An app REQUIRES `name` plus `files` (path → content; entry',
-    'defaults to index.html) or `html` shorthand — start with a minimal shell',
-    'immediately,',
-    'then grow it file by file through the app\'s actor. For a MULTIPLAYER app',
-    'that talks to peers over the dweb, pass dwapp:true and follow dweb_guide.',
+    'no extension access). ✅ "build a TODO app / calculator / dashboard";',
+    'REQUIRES `name` plus `files` (or `html` shorthand). For a MULTIPLAYER dwapp',
+    'that talks to peers, pass dwapp:true.',
     'The new instance becomes the chat\'s current of its kind and a "go there"',
-    'card lands in chat. Then DELEGATE the work: message_actor(<id>, goal) —',
-    'the instance\'s actor holds all its file/run tools. (For quick headless',
-    'compute with no tab and no instance, script is simpler.)',
+    'card lands in chat. Then DELEGATE the work: message_actor(<id>, goal) — the',
+    'instance\'s actor holds all its file/run tools and gets the how-to in the',
+    'create result. (For quick headless compute with no tab and no instance,',
+    'script is simpler.)',
   ].join(' '),
   schema: {
     type: 'object',
