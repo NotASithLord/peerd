@@ -26,7 +26,8 @@
 // the tag can also be cut entirely from a dev machine.
 
 import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, basename } from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { REPO_ROOT, ARTIFACTS_DIR, readVersion, parseArgs } from './lib.ts';
 import { fetchFeedVersions } from './check-feeds.ts';
@@ -114,8 +115,22 @@ const main = async () => {
 
   step('package all four artifacts');
   run('bun', ['packaging/package.ts', '--all']);
-  if (!dryRun && !existsSync(join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'))) {
-    die('peerd-preview-chrome.crx was not produced — signing failed?');
+  // Positive signing proof, matching the CI release job's gate: the .crx must
+  // carry the CRX3 magic and the .xpi must contain AMO's signature block.
+  // File-exists alone let a run that died before sign.ts pass this step.
+  if (!dryRun) {
+    const crx = join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx');
+    const xpi = join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi');
+    if (!existsSync(crx)) die('peerd-preview-chrome.crx was not produced — signing failed?');
+    const magic = readFileSync(crx).subarray(0, 4).toString('latin1');
+    if (magic !== 'Cr24') die('peerd-preview-chrome.crx lacks the Cr24 CRX3 magic — not a signed CRX');
+    if (!existsSync(xpi)) die('peerd-preview-firefox.xpi was not produced — AMO signing failed?');
+    try {
+      execFileSync('unzip', ['-l', xpi, 'META-INF/mozilla.rsa'], { cwd: REPO_ROOT, stdio: 'ignore' });
+    } catch {
+      die('peerd-preview-firefox.xpi has no META-INF/mozilla.rsa — AMO signing did not run');
+    }
+    console.log('signing proof OK (CRX3 magic + AMO signature block)');
   }
 
   step('regenerate update feeds');
@@ -176,9 +191,28 @@ const main = async () => {
   }
 
   step('create GitHub release (idempotent)');
+  // Digest manifest, matching the CI release job: sha256sum-format lines so
+  // `sha256sum -c` / `shasum -a 256 -c` verify downloads directly. Store zips
+  // are included because their store upload is manual — the digest is how a
+  // human confirms the submitted file is the one that was verified.
+  const digestTargets = [
+    join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
+    join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
+    join(ARTIFACTS_DIR, 'peerd-store-chrome.zip'),
+    join(ARTIFACTS_DIR, 'peerd-store-firefox.xpi'),
+    join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
+    join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
+  ].filter((f) => existsSync(f));
+  const sums = digestTargets
+    .map((f) => `${createHash('sha256').update(readFileSync(f)).digest('hex')}  ${basename(f)}`)
+    .join('\n') + '\n';
+  const sumsPath = join(ARTIFACTS_DIR, 'SHA256SUMS');
+  writeFileSync(sumsPath, sums);
+  console.log(`wrote ${relative(REPO_ROOT, sumsPath)} (${digestTargets.length} files)`);
   const assets = [
     join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
     join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
+    sumsPath,
     join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
     join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
   ];

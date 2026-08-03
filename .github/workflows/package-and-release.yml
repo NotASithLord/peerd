@@ -34,11 +34,27 @@ on:
         type: boolean
         default: false
 
-# why these pins: every action below runs on the Node 24 JS-action runtime
-# (checkout@v5, upload-artifact@v6, setup-chrome@v2, setup-bun@v2 — the first
-# major of each that targets node24). That clears GitHub's Node-20 deprecation
-# warnings at the source; no FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 shim needed.
-# (This is GitHub's *action* runtime — peerd's own tooling is 100% Bun.)
+# Default the workflow token to read-only; jobs that write (visual's diff
+# branch + PR comment, release's assets) elevate per-job. why: the default
+# GITHUB_TOKEN grant is workflow-wide, so one compromised step in ANY job
+# could otherwise push refs or rewrite releases.
+permissions:
+  contents: read
+
+# why these pins: two constraints at once.
+#   1. Node-24 runtime — every action below is the first major of its line
+#      that targets node24 (clears GitHub's Node-20 deprecation warnings; no
+#      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 shim. This is GitHub's *action*
+#      runtime — peerd's own tooling is 100% Bun).
+#   2. Immutable SHAs, not tags — a major tag (`@v5`) is a mutable ref the
+#      action publisher can move; a moved tag means arbitrary code running in
+#      release CI. Every third-party action is pinned to a full commit SHA
+#      with the human-readable version in a trailing comment (the format
+#      Dependabot understands and keeps updated — see .github/dependabot.yml).
+#      When bumping: resolve the new tag with
+#      `git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'`
+#      (fall back to the bare tag ref when there is no ^{} line) and update
+#      the comment to match.
 jobs:
   test:
     # Keep this job's display name stable — it predates the packaging matrix
@@ -46,22 +62,22 @@ jobs:
     name: bun test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - run: bun test ./tests
 
   checks:
     name: lint + boundary + drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - name: ESLint
         run: bun run lint
       - name: Typecheck (bun suite + // @ts-check extension files)
@@ -76,6 +92,8 @@ jobs:
         run: bun run check:docpaths
       - name: Source hygiene (no control bytes / tracked symlinks in source)
         run: bun run check:hygiene
+      - name: Vendor integrity (extension/vendor/ matches vendor.lock.json)
+        run: bun run check:vendor
       # The web target: stage it fresh from live source, then prove the
       # assembled tree is import-closed (check-web-boundary auto-runs inside
       # package:web; the explicit second run keeps the gate visible in logs).
@@ -115,11 +133,11 @@ jobs:
     name: in-browser tests (headless Chrome)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         id: chrome
         with:
           chrome-version: stable
@@ -139,15 +157,15 @@ jobs:
     name: dweb two-peer (headless WebRTC)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         id: chrome
         with:
           chrome-version: stable
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - name: Run the two-peer harness over CDP
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
@@ -195,11 +213,11 @@ jobs:
     name: dweb netproc (multi-process nodes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       # Retry: cross-process port/timing in the multi-node mesh can flake.
       - name: Run the netproc harness (retry)
         run: |
@@ -217,14 +235,14 @@ jobs:
     name: e2e (side panel)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
       # why setup-chrome: it installs the system libraries headless Chrome
       # needs. We then run against Chrome for Testing (branded Chrome ignores
       # --load-extension), which reuses those libs.
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
       - name: Generate dev manifest
         run: bun run gen:dev
       - name: Provision Chrome for Testing
@@ -270,19 +288,19 @@ jobs:
       VISUAL_PLATFORM: linux-x64
       TZ: UTC
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
       # why setup-chrome: installs the system libraries headless Chrome needs.
       # We then run the PINNED Chrome for Testing build against them.
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
       - name: Read the pinned Chrome for Testing version
         id: pin
         run: echo "version=$(cat scripts/cdp/chrome-version.txt)" >> "$GITHUB_OUTPUT"
       # why cache: the CfT zip is ~150 MB per run, and the key IS the pin, so a
       # hit is always the exact build the baselines were seeded against.
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/peerd-cft/${{ steps.pin.outputs.version }}
           key: peerd-cft-${{ runner.os }}-${{ steps.pin.outputs.version }}
@@ -380,7 +398,7 @@ jobs:
       # runtime token, not GITHUB_TOKEN. This is the fork-safe evidence channel.
       - name: Upload before / after / diff renders
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: visual-diff-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
           path: visual-review/
@@ -450,7 +468,7 @@ jobs:
         run: bun run gallery
       - name: Upload the reseeded baselines + gallery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: visual-baselines-linux-x64
           path: |
@@ -469,12 +487,12 @@ jobs:
     name: packaged page boot
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - uses: browser-actions/setup-chrome@v2
-      - run: bun install
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+      - run: bun install --frozen-lockfile
       - name: Provision Chrome for Testing
         id: cft
         run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
@@ -497,15 +515,31 @@ jobs:
         channel: [store, preview]
         browser: [chrome, firefox]
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       # --no-sign: matrix packages prove packageability + boundary on every
       # push (store artifacts are verified inside package.ts); signing
       # happens only in the release job, where the secrets live.
       - run: bun packaging/package.ts --channel=${{ matrix.channel }} --browser=${{ matrix.browser }} --no-sign
+      # Reproducibility gate: package.ts normalizes mtimes/modes/entry order,
+      # so a second build of the same tree must be byte-identical. If this
+      # fails, a nondeterministic input crept into the staging pass — and the
+      # "rebuild the release from source and compare digests" verification
+      # story silently stops working.
+      - name: Rebuild and assert byte-identical artifact
+        run: |
+          set -euo pipefail
+          sha256sum artifacts/*.zip artifacts/*.xpi 2>/dev/null | sort > first.sums
+          bun packaging/package.ts --channel=${{ matrix.channel }} --browser=${{ matrix.browser }} --no-sign --skip-verify
+          sha256sum artifacts/*.zip artifacts/*.xpi 2>/dev/null | sort > second.sums
+          diff first.sums second.sums || {
+            echo '::error::packaging is not reproducible — two builds of the same tree produced different bytes'
+            exit 1
+          }
+          cat first.sums
       # why upload only off PRs: a PR build's job is to prove the package
       # COMPILES and passes the dweb-trace verify — both run in package.ts above,
       # BEFORE this step — and nobody downloads a PR's artifact. Uploading every
@@ -513,7 +547,7 @@ jobs:
       # hit the upload step itself errors and reds the whole matrix on changes
       # that built + verified fine. Keep uploads for main + tags (the release/QA
       # inputs); cap retention so they can't pile up indefinitely.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: github.event_name != 'pull_request'
         with:
           name: peerd-${{ matrix.channel }}-${{ matrix.browser }}
@@ -528,14 +562,24 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     needs: [test, checks, package]
+    # The one job that holds signing secrets. Bound to a GitHub Environment so
+    # the secrets can be scoped to it AND protection rules (required reviewers,
+    # tag-pattern restrictions) can gate every run that touches the signing
+    # key — configure those under Settings → Environments → release. The
+    # environment is auto-created on first run; the protection rules are the
+    # part only a human can add.
+    environment: release
     permissions:
       contents: write
+      # For the signed build-provenance attestation on the release artifacts.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
 
       - name: Check tag matches package.json version
         run: |
@@ -595,6 +639,37 @@ jobs:
       - name: Regenerate update feeds for this release
         run: bun packaging/gen-update-feeds.ts --version="${GITHUB_REF_NAME#v}" --repo="$GITHUB_REPOSITORY"
 
+      # Digest manifest: lets anyone verify a downloaded artifact (or a
+      # store-submitted zip) against what this run actually built, and gives
+      # the provenance attestation below stable subjects. Store zips are
+      # included because their upload is manual — the digest is how a human
+      # confirms the file they submit is the file CI verified.
+      - name: Write SHA256SUMS for all release artifacts
+        run: |
+          set -euo pipefail
+          # Basename-relative lines so `sha256sum -c SHA256SUMS` verifies
+          # files downloaded from the release page directly.
+          (cd artifacts && sha256sum \
+            peerd-preview-chrome.crx \
+            peerd-preview-firefox.xpi \
+            peerd-store-chrome.zip \
+            peerd-store-firefox.xpi \
+            > SHA256SUMS)
+          (cd update-feeds && sha256sum chrome-preview.xml firefox-preview.json) >> artifacts/SHA256SUMS
+          cat artifacts/SHA256SUMS
+
+      # Signed SLSA-style provenance: binds each artifact digest to this
+      # workflow, commit, and runner via GitHub's attestation service.
+      # Verify with: gh attestation verify <file> --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-path: |
+            artifacts/peerd-preview-chrome.crx
+            artifacts/peerd-preview-firefox.xpi
+            artifacts/peerd-store-chrome.zip
+            artifacts/peerd-store-firefox.xpi
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -607,6 +682,7 @@ jobs:
           ASSETS=(
             artifacts/peerd-preview-chrome.crx
             artifacts/peerd-preview-firefox.xpi
+            artifacts/SHA256SUMS
             update-feeds/chrome-preview.xml
             update-feeds/firefox-preview.json
           )
