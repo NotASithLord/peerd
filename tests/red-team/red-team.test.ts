@@ -38,6 +38,7 @@ describe('peerd red-team suite', () => {
       '08-prompt-injection-benchmark',
       '09-page-content-injection',
       '10-origin-retasking',
+      '11-login-orchestration',
     ]);
   });
 

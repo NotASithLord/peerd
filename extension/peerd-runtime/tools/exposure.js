@@ -57,6 +57,11 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // fetch; read/capture ingest page/response bytes; write persists them. Same
   // tier as fetch_url — the orchestrator delegates web work via message_actor.
   'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
+  // login (Tier 0) — INITIATES a user-gesture sign-in on the active tab. It holds
+  // no credential and never fills a password, but it drives the page and its
+  // confirm names the live origin, so it rides the web-actor tier like every other
+  // page-driving tool: the orchestrator delegates "sign in here" via message_actor.
+  'login',
 ]));
 
 /** Is this tool hidden from the main agent (actor-only)? Pure. @param {string} name */
@@ -231,6 +236,9 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   web: Object.freeze(new Set([
     ...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_web_cache',
     'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
+    // login (Tier 0) — the web actor drives a page's sign-in affordance; keyless
+    // by construction (it holds no secret and fills no password).
+    'login',
   ])),
   // The dweb actor — the mesh's operator (global singleton, handle "dweb").
   // Exactly the dweb family, nothing else: no egress tools, no DOM, no engine

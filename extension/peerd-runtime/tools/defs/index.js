@@ -18,6 +18,7 @@ import { pageEvalTool }              from './page-eval.js';
 import { pageExecTool }              from './page-exec.js';
 import { pageKeysTool }              from './page-keys.js';
 import { clickTool }                 from './click.js';
+import { loginTool }                 from './login.js';
 import { typeTool }                  from './type.js';
 import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
@@ -87,6 +88,7 @@ export {
   pageExecTool,
   pageKeysTool,
   clickTool,
+  loginTool,
   typeTool,
   navigateTool,
   readPdfTool,
@@ -182,6 +184,9 @@ export const BUILTIN_TOOLS = Object.freeze([
   navigateTool,
   typeTool,
   clickTool,
+  // login (Tier 0) — INITIATES a user-gesture sign-in; web-actor-only (hidden from
+  // main in exposure.js, allowed for kind:'web'). Holds no secret, fills no password.
+  loginTool,
   readPdfTool,
   // the web actor's SESSIONLESS secure fetch (its non-render web mechanism).
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
