@@ -225,17 +225,17 @@ export const parseSiteHandle = (input) => {
  * }}
  */
 export const makeApiActorBindings = () => {
-  /** @type {Map<string, string>} `${ownerChatId} ${origin}` → API-actor sessionId */
+  /** @type {Map<string, string>} `${ownerChatId}\u0000${origin}` → API-actor sessionId */
   const byKey = new Map();
   /** @param {string} ownerChatId @param {string} origin @returns {string} */
-  const keyOf = (ownerChatId, origin) => `${ownerChatId} ${origin}`;
+  const keyOf = (ownerChatId, origin) => `${ownerChatId}\u0000${origin}`;
   return {
     bind: (ownerChatId, origin, actorSessionId) => { byKey.set(keyOf(ownerChatId, origin), actorSessionId); },
     resolve: (ownerChatId, origin) => byKey.get(keyOf(ownerChatId, origin)) ?? null,
     drop: (ownerChatId, origin) => byKey.delete(keyOf(ownerChatId, origin)),
     // The origins a chat has integrations for — feeds list_integrations + chat-end cleanup.
     originsFor: (ownerChatId) => {
-      const prefix = `${ownerChatId} `;
+      const prefix = `${ownerChatId}\u0000`;
       const out = [];
       for (const k of byKey.keys()) if (k.startsWith(prefix)) out.push(k.slice(prefix.length));
       return out;
