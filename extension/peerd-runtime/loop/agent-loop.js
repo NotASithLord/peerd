@@ -28,7 +28,7 @@
 
 import { uuidv7 } from '/shared/util.js';
 import { RuntimeContextIncompleteError } from '../errors.js';
-import { redactToolResult } from './redact.js';
+import { redactToolResult, PAGED_MAX_CHARS } from './redact.js';
 import { stripAttachments } from './attachments.js';
 import { planTrim } from './trim.js';
 import { planBodyCompaction } from './lineage-compaction.js';
@@ -911,9 +911,15 @@ export async function* runUserTurn(ctx) {
             && typeof im.data === 'string' && im.data.length > 0);
         if (imgs.length > 0) liveToolImages.set(tu.id, imgs);
       }
+      // why the paged raise: an EXPLICITLY-PAGED reader result (read_web_cache /
+      // read_run_cache / the self-paging file reads flag `paged`) is one slice
+      // the model asked for — redact it at the larger paged ceiling so the
+      // requested page survives instead of being re-cut by the 8k backstop.
+      // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.
+      const paged = dispatchResult.ok && dispatchResult.paged === true;
       const block = {
         tool_use_id: tu.id,
-        content: redactToolResult(rawContent),
+        content: redactToolResult(rawContent, paged ? { maxChars: PAGED_MAX_CHARS } : undefined),
         is_error: !dispatchResult.ok,
         meta: dispatchResult.meta,
       };

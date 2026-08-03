@@ -33,6 +33,8 @@ describe('read_web_cache', () => {
     const afterFence = r.content!.split('</untrusted_web_content>')[1];
     expect(afterFence).toContain('[paging]');
     expect(afterFence).toContain('"offset": 30');   // the next-call hint continues where this slice ended
+    // paged: redacted at the larger paged ceiling so the requested slice survives.
+    expect((r as { paged?: boolean }).paged).toBe(true);
   });
 
   test('the final slice says end-of-text instead of a next-call hint', async () => {
