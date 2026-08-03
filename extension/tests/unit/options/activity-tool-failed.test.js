@@ -59,7 +59,18 @@ describe('options.activity — a declined tool call shows as failed (end-to-end)
     registerTool(makeTool({
       execute: async () => ({ ok: false, error: 'declined', content: 'User declined the outbound write.' }),
     }));
-    await dispatchToolCall({ id: 'x', name: 't', args: {} }, dispatchCtx((e) => log.append(e)));
+    // The dispatcher fires ctx.audit fire-and-forget (.catch, not awaited), so
+    // dispatchToolCall resolves BEFORE log.append finishes its async chain-head
+    // read + hash + IDB put. Capture the append promise and await it ourselves,
+    // or list() races an empty log. (Deterministic — no poll/sleep.)
+    /** @type {Promise<any>[]} */
+    const appends = [];
+    await dispatchToolCall({ id: 'x', name: 't', args: {} }, dispatchCtx((e) => {
+      const p = log.append(e);
+      appends.push(p);
+      return p;
+    }));
+    await Promise.all(appends);
 
     const entries = await log.list();
     // The dispatcher wrote tool_failed (not tool_executed) for the {ok:false}.

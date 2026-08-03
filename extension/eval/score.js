@@ -243,9 +243,12 @@ export const wastedTurns = (transcript) => {
   for (const n of identity.values()) if (n > 1) repeatedIdenticalCall += n - 1;
 
   // error-then-retry: a failed call immediately followed by the SAME tool on the
-  // next step (the model reacting to a bad error by re-poking it). blind spot:
-  // only the IMMEDIATE next step and only the same tool NAME — a retry after an
-  // intervening tool, or via a different tool, is invisible (undercounts).
+  // next step (the model reacting to a bad error by re-poking it). blind spots
+  // BOTH directions: undercounts — only the IMMEDIATE next step and only the
+  // same tool NAME, so a retry after an intervening tool or via a different tool
+  // is invisible; overcounts — a failed call whose same-tool successor is an
+  // UNRELATED next action (click #login fails, then click #next) or a
+  // legitimately-corrected retry both trip it. A proxy, not a tally (see header).
   let errorThenRetry = 0;
   for (let i = 0; i < calls.length - 1; i++) {
     if (calls[i].ok === false && calls[i + 1].name === calls[i].name) errorThenRetry++;

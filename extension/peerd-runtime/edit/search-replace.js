@@ -307,15 +307,14 @@ export const applyBlocks = (source, blocks) => {
 
     const count = countOccurrences(text, search);
     if (count === 0) {
-      // 3b: a re-issued edit whose REPLACE already landed is not a typo — if
-      // it's provably in place, skip it and report the no-op rather than
-      // firing a misleading search_not_found.
-      if (isAlreadyApplied(text, search, replace)) {
-        alreadyApplied.push(blockIndex);
-        return;
-      }
-      // 3d: diagnose the most common real cause — an indentation/whitespace
-      // mismatch — by name, instead of the misdirecting "the file changed".
+      // 3d BEFORE 3b (F1): a whitespace-ALIGNED match is positive proof the
+      // block did NOT land — the old anchor is still present, only its
+      // indentation/tabs/trailing-space differ. So diagnose whitespace first
+      // and let it VETO already-applied: otherwise an indentation-only miss
+      // whose REPLACE line happens to exist elsewhere (a common `return null;`)
+      // would report a false no-op and silently skip a real edit. Erroring to
+      // re-read is the safe direction; a genuine retry's old anchor is gone
+      // entirely, so this never blocks a true already-applied case.
       const wsLine = whitespaceMissLine(text, search);
       if (wsLine !== null) {
         throw new SearchNotFoundError(
@@ -323,6 +322,13 @@ export const applyBlocks = (source, blocks) => {
           blockIndex,
           { whitespace: true, line: wsLine },
         );
+      }
+      // 3b: a re-issued edit whose REPLACE already landed is not a typo — if
+      // it's provably in place (and no whitespace-aligned anchor survives),
+      // skip it and report the no-op rather than a misleading search_not_found.
+      if (isAlreadyApplied(text, search, replace)) {
+        alreadyApplied.push(blockIndex);
+        return;
       }
       throw new SearchNotFoundError(
         `block ${blockIndex}: SEARCH text not found. The file may have changed; re-read it and rebuild the block.`,

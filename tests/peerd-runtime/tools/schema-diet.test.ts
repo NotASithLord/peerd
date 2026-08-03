@@ -2,7 +2,9 @@
 // descriptors (name + description + schema) were trimmed by MOVING reference
 // prose off the always-on main surface — message_actor's schema prose into its
 // description, script's peerd:std/wasi reference into the once-per-session
-// JS_PITFALLS_NOTE, sandbox_create's per-kind how-to into the create-result
+// SCRIPT_BUILTINS_NOTE (kept out of JS_PITFALLS_NOTE, which also rides the
+// notebook actor's every-turn prompt), sandbox_create's per-kind how-to into
+// the create-result
 // notes. NO field/mode/capability was removed. These pin the achieved sizes and
 // assert the net main-surface delta is meaningfully negative, and that every
 // message_actor field the tool's execute() reads still exists in the schema.
