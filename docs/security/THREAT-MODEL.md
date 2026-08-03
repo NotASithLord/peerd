@@ -120,6 +120,7 @@ malicious separate extension, and physical device access.
 | Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never enters a keyless heap, egress allowlist |
 | Origin-bound API keys (per integration) | Vault, injected at the egress boundary only | `origin-credentials.js`. Sent only to the exact owned https origin |
 | The user's session cookies (logged-in tabs) | The browser's cookie jar. peerd never reads cookies | Sensitive-origin denylist, Plan and Act mode, confirm gate |
+| User authentication factor (login) | Never held by the agent — a passkey stays on the user's device; an SSO session stays with the provider; a password is never read or filled | The agent never holds it; a login is initiated only through a gated, origin-verified, always-confirmed, affordance-verified action (`tools/defs/login.js`, Tier 0). The factor stays with the user |
 | Page content the agent reads | Transiently, inside an actor heap | The memory boundary (B1) and the untrusted-content fence |
 | Durable memory (notes loaded into every future prompt) | `peerd-runtime/memory/` | User-approved writes. The digest excludes tool results (see residual risk R2) |
 | Local files (WebVM filesystem, Notebook and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
@@ -363,6 +364,35 @@ classified from the tab's live URL rather than a turn-start pin, because an in-p
 hop moves the page with no tool call to observe.
 Code: `peerd-runtime/actor/ugc-registry.js`, enforced in `tools/dispatcher.js`.
 Red-team: scenario 09.
+
+<a id="inv-14"></a>
+### INV-14. Login orchestration holds no credential
+The `login` tool INITIATES a user-gesture sign-in (passkey/WebAuthn or "Sign in with
+a recognized identity provider") and holds nothing: it never fills a password field,
+stores no token, and returns no secret. It confirms on a SYSTEM-DERIVED https origin
+(`ctx.activeTab.origin`, never a model-supplied string; fail-closed on a non-secure or
+unknown origin), and the confirm is UNCONDITIONAL — it prompts **even when
+confirmations are disabled**, the product default. Before it confirms or clicks it
+reads GROUND TRUTH off the page and runs a pure, deterministic classifier, so the
+method and provider the confirm names come from the page rather than a model argument
+that could spoof the consent. SSO for a provider outside the identity-provider corridor
+(github/gitlab/facebook/unknown) is refused GRACEFULLY — no click, no actor kill — and
+a password affordance is refused because Tier 0 holds no credentials. A supported SSO
+affordance is clicked with an ordinary navigation click on the SAME element the read
+resolved (identical inputs → identical node). A passkey is ASSISTED-MANUAL at Tier 0:
+after the origin-verified consent, peerd hands the gesture to the user rather than
+auto-firing a trusted click — because the only trusted channel (a CDP click on a backend
+node) resolves the target by a different key than the ground-truth read, so an
+auto-click could be a confused deputy (consent to one element, a trusted click on
+another). No synthetic gesture is ever faked. A trusted passkey auto-click via a CDP
+same-node read is a documented Tier-0.1 follow-up. The tool is web-actor-only (hidden from the
+orchestrator, allowed only for a `kind:'web'` actor), and an inbound (untrusted) turn
+cannot reach it — the sender gate plus a defense-in-depth refusal inside the tool.
+This is **Tier 0** of the credential roadmap: the agent holds NOTHING. Tier 1 (scoped
+OAuth tokens) and passwords/keychain remain future work and out of scope here.
+Code: `peerd-runtime/tools/defs/login.js`, `peerd-runtime/tools/login-affordance.js`,
+`peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`. Red-team:
+scenario 11.
 
 ### Additional invariants (not scenario-gated, enforced in code)
 
