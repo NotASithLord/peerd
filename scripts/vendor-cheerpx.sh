@@ -95,13 +95,37 @@ for rel in "${FILES[@]}"; do
 done
 
 if [[ "${RESEED}" -eq 1 ]]; then
-  ( cd "${STAGE}" && sha256sum "${FILES[@]}" ) > "${SUMS_FILE}"
+  # Write via a temp file: a bare `> "${SUMS_FILE}"` truncates the committed pins
+  # BEFORE sha256sum runs, so a failure there would destroy them.
+  TMP_SUMS="$(mktemp)"
+  ( cd "${STAGE}" && sha256sum "${FILES[@]}" ) > "${TMP_SUMS}"
+  mv "${TMP_SUMS}" "${SUMS_FILE}"
   echo "[vendor-cheerpx] RESEEDED ${SUMS_FILE}:"
   cat "${SUMS_FILE}"
-  echo "[vendor-cheerpx] Review these hashes against upstream before committing."
+  echo "[vendor-cheerpx] Before committing, diff the new bytes against the previously"
+  echo "                 vendored version (git diff extension/vendor/cheerpx/) — Leaning"
+  echo "                 Technologies publishes no per-file digests for this CDN path, so"
+  echo "                 that diff, plus the npm @leaningtech/cheerpx tarball for the same"
+  echo "                 version, is the verifiable cross-check available."
 else
   if [[ ! -f "${SUMS_FILE}" ]]; then
     echo "[vendor-cheerpx] FATAL: ${SUMS_FILE} missing. Run with --reseed to create it."
+    exit 1
+  fi
+  # `sha256sum -c` only checks files LISTED IN THE SUMS FILE — an entry added to
+  # FILES without a reseed downloads, passes, and gets copied in having never been
+  # hashed, while the script prints a verified count it did not verify. (That is
+  # exactly the workflow the FILES comment above prescribes for a version bump.)
+  # So assert the two sets match, both directions, before trusting the check.
+  want="$(printf '%s\n' "${FILES[@]}" | sort)"
+  have="$(awk '{ $1=""; sub(/^ +/,""); print }' "${SUMS_FILE}" | sort)"
+  if [[ "${want}" != "${have}" ]]; then
+    echo "[vendor-cheerpx] FATAL: FILES and $(basename "${SUMS_FILE}") disagree."
+    echo "  only in FILES (would be vendored UNVERIFIED):"
+    comm -23 <(printf '%s\n' "${want}") <(printf '%s\n' "${have}") | sed 's/^/    /'
+    echo "  only in the sums file (pinned but no longer fetched):"
+    comm -13 <(printf '%s\n' "${want}") <(printf '%s\n' "${have}") | sed 's/^/    /'
+    echo "  Re-run with --reseed after reviewing the new file set."
     exit 1
   fi
   echo "[vendor-cheerpx] verifying against $(basename "${SUMS_FILE}")"
@@ -115,12 +139,16 @@ else
   echo "[vendor-cheerpx] all ${#FILES[@]} files verified"
 fi
 
-# Commit the staged tree into vendor/ only now.
-mkdir -p "${VENDOR_DIR}/tun"
-for rel in "${FILES[@]}"; do
-  mkdir -p "$(dirname "${VENDOR_DIR}/${rel}")"
-  cp "${STAGE}/${rel}" "${VENDOR_DIR}/${rel}"
-done
+# Commit the staged tree into vendor/ by REPLACING the directory, not copying over
+# it. why: a plain copy leaves behind any file a version bump dropped from FILES —
+# and the next `check-vendor.ts --write` would then pin those stale bytes as part of
+# the new release, permanently blessed and invisible to every gate afterward. A
+# whole-directory swap gets pruning and atomicity in one move.
+cp "${VENDOR_DIR}/SOURCE.txt" "${STAGE}/SOURCE.txt"
+rm -rf "${VENDOR_DIR}.new"
+cp -R "${STAGE}" "${VENDOR_DIR}.new"
+rm -rf "${VENDOR_DIR}"
+mv "${VENDOR_DIR}.new" "${VENDOR_DIR}"
 
 echo "[vendor-cheerpx] done. Vendored ${#FILES[@]} files → ${VENDOR_DIR}"
 echo "[vendor-cheerpx] Next: update vendor/cheerpx/SOURCE.txt, then"

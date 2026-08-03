@@ -265,7 +265,25 @@ describe('makeSpawnActor — the in-SW fallback loop is keyless', () => {
   test('the model call still receives the REAL credentials from the wrapper', async () => {
     const store = makeStore();
     const parent = await store.create({});
-    const { loop } = makeMockLoop();
+    // The loop must forward ctx.getSecret/ctx.safeFetch into ctx.callModel, exactly as
+    // the real agent-loop does. why that matters here: the stubs and the real
+    // credentials COLLIDE in cappedCallModel's object literal, and only the spread
+    // order ({...modelArgs, getSecret, safeFetch}) decides which wins. A mock that
+    // omits the forward never creates the collision, so the natural deps-first
+    // ordering — which hands every in-SW model call a getSecret that throws and kills
+    // the whole fallback lane — would pass. Mutation-checked: flipping the order in
+    // spawn.js fails this test.
+    let loopCtx: any = null;
+    async function* loop(ctx: any) {
+      loopCtx = ctx;
+      const stream = ctx.callModel({
+        messages: [], system: 's', tools: [],
+        getSecret: ctx.getSecret, safeFetch: ctx.safeFetch,
+      });
+      for await (const _ of stream) { /* drain */ }
+      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
+      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
+    }
     const { deps, modelCalls } = baseDeps(store, loop);
     await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
 
@@ -274,6 +292,8 @@ describe('makeSpawnActor — the in-SW fallback loop is keyless', () => {
     expect(modelCalls.length).toBeGreaterThan(0);
     expect(await modelCalls[0].getSecret('anthropic')).toBe('sk-test');
     expect(typeof modelCalls[0].safeFetch).toBe('function');
+    // And the loop's own view is still the stub, even though it forwarded it.
+    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
   });
 });
 

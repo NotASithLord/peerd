@@ -5,10 +5,10 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import {
   extractPathRefs, resolutionRoots, resolvesInRepo, isCheckableRef,
-  isGitignored, CHECKED_DOCS,
+  isGitignored, isRouteName, CHECKED_DOCS,
 } from '../../packaging/check-doc-paths.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 
@@ -73,12 +73,15 @@ describe('resolution against the real repo', () => {
 describe('the real top-level docs', () => {
   // The live gate: every checked doc's path claims must resolve. This is
   // the same walk main() does, run at PR time via bun test as well.
-  const roots = resolutionRoots();
   for (const doc of CHECKED_DOCS) {
     test(`${doc} has no dead path references`, () => {
       const p = join(REPO_ROOT, doc);
       if (!existsSync(p)) return;
+      // Same resolution the checker uses: the doc's own directory is a root, so a
+      // doc under docs/ can use ordinary sibling links.
+      const roots = resolutionRoots(REPO_ROOT, dirname(p));
       const dead = extractPathRefs(readFileSync(p, 'utf8'))
+        .filter((r) => !isRouteName(r))
         .filter((r) => isCheckableRef(r, roots))
         .filter((r) => !resolvesInRepo(r, roots) && !isGitignored(r));
       expect(dead).toEqual([]);

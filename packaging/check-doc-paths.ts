@@ -9,11 +9,21 @@
 // files that were later deleted.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { REPO_ROOT } from './lib.ts';
 
-export const CHECKED_DOCS = ['README.md', 'CLAUDE.md', 'SECURITY.md', 'CONTRIBUTING.md'];
+// why the security docs are in here: they cite more source paths than any other
+// prose in the repo, and a stale citation there is worse than elsewhere — the whole
+// point of THREAT-MODEL / HARDENING-ROADMAP is that a reader can check a claim
+// against the code it names. (Caught a real one: the roadmap cited
+// peerd-runtime/tools/provider-call-api.js, which lives under actor/.)
+export const CHECKED_DOCS = [
+  'README.md', 'CLAUDE.md', 'SECURITY.md', 'CONTRIBUTING.md',
+  'docs/security/THREAT-MODEL.md',
+  'docs/security/HARDENING-ROADMAP.md',
+  'docs/security/RED-TEAM-RESULTS.md',
+];
 
 // A backticked token or link target is treated as a repo-path claim only
 // when it looks like one: has a slash, no spaces, no glob/placeholder
@@ -52,13 +62,28 @@ export const extractPathRefs = (md: string): string[] => {
 /** The roots a doc path claim may be relative to. Docs use module-relative
  *  shorthand constantly: `peerd-egress/vault/` means extension/peerd-egress/
  *  vault/, and `tools/exposure.js` or `dom/walk-injected.js` are relative to
- *  a peerd-* module. */
-export const resolutionRoots = (root: string = REPO_ROOT): string[] => {
+ *  a peerd-* module.
+ *
+ *  `docDir` adds the checked document's OWN directory, so a doc outside the repo
+ *  root can use ordinary relative links (`./THREAT-MODEL.md` between the two
+ *  security docs) — without it, every sibling link in docs/ reads as dead. */
+export const resolutionRoots = (root: string = REPO_ROOT, docDir?: string): string[] => {
   const modules = existsSync(join(root, 'extension'))
     ? readdirSync(join(root, 'extension')).filter((d) => d.startsWith('peerd-'))
       .map((d) => join(root, 'extension', d))
     : [];
-  return [root, join(root, 'extension'), ...modules];
+  return [root, join(root, 'extension'), ...modules, ...(docDir ? [docDir] : [])];
+};
+
+/** Message-route names read exactly like paths (`actor/model-call`, `vault/unlock`,
+ *  `sw/web-fetch`) and are all over the security docs, which describe the RPC
+ *  surface. They are route ids, not files. Recognized by their first segment
+ *  matching a known route namespace — narrow on purpose, so a real
+ *  `actor/`-prefixed file path is still checked. */
+const ROUTE_NAMESPACES = new Set(['actor', 'actors', 'vault', 'sw', 'a2a', 'script', 'dweb', 'apps', 'pdf', 'web', 'turn', 'voice']);
+export const isRouteName = (ref: string): boolean => {
+  const [head, ...rest] = ref.split('/');
+  return rest.length === 1 && ROUTE_NAMESPACES.has(head) && !ref.includes('.');
 };
 
 export const resolvesInRepo = (ref: string, roots: string[]): boolean =>
@@ -92,11 +117,12 @@ export const isGitignored = (ref: string, root: string = REPO_ROOT): boolean => 
 
 const main = () => {
   let bad = 0;
-  const roots = resolutionRoots();
   for (const doc of CHECKED_DOCS) {
     const p = join(REPO_ROOT, doc);
     if (!existsSync(p)) continue; // a checked doc may legitimately not exist
+    const roots = resolutionRoots(REPO_ROOT, dirname(p));
     for (const ref of extractPathRefs(readFileSync(p, 'utf8'))) {
+      if (isRouteName(ref)) continue;
       if (!isCheckableRef(ref, roots)) continue;
       if (resolvesInRepo(ref, roots) || isGitignored(ref)) continue;
       console.error(`${doc}: dead path reference: ${ref}`);

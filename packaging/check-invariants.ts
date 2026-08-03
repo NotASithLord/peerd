@@ -43,40 +43,65 @@ const sourceFiles = (): string[] =>
     .filter((rel) => !rel.endsWith('.test.js'))
     .sort();
 
-/** Count non-comment matches of a pattern, per file, dropping files with none. */
+/**
+ * Strip comments so a mention in a `// why:` note isn't counted as a site, while
+ * keeping the file's byte length (replace with spaces) so nothing shifts.
+ *
+ * why not a line-prefix filter: the earlier version skipped lines *starting* with
+ * `//` or `*`, which both under- and over-counted — a trailing `// …` comment on a
+ * code line was scanned, a `/* … *\/` block was not stripped at all, and matching
+ * per LINE meant two sites on one line counted as one. This is still not a parser
+ * (a `//` inside a string literal is treated as a comment), but it errs toward
+ * counting MORE, and a false positive fails loudly and is cheap to re-bless — the
+ * failure mode a security gate should have.
+ */
+const stripComments = (src: string): string =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length));
+
+/** Count matches of a pattern across each whole file, dropping files with none. */
 const sitesMatching = (pattern: RegExp): Record<string, number> => {
   const out: Record<string, number> = {};
   for (const rel of sourceFiles()) {
-    const lines = readFileSync(join(EXTENSION_DIR, rel), 'utf8').split('\n');
-    // Skip line comments so a mention in a `// why:` note isn't counted as a
-    // site — this file's whole job is to be precise about where code lives.
-    const n = lines.filter((l) => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*'))
-      .filter((l) => pattern.test(l)).length;
+    const src = stripComments(readFileSync(join(EXTENSION_DIR, rel), 'utf8'));
+    const n = src.match(pattern)?.length ?? 0;
     if (n > 0) out[rel] = n;
   }
   return out;
 };
 
-const DYNAMIC_CODE = /new Function\s*\(|(^|[^.\w$])eval\s*\(/;
-const MESSAGE_HOST = /runtime\.onMessage\.addListener/;
+// Whole-file, global, and deliberately wide. Each alternative closes a way the
+// narrow versions were evaded: `new AsyncFunction(` (the ctor obtained off an async
+// function's prototype — hooks/compile.js does exactly this, and it was invisible),
+// a bare `Function(...)` call, indirect eval (`(0, eval)`, `globalThis.eval`), and
+// the string forms of setTimeout/setInterval. Line breaks between the callee and
+// `(` are tolerated so a formatter can't hide a site.
+const DYNAMIC_CODE = /new\s+\w*Function\s*\(|(^|[^.\w$])Function\s*\(|(^|[^.\w$])eval\s*\(|\.\s*eval\s*\(|set(?:Timeout|Interval)\s*\(\s*['"`]/g;
+// `?.` and whitespace/newlines between every part, and onMessageExternal too — the
+// external surface would be strictly worse than onMessage if it ever appeared.
+const MESSAGE_HOST = /runtime\s*\??\.\s*onMessage(?:External)?\s*\??\.\s*addListener/g;
 
-type ManifestSurface = {
-  permissions: string[];
-  optional_permissions: string[];
-  host_permissions: string[];
-  content_security_policy: Record<string, string>;
-  web_accessible_resources: unknown;
-};
+// The whole generated manifest is the surface, minus the keys that legitimately
+// move on their own. why a denylist instead of the hand-picked allowlist this
+// started as: an allowlist silently ignores every key nobody thought of, and the
+// ones missed were not obscure — `sandbox` (which places a page under the
+// permissive sandbox CSP), `optional_host_permissions`, and `devtools_page` all
+// passed the gate untouched. A denylist means a NEW manifest key shows up as a
+// diff by default, which is the posture a surface gate wants.
+const VOLATILE_MANIFEST_KEYS = new Set(['version', 'version_name', 'key']);
 
-const manifestSurface = (channel: Channel, browser: Browser, version: string): ManifestSurface => {
+const manifestSurface = (channel: Channel, browser: Browser, version: string): Record<string, unknown> => {
   const m = generateManifest({ channel, browser, version }) as Record<string, any>;
-  return {
-    permissions: [...(m.permissions ?? [])].sort(),
-    optional_permissions: [...(m.optional_permissions ?? [])].sort(),
-    host_permissions: [...(m.host_permissions ?? [])].sort(),
-    content_security_policy: m.content_security_policy ?? {},
-    web_accessible_resources: m.web_accessible_resources ?? [],
-  };
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(m).sort()) {
+    if (VOLATILE_MANIFEST_KEYS.has(k)) continue;
+    // Sort permission-ish arrays so a reorder isn't noise; everything else rides verbatim.
+    out[k] = Array.isArray(m[k]) && m[k].every((v: unknown) => typeof v === 'string')
+      ? [...m[k]].sort()
+      : m[k];
+  }
+  return out;
 };
 
 /**
@@ -89,11 +114,20 @@ const forbiddenManifestKeys = (channel: Channel, browser: Browser, version: stri
   return ['content_scripts', 'externally_connectable'].filter((k) => m[k] !== undefined);
 };
 
+// Every channel a manifest is generated for — INCLUDING dev, which CHANNELS omits.
+// why dev belongs here: it is the manifest every contributor load-unpacks, against a
+// real unlocked vault and a real API key, and it already exposes tests/runner.html to
+// <all_urls>. An `externally_connectable` added to manifests/dev.patch.json would make
+// the ~100-route privileged dispatcher reachable from a web page, and nothing else
+// would catch it — the generated-file drift check only asserts extension/manifest.json
+// matches `gen:dev` output, so patching the source and regenerating is drift-clean.
+const GATED_CHANNELS = /** @type {Channel[]} */ ([...CHANNELS, 'dev' as Channel]);
+
 const collect = () => {
   const version = readVersion();
-  const manifests: Record<string, ManifestSurface> = {};
+  const manifests: Record<string, Record<string, unknown>> = {};
   const forbidden: string[] = [];
-  for (const channel of CHANNELS) {
+  for (const channel of GATED_CHANNELS) {
     for (const browser of BROWSERS) {
       manifests[`${channel}/${browser}`] = manifestSurface(channel, browser, version);
       for (const key of forbiddenManifestKeys(channel, browser, version)) {

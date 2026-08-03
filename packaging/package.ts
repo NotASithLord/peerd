@@ -63,7 +63,23 @@ const PRUNE_STORE = ['eval', 'peerd-distributed', 'peerd-provider/system-prompt-
 //   order   — `zip -r` walks readdir order; feed it an explicitly sorted
 //             entry list instead. TZ is pinned for the zip child because
 //             DOS timestamps in zip headers are local time.
-const SOURCE_DATE_EPOCH = Number(process.env.SOURCE_DATE_EPOCH ?? 946684800); // 2000-01-01T00:00:00Z
+// Validated, not coerced: an exported-but-EMPTY SOURCE_DATE_EPOCH is not nullish, so
+// `??` doesn't fire and Number('') is 0 — every entry would silently stamp at the 1980
+// DOS floor, a rebuilder's digests wouldn't match, and nothing would say why. A
+// non-numeric value dies inside utimesSync naming neither the variable nor the cause.
+// Both are configuration mistakes that must fail loudly at the source.
+const readSourceDateEpoch = (): number => {
+  const raw = process.env.SOURCE_DATE_EPOCH;
+  if (raw === undefined || raw === '') return 946684800; // 2000-01-01T00:00:00Z
+  // 315532800 = 1980-01-01, the earliest timestamp the zip format can represent.
+  if (!/^\d+$/.test(raw) || Number(raw) < 315532800) {
+    throw new Error(
+      `SOURCE_DATE_EPOCH must be a positive integer unix timestamp at or after 315532800 (1980-01-01, the zip format floor); got "${raw}"`,
+    );
+  }
+  return Number(raw);
+};
+const SOURCE_DATE_EPOCH = readSourceDateEpoch();
 
 const listEntriesSorted = (root: string): string[] =>
   (readdirSync(root, { recursive: true }) as string[])

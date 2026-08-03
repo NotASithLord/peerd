@@ -29,6 +29,7 @@
 
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
+import { isOffscreenSender } from '/shared/sender-trust.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
@@ -2461,19 +2462,40 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // in-SW only), so without this the eval harness's OM2W recorder — and any
   // activity view — is blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
-  // Spend-limit preflight for the actor lane. The cap is stored on the CHAT at the
-  // base of the lineage, so walk parentSessionId up from the actor and test that
-  // tally: an actor (or a spawned child of one) must not push a session that has
-  // already hit the user's hard cap. Refusing is all this does — it never bills.
-  // why the lane needed it at all: script/model-call and cheap-call both preflight,
-  // but the actor relay did not, so delegating was a way around the limit.
+  // The relay boundary. `runtime.sendMessage` cannot address one extension
+  // context, so the actor/run job (grant token included) is broadcast to every
+  // listener — the side panel and the engine tab pages among them. Pinning the
+  // three relay routes to the offscreen document is therefore what actually
+  // keeps another first-party page from dispatching as an actor; the token
+  // carries run identity and liveness on top of it.
+  isOffscreenSender: (/** @type {any} */ sender) => isOffscreenSender(sender, {
+    runtimeId: browser.runtime?.id,
+    extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+    offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
+  }),
+  // Spend-limit preflight for the actor lane. Two tallies, because they fail in
+  // different directions and each alone leaves a hole:
+  //
+  //   the ACTOR's own record — the one runActorTurnOffscreen folds this lane's
+  //     cost into. This is the check that actually bounds actor spend, and it is
+  //     the only one that works for the dweb daemon actor, a global singleton with
+  //     no parent chat to walk to. Same shape as cheap-call.js: preflight and fold
+  //     name the same record, so the number being tested is the number being
+  //     incremented.
+  //   the ROOT CHAT — so a conversation that has already blown the cap cannot keep
+  //     spending by delegating.
+  //
+  // Refusing is all this does; it never bills. NOT closed by this: a fan-out across
+  // MANY actors, each individually under the cap. That needs one budget spanning the
+  // lineage — see HARDENING-ROADMAP.md P0-3, still open.
   spendRefusalFor: async (/** @type {string} */ actorSessionId) => {
-    const root = await rootChatSessionFor(actorSessionId);
-    if (!root) return null;
     const spendLimit = settingsStore.get().spendLimitUsd;
-    return limitExceeded(normalizeTally(root.cost).cost, spendLimit)
-      ? `actor refused: the session spend limit ($${spendLimit}) is reached`
-      : null;
+    const over = (/** @type {any} */ rec) => !!rec && limitExceeded(normalizeTally(rec.cost).cost, spendLimit);
+    const own = await sessions.get(actorSessionId).catch(() => null);
+    if (over(own)) return `actor refused: this actor has reached the session spend limit ($${spendLimit})`;
+    const root = await rootChatSessionFor(actorSessionId);
+    if (over(root)) return `actor refused: the session spend limit ($${spendLimit}) is reached`;
+    return null;
   },
 }) : null;
 
@@ -4779,8 +4801,10 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // used to be broadcast to the UI and then dropped — nothing wrote it to a tally,
     // and the broadcast itself was conditional on a connected side panel, so a
     // headless/goal-mode actor turn cost nothing on the record at all. The fold runs
-    // unconditionally now, which is also what makes the lane's spend-limit preflight
-    // meaningful rather than a check against a tally nobody increments.
+    // unconditionally now, and spendRefusalFor preflights THIS record, so the number
+    // being tested is the number being incremented. It stays on the actor's own
+    // session (not rolled up to the parent) — spawn.js documents that separation
+    // deliberately, and changing it changes user-visible chat cost.
     if (r.usage) {
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;

@@ -34,15 +34,16 @@ For orientation — enforced by CI, not by this prose:
   or a failed fetch aborts without touching the tree); `--reseed` makes an
   upgrade a reviewable hash diff.
 - Security CI (`.github/workflows/security.yml`) — CodeQL, OSV against the
-  lockfile, PR dependency review with a copyleft denylist, and peerd's own
-  architectural gate `bun run check:invariants`
-  (`packaging/check-invariants.ts`): it pins the per-channel manifest attack
-  surface, every dynamic-code site, and every `runtime.onMessage` listener
-  against a blessed baseline, and hard-refuses `content_scripts` /
-  `externally_connectable` in any channel.
-- The actor relay grant, the actor-lane spend preflight + cost fold, and
-  keyless custody on the in-service-worker fallback — see P0-1..3 below, which
-  now record what shipped and what remains.
+  lockfile, and peerd's own architectural gate `bun run check:invariants`
+  (`packaging/check-invariants.ts`): it pins the generated manifest surface for
+  store, preview AND dev, every dynamic-code site, and every `runtime.onMessage`
+  listener against a blessed baseline, and hard-refuses `content_scripts` /
+  `externally_connectable` in any channel. PR dependency review runs alongside
+  but is ADVISORY (`continue-on-error`) until the repository's Dependency graph
+  setting is enabled — so the copyleft denylist reports without gating today.
+- The actor relay sender-pin + grant, the actor-lane spend preflight + cost fold,
+  and keyless custody on the spawned-child fallback — see P0-1..3 below, which
+  record precisely what shipped and what remains.
 
 ## P0 — isolation invariants
 
@@ -55,24 +56,31 @@ no key and no tool closures. The fallback path — Firefox, which has no
 offscreen API, plus a run that never started — runs the child loop in the
 service-worker realm.
 
-Shipped: that fallback now has the same *credential custody* as the offscreen
-path. `restrictCtxCapabilities` already stripped `getSecret`/`safeFetch` from
-the tool context unconditionally; the loop itself used to receive the live
-credentials, and now receives throwing stubs while the SW-owned `callModel`
-wrapper adds the real ones at the call boundary (`keylessCredentials` in
-`extension/peerd-runtime/actor/spawn.js`, pinned by
-`tests/peerd-runtime/spawn.test.ts`). The "keyless fallback" claim in
-`CLAUDE.md` and THREAT-MODEL R1 is now true as written, and both were rewritten
-to say precisely what is and isn't fenced.
+Shipped, for the SPAWNED (ephemeral) child lane only: `restrictCtxCapabilities`
+already stripped `getSecret`/`safeFetch` from the tool context unconditionally;
+the loop itself used to receive the live credentials, and now receives throwing
+stubs while the SW-owned `callModel` wrapper adds the real ones at the call
+boundary (`keylessCredentials` in `extension/peerd-runtime/actor/spawn.js`).
+Both the stubs AND the spread ordering that keeps the lane working are pinned by
+`tests/peerd-runtime/spawn.test.ts` — the ordering matters because the stubs and
+the real credentials collide in one object literal, and the wrong order hands
+every in-SW model call a `getSecret` that throws.
 
-Still open — the part that matters most: **no separate heap ⇒ no
-untrusted-content actor.** Keyless custody does not buy memory separation; the
-child's untrusted transcript still shares a realm with the vault broker and the
-engine clients. When an isolated host cannot be created, the feature should
-degrade with an explicit "secure actor isolation unavailable" state rather than
-execute in the privileged realm. For Firefox, evaluate an
-extension-page-hosted dedicated Worker as the isolated host before accepting
-that degradation.
+Still open, two things:
+
+1. **The BOUND-actor lane never got the stub custody.** A web/webvm/notebook/app/
+   dweb actor with no offscreen client falls through `runActorTurnOffscreen` to
+   `runAgentTurn`, which forwards the live `getSecret`/`safeFetch` into the loop
+   (`loop/turn-driver.js`). So on Firefox the actors that ingest the most
+   untrusted content are exactly the ones still holding credentials. Thread a
+   `cappedCallModel`-style wrapper through that path.
+2. **The part that matters most: no separate heap ⇒ no untrusted-content actor.**
+   Keyless custody does not buy memory separation; the child's untrusted
+   transcript still shares a realm with the vault broker and the engine clients.
+   When an isolated host cannot be created, the feature should degrade with an
+   explicit "secure actor isolation unavailable" state rather than execute in the
+   privileged realm. For Firefox, evaluate an extension-page-hosted dedicated
+   Worker as the isolated host before accepting that degradation.
 
 ### 2. Bind actor relay identity to the channel, not the payload
 
@@ -83,16 +91,30 @@ that degradation.
 payload — so any first-party page, engine tabs included, could dispatch a tool
 as an arbitrary actor session or spend the key on a dead run just by naming it.
 
-Each run now mints a grant token service-worker-side; it travels in the job,
-the offscreen runner stamps it on every relay, and identity is *derived* from
-it (`grantFor`). The session id is no longer sent at all. Retiring the grant
-when the run settles makes it a liveness check too, which is the `script`
-lane's owner-check posture. The Worker never receives the token, so it stays a
-host-side binding rather than a secret the untrusted heap could leak.
+Two checks now, and both are load-bearing:
 
-Still open: the longer-term shape — per-run `MessagePort`s bound at spawn to
-(actor, session, generation), so relays stop carrying identity in the payload
-at all rather than carrying an unforgeable handle to it.
+- **The sender pin is the boundary.** Every relay requires `isOffscreenSender`
+  (`extension/shared/sender-trust.js`) — an exact match on the offscreen document
+  URL, not merely "first-party". This is what stops another extension page, and
+  it is required because the token is *not* a secret from those pages:
+  `runtime.sendMessage` has no way to address a single extension context, so the
+  `actor/run` job — token included — is broadcast to every listener in the
+  extension, engine tab pages among them. A grant alone would have been a shared
+  secret handed to the adversary it was defending against.
+- **The grant carries run identity and liveness.** Minted service-worker-side,
+  stamped by the offscreen runner on every relay, never given to the Worker; the
+  session id is no longer sent at all. Retiring it when the run settles refuses a
+  replayed relay, which is the `script` lane's owner-check posture.
+
+Neither alone suffices: the sender check cannot say *which* run is speaking, and
+the token cannot say *who* is holding it.
+
+Still open: targeted delivery — per-run `MessagePort`s bound at spawn to (actor,
+session, generation) would stop broadcasting the job at all, making the token
+genuinely private and letting relays drop payload identity entirely. Related and
+pre-existing: `actor/abort` in `offscreen/offscreen.js` still takes a `runId`
+from any first-party sender, so any extension page can cancel an in-flight actor
+turn.
 
 ### 3. Close the actor-lane spend gap
 
@@ -102,21 +124,29 @@ Per-lane limits were already real (child depth/steps/output/wall-clock in
 `spawn.js`, delegation budgets keyed by lineage root in
 `extension/peerd-runtime/actor/actor-messaging.js`, dweb inbound rate caps, and
 a reserve-then-reconcile model-call quota on the `script` lane in
-`extension/peerd-runtime/tools/provider-call-api.js`). The aggregate
+`extension/peerd-runtime/actor/provider-call-api.js`). The aggregate
 `spendLimitUsd` gate, though, did not bound actors at all: `actor/model-call`
 had no preflight, and offscreen actor-turn cost was broadcast to the UI without
 ever being written to a tally — so delegating was a way around the cap.
 
-Shipped: `actor/model-call` now preflights against the chat session at the base
-of the lineage (`rootChatSessionFor` walks `parentSessionId`, bounded and
-cycle-guarded) and refuses before the key-bearing call; the actor turn's cost is
-folded into its session record unconditionally, no longer only when a side panel
-happens to be connected.
+Shipped: the actor turn's cost is folded into its session record
+unconditionally, no longer only when a side panel happens to be connected, and
+`actor/model-call` preflights before the key-bearing call. The preflight tests
+**two** tallies, and which ones is the whole point:
 
-Still open: **every model call debits one hierarchical budget** (session →
-actor → call). Spawned-child usage is still summed but deliberately not rolled
-into the parent — changing that changes user-visible cost accounting, so it
-wants its own design pass rather than a ride-along.
+- the ACTOR's own record — the one the fold writes. Preflight and fold naming the
+  same record is what makes the check mean anything; an earlier revision of this
+  work read the root chat's tally while the fold wrote the actor's, so the gate
+  could never fire on actor spend at all. It is also the only check that works
+  for the dweb daemon actor, a global singleton with no parent chat to walk to.
+- the ROOT CHAT (`rootChatSessionFor`, bounded and cycle-guarded) — so a
+  conversation that already blew its cap cannot keep spending by delegating.
+
+Still open: **every model call debits one hierarchical budget** (session → actor
+→ call). A fan-out across many actors, each individually under the cap, still
+gets through, and spawned-child usage is summed but deliberately not rolled into
+the parent. Rolling it up changes user-visible cost accounting, so it wants its
+own design pass rather than a ride-along.
 
 ### 4. Full integrity for the WebVM root filesystem
 

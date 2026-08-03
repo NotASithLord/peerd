@@ -46,6 +46,11 @@
  *   ACTOR tool dispatch on the UI ports ('actor/op' — name/args/ok, observability only).
  *   The offscreen heap emits no turn/tool-use, so this is how the eval harness's OM2W
  *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
+ * @param {(sender: unknown) => boolean} [deps.isOffscreenSender]  is this message from the
+ *   OFFSCREEN DOCUMENT? The three relay routes below refuse anything else. REQUIRED in
+ *   production and fail-CLOSED by omission (an unwired client refuses every relay), because
+ *   this is the boundary, not a hint — see the grants-map note for why the token alone is
+ *   not sufficient.
  * @param {() => string} [deps.mintRelayToken]  mints the per-run relay grant (below).
  *   Injected so the grant is testable without a browser; defaults to crypto.randomUUID.
  * @param {(sessionId: string) => Promise<string | null>} [deps.spendRefusalFor]  spend-limit
@@ -62,6 +67,7 @@ export const makeOffscreenActorClient = ({
   broadcastOp = (/** @type {any} */ _msg) => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
   spendRefusalFor = undefined,
+  isOffscreenSender = () => false,
 }) => {
   let seq = 0;
   /**
@@ -83,6 +89,14 @@ export const makeOffscreenActorClient = ({
    *
    * The Worker never receives the token (the runner holds it and stamps it on outbound
    * relays), so it stays a host-side binding, not a secret the untrusted heap can leak.
+   *
+   * The token is NOT a secret from other extension pages, though, and must not be treated
+   * as one: `runtime.sendMessage` has no way to address a single extension context, so the
+   * `actor/run` job — token included — is broadcast to every listener in the extension,
+   * including the engine tab pages named above. That is why every route ALSO requires
+   * `isOffscreenSender`. The sender check is the boundary; the token adds run identity and
+   * liveness on top of it. Either alone is insufficient: the sender check cannot say WHICH
+   * run is speaking, and the token cannot say who is holding it.
    */
   const grants = new Map();
   /** @type {Map<string, Set<AbortController>>} runId → in-flight model-call controllers */
@@ -157,25 +171,31 @@ export const makeOffscreenActorClient = ({
   };
 
   /**
-   * Resolve a relay's identity from its grant token. Returns null for a missing,
-   * unknown, or retired token — every route treats that as a hard refusal, so an
-   * unauthorized first-party sender learns nothing beyond "no".
+   * Resolve a relay's identity: the sender must be the offscreen document AND the
+   * message must carry a live grant token. Returns null for anything else — a
+   * non-offscreen page, a missing/unknown/retired token — and every route treats
+   * that as a hard refusal, so an unauthorized caller learns nothing beyond "no".
    * @param {{ relayToken?: unknown }} [msg]
+   * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
    * @returns {{ runId: string, actorSessionId: string } | null}
    */
-  const grantFor = (msg) => {
+  const grantFor = (msg, sender) => {
+    if (!isOffscreenSender(sender)) return null;
     const token = msg?.relayToken;
     if (typeof token !== 'string' || token.length === 0) return null;
     return grants.get(token) ?? null;
   };
 
   const routes = {
-    /** @param {{ relayToken?: string, args?: object }} [msg] - the model call: key+egress added HERE. */
-    'actor/model-call': async (msg = {}) => {
-      // Identity from the grant, never from the message: this route adds the
-      // user's key to whatever it forwards, so an unauthorized caller must not
-      // be able to name a run at all.
-      const grant = grantFor(msg);
+    /**
+     * @param {{ relayToken?: string, args?: object }} [msg] - the model call: key+egress added HERE.
+     * @param {unknown} [sender] - must be the offscreen document (see grantFor).
+     */
+    'actor/model-call': async (msg = {}, sender = undefined) => {
+      // Identity from the offscreen sender + the grant, never from the message:
+      // this route adds the user's key to whatever it forwards, so an
+      // unauthorized caller must not be able to name a run at all.
+      const grant = grantFor(msg, sender);
       if (!grant) return { ok: false, error: 'actor/model-call: unauthorized relay' };
       const { runId } = grant;
       const args = msg.args;
@@ -216,13 +236,16 @@ export const makeOffscreenActorClient = ({
         set.delete(ac); if (set.size === 0) inflight.delete(key);
       }
     },
-    /** @param {{ relayToken?: string, call?: any }} [msg] - SW-side ctx build + gate + dispatch. */
-    'actor/tool-dispatch': async (msg = {}) => {
+    /**
+     * @param {{ relayToken?: string, call?: any }} [msg] - SW-side ctx build + gate + dispatch.
+     * @param {unknown} [sender] - must be the offscreen document (see grantFor).
+     */
+    'actor/tool-dispatch': async (msg = {}, sender = undefined) => {
       try {
-        // The session comes from the GRANT, not the message. This is the route that
-        // builds an instance-pinned, tool-granting context, so a caller that could
-        // name its own session would inherit any actor's pin and toolset.
-        const grant = grantFor(msg);
+        // The session comes from the offscreen-pinned GRANT, not the message. This is
+        // the route that builds an instance-pinned, tool-granting context, so a caller
+        // that could name its own session would inherit any actor's pin and toolset.
+        const grant = grantFor(msg, sender);
         if (!grant) return { ok: false, error: 'actor/tool-dispatch: unauthorized relay' };
         const { actorSessionId } = grant;
         const call = msg.call;
@@ -295,12 +318,15 @@ export const makeOffscreenActorClient = ({
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
-    /** @param {{ relayToken?: string, event?: object }} [msg] */
-    'actor/loop-event': (msg = {}) => {
+    /**
+     * @param {{ relayToken?: string, event?: object }} [msg]
+     * @param {unknown} [sender] - must be the offscreen document (see grantFor).
+     */
+    'actor/loop-event': (msg = {}, sender = undefined) => {
       // Lowest-authority of the three (it only feeds the actor card + cost meter),
-      // but grant-bound for the same reason: an unauthorized sender could otherwise
-      // inject fabricated progress/cost events into another run's UI.
-      const grant = grantFor(msg);
+      // but bound the same way: an unauthorized sender could otherwise inject
+      // fabricated progress/cost events into another run's UI.
+      const grant = grantFor(msg, sender);
       if (!grant) return { ok: false, error: 'actor/loop-event: unauthorized relay' };
       try { if (msg.event) runOnEvent.get(grant.runId)?.(msg.event); } catch { /* never break the relay */ }
       return { ok: true };

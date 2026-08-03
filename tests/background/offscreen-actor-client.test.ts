@@ -4,8 +4,17 @@
 import { describe, test, expect } from 'bun:test';
 import { makeOffscreenActorClient } from '../../extension/background/offscreen-actor-client.js';
 
+// Stand-ins for the two senders that matter. The relay routes must accept only the
+// first: `runtime.sendMessage` from the SW broadcasts to EVERY extension context, so
+// the grant token is visible to the side panel and to the three engine tab pages that
+// host agent-authored content — which makes the sender check, not the token, the
+// actual boundary.
+const OFFSCREEN = { id: 'ext', url: 'chrome-extension://ext/offscreen/offscreen.html' };
+const ENGINE_TAB = { id: 'ext', url: 'chrome-extension://ext/engine-tabs/vm-tab/vm-tab.html' };
+
 const baseDeps = (over: any = {}) => ({
   ensureOffscreen: async () => {},
+  isOffscreenSender: (s: any) => s?.url === OFFSCREEN.url,
   sendMessage: async () => ({ ok: true }),
   callModel: (async function* () {})(),
   getSecret: async () => 'sk',
@@ -39,9 +48,12 @@ const clientWithRelay = (over: any = {}) => {
   }));
   return {
     client,
-    during: async (fn: (token: string) => Promise<any>, actorSessionId = 's1') => {
+    during: async (fn: (token: string) => Promise<any>, actorSessionId = 's1', onEvent?: (ev: any) => void) => {
       relay = fn;
-      await client.run({ actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any);
+      await client.run(
+        { actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any,
+        onEvent ? { onEvent } : undefined,
+      );
       return captured;
     },
   };
@@ -91,7 +103,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       pinActorCall: (call: any, at: string, id: string) => { pinned = { call, at, id }; },
       dispatchToolCall: async () => ({ ok: true, content: 'snapshot' }),
     });
-    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'snapshot', args: {} } }));
+    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'snapshot', args: {} } }, OFFSCREEN));
     expect(out).toEqual({ ok: true, result: { ok: true, content: 'snapshot' } });
     expect(ctxOpts.activeTabId).toBe(42);           // the owned tab reached the ctx
     expect(ctxOpts.actorType).toBe('web');
@@ -106,7 +118,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       buildToolContext: async (o: any) => { ctxOpts = o; return {}; },
       dispatchToolCall: async () => ({ ok: true }),
     });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'fetch_url', args: {} } }));
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'fetch_url', args: {} } }, OFFSCREEN));
     expect(ctxOpts.activeTabId).toBeUndefined();
   });
 
@@ -118,11 +130,11 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       buildToolContext: async (o: any) => { ctxOpts = o; return {}; },
       dispatchToolCall: async () => ({ ok: true }),
     });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_boot', args: {} } }), 'engine');
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_boot', args: {} } }, OFFSCREEN), 'engine');
     expect(ctxOpts.activeTabId).toBeUndefined();     // engine acts on its instance, not a tab
     // The grant now decides WHICH session is dispatched against, so a chat-session
     // grant reaches the kind check and is refused there.
-    const refused = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'x', args: {} } }), 'chatSession');
+    const refused = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'x', args: {} } }, OFFSCREEN), 'chatSession');
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain('not an actor or actor session');
   });
@@ -147,7 +159,7 @@ describe('relay grant — routes refuse anything without a live token', () => {
       ...dispatchDeps,
       dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
     }));
-    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 'victim-actor', call: { name: 'vm_exec', args: {} } } as any);
+    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 'victim-actor', call: { name: 'vm_exec', args: {} } } as any, OFFSCREEN);
     expect(out.ok).toBe(false);
     expect(out.error).toContain('unauthorized relay');
     expect(dispatched).toBe(false);   // refused BEFORE any ctx build or dispatch
@@ -158,7 +170,7 @@ describe('relay grant — routes refuse anything without a live token', () => {
     const client = makeOffscreenActorClient(baseDeps({
       callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
     }));
-    const out: any = await client.routes['actor/model-call']({ runId: 'aw-guess', args: {} } as any);
+    const out: any = await client.routes['actor/model-call']({ runId: 'aw-guess', args: {} } as any, OFFSCREEN);
     expect(out.ok).toBe(false);
     expect(out.error).toContain('unauthorized relay');
     expect(called).toBe(false);
@@ -169,7 +181,7 @@ describe('relay grant — routes refuse anything without a live token', () => {
     const { client, during } = clientWithRelay(dispatchDeps);
     await during(async (relayToken) => { leaked = relayToken; return null; });
     // Same token, after the run — the liveness half of the grant.
-    const out: any = await client.routes['actor/tool-dispatch']({ relayToken: leaked, call: { name: 'vm_exec', args: {} } });
+    const out: any = await client.routes['actor/tool-dispatch']({ relayToken: leaked, call: { name: 'vm_exec', args: {} } }, OFFSCREEN);
     expect(out.ok).toBe(false);
     expect(out.error).toContain('unauthorized relay');
   });
@@ -183,17 +195,73 @@ describe('relay grant — routes refuse anything without a live token', () => {
       buildToolContext: async () => ({}),
       dispatchToolCall: async () => ({ ok: true }),
     });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }), 'actor-A');
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }), 'actor-B');
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }, OFFSCREEN), 'actor-A');
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }, OFFSCREEN), 'actor-B');
     expect(seen).toEqual(['actor-A', 'actor-B']);
   });
 
   test('loop-event without a token cannot inject progress into a run', async () => {
-    const events: any[] = [];
-    const client = makeOffscreenActorClient(baseDeps({}));
-    const out: any = await client.routes['actor/loop-event']({ runId: 'aw-guess', event: { type: 'fake' } } as any);
+    // Assert the event is NOT DELIVERED, not merely that the reply says no: a route
+    // that forwarded first and returned {ok:false} after would pass the weaker check
+    // while doing exactly the injection this forbids.
+    const seen: any[] = [];
+    const { client, during } = clientWithRelay({});
+    const out: any = await during(async (relayToken) => {
+      // A live run exists (its onEvent is recording), but this relay carries no token.
+      const r = await client.routes['actor/loop-event']({ event: { type: 'fake' } } as any, OFFSCREEN);
+      // ...and a live token from a page that is not the offscreen doc is equally refused.
+      await client.routes['actor/loop-event']({ relayToken, event: { type: 'forged' } }, ENGINE_TAB);
+      return r;
+    }, 's1', (ev: any) => seen.push(ev));
     expect(out.ok).toBe(false);
-    expect(events).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+});
+
+// The sender pin. `runtime.sendMessage` from the SW cannot address one context, so
+// the actor/run job — grant token included — is broadcast to the side panel and to
+// every engine tab page. A page that keeps the token must still get nowhere.
+describe('relay sender pin — a leaked token is useless from any other page', () => {
+  const dispatchDeps = {
+    sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+    buildToolContext: async () => ({}),
+  };
+
+  test('an engine tab replaying a LIVE token cannot dispatch a tool', async () => {
+    let dispatched = false;
+    const { client, during } = clientWithRelay({
+      ...dispatchDeps,
+      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
+    });
+    const out: any = await during((relayToken) =>
+      client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }, ENGINE_TAB));
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain('unauthorized relay');
+    expect(dispatched).toBe(false);
+  });
+
+  test('an engine tab replaying a LIVE token cannot spend the key', async () => {
+    let called = false;
+    const { client, during } = clientWithRelay({
+      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
+    });
+    const out: any = await during((relayToken) =>
+      client.routes['actor/model-call']({ relayToken, args: {} }, ENGINE_TAB));
+    expect(out.ok).toBe(false);
+    expect(called).toBe(false);
+  });
+
+  test('an unwired client refuses every relay (fail-closed, not fail-open)', async () => {
+    // isOffscreenSender defaults to () => false: forgetting to wire the predicate
+    // must break the lane loudly rather than silently drop the boundary.
+    let relayed: any = null;
+    const client = makeOffscreenActorClient({ ...baseDeps({ ...dispatchDeps }), isOffscreenSender: undefined } as any);
+    const r = await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any)
+      .catch(() => null);
+    relayed = await client.routes['actor/tool-dispatch']({ relayToken: 'anything', call: { name: 'vm_exec', args: {} } }, OFFSCREEN);
+    expect(relayed.ok).toBe(false);
+    expect(relayed.error).toContain('unauthorized relay');
+    expect(r).not.toBeUndefined();
   });
 });
 
@@ -207,7 +275,7 @@ describe('actor/model-call — spend-limit preflight', () => {
       callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
       spendRefusalFor: async () => 'actor refused: the session spend limit ($5) is reached',
     });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }));
+    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN));
     expect(out.ok).toBe(false);
     expect(out.error).toContain('spend limit');
     expect(called).toBe(false);
@@ -219,7 +287,7 @@ describe('actor/model-call — spend-limit preflight', () => {
       callModel: async function* () { yield { type: 'text', text: 'hi' }; },
       spendRefusalFor: async (sid: string) => { asked.push(sid); return null; },
     });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }), 'actor-A');
+    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN), 'actor-A');
     expect(out.ok).toBe(true);
     expect(asked).toEqual(['actor-A']);
   });
@@ -236,7 +304,7 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
 
   test('a GRANTED tool builds the restricted ctx (from grantedTools) and dispatches', async () => {
     const { client, during } = clientWithRelay(subDeps());
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: { code: 'x' } } }));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: { code: 'x' } } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(out.result.ran).toBe('script');
     // the ctx was restricted to exactly the persisted granted set (never the worker's word)
@@ -258,7 +326,7 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
       dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
       EXPOSURE_REVIEW: 'review',
     }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'js_read_file', args: {} } }));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'js_read_file', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(seenCtx.exposure).toBe('review');
   });
@@ -269,7 +337,7 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
       dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
       EXPOSURE_REVIEW: 'review',
     }));
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }));
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
     expect(seenCtx.exposure).toBeUndefined();
   });
 
@@ -280,14 +348,14 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
       dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
       EXPOSURE_REVIEW: 'review',
     }));
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }));
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
     expect(seenCtx.exposure).toBeUndefined();
   });
 
   test('an UNGRANTED tool the worker asks for is REFUSED before any dispatch (never trust the worker)', async () => {
     let dispatched = false;
     const { client, during } = clientWithRelay(subDeps({ dispatchToolCall: async () => { dispatched = true; return { ok: true }; } }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'actor_create', args: {} } }));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'actor_create', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(false);
     expect(out.error).toContain('tool_not_available_to_actor');
     expect(dispatched).toBe(false);
@@ -295,7 +363,7 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
 
   test('an actor tool-dispatch needs restrictCtxCapabilities wired (fails closed without it)', async () => {
     const { client, during } = clientWithRelay(subDeps({ restrictCtxCapabilities: undefined }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(false);
     expect(out.error).toContain('not wired');
   });

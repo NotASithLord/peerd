@@ -652,25 +652,31 @@ jobs:
       # the provenance attestation below stable subjects. Store zips are
       # included because their upload is manual — the digest is how a human
       # confirms the file they submit is the file CI verified.
+      #
+      # why the store lines get their OWN file: they are NOT release assets (store
+      # uploads are manual), so a user who downloads everything the release
+      # publishes and runs `sha256sum -c SHA256SUMS` would get two
+      # "FAILED open or read" lines and exit 1 on a perfectly authentic release —
+      # the canonical verification command reporting failure is how people learn to
+      # stop running it. SHA256SUMS covers exactly the published assets.
       - name: Write SHA256SUMS for all release artifacts
         run: |
           set -euo pipefail
           # Basename-relative lines so `sha256sum -c SHA256SUMS` verifies
           # files downloaded from the release page directly.
-          (cd artifacts && sha256sum \
-            peerd-preview-chrome.crx \
-            peerd-preview-firefox.xpi \
-            peerd-store-chrome.zip \
-            peerd-store-firefox.xpi \
-            > SHA256SUMS)
+          (cd artifacts && sha256sum peerd-preview-chrome.crx peerd-preview-firefox.xpi > SHA256SUMS)
           (cd update-feeds && sha256sum chrome-preview.xml firefox-preview.json) >> artifacts/SHA256SUMS
+          (cd artifacts && sha256sum peerd-store-chrome.zip peerd-store-firefox.xpi > SHA256SUMS.store)
+          echo '--- SHA256SUMS (release assets; verify with `sha256sum -c SHA256SUMS`) ---'
           cat artifacts/SHA256SUMS
+          echo '--- SHA256SUMS.store (manually submitted store packages) ---'
+          cat artifacts/SHA256SUMS.store
 
       # Signed SLSA-style provenance: binds each artifact digest to this
       # workflow, commit, and runner via GitHub's attestation service.
       # Verify with: gh attestation verify <file> --repo <owner>/<repo>
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             artifacts/peerd-preview-chrome.crx
@@ -691,6 +697,7 @@ jobs:
             artifacts/peerd-preview-chrome.crx
             artifacts/peerd-preview-firefox.xpi
             artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.store
             update-feeds/chrome-preview.xml
             update-feeds/firefox-preview.json
           )

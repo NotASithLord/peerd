@@ -195,24 +195,33 @@ const main = async () => {
   // `sha256sum -c` / `shasum -a 256 -c` verify downloads directly. Store zips
   // are included because their store upload is manual — the digest is how a
   // human confirms the submitted file is the one that was verified.
-  const digestTargets = [
+  // Split exactly as the CI job does: SHA256SUMS covers the PUBLISHED assets, so
+  // `sha256sum -c SHA256SUMS` over a full download succeeds. The store packages are
+  // uploaded by hand and get their own file — listing them in the main manifest
+  // would make the canonical verification command fail on an authentic release.
+  const digest = (f: string) => `${createHash('sha256').update(readFileSync(f)).digest('hex')}  ${basename(f)}`;
+  const writeSums = (name: string, files: string[]) => {
+    const present = files.filter((f) => existsSync(f));
+    const p = join(ARTIFACTS_DIR, name);
+    writeFileSync(p, present.map(digest).join('\n') + '\n');
+    console.log(`wrote ${relative(REPO_ROOT, p)} (${present.length} files)`);
+    return p;
+  };
+  const sumsPath = writeSums('SHA256SUMS', [
     join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
     join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
-    join(ARTIFACTS_DIR, 'peerd-store-chrome.zip'),
-    join(ARTIFACTS_DIR, 'peerd-store-firefox.xpi'),
     join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
     join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
-  ].filter((f) => existsSync(f));
-  const sums = digestTargets
-    .map((f) => `${createHash('sha256').update(readFileSync(f)).digest('hex')}  ${basename(f)}`)
-    .join('\n') + '\n';
-  const sumsPath = join(ARTIFACTS_DIR, 'SHA256SUMS');
-  writeFileSync(sumsPath, sums);
-  console.log(`wrote ${relative(REPO_ROOT, sumsPath)} (${digestTargets.length} files)`);
+  ]);
+  const storeSumsPath = writeSums('SHA256SUMS.store', [
+    join(ARTIFACTS_DIR, 'peerd-store-chrome.zip'),
+    join(ARTIFACTS_DIR, 'peerd-store-firefox.xpi'),
+  ]);
   const assets = [
     join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
     join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
     sumsPath,
+    storeSumsPath,
     join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
     join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
   ];

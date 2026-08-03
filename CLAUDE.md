@@ -327,16 +327,19 @@ gotchas to know going in:
   call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
   and every tool call (the SW rebuilds the caller's instance-pinned or
   `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
-  args). Both relays are bound to a per-run GRANT minted SW-side and held by the
-  offscreen runner (never the worker): identity is derived from the token, so no
-  other first-party page can dispatch as an actor or spend on a dead run, and a
-  retired token makes a replayed relay a refusal. So the actor fence is a MEMORY
-  boundary, not a prompt boundary: untrusted page/instance/response content stays
-  behind the heap, one process-eviction from the vault DK no longer reachable.
-  Chrome-only (needs the offscreen API); Firefox falls back to an in-SW loop that
-  keeps the same KEYLESS custody (throwing credential stubs; the SW-owned
-  `callModel` wrapper adds the real ones at the call boundary) but NOT the heap
-  separation — the honest residual, THREAT-MODEL R1. why it matters: prompt
+  args). Both relays are pinned to the OFFSCREEN DOCUMENT as sender and carry a
+  per-run GRANT minted SW-side (`isOffscreenSender` + the grants map): the sender
+  check is the boundary — `runtime.sendMessage` can't address one context, so the
+  job and its token reach every extension page — and the token adds run identity
+  plus liveness on top, so a replayed relay from a settled run is refused. So the
+  actor fence is a MEMORY boundary, not a prompt boundary: untrusted
+  page/instance/response content stays behind the heap, one process-eviction from
+  the vault DK no longer reachable. Chrome-only (needs the offscreen API); Firefox
+  falls back to an in-SW loop with no heap separation — its SPAWNED children keep
+  the keyless custody (throwing credential stubs; the SW-owned `callModel` wrapper
+  adds the real ones at the call boundary), its BOUND actors go through
+  `runAgentTurn` and still hold live credentials — the honest residual,
+  THREAT-MODEL R1. why it matters: prompt
   injection has no filter — the fix is to never hand untrusted reasoning the
   authority in the first place.
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
