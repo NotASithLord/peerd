@@ -94,6 +94,9 @@
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {any} [content]  optional human-readable explanation authored
+ *   alongside the machine `error` code (e.g. "User declined the outbound
+ *   write."); the loop surfaces it on the failure path — see agent-loop.js.
  * @property {ToolMeta} [meta]
  */
 

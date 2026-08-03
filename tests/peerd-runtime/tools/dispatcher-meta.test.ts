@@ -13,6 +13,16 @@ const ctx: any = {
   permission: { mode: 'act', confirmActions: false },
 };
 
+// A ctx that records every audit entry synchronously (the dispatcher fires
+// audit as fire-and-forget; the recorder pushes before its first await).
+const recorderCtx = () => {
+  const audited: any[] = [];
+  return {
+    audited,
+    ctx: { ...ctx, audit: async (e: any) => { audited.push(e); } },
+  };
+};
+
 const baseTool = (over: any = {}) => ({
   name: 'lt', description: 'd', primitive: 'web', sideEffect: 'read',
   schema: { type: 'object', properties: {} },
@@ -43,6 +53,47 @@ describe('dispatcher lineage spine fields', () => {
     expect(r.ok).toBe(false);
     expect(r.meta.sideEffect).toBe('mutate_external');
     expect(r.meta.origins).toEqual(['https://api.bank.com']);
+  });
+
+  test('return-value failure ({ok:false}) audits tool_failed, not tool_executed', async () => {
+    registerTool(baseTool({
+      primitive: 'web',
+      execute: async () => ({ ok: false, error: 'declined' }),
+    }) as any);
+    const { ctx: rctx, audited } = recorderCtx();
+    const r: any = await dispatchToolCall({ id: 't4', name: 'lt', args: {} } as any, rctx);
+    expect(r.ok).toBe(false);
+    await Promise.resolve();
+    const failed = audited.find((e) => e.type === 'tool_failed');
+    expect(failed).toBeTruthy();
+    expect(audited.some((e) => e.type === 'tool_executed')).toBe(false);
+    expect(failed.details.primitive).toBe('web');
+    expect(failed.details.error).toBe('declined');
+    expect(typeof failed.details.durationMs).toBe('number');
+  });
+
+  test('success audits tool_executed', async () => {
+    registerTool(baseTool() as any);
+    const { ctx: rctx, audited } = recorderCtx();
+    await dispatchToolCall({ id: 't5', name: 'lt', args: {} } as any, rctx);
+    await Promise.resolve();
+    expect(audited.some((e) => e.type === 'tool_executed')).toBe(true);
+    expect(audited.some((e) => e.type === 'tool_failed')).toBe(false);
+  });
+
+  test('a throwing tool audits tool_failed enriched with primitive + durationMs', async () => {
+    registerTool(baseTool({
+      primitive: 'web',
+      execute: async () => { throw new Error('boom'); },
+    }) as any);
+    const { ctx: rctx, audited } = recorderCtx();
+    await dispatchToolCall({ id: 't6', name: 'lt', args: {} } as any, rctx);
+    await Promise.resolve();
+    const failed = audited.find((e) => e.type === 'tool_failed');
+    expect(failed).toBeTruthy();
+    expect(failed.details.primitive).toBe('web');
+    expect(failed.details.error).toBe('boom');
+    expect(typeof failed.details.durationMs).toBe('number');
   });
 
   test('a throwing origins() fails closed at the origin gate (never reaches meta)', async () => {
