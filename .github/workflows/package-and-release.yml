@@ -74,6 +74,8 @@ jobs:
         run: bun run check:imports
       - name: Doc path references (top-level docs point at real files)
         run: bun run check:docpaths
+      - name: Source hygiene (no control bytes / tracked symlinks in source)
+        run: bun run check:hygiene
       # The web target: stage it fresh from live source, then prove the
       # assembled tree is import-closed (check-web-boundary auto-runs inside
       # package:web; the explicit second run keeps the gate visible in logs).

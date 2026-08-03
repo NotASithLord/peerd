@@ -51,6 +51,7 @@
     "check:imports": "bun packaging/check-packaged-imports.ts",
     "check:pages": "bun scripts/cdp/check-packaged-pages.mjs",
     "check:docpaths": "bun packaging/check-doc-paths.ts",
+    "check:hygiene": "bun packaging/check-source-hygiene.ts",
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
     "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"
