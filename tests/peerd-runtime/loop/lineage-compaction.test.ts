@@ -102,6 +102,13 @@ describe('defaultClassify', () => {
     expect(c({ sideEffect: 'mutate_external' })).toBe(Infinity);
     expect(c({ sideEffect: 'destructive' })).toBe(Infinity);
   });
+  // why: load_skill's repeat-injection dedup (schema-diet 6b) keys on the trim
+  // watermark, which only accounts for the body if it leaves the sent slice via
+  // the trim — NOT via body-compaction. So a skill body must never be compacted
+  // to a spine, even though it's a cheap read that would otherwise classify 1.
+  test('load_skill result → never, despite being a read (dedup depends on it)', () => {
+    expect(c({ sideEffect: 'read', durationMs: 10, toolName: 'load_skill' })).toBe(Infinity);
+  });
 });
 
 describe('planBodyCompaction — gating', () => {
@@ -159,6 +166,24 @@ describe('planBodyCompaction — behavior', () => {
     if (writes.some(compacted)) {
       expect(reads.every(compacted)).toBe(true); // a write only compacts once reads are exhausted
     }
+  });
+
+  test('never compacts a load_skill body, even under heavy pressure', () => {
+    // A big skill body in the compactable prefix would, as a cheap read, be the
+    // FIRST thing compacted (priority 1, biggest-within-priority). It must be
+    // left whole so load_skill's watermark dedup stays truthful (schema-diet 6b).
+    const msgs: any[] = [];
+    for (let i = 0; i < 12; i++) {
+      const toolName = i === 0 ? 'load_skill' : 'read_page';
+      const bytes = i === 0 ? 64000 : 4000; // the skill body is the biggest block
+      msgs.push(asstMsg(i * 2, [{ id: `tu_${i}`, name: toolName, input: {} }]));
+      msgs.push(resultMsg(i * 2 + 1, [block(i, { toolName, bytes })]));
+    }
+    const plan = planBodyCompaction(msgs, { contextWindow: 4000, keepRecent: 2 });
+    expect(plan.didCompact).toBe(true); // it DID compact (other reads), just not the skill
+    const skillBlock = (plan.messages[1] as any).toolResults[0];
+    expect(skillBlock.content.startsWith('‹elided›')).toBe(false);
+    expect(skillBlock.content.length).toBe(64000); // whole, unchanged
   });
 
   test('skips tiny bodies (< minBytes)', () => {

@@ -13,7 +13,8 @@
 // iframe, peerd-engine).
 
 import { clamp } from '/shared/util.js';
-import { JS_PITFALLS_NOTE } from './code-style-note.js';
+import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
+import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
 import { SPILL_PAGE_CHARS as RUN_CACHE_SLICE_CHARS } from '../web/spill.js';
 import { MAX_SPILL_TEXT_CHARS } from '../run-cache.js';
@@ -29,14 +30,6 @@ const MAX_TIMEOUT_MS = 120_000;
 // timeout TOWER in actors-api.js (job > bridge guard > per-ask cap, all
 // derived from one ceiling) — never a literal here that could drift below the
 // bridge and kill the worker mid-ask.
-
-// why once per session: script is the agent's OWN quick-compute path (the
-// precision / off-by-one class of bug lands here, e.g. large-integer math), so
-// the correctness note matters most here — but script is called repeatedly, so
-// we disclose it on the FIRST run and stay silent after, paying the tokens once.
-// Bounded by distinct sessions in one SW lifetime (tiny); an SW restart re-arms.
-/** @type {Set<string>} */
-const pitfallsDisclosed = new Set();
 
 /**
  * @typedef {Object} RunResult
@@ -83,17 +76,9 @@ export const scriptTool = {
     'provider. TEXT-ONLY (no tools/streaming — a tool-using subtask belongs to',
     'actors/actor_create), quota-capped per run (overflow throws — catch and',
     'degrade), spends real credits (counted in the result + cost meter).',
-    'peerd:std ships the math/data',
-    'helpers (import { mean, stdev, quantile, sum, groupBy, countBy, range,',
-    'chunk, parseJsonl, toJsonl, parseCsv, toCsv, stripTags, textOfTag,',
-    'extractLinks, dedupeBy } from \'peerd:std\'; table/chart need',
-    'a Notebook to render). peerd:wasi runs a compiled wasm32-wasi BINARY over',
-    'an in-memory FS — import { runWasi } from \'peerd:wasi\'; await',
-    'runWasi(bytes, { args, env, stdin, files }) → { exitCode, stdout, stderr,',
-    'files } (bytes from peerd.egress.fetch(url).bytes; the module gets NO',
-    'network and sees ONLY the files you pass; demoModule() from the same',
-    'import is a known-good module — smoke-test runWasi(demoModule()) before',
-    'hunting real binaries). Returns the value, console',
+    'Built-ins: import helpers from \'peerd:std\' (math / data / parsing; charts',
+    'need a Notebook) and run compiled wasm32-wasi binaries via \'peerd:wasi\' —',
+    'the first-run note lists both with signatures. Returns the value, console',
     'output, any error, and a [DELEGATIONS] trace of every actors op.',
     'Pass workspace: true to run against your durable session workspace instead',
     'of the ephemeral scratch (files persist across runs and turns; output',
@@ -235,9 +220,13 @@ export const scriptTool = {
         } catch { /* spill failed — the capped [VALUE] still ships */ }
       }
       let content = formatRunResult(args.code, result, valueSpill, sv);
-      if (!pitfallsDisclosed.has(sid)) {
-        pitfallsDisclosed.add(sid);
-        content += `\n\n${JS_PITFALLS_NOTE}`;
+      // why once per session: script is the agent's OWN quick-compute path (the
+      // precision / off-by-one bug class lands here), so the correctness note +
+      // the peerd:std/peerd:wasi builtins reference matter most here — but script
+      // is called repeatedly, so disclose them on the FIRST run and stay silent
+      // after, paying the tokens once. (oncePerSession re-arms on SW restart.)
+      if (oncePerSession(sid, 'js-pitfalls')) {
+        content += `\n\n${JS_PITFALLS_NOTE}\n\n${SCRIPT_BUILTINS_NOTE}`;
       }
       return { ok: true, content };
     } catch (e) {

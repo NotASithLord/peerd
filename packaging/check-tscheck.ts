@@ -108,7 +108,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // peerd:std helpers (design 2), remote module imports via egress (design 3),
 // peerd.provider.call (design 5), and the peerd:toolbox store + tools
 // (design 6); all new files carry // @ts-check.
-const COVERED_FLOOR = 570;
+// 570 → 571: the schema-diet arc (tool-ergonomics design 6) adds the shared
+// once-per-session dedup guard (tools/defs/once-per-session.js) — the factored
+// pitfallsDisclosed pattern behind the repeat-injection dedup.
+const COVERED_FLOOR = 571;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

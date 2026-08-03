@@ -1441,6 +1441,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // later turn to wake, so its actor reply is awaited into the tool
       // result instead of delivered as a re-entry wake.
       kind: activeSession?.kind ?? 'chat',
+      // why: load_skill's trim-aware once-per-session dedup (schema-diet 6b).
+      // messageCount is where this call's result will sit; trimCovered is the
+      // count of leading messages the rolling summary has folded out of the
+      // SENT slice. A re-load re-injects the full body only once trimCovered
+      // has passed the prior load's position — so a skill still in context is
+      // deduped, one that scrolled out is re-paged. Read-only, both default 0.
+      messageCount: Array.isArray(activeSession?.messages) ? activeSession.messages.length : 0,
+      trimCovered: activeSession?.trimSummary?.covered ?? 0,
     },
     // Plan/Act permission policy input. The persona gate reads
     // permission.mode to enforce Plan's read-only block; the dispatcher

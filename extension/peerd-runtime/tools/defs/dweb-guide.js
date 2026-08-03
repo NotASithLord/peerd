@@ -7,6 +7,8 @@
 // client + ops + events + game pattern arrives only then. Read-only, no IO, no
 // confirm — it just returns reference text. dweb-only.
 
+import { oncePerSession } from './once-per-session.js';
+
 // why a const string, not a fetched asset: it's the tool's payload, versioned with
 // the tool; keeping it inline means no extra fetch + no store-pruning surprises.
 const BRIDGE_GUIDE = `dwapp bridge — build a MULTIPLAYER / shared App.
@@ -92,6 +94,12 @@ export const dwebGuideTool = {
     // why: narrow the SW-injected ctx.dweb slot — only its presence is checked.
     const dweb = /** @type {{ dweb?: unknown }} */ (ctx).dweb;
     if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    // The bulky bridge reference re-ships every turn once it's in history, so a
+    // second call this session is pure repetition (schema-diet 6b): return a
+    // pointer instead. It has not changed — the earlier result still applies.
+    if (!oncePerSession(ctx.session?.sessionId, 'dweb-guide')) {
+      return { ok: true, content: 'The dwapp bridge guide was already returned earlier this session — re-read that result; it has not changed.' };
+    }
     return { ok: true, content: BRIDGE_GUIDE };
   },
 };
