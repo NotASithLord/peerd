@@ -369,27 +369,51 @@ Red-team: scenario 09.
 ### INV-14. Login orchestration holds no credential
 The `login` tool INITIATES a user-gesture sign-in (passkey/WebAuthn or "Sign in with
 a recognized identity provider") and holds nothing: it never fills a password field,
-stores no token, and returns no secret. It confirms on a SYSTEM-DERIVED https origin
-(`ctx.activeTab.origin`, never a model-supplied string; fail-closed on a non-secure or
+stores no token, and returns no secret. The ground-truth reader reads ATTRIBUTES and
+structure only — it NEVER folds a field VALUE into the affordance name (it reads an
+input `value` only where the value is the CONTROL LABEL: a submit/button/reset input, a
+`<button>`, an `<option>`), so a bare `<input type=password>` cannot leak the typed
+secret. It confirms on a SYSTEM-DERIVED https origin taken from the LIVE resolved tab
+(`originOfUrl(tab.url)`, never a model-supplied string; fail-closed on a non-secure or
 unknown origin), and the confirm is UNCONDITIONAL — it prompts **even when
 confirmations are disabled**, the product default. Before it confirms or clicks it
 reads GROUND TRUTH off the page and runs a pure, deterministic classifier, so the
 method and provider the confirm names come from the page rather than a model argument
-that could spoof the consent. SSO for a provider outside the identity-provider corridor
-(github/gitlab/facebook/unknown) is refused GRACEFULLY — no click, no actor kill — and
-a password affordance is refused because Tier 0 holds no credentials. A supported SSO
-affordance is clicked with an ordinary navigation click on the SAME element the read
-resolved (identical inputs → identical node). A passkey is ASSISTED-MANUAL at Tier 0:
-after the origin-verified consent, peerd hands the gesture to the user rather than
-auto-firing a trusted click — because the only trusted channel (a CDP click on a backend
-node) resolves the target by a different key than the ground-truth read, so an
-auto-click could be a confused deputy (consent to one element, a trusted click on
-another). No synthetic gesture is ever faked. A trusted passkey auto-click via a CDP
-same-node read is a documented Tier-0.1 follow-up. The tool is web-actor-only (hidden from the
+that could spoof the consent; the provider shown is a CANONICAL single-word title-cased
+label, never the raw captured phrase. SSO for a provider outside the identity-provider
+corridor (github/gitlab/facebook/unknown) is refused GRACEFULLY — no click, no actor
+kill — and a password affordance is refused because Tier 0 holds no credentials.
+
+**The auto-click rule.** peerd AUTO-CLICKS a login only when it has (a) VERIFIED the
+destination is a known IdP (an href/formAction host that passes `isKnownIdp`), (b)
+pinned a STABLE `walkId` (a snapshot registry node the page cannot re-point — a raw
+selector or a CDP-only backend ref is NOT stable across the up-to-120s confirm), and
+(c) RE-VERIFIED, AFTER the consent, that the live origin is unchanged and a re-read via
+the SAME walkId re-classifies to the identical verdict (method/provider/verified) —
+aborting on any change (`login_origin_changed` / `login_affordance_changed` /
+`login_target_gone`). Everything else is ASSISTED-MANUAL: peerd verified the origin and
+took consent, then hands the gesture to the user. A recognized provider NAME with an
+unverified (or unverifiable) destination is supported-but-unverified — never an
+auto-click under the "peerd never sees your password" reassurance; the confirm carries
+`verified:false` and the card softens its copy and does not vouch for the destination.
+A passkey is ALWAYS assisted-manual at Tier 0: WebAuthn needs transient user activation,
+which only a TRUSTED (CDP) click grants, and that channel resolves the node by a
+different key than the ground-truth read, so an auto-fire could be a confused deputy.
+No synthetic gesture is ever faked. A trusted passkey auto-click via a CDP same-node
+read is a documented Tier-0.1 follow-up. The tool is web-actor-only (hidden from the
 orchestrator, allowed only for a `kind:'web'` actor), and an inbound (untrusted) turn
-cannot reach it — the sender gate plus a defense-in-depth refusal inside the tool.
-This is **Tier 0** of the credential roadmap: the agent holds NOTHING. Tier 1 (scoped
-OAuth tokens) and passwords/keychain remain future work and out of scope here.
+cannot reach it — the sender gate is the real control (an inbound turn never wakes the
+web actor); a defense-in-depth refusal inside the tool is inert belt-and-braces for any
+future path that folds `ctx.inbound`. This is **Tier 0** of the credential roadmap: the
+agent holds NOTHING. Tier 1 (scoped OAuth tokens) and passwords/keychain remain future
+work and out of scope here. Residual, stated plainly: destination verification is
+BEST-EFFORT — it proves the element's declared navigation target (its href, or, for a
+SUBMIT control only, its form action) is a known IdP, but a script `onclick` can still do
+something other than that declared target. So an auto-click carries the residual that a
+verified-looking button runs a different handler; this is bounded by the origin lock
+(a cross-origin hop off the corridor ends the actor) and by the fact that peerd only
+auto-clicks — never fills a credential — so the worst case is a same-origin action on the
+origin the user already consented to interact with, not a credential leak.
 Code: `peerd-runtime/tools/defs/login.js`, `peerd-runtime/tools/login-affordance.js`,
 `peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`. Red-team:
 scenario 11.

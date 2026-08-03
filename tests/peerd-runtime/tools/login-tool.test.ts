@@ -139,14 +139,105 @@ describe('login tool — the confirm is UNCONDITIONAL', () => {
   });
 });
 
-describe('login tool — SSO initiation (ordinary click) after consent', () => {
-  test('a confirmed SSO login clicks the same element and audits login_initiated', async () => {
+// A VERIFIED SSO descriptor (destination is a known IdP) — the ONLY thing peerd
+// auto-clicks, and only with a stable walkId. Name alone is not enough (Fix 2).
+const verifiedSsoDescriptor = { tag: 'button', name: 'Sign in with Google', href: 'https://accounts.google.com/o/oauth2/v2/auth' };
+const walkDomRefs = { resolve: () => ({ backendDOMNodeId: null, walkId: 5, role: 'button', name: 'Sign in with Google' }) };
+
+describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId', () => {
+  test('verified sso + walkId → re-verifies, clicks the SAME walkId, audits login_initiated', async () => {
+    const { ctx, calls } = makeCtx({ descriptor: verifiedSsoDescriptor, domRefs: walkDomRefs, confirmAnswer: 'yes_once' });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(true);
+    expect(String((r as any).content)).toContain('login initiated');
+    const clicks = calls.execute.filter((o) => o.func?.name === 'clickInjected');
+    expect(clicks.length).toBe(1);
+    // the click is by walkId (not a raw selector) with expectedCount=1
+    expect(clicks[0].args).toEqual([null, 0, 5, 1]);
+    // the confirm carried verified:true
+    expect(calls.confirm[0].verified).toBe(true);
+    expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(true);
+  });
+
+  test('a name-only "Sign in with Google" (no walkId) is ASSISTED-MANUAL — no click', async () => {
     const { ctx, calls } = makeCtx({ descriptor: ssoDescriptor, confirmAnswer: 'yes_once' });
     const r = await loginTool.execute({ selector: '#signin' }, ctx);
     expect(r.ok).toBe(true);
-    expect(String((r as any).content)).toContain('login initiated');
-    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(1);
-    expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(true);
+    expect(String((r as any).content)).toContain('login_ready');
+    // unverified destination → the confirm must NOT vouch for it
+    expect(calls.confirm[0].verified).toBe(false);
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
+    expect(calls.audit.some((e) => e.type === 'login_gesture_required')).toBe(true);
+    expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(false);
+  });
+
+  test('a VERIFIED sso but NO walkId (selector only) is still ASSISTED-MANUAL — no click', async () => {
+    const { ctx, calls } = makeCtx({ descriptor: verifiedSsoDescriptor, confirmAnswer: 'yes_once' });
+    const r = await loginTool.execute({ selector: '#signin' }, ctx);
+    expect(r.ok).toBe(true);
+    expect(String((r as any).content)).toContain('login_ready');
+    expect(calls.confirm[0].verified).toBe(true);
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
+    expect(calls.audit.some((e) => e.type === 'login_gesture_required')).toBe(true);
+  });
+});
+
+describe('login tool — post-confirm re-verification aborts on any change', () => {
+  test('origin change during the confirm → login_origin_changed, no click', async () => {
+    const calls = { confirm: [] as any[], audit: [] as any[], click: 0 };
+    let getCount = 0;
+    const ctx: any = {
+      session: { sessionId: 's1' },
+      activeTab: { id: 1, url: 'https://acct.example.com/login', origin: 'https://acct.example.com' },
+      // 1st resolve (pre-confirm) → acct.example.com; 2nd (post-confirm) → a DIFFERENT origin
+      tabs: { get: async (id: number) => { getCount += 1; return { id, url: getCount <= 1 ? 'https://acct.example.com/login' : 'https://evil.example.com/login' }; } },
+      denylist: [],
+      scripting: {
+        executeScript: async (opts: any) => {
+          if (opts?.func?.name === 'loginTargetReader') return [{ result: { ok: true, descriptor: verifiedSsoDescriptor } }];
+          if (opts?.func?.name === 'clickInjected') { calls.click += 1; return [{ result: { ok: true } }]; }
+          return [{ result: null }];
+        },
+      },
+      confirm: async (p: any) => { calls.confirm.push(p); return 'yes_once'; },
+      audit: async (e: any) => { calls.audit.push(e); },
+      domRefs: walkDomRefs,
+    };
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toBe('login_origin_changed');
+    expect(calls.click).toBe(0);
+    expect(calls.audit.some((e) => e.type === 'login_initiated')).toBe(false);
+  });
+
+  test('affordance change during the confirm → login_affordance_changed, no click', async () => {
+    const calls = { confirm: [] as any[], audit: [] as any[], click: 0 };
+    let readCount = 0;
+    const ctx: any = {
+      session: { sessionId: 's1' },
+      activeTab: { id: 1, url: 'https://acct.example.com/login', origin: 'https://acct.example.com' },
+      tabs: { get: async (id: number) => ({ id, url: 'https://acct.example.com/login' }) },
+      denylist: [],
+      scripting: {
+        executeScript: async (opts: any) => {
+          if (opts?.func?.name === 'loginTargetReader') {
+            readCount += 1;
+            // 1st read: verified Google. 2nd (post-confirm) read: the node was swapped
+            // to a non-IdP "Delete account" — must abort.
+            return [{ result: { ok: true, descriptor: readCount <= 1 ? verifiedSsoDescriptor : { tag: 'button', name: 'Delete account' } } }];
+          }
+          if (opts?.func?.name === 'clickInjected') { calls.click += 1; return [{ result: { ok: true } }]; }
+          return [{ result: null }];
+        },
+      },
+      confirm: async (p: any) => { calls.confirm.push(p); return 'yes_once'; },
+      audit: async (e: any) => { calls.audit.push(e); },
+      domRefs: walkDomRefs,
+    };
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toBe('login_affordance_changed');
+    expect(calls.click).toBe(0);
   });
 });
 

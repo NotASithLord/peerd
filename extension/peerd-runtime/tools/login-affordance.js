@@ -33,11 +33,17 @@
 
 /**
  * @typedef {{ tag: string, type?: string, role?: string, name?: string,
- *   autocomplete?: string, href?: string, hasPasswordFieldInForm?: boolean }} LoginTargetDescriptor
+ *   autocomplete?: string, href?: string, formAction?: string,
+ *   hasPasswordFieldInForm?: boolean }} LoginTargetDescriptor
  */
 /**
  * @typedef {{ method: 'passkey'|'sso'|'password'|'unknown', provider?: string,
- *   supported: boolean, reason: string }} LoginAffordanceVerdict
+ *   supported: boolean, verified: boolean, reason: string }} LoginAffordanceVerdict
+ *
+ * `verified` — the DESTINATION is proven to be a known IdP (an href/formAction host
+ * that passes isKnownIdp), so peerd may AUTO-CLICK it. A recognized provider NAME
+ * alone is supported-but-unverified: assisted-manual, never an auto-click. passkey is
+ * verified:true (WebAuthn is origin-bound by the browser); password/unknown false.
  */
 
 // SSO providers whose sign-in peerd's origin lock will actually corridor to — the
@@ -46,10 +52,15 @@
 // so a bound actor sent through it lands on an auth surface, not a full product.
 // The href path defers to isKnownIdp (deps) directly; this NAME set is the fallback
 // for a "Sign in with X" affordance that exposes no IdP href to check.
-const SUPPORTED_SSO_PROVIDERS = Object.freeze(new Set([
+// why every name here maps to a host isKnownIdp accepts (asserted by the corridor-
+// subset test): a "recognized name" must correspond to a real corridor IdP, so the
+// ambiguous consumer names whose "Sign in with X" lands OFF the corridor are kept out
+// ('amazon' → the retail site, not signin.aws.amazon.com; 'ping' → ambiguous). Keep the
+// unambiguous forms ('aws', 'pingidentity').
+export const SUPPORTED_SSO_PROVIDERS = Object.freeze(new Set([
   'google', 'apple', 'microsoft', 'azure', 'okta', 'auth0', 'onelogin',
-  'ping', 'pingidentity', 'duo', 'workos', 'jumpcloud', 'atlassian',
-  'spotify', 'yahoo', 'amazon', 'aws',
+  'pingidentity', 'duo', 'workos', 'jumpcloud', 'atlassian',
+  'spotify', 'yahoo', 'aws',
 ]));
 
 // The deliberate EXCLUSIONS — full products that ALSO speak OAuth. idp-registry.js
@@ -100,6 +111,16 @@ const providerKey = (provider) => {
 };
 
 /**
+ * A CANONICAL, title-cased provider LABEL from a lowercase key ('google' → 'Google').
+ * why not the raw phrase: SSO_NAME_RE captures up to 40 chars of untrusted page text
+ * after "with" ("google to approve the pending transfer"), and the confirm card must
+ * show a clean single word, never the greedy phrase. Pure.
+ * @param {string} key
+ * @returns {string}
+ */
+const titleCase = (key) => (typeof key === 'string' && key ? key.charAt(0).toUpperCase() + key.slice(1) : '');
+
+/**
  * Best-effort host from an href, for the isKnownIdp corridor check. Pure — a
  * malformed href yields ''.
  * @param {string | undefined} href
@@ -129,27 +150,48 @@ export const classifyLoginAffordance = (descriptor, deps) => {
     ? d.autocomplete.toLowerCase().split(/\s+/).filter(Boolean)
     : [];
   const hrefHost = hostFromHref(d.href);
-  const hrefOriginGuess = hrefHost ? `https://${hrefHost}` : '';
+  const formActionHost = hostFromHref(d.formAction);
+  const hrefIsIdp = hrefHost ? isKnownIdp(`https://${hrefHost}`) : false;
+  const formActionIsIdp = formActionHost ? isKnownIdp(`https://${formActionHost}`) : false;
 
   // 1) PASSKEY — checked first so "sign in with a passkey" is never mis-read as an
-  //    SSO provider named "passkey" by the broader SSO regex below.
+  //    SSO provider named "passkey" by the broader SSO regex below. verified:true —
+  //    WebAuthn is origin-bound by the browser, so the ceremony is inherently on the
+  //    real origin; there is no destination to spoof.
   if (autocompleteTokens.includes('webauthn') || (name && PASSKEY_NAME_RE.test(name))) {
-    return { method: 'passkey', supported: true, reason: 'passkey/WebAuthn affordance' };
+    return { method: 'passkey', supported: true, verified: true, reason: 'passkey/WebAuthn affordance' };
   }
 
   // 2) SSO — a "sign in with <provider>" affordance, or an element whose href/host
-  //    is itself a dedicated identity provider.
+  //    (or form action) is itself a dedicated identity provider.
   const nameMatch = name ? name.match(SSO_NAME_RE) : null;
-  const hrefIsIdp = hrefOriginGuess ? isKnownIdp(hrefOriginGuess) : false;
-  if (nameMatch || hrefIsIdp) {
-    const providerPhrase = cleanText(nameMatch ? nameMatch[1] : hrefHost, 40);
+  if (nameMatch || hrefIsIdp || formActionIsIdp) {
+    const providerPhrase = cleanText(nameMatch ? nameMatch[1] : (hrefHost || formActionHost), 40);
     const key = providerKey(providerPhrase);
-    // Supported when a dedicated IdP host is proven (isKnownIdp) OR the provider
-    // word is a recognized IdP — but NEVER for the explicit exclusions, even if a
-    // future edit adds one to the supported set (defense in depth).
-    const supported = (hrefIsIdp || SUPPORTED_SSO_PROVIDERS.has(key)) && !EXCLUDED_SSO_PROVIDERS.has(key);
+    // The provider shown to the user is a CANONICAL single-word label, never the raw
+    // greedy phrase (Fix 3) — so the confirm card cannot echo attacker page text.
+    const provider = titleCase(key) || providerPhrase;
+    // VERIFIED — where does it actually LEAD? Proven only when an href or form-action
+    // host passes isKnownIdp. This is what gates an AUTO-CLICK: a recognized NAME with
+    // an unverifiable (or missing) destination is supported-but-unverified.
+    const destHosts = [hrefHost, formActionHost].filter(Boolean);
+    const verified = destHosts.some((h) => isKnownIdp(`https://${h}`));
+    // Supported when the destination is a proven IdP OR the provider word is a
+    // recognized IdP — but NEVER for the explicit exclusions, even if a future edit
+    // adds one to the supported set (defense in depth).
+    const supported = (verified || SUPPORTED_SSO_PROVIDERS.has(key)) && !EXCLUDED_SSO_PROVIDERS.has(key);
+    if (supported && verified) {
+      return { method: 'sso', provider, supported: true, verified: true, reason: 'sign in to a verified identity provider' };
+    }
     if (supported) {
-      return { method: 'sso', provider: providerPhrase, supported: true, reason: 'sign in with a recognized identity provider' };
+      // Recognized name, unverified destination — assisted-manual, not an auto-click.
+      return {
+        method: 'sso',
+        provider,
+        supported: true,
+        verified: false,
+        reason: `looks like a "Sign in with ${provider}" button — peerd could not verify where it leads`,
+      };
     }
     // why refuse gracefully instead of clicking: idp-registry.js deliberately
     // EXCLUDES github/gitlab/facebook, and the landing rule ENDS a bound actor
@@ -157,8 +199,9 @@ export const classifyLoginAffordance = (descriptor, deps) => {
     // returning an unsupported verdict lets it (and the user) learn why.
     return {
       method: 'sso',
-      provider: providerPhrase,
+      provider,
       supported: false,
+      verified: false,
       reason: "SSO provider outside peerd's login corridor (the origin lock would end the actor)",
     };
   }
@@ -166,12 +209,12 @@ export const classifyLoginAffordance = (descriptor, deps) => {
   // 3) PASSWORD — a password input, or a form that contains one and shows no
   //    passkey/SSO affordance. peerd holds no credentials at Tier 0.
   if (type === 'password' || (d.hasPasswordFieldInForm === true)) {
-    return { method: 'password', supported: false, reason: 'password login: peerd holds no credentials (Tier 0)' };
+    return { method: 'password', supported: false, verified: false, reason: 'password login: peerd holds no credentials (Tier 0)' };
   }
 
   // 4) Everything else is NOT a login affordance. A "Delete account" / "Submit"
   //    button lands here, not in any login branch.
-  return { method: 'unknown', supported: false, reason: 'not a recognized login affordance' };
+  return { method: 'unknown', supported: false, verified: false, reason: 'not a recognized login affordance' };
 };
 
 /**
@@ -232,7 +275,18 @@ export function loginTargetReader(selector, nth, walkId) {
     }
   }
   if (!name) name = (el.innerText || el.textContent || '');
-  if (!name) name = attr('title') || attr('alt') || attr('value');
+  if (!name) name = attr('title') || attr('alt');
+  if (!name) {
+    // why NEVER a bare `value`: for a text/password/email input the value IS the
+    // typed secret, and folding it into descriptor.name would be a credential READ.
+    // Read `value` ONLY for controls where it is the CONTROL LABEL, not user input:
+    // a submit/button/reset input, a <button>, or an <option>.
+    const t = (el.tagName || '').toLowerCase();
+    const ty = (attr('type') || '').toLowerCase();
+    if (t === 'button' || t === 'option' || (t === 'input' && (ty === 'submit' || ty === 'button' || ty === 'reset'))) {
+      name = attr('value');
+    }
+  }
   name = String(name).replace(/\s+/g, ' ').trim().slice(0, 200);
 
   // Nearest form (or aria-owning form) — does it CONTAIN a password field? We
@@ -251,6 +305,29 @@ export function loginTargetReader(selector, nth, walkId) {
     if (a) href = a.href || a.getAttribute('href') || '';
   }
 
+  // The FORM ACTION — where a login click navigates. why ONLY for a SUBMIT control:
+  // a `type=button`/`reset` does NOT submit its form, so the form's action is NOT
+  // where its click leads — trusting it would be a FALSE "verified" signal (a
+  // `<form action="accounts.google.com"><button type=button onclick=evil>` would
+  // read as a verified Google destination while the onclick does something else).
+  // A `<button>` with no/empty type defaults to submit. Captured so the classifier
+  // can VERIFY the destination is a known IdP (never a field value).
+  let formAction = '';
+  try {
+    const tg = (el.tagName || '').toLowerCase();
+    const ty2 = (attr('type') || '').toLowerCase();
+    const isSubmit = (tg === 'input' && ty2 === 'submit') || (tg === 'button' && (ty2 === '' || ty2 === 'submit'));
+    if (isSubmit) {
+      const own = /** @type {{ formAction?: string }} */ (el).formAction;
+      if (typeof own === 'string' && own) {
+        formAction = own;
+      } else {
+        const f = el.closest ? el.closest('form') : null;
+        if (f) formAction = f.getAttribute('action') || /** @type {{ action?: string }} */ (f).action || '';
+      }
+    }
+  } catch (e) { /* best-effort */ }
+
   return {
     ok: true,
     descriptor: {
@@ -260,6 +337,7 @@ export function loginTargetReader(selector, nth, walkId) {
       name,
       autocomplete: (attr('autocomplete') || '').toLowerCase(),
       href: String(href || '').slice(0, 2048),
+      formAction: String(formAction || '').slice(0, 2048),
       hasPasswordFieldInForm,
     },
   };
