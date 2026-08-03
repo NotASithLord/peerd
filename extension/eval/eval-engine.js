@@ -21,7 +21,7 @@ import { sleep } from '/shared/util.js';
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
  * @typedef {{ toolUseId: string, name: string, input?: unknown, ok?: boolean }} ToolLogEntry
- * @typedef {{ session: any, tools: string[], toolLog: ToolLogEntry[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, runnerUsdByKey: Map<string, number>, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
+ * @typedef {{ session: any, toolLog: ToolLogEntry[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, runnerUsdByKey: Map<string, number>, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
  */
 
 // The runner's own $ for a task. 'local' (the on-device runner) is FREE; a cloud
@@ -45,7 +45,7 @@ const costFields = (c) => c ? {
   costUsd: typeof c.cost === 'number' ? c.cost : 0,
 } : { ...ZERO_COST };
 /** @returns {Turn} */
-const newTurn = () => ({ session: null, tools: [], toolLog: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, runnerUsdByKey: new Map(), error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
+const newTurn = () => ({ session: null, toolLog: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, runnerUsdByKey: new Map(), error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
 
 /** @param {any} session */
 const finalAnswer = (session) => {
@@ -93,15 +93,16 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
         if (msg.session?.model) turn.modelsSeen.add(msg.session.model);
         break;
       case 'turn/delta': turn.started = true; break;
-      case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); turn.toolLog.push({ toolUseId: msg.toolUseId, name: msg.name, input: msg.input }); break;
-      // Correlate outcomes back to the naming tool-use (by tool_use_id) so the
-      // scorecard can tell a failed call from a successful one — the measurement
-      // seam the tool-ergonomics batch is proven against. ToolResult.ok===true is
+      case 'turn/tool-use': turn.started = true; if (isSubject(msg)) turn.toolLog.push({ toolUseId: msg.toolUseId, name: msg.name, input: msg.input }); break;
+      // Correlate each outcome back to its naming tool-use by tool_use_id, so the
+      // scorecard can tell a failed call from a successful one. ok===true is
       // success; anything else (explicit false, or a malformed/absent result) is
-      // an error, matching agent-loop's `is_error: !dispatchResult.ok`. Actor
-      // turns emit their own events (not turn/tool-result), so this stays the
-      // main subject's trace — the same scope as turn/tool-use above.
+      // an error, matching agent-loop's `is_error: !dispatchResult.ok`. why
+      // isSubject (like turn/cost): the 'eval' port sees EVERY session's events,
+      // so a zombie/actor turn's late tool-use/result must not land in THIS
+      // task's toolLog and skew toolErrors/wastedTurns.
       case 'turn/tool-result': {
+        if (!isSubject(msg)) break;
         const rec = turn.toolLog.find((c) => c.toolUseId === msg.toolUseId);
         if (rec) rec.ok = msg.result?.ok === true;
         break;
@@ -313,11 +314,12 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     await settleSubject();
     const end = await resolveEndTab();
     const tabInfo = await readTab(end?.id ?? subjId);
-    // Tool outcomes (design 5a): correlate each result back to its tool-use,
-    // count errors, and roll them up by tool name. `toolResults` carries only
-    // the resolved calls; `tools[]` stays the full name list for back-compat.
+    // Tool outcomes (design 5a): the subject's tool transcript is the single
+    // source — `tools[]` is DERIVED from it (not maintained in parallel), and
+    // `toolResults` carries only the resolved calls; count errors + roll up by name.
+    const tools = turn.toolLog.map((c) => c.name);
     const toolResults = turn.toolLog.filter((c) => typeof c.ok === 'boolean').map((c) => ({ name: c.name, ok: /** @type {boolean} */ (c.ok) }));
-    const toolCalls = turn.tools.length;
+    const toolCalls = tools.length;
     const toolErrors = toolResults.filter((r) => !r.ok).length;
     /** @type {Record<string, number>} */
     const toolErrorsByName = {};
@@ -325,7 +327,7 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     const wasted = wastedTurns(turn.toolLog);
     const state = {
       tabUrl: tabInfo.url, tabTitle: tabInfo.title, tabText: tabInfo.text,
-      answer: finalAnswer(turn.session), steps: turn.tools.length, tools: turn.tools,
+      answer: finalAnswer(turn.session), steps: tools.length, tools,
       toolResults,
       tokens: turn.tokens, durationMs, error: turn.error || (timedOut ? 'timeout' : null),
     };

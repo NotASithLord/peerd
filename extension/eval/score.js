@@ -12,8 +12,7 @@
  *   inputTokens?: number, outputTokens?: number, cacheReadTokens?: number,
  *   cacheWriteTokens?: number, costUsd?: number, runnerCostUsd?: number,
  *   toolCalls?: number, toolErrors?: number, wastedTurns?: number,
- *   toolErrorsByName?: Record<string, number>, wastedByKind?: Record<string, number>,
- *   toolResults?: Array<{ name: string, ok: boolean }> }} TaskResult
+ *   toolErrorsByName?: Record<string, number>, wastedByKind?: Record<string, number> }} TaskResult
  */
 
 /** @param {number} n @param {number} [dp] */
@@ -175,16 +174,17 @@ export const compare = (before, after) => {
 // regressions build-over-build (did a fix make the agent thrash more?) — never
 // a correctness signal (passRate stays the ground truth). Each heuristic is a
 // separate key in `byKind` so a noisy one can be read (or ignored) on its own;
-// `total` sums them and CAN double-count (a same-target read reissued with
+// `total` sums them and CAN over-count: a same-target read reissued with
 // identical args trips both repeated-identical-call and truncation-forced-
-// reread) — that overlap is deliberate, the two measure different intents.
+// reread, and if that first read ERRORED it also trips error-then-retry — so one
+// failed identical read-retry counts 3×. The overlap is deliberate; the
+// heuristics measure different intents and `total` is a proxy, not a tally.
 
 /**
  * A single tool call in the transcript: the tool name, the raw input (for
- * identity/target hashing), the outcome (true = ok, false = errored, undefined
- * = never resolved), and — when design 4's paged marker lands — whether the
- * RESULT was truncated. All optional but `name`.
- * @typedef {{ name: string, input?: unknown, ok?: boolean, truncated?: boolean }} ToolCall
+ * identity/target hashing), and the outcome (true = ok, false = errored,
+ * undefined = never resolved). All optional but `name`.
+ * @typedef {{ name: string, input?: unknown, ok?: boolean }} ToolCall
  */
 
 // Read-ish tools whose repeat-on-the-same-target is the truncation-reread
@@ -236,7 +236,7 @@ export const wastedTurns = (transcript) => {
   /** @type {Map<string, number>} */
   const identity = new Map();
   for (const c of calls) {
-    const key = `${c.name} ${stableStringify(c.input ?? null)}`;
+    const key = `${c.name}\u0000${stableStringify(c.input ?? null)}`;
     identity.set(key, (identity.get(key) ?? 0) + 1);
   }
   let repeatedIdenticalCall = 0;
@@ -254,21 +254,16 @@ export const wastedTurns = (transcript) => {
   // truncation-forced-reread: a READ tool re-issued against the same primary
   // target. Approximation — design 4's paged/truncation marker isn't wired yet,
   // so we can't confirm the FIRST read was actually truncated; absent that
-  // marker every same-target reread counts. When entries carry `truncated`, we
-  // tighten to rereads FOLLOWING a truncated read. blind spot: over-counts a
-  // deliberate fresh reread of changed content; overlaps repeated-identical-call.
-  /** @type {Map<string, { truncated: boolean | undefined }>} */
-  const readTargets = new Map();
+  // marker every same-target reread counts. blind spot: over-counts a deliberate
+  // fresh reread of changed content; overlaps repeated-identical-call.
+  /** @type {Set<string>} */
+  const readTargets = new Set();
   let truncationForcedReread = 0;
   for (const c of calls) {
     if (!READ_TOOLS.has(c.name)) continue;
-    const key = `${c.name} ${primaryArg(c.input)}`;
-    const prev = readTargets.get(key);
-    // prev.truncated===undefined → no marker available, approximate (count it);
-    // ===true → prior read was truncated, a genuine forced reread; ===false →
-    // prior read was complete, this reread isn't truncation-forced (skip).
-    if (prev && prev.truncated !== false) truncationForcedReread++;
-    readTargets.set(key, { truncated: c.truncated });
+    const key = `${c.name}\u0000${primaryArg(c.input)}`;
+    if (readTargets.has(key)) truncationForcedReread++;
+    readTargets.add(key);
   }
 
   return {

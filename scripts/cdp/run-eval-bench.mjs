@@ -201,12 +201,17 @@ async function main() {
     if (BASELINE) {
       if (!existsSync(BASELINE)) throw new Error(`baseline not found: ${BASELINE}`);
       const base = JSON.parse(readFileSync(BASELINE, 'utf8'));
-      const d = compare(base.card ?? base, card);
+      const baseCard = base.card ?? base;
+      const d = compare(baseCard, card);
       printDelta(d);
       regressed = d.regressions.length > 0;
       // Opt-in: a change can lift pass-rate while making the agent thrash more.
       // With the guard on, more tool errors/task than the baseline fails the run.
-      if (GUARD_TOOL_ERRORS && d.toolErrorsDelta > 0) {
+      // Skip when the baseline predates the metric — else its absent avgToolErrors
+      // coerces to 0 and EVERY current error reads as a rise (false regression).
+      if (GUARD_TOOL_ERRORS && baseCard.avgToolErrors === undefined) {
+        log('⚠ baseline has no tool-error metrics — guard skipped; re-baseline to enable it');
+      } else if (GUARD_TOOL_ERRORS && d.toolErrorsDelta > 0) {
         log(`⚠ TOOL-ERROR REGRESSION: avg tool errors/task +${d.toolErrorsDelta} (guard on)`);
         regressed = true;
       }

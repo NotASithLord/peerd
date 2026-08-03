@@ -217,22 +217,6 @@ describe('wastedTurns — the three named heuristics', () => {
     expect(w.byKind.truncationForcedReread).toBe(0);
   });
 
-  test('with truncated markers: a reread after a COMPLETE read is not truncation-forced', () => {
-    const w = wastedTurns([
-      { name: 'fetch_url', input: { url: 'https://x' }, truncated: false },
-      { name: 'fetch_url', input: { url: 'https://x' } }, // prior read was complete → skip
-    ]);
-    expect(w.byKind.truncationForcedReread).toBe(0);
-  });
-
-  test('with truncated markers: a reread after a TRUNCATED read counts', () => {
-    const w = wastedTurns([
-      { name: 'fetch_url', input: { url: 'https://x' }, truncated: true },
-      { name: 'fetch_url', input: { url: 'https://x' } },
-    ]);
-    expect(w.byKind.truncationForcedReread).toBe(1);
-  });
-
   test('total sums the kinds (overlap is deliberate) and is safe on junk input', () => {
     const w = wastedTurns([
       { name: 'read_file', input: { path: '/a' } },
