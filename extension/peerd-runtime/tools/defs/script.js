@@ -105,7 +105,7 @@ export const scriptTool = {
     }
     // why: jsOffscreenClient/scriptRuns/messageActor ride the opaque ctx
     // contract (not on ToolContext); narrow to what this tool touches.
-    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function }, toolUseId?: string }} */ (
+    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, inbound?: boolean, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function }, toolUseId?: string }} */ (
       /** @type {unknown} */ (ctx));
     const jsOffscreenClient = c.jsOffscreenClient;
     if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
@@ -125,8 +125,20 @@ export const scriptTool = {
     //     30s compute wall-clock, not inherit the ~5-minute delegation one.
     // The SW actors/call route re-verifies the owner per op regardless.
     const sessionKind = /** @type {{ kind?: string } | undefined} */ (ctx.session)?.kind;
+    // why ctx.inbound !== true: an inbound (untrusted-origin) turn — a synthetic
+    // async-actor reintegration wake or the dweb agent's trickle-up, both fenced
+    // attacker-derived bytes — is refused a DIRECT message_actor by the sender
+    // gate's Wall 1 (mayMessageActor: inbound === true → false). The script tool's
+    // actors.send/ask reach the SAME messageActor through the actors/call relay,
+    // so minting that surface on an inbound turn would be a SECOND, ungated door
+    // through the inbound wall (the relay never carried the flag). Fail closed at
+    // the mint — no surface advertised — and thread the flag to the SW route below
+    // (defense-in-depth: the route re-checks, consistent with "SW re-verifies
+    // every op"). Direct message_actor already gates on c.inbound the same way.
+    const inbound = c.inbound === true;
     const actorsOn = typeof c.messageActor === 'function' && !!c.scriptRuns && !!sid
       && sessionKind !== 'spawned' && sessionKind !== 'actor'
+      && !inbound
       && /\bactors\b/.test(args.code);
     // The durable workspace is a CHAT-SESSION surface: a spawned/actor child's
     // session is ephemeral and never archived (archive is the only teardown

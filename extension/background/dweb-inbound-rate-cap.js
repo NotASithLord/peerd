@@ -21,7 +21,8 @@
 export const makeDwebInboundRateCap = ({ now = Date.now, perDidPerMinute = 3, perHourGlobal = 30 } = {}) => {
   /** @type {Map<string, number[]>} per-did wake timestamps (sliding minute) */
   const byDid = new Map();
-  let hour = { windowStart: 0, count: 0 };
+  /** @type {number[]} global wake timestamps (sliding hour) */
+  let globalTimes = [];
 
   /** Admit an inbound wake from `did`? Records the wake when it returns true.
    *  @param {string} did @returns {boolean} */
@@ -29,11 +30,16 @@ export const makeDwebInboundRateCap = ({ now = Date.now, perDidPerMinute = 3, pe
     const nowMs = now();
     const times = (byDid.get(did) ?? []).filter((t) => nowMs - t < 60_000);
     if (times.length >= perDidPerMinute) return false;             // per-did minute cap
-    if (nowMs - hour.windowStart > 3_600_000) hour = { windowStart: nowMs, count: 0 };
-    if (hour.count >= perHourGlobal) return false;                 // global hour cap
+    // why a SLIDING hour, not a fixed window: a fixed [windowStart, +1h) counter
+    // resets abruptly, so ~perHourGlobal admits in the final seconds plus another
+    // full perHourGlobal right after the reset = a ~2x burst across the boundary
+    // (a Sybil peer mints free did:keys to realize it). A sliding filter caps the
+    // TRUE rate at perHourGlobal per any rolling hour, closing the boundary burst.
+    globalTimes = globalTimes.filter((t) => nowMs - t < 3_600_000);
+    if (globalTimes.length >= perHourGlobal) return false;         // global sliding-hour cap
     times.push(nowMs);
     byDid.set(did, times);
-    hour.count += 1;
+    globalTimes.push(nowMs);
     // Sweep dids whose timestamps have all aged out, so the map can't grow
     // without limit on the long-lived SW.
     for (const [k, ts] of byDid) {

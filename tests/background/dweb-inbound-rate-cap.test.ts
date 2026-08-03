@@ -56,6 +56,27 @@ describe('makeDwebInboundRateCap — global hour cap', () => {
     c.advance(3_600_001);
     expect(cap.allow('did:x')).toBe(true);
   });
+
+  test('SLIDING window — no ~2x burst across the hour boundary (fixed-window weakness)', () => {
+    // Regression for the audit finding: a FIXED window admits perHourGlobal in
+    // the last seconds AND another full perHourGlobal right after an abrupt
+    // reset. A sliding window caps the TRUE rate at perHourGlobal per rolling
+    // hour, so straddling the boundary must NOT double the admits.
+    const c = clock();
+    const cap = makeDwebInboundRateCap({ now: c.now });
+    // Fill the window near the end of the first hour.
+    for (let i = 0; i < 30; i += 1) expect(cap.allow(`did:a${i}`)).toBe(true);
+    expect(cap.allow('did:a-extra')).toBe(false);
+    // Advance PAST a fixed 1h window edge but keep the earlier admits inside a
+    // rolling hour (only +30s). A fixed window would reset and admit 30 more.
+    c.advance(30_000);
+    let burst = 0;
+    for (let i = 0; i < 30; i += 1) if (cap.allow(`did:b${i}`)) burst += 1;
+    expect(burst).toBe(0); // sliding window: the earlier 30 still count
+    // Once the earliest admits truly age out (>1h), capacity returns normally.
+    c.advance(3_600_001);
+    expect(cap.allow('did:c')).toBe(true);
+  });
 });
 
 describe('makeDwebInboundRateCap — eviction', () => {

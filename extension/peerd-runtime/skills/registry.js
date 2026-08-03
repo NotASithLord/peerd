@@ -22,6 +22,7 @@
 // text the model may later read.
 
 import { parseSkillMd, SkillParseError } from './parse.js';
+import { disarmText } from '../dom/cdr.js';
 
 export { SkillParseError };
 
@@ -110,7 +111,7 @@ export const createSkillRegistry = ({ store, audit }) => {
   const describeForPrompt = async () => {
     const enabled = (await list()).filter((s) => s.enabled);
     if (enabled.length === 0) return '';
-    const lines = enabled.map((s) => `  ${s.name} — ${oneLine(s.description)}`);
+    const lines = enabled.map((s) => `  ${disarmText(s.name)} — ${oneLine(s.description)}`);
     return [
       '──── skills ───────────────────────────────────────────────────────────',
       '',
@@ -202,10 +203,17 @@ export const createSkillRegistry = ({ store, audit }) => {
 
 /**
  * Collapse a description to a single prompt line; clamp runaway length.
+ * why disarmText first: a skill description is rendered verbatim into the
+ * TRUSTED system prompt at every startup (describeForPrompt) with no
+ * untrusted-content fence — R3 names a malicious shared skill as a direct
+ * instruction-injection vector. Stripping invisible-Unicode / bidi here means
+ * the description the user reviewed in the skills UI is the description the
+ * model reads; a covert channel smuggled past review is removed. Disarm BEFORE
+ * the whitespace collapse so any newline vector inside it is also flattened.
  * @param {string} s
  */
 const oneLine = (s) => {
-  const flat = String(s).replace(/\s+/g, ' ').trim();
+  const flat = disarmText(String(s)).replace(/\s+/g, ' ').trim();
   return flat.length > 300 ? `${flat.slice(0, 297)}…` : flat;
 };
 

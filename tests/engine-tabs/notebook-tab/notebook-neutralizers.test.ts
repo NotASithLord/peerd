@@ -29,6 +29,15 @@ const freshGlobal = () => {
       open: () => 'NATIVE-CACHE-OPEN', match: () => undefined,
       has: () => false, delete: () => false, keys: () => [],
     },
+    // indexedDB is an IDBFactory on WorkerGlobalScope.prototype. It is NOT a
+    // network channel but a same-origin DURABLE edge: the sealed worker inherits
+    // the extension origin (blob: worker of an ordinary extension page), so an
+    // unsealed indexedDB reaches the `peerd` DB — vault blob, durable memory,
+    // sessions, tool_grants, audit. The seal must block it like caches.
+    indexedDB: {
+      open: () => 'NATIVE-IDB-OPEN', deleteDatabase: () => 'NATIVE-IDB-DELETE',
+      databases: () => [], cmp: () => 0,
+    },
   };
   const g: any = Object.create(proto);
   g.XMLHttpRequest = function XMLHttpRequest() {};
@@ -99,6 +108,19 @@ describe('realm seal — raw channels are hard-blocked', () => {
     expect(() => g.caches.match('x')).toThrow('peerd.egress.fetch');
     // the native CacheStorage is gone from the prototype chain, not just shadowed
     expect(Object.getOwnPropertyDescriptor(proto, 'caches')).toBeUndefined();
+  });
+
+  test('IndexedDB is sealed — the same-origin durable store cannot be reached', () => {
+    // The seal's escape the audit found: indexedDB is not a network channel, so
+    // it slipped the egress-only framing, but the sealed worker runs at the
+    // extension origin and would otherwise read/write the `peerd` DB (vault blob,
+    // agents_memory poisoning, tool_grants forgery, audit). It must throw like
+    // caches, and the native IDBFactory must be gone from the prototype chain.
+    const { g, proto } = freshGlobal();
+    applyRealmSeal(g);
+    expect(() => g.indexedDB.open('peerd')).toThrow('peerd.egress.fetch');
+    expect(() => g.indexedDB.deleteDatabase('peerd')).toThrow('peerd.egress.fetch');
+    expect(Object.getOwnPropertyDescriptor(proto, 'indexedDB')).toBeUndefined();
   });
 
   test('survives a navigator with no sendBeacon, and no navigator at all', () => {

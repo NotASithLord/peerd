@@ -203,9 +203,19 @@ const fetchPdfBytes = async (/** @type {{ url?: string, bytesB64?: string }} */ 
   }
   let res;
   try {
-    res = await fetch(url);
+    // redirect:'manual' — the SW validated only the INITIAL host (denylist +
+    // isPrivateOrLocalHost in read-pdf.js). A default follow-mode fetch would
+    // let a public host 302 this request onto a loopback / LAN / link-local /
+    // metadata / denylisted host that no decision-time gate re-checks — the same
+    // SSRF pivot webFetch closes by refusing 3xx (INV-7). Mirror that here: a
+    // redirect returns an opaqueredirect (status 0) that we reject rather than
+    // follow, so the byte fetch can never reach an origin the guard never saw.
+    res = await fetch(url, { redirect: 'manual' });
   } catch (e) {
     throw new PdfFetchError(`could not fetch PDF: ${(/** @type {{ message?: string }} */ (e))?.message ?? e}`);
+  }
+  if (res.type === 'opaqueredirect' || res.status === 0) {
+    throw new PdfFetchError('PDF url redirected; redirects are refused to prevent SSRF to internal hosts');
   }
   if (!res.ok) throw new PdfFetchError(`HTTP ${res.status} fetching PDF`, { status: res.status });
   const buf = await res.arrayBuffer();
