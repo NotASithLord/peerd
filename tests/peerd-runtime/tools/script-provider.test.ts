@@ -75,6 +75,29 @@ describe('script — the caps.provider mint (design 5)', () => {
   });
 });
 
+describe('script — the actors mint is refused on an inbound (untrusted) turn (INV-5)', () => {
+  const actorsCtx = () => ({ messageActor: () => {} });
+
+  test('baseline: a chat turn referencing `actors` mints the delegation surface', async () => {
+    const { opts } = await run('await actors.send({ to: "web", goal: "x" });', actorsCtx());
+    expect(opts?.actors).toBe(true);
+    expect(opts?.ownerSessionId).toBe('s1');
+  });
+
+  test('an INBOUND turn does NOT mint the actors surface — the second door through the inbound wall is closed', async () => {
+    // The sender gate refuses a DIRECT message_actor on an inbound turn; the
+    // script tool must not hand that same delegation reach through a relay that
+    // never carried the flag. ctx.inbound is folded SW-side (trusted); the fix
+    // fails closed at the mint so no surface is ever advertised.
+    const { opts, scriptRuns } = await run('await actors.send({ to: "site:https://mail.example.com", goal: "x" });', {
+      ...actorsCtx(), inbound: true,
+    });
+    expect(opts?.actors).toBeUndefined();
+    // and with no other cap referenced, the run mints nothing at all
+    expect(scriptRuns.calls.some((c) => c.fn === 'mintRunId')).toBe(false);
+  });
+});
+
 describe('formatRunResult — the [MODEL CALLS] meter line', () => {
   test('a provider-using run always shows the host-counted meter, fence-free', () => {
     const out = formatRunResult('code', {
