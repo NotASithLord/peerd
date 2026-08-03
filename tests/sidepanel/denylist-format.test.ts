@@ -98,3 +98,74 @@ describe('denylist-format', () => {
     });
   });
 });
+
+// ── grouping (P4) ───────────────────────────────────────────────────────────
+// The seed ships 164 patterns already categorised. Flat, that was a wall nobody
+// read; grouped, the page answers "what am I protected from" at a glance. What
+// these pin is the part that could quietly lie: the counts, and whether a group
+// can vanish.
+import { groupDenylist, categoryLabel } from '../../extension/sidepanel/components/denylist-format.js';
+
+const CATS = {
+  banks_us: ['chase.com', '*.chase.com', 'wellsfargo.com'],
+  health_us: ['uhc.com', 'cigna.com'],
+};
+
+const rows = (...ps: string[]) => ps.map((p) => ({ pattern: p, user: false }));
+
+describe('groupDenylist', () => {
+  test('counts come from the DATA — shown vs the category\'s real total', () => {
+    // A hardcoded count is how a UI starts lying about what is enforced.
+    const g = groupDenylist(rows('uhc.com'), CATS, [...CATS.banks_us, ...CATS.health_us]);
+    const health = g.find((x) => x.key === 'health_us')!;
+    expect(health.shown).toBe(1);
+    expect(health.total).toBe(2);
+    expect(health.label).toBe('Health (US)');
+  });
+
+  test('a category with no search hits STAYS listed at 0 of N', () => {
+    // Dropping empty groups reads as "these protections do not exist".
+    const g = groupDenylist(rows('uhc.com'), CATS, [...CATS.banks_us, ...CATS.health_us]);
+    const banks = g.find((x) => x.key === 'banks_us')!;
+    expect(banks.shown).toBe(0);
+    expect(banks.total).toBe(3);
+    expect(g.length).toBe(2);           // both categories present
+  });
+
+  test("the user's own patterns lead, and are marked as theirs", () => {
+    const active = [{ pattern: 'mybank.example', user: true }, ...rows('chase.com')];
+    const g = groupDenylist(active, CATS, ['mybank.example', ...CATS.banks_us, ...CATS.health_us]);
+    expect(g[0].key).toBe('__user');
+    expect(g[0].label).toBe('Your patterns');
+    expect(g[0].user).toBe(true);
+    expect(g[0].rows.map((r) => r.pattern)).toEqual(['mybank.example']);
+  });
+
+  test('a seed pattern in NO category still surfaces under Your patterns', () => {
+    // A taxonomy gap must never hide an enforced pattern.
+    const g = groupDenylist(rows('orphan.example'), CATS, ['orphan.example', ...CATS.banks_us]);
+    expect(g[0].rows.map((r) => r.pattern)).toEqual(['orphan.example']);
+  });
+
+  test('no user patterns and no orphans → no Your-patterns group at all', () => {
+    const g = groupDenylist(rows('chase.com'), CATS, [...CATS.banks_us, ...CATS.health_us]);
+    expect(g.some((x) => x.key === '__user')).toBe(false);
+  });
+
+  test('an unknown category key renders humanized rather than vanishing', () => {
+    const g = groupDenylist(rows('x.test'), { new_sector: ['x.test'] }, ['x.test']);
+    expect(g[0].label).toBe('New sector');
+  });
+
+  test('no categories at all → one group, nothing lost', () => {
+    const g = groupDenylist(rows('a.com', 'b.com'), {}, ['a.com', 'b.com']);
+    expect(g.length).toBe(1);
+    expect(g[0].shown).toBe(2);
+  });
+
+  test('categoryLabel maps every shipped key', () => {
+    expect(categoryLabel('banks_us')).toBe('Banks (US)');
+    expect(categoryLabel('identity')).toBe('Identity & SSO');
+    expect(categoryLabel('password_managers')).toBe('Password managers');
+  });
+});

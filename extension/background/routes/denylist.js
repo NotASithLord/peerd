@@ -16,12 +16,22 @@ export const makeDenylistRoutes = (deps) => {
   // from the list — background/denylist-net-guard.js). An edit changes what that
   // rule must block, so both mutating routes resync it. Injected like every other
   // collaborator; this file still imports nothing.
-  const { denylistStore, auditLog, denylistNetGuard } = deps;
+  const { denylistStore, auditLog, denylistNetGuard, getSeedCategories } = deps;
 
-  // The shared { patterns, added, disabled } reply every denylist route returns.
+  // The shared { patterns, added, disabled, categories } reply every denylist route returns.
   const snapshot = () => {
     const o = denylistStore.overlay();
-    return { ok: true, patterns: [...denylistStore.patterns()], added: o.added, disabled: o.disabled };
+    // `categories` is the SEED's own curated taxonomy, carried through read-only so
+    // the settings list can group 164 patterns instead of stacking them in one wall.
+    // It describes the seed only: a user-added pattern belongs to no category, and
+    // the effective list (`patterns`) stays the flat thing every gate matches against.
+    return {
+      ok: true,
+      patterns: [...denylistStore.patterns()],
+      added: o.added,
+      disabled: o.disabled,
+      categories: getSeedCategories?.() ?? {},
+    };
   };
 
   return {

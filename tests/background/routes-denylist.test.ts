@@ -17,6 +17,8 @@ const makeDeps = (over: any = {}) => {
       ...over.denylistStore,
     },
     auditLog: { append: async (e: any) => { audits.push(e); } },
+    // The seed's curated taxonomy, carried read-only so the settings list can group.
+    getSeedCategories: () => ({ banks_us: ['a.com'], health_us: ['b.com'] }),
     // The DNR backstop's resync — an edit changes what the rule blocks.
     denylistNetGuard: { sync: () => { syncs.push(true); } },
   };
@@ -27,7 +29,13 @@ describe('denylist routes', () => {
   test('list returns the snapshot', async () => {
     const { deps } = makeDeps();
     expect(await makeDenylistRoutes(deps)['denylist/list']())
-      .toEqual({ ok: true, patterns: ['a.com'], added: ['x.com'], disabled: ['b.com'] });
+      .toEqual({
+        ok: true,
+        patterns: ['a.com'],
+        added: ['x.com'],
+        disabled: ['b.com'],
+        categories: { banks_us: ['a.com'], health_us: ['b.com'] },
+      });
   });
 
   test('add audits denylist_added with the seed flag + returns snapshot', async () => {
@@ -69,5 +77,25 @@ describe('denylist routes', () => {
     const { deps, syncs } = makeDeps({ denylistStore: { add: async () => ({ ok: false, error: 'invalid-pattern' }) } });
     await makeDenylistRoutes(deps)['denylist/add']({ pattern: '' });
     expect(syncs).toEqual([]);
+  });
+});
+
+describe('denylist routes carry the seed taxonomy', () => {
+  test('categories ride every snapshot, not just list', async () => {
+    // The settings list groups by these; a mutation reply is what the view
+    // re-renders from, so a reply without them would collapse the groups.
+    const { deps } = makeDeps();
+    const routes = makeDenylistRoutes(deps);
+    for (const call of [routes['denylist/list'](), routes['denylist/add']({ pattern: 'x.com' })]) {
+      expect((await call).categories).toEqual({ banks_us: ['a.com'], health_us: ['b.com'] });
+    }
+  });
+
+  test('an unwired category source degrades to no grouping, never a crash', async () => {
+    // Pre-hydration (or a seed fetch that failed) must render the flat list, not throw.
+    const { deps } = makeDeps();
+    const r = await makeDenylistRoutes({ ...deps, getSeedCategories: undefined })['denylist/list']();
+    expect(r.ok).toBe(true);
+    expect(r.categories).toEqual({});
   });
 });
