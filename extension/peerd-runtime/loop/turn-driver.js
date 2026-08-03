@@ -30,6 +30,10 @@ import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } fr
 // prompt only while session.prewalk.phase === 'planning'. Pure text; the
 // swap/restore IO rides the injected reconcilePrewalk/maybePrewalkSwap deps.
 import { PREWALK_NUDGE } from './prewalk.js';
+// Pure helper (no IO) — imported directly, like PREWALK_NUDGE above. Builds the
+// per-turn ephemeral <context> message (temporal + active tab) that keeps the
+// main system string byte-stable and prompt-cacheable (design 01).
+import { buildTemporalContext } from './system-prompt.js';
 
 // pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
 // relay, a security seam — one implementation, no drift).
@@ -216,6 +220,16 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     return '';
   });
 
+  // design 01 (prompt-cache stability): the per-turn-volatile temporal + active-tab
+  // bytes ride a LEADING <context> message in the stream, NOT the cached system
+  // block, so the main system string stays byte-stable and its prefix caches. Built
+  // here (temporalBlock + the foreground tab), handed to the loop, prepended each
+  // step. An actor keeps its temporal block embedded in its own per-turn prompt
+  // (see getSystemPrompt), so it takes no context message — '' skips the injection.
+  const contextMessage = isActor
+    ? ''
+    : buildTemporalContext({ temporalBlock, activeTab: activeTabContext });
+
   const getSystemPrompt = async () => {
     // why: re-read the session record at render time so a /system change
     // (set or clear) takes effect on the very next turn. The block is the
@@ -233,12 +247,15 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       : '';
     return (await renderSystemPrompt({
       memoryBlock,
-      temporalBlock,
+      // design 01: the MAIN system string must be byte-stable to cache, so the
+      // orchestrator's volatile temporal bytes ride a leading <context> message
+      // (contextMessage below) instead of the system block. An ACTOR re-renders
+      // its system prompt per turn and keeps embedding the block (relocating it
+      // there too would need offscreen-worker plumbing — deferred). '' for the
+      // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
+      temporalBlock: isActor ? temporalBlock : '',
       skillsBlock,
       customSystemPrompt: promptSession?.customSystemPrompt,
-      // Ephemeral active-tab reorientation (null on home / non-web tabs; always
-      // null for an actor).
-      activeTab: activeTabContext,
       // DESIGN-17: an actor gets a kind-specific tuned block appended (the base
       // template — incl. all the security/defense text — survives verbatim).
       // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
@@ -523,6 +540,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // mid-flight — no new user message; the loop continues the persisted
       // history. Normal sends pass resume=false.
       resume,
+      // design 01: the per-turn ephemeral <context> message (temporal + active
+      // tab). The loop prepends it as message[0] each step — after the cached
+      // system/tool breakpoints — so the byte-stable system prefix caches while
+      // this volatile content still reaches the model. '' (actors) → not passed.
+      ...(contextMessage ? { contextMessage } : {}),
       // why: already validated + shaped by loop/attachments.js in
       // agent/send (text payloads inlined there). The loop ships the
       // bytes this turn and persists the stripped metadata shape.

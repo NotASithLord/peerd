@@ -5,7 +5,7 @@ import { describe, it, expect } from '../../framework.js';
 import { renderSystemPrompt, _setTemplateForTests } from '/peerd-runtime/index.js';
 
 const TEMPLATE = [
-  'date: {{DATE}}',
+  'BASE-PROMPT',
   '{{MEMORY_BLOCK}}',
   '{{TEMPORAL_BLOCK}}',
   '---',
@@ -13,15 +13,11 @@ const TEMPLATE = [
 ].join('\n');
 
 describe('renderSystemPrompt', () => {
-  it('substitutes the date', async () => {
-    _setTemplateForTests(TEMPLATE);
-    const out = await renderSystemPrompt({
-      date: new Date('2026-06-05T00:00:00Z'),
-    });
-    expect(out.includes('date: 2026-06-05')).toBe(true);
-  });
-
-  it('embeds the temporal block when provided', async () => {
+  // design 01: the volatile temporal/date bytes moved OUT of the cached system
+  // block into a per-turn <context> message; renderSystemPrompt still substitutes
+  // {{TEMPORAL_BLOCK}} for an ACTOR turn (which re-renders per turn), so a passed
+  // block still embeds. The main path passes '' → the placeholder collapses.
+  it('embeds the temporal block when provided (actor path)', async () => {
     _setTemplateForTests(TEMPLATE);
     const out = await renderSystemPrompt({
       temporalBlock: '<time>2026-06-05T14:00:00Z · t+47s</time>',
@@ -61,7 +57,7 @@ describe('renderSystemPrompt', () => {
       _setTemplateForTests(TEMPLATE);
       const out = await renderSystemPrompt({ customSystemPrompt: 'answer like a pirate' });
       // Augments — the full base renders first, the block is appended.
-      expect(out.includes('date:')).toBe(true);
+      expect(out.includes('BASE-PROMPT')).toBe(true);
       expect(out.includes('<session_instructions>')).toBe(true);
       expect(out.includes('answer like a pirate')).toBe(true);
       expect(out.indexOf('---') < out.indexOf('<session_instructions>')).toBe(true);

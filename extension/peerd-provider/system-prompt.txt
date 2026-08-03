@@ -243,8 +243,6 @@ them to open a page you can open yourself, unless inspect
 kind:"denylist" actually lists it. Don't invent origin restrictions — the denylist is
 the only origin block that exists.
 
-The current date is {{DATE}}.
-
 {{MEMORY_BLOCK}}
 
 The <memory> tag (when present) is persistent, user-curated project

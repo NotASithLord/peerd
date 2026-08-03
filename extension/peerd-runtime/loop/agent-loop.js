@@ -232,6 +232,14 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   synthesize the reply from the tool results and stop — no second model call
  *   to summarize. An errored round falls through to the normal loop. The caller
  *   (the orchestrator, via message_actor) sets it when one round suffices.
+ * @param {string} [ctx.contextMessage]
+ *   Per-turn EPHEMERAL context (loop/system-prompt.js buildTemporalContext): the
+ *   wall-clock + active-tab bytes relocated OUT of the cached system block so it
+ *   stays byte-stable (design 01, prompt-cache stability). Prepended as a leading
+ *   `user`-role <context> message each step — after the cached system + tool
+ *   breakpoints, before real history — so its per-turn variance never busts the
+ *   cached prefix. Never persisted to history (re-derived each turn). Absent /
+ *   empty → nothing injected.
  * @returns {AsyncGenerator<LoopEvent>}
  */
 export async function* runUserTurn(ctx) {
@@ -505,6 +513,23 @@ export async function* runUserTurn(ctx) {
           });
           return changed ? { ...msg, toolResults } : msg;
         });
+      }
+      // Prompt-cache stability (design 01): prepend the per-turn ephemeral
+      // <context> message (temporal + active tab) as message[0]. why HERE, after
+      // every trim/compaction/splice: it must be the FIRST message on the wire so
+      // it lands right after the system + tool cache breakpoints — its per-turn
+      // variance then invalidates nothing cached, while the byte-stable system
+      // prefix (the volatile bytes moved OUT of it) caches. Ephemeral: injected on
+      // the wire only, never persisted; re-derived by the SW each turn. The
+      // converter collapses it into the following user turn's text — harmless, the
+      // <context> tag keeps it legible as injected context, not the user talking.
+      if (typeof ctx.contextMessage === 'string' && ctx.contextMessage.length > 0) {
+        historyForModel = [
+          /** @type {InternalMessage} */ ({
+            role: 'user', content: ctx.contextMessage, id: uuidv7(now), when: now(),
+          }),
+          ...historyForModel,
+        ];
       }
       // didTrim true ⇒ summaryState non-null (planTrim's contract); the
       // extra truthiness check is runtime-identical and narrows the type.
