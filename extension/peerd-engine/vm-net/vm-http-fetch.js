@@ -56,9 +56,14 @@ export const makeVmHttpFetch = (deps) => {
   const injectGitAuth = makeInjectGitAuth(deps);
 
   /**
-   * @param {{ url: string, method?: string, headers?: Record<string,string>, body?: string|null, gitAuth?: boolean }} req
+   * @param {{ url: string, method?: string, headers?: Record<string,string>, body?: string|null, gitAuth?: boolean, noCache?: boolean }} req
+   *   noCache opts this request out of the IDB cache entirely (no read, no
+   *   store). why: remote MODULE source (module-resolver.js makeFetchRemote)
+   *   must hit the live audited fetch every run — a warm IDB hit would serve
+   *   third-party code with no denylist re-check and no audit entry, and the
+   *   design forbids a persistent module cache (stale code silently pinned).
    */
-  return async ({ url, method, headers, body, gitAuth }) => {
+  return async ({ url, method, headers, body, gitAuth, noCache }) => {
     const verb = (method || 'GET').toUpperCase();
 
     // Anti-exfil gate: anything that can transmit a body (every verb except
@@ -80,7 +85,7 @@ export const makeVmHttpFetch = (deps) => {
 
     let effHeaders = gitAuth ? await injectGitAuth(url, headers) : headers;
 
-    const cacheable = isRequestCacheable({ method: verb, url, headers: effHeaders, body });
+    const cacheable = !noCache && isRequestCacheable({ method: verb, url, headers: effHeaders, body });
     const key = cacheable ? cacheKey(url) : null;
     let cached = null;
     if (key) {

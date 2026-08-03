@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { runJob, abortJob } from '/offscreen/job-runner.js';
+import { REMOTE_MODULES_MAX_PER_RUN } from '/peerd-engine/module-resolver.js';
 
 describe('offscreen job-runner (real sealed worker)', () => {
   it('runs code headless and returns its value + console output', async () => {
@@ -40,6 +41,59 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(sawFetch?.body).toBe('b');
     expect(r.value).toBe('pong');
     expect(r.error).toBe(null);
+  });
+
+  // Design 02, 2a — extract:'markdown' on the bridged fetch. The extraction
+  // pipeline is INJECTED (deps.extractMarkdown — in production offscreen.js
+  // passes web-extract-core's extractMarkdownLocal); stubbed here so the test
+  // pins the host-relay + realm-surface shape in isolation. The REAL pipeline
+  // (and host parity) runs in notebook-tab/notebook-extract.test.js.
+  it("peerd.egress.fetch(url, { extract: 'markdown' }) returns markdown for an HTML response", async () => {
+    /** @type {{ html?: string, url?: string } | null} */
+    let extractorSaw = null;
+    const html = '<html><body><article>Long article body</article></body></html>';
+    const r = await runJob(
+      {
+        code: [
+          'const res = await peerd.egress.fetch("https://site.example/post", { extract: "markdown" });',
+          'return { text: await res.text(), extracted: res.extracted, contentType: res.contentType };',
+        ].join('\n'),
+      },
+      {
+        sendToSW: async (type) => (type === 'sw/web-fetch'
+          ? { ok: true, status: 200, headers: { 'content-type': 'text/html' }, bodyB64: btoa(html) }
+          : { ok: false }),
+        extractMarkdown: async (source) => { extractorSaw = source; return { readerable: true, markdown: '# Article\n\nLong article body' }; },
+      },
+    );
+    expect(r.error).toBe(null);
+    const v = /** @type {{ text: string, extracted: boolean, contentType: string }} */ (r.value);
+    expect(v.text).toBe('# Article\n\nLong article body');
+    expect(v.extracted).toBe(true);
+    expect(v.contentType).toBe('text/markdown');
+    expect(/** @type {any} */ (extractorSaw)?.url).toBe('https://site.example/post');
+    expect(r.usedEgress).toBe(true);   // extraction never launders the fence
+  });
+
+  it('extract on a non-HTML response passes the body through unchanged, extracted:false', async () => {
+    let extractorCalled = false;
+    const r = await runJob(
+      {
+        code: [
+          'const res = await peerd.egress.fetch("https://api.example/data.json", { extract: "markdown" });',
+          'return { body: await res.text(), extracted: res.extracted };',
+        ].join('\n'),
+      },
+      {
+        sendToSW: async () => ({ ok: true, status: 200, headers: { 'content-type': 'application/json' }, bodyB64: btoa('{"a":1}') }),
+        extractMarkdown: async () => { extractorCalled = true; return { readerable: true, markdown: 'x' }; },
+      },
+    );
+    expect(r.error).toBe(null);
+    const v = /** @type {{ body: string, extracted: boolean }} */ (r.value);
+    expect(v.body).toBe('{"a":1}');      // mixed-URL fan-outs: no throw, no rewrite
+    expect(v.extracted).toBe(false);
+    expect(extractorCalled).toBe(false);
   });
 
   it('surfaces a thrown error (and resolves, does not hang)', async () => {
@@ -201,6 +255,32 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.error).toContain('aborted');
   });
 
+  // design 7.3 — headless peerd.distributed.* must fail FAST. The runner forces
+  // the distributed cap off (this host has no 'distributed-request' handler),
+  // so the in-realm shim throws immediately; the host relay's refusal is the
+  // second wall. Pre-fix a touch of peerd.distributed.* hung to the job
+  // wall-clock. Exercised against the REAL worker: if either wall regresses AND
+  // the forced-off profile is dropped, the run times out at timeoutMs and the
+  // assertions below fail — the hang cannot come back silently.
+  it('headless peerd.distributed.whoami() rejects immediately — even when caller caps ask for it', async () => {
+    const t0 = performance.now();
+    const r = await runJob(
+      // why the cast: caps.distributed is deliberately NOT on runJob's typedef
+      // (it is not a caller knob headless) — this passes it anyway to pin that
+      // a wider caller profile still cannot re-open the lane.
+      /** @type {any} */ ({
+        code: 'try { await peerd.distributed.whoami(); return "REACHED"; } catch (e) { return "blocked:" + e.message; }',
+        caps: { distributed: true },
+        timeoutMs: 5000,
+      }),
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(r.error).toBe(null);
+    expect(String(r.value)).toContain('blocked');
+    expect(String(r.value)).toContain('not available');
+    expect(performance.now() - t0 < 4000).toBe(true);  // fast refusal, not the wall-clock
+  });
+
   // ── the actors delegation surface (script orchestration) ─────────────────
 
   it('actors: ask relays to the SW actors/call route with owner ids from TRUSTED job params', async () => {
@@ -288,6 +368,112 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(/** @type {any[]} */ (r.actorsTrace).length).toBe(0);
   });
 
+  // ── the provider sub-model surface (design 5) ─────────────────────────────
+
+  it('provider: a stubbed round-trip returns text into the worker, with trusted owner/runId on the relay', async () => {
+    /** @type {any[]} */
+    const calls = [];
+    const r = await runJob(
+      {
+        code: 'const r = await peerd.provider.call({ prompt: "classify: good or bad?" }); return r.text;',
+        caps: { provider: true }, ownerSessionId: 'chat-1', runId: 'run-p1',
+      },
+      {
+        sendToSW: async (type, payload) => {
+          calls.push({ type, payload });
+          return { ok: true, value: { text: 'good', model: 'm-1', usage: { inputTokens: 5, outputTokens: 7 } } };
+        },
+      },
+    );
+    expect(r.error).toBe(null);
+    expect(r.value).toBe('good');
+    const c = /** @type {any} */ (calls[0]);
+    expect(c.type).toBe('script/model-call');
+    // owner + runId ride from TRUSTED job params — the worker cannot spoof them
+    expect(c.payload.ownerSessionId).toBe('chat-1');
+    expect(c.payload.runId).toBe('run-p1');
+    expect(c.payload.args?.prompt).toBe('classify: good or bad?');
+    // the host-counted meter rides the result (the [MODEL CALLS] line's source)
+    expect(r.usedProvider).toBe(true);
+    expect(r.providerCalls).toBe(1);
+    expect(r.providerTokens).toBe(12);
+  });
+
+  it('provider: the capability is DENIED without the caps flag — in-realm throw, no relay', async () => {
+    /** @type {any[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: 'try { await peerd.provider.call({ prompt: "x" }); return "REACHED"; } catch (e) { return "blocked:" + e.message; }' },
+      { sendToSW: async (type, payload) => { calls.push({ type, payload }); return { ok: true, value: { text: 'y' } }; } },
+    );
+    expect(calls.some((c) => c.type === 'script/model-call')).toBe(false);
+    expect(String(r.value)).toContain('no-provider capability profile');
+    expect(r.usedProvider).toBeFalsy();
+  });
+
+  it('provider: caps flag without a runId is refused at the host wall (fail closed)', async () => {
+    // A provider run must be a LIVE registered run (the SW route verifies the
+    // owner-bound runId); the host wall already refuses when the trusted job
+    // params are incomplete, even though the realm surface was minted.
+    const r = await runJob(
+      { code: 'try { await peerd.provider.call({ prompt: "x" }); return "reached"; } catch (e) { return e.message; }',
+        caps: { provider: true }, ownerSessionId: 'chat-1' },
+      { sendToSW: async () => ({ ok: true, value: { text: 'y' } }) },
+    );
+    expect(String(r.value)).toContain('disabled');
+  });
+
+  it('provider: a quota refusal is a CATCHABLE error the script can degrade on, not a worker kill', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'const out = [];',
+          'for (const row of ["a", "b"]) {',
+          '  try { out.push((await peerd.provider.call({ prompt: row })).text); }',
+          '  catch (e) { out.push("skipped: " + e.message); }',
+          '}',
+          'return out;',
+        ].join('\n'),
+        caps: { provider: true }, ownerSessionId: 'chat-1', runId: 'run-p2',
+      },
+      {
+        sendToSW: (() => {
+          let n = 0;
+          return async () => (++n === 1
+            ? { ok: true, value: { text: 'ok-1', usage: { inputTokens: 1, outputTokens: 1 } } }
+            : { ok: false, error: 'provider quota exceeded: 20 sub-calls per run' });
+        })(),
+      },
+    );
+    expect(r.error).toBe(null);
+    const v = /** @type {string[]} */ (r.value);
+    expect(v[0]).toBe('ok-1');
+    expect(v[1]).toContain('provider quota exceeded');
+    expect(r.providerCalls).toBe(1);   // only the call that returned usage counts — the quota refusal spent nothing
+  });
+
+  it('provider: abortJob(runId) terminates a run mid sub-call — the meter survives', async () => {
+    const pending = runJob(
+      {
+        code: 'await peerd.provider.call({ prompt: "long" }); return "never";',
+        caps: { provider: true }, ownerSessionId: 'chat-1', runId: 'run-p-abort', timeoutMs: 30000,
+      },
+      {
+        sendToSW: (type) => new Promise((resolve) => {
+          // the sub-call hangs (a live provider stream) until the abort fires
+          if (type === 'script/model-call') setTimeout(() => resolve({ ok: false, error: 'aborted' }), 5000);
+          else resolve({ ok: true });
+        }),
+      },
+    );
+    await new Promise((res) => setTimeout(res, 400));
+    abortJob('run-p-abort', 'chat-1');
+    const r = await pending;
+    expect(r.error).toContain('aborted');
+    expect(r.usedProvider).toBe(true);   // the attempt is visible (fencing stays conservative)
+    expect(r.providerCalls).toBe(0);     // aborted before any usage came back → nothing counted as spent
+  });
+
   it('actors: abortJob(runId) terminates a live run — partial trace survives', async () => {
     const pending = runJob(
       {
@@ -309,5 +495,186 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.error).toContain('aborted');
     expect(r.usedActors).toBe(true);
     expect(/** @type {any[]} */ (r.actorsTrace).length).toBe(1);   // the in-flight ask is on the record
+  });
+});
+
+// Remote (https:) module imports — design 3's regression net. Two fences,
+// both MEASURED here in a real worker (not argued by construction):
+//   1. the resolver path — remote module source rides the audited
+//      sw/web-fetch relay and re-enters as a blob, so the worker's module
+//      graph never names a third-party URL (the relay stub sees the bytes;
+//      the no-egress lanes visibly get nothing);
+//   2. the native-loader backstop — design 3's Step 0 question, answered by
+//      actually spawning a worker whose graph DOES name an https URL and
+//      asserting it never executes (see the last test).
+describe('headless remote module imports (audited resolver path)', () => {
+  /**
+   * A sendToSW stub that serves remote module source over the sw/web-fetch
+   * route (an unknown URL answers like a denylist refusal) and records calls.
+   * @param {Record<string, string>} sources
+   * @param {{ type: string, payload: any }[]} calls
+   */
+  const servingSW = (sources, calls) => async (
+    /** @type {string} */ type, /** @type {any} */ payload,
+  ) => {
+    calls.push({ type, payload });
+    if (type === 'sw/web-fetch') {
+      const src = sources[payload.url];
+      if (src === undefined) return { ok: false, status: 0, error: `denylisted: ${payload.url}` };
+      return { ok: true, status: 200, bodyB64: btoa(src) };
+    }
+    return { ok: true };
+  };
+
+  it('a static https import arrives via sw/web-fetch, runs as a blob, and fences the run (usedEgress)', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: "import { answer } from 'https://mods.example/util.js';\nreturn answer;" },
+      { sendToSW: servingSW({ 'https://mods.example/util.js': 'export const answer = 6 * 7;' }, calls) },
+    );
+    expect(r.error).toBe(null);
+    expect(r.value).toBe(42);
+    // the module bytes crossed the AUDITED relay, not the native loader
+    const fetches = calls.filter((c) => c.type === 'sw/web-fetch');
+    expect(fetches.length).toBe(1);
+    expect(fetches[0].payload.url).toBe('https://mods.example/util.js');
+    expect(fetches[0].payload.method).toBe('GET');
+    expect(r.usedEgress).toBe(true);   // module source is untrusted web bytes
+  });
+
+  it('a remote module’s relative import resolves against ITS url through the same relay', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: "import { lib } from 'https://mods.example/pkg/lib.js';\nreturn lib;" },
+      { sendToSW: servingSW({
+        'https://mods.example/pkg/lib.js': "import { base } from './base.js'; export const lib = base + 1;",
+        'https://mods.example/pkg/base.js': 'export const base = 41;',
+      }, calls) },
+    );
+    expect(r.error).toBe(null);
+    expect(r.value).toBe(42);
+    const urls = calls.filter((c) => c.type === 'sw/web-fetch').map((c) => c.payload.url).sort();
+    expect(urls).toEqual(['https://mods.example/pkg/base.js', 'https://mods.example/pkg/lib.js']);
+  });
+
+  it('a no-egress caps profile refuses the import at RESOLUTION — zero network calls', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: "import 'https://mods.example/util.js';\nreturn 'REACHED';",
+        caps: { egress: false } },
+      { sendToSW: servingSW({ 'https://mods.example/util.js': 'export const x = 1;' }, calls) },
+    );
+    expect(String(r.error)).toContain('no network');
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
+    expect(r.usedEgress).toBeFalsy();
+  });
+
+  it('an a2a run refuses remote imports the same way (mesh-only, provably including code bytes)', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: "import 'https://mods.example/util.js';\nreturn 'REACHED';",
+        a2a: true, ownerSessionId: 'dweb' },
+      { sendToSW: servingSW({ 'https://mods.example/util.js': 'export const x = 1;' }, calls) },
+    );
+    expect(String(r.error)).toContain('no network');
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
+  });
+
+  it('a denylisted module URL fails the run with the resolver’s error, never spawning the worker', async () => {
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: "import 'https://evil.example/mod.js';\nreturn 'REACHED';" },
+      { sendToSW: servingSW({}, calls) },
+    );
+    expect(String(r.error)).toContain('import resolution failed');
+    expect(String(r.error)).toContain('denylisted: https://evil.example/mod.js');
+    expect(r.value).toBe(undefined);
+    // the refusal came from the audited relay — the fetch was ATTEMPTED there
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(true);
+  });
+
+  it('a RUNTIME dynamic import("https://…") composes through the audited relay in the live worker', async () => {
+    // The compose-module path executed for real: the worker asks the host,
+    // buildModule routes the https specifier through fetchRemote, and the
+    // worker re-blobs + imports the returned source in its own realm.
+    //
+    // KNOWN GAP (pre-existing, measured 2026-08-02 on Chrome 151, real
+    // extension origin via CDP): the final in-realm `import(blobUrl)` of the
+    // WORKER-created blob violates the MV3 extension CSP (script-src 'self'
+    // 'wasm-unsafe-eval' — blob: is not addable in MV3), so EVERY runtime
+    // dynamic import — OPFS compose and remote alike — currently fails at
+    // that last hop (__peerd_dynamic_import in worker-source.js). The static
+    // graph is unaffected (its blob loads ride the worker-script load, which
+    // extension origins permit). Fixing the mechanism is its own design; what
+    // THIS test pins is design 3's seam, which holds regardless: the module
+    // bytes ride the audited relay, the run is fenced, and the outcome is the
+    // composed module or a loud load error — never silent unaudited code.
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      { code: "const m = await import('https://mods.example/lazy.js');\nreturn m.x;" },
+      { sendToSW: servingSW({ 'https://mods.example/lazy.js': 'export const x = 42;' }, calls) },
+    );
+    const fetches = calls.filter((c) => c.type === 'sw/web-fetch');
+    expect(fetches.length).toBe(1);
+    expect(fetches[0].payload.url).toBe('https://mods.example/lazy.js');
+    expect(r.usedEgress).toBe(true);   // the runtime lane fences the run too
+    // Composed-and-ran, or the known CSP-blocked last hop — never anything else.
+    const ok = r.value === 42
+      || String(r.error).includes('Failed to fetch dynamically imported module');
+    expect(ok).toBe(true);
+  });
+
+  it('runtime dynamic imports share the per-run cap with the static graph', async () => {
+    const cap = REMOTE_MODULES_MAX_PER_RUN;
+    /** @type {Record<string, string>} */
+    const sources = {};
+    const importLines = [];
+    for (let i = 0; i <= cap; i += 1) {   // cap-many static + 1 dynamic
+      sources[`https://mods.example/m${i}.js`] = `export const v${i} = ${i};`;
+      if (i < cap) importLines.push(`import 'https://mods.example/m${i}.js';`);
+    }
+    /** @type {{ type: string, payload: any }[]} */
+    const calls = [];
+    const r = await runJob(
+      {
+        code: `${importLines.join('\n')}\n`
+          + `try { await import('https://mods.example/m${cap}.js'); return 'REACHED'; }\n`
+          + 'catch (e) { return `capped:${e.message}`; }',
+      },
+      { sendToSW: servingSW(sources, calls) },
+    );
+    expect(r.error).toBe(null);
+    expect(String(r.value)).toContain('capped:');
+    expect(String(r.value)).toContain('per-run cap');   // one counter spans both lanes
+    expect(calls.filter((c) => c.type === 'sw/web-fetch').length).toBe(cap);
+  });
+
+  // Design 3's Step 0 measurement (not an argument): hand the native loader a
+  // module graph that DOES name an https URL — bypassing the resolver on
+  // purpose — and record that it never executes. Whichever layer refuses
+  // (worker CSP, the network stack), a load failure must surface as the
+  // worker error event, never as module execution; this is the regression
+  // fence for the backstop behind the resolver path. why an unroutable
+  // loopback port: the fence being measured is "no silent success", and a
+  // denied/refused fetch and a CSP block both land in the same observable —
+  // the error event — without this test ever touching a real network.
+  it('the native loader never executes a remote static import from a sealed-worker blob (Step 0)', async () => {
+    const src = "import 'https://127.0.0.1:9/never.js';\npostMessage({ type: 'loaded' });";
+    const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+    const worker = new Worker(url, { type: 'module' });
+    const outcome = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve('hung'), 8000);
+      worker.addEventListener('message', () => { clearTimeout(timer); resolve('EXECUTED'); });
+      worker.addEventListener('error', () => { clearTimeout(timer); resolve('load-error'); });
+    });
+    worker.terminate();
+    URL.revokeObjectURL(url);
+    expect(outcome).toBe('load-error');
   });
 });

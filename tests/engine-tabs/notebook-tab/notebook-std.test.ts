@@ -9,6 +9,7 @@ import {
   clamp, variance, stdev, quantile, mode, sumBy, meanBy, countBy, keyBy,
   chunk, zip, partition,
   parseJsonl, toJsonl, dedupeBy,
+  parseCsv, toCsv, stripTags, textOfTag, extractLinks,
   gcd, lcm, factorial, modpow,
 } from '../../../extension/engine-tabs/notebook-tab/notebook-std.js';
 
@@ -197,6 +198,78 @@ describe('peerd:std line-delimited records (JSONL)', () => {
     expect(dedupeBy(merged, 'id')).toEqual(merged);                                 // idempotent
     expect(dedupeBy([{ d: '25-01' }, { d: '25-01' }, { d: '25-02' }], (r: any) => r.d).length).toBe(2);
     expect(dedupeBy('nope' as any, 'id')).toEqual([]);
+  });
+});
+
+describe('peerd:std CSV (RFC-4180-quote-aware)', () => {
+  test('parseCsv: header row → objects; quoted fields carry delimiters, "" and newlines', () => {
+    const text = 'name,note,n\n"Smith, Jane","says ""hi""",1\n"multi\nline",plain,2';
+    expect(parseCsv(text)).toEqual([
+      { name: 'Smith, Jane', note: 'says "hi"', n: '1' },
+      { name: 'multi\nline', note: 'plain', n: '2' },
+    ]);
+  });
+
+  test('parseCsv: header:false → string arrays; CRLF rows; trailing newline yields no phantom row', () => {
+    expect(parseCsv('a,b\r\n1,2\r\n', { header: false })).toEqual([['a', 'b'], ['1', '2']]);
+  });
+
+  test('parseCsv: custom delimiter, short-row padding, values stay strings; non-string → []', () => {
+    expect(parseCsv('a;b\n1', { delimiter: ';' })).toEqual([{ a: '1', b: '' }]);
+    expect(parseCsv('n\n007')).toEqual([{ n: '007' }]);   // no number coercion — exactness
+    expect(parseCsv(42 as any)).toEqual([]);
+    expect(parseCsv('')).toEqual([]);
+  });
+
+  test('a non-single-character delimiter falls back to "," (never a silent mis-parse)', () => {
+    // '||' can never match the one-char scan — pre-guard it parsed as garbage
+    expect(parseCsv('a,b\n1,2', { delimiter: '||' })).toEqual([{ a: '1', b: '2' }]);
+    expect(toCsv([{ a: '1', b: '2' }], { delimiter: '||' })).toBe('a,b\n1,2');
+  });
+
+  test('toCsv: objects get a first-seen-union header; arrays get none; special fields quoted', () => {
+    expect(toCsv([{ a: 1, b: 'x,y' }, { a: 2, c: 'q"r' }]))
+      .toBe('a,b,c\n1,"x,y",\n2,,"q""r"');
+    expect(toCsv([['a', 'b'], [1, 'new\nline']])).toBe('a,b\n1,"new\nline"');
+    expect(toCsv([])).toBe('');
+    expect(toCsv('nope' as any)).toBe('');
+  });
+
+  test('parseCsv ∘ toCsv round-trips string-valued rows (incl. the nasty quoting cases)', () => {
+    const rows = [
+      { name: 'Smith, Jane', note: 'says "hi"' },
+      { name: 'multi\nline', note: '' },
+    ];
+    expect(parseCsv(toCsv(rows))).toEqual(rows);
+  });
+});
+
+describe('peerd:std HTML string helpers (regex-grade, honestly limited)', () => {
+  test('stripTags drops tags + script/style bodies + comments, decodes entities, collapses whitespace', () => {
+    const html = '<div><script>evil()</script><style>.x{}</style><!-- note --><p>A &amp; B&#39;s &lt;win&gt;</p>\n<p>next</p></div>';
+    expect(stripTags(html)).toBe("A & B's <win>\nnext");
+    expect(stripTags('&#x1F600;')).toBe('😀');
+    expect(stripTags(null as any)).toBe('');
+  });
+
+  test('textOfTag returns the text of EVERY occurrence, in order; invalid input → []', () => {
+    const html = '<h2 class="a">One</h2><p>skip</p><h2>Two &amp; more</h2>';
+    expect(textOfTag(html, 'h2')).toEqual(['One', 'Two & more']);
+    expect(textOfTag(html, 'h3')).toEqual([]);
+    expect(textOfTag(html, 'not a tag!')).toEqual([]);
+    expect(textOfTag(42 as any, 'h2')).toEqual([]);
+  });
+
+  test('extractLinks → [{ href, text }] for every quoting style, hrefs entity-decoded not resolved', () => {
+    const html = '<a href="https://a.example/x?a=1&amp;b=2">First</a> '
+      + "<a class='c' href='/relative'>Rel <b>bold</b></a> <a href=bare>Bare</a> <a name=no-href>skip</a>";
+    expect(extractLinks(html)).toEqual([
+      { href: 'https://a.example/x?a=1&b=2', text: 'First' },
+      { href: '/relative', text: 'Rel bold' },
+      { href: 'bare', text: 'Bare' },
+    ]);
+    expect(extractLinks('no links')).toEqual([]);
+    expect(extractLinks(undefined as any)).toEqual([]);
   });
 });
 

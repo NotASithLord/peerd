@@ -202,6 +202,47 @@ describe('realm seal — the fetch bridge protocol', () => {
     expect(err?.name).toBe('TypeError');
   });
 
+  test("extract: 'markdown' rides the fetch-request; other values stay client-side inert (design 02, 2a)", async () => {
+    const { g, posted, listeners } = freshGlobal();
+    applyRealmSeal(g);
+    const p = g.fetch('https://site.example/post', { extract: 'markdown' });
+    expect(posted[0].extract).toBe('markdown');
+    // The host answered with extracted markdown: the fake Response carries the
+    // design's markers (contentType from the rewritten headers + extracted).
+    respond(listeners, {
+      type: 'fetch-response', rid: posted[0].rid, ok: true, status: 200,
+      headers: { 'content-type': 'text/markdown' }, bodyB64: btoa('# Hi'), extracted: true,
+    });
+    const resp = await p;
+    expect(resp.extracted).toBe(true);
+    expect(resp.contentType).toBe('text/markdown');
+    expect(await resp.text()).toBe('# Hi');
+
+    // An unknown mode must NOT cross the bridge — a future value can't change
+    // bytes on a host that doesn't know it.
+    const p2 = g.fetch('https://site.example/x', { extract: 'text' });
+    expect(posted[1].extract).toBeUndefined();
+    expect('extract' in posted[1]).toBe(false);
+    respond(listeners, { type: 'fetch-response', rid: posted[1].rid, ok: true, status: 200, bodyB64: btoa('raw') });
+    const resp2 = await p2;
+    expect(resp2.extracted).toBe(false);
+    expect(await resp2.text()).toBe('raw');
+  });
+
+  test('a plain fetch response surfaces contentType from headers, extracted false', async () => {
+    const { g, posted, listeners } = freshGlobal();
+    applyRealmSeal(g);
+    const p = g.fetch('https://api.example/j');
+    expect('extract' in posted[0]).toBe(false);
+    respond(listeners, {
+      type: 'fetch-response', rid: posted[0].rid, ok: true, status: 200,
+      headers: { 'Content-Type': 'application/json' }, bodyB64: btoa('{}'),
+    });
+    const resp = await p;
+    expect(resp.extracted).toBe(false);
+    expect(resp.contentType).toBe('application/json');   // any header casing
+  });
+
   test('unrelated and duplicate responses are ignored', async () => {
     const { g, posted, listeners } = freshGlobal();
     applyRealmSeal(g);

@@ -30,10 +30,13 @@
 // (the voice model downloads there) — so in that host the realm seal is the
 // ONLY fence. Every network-capable primitive must therefore be sealed by the
 // realm itself, not deferred to the page CSP.
-// One channel remains OPEN by design and is NOT sealed here:
-//   - module loads: static/dynamic `import` of absolute CDN URLs is a
-//     documented js_notebook feature (script-src territory, not reachable
-//     from inside the realm — import() is syntax, not a global).
+// Module loads are NOT an open channel: a remote (https:) import never
+// reaches this realm's native loader — the HOST resolver fetches its source
+// through the same audited relay as data fetches (module-resolver.js
+// fetchRemote → sw/web-fetch: denylist + SSRF + audit) and hands the worker
+// a same-realm blob, so the module graph the loader sees carries no
+// third-party URLs. import() itself is syntax, not a global — nothing to
+// seal here.
 //
 // One implementation, three callers: realm-seal.js (the worker entry's
 // first static import — the production path), the bun unit tests (mock
@@ -119,6 +122,10 @@ export function applyRealmSeal(global) {
     }
     const body = opts.body == null ? undefined
       : typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
+    // Design 2a extract step — why + security posture: shared/fetch-extract.js.
+    // Only the one shipped mode crosses the bridge; anything else stays inert
+    // (today's raw behavior, byte-for-byte).
+    const extract = opts.extract === 'markdown' ? 'markdown' : undefined;
     return new Promise((resolve, reject) => {
       const rid = nextRid++;
       // why a timeout: a dropped host relay must not strand the eval —
@@ -130,7 +137,7 @@ export function applyRealmSeal(global) {
         }
       }, 30000);
       pending.set(rid, { resolve, reject, timer });
-      global.postMessage({ type: 'fetch-request', rid, url, method, headers, body });
+      global.postMessage({ type: 'fetch-request', rid, url, method, headers, body, ...(extract ? { extract } : {}) });
     });
   };
   global.addEventListener('message', (/** @type {MessageEvent} */ ev) => {
@@ -144,11 +151,21 @@ export function applyRealmSeal(global) {
     const bytes = m.bodyB64
       ? Uint8Array.from(atob(m.bodyB64), (c) => c.charCodeAt(0))
       : new Uint8Array();
+    const headers = m.headers || {};
+    // Design 2a markers: contentType reports what the bytes ARE ('text/markdown'
+    // after extraction, the wire type otherwise); extracted says whether the
+    // host's extraction actually ran, so code fanning out over mixed URLs can tell.
+    let contentType = null;
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'content-type') { contentType = headers[key]; break; }
+    }
     p.resolve({
       ok: m.ok,
       status: m.status,
       statusText: m.statusText || '',
-      headers: m.headers || {},
+      headers,
+      contentType,
+      extracted: m.extracted === true,
       text: async () => new TextDecoder().decode(bytes),
       json: async () => JSON.parse(new TextDecoder().decode(bytes)),
       arrayBuffer: async () => bytes.buffer,

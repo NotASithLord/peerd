@@ -21,17 +21,57 @@ const build = (caps?: object) =>
   buildWorkerSource('return 1', { entryPath: 'job.js', notebookId: 'job-1', resolverDeps: deps, caps: caps as any });
 
 describe('worker capability profile — the default (historical) surface', () => {
-  test('DEFAULT_WORKER_CAPS is the pre-profile surface: no page, everything else on', () => {
-    expect(DEFAULT_WORKER_CAPS).toEqual({ page: false, egress: true, subagent: true, opfs: true });
+  test('DEFAULT_WORKER_CAPS is the pre-profile surface: no page, no provider, distributed + everything else on', () => {
+    // provider is the ONE spend-capable cap — off by default everywhere; the
+    // script tool mints it per-run (design 5). distributed defaults ON (the tab
+    // host answers it); the headless runner forces it off (design 7.3).
+    expect(DEFAULT_WORKER_CAPS).toEqual({ page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true });
   });
 
-  test('a default build has NO page bridge and NO capability throw-shims', async () => {
+  test('a default build has NO page bridge and only the provider throw-shim', async () => {
     const { source } = await build();               // no caps → defaults
     expect(source).not.toContain('peerd.page');
     expect(source).not.toContain("makeBridge('page'");
     expect(source).not.toContain('globalThis.page');
-    // egress / subagent / opfs stay wired — no "not available in this worker" shims.
-    expect(source).not.toContain('not available in this worker');
+    // egress / subagent / opfs stay wired — no throw-shims for them.
+    expect(source).not.toContain('no-egress capability profile');
+    expect(source).not.toContain('no-subagent capability profile');
+    expect(source).not.toContain('no-opfs capability profile');
+    // provider (default OFF, design 5) is the one shimmed surface.
+    expect(source).toContain('no-provider capability profile');
+    expect(source).not.toContain("makeBridge('provider'");
+    // distributed (default ON) stays on the live bridge (the tab host answers it).
+    expect(source).not.toContain('no-distributed capability profile');
+    expect(source).toContain("makeBridge('distributed'");
+  });
+});
+
+describe('worker capability profile — the sub-model lane (design 5)', () => {
+  test('provider:true installs the provider bridge and drops the shim', async () => {
+    const { source } = await build({ provider: true });
+    expect(source).toContain("makeBridge('provider'");
+    expect(source).toContain('globalThis.peerd.provider.call = (args) => providerRelay');
+    expect(source).not.toContain('no-provider capability profile');
+  });
+
+  test('provider stays OFF under the code-REPL profile (page workers must not spend the key)', async () => {
+    const { source } = await build({ page: true, egress: false, subagent: false, opfs: false });
+    expect(source).not.toContain("makeBridge('provider'");
+    expect(source).toContain('no-provider capability profile');
+  });
+});
+
+describe('worker capability profile — headless distributed fast-fail (design 7.3)', () => {
+  // The headless job runner forces distributed:false (it has no
+  // 'distributed-request' handler); the in-realm wall must throw synchronously
+  // instead of letting the un-answered bridge hang the run to its wall-clock.
+  // The host relay's refusal in job-runner.js is the second wall.
+  test('distributed:false replaces every wired read with a throw-shim', async () => {
+    const { source } = await build({ distributed: false });
+    expect(source).toContain('no-distributed capability profile');
+    for (const m of ['whoami', 'status', 'peers', 'presence']) {
+      expect(source).toContain(`globalThis.peerd.distributed.${m} = noDistributed('${m}')`);
+    }
   });
 });
 

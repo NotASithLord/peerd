@@ -37,7 +37,8 @@ export const jsNotebookTool = {
     'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
     'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
     'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
-    'relative static + dynamic imports work. No `notebook` arg → the chat\'s',
+    'relative static imports work (dynamic import() does not on the packaged',
+    'extension). No `notebook` arg → the chat\'s',
     'current Notebook. Returns the return value, console output, and any error.',
   ].join(' '),
   schema: {

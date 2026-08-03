@@ -88,6 +88,64 @@ export class VMTabClosedError extends TypedError {
   }
 }
 
+// --- Remote module imports (module-resolver.js — the audited import path) --
+
+/**
+ * A remote import refused BEFORE any fetch. The default reason is the
+ * no-network lane (no `fetchRemote` injected — page_code / a2a / site-client);
+ * callers pass a reason for the other fail-closed forms (a malformed near-miss
+ * integrity pin, a protocol-relative specifier). why the WHY in the message:
+ * the agent reads this verbatim and must learn the refusal is policy, not a
+ * typo it should retry.
+ */
+export class RemoteImportBlockedError extends TypedError {
+  /**
+   * @param {string} specifier
+   * @param {string} [reason]
+   */
+  constructor(specifier, reason = 'this run has no network (egress capability is off for this lane)') {
+    super(`remote import '${specifier}' refused: ${reason}`);
+    this.specifier = specifier;
+    this.reason = reason;
+  }
+}
+
+/**
+ * A remote module graph hit a hostile-input rail — the per-module source
+ * size or the per-run remote-fetch count (fan-out module graphs are an
+ * amplification vector). The rails live in module-resolver.js.
+ */
+export class RemoteModuleCapError extends TypedError {
+  /**
+   * @param {string} specifier
+   * @param {string} reason
+   */
+  constructor(specifier, reason) {
+    super(`remote import '${specifier}' refused: ${reason}`);
+    this.specifier = specifier;
+    this.reason = reason;
+  }
+}
+
+/**
+ * The fetched remote source doesn't match the specifier's #sha256-<base64>
+ * integrity pin. Fails closed — the module never reaches the worker.
+ */
+export class RemoteModuleIntegrityError extends TypedError {
+  /**
+   * @param {string} url
+   * @param {string} expected  the pinned hash (normalized base64)
+   * @param {string} actual    what the fetched source hashes to
+   */
+  constructor(url, expected, actual) {
+    super(`remote module '${url}' failed its #sha256 pin: expected ${expected}, `
+      + `fetched source hashes to ${actual}`);
+    this.url = url;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 // --- Artifact export/import (.peerd envelopes — DESIGN-10) ----------------
 
 /**

@@ -69,6 +69,7 @@ import {
 } from '/peerd-egress/index.js';
 
 import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
+import { applyFetchExtract } from '/shared/fetch-extract.js';
 
 import {
   listProviders,
@@ -97,8 +98,10 @@ import {
   // different provider could get past, and order the candidate chain.
   shouldFailover,
   planFailoverChain,
-  // cost telemetry (feature 06): local pricing table + cost math.
-  costOf,
+  // cost telemetry (feature 06): local pricing table + cost math. hasPricing
+  // also gates the sub-call model arg (design 5): an unpriceable id would
+  // spend invisibly past the spend limit, so the route refuses it up front.
+  costOf, hasPricing,
   // long-session compression: resolve the active model's context window so
   // the trim trigger scales to it (dynamic, not a fixed token count).
   // contextWindowFor returns the resolved number, or null when unknown —
@@ -204,14 +207,24 @@ import {
   createCheckpointManager,
   // cost telemetry (feature 06): normalize for the state push + the
   // per-turn tracker (fold/persist/push/halt with all IO injected).
-  normalizeTally, makeTurnCostTracker,
+  // addUsage/limitExceeded also serve the script/model-call route's cost
+  // fold + spend-limit preflight (design 5).
+  normalizeTally, makeTurnCostTracker, addUsage, limitExceeded,
   // transfer (settings export/import — dual-distribution §10)
   buildExport,
   inspectImport,
   applyImport,
   ExportPassphraseError,
+  // design js-superpower/06 — the toolbox: durable agent-authored modules
+  // (peerd:toolbox/<name>; store + the write-time import-resolution check).
+  createToolboxStore,
+  makeToolboxParseCheck,
   // DESIGN-19 site clients — per-origin derived API clients (store + pure helpers)
   createSiteClientStore,
+  // script's value-spill store (run cache) — read_run_cache pages it back —
+  // and the shared spill-cache entry cap both spill stores use.
+  createRunCacheStore,
+  SPILL_CACHE_MAX_ENTRIES,
   resolveSiteUrl,
   buildMintInjection,
   digestCapture,
@@ -241,6 +254,9 @@ import {
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  // Design 5 — the pure core the script/model-call route runs: text-only arg
+  // validation, per-run quota arithmetic, and the provider-event fold.
+  validateProviderCallArgs, providerQuotaError, foldProviderEvents,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
   // Standing peer conversations — the pure thread registry (convId → turns).
@@ -290,6 +306,9 @@ import {
   createAppRegistry,
   // artifact export/import (.peerd envelopes — DESIGN-10)
   opfsHelpers,
+  // design 06: the resolver transform, injected into the toolbox write-time
+  // parse check (functional core — the check itself lives in peerd-runtime).
+  buildModule,
   NOTEBOOK_OPFS_ROOT,
   IMAGE_PIN_STORAGE_KEY,
   buildAppExport,
@@ -337,6 +356,7 @@ import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
+import { makeToolboxRoutes } from './routes/toolbox.js';
 
 // ---------------------------------------------------------------------------
 // 1. Layer 1 instances
@@ -600,7 +620,7 @@ const VM_HTTP_CACHE_STORE = 'vm_http_cache';
 // cutoff key (the vm_http_cache posture: fetched public bytes, best-effort,
 // safe to clear). Bounded so unbounded page-spills can't grow the profile.
 const WEB_EXTRACT_CACHE_STORE = 'web_extract_cache';
-const WEB_EXTRACT_CACHE_MAX_ENTRIES = 40;
+const WEB_EXTRACT_CACHE_MAX_ENTRIES = SPILL_CACHE_MAX_ENTRIES;
 let webCacheSeq = 0;
 const webCache = {
   /** Mint a new time-ordered cache key. */
@@ -695,6 +715,38 @@ const memory = createMemoryStore({ idb });
 // loadable as a skill). Injected as ctx.siteClients for the web actor's
 // site_client_* tools and read at mint for fenced dossier injection.
 const siteClientStore = createSiteClientStore();
+
+// The script value-spill store (run cache) — its OWN best-effort IDB DB, the
+// web-extract-cache posture one tier down: an oversized script [VALUE] spills
+// here and read_run_cache pages it back, ownership-stamped per session and
+// fenced per the run's own fence state.
+const runCache = createRunCacheStore();
+
+// Session teardown for the durable script WORKSPACE (['peerd-workspace', sid]
+// — the `script` tool's workspace:true root). Wired into session/archive,
+// the terminal session-lifecycle event. OPFS is reachable from the SW
+// (peerd-engine/opfs.js header); nuke() already swallows a missing subtree.
+const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-workspace', sid]).nuke();
+
+// design js-superpower/06 — the TOOLBOX: durable agent-authored ES modules
+// (peerd:toolbox/<name>), its OWN IDB DB. A distinct trust class from skills
+// AND site clients (a toolbox module is never loadable as a skill and never
+// runnable against an origin pin); keeping the DBs separate makes that
+// boundary structural. Injected as ctx.toolbox for the toolbox_* tools; the
+// resolution hosts read bodies via the toolbox/read route.
+const toolboxStore = createToolboxStore();
+// The write-time import-resolution check: the resolver transform run against a
+// candidate body, siblings read from the store. It validates import resolution,
+// NOT JS syntax. makeBlobUrl inside is a stub — the SW has no
+// URL.createObjectURL, and the check never imports the result.
+const toolboxParseCheck = makeToolboxParseCheck({
+  buildModule,
+  readSibling: async (/** @type {string} */ name) => {
+    const body = await toolboxStore.getBody(name);
+    if (body == null) throw new Error(`unknown toolbox module '${name}' — write it first (toolbox_write)`);
+    return body;
+  },
+});
 
 // Profiles (ROADMAP "Profiles", deprioritized to the default-profile
 // shape). Exactly ONE record exists — 'default' — carrying peerName
@@ -1532,6 +1584,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // read_web_cache pages it back. Stripped to exactly those two tools by
     // spawn.js CAPABILITY_CONSUMERS.webCache.
     webCache,
+    // script's value-spill store: an oversized [VALUE] spills here and
+    // read_run_cache pages it back. Stripped to exactly those two tools by
+    // spawn.js CAPABILITY_CONSUMERS.runCache.
+    runCache,
     // why: web tools open background tabs unconditionally (never-steal-
     // focus policy, 2026-06-12); settings ride along for other consumers.
     settings: { ...settingsStore.get() },
@@ -1558,6 +1614,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // actor whose toolset lacks the site_client_* tools (CAPABILITY_CONSUMERS.siteClients);
     // present on the web actor. Harmless on the main ctx (the tools are hidden + gated).
     siteClients: siteClientStore,
+    // design 06: the toolbox store + write-time parse check (toolbox_write/
+    // list/delete). Stripped from any actor/child whose grants lack the tools
+    // (CAPABILITY_CONSUMERS.toolbox / .toolboxParseCheck).
+    toolbox: toolboxStore,
+    toolboxParseCheck,
     // DESIGN-19: the capture closure for site_capture (Tap A CDP / Tap B scripting),
     // injected ONLY for a tab-backed web actor below (like adoptWebTab). Absent → the
     // tool returns site_capture_unavailable.
@@ -2302,6 +2363,18 @@ const webOffscreenClient = offscreenAvailable ? makeOffscreenWebClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
+
+// The sw/web-fetch route's extract post-step (see shared/fetch-extract.js) —
+// composed HERE so the route reuses the SAME offscreen extraction client
+// fetch_url rides. Firefox (no offscreen doc): no extractor → the helper
+// passes the body through, extracted:false.
+const applyWebExtract = (/** @type {any} */ resp, /** @type {unknown} */ extract, /** @type {string} */ url) =>
+  applyFetchExtract(resp, {
+    extract, url,
+    extractMarkdown: webOffscreenClient
+      ? (source) => webOffscreenClient.extractMarkdown(source)
+      : null,
+  });
 
 // ── Local WebGPU runner bridge (FEATURE-LOCAL-WEBGPU B / M1) ────────────────
 // The local-webgpu adapter generates by calling generateLocalForAdapter, which
@@ -4039,6 +4112,167 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
   }
 };
 
+// Design 5's session cost fold, SERIALIZED per session. why a chain: the
+// sub-call route below is the first caller that is concurrent with ITSELF by
+// design (a script can Promise.all its provider.call fan-out), and a bare
+// get→setCost read-modify-write interleaves — two folds read the same tally
+// and the later write drops the earlier call's spend from the very tally the
+// spend-limit preflight reads. Entries self-evict once their chain drains.
+/** @type {Map<string, Promise<void>>} */
+const sessionCostFoldTails = new Map();
+const foldSessionCost = (/** @type {string} */ sessionId, /** @type {any} */ usage, /** @type {number} */ cost) => {
+  const tail = (sessionCostFoldTails.get(sessionId) ?? Promise.resolve())
+    .then(async () => {
+      const fresh = await sessions.get(sessionId);
+      await sessions.setCost(sessionId, addUsage(normalizeTally(fresh?.cost), usage, cost));
+    })
+    .catch(() => { /* a persist hiccup must not fail the call */ });
+  sessionCostFoldTails.set(sessionId, tail);
+  tail.then(() => { if (sessionCostFoldTails.get(sessionId) === tail) sessionCostFoldTails.delete(sessionId); });
+  return tail;
+};
+
+// The script/model-call route (design 5) — invoked by the offscreen relay for
+// each peerd.provider.call a provider-enabled `script` run makes. The custody
+// shape is actor/model-call's: getSecret + safeFetch are added HERE, so the
+// key never enters the worker or the offscreen document; ownerSessionId/runId
+// are TRUSTED job params (minted by the script tool SW-side) — the worker's
+// own words buy nothing. On top of that custody this route adds: the live-run
+// owner check, text-only arg validation, the per-run quota, the session
+// provider PIN + model gate, the spend-limit preflight, the cost fold, and the
+// Stop chain (the run's abort signal cancels an in-flight provider fetch).
+const scriptModelCallRoute = async (/** @type {{ ownerSessionId?: string, runId?: string, args?: unknown }} */ msg) => {
+  try {
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    // Same posture as actors/call: v1 is the ORCHESTRATOR's surface only. An
+    // actor or spawned owner is refused even if a job param leaked — the
+    // sub-call lane must never hand a fenced context the user's paid key.
+    if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
+      return { ok: false, error: 'provider: only a chat session holds the sub-call surface' };
+    }
+    // The LIVE-RUN check: the runId must be registered (script-runs.js) and
+    // bound to this owner — a call from a dead or foreign run is refused.
+    const runId = typeof msg.runId === 'string' ? msg.runId : '';
+    if (!runId || scriptRuns.ownerFor(runId) !== msg.ownerSessionId) {
+      return { ok: false, error: 'provider: unknown or finished run' };
+    }
+    /** @type {ReturnType<typeof validateProviderCallArgs>} */
+    let call;
+    try { call = validateProviderCallArgs(msg.args); }
+    catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+    // Quota BEFORE the call, counted before it flies (script-runs.js) —
+    // overflow is a structured refusal the script can catch and degrade on
+    // (ProviderQuotaError message), never a worker kill.
+    const quotaRefusal = providerQuotaError(scriptRuns.providerUsageFor(runId));
+    if (quotaRefusal) return { ok: false, error: quotaRefusal.message };
+    // Spend-limit preflight — cheap-call's posture: sub-calls spend against
+    // the OWNING session, so a session past the user's hard cap must not be
+    // pushed further by its own script.
+    // why no reservation: this reads owner.cost per-invocation with no hold, so
+    // a concurrent fan-out can collectively overshoot the limit between the read
+    // and each fold. That is DELIBERATE — the USD limit is a coarse safety lever,
+    // not a ledger; the tight bound on a single run's spend is the per-run
+    // call/token quota above (recordProviderCall), which the fan-out cannot dodge.
+    const spendLimit = settingsStore.get().spendLimitUsd;
+    if (limitExceeded(normalizeTally(owner.cost).cost, spendLimit)) {
+      return { ok: false, error: `provider quota exceeded: the session spend limit ($${spendLimit}) is reached` };
+    }
+    // The session PIN: the endpoint is ALWAYS the owning session's provider
+    // adapter — there is no provider arg, and an explicit `model` only picks a
+    // model WITHIN it. That is design 5's "cannot name an arbitrary endpoint"
+    // enforced by construction (registry.js resolves the adapter by name).
+    const provider = owner.provider;
+    const providerEntry = listProviders().find((p) => p.name === provider);
+    if (!providerEntry) {
+      return { ok: false, error: `provider: session provider not registered: ${provider}` };
+    }
+    const localProvider = !!providerEntry.keyless;
+    const pricingOverrides = /** @type {any} */ (settingsStore.get().pricingOverrides);
+    // The MODEL gate (design 5: an explicit model arg "must resolve within the
+    // user's configured providers or is refused"): a worker-chosen id must be
+    // the session's own model or one with a LOCAL RATE CARD (built-in table or
+    // Settings override). why pricing as the resolver: costOf() prices an
+    // unknown id at $0, so an unpriced model would spend real credits that the
+    // cost tally — and therefore the spend-limit preflight above — never sees.
+    // A keyless (local) provider genuinely costs $0 for any id, so it is
+    // exempt by the same rule.
+    const model = call.model || owner.model;
+    if (call.model && call.model !== owner.model && !localProvider && !hasPricing(call.model, pricingOverrides)) {
+      return { ok: false, error: `provider.call: unknown model '${call.model}' — use the session's model, or an id with a rate card (Settings → pricing overrides)` };
+    }
+    // Abort rides the RUN's controller (script-runs.js): Stop chains into it,
+    // and release() aborts it when the run ends — either kills this fetch.
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'aborted' };
+    // Admission counts the call AND reserves its clamped maxTokens against the
+    // run's output meter (settled to the actual bill below) — so a concurrent
+    // fan-out is bounded by the run ceiling, not just the per-call clamp.
+    scriptRuns.recordProviderCall(runId, call.maxTokens);
+    /** @type {any[]} */
+    const events = [];
+    /** @type {string | undefined} */
+    let streamError;
+    try {
+      // The context inspector sees the sub-call like every delegated model
+      // call; identity from the trusted params, never a worker claim.
+      contextSnapshots.record({
+        provider, model, system: call.system ?? '', messages: call.messages,
+        maxTokens: call.maxTokens, sessionId: msg.ownerSessionId, label: 'script:sub-call',
+      });
+      for await (const ev of callModel(/** @type {any} */ ({
+        provider, model, system: call.system ?? '', messages: call.messages,
+        maxTokens: call.maxTokens, signal: runSignal ?? undefined, getSecret, safeFetch,
+        // issue #104: a remote Ollama daemon — same threading as turn-driver.
+        ollamaHost: settingsStore.get().ollamaHost,
+      }))) events.push(ev);
+    } catch (e) {
+      // A stream that THROWS mid-iteration (an aborted fetch, a network cut)
+      // may already have yielded billed usage events — capture the error and
+      // fall through to the same fold/cost path an error-EVENT stream takes,
+      // so no billed tokens escape the meter or the tally.
+      streamError = runSignal?.aborted ? 'aborted' : (/** @type {{ message?: string }} */ (e)?.message ?? String(e));
+    }
+    const folded = foldProviderEvents(events);
+    scriptRuns.settleProviderCall(runId, call.maxTokens, folded.usage?.outputTokens ?? 0);
+    // ONE usage shape on every return path — the job-runner meter sums
+    // input+output; cache-token detail stays inside the cost fold.
+    const usage = folded.usage ? { inputTokens: folded.usage.inputTokens, outputTokens: folded.usage.outputTokens } : null;
+    // Cost: fold ANY usage — an errored stream's billed tokens are still
+    // billed. Same fold as cheap-call: price locally, add into the owning
+    // session's persisted tally (the cost meter + next turn's hard-limit
+    // check see it), audit the sub_call so money moving leaves a record.
+    if (folded.usage) {
+      let cost = 0;
+      try { cost = costOf(/** @type {any} */ (model), folded.usage, pricingOverrides, { localProvider })?.cost ?? 0; }
+      catch { cost = 0; }
+      await foldSessionCost(/** @type {string} */ (msg.ownerSessionId), folded.usage, cost);
+      auditLog.append({
+        type: 'provider_sub_call', sessionId: msg.ownerSessionId,
+        details: { runId, provider, model, outputTokens: folded.usage.outputTokens, cost },
+      }).catch(() => {});
+    }
+    // A Stop that fired mid-stream must never deliver a completed answer, even
+    // if the provider flushed before the abort landed (actor/model-call's race
+    // guard 2, same reasoning).
+    if (runSignal?.aborted) return { ok: false, error: 'aborted', ...(usage ? { usage } : {}) };
+    if (streamError) return { ok: false, error: streamError, ...(usage ? { usage } : {}) };
+    if (folded.error) return { ok: false, error: folded.error, ...(usage ? { usage } : {}) };
+    return {
+      ok: true,
+      value: {
+        text: folded.text, model,
+        // stopReason surfaces truncation: a maxTokens-clipped generation
+        // ('max_tokens') must be distinguishable from a complete answer on a
+        // surface whose per-call clamp is this tight.
+        ...(folded.stopReason !== undefined ? { stopReason: folded.stopReason } : {}),
+        ...(usage ? { usage } : {}),
+      },
+    };
+  } catch (e) {
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
 // The a2a/call route — invoked by the offscreen relay for each mesh call the
 // a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
 // THE dweb actor before touching the mesh, translate + gate + dispatch.
@@ -4823,6 +5057,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // actors-enabled headless run makes relays here (owner-verified, fully
   // re-gated through messageActor).
   'actors/call': (/** @type {any} */ msg) => actorsCallRoute(msg),
+  // provider (design 5): the script tool's sub-model surface — each
+  // peerd.provider.call a provider-enabled headless run makes relays here
+  // (owner/run-verified, quota-capped, the key added SW-side).
+  'script/model-call': (/** @type {any} */ msg) => scriptModelCallRoute(msg),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
@@ -4871,7 +5109,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED,
+    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
   }),
   ...makeSystemRoutes({
     vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
@@ -4934,6 +5172,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // cascade to its in-flight actors — same primitives agent/stop uses — so
     // background web/VM/App work doesn't keep running on the orphaned session.
     turnSlots, actorMessaging,
+    // Session teardown drops the durable script workspace subtree.
+    nukeSessionWorkspace,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
@@ -4967,6 +5207,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
 
   // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
   ...(/** @type {any} */ (siteClientRoutes)),
+
+  // --- design 06: toolbox module resolution (body read for the sealed-worker
+  // resolver) + post-run rot bookkeeping ---
+  ...makeToolboxRoutes({ toolboxStore }),
 })));
 
 // The toolbar icon + Alt+Shift+P front door (open the panel or home, per the

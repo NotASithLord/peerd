@@ -66,6 +66,7 @@ import './unit/peerd-engine/personal-index-durability.test.js';
 
 // --- chassis: notebook-tab ---
 import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
+import './unit/engine-tabs/notebook-tab/notebook-extract.test.js';
 import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
@@ -76,10 +77,13 @@ import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
+import './unit/offscreen/job-runner-workspace.test.js';
+import './unit/offscreen/job-runner-toolbox.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
 import './unit/background/state-get.test.js';
+import './unit/background/script-model-call.test.js';
 
 // --- peerd-distributed ---
 // (none yet — dweb surface reserved for V2+)

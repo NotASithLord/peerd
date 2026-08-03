@@ -37,6 +37,11 @@ export {
 export {
   buildModule,
   buildEntry,
+  isRemoteSpecifier,
+  makeFetchRemote,
+  // design js-superpower/06: the `peerd:toolbox/<name>` specifier family the
+  // resolver recognizes; hosts use it to spot toolbox entries in a module cache.
+  TOOLBOX_SPECIFIER_PREFIX,
 } from './module-resolver.js';
 
 // --- Editor (CodeMirror + file tree + OPFS, used by Notebook & App tabs) ---
@@ -53,6 +58,9 @@ export {
   VMBootFailedError,
   VMRunTimeoutError,
   VMTabClosedError,
+  RemoteImportBlockedError,
+  RemoteModuleCapError,
+  RemoteModuleIntegrityError,
   ArtifactTooLargeError,
   EnvelopeFormatError,
   EnvelopeIntegrityError,

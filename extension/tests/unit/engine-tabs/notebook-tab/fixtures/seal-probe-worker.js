@@ -19,6 +19,8 @@ import '/engine-tabs/notebook-tab/realm-seal.js';
  * @property {number} status
  * @property {string} statusText
  * @property {Record<string, string>} headers
+ * @property {string | null} contentType
+ * @property {boolean} extracted
  * @property {() => Promise<string>} text
  * @property {() => Promise<unknown>} json
  * @property {() => Promise<ArrayBuffer>} arrayBuffer
@@ -27,7 +29,7 @@ import '/engine-tabs/notebook-tab/realm-seal.js';
 
 /**
  * @param {string} url
- * @param {RequestInit} [init]
+ * @param {RequestInit & { extract?: string }} [init]
  * @returns {Promise<BridgeResponse>}
  */
 const bridgeFetch = (url, init) =>
@@ -155,6 +157,22 @@ self.addEventListener('message', async (ev) => {
     } catch (e) {
       const err = /** @type {{ message?: string }} */ (e);
       postMessage({ type: 'binary-result', fetch: { error: String(err?.message ?? e) } });
+    }
+    return;
+  }
+  if (m.type === 'extract-fetch') {
+    // Design 02, 2a: fetch with extract:'markdown' from INSIDE the sealed
+    // realm — the test page plays the notebook-tab host + SW route, so this
+    // round-trip pins the realm-side marshalling and the fake-Response markers.
+    try {
+      const resp = await bridgeFetch(m.url, { extract: 'markdown' });
+      postMessage({
+        type: 'extract-result',
+        fetch: { ok: resp.ok, status: resp.status, extracted: resp.extracted, contentType: resp.contentType, text: await resp.text() },
+      });
+    } catch (e) {
+      const err = /** @type {{ message?: string }} */ (e);
+      postMessage({ type: 'extract-result', fetch: { error: String(err?.message ?? e) } });
     }
     return;
   }

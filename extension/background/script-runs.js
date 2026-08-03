@@ -1,5 +1,8 @@
 // @ts-check
-// background/script-runs.js — the live registry of actors-enabled script runs.
+// background/script-runs.js — the live registry of delegating script runs:
+// actors-enabled AND provider-enabled (design 5 — a provider run registers
+// here with no actors at all, for the owner binding the script/model-call
+// relay checks and the per-run sub-model quota counters below).
 //
 // why it exists: a `script` run that delegates holds real work in flight —
 // pending actors.ask calls are LIVE ACTOR TURNS. When the user hits Stop (or
@@ -16,7 +19,7 @@
  */
 
 export const createScriptRunRegistry = () => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>> }>} */
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, providerCalls: number, providerOutputTokens: number }>} */
   const runs = new Map();
   let seq = 0;
 
@@ -34,12 +37,15 @@ export const createScriptRunRegistry = () => {
     /**
      * Register a live run. Chains the run's own controller to the caller's
      * dispatch abort signal (Stop), so either aborts the pending asks.
-     * @param {string} runId @param {AbortSignalLike} [outerSignal]
+     * `owner` binds the run to its session: the script/model-call relay
+     * refuses a runId whose registered owner doesn't match the trusted job
+     * param (design 5 — a dead or foreign run buys nothing).
+     * @param {string} runId @param {AbortSignalLike} [outerSignal] @param {string} [owner]
      */
-    register: (runId, outerSignal) => {
+    register: (runId, outerSignal, owner) => {
       const controller = new AbortController();
-      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>> }} */
-      const entry = { controller, ops: [] };
+      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, providerCalls: number, providerOutputTokens: number }} */
+      const entry = { controller, ops: [], ...(owner ? { owner } : {}), providerCalls: 0, providerOutputTokens: 0 };
       if (outerSignal) {
         const onOuterAbort = () => controller.abort();
         if (outerSignal.aborted) controller.abort();
@@ -69,6 +75,47 @@ export const createScriptRunRegistry = () => {
 
     /** The run's abort signal for pending asks, or null when unregistered. @param {string} runId */
     signalFor: (runId) => runs.get(runId)?.controller.signal ?? null,
+
+    /** The session a live run was registered FOR, or null. @param {string} runId */
+    ownerFor: (runId) => runs.get(runId)?.owner ?? null,
+
+    // ── design 5: the per-run sub-model quota counters ────────────────────
+    // SW-side ON PURPOSE (never worker state): the realm being metered must
+    // not hold its own meter. The call is counted BEFORE it flies so a
+    // concurrent fan-out can't slip N calls past one stale read.
+
+    /** Count one sub-call against the run, RESERVING its clamped maxTokens
+     * against the output meter at admission. why reserve: the quota is checked
+     * before flight and settled after, so without a reservation a concurrent
+     * fan-out (Promise.all) all admits against a stale 0 and the run's token
+     * ceiling only binds strictly sequential scripts. settleProviderCall
+     * reconciles the reservation to the actual billed output.
+     * @param {string} runId @param {number} [reserveOutputTokens] */
+    recordProviderCall: (runId, reserveOutputTokens = 0) => {
+      const entry = runs.get(runId);
+      if (!entry) return;
+      entry.providerCalls += 1;
+      if (Number.isFinite(reserveOutputTokens) && reserveOutputTokens > 0) {
+        entry.providerOutputTokens += reserveOutputTokens;
+      }
+    },
+
+    /** Settle a sub-call's admission reservation against its actual billed
+     * output (0 when the stream produced none — the reservation is released).
+     * @param {string} runId @param {number} reservedOutputTokens @param {number} actualOutputTokens */
+    settleProviderCall: (runId, reservedOutputTokens, actualOutputTokens) => {
+      const entry = runs.get(runId);
+      if (!entry) return;
+      const reserved = Number.isFinite(reservedOutputTokens) && reservedOutputTokens > 0 ? reservedOutputTokens : 0;
+      const actual = Number.isFinite(actualOutputTokens) && actualOutputTokens > 0 ? actualOutputTokens : 0;
+      entry.providerOutputTokens = Math.max(0, entry.providerOutputTokens - reserved + actual);
+    },
+
+    /** The run's sub-call meter (copy), or null when unregistered. @param {string} runId */
+    providerUsageFor: (runId) => {
+      const entry = runs.get(runId);
+      return entry ? { calls: entry.providerCalls, outputTokens: entry.providerOutputTokens } : null;
+    },
 
     /** Abort a run's pending asks (Stop / tool-dispatch unwind). @param {string} runId */
     abort: (runId) => { runs.get(runId)?.controller.abort(); },

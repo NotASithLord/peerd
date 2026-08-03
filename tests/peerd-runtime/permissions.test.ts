@@ -40,6 +40,7 @@ const TOOLS = {
   vm_boot:       { name: 'vm_boot',       sideEffect: 'write',           primitive: 'webvm' },
   js_notebook:       { name: 'js_notebook',       sideEffect: 'write',           primitive: 'notebook' },
   page_exec:     { name: 'page_exec',     sideEffect: 'write',           primitive: 'tab' },
+  script:        { name: 'script',        sideEffect: 'write',           primitive: 'notebook' },
   click:         { name: 'click',         sideEffect: 'write',           primitive: 'tab' },
   type:          { name: 'type',          sideEffect: 'write',           primitive: 'tab' },
   navigate:      { name: 'navigate',      sideEffect: 'write',           primitive: 'tab' },
@@ -69,6 +70,9 @@ describe('classifyAction', () => {
     expect(classifyAction(TOOLS.vm_boot)).toBe(ACTION_CLASSES.SHELL);
     expect(classifyAction(TOOLS.js_notebook)).toBe(ACTION_CLASSES.SHELL);
     expect(classifyAction(TOOLS.page_exec)).toBe(ACTION_CLASSES.SHELL);
+    // design 7.4: script (headless JS with egress + delegation) must not carry
+    // a softer confirm class than the other code lanes via its notebook primitive.
+    expect(classifyAction(TOOLS.script)).toBe(ACTION_CLASSES.SHELL);
   });
 
   test('live-page DOM writes + external mutations + deletes → EXTERNAL', () => {
@@ -153,7 +157,7 @@ describe('ACT + confirmActions ON confirms every non-read', () => {
   });
 
   test.each([
-    TOOLS.vm_write_file, TOOLS.js_notebook, TOOLS.vm_boot, TOOLS.page_exec,
+    TOOLS.vm_write_file, TOOLS.js_notebook, TOOLS.vm_boot, TOOLS.page_exec, TOOLS.script,
     TOOLS.click, TOOLS.type, TOOLS.navigate, TOOLS.open_tab, TOOLS.vm_delete,
   ])('confirms %o', (tool) => {
     const v = decideAction({ mode: PERMISSION_MODES.ACT, confirmActions: true, tool });

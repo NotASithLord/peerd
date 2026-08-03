@@ -103,7 +103,7 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
  * @param {() => number} [deps.now]
  *   Clock for idle tracking (default Date.now); injected in tests.
  * @returns {{
- *   run(cmd: string, opts?: { sessionId?: string, vmId?: string, toolUseId?: string, timeoutMs?: number }):
+ *   run(cmd: string, opts?: { sessionId?: string, vmId?: string, timeoutMs?: number }):
  *     Promise<{ stdout: string, stderr: string, exitCode: number, durationMs: number }>,
  *   writeFile(path: string, bytes: Uint8Array, opts?: { sessionId?: string, vmId?: string }): Promise<void>,
  *   isReady(opts?: { sessionId?: string, vmId?: string }): Promise<boolean>,
@@ -313,7 +313,6 @@ export const createVmClient = ({
         type: 'vm/run',
         cmd,
         sessionId: opts.sessionId,
-        toolUseId: opts.toolUseId,
         timeoutMs: opts.timeoutMs,
       }));
       // why the guard: callTab already threw unless ok, and a successful

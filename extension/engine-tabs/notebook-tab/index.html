@@ -15,8 +15,10 @@
     connect-src 'none' is the second fence, exactly as tight as the seal:
     neither this page, nor the blob worker (which inherits this policy),
     nor any realm that somehow escaped the seal can open a connection-class
-    request to ANY host — ours included. Script loads (CDN module imports,
-    a documented js_notebook feature) are script-src territory and unaffected.
+    request to ANY host — ours included. Remote module imports don't ride the
+    native loader: the host resolver fetches their source over the same audited
+    SW relay (module-resolver.js fetchRemote → sw/web-fetch) and re-blobs it,
+    so no script load leaves this page either.
     The SW keeps its own (manifest) CSP with https:, so webFetch still works.
   -->
   <meta http-equiv="Content-Security-Policy" content="connect-src 'none'">

@@ -16,7 +16,7 @@ export const makeSessionMutationRoutes = (deps) => {
   const {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume, haltGoalRun, turnSlots, actorMessaging,
+    maybeAutoResume, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
   } = deps;
 
   return {
@@ -131,6 +131,14 @@ export const makeSessionMutationRoutes = (deps) => {
         // up. Fire-and-forget so archive stays instant.
         autoMemory.maybeExtract(sessionId, 'archive')
           .catch((/** @type {unknown} */ e) => console.warn('[sw] auto-memory extract failed', e));
+        // Tear down the session's durable script workspace
+        // (['peerd-workspace', sid] in OPFS). why HERE: archive is the terminal
+        // session-lifecycle event today — no session-delete route exists (the
+        // sessions view's "×" archives) — so this is where "the session is torn
+        // down" lives; if a true delete route ever lands, it must nuke too.
+        // Fire-and-forget + guarded: workspace bytes are agent scratch,
+        // best-effort cleanup must never fail the archive.
+        Promise.resolve(nukeSessionWorkspace?.(sessionId)).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof SessionNotFoundError) return { ok: false, error: 'session-not-found' };
