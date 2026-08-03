@@ -57,9 +57,8 @@ export const loadSkillTool = {
       // must re-page. shouldInjectBody keys on the rolling-summary watermark:
       // it returns false (dedup to a pointer) only while the prior body is still
       // in context. ctx.session carries messageCount/trimCovered (SW-injected).
-      const s = /** @type {{ sessionId?: string|null, messageCount?: number, trimCovered?: number }} */ (
-        /** @type {unknown} */ (ctx.session)) ?? {};
-      const inject = shouldInjectBody(s.sessionId, `skill:${meta.name}`, s.messageCount ?? 0, s.trimCovered ?? 0);
+      const { sessionId, messageCount, trimCovered } = ctx.session ?? {};
+      const inject = shouldInjectBody(sessionId, `skill:${meta.name}`, messageCount ?? 0, trimCovered ?? 0);
       // why: frame the body as an instruction playbook the agent should
       // follow, while reminding the model these are operating
       // instructions for a task — not a new system policy and not a

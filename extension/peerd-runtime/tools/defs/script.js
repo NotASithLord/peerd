@@ -13,7 +13,8 @@
 // iframe, peerd-engine).
 
 import { clamp } from '/shared/util.js';
-import { JS_PITFALLS_NOTE } from './code-style-note.js';
+import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
+import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
 import { MAX_SLICE_CHARS as RUN_CACHE_SLICE_CHARS } from './read-run-cache.js';
 import { MAX_SPILL_TEXT_CHARS } from '../run-cache.js';
@@ -29,14 +30,6 @@ const MAX_TIMEOUT_MS = 120_000;
 // timeout TOWER in actors-api.js (job > bridge guard > per-ask cap, all
 // derived from one ceiling) — never a literal here that could drift below the
 // bridge and kill the worker mid-ask.
-
-// why once per session: script is the agent's OWN quick-compute path (the
-// precision / off-by-one class of bug lands here, e.g. large-integer math), so
-// the correctness note matters most here — but script is called repeatedly, so
-// we disclose it on the FIRST run and stay silent after, paying the tokens once.
-// Bounded by distinct sessions in one SW lifetime (tiny); an SW restart re-arms.
-/** @type {Set<string>} */
-const pitfallsDisclosed = new Set();
 
 /**
  * @typedef {Object} RunResult
@@ -227,9 +220,13 @@ export const scriptTool = {
         } catch { /* spill failed — the capped [VALUE] still ships */ }
       }
       let content = formatRunResult(args.code, result, valueSpill, sv);
-      if (!pitfallsDisclosed.has(sid)) {
-        pitfallsDisclosed.add(sid);
-        content += `\n\n${JS_PITFALLS_NOTE}`;
+      // why once per session: script is the agent's OWN quick-compute path (the
+      // precision / off-by-one bug class lands here), so the correctness note +
+      // the peerd:std/peerd:wasi builtins reference matter most here — but script
+      // is called repeatedly, so disclose them on the FIRST run and stay silent
+      // after, paying the tokens once. (oncePerSession re-arms on SW restart.)
+      if (oncePerSession(sid, 'js-pitfalls')) {
+        content += `\n\n${JS_PITFALLS_NOTE}\n\n${SCRIPT_BUILTINS_NOTE}`;
       }
       return { ok: true, content };
     } catch (e) {

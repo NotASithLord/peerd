@@ -109,6 +109,10 @@
 /**
  * @typedef {Object} SessionLite
  * @property {string} sessionId
+ * @property {string} [kind]           session kind ('chat'|'spawned'|'actor'|…); SW-injected
+ * @property {number} [depth]          delegation depth (parent + 1); SW-injected
+ * @property {number} [messageCount]   session message count at ctx-build — the load_skill dedup anchor; SW-injected
+ * @property {number} [trimCovered]    leading messages the rolling summary folded out of the sent slice — the load_skill dedup watermark; SW-injected
  */
 
 /**

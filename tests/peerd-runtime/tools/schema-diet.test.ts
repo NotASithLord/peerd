@@ -16,7 +16,7 @@ import { describe, test, expect } from 'bun:test';
 const { messageActorTool } = await import('../../../extension/peerd-runtime/tools/defs/message-actor.js');
 const { scriptTool } = await import('../../../extension/peerd-runtime/tools/defs/script.js');
 const { sandboxCreateTool } = await import('../../../extension/peerd-runtime/tools/defs/sandbox-create.js');
-const { JS_PITFALLS_NOTE } = await import('../../../extension/peerd-runtime/tools/defs/code-style-note.js');
+const { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } = await import('../../../extension/peerd-runtime/tools/defs/code-style-note.js');
 
 const descriptorChars = (t: any) =>
   (t.name || '').length + (t.description || '').length + JSON.stringify(t.schema || {}).length;
@@ -48,10 +48,16 @@ describe('schema diet — descriptor sizes dropped, no capability lost', () => {
     expect(scriptTool.description.length).toBeLessThan(BASELINE.script - 400);
     // the runWasi signature + the parsing helpers left the every-turn description…
     expect(scriptTool.description).not.toContain('runWasi(bytes');
-    // …and landed in JS_PITFALLS_NOTE (disclosed once per session on the first run)
-    expect(JS_PITFALLS_NOTE).toContain('runWasi(bytes');
-    expect(JS_PITFALLS_NOTE).toContain('parseCsv');
-    expect(JS_PITFALLS_NOTE).toContain('demoModule()');
+    // …and landed in SCRIPT_BUILTINS_NOTE (script-only, disclosed once per session
+    // on the first run — kept OUT of JS_PITFALLS_NOTE so it doesn't grow the
+    // Notebook actor's every-turn prompt; invariant #2).
+    expect(SCRIPT_BUILTINS_NOTE).toContain('runWasi(bytes');
+    expect(SCRIPT_BUILTINS_NOTE).toContain('parseCsv');
+    expect(SCRIPT_BUILTINS_NOTE).toContain('demoModule()');
+    // JS_PITFALLS_NOTE rides the Notebook actor's per-turn system prompt, so the
+    // moved reference must NOT be in it (would be unpaid always-on growth).
+    expect(JS_PITFALLS_NOTE).not.toContain('runWasi(bytes');
+    expect(JS_PITFALLS_NOTE).not.toContain('parseCsv');
   });
 
   test('sandbox_create description shrank (per-kind how-to moved to create-result notes)', () => {
