@@ -14,7 +14,7 @@
 // Writes route through feature 03's permission policy via the adapter
 // (resolveCanWrite). Until 03 is wired, that defaults to allow.
 
-import { applyEdit } from '../../edit/search-replace.js';
+import { parseEditBlocks, applyBlocks, isWholeFileCreate } from '../../edit/search-replace.js';
 import {
   EditParseError, SearchNotFoundError, SearchAmbiguousError,
 } from '../../edit/errors.js';
@@ -146,22 +146,59 @@ export const editFileTool = {
       }
     }
 
-    // Read current content. A missing file is fine ONLY for a whole-file
-    // create (empty SEARCH); applyEdit enforces that distinction.
-    let source = '';
+    // Parse up front: whether this is a whole-file create (a single empty
+    // SEARCH) decides whether a not-found target is legitimate — 3a.
+    let blocks;
     try {
-      source = (await readFile()) ?? '';
-    } catch {
-      source = '';
+      blocks = parseEditBlocks(args.edits);
+    } catch (e) {
+      if (e instanceof EditParseError) return { ok: false, error: e.message, code: 'edit_parse_error' };
+      return { ok: false, error: `edit_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+    }
+    const isCreate = isWholeFileCreate(blocks);
+
+    // Read current content, distinguishing three outcomes (3a) so a typo'd
+    // path is never silently laundered into a whole-file create:
+    //   • found  → edit against the real bytes
+    //   • absent → legitimate ONLY for a whole-file create (empty SEARCH)
+    //   • failed → an OPFS/permission fault, surfaced, never a silent empty
+    let source = '';
+    let fileExists = false;
+    try {
+      const read = await readFile();
+      // Client convention: null/undefined means "no such file", not an error.
+      if (read != null) { fileExists = true; source = read; }
+    } catch (e) {
+      // OPFS raises NotFoundError for a missing entry — that's an absent file,
+      // not a read fault. Anything else is a genuine read failure.
+      if (/** @type {{ name?: string }} */ (e)?.name !== 'NotFoundError') {
+        return { ok: false, code: 'read_failed', error: `read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      }
+    }
+
+    if (!fileExists && !isCreate) {
+      // An anchored edit against a path that doesn't exist is a typo, not a
+      // moved anchor — say so precisely instead of a misleading not-found (3a).
+      const listTool = kind === 'app' ? 'app_list_files' : 'js_read_file';
+      return {
+        ok: false,
+        code: 'file_not_found',
+        error: `file_not_found: no ${kind} file at "${args.path}" — check the path (${listTool}) or use an empty SEARCH block to create it`,
+      };
     }
 
     let result;
     try {
-      result = applyEdit(source, args.edits);
+      const applied = applyBlocks(source, blocks);
+      result = { content: applied.text, blocks: blocks.length, alreadyApplied: applied.alreadyApplied };
     } catch (e) {
       // Map the typed errors to stable codes the model can react to.
-      if (e instanceof SearchNotFoundError) return { ok: false, error: e.message, code: 'search_not_found', blockIndex: e.blockIndex };
-      if (e instanceof SearchAmbiguousError) return { ok: false, error: e.message, code: 'search_ambiguous', blockIndex: e.blockIndex, count: e.count };
+      if (e instanceof SearchNotFoundError) return { ok: false, error: e.message, code: 'search_not_found', blockIndex: e.blockIndex, ...(e.whitespace ? { whitespace: true, line: e.line } : {}) };
+      // why: locations[].preview holds untrusted file bytes — they ride the
+      // STRUCTURED result only, and must never be concatenated into model-visible
+      // text unfenced (the message stays line-numbers-only; agent-loop serializes
+      // only .error). Fence the previews first if that ever changes.
+      if (e instanceof SearchAmbiguousError) return { ok: false, error: e.message, code: 'search_ambiguous', blockIndex: e.blockIndex, count: e.count, locations: e.locations };
       if (e instanceof EditParseError) return { ok: false, error: e.message, code: 'edit_parse_error' };
       return { ok: false, error: `edit_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
@@ -179,10 +216,19 @@ export const editFileTool = {
     return {
       ok: true,
       content: JSON.stringify({
+        // echo the target path so a create's destination is visible in the
+        // result (3a), not just assumed.
         path: args.path,
         kind,
         blocks: result.blocks,
         bytes: result.content.length,
+        // 3b: an already-in-place edit succeeds and says so — with the 0-based
+        // block indices, so a multi-block result isn't ambiguous about which
+        // landed vs. was skipped — so the agent stops retrying instead of
+        // reading a search_not_found.
+        ...(result.alreadyApplied.length > 0
+          ? { alreadyApplied: true, alreadyAppliedBlocks: result.alreadyApplied }
+          : {}),
       }, null, 2),
     };
   },

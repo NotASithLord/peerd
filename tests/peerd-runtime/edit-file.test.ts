@@ -53,3 +53,125 @@ describe('edit_file — create-first hint (progressive disclosure consistency)',
     expect(r.ok).toBe(true);
   });
 });
+
+// 3a: a read that returns "no such file" must not be laundered into a create.
+const ANCHORED = '<<<<<<< SEARCH\nconst x = 1;\n=======\nconst x = 2;\n>>>>>>> REPLACE\n';
+
+// A registry that confirms a current instance so we bypass the create-first
+// hint and reach the read/apply path under test.
+const withInstance = (over: any = {}) =>
+  baseCtx({ appRegistry: { getDefaultForSession: async () => 'app-1' }, ...over });
+
+describe('edit_file — 3a–3d robustness surface', () => {
+  test('anchored edit against a missing file → file_not_found (not search_not_found)', async () => {
+    // readFile returns null → the file does not exist.
+    const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });
+    const r: any = await editFileTool.execute({ path: 'nope.js', edits: ANCHORED }, ctx as any);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('file_not_found');
+    expect(r.error).toContain('nope.js');
+    expect(r.error).toContain('app_list_files');
+  });
+
+  test('notebook anchored edit against a missing file names js_read_file', async () => {
+    const ctx = baseCtx({
+      jsRegistry: { getDefaultForSession: async () => 'nb-1' },
+      jsClient: { readFile: async () => null, writeFile: async () => {} },
+    });
+    const r: any = await editFileTool.execute({ path: 'nope.js', edits: ANCHORED, kind: 'notebook' }, ctx as any);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('file_not_found');
+    expect(r.error).toContain('js_read_file');
+  });
+
+  test('whole-file create against a missing file → success, path echoed', async () => {
+    const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });
+    const r: any = await editFileTool.execute({ path: 'fresh.html', edits: WHOLE_FILE }, ctx as any);
+    expect(r.ok).toBe(true);
+    expect(JSON.parse(r.content).path).toBe('fresh.html');
+  });
+
+  test('a non-not-found read error surfaces as read_failed (not a silent empty)', async () => {
+    const ctx = withInstance({
+      appClient: {
+        readFile: async () => { throw new Error('OPFS unavailable'); },
+        writeFile: async () => {},
+      },
+    });
+    const r: any = await editFileTool.execute({ path: 'index.html', edits: ANCHORED }, ctx as any);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('read_failed');
+    expect(r.error).toContain('OPFS unavailable');
+  });
+
+  test('a NotFoundError thrown by the client is treated as absent (create ok)', async () => {
+    const notFound = Object.assign(new Error('missing'), { name: 'NotFoundError' });
+    const ctx = withInstance({
+      appClient: {
+        readFile: async () => { throw notFound; },
+        writeFile: async () => {},
+      },
+    });
+    const r: any = await editFileTool.execute({ path: 'fresh.html', edits: WHOLE_FILE }, ctx as any);
+    expect(r.ok).toBe(true);
+  });
+
+  // The REAL notebook client (background/notebook-client.js) re-inflates the
+  // OPFS not-found signal into a NotFoundError-named Error across the tab RPC —
+  // these lock the edit_file contract on that shape (a plain Error would break
+  // both branches: create → read_failed, anchored → read_failed not file_not_found).
+  test('notebook create against a NotFoundError-throwing client → success', async () => {
+    const notFound = Object.assign(new Error('A requested file could not be found'), { name: 'NotFoundError' });
+    const ctx = baseCtx({
+      jsRegistry: { getDefaultForSession: async () => 'nb-1' },
+      jsClient: { readFile: async () => { throw notFound; }, writeFile: async () => {} },
+    });
+    const r: any = await editFileTool.execute({ path: 'fresh.js', edits: WHOLE_FILE, kind: 'notebook' }, ctx as any);
+    expect(r.ok).toBe(true);
+    expect(JSON.parse(r.content).path).toBe('fresh.js');
+  });
+
+  test('notebook anchored edit against a NotFoundError-throwing client → file_not_found', async () => {
+    const notFound = Object.assign(new Error('A requested file could not be found'), { name: 'NotFoundError' });
+    const ctx = baseCtx({
+      jsRegistry: { getDefaultForSession: async () => 'nb-1' },
+      jsClient: { readFile: async () => { throw notFound; }, writeFile: async () => {} },
+    });
+    const r: any = await editFileTool.execute({ path: 'gone.js', edits: ANCHORED, kind: 'notebook' }, ctx as any);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('file_not_found');
+    expect(r.error).toContain('js_read_file');
+  });
+
+  test('already-applied edit → success with alreadyApplied:true', async () => {
+    // File already holds the post-edit text; the anchor (const x = 1;) is gone.
+    const ctx = withInstance({
+      appClient: { readFile: async () => 'const x = 2;\n', writeFile: async () => {} },
+    });
+    const r: any = await editFileTool.execute({ path: 'index.html', edits: ANCHORED }, ctx as any);
+    expect(r.ok).toBe(true);
+    expect(JSON.parse(r.content).alreadyApplied).toBe(true);
+  });
+
+  test('ambiguous match surfaces locations', async () => {
+    const ctx = withInstance({
+      appClient: { readFile: async () => 'const x = 1;\nconst x = 1;\n', writeFile: async () => {} },
+    });
+    const r: any = await editFileTool.execute({ path: 'index.html', edits: ANCHORED }, ctx as any);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('search_ambiguous');
+    expect(r.locations.map((l: any) => l.line)).toEqual([1, 2]);
+  });
+
+  test('whitespace-only mismatch surfaces the whitespace flag + line', async () => {
+    const ctx = withInstance({
+      appClient: { readFile: async () => 'function f() {\n    return 1;\n}\n', writeFile: async () => {} },
+    });
+    const edits = '<<<<<<< SEARCH\n\treturn 1;\n=======\n\treturn 2;\n>>>>>>> REPLACE\n';
+    const r: any = await editFileTool.execute({ path: 'index.html', edits }, ctx as any);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('search_not_found');
+    expect(r.whitespace).toBe(true);
+    expect(r.line).toBe(2);
+  });
+});
