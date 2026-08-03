@@ -33,6 +33,12 @@
 // UI can look them up; for V1 we accept "see it once when it
 // happens, see the metadata afterwards" as the right cost.
 
+// PAGED_MAX_CHARS lives beside the page size it derives from (tools/web/spill.js)
+// so the two can't drift; re-exported here because the paged ceiling is a redact
+// concept and agent-loop.js reads it from this module. why the paging tools fit
+// their framed output under it: spill.js buildPagedResult.
+export { PAGED_MAX_CHARS } from '../tools/web/spill.js';
+
 const DATA_URL_RE = /data:(image\/[a-z+.-]+);base64,[A-Za-z0-9+/=]+/g;
 
 // Default truncation threshold. Picked to bound the worst-case

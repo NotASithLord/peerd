@@ -119,6 +119,12 @@ describe('dispatcher', () => {
     expect(audited.some((e) => e.type === 'tool_executed' && e.details.tool === 't')).toBe(true);
   });
 
+  // why no returned-{ok:false} audit case here: that's pure values-in/out
+  // (dispatcher branch → recorded audit array) and lives in the Bun suite
+  // (tests/peerd-runtime/tools/dispatcher-meta.test.ts). This in-browser
+  // file earns its keep on the REAL-audit-log + render seam — see
+  // tests/unit/options/activity-tool-failed.test.js.
+
   it('catches execute() throw and returns ok:false with meta intact', async () => {
     clearTools();
     registerTool(makeTool({

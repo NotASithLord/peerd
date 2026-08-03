@@ -9,6 +9,7 @@
 // fence is what makes that safe.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const jsReadFileTool = {
@@ -17,14 +18,17 @@ export const jsReadFileTool = {
   description: [
     'Read a file from the Notebook\'s OPFS scratch and return its',
     'contents as UTF-8 text. Use to inspect what code wrote or what',
-    'was staged via js_write_file. For binary or huge files, fetch',
-    'directly inside js_notebook instead.',
+    'was staged via js_write_file. A large file returns a bounded slice',
+    'plus a paging note — re-call with offset to read on (no re-truncation).',
+    'For binary files, fetch directly inside js_notebook instead.',
   ].join(' '),
   schema: {
     type: 'object',
     properties: {
       path: { type: 'string', description: 'Relative path in OPFS scratch.' },
       notebook: { type: 'string', description: 'Optional notebook id or name.' },
+      offset: { type: 'number', description: 'Start character offset. Default 0.' },
+      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
     },
     required: ['path'],
   },
@@ -43,14 +47,39 @@ export const jsReadFileTool = {
         sessionId: ctx.session?.sessionId,
         notebookId: args.notebook,
       });
-      return {
-        ok: true,
-        content: wrapUntrusted({
-          origin: `notebook:${args.notebook ?? 'current'}/${args.path}`,
-          tool: 'js_read_file',
-          body: content,
-        }),
-      };
+      // Self-paging (the infinite-reread fix): the OPFS file IS the durable
+      // backing, so a big read returns a bounded slice and the footer points
+      // back at THIS tool with a new offset — no spill store, and no need for a
+      // main-agent reader the notebook actor could not reach anyway (read_run_
+      // cache is off the actor tier). why it matters: before this a >window file
+      // came back whole, got 8k-redacted, and every re-read returned the SAME
+      // truncation — a guaranteed wasted-turn loop. buildPagedResult flags
+      // `paged` (redacted at the larger paged ceiling) and fits the framed slice
+      // under it so the requested page is never re-cut.
+      return buildPagedResult({
+        text: content,
+        offset: typeof args.offset === 'number' ? args.offset : 0,
+        limit: clampPageLimit(args.limit),
+        // The slice is fenced (a Notebook file is not reliably agent-authored);
+        // the tool-authored paging status rides OUTSIDE the fence. nextArgs is
+        // JSON.stringify'd so a path with a quote/backslash stays valid.
+        frame: (page) => {
+          const shown = wrapUntrusted({
+            origin: `notebook:${args.notebook ?? 'current'}/${args.path}`,
+            tool: 'js_read_file',
+            body: page.slice,
+          });
+          const nextArgs = JSON.stringify({
+            path: args.path,
+            ...(args.notebook ? { notebook: args.notebook } : {}),
+            offset: page.end,
+          });
+          const footer = (page.remaining > 0 || page.offset > 0)
+            ? `\n${pageStatusLine({ page, nextArgs })}`
+            : '';
+          return `${shown}${footer}`;
+        },
+      });
     } catch (e) {
       return { ok: false, error: `read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

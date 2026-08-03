@@ -28,7 +28,7 @@
 
 import { uuidv7 } from '/shared/util.js';
 import { RuntimeContextIncompleteError } from '../errors.js';
-import { redactToolResult } from './redact.js';
+import { redactToolResult, PAGED_MAX_CHARS } from './redact.js';
 import { stripAttachments } from './attachments.js';
 import { planTrim } from './trim.js';
 import { planBodyCompaction } from './lineage-compaction.js';
@@ -232,6 +232,11 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   synthesize the reply from the tool results and stop — no second model call
  *   to summarize. An errored round falls through to the normal loop. The caller
  *   (the orchestrator, via message_actor) sets it when one round suffices.
+ * @param {string} [ctx.contextMessage]
+ *   Per-turn EPHEMERAL context (loop/system-prompt.js buildTemporalContext — the
+ *   canonical design-01 rationale): the wall-clock + active-tab bytes relocated OUT
+ *   of the cached system block. Prepended as a leading `user`-role <context> message
+ *   each step, then never persisted. Absent / empty → nothing injected.
  * @returns {AsyncGenerator<LoopEvent>}
  */
 export async function* runUserTurn(ctx) {
@@ -505,6 +510,28 @@ export async function* runUserTurn(ctx) {
           });
           return changed ? { ...msg, toolResults } : msg;
         });
+      }
+      // Prompt-cache stability (design 01 — see buildTemporalContext for the full
+      // rationale): prepend the per-turn ephemeral <context> message (temporal +
+      // active tab) as message[0]. why HERE, after every trim/compaction/splice: it
+      // must be the FIRST message on the wire so it lands right after the system +
+      // tool cache breakpoints — its per-turn variance then leaves those (the
+      // cross-turn win) intact. It DOES sit ahead of the message-history breakpoint,
+      // so history caches only WITHIN a turn (byte-identical across the turn's steps),
+      // not turn-to-turn — a known, accepted tradeoff of the leading-context shape.
+      // Ephemeral: injected on the wire only, never persisted; re-derived each turn.
+      // The converter collapses it into the following user turn's text — harmless,
+      // the <context> tag keeps it legible as injected context, not the user talking.
+      if (typeof ctx.contextMessage === 'string' && ctx.contextMessage.length > 0) {
+        historyForModel = [
+          // Fixed sentinel id/when: nothing persists or correlates this wire-only
+          // message, and the converter emits only {role, content} — so a per-step
+          // uuid/clock would be dead churn (and would stamp msg[0] newest of all).
+          /** @type {InternalMessage} */ ({
+            role: 'user', content: ctx.contextMessage, id: 'ephemeral-context', when: 0,
+          }),
+          ...historyForModel,
+        ];
       }
       // didTrim true ⇒ summaryState non-null (planTrim's contract); the
       // extra truthiness check is runtime-identical and narrows the type.
@@ -823,14 +850,21 @@ export async function* runUserTurn(ctx) {
             if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
             resolveDispatch(v);
           };
-          /** @param {string} error */
-          const failWith = (error) => finish({
-            ok: false, error,
-            meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
-          });
-          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled');
+          /** @param {string} error @param {'aborted'|'timeout'} [kind] */
+          const failWith = (error, kind) => {
+            // why: deadline/abort failures are synthesized HERE, bypassing the
+            // dispatcher audit — emit tool_failed so the log matches is_error.
+            // A timeout waited the full deadline before we gave up (a real,
+            // known wall-clock); an abort can fire at any moment, so 0.
+            if (kind) appendAudit({ type: 'tool_failed', sessionId, details: { tool: tu.name, primitive: 'unknown', error, kind, durationMs: kind === 'timeout' ? DISPATCH_DEADLINE_MS : 0 } }).catch(() => {});
+            return finish({
+              ok: false, error,
+              meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
+            });
+          };
+          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled', 'aborted');
           const deadline = setTimeout(
-            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`),
+            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`, 'timeout'),
             DISPATCH_DEADLINE_MS,
           );
           toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
@@ -855,11 +889,19 @@ export async function* runUserTurn(ctx) {
       // UNREDACTED dispatchResult so the side panel renders the full
       // image/text this turn; only the persisted + re-sent copy is
       // redacted. See redact.js for the rate-limit rationale.
+      // why: on the FAILURE path a tool often authors a human `content`
+      // sentence alongside the machine `error` code (e.g. error:'declined',
+      // content:'User declined the outbound write.'). Join as `code: content`
+      // — code first (the stable anchor the model has learned), prose second
+      // (the actionable part), so the model can tell a hard "no" from a
+      // retryable glitch. Still redacted like the success path.
       const rawContent = dispatchResult.ok
         ? (typeof dispatchResult.content === 'string'
             ? dispatchResult.content
             : JSON.stringify(dispatchResult.content))
-        : (dispatchResult.error ?? 'tool failed');
+        : (typeof dispatchResult.content === 'string' && dispatchResult.content
+            ? `${dispatchResult.error ?? 'error'}: ${dispatchResult.content}`
+            : (dispatchResult.error ?? 'tool failed'));
       // why: a tool that returned vision blocks (view) — stash the bytes for the
       // one-shot splice into the NEXT model call (above). The persisted block
       // stays bytes-free; only content (metadata) is kept here.
@@ -869,9 +911,15 @@ export async function* runUserTurn(ctx) {
             && typeof im.data === 'string' && im.data.length > 0);
         if (imgs.length > 0) liveToolImages.set(tu.id, imgs);
       }
+      // why the paged raise: an EXPLICITLY-PAGED reader result (read_web_cache /
+      // read_run_cache / the self-paging file reads flag `paged`) is one slice
+      // the model asked for — redact it at the larger paged ceiling so the
+      // requested page survives instead of being re-cut by the 8k backstop.
+      // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.
+      const paged = dispatchResult.ok && dispatchResult.paged === true;
       const block = {
         tool_use_id: tu.id,
-        content: redactToolResult(rawContent),
+        content: redactToolResult(rawContent, paged ? { maxChars: PAGED_MAX_CHARS } : undefined),
         is_error: !dispatchResult.ok,
         meta: dispatchResult.meta,
       };

@@ -8,6 +8,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readRunCacheTool } from '../../../extension/peerd-runtime/tools/defs/read-run-cache.js';
+import { redactToolResult, PAGED_MAX_CHARS } from '../../../extension/peerd-runtime/loop/redact.js';
 
 const TAG_OPEN = /<untrusted_web_content origin="[^"]*" tool="([^"]*)" retrieved_at="[^"]*">\n/;
 const TAG_CLOSE = /\n<\/untrusted_web_content>/;
@@ -40,6 +41,9 @@ describe('read_run_cache', () => {
     const afterFence = r.content!.split('</untrusted_web_content>')[1];
     expect(afterFence).toContain('[paging]');
     expect(afterFence).toContain('"offset": 30');   // the next-call hint continues where this slice ended
+    // paged: the loop redacts the slice at the larger paged ceiling, not the 8k
+    // backstop, so the page the model asked for survives intact.
+    expect((r as { paged?: boolean }).paged).toBe(true);
   });
 
   test('an UNFENCED record (pure-compute run) re-enters raw — the agent\'s own bytes', async () => {
@@ -67,6 +71,27 @@ describe('read_run_cache', () => {
     const r = await readRunCacheTool.execute({ key: 'run:big', limit: 999_999 }, ctxWith({ 'run:big': big }) as any);
     if (!r.ok) throw new Error('expected ok');
     expect(unwrap(r.content!).value.length).toBe(16_000);
+  });
+
+  test('a quote-dense value FITS the paged ceiling so the loop never re-cuts it', async () => {
+    // A value that is itself JSON (~25% quotes/backslashes): the envelope
+    // escaping inflates a raw 16k slice well past PAGED_MAX_CHARS. buildPagedResult
+    // must shrink the slice so the FRAMED result the model receives is whole.
+    const unit = JSON.stringify({ a: 'x"y\\z"w', n: 1 }) + '\n';
+    let text = '';
+    while (text.length < 60_000) text += unit;
+    const dense = { ...REC, key: 'run:dense', text };
+    const r = await readRunCacheTool.execute({ key: 'run:dense' }, ctxWith({ 'run:dense': dense }) as any);
+    if (!r.ok) throw new Error('expected ok');
+    // the framed result fits the ceiling ...
+    expect(r.content!.length).toBeLessThanOrEqual(PAGED_MAX_CHARS);
+    // ... so the loop's paged redact leaves it INTACT (no middle re-cut) ...
+    expect(redactToolResult(r.content!, { maxChars: PAGED_MAX_CHARS })).toBe(r.content);
+    expect(r.content).not.toContain('chars elided');
+    // ... and the paging status still names the next call, so paging continues.
+    const afterFence = r.content!.split('</untrusted_web_content>')[1];
+    expect(afterFence).toContain('[paging]');
+    expect(afterFence).toContain('next:');
   });
 
   test('the final slice says end-of-text instead of a next-call hint', async () => {

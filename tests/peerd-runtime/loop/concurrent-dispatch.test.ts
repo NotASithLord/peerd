@@ -307,6 +307,50 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
   });
 
+  test('a failure with authored content renders `code: content`; without content, the code alone', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    const calls = [{ id: 't_a', name: 'a' }, { id: 't_b', name: 'b' }];
+    const ctx = baseCtx(store, {
+      callModel: makeToolModel(calls),
+      tools: [{ name: 'a', description: '', schema: {} }, { name: 'b', description: '', schema: {} }],
+      classifyToolCall: () => WRITE_VERDICT,
+      toolDispatch: async (call: any) => (call.name === 'a'
+        // authored human explanation alongside the machine code
+        ? { ok: false, error: 'declined', content: 'User declined the outbound write.', meta: {} }
+        // failure carrying only a code
+        : { ok: false, error: 'not_found', meta: {} }),
+    });
+    await drain(runUserTurn(ctx));
+    const s = await store.get('s1');
+    const resultMsg = s.messages.find((m: any) => Array.isArray(m.toolResults));
+    expect(resultMsg.toolResults[0].content).toBe('declined: User declined the outbound write.');
+    expect(resultMsg.toolResults[0].is_error).toBe(true);
+    expect(resultMsg.toolResults[1].content).toBe('not_found');
+    expect(resultMsg.toolResults[1].is_error).toBe(true);
+  });
+
+  test('a hung dispatch synthesizes an aborted tool_failed audit on Stop', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    const audited: any[] = [];
+    const ac = new AbortController();
+    const ctx = baseCtx(store, {
+      callModel: makeToolModel([{ id: 't_w1', name: 'click' }]),
+      tools: [{ name: 'click', description: '', schema: {} }],
+      classifyToolCall: () => WRITE_VERDICT,
+      signal: ac.signal,
+      appendAudit: async (e: any) => { audited.push(e); },
+      // never settles — the abort is the only thing that ends the dispatch
+      toolDispatch: () => { ac.abort(); return new Promise(() => {}); },
+    });
+    await drain(runUserTurn(ctx));
+    const failed = audited.find((e) => e.type === 'tool_failed');
+    expect(failed).toBeTruthy();
+    expect(failed.details.tool).toBe('click');
+    expect(failed.details.kind).toBe('aborted');
+  });
+
   test('one failing sibling in a concurrent wave becomes its own error block, not a batch failure', async () => {
     const store = makeStore();
     store.seed('s1');

@@ -17,7 +17,7 @@ export const JS_TAB_GROUP_TITLE = 'peerd';
 /**
  * Reply shape from the Notebook tab's js/* handlers. Dynamic over the
  * message channel — typed to the fields the client reads back.
- * @typedef {{ ok?: boolean, error?: string, result?: unknown, content?: unknown, files?: unknown }} JsTabReply
+ * @typedef {{ ok?: boolean, error?: string, code?: string, result?: unknown, content?: unknown, files?: unknown }} JsTabReply
  */
 
 /**
@@ -90,7 +90,13 @@ export const createJsClient = ({ registry, tracker }) => {
       clearTimeout(timeoutId);
     }
     if (!response || response.ok !== true) {
-      throw new Error(response?.error ?? 'js call returned no response');
+      const err = new Error(response?.error ?? 'js call returned no response');
+      // why: re-inflate the OPFS not-found signal the tab flattened into a code,
+      // so callers (edit_file 3a) can tell an absent notebook file — a legit
+      // whole-file create — from a genuine read fault. Matches the App client,
+      // which surfaces a real NotFoundError DOMException directly.
+      if (response?.code === 'not_found') err.name = 'NotFoundError';
+      throw err;
     }
     return response;
   };

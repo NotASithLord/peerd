@@ -8,6 +8,7 @@
 // without an explicit `notebook` arg route here.
 
 import { JS_TAB_GROUP_TITLE } from '/background/notebook-client.js';
+import { oncePerSession } from './once-per-session.js';
 
 // why a Notebook-specific note (the shared CODE_STYLE_NOTE rides the Notebook
 // actor's own prompt now): the
@@ -96,8 +97,13 @@ export const createNotebookSandbox = async (args, ctx) => {
     }, null, 2);
     // The Notebook ACTOR writes + runs the code, so the style + correctness
     // guidance rides ITS prompt (actorBlock), not this orchestrator create-result.
+    // The full runtime note is disclosed once per session (schema-diet 6b): a
+    // second notebook this session doesn't need it re-stated — a pointer suffices.
+    const note = oncePerSession(sessionId, 'notebook-note')
+      ? NOTEBOOK_NOTE
+      : '(Notebook runtime note shown earlier this session — same rules apply.)';
     return {
       ok: true,
-      content: `${summary}\n\n${NOTEBOOK_NOTE}`,
+      content: `${summary}\n\n${note}`,
     };
   };

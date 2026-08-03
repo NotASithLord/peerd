@@ -6,7 +6,7 @@
 import { describe, test, expect } from 'bun:test';
 import { classifyFailure, FAILURE_KINDS } from '../../extension/peerd-runtime/observability/failure-classify.js';
 import {
-  assembleDebugBundle, childSessionIdsOf, collectFailures,
+  assembleDebugBundle, childSessionIdsOf, collectFailures, aggregateFailures,
   DEBUG_BUNDLE_FORMAT, BUNDLE_MAX_AUDIT_ENTRIES, BUNDLE_MAX_CHILD_SESSIONS,
 } from '../../extension/peerd-runtime/observability/debug-bundle.js';
 import { bundleToOtlp, traceIdFromUuid, spanIdFrom } from '../../extension/peerd-runtime/observability/otel-export.js';
@@ -120,6 +120,30 @@ describe('collectFailures — the "what went wrong" index', () => {
     const turn = failures.find((f: any) => f.scope === 'turn') as any;
     expect(turn.messageId).toBe('a2');
     expect(turn.kind).toBe('provider');
+  });
+});
+
+describe('aggregateFailures — the cross-session error-class analyzer (5d)', () => {
+  test('groups every session\'s failures by scope:kind', () => {
+    // SESSION contributes tool:policy (message_actor) + turn:provider (HTTP 529).
+    const other = {
+      sessionId: 'other',
+      messages: [
+        { role: 'user', id: 'u', when: 1, toolResults: [
+          { tool_use_id: 't1', content: 'egress denied: denylist matched host x', is_error: true },
+        ] },
+        { role: 'assistant', id: 'a', when: 2, content: '', error: "Provider 'anthropic' HTTP 429: rate limited" },
+      ],
+    };
+    const table = aggregateFailures([SESSION, other]);
+    expect(table['tool:policy']).toBe(2);     // message_actor (SESSION) + denylist (other)
+    expect(table['turn:provider']).toBe(1);   // SESSION's HTTP 529
+    expect(table['turn:limits']).toBe(1);     // other's HTTP 429
+  });
+
+  test('safe on empty / non-array input', () => {
+    expect(aggregateFailures([])).toEqual({});
+    expect(aggregateFailures(null as any)).toEqual({});
   });
 });
 

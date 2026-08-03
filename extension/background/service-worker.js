@@ -1441,6 +1441,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // later turn to wake, so its actor reply is awaited into the tool
       // result instead of delivered as a re-entry wake.
       kind: activeSession?.kind ?? 'chat',
+      // why: load_skill's trim-aware once-per-session dedup (schema-diet 6b).
+      // messageCount is where this call's result will sit; trimCovered is the
+      // count of leading messages the rolling summary has folded out of the
+      // SENT slice. A re-load re-injects the full body only once trimCovered
+      // has passed the prior load's position — so a skill still in context is
+      // deduped, one that scrolled out is re-paged. Read-only, both default 0.
+      messageCount: Array.isArray(activeSession?.messages) ? activeSession.messages.length : 0,
+      trimCovered: activeSession?.trimSummary?.covered ?? 0,
     },
     // Plan/Act permission policy input. The persona gate reads
     // permission.mode to enforce Plan's read-only block; the dispatcher
@@ -1877,7 +1885,15 @@ const spawnActorCore = makeSpawnActor({
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   // why: resolve background-tabs from CURRENT settings at call time, not
   // boot — settings load async and can change over the SW's life. This
-  renderSystemPrompt: (opts) => renderSystemPrompt(opts),
+  // design 01: a spawned child renders its prompt FRESH per spawn (no cross-turn
+  // cache to bust), so it embeds its own temporal grounding — without this an
+  // ephemeral child gets zero time bytes (the main path's <context> message is
+  // built only in turn-driver and never reaches a child). Caller-supplied
+  // temporalBlock still wins.
+  renderSystemPrompt: (/** @type {any} */ opts) => renderSystemPrompt({
+    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+    ...opts,
+  }),
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
   // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
   // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
@@ -1906,7 +1922,13 @@ const spawnActorCore = makeSpawnActor({
       tools: job.tools ?? [],
     }, opts)
     : Promise.resolve({ ok: false, error: 'child offscreen unavailable' }),
-  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
+  // design 01: embed temporal grounding — the offscreen child prompt renders
+  // fresh per spawn (no cache), and the main path's <context> message never
+  // reaches a child, so without this an ephemeral child has zero time bytes.
+  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({
+    taskOverride: task,
+    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+  }),
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to

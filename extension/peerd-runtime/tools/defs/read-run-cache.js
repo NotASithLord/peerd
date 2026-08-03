@@ -17,12 +17,7 @@
 //     agent's own bytes and re-enters raw.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { pageSlice } from '../web/spill.js';
-
-// Same per-call ceiling as read_web_cache — one page of cache reads like one
-// fetch. Exported: script's spill footer interpolates it so the advertised
-// ceiling can never drift from the enforced one.
-export const MAX_SLICE_CHARS = 16_000;
+import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readRunCacheTool = {
@@ -41,7 +36,7 @@ export const readRunCacheTool = {
     properties: {
       key: { type: 'string', description: 'The cache key from the script paging note.' },
       offset: { type: 'number', description: 'Start character offset. Default 0.' },
-      limit: { type: 'number', description: `Max characters to return (capped at ${MAX_SLICE_CHARS}). Default the cap.` },
+      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
     },
   },
   sideEffect: 'read',
@@ -65,23 +60,30 @@ export const readRunCacheTool = {
     if (!rec || typeof rec.text !== 'string') {
       return { ok: false, error: `no_such_key: ${args.key} — the cache entry may have been evicted; re-run the script that produced it (and return a more compact value if you can).` };
     }
-    const limit = Math.min(typeof args.limit === 'number' && args.limit > 0 ? args.limit : MAX_SLICE_CHARS, MAX_SLICE_CHARS);
-    const page = pageSlice(rec.text, typeof args.offset === 'number' ? args.offset : 0, limit);
-    const body = JSON.stringify({
-      key: rec.key,
-      offset: page.offset,
-      end: page.end,
-      total: page.total,
-      value: page.slice,
-    }, null, 2);
-    const status = page.remaining > 0
-      ? `[paging] chars ${page.offset}–${page.end} of ${page.total}; ${page.remaining} remain — next: { "key": "${rec.key}", "offset": ${page.end} }.`
-      : `[paging] chars ${page.offset}–${page.end} of ${page.total}; end of stored text.`;
-    // Fence exactly as the run's own output was fenced — the stored flag, not a
-    // re-derivation. The paging status is tool-authored → outside the fence.
-    const shown = rec.fenced
-      ? wrapUntrusted({ origin: rec.originLabel || 'script', tool: 'read_run_cache', body })
-      : body;
-    return { ok: true, content: `${shown}\n${status}` };
+    // buildPagedResult fits the FRAMED slice under the paged ceiling (the JSON
+    // envelope escapes quote/backslash-dense values well past the raw cap) so the
+    // slice the model asked for survives redaction intact — else the loop re-cuts
+    // its middle. `paged` routes it to that larger ceiling, not the 8k backstop.
+    return buildPagedResult({
+      text: rec.text,
+      offset: typeof args.offset === 'number' ? args.offset : 0,
+      limit: clampPageLimit(args.limit),
+      frame: (page) => {
+        const body = JSON.stringify({
+          key: rec.key,
+          offset: page.offset,
+          end: page.end,
+          total: page.total,
+          value: page.slice,
+        }, null, 2);
+        const status = pageStatusLine({ page, nextArgs: `{ "key": "${rec.key}", "offset": ${page.end} }` });
+        // Fence exactly as the run's own output was fenced — the stored flag, not
+        // a re-derivation. The paging status is tool-authored → outside the fence.
+        const shown = rec.fenced
+          ? wrapUntrusted({ origin: rec.originLabel || 'script', tool: 'read_run_cache', body })
+          : body;
+        return `${shown}\n${status}`;
+      },
+    });
   },
 };
