@@ -419,10 +419,22 @@ Red-team: scenario 09.
 These are stated plainly. Several are deliberate tradeoffs. All are things a reader
 evaluating peerd should know. Each cites where it lives in the code.
 
-- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox the actor
-  falls back to a keyless in-service-worker loop where the boundary is a prompt
-  boundary rather than a memory boundary, which is the pre-heap-split posture. The
-  memory boundary is not universal. (`background/service-worker.js` offscreen fallback.)
+- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox — and for
+  a run that never started offscreen — the actor falls back to an in-service-worker
+  loop where the boundary is a prompt boundary rather than a memory boundary, which
+  is the pre-heap-split posture. The memory boundary is not universal.
+  (`background/service-worker.js` offscreen fallback.)
+
+  Scoped precisely: that fallback loop is keyless in the same sense the offscreen
+  worker is — `restrictCtxCapabilities` strips `getSecret`/`safeFetch` from the tool
+  context unconditionally, and the loop itself is handed throwing stubs while the
+  real credentials are closed over by the SW-owned `callModel` wrapper and added at
+  the call boundary (`actor/spawn.js`, `keylessCredentials`). What it does NOT have,
+  and cannot have without an isolated host, is heap separation: the child's untrusted
+  transcript shares a realm with the vault broker and the engine clients, so a
+  memory-disclosure bug there is not fenced the way it is on Chrome. Retiring this
+  branch in favor of an isolated Firefox host — or failing closed — is P0-1 in
+  [`HARDENING-ROADMAP.md`](HARDENING-ROADMAP.md).
 - R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
   synthetic messages, but still includes raw assistant text, which can echo
   attacker-paraphrased content, and an approved note persists into every future prompt.

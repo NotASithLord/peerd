@@ -94,6 +94,8 @@ jobs:
         run: bun run check:hygiene
       - name: Vendor integrity (extension/vendor/ matches vendor.lock.json)
         run: bun run check:vendor
+      - name: Security invariants (manifest surface / dynamic code / message hosts)
+        run: bun run check:invariants
       # The web target: stage it fresh from live source, then prove the
       # assembled tree is import-closed (check-web-boundary auto-runs inside
       # package:web; the explicit second run keeps the gate visible in logs).

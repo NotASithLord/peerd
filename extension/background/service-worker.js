@@ -2399,6 +2399,34 @@ const scriptRuns = createScriptRunRegistry();
 // route below); read by the debug-bundle route and the inspector view.
 const contextSnapshots = createContextSnapshots();
 
+/**
+ * Walk parentSessionId up from any actor / spawned session to the CHAT at the base
+ * of its lineage — the session that carries the user-visible cost tally the spend
+ * limit is measured against. Returns the record, or null when the chain is broken
+ * (a reaped parent) or the id is already a chat.
+ *
+ * why bounded + cycle-guarded rather than a plain while: this walks persisted
+ * records, and a corrupt or hand-edited chain must degrade to "no root" instead of
+ * spinning the service worker.
+ * @param {string} sessionId
+ * @returns {Promise<any | null>}
+ */
+const rootChatSessionFor = async (sessionId) => {
+  const seen = new Set();
+  let id = sessionId;
+  for (let hop = 0; hop < 16; hop++) {
+    if (!id || seen.has(id)) return null;
+    seen.add(id);
+    const rec = await sessions.get(id).catch(() => null);
+    if (!rec) return null;
+    if (rec.kind !== 'actor' && rec.kind !== 'spawned') return rec;
+    // A reaped or never-set parent ends the walk (the `!id` guard above) rather
+    // than climbing into undefined — an orphaned actor simply has no root.
+    id = rec.parentSessionId ?? '';
+  }
+  return null;
+};
+
 // The heap split: the ONE offscreen agent-loop client. It runs every non-
 // orchestrator loop — an ephemeral reasoning actor (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
@@ -2433,6 +2461,20 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // in-SW only), so without this the eval harness's OM2W recorder — and any
   // activity view — is blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
+  // Spend-limit preflight for the actor lane. The cap is stored on the CHAT at the
+  // base of the lineage, so walk parentSessionId up from the actor and test that
+  // tally: an actor (or a spawned child of one) must not push a session that has
+  // already hit the user's hard cap. Refusing is all this does — it never bills.
+  // why the lane needed it at all: script/model-call and cheap-call both preflight,
+  // but the actor relay did not, so delegating was a way around the limit.
+  spendRefusalFor: async (/** @type {string} */ actorSessionId) => {
+    const root = await rootChatSessionFor(actorSessionId);
+    if (!root) return null;
+    const spendLimit = settingsStore.get().spendLimitUsd;
+    return limitExceeded(normalizeTally(root.cost).cost, spendLimit)
+      ? `actor refused: the session spend limit ($${spendLimit}) is reached`
+      : null;
+  },
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -4729,16 +4771,27 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     for (const m of newMessages) {
       await sessions.appendMessage(actorSessionId, /** @type {any} */ (m)).catch(() => { persistOk = false; });
     }
-    // Cost PARITY: price the turn's usage and surface it on the card (the reducer
-    // reads `cost`, not raw usage — the earlier `usage` field never populated).
-    if (display && uiConnected() && r.usage) {
+    // Cost PARITY: price the turn's usage, PERSIST it on the actor's own session,
+    // and surface it on the card (the reducer reads `cost`, not raw usage — the
+    // earlier `usage` field never populated).
+    //
+    // why the fold is separate from the broadcast: an offscreen actor turn's spend
+    // used to be broadcast to the UI and then dropped — nothing wrote it to a tally,
+    // and the broadcast itself was conditional on a connected side panel, so a
+    // headless/goal-mode actor turn cost nothing on the record at all. The fold runs
+    // unconditionally now, which is also what makes the lane's spend-limit preflight
+    // meaningful rather than a check against a tally nobody increments.
+    if (r.usage) {
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
         const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
+        foldSessionCost(actorSessionId, r.usage, /** @type {any} */ (cost)?.cost ?? 0);
         // usage rides along RAW: costOf returns only { cost: USD } — consumers
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
-        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
+        if (display && uiConnected()) {
+          uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
+        }
       } catch { /* cost telemetry is best-effort */ }
     }
     auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});

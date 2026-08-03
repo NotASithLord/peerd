@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vendor-cheerpx.sh — pull a pinned CheerpX release into
+# vendor-cheerpx.sh — pull a pinned, HASH-VERIFIED CheerpX release into
 # extension/vendor/cheerpx/.
 #
 # Why
@@ -13,10 +13,29 @@
 # / fail.wasm / tun/* at runtime. We fetch all of them so the runtime
 # can resolve every reference relative to vendor/cheerpx/.
 #
-# Pinned version
-# --------------
-# Bump CHEERPX_VERSION below to upgrade. After bumping, run the script
-# and commit the new bytes.
+# Integrity
+# ---------
+# This is the highest-privilege third-party code in the tree — a Wasm CPU
+# emulator, fetched from a single-vendor CDN. So every file is verified
+# against scripts/vendor-cheerpx.sha256 BEFORE anything is written into
+# vendor/, and the whole vendoring is atomic: a mismatch, a missing file, or
+# a failed download aborts without touching the working tree. (The previous
+# version warned and continued on a failed fetch, which could leave a
+# partially-updated vendor dir.)
+#
+# Bumping
+# -------
+#   1. Bump CHEERPX_VERSION below.
+#   2. Run with --reseed: downloads, shows the hashes, and REWRITES
+#      scripts/vendor-cheerpx.sha256 without verifying against the old pins.
+#   3. Review the new bytes, then run without --reseed to confirm the
+#      verified path passes.
+#   4. Refresh extension/vendor/cheerpx/SOURCE.txt, regenerate the vendor
+#      lock (`bun packaging/check-vendor.ts --write`), and commit all of it
+#      together.
+#
+# why --reseed is explicit and separate: an upgrade must be a deliberate act
+# that a reviewer sees as a hash diff, never something a re-run does quietly.
 
 set -euo pipefail
 
@@ -24,7 +43,11 @@ CHEERPX_VERSION="1.2.8"     # pinned; bump to upgrade
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR_DIR="${REPO_ROOT}/extension/vendor/cheerpx"
+SUMS_FILE="${REPO_ROOT}/scripts/vendor-cheerpx.sha256"
 BASE_URL="https://cxrtnc.leaningtech.com/${CHEERPX_VERSION}"
+
+RESEED=0
+[[ "${1:-}" == "--reseed" ]] && RESEED=1
 
 # Files we need from upstream. Listed explicitly so the set is reviewable
 # and the script doesn't crawl the CDN blindly. If a CheerpX bump adds
@@ -54,22 +77,51 @@ FILES=(
   "tun/ipstack.wasm"
 )
 
-mkdir -p "${VENDOR_DIR}/tun"
-echo "[vendor-cheerpx] pulling CheerpX ${CHEERPX_VERSION} → ${VENDOR_DIR}"
+# Stage into a temp tree first — nothing reaches vendor/ until every file
+# has downloaded AND verified.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "${STAGE}"' EXIT
 
+echo "[vendor-cheerpx] pulling CheerpX ${CHEERPX_VERSION} (staging)"
 for rel in "${FILES[@]}"; do
   url="${BASE_URL}/${rel}"
-  out="${VENDOR_DIR}/${rel}"
+  out="${STAGE}/${rel}"
   mkdir -p "$(dirname "${out}")"
   echo "  ${rel}"
   if ! curl -fsSL "${url}" -o "${out}"; then
-    echo "[vendor-cheerpx] WARN: failed to fetch ${rel}; continuing"
-    rm -f "${out}"
+    echo "[vendor-cheerpx] FATAL: failed to fetch ${rel} — aborting without touching vendor/."
+    exit 1
   fi
 done
 
-# Compute SHA256 for the entry file so SOURCE.txt has a real pin.
-ENTRY_SHA="$(shasum -a 256 "${VENDOR_DIR}/cx.esm.js" | awk '{print $1}')"
-echo "[vendor-cheerpx] cx.esm.js sha256: ${ENTRY_SHA}"
-echo "[vendor-cheerpx] done. Vendored ${#FILES[@]} files."
-echo "[vendor-cheerpx] Update vendor/cheerpx/SOURCE.txt with version + sha if you bumped."
+if [[ "${RESEED}" -eq 1 ]]; then
+  ( cd "${STAGE}" && sha256sum "${FILES[@]}" ) > "${SUMS_FILE}"
+  echo "[vendor-cheerpx] RESEEDED ${SUMS_FILE}:"
+  cat "${SUMS_FILE}"
+  echo "[vendor-cheerpx] Review these hashes against upstream before committing."
+else
+  if [[ ! -f "${SUMS_FILE}" ]]; then
+    echo "[vendor-cheerpx] FATAL: ${SUMS_FILE} missing. Run with --reseed to create it."
+    exit 1
+  fi
+  echo "[vendor-cheerpx] verifying against $(basename "${SUMS_FILE}")"
+  if ! ( cd "${STAGE}" && sha256sum --quiet -c "${SUMS_FILE}" ); then
+    echo "[vendor-cheerpx] FATAL: sha256 mismatch."
+    echo "  Either upstream changed the bytes at a pinned version, or the CDN is"
+    echo "  serving something else. Investigate before proceeding; if the change is"
+    echo "  genuine and reviewed, re-run with --reseed."
+    exit 1
+  fi
+  echo "[vendor-cheerpx] all ${#FILES[@]} files verified"
+fi
+
+# Commit the staged tree into vendor/ only now.
+mkdir -p "${VENDOR_DIR}/tun"
+for rel in "${FILES[@]}"; do
+  mkdir -p "$(dirname "${VENDOR_DIR}/${rel}")"
+  cp "${STAGE}/${rel}" "${VENDOR_DIR}/${rel}"
+done
+
+echo "[vendor-cheerpx] done. Vendored ${#FILES[@]} files → ${VENDOR_DIR}"
+echo "[vendor-cheerpx] Next: update vendor/cheerpx/SOURCE.txt, then"
+echo "                 bun packaging/check-vendor.ts --write"
