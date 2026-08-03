@@ -219,4 +219,28 @@ export function applyRealmSeal(global) {
     open: cacheBlocked, match: cacheBlocked, has: cacheBlocked,
     delete: cacheBlocked, keys: cacheBlocked,
   }));
+
+  // IndexedDB: a DURABLE, same-origin edge — NOT network, so it slips the
+  // "every egress channel is sealed" framing above, yet it is the single most
+  // dangerous one. The sealed worker is minted from a blob: URL inside an
+  // ORDINARY extension page (the Notebook tab / the offscreen host — only
+  // engine-tabs/app-tab/runner.html is in manifest `sandbox.pages`), so it
+  // inherits the extension origin chrome-extension://<id>. That is the SAME
+  // origin whose one IDB database `peerd` (peerd-egress/storage/idb.js) holds
+  // the vault blob, agents_memory (durable, always-loaded into the trusted
+  // orchestrator prompt), every session + session_messages, tool_grants, and
+  // the audit log — none of it partitioned from a same-origin worker. Without
+  // this seal, model-authored code the keyless web actor runs here (page-code
+  // REPL) or a Notebook run could POISON agents_memory('user') — a persistent,
+  // highest-authority prompt injection that re-enters the orchestrator across
+  // the B1 memory boundary the whole design rests on — FORGE a tool_grants
+  // record to pre-approve a side-effecting tool, or read the vault blob and
+  // full history out for exfil (the js_notebook lane ships egress). The
+  // sandbox's sanctioned durable store is OPFS, rooted per-instance by the
+  // host; IDB is never a sanctioned edge, so replace the whole IDBFactory with
+  // throwing stubs (open/deleteDatabase/databases/cmp), same shape as caches.
+  const idbBlocked = () => fail('IndexedDB (indexedDB)');
+  seal(global, 'indexedDB', /** @type {any} */ ({
+    open: idbBlocked, deleteDatabase: idbBlocked, databases: idbBlocked, cmp: idbBlocked,
+  }));
 }

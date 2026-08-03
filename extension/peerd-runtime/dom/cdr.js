@@ -173,11 +173,22 @@ const VARIATION_SELECTOR_RE = new RegExp(
   'gu',
 );
 
+// A few INVISIBLE marks are General_Category=Mn (a combining mark), NOT Format,
+// so the \p{Cf} catch-all below structurally cannot reach them — and unlike the
+// variation selectors handled above they carry no legitimate emoji/CJK role to
+// preserve. COMBINING GRAPHEME JOINER (U+034F) renders as nothing yet the model
+// reads it: splice it between letters to smuggle a token boundary the human
+// never sees (the same class of covert channel as ZWSP, a different category).
+// why NOT the Mongolian free variation selectors (U+180B-180D/180F, also Mn):
+// like ZWNJ they do orthographic glyph-selection work in Mongolian text, so
+// stripping them would change the word — accepted collateral, left in place.
+const INVISIBLE_MARKS = '\\u034F';
+
 // The invisible-format sweep: the named ranges above UNION \p{Cf}, minus ZWJ
 // (already handled). why: `v`-flag set subtraction is the only way to say
 // "all format chars EXCEPT the one that doubles as an emoji joiner".
 const INVISIBLES_RE = new RegExp(
-  `[[${ZERO_WIDTH}${BIDI_CONTROLS}${TAG_BLOCK}\\p{Cf}]--[\\u200D\\u200C]]`,
+  `[[${ZERO_WIDTH}${BIDI_CONTROLS}${TAG_BLOCK}${INVISIBLE_MARKS}\\p{Cf}]--[\\u200D\\u200C]]`,
   'gv',
 );
 

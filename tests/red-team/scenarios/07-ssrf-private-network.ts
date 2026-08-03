@@ -48,6 +48,9 @@ const SSRF_TARGETS: { label: string; url: string }[] = [
 const EVASION_HOSTS = [
   '169.254.169.254', '0x7f000001', '0177.0.0.1', '127.1',
   '::ffff:7f00:1', '::ffff:a9fe:a9fe', '64:ff9b::a9fe:a9fe', 'foo.localhost',
+  // Non-routable / internal-use ranges an SSRF guard must also refuse (RFC 6598
+  // shared/CGNAT is real internal LAN space on mobile/ISP deployments).
+  '100.64.0.1', '100.127.255.255', '198.18.0.5', '255.255.255.255', '240.0.0.1',
 ];
 
 export const scenario: Scenario = {

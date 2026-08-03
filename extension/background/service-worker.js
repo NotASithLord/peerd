@@ -3475,7 +3475,20 @@ const siteFetchCallRoute = {
     // the owned origin; the worker never holds a credential.
     let scopedFetch;
     if (owner.backing === 'api') {
-      scopedFetch = withApiCredentials(webFetch, () => pin, {
+      // An API actor OWNS ONE origin (its instanceId), and fetch_url pins its
+      // credentials to that FIXED origin (see the actorBacking==='api' branch in
+      // buildToolContext). This relay must pin the SAME way — `pin` here is
+      // MODEL-supplied (site_client_run's `origin` arg), so without this check a
+      // hijacked API actor bound to origin A could name origin B and spend B's
+      // stored vault key + B's cookies: the cross-origin credential escalation the
+      // "an API actor owns one origin" containment (DESIGN-18) exists to prevent.
+      // Refuse when the named origin is not the actor's owned origin. why this is
+      // the API sibling of the tab branch below: #251 scoped the tab path to the
+      // tab's LIVE origin via the lock and origin-lock.js flagged site_client_* as
+      // uncovered — that fix landed for tab actors; this closes it for API actors.
+      const owned = typeof owner.instanceId === 'string' ? normalizeApiOrigin(owner.instanceId) : null;
+      if (!owned || pin !== owned) return { ok: false, error: 'site_fetch_cross_origin' };
+      scopedFetch = withApiCredentials(webFetch, () => owned, {
         getSecret: (/** @type {string} */ name) => vault.getSecret(name),
         audit: (/** @type {any} */ e) => auditLog.append(e),
       });
@@ -4140,6 +4153,13 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
     if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
       return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
     }
+    // why no inbound re-check HERE: the inbound (untrusted-origin) wall for this
+    // path is enforced at the trusted MINT — script.js refuses to expose the
+    // `actors` surface at all when ctx.inbound === true (folded SW-side by the
+    // turn driver), so an inbound turn never reaches this route with an actors
+    // op. inbound is a per-TURN property the untrusted worker cannot be trusted
+    // to echo, so the mint is the only sound enforcement point; do NOT accept an
+    // inbound flag off the relay message here.
     const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
     if (op === 'list') {
       // The roster through the normal tool gates — actor_list with the owner's
