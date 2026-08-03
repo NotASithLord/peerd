@@ -9,7 +9,7 @@
 // fence is what makes that safe.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { pageSlice, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const jsReadFileTool = {
@@ -53,25 +53,33 @@ export const jsReadFileTool = {
       // main-agent reader the notebook actor could not reach anyway (read_run_
       // cache is off the actor tier). why it matters: before this a >window file
       // came back whole, got 8k-redacted, and every re-read returned the SAME
-      // truncation — a guaranteed wasted-turn loop.
-      const limit = Math.min(typeof args.limit === 'number' && args.limit > 0 ? args.limit : SPILL_PAGE_CHARS, SPILL_PAGE_CHARS);
-      const page = pageSlice(content, typeof args.offset === 'number' ? args.offset : 0, limit);
-      // The slice is fenced (a Notebook file is not reliably agent-authored); the
-      // tool-authored paging status rides OUTSIDE the fence.
-      const shown = wrapUntrusted({
-        origin: `notebook:${args.notebook ?? 'current'}/${args.path}`,
-        tool: 'js_read_file',
-        body: page.slice,
+      // truncation — a guaranteed wasted-turn loop. buildPagedResult flags
+      // `paged` (redacted at the larger paged ceiling) and fits the framed slice
+      // under it so the requested page is never re-cut.
+      return buildPagedResult({
+        text: content,
+        offset: typeof args.offset === 'number' ? args.offset : 0,
+        limit: clampPageLimit(args.limit),
+        // The slice is fenced (a Notebook file is not reliably agent-authored);
+        // the tool-authored paging status rides OUTSIDE the fence. nextArgs is
+        // JSON.stringify'd so a path with a quote/backslash stays valid.
+        frame: (page) => {
+          const shown = wrapUntrusted({
+            origin: `notebook:${args.notebook ?? 'current'}/${args.path}`,
+            tool: 'js_read_file',
+            body: page.slice,
+          });
+          const nextArgs = JSON.stringify({
+            path: args.path,
+            ...(args.notebook ? { notebook: args.notebook } : {}),
+            offset: page.end,
+          });
+          const footer = (page.remaining > 0 || page.offset > 0)
+            ? `\n${pageStatusLine({ page, nextArgs })}`
+            : '';
+          return `${shown}${footer}`;
+        },
       });
-      const nextArgs = args.notebook
-        ? `{ "path": "${args.path}", "notebook": "${args.notebook}", "offset": ${page.end} }`
-        : `{ "path": "${args.path}", "offset": ${page.end} }`;
-      const footer = (page.remaining > 0 || page.offset > 0)
-        ? `\n${pageStatusLine({ page, nextArgs })}`
-        : '';
-      // paged: the loop redacts this at PAGED_MAX_CHARS, not the 8k backstop, so
-      // the requested slice survives — the whole point of the offset/limit page.
-      return { ok: true, content: `${shown}${footer}`, paged: true };
     } catch (e) {
       return { ok: false, error: `read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

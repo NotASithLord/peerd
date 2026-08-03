@@ -874,8 +874,7 @@ export async function* runUserTurn(ctx) {
       // the model asked for — redact it at the larger paged ceiling so the
       // requested page survives instead of being re-cut by the 8k backstop.
       // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.
-      const paged = dispatchResult.ok
-        && /** @type {{ paged?: boolean }} */ (dispatchResult).paged === true;
+      const paged = dispatchResult.ok && dispatchResult.paged === true;
       const block = {
         tool_use_id: tu.id,
         content: redactToolResult(rawContent, paged ? { maxChars: PAGED_MAX_CHARS } : undefined),

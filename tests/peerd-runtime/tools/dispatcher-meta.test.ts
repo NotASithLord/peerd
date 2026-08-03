@@ -45,6 +45,17 @@ describe('dispatcher lineage spine fields', () => {
     expect(r.meta.origins).toEqual(['https://api.bank.com']);
   });
 
+  test('paged survives the {...result, meta} enrichment spread (the loop reads it)', async () => {
+    // The agent loop redacts at the larger paged ceiling only when the DISPATCH
+    // result carries paged:true — but dispatch spreads the tool result to attach
+    // meta, so a spread that dropped unknown fields would silently un-page it.
+    registerTool(baseTool({ execute: async () => ({ ok: true, content: 'slice', paged: true }) }) as any);
+    const r: any = await dispatchToolCall({ id: 't4', name: 'lt', args: {} } as any, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.paged).toBe(true);
+    expect(r.meta.sideEffect).toBe('read');   // enrichment still attached
+  });
+
   test('a throwing origins() fails closed at the origin gate (never reaches meta)', async () => {
     registerTool(baseTool({ origins: () => { throw new Error('origins blew up'); } }) as any);
     const r: any = await dispatchToolCall({ id: 't3', name: 'lt', args: {} } as any, ctx);

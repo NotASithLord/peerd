@@ -23,9 +23,33 @@ export const SPILL_CACHE_MAX_ENTRIES = 40;
 // read_web_cache, read_run_cache, AND the self-paging file reads (js_read_file /
 // app_read_file page the OPFS file itself). One constant so the advertised cap,
 // the enforced slice, and the loop's paged-result redact ceiling
-// (loop/redact.js PAGED_MAX_CHARS, which imports this) can never drift apart —
+// (PAGED_MAX_CHARS below, imported by loop/redact.js) can never drift apart —
 // a page in is a page out.
 export const SPILL_PAGE_CHARS = 16_000;
+
+// The ceiling the loop redacts a `paged` result at (loop/redact.js imports and
+// re-exports this; the agent loop passes it when the dispatch result is flagged
+// paged). why a separate, larger ceiling: a paging tool returns ONE
+// deliberately-sized slice the model ASKED for — re-cutting it at the 8k
+// backstop would elide the middle of the very page paging exists to deliver.
+// The raw slice is capped at SPILL_PAGE_CHARS, but FRAMING inflates it (the JSON
+// envelope escapes quotes/backslashes, the untrusted fence defangs tag
+// lookalikes), so the model-visible content runs over the raw cap; the margin
+// covers ordinary framing and buildPagedResult shrinks the slice for the
+// pathological rest, so a paged result reaches this ceiling intact.
+export const PAGED_MAX_CHARS = SPILL_PAGE_CHARS + 2000;
+
+/**
+ * Clamp a caller's requested page limit to the shared per-call cap: an absent or
+ * non-positive limit defaults to the cap, and any larger limit is capped. The
+ * ONE place the offset/limit readers share this so the four call sites can't
+ * drift.
+ *
+ * @param {unknown} rawLimit
+ * @returns {number}
+ */
+export const clampPageLimit = (rawLimit) =>
+  Math.min(typeof rawLimit === 'number' && rawLimit > 0 ? rawLimit : SPILL_PAGE_CHARS, SPILL_PAGE_CHARS);
 
 /**
  * The tool-authored paging status line for an offset/limit page read — the
@@ -78,7 +102,7 @@ export const windowText = (text, budget) => {
  */
 export const pagingFooter = ({ key, total, headChars, tailChars }) => [
   `[paging] The full text (${total} chars) is stored locally. You saw the first ${headChars} and last ${tailChars} chars.`,
-  `To read more call read_web_cache with { "key": "${key}", "offset": <char offset>, "limit": <chars, max 16000> } — e.g. offset ${headChars} continues where the head stopped.`,
+  `To read more call read_web_cache with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> } — e.g. offset ${headChars} continues where the head stopped.`,
 ].join('\n');
 
 /**
@@ -94,6 +118,34 @@ export const pageSlice = (text, offset, limit) => {
   const start = Math.max(0, Math.min(Math.floor(offset) || 0, total));
   const end = Math.min(start + Math.max(1, Math.floor(limit) || 1), total);
   return { slice: text.slice(start, end), offset: start, end, total, remaining: total - end };
+};
+
+/**
+ * Build a `paged` tool result whose FRAMED size fits PAGED_MAX_CHARS, so the
+ * loop never re-cuts the middle of the slice the model asked for. `frame(page)`
+ * returns the final content string (fence + envelope + status/footer) for a
+ * given slice; escaping (JSON envelope, fence defang) can push a full slice past
+ * the ceiling, so we shrink the limit and re-frame a bounded number of times
+ * until it fits. Pure; no IO. The shared home for the offset/limit readers'
+ * self-paging result shape (js/app_read_file, read_web_cache, read_run_cache).
+ *
+ * @param {{ text: string, offset: number, limit: number, frame: (page: ReturnType<typeof pageSlice>) => string }} p
+ * @returns {{ ok: true, content: string, paged: true }}
+ */
+export const buildPagedResult = ({ text, offset, limit, frame }) => {
+  let lim = limit;
+  let page = pageSlice(text, offset, lim);
+  let content = frame(page);
+  // Escaping is content-dependent, so estimate the overshoot ratio and retry a
+  // few times rather than solving it exactly. Bounded so a degenerate case can't
+  // spin; if it somehow still overshoots, the loop's head+tail keeps the footer
+  // so the model can still page on — never a wasted-turn loop.
+  for (let i = 0; i < 5 && content.length > PAGED_MAX_CHARS && lim > 1; i++) {
+    lim = Math.max(1, Math.floor((lim * PAGED_MAX_CHARS) / content.length * 0.95));
+    page = pageSlice(text, offset, lim);
+    content = frame(page);
+  }
+  return { ok: true, content, paged: true };
 };
 
 // ── Query-relevant excerpting (BM25) ────────────────────────────────────────
@@ -263,5 +315,5 @@ export const excerptRelevant = (text, query, budget, opts = {}) => {
  */
 export const excerptFooter = ({ key, total, passagesShown, passagesTotal, query }) => [
   `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from ${total} chars stored locally — NOT a contiguous slice.`,
-  `To read the surrounding text or other sections call read_web_cache with { "key": "${key}", "offset": <char offset>, "limit": <chars, max 16000> }.`,
+  `To read the surrounding text or other sections call read_web_cache with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> }.`,
 ].join('\n');

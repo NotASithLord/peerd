@@ -7,7 +7,7 @@
 // orchestrator's trusted context. Reads stay global; the fence pays for it.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { pageSlice, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const appReadFileTool = {
@@ -49,21 +49,31 @@ export const appReadFileTool = {
       // file is the durable backing, so a big read returns a bounded slice and
       // the footer re-calls THIS tool at a new offset — no spill store, no
       // main-agent reader the app actor could not reach (off the actor tier).
-      const limit = Math.min(typeof args.limit === 'number' && args.limit > 0 ? args.limit : SPILL_PAGE_CHARS, SPILL_PAGE_CHARS);
-      const page = pageSlice(content, typeof args.offset === 'number' ? args.offset : 0, limit);
-      const shown = wrapUntrusted({
-        origin: `app:${args.appId ?? 'current'}/${args.path}`,
-        tool: 'app_read_file',
-        body: page.slice,
+      // buildPagedResult flags `paged` and fits the framed slice under the paged
+      // ceiling so the requested page survives redaction intact.
+      return buildPagedResult({
+        text: content,
+        offset: typeof args.offset === 'number' ? args.offset : 0,
+        limit: clampPageLimit(args.limit),
+        // nextArgs is JSON.stringify'd so an appId/path with a quote/backslash
+        // stays a valid next-call hint.
+        frame: (page) => {
+          const shown = wrapUntrusted({
+            origin: `app:${args.appId ?? 'current'}/${args.path}`,
+            tool: 'app_read_file',
+            body: page.slice,
+          });
+          const nextArgs = JSON.stringify({
+            ...(args.appId ? { appId: args.appId } : {}),
+            path: args.path,
+            offset: page.end,
+          });
+          const footer = (page.remaining > 0 || page.offset > 0)
+            ? `\n${pageStatusLine({ page, nextArgs })}`
+            : '';
+          return `${shown}${footer}`;
+        },
       });
-      const nextArgs = args.appId
-        ? `{ "appId": "${args.appId}", "path": "${args.path}", "offset": ${page.end} }`
-        : `{ "path": "${args.path}", "offset": ${page.end} }`;
-      const footer = (page.remaining > 0 || page.offset > 0)
-        ? `\n${pageStatusLine({ page, nextArgs })}`
-        : '';
-      // paged: redacted at PAGED_MAX_CHARS so the requested slice survives.
-      return { ok: true, content: `${shown}${footer}`, paged: true };
     } catch (e) {
       return { ok: false, error: `app_read_file_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

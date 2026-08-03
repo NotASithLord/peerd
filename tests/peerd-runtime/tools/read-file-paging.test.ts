@@ -54,7 +54,7 @@ describe('js_read_file self-paging', () => {
     expect(afterFence).toContain('[paging]');
     expect(afterFence).toContain(`chars 0–${SPILL_PAGE_CHARS} of ${big.length}`);
     // the footer re-calls THIS tool at the next offset — not a separate reader
-    expect(afterFence).toContain(`{ "path": "big.json", "offset": ${SPILL_PAGE_CHARS} }`);
+    expect(afterFence).toContain(`{"path":"big.json","offset":${SPILL_PAGE_CHARS}}`);
     expect(afterFence).not.toContain('read_run_cache');
   });
 
@@ -79,7 +79,17 @@ describe('js_read_file self-paging', () => {
     const big = 'A'.repeat(SPILL_PAGE_CHARS + 100);
     const r = await jsReadFileTool.execute({ path: 'f', notebook: 'nb-2' }, jsCtx(big) as any);
     if (!r.ok) throw new Error('expected ok');
-    expect(split(r.content!).afterFence).toContain('"notebook": "nb-2"');
+    expect(split(r.content!).afterFence).toContain('"notebook":"nb-2"');
+  });
+
+  test('a path with a quote stays a VALID JSON next-call hint (JSON.stringify escaping)', async () => {
+    const big = 'A'.repeat(SPILL_PAGE_CHARS + 100);
+    const r = await jsReadFileTool.execute({ path: 'we"ird.json' }, jsCtx(big) as any);
+    if (!r.ok) throw new Error('expected ok');
+    // A raw interpolation would emit `"path": "we"ird.json"` — unparseable. The
+    // hint must round-trip through JSON.parse.
+    const hint = split(r.content!).afterFence.match(/next: (\{.*\})\./)![1];
+    expect(JSON.parse(hint)).toMatchObject({ path: 'we"ird.json', offset: SPILL_PAGE_CHARS });
   });
 
   test('the slice is fenced under the file\'s origin (untrusted instance bytes)', async () => {
@@ -104,7 +114,7 @@ describe('app_read_file self-paging', () => {
     const { body, afterFence } = split(r.content!);
     expect(body.length).toBe(SPILL_PAGE_CHARS);
     expect(afterFence).toContain('[paging]');
-    expect(afterFence).toContain(`{ "appId": "app-9", "path": "index.html", "offset": ${SPILL_PAGE_CHARS} }`);
+    expect(afterFence).toContain(`{"appId":"app-9","path":"index.html","offset":${SPILL_PAGE_CHARS}}`);
     expect((r as { paged?: boolean }).paged).toBe(true);
   });
 

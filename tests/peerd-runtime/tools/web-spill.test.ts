@@ -4,7 +4,7 @@
 // paging contract honest live here.
 
 import { describe, test, expect } from 'bun:test';
-import { windowText, pagingFooter, pageSlice, pageStatusLine, SPILL_PAGE_CHARS, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
+import { windowText, pagingFooter, pageSlice, pageStatusLine, SPILL_PAGE_CHARS, PAGED_MAX_CHARS, clampPageLimit, buildPagedResult, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
 
 describe('windowText', () => {
   test('text at or under the budget passes through whole', () => {
@@ -74,6 +74,34 @@ describe('pageStatusLine (the shared offset/limit paging footer)', () => {
 
   test('the shared slice size is one constant (page in == page out)', () => {
     expect(SPILL_PAGE_CHARS).toBe(16_000);
+  });
+});
+
+describe('clampPageLimit (the ONE shared limit clamp)', () => {
+  test('absent / non-positive → the cap; larger → capped; in-range → verbatim', () => {
+    expect(clampPageLimit(undefined)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(0)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(-5)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(999_999)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(500)).toBe(500);
+  });
+});
+
+describe('buildPagedResult (fits the FRAMED slice under the paged ceiling)', () => {
+  test('a plain slice frames straight through, flagged paged', () => {
+    const r = buildPagedResult({ text: 'a'.repeat(1000), offset: 0, limit: SPILL_PAGE_CHARS, frame: (p) => p.slice });
+    expect(r).toMatchObject({ ok: true, paged: true });
+    expect(r.content).toBe('a'.repeat(1000));
+    expect(PAGED_MAX_CHARS).toBeGreaterThan(SPILL_PAGE_CHARS);
+  });
+
+  test('shrinks the slice when framing inflates it past PAGED_MAX_CHARS', () => {
+    // A framer that doubles every char: a full 16k slice would frame to 32k —
+    // buildPagedResult must shrink until the framed content fits the ceiling.
+    const inflate = (p: { slice: string }) => p.slice.replace(/./g, 'xx');
+    const r = buildPagedResult({ text: 'a'.repeat(40_000), offset: 0, limit: SPILL_PAGE_CHARS, frame: inflate });
+    expect(r.content.length).toBeLessThanOrEqual(PAGED_MAX_CHARS);
+    expect(r.content.length).toBeGreaterThan(0);
   });
 });
 

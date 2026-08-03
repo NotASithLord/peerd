@@ -15,7 +15,7 @@
 import { clamp } from '/shared/util.js';
 import { JS_PITFALLS_NOTE } from './code-style-note.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
-import { MAX_SLICE_CHARS as RUN_CACHE_SLICE_CHARS } from './read-run-cache.js';
+import { SPILL_PAGE_CHARS as RUN_CACHE_SLICE_CHARS } from '../web/spill.js';
 import { MAX_SPILL_TEXT_CHARS } from '../run-cache.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import {
