@@ -203,7 +203,14 @@ export const fetchUrlTool = {
       if (truncated && webCache?.key && webCache?.put) {
         const cacheKey = webCache.key();
         try {
-          await webCache.put({ key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody });
+          // Stamp the OWNER. The spill store is one service-worker-level map keyed
+          // by an opaque handle, so without this any actor holding a key could page
+          // back bytes a different actor fetched - credentialed, from an origin it
+          // is itself locked out of. read_web_cache checks this before slicing.
+          await webCache.put({
+            key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody,
+            ownerSessionId: ctx.session?.sessionId ?? null,
+          });
           footer = ex
             ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
             : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });

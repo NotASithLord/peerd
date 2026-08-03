@@ -223,6 +223,24 @@ describe('makeVmHttpFetch — response cache', () => {
     expect(calls.cachePut.length).toBe(0);
   });
 
+  test('a noCache request (the module-source lane) never serves from nor stores to the cache', async () => {
+    // module-resolver.js makeFetchRemote sets noCache on every module fetch:
+    // a FRESH cached entry must still be bypassed (a warm IDB hit would serve
+    // third-party CODE with no denylist re-check and no audit entry, and the
+    // design forbids a persistent module cache).
+    const cached = { key: cacheableUrl, meta: { status: 200, statusText: 'OK', headers: { 'cache-control': 'max-age=31536000' } }, bodyB64: b64('STALE-MODULE'), storedAt: 1_000_000 - 1000 };
+    let cacheRead = false;
+    const { fetch, calls } = build({
+      cacheGet: async () => { cacheRead = true; return cached; },
+      webFetch: async () => fakeResponse({ status: 200, headers: { 'cache-control': 'max-age=31536000' }, body: 'LIVE' }),
+    });
+    const r = await fetch({ url: cacheableUrl, method: 'GET', noCache: true });
+    expect(cacheRead).toBe(false);
+    expect(r.fromCache).toBeUndefined();
+    expect(r.bodyB64).toBe(b64('LIVE'));
+    expect(calls.cachePut.length).toBe(0);
+  });
+
   test('a cachePut quota failure does not fail the fetch', async () => {
     const { fetch } = build({ cachePut: async () => { throw new Error('QuotaExceeded'); } });
     const r = await fetch({ url: cacheableUrl, method: 'GET' });

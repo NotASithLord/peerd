@@ -236,7 +236,7 @@ export async function capturePage(page) {
  * @param {string} path  extension-relative, e.g. 'home/home.html'
  * @param {{ metrics?: object }} [opts]
  */
-export async function openWidePage(ctx, path, { metrics = WIDE_METRICS } = {}) {
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } = {}) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
   const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
   const page = await attach(created.webSocketDebuggerUrl);
@@ -246,9 +246,16 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS } = {}) {
   await setEmulatedTheme(page, 'light');
   await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
   await page.send('Page.navigate', { url });
-  const mounted = await waitFor(
-    () => evalIn(page, `document.readyState === 'complete' && !!document.querySelector('#app > *')`),
-    { budgetMs: READY_BUDGET_MS });
+  // why `ready` is overridable: the default probe waits for a Mithril mount at
+  // `#app`, which is right for the SPA pages and WRONG for every standalone tab
+  // page — the engine tabs render into their own ids (and their hard-fail cards
+  // replace <body> outright), so they would time out here forever despite having
+  // painted. Those pages are exactly the ones with no visual coverage, so the
+  // probe has to be the caller's to choose.
+  const probe = ready
+    ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
+    : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
+  const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
   if (!mounted) { try { page.close(); } catch { /* */ } throw new Error(`wide page never mounted: ${path}`); }
   return page;
 }
@@ -530,7 +537,11 @@ export async function visualCheck(ctx, checks, name, opts = {}) {
   await freezeAnimations(ctx);
   const png = await ctx.screenshot();
   const v = compareToBaseline(name, png, { update: UPDATE_BASELINES, ...opts });
-  if (v.wrote) {
+  if (v.unchanged) {
+    // A reseed that changed nothing should SAY so — otherwise "baseline updated"
+    // on 24 files implies 24 real changes to look at.
+    checks.check(`visual: ${name} — unchanged, not rewritten`, true);
+  } else if (v.wrote) {
     checks.check(`visual: ${name} — baseline ${v.missing ? 'created' : 'updated'} (skipped compare)`, true);
   } else if (!v.dimsMatch) {
     checks.check(`visual: ${name} — dimensions match the baseline`, false);

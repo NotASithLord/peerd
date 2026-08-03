@@ -4,6 +4,10 @@ import {
   buildEntry,
   buildModule,
   stripExports,
+  isRemoteSpecifier,
+  makeFetchRemote,
+  REMOTE_MODULE_MAX_CHARS,
+  REMOTE_MODULES_MAX_PER_RUN,
 } from '../../extension/peerd-engine/module-resolver.js';
 
 const makeDeps = (files: Record<string, string>, log: any[] = []) => ({
@@ -225,6 +229,314 @@ describe('buildModule (imported-module path)', () => {
     // buildModule's cache.get fast path widens the return to | undefined
     if (!entry) throw new Error('expected built module');
     expect(entry.source).toContain('export const x = 1');
+  });
+});
+
+describe('resolveRelativePath — URL base (remote modules)', () => {
+  test.each([
+    ['https://cdn.test/a/b.js', './c.js',  'https://cdn.test/a/c.js'],
+    ['https://cdn.test/a/b.js', '../c.js', 'https://cdn.test/c.js'],
+    ['https://cdn.test/lib.js#sha256-abc', './x.js', 'https://cdn.test/x.js'],  // pin never inherits
+  ])('resolves %s + %s → %s', (base, rel, want) => {
+    expect(resolveRelativePath(base, rel)).toBe(want);
+  });
+});
+
+describe('remote (https) imports via injected fetchRemote', () => {
+  const makeRemoteDeps = (
+    remote: Record<string, string>,
+    files: Record<string, string> = {},
+    fetched: string[] = [],
+  ) => ({
+    ...makeDeps(files),
+    fetchRemote: async (url: string) => {
+      fetched.push(url);
+      if (!(url in remote)) throw new Error(`denylisted: ${url}`);
+      return remote[url];
+    },
+  });
+
+  test('isRemoteSpecifier matches http(s) URLs only — case-insensitively (schemes are)', () => {
+    expect(isRemoteSpecifier('https://cdn.test/x.js')).toBe(true);
+    expect(isRemoteSpecifier('http://cdn.test/x.js')).toBe(true);
+    expect(isRemoteSpecifier('HTTPS://cdn.test/x.js')).toBe(true);
+    expect(isRemoteSpecifier('Http://cdn.test/x.js')).toBe(true);
+    expect(isRemoteSpecifier('lodash')).toBe(false);
+    expect(isRemoteSpecifier('./x.js')).toBe(false);
+    expect(isRemoteSpecifier('//cdn.test/x.js')).toBe(false);
+    expect(isRemoteSpecifier('peerd:std')).toBe(false);
+  });
+
+  test('an UPPERCASE-scheme import rides the audited path, never the native loader', async () => {
+    const fetched: string[] = [];
+    const out = await buildEntry(
+      "import { x } from 'HTTPS://cdn.test/lib.js';\nreturn x;",
+      'scratch.js',
+      makeRemoteDeps({ 'HTTPS://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched),
+    );
+    expect(fetched).toEqual(['HTTPS://cdn.test/lib.js']);
+    expect(out.imports).toContain('blob:test/');
+    expect(out.imports).not.toContain('HTTPS://');
+  });
+
+  test('a protocol-relative specifier fails CLOSED with a named refusal (static + dynamic)', async () => {
+    // '//cdn…' is not remote per the predicate and would otherwise pass
+    // through to the worker's native loader — the unaudited near-miss.
+    await expect(buildEntry(
+      "import '//cdn.test/x.js';",
+      'scratch.js',
+      makeRemoteDeps({}),
+    )).rejects.toThrow('protocol-relative');
+    await expect(buildEntry(
+      "return import('//cdn.test/x.js');",
+      'scratch.js',
+      makeRemoteDeps({}),
+    )).rejects.toThrow('protocol-relative');
+  });
+
+  test('a static https import is fetched through fetchRemote and re-blobbed', async () => {
+    const fetched: string[] = [];
+    const out = await buildEntry(
+      "import { answer } from 'https://cdn.test/lib.js';\nreturn answer;",
+      'scratch.js',
+      makeRemoteDeps({ 'https://cdn.test/lib.js': 'export const answer = 42;' }, {}, fetched),
+    );
+    expect(fetched).toEqual(['https://cdn.test/lib.js']);
+    expect(out.imports).toContain('blob:test/');
+    expect(out.imports).not.toContain('https://cdn.test/lib.js');
+    expect(out.cache.get('https://cdn.test/lib.js')?.source).toContain('export const answer');
+  });
+
+  test('a remote module’s relative import resolves against ITS url', async () => {
+    const fetched: string[] = [];
+    const out = await buildEntry(
+      "import { lib } from 'https://cdn.test/pkg/lib.js';\nreturn lib;",
+      'scratch.js',
+      makeRemoteDeps({
+        'https://cdn.test/pkg/lib.js': "import { base } from './base.js'; export const lib = base + 1;",
+        'https://cdn.test/pkg/base.js': 'export const base = 41;',
+      }, {}, fetched),
+    );
+    expect(fetched.sort()).toEqual(['https://cdn.test/pkg/base.js', 'https://cdn.test/pkg/lib.js']);
+    const libSrc = out.cache.get('https://cdn.test/pkg/lib.js')!.source;
+    expect(libSrc).not.toContain("'./base.js'");
+    expect(libSrc).toContain('blob:test/');
+  });
+
+  test('a remote module importing a builtin (peerd:std) is rewritten to its native URL', async () => {
+    const STD = 'chrome-extension://abc/notebook-std.js';
+    const out = await buildEntry(
+      "import { m } from 'https://cdn.test/stats.js';\nreturn m;",
+      'scratch.js',
+      {
+        ...makeRemoteDeps({ 'https://cdn.test/stats.js': "import { mean } from 'peerd:std'; export const m = mean([1]);" }),
+        builtins: { 'peerd:std': STD },
+      },
+    );
+    const src = out.cache.get('https://cdn.test/stats.js')!.source;
+    expect(src).toContain(`from '${STD}'`);
+    expect(src).not.toContain("'peerd:std'");
+  });
+
+  test('the same URL imported twice is fetched once (per-run cache)', async () => {
+    const fetched: string[] = [];
+    await buildEntry(
+      [
+        "import { a } from 'https://cdn.test/shared.js';",
+        "import { b } from './local.js';",
+        'return a + b;',
+      ].join('\n'),
+      'scratch.js',
+      makeRemoteDeps(
+        { 'https://cdn.test/shared.js': 'export const a = 1;\nexport const b = 2;' },
+        { 'local.js': "import { a } from 'https://cdn.test/shared.js'; export const b = a + 1;" },
+        fetched,
+      ),
+    );
+    expect(fetched).toEqual(['https://cdn.test/shared.js']);
+  });
+
+  test('a remote↔remote cycle is detected across the URL branch', async () => {
+    await expect(buildEntry(
+      "import 'https://cdn.test/a.js';",
+      'scratch.js',
+      makeRemoteDeps({
+        'https://cdn.test/a.js': "import './b.js';",
+        'https://cdn.test/b.js': "import './a.js';",
+      }),
+    )).rejects.toThrow('circular import');
+  });
+
+  test('without fetchRemote, an https import fails closed with the WHY (no network)', async () => {
+    await expect(buildEntry(
+      "import { x } from 'https://cdn.test/lib.js';\nreturn x;",
+      'scratch.js',
+      makeDeps({}),
+    )).rejects.toThrow('no network');
+  });
+
+  test('a fetch failure (denylist et al) surfaces as the resolver error', async () => {
+    await expect(buildEntry(
+      "import { x } from 'https://evil.test/lib.js';\nreturn x;",
+      'scratch.js',
+      makeRemoteDeps({}),
+    )).rejects.toThrow('denylisted: https://evil.test/lib.js');
+  });
+
+  test('a module over the per-module size cap is refused', async () => {
+    await expect(buildEntry(
+      "import 'https://cdn.test/huge.js';",
+      'scratch.js',
+      makeRemoteDeps({ 'https://cdn.test/huge.js': 'x'.repeat(REMOTE_MODULE_MAX_CHARS + 1) }),
+    )).rejects.toThrow('per-module cap');
+  });
+
+  test('the per-run remote-fetch count cap is enforced across the graph', async () => {
+    const remote: Record<string, string> = {};
+    const importLines: string[] = [];
+    for (let i = 0; i <= REMOTE_MODULES_MAX_PER_RUN; i += 1) {
+      remote[`https://cdn.test/m${i}.js`] = `export const v${i} = ${i};`;
+      importLines.push(`import 'https://cdn.test/m${i}.js';`);
+    }
+    await expect(buildEntry(
+      importLines.join('\n'),
+      'scratch.js',
+      makeRemoteDeps(remote),
+    )).rejects.toThrow('per-run cap');
+  });
+
+  test('a graph of EXACTLY the per-run cap resolves (boundary — a tightening regresses loud)', async () => {
+    const remote: Record<string, string> = {};
+    const importLines: string[] = [];
+    for (let i = 0; i < REMOTE_MODULES_MAX_PER_RUN; i += 1) {
+      remote[`https://cdn.test/m${i}.js`] = `export const v${i} = ${i};`;
+      importLines.push(`import 'https://cdn.test/m${i}.js';`);
+    }
+    const fetched: string[] = [];
+    const out = await buildEntry(
+      importLines.join('\n'),
+      'scratch.js',
+      makeRemoteDeps(remote, {}, fetched),
+    );
+    expect(fetched.length).toBe(REMOTE_MODULES_MAX_PER_RUN);
+    expect(out.cache.size).toBe(REMOTE_MODULES_MAX_PER_RUN);
+  });
+
+  test('a FAILED fetch still consumes cap budget (no free retries for a hostile graph)', async () => {
+    const deps = makeRemoteDeps({ 'https://cdn.test/ok.js': 'export const x = 1;' });
+    const cache = new Map<string, { blobUrl: string, source: string }>();
+    for (let i = 0; i < REMOTE_MODULES_MAX_PER_RUN; i += 1) {
+      await buildModule(`https://evil.test/m${i}.js`, deps, cache).catch(() => {});
+    }
+    await expect(buildModule('https://cdn.test/ok.js', deps, cache)).rejects.toThrow('per-run cap');
+  });
+
+  test('a #sha256 pin verifies (and a mismatch is refused)', async () => {
+    const source = 'export const pinned = true;';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+    const pin = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const ok = await buildEntry(
+      `import { pinned } from 'https://cdn.test/lib.js#sha256-${pin}';\nreturn pinned;`,
+      'scratch.js',
+      makeRemoteDeps({ 'https://cdn.test/lib.js': source }),
+    );
+    expect(ok.cache.has(`https://cdn.test/lib.js#sha256-${pin}`)).toBe(true);
+    await expect(buildEntry(
+      "import { pinned } from 'https://cdn.test/lib.js#sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';\nreturn pinned;",
+      'scratch.js',
+      makeRemoteDeps({ 'https://cdn.test/lib.js': source }),
+    )).rejects.toThrow('failed its #sha256 pin');
+  });
+
+  test.each([
+    ['https://cdn.test/lib.js#sha256-abc!def'],   // stray char in the hash
+    ['https://cdn.test/lib.js#sha384-AAAA'],      // wrong algorithm tag
+    ['https://cdn.test/lib.js#sha256=AAAA'],      // wrong separator
+    ['https://cdn.test/lib.js#sha256-AAAA#x'],    // second fragment
+    ['https://cdn.test/lib.js#readme'],           // any non-pin fragment
+  ])('a malformed pin fails CLOSED without fetching unpinned (%s)', async (spec) => {
+    // A near-miss pin must never degrade to "no pin" — the author believed
+    // this code was pinned. Fragments never reach the server, so refusing
+    // every non-pin fragment costs nothing legitimate.
+    const fetched: string[] = [];
+    await expect(buildEntry(
+      `import '${spec}';`,
+      'scratch.js',
+      makeRemoteDeps({ 'https://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched),
+    )).rejects.toThrow('integrity pin');
+    expect(fetched).toEqual([]);   // refused BEFORE any fetch
+  });
+
+  test('a #sha256 pin applies on the dynamic-import (compose-module) path too', async () => {
+    const source = 'export const pinned = 7;';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+    const pin = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const good = await buildModule(
+      `https://cdn.test/lazy.js#sha256-${pin}`,
+      makeRemoteDeps({ 'https://cdn.test/lazy.js': source }),
+    );
+    expect(good.source).toContain('export const pinned');
+    await expect(buildModule(
+      'https://cdn.test/lazy.js#sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      makeRemoteDeps({ 'https://cdn.test/lazy.js': source }),
+    )).rejects.toThrow('failed its #sha256 pin');
+  });
+
+  test('a base64url pin verifies the same bytes as standard base64', async () => {
+    const source = 'export const pinned = 1;';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const b64url = b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const out = await buildEntry(
+      `import { pinned } from 'https://cdn.test/lib.js#sha256-${b64url}';\nreturn pinned;`,
+      'scratch.js',
+      makeRemoteDeps({ 'https://cdn.test/lib.js': source }),
+    );
+    expect(out.imports).toContain('blob:test/');
+  });
+
+  test('a string-literal dynamic import of an https URL routes through __peerd_dynamic_import', async () => {
+    const out = await buildEntry(
+      "const m = await import('https://cdn.test/lazy.js'); return m.x;",
+      'scratch.js',
+      makeDeps({}),
+    );
+    // resolution is deferred to the host compose-module path at runtime,
+    // where buildModule applies the SAME fetchRemote gating.
+    expect(out.body).toContain('__peerd_dynamic_import("https://cdn.test/lazy.js")');
+  });
+
+  test('a relative dynamic import INSIDE a remote module resolves against its URL', async () => {
+    const out = await buildEntry(
+      "import { lazy } from 'https://cdn.test/pkg/loader.js';\nreturn lazy();",
+      'scratch.js',
+      makeRemoteDeps({
+        'https://cdn.test/pkg/loader.js': "export const lazy = () => import('./helper.js');",
+      }),
+    );
+    const src = out.cache.get('https://cdn.test/pkg/loader.js')!.source;
+    expect(src).toContain('__peerd_dynamic_import("https://cdn.test/pkg/helper.js")');
+  });
+});
+
+describe('makeFetchRemote (the shared host fetch/decode)', () => {
+  test('decodes utf-8 body bytes and sends noCache:true on EVERY module fetch', async () => {
+    const reqs: any[] = [];
+    const fetchRemote = makeFetchRemote(async (req) => {
+      reqs.push(req);
+      return { ok: true, status: 200, bodyB64: Buffer.from('export const s = "héllo";', 'utf8').toString('base64') };
+    });
+    expect(await fetchRemote('https://cdn.test/x.js')).toBe('export const s = "héllo";');
+    // noCache is the load-bearing bit: module source must never serve from the
+    // IDB cache (a warm hit would skip the denylist re-check + audit).
+    expect(reqs).toEqual([{ url: 'https://cdn.test/x.js', method: 'GET', noCache: true }]);
+  });
+
+  test('a relay refusal surfaces as its error message; a bodyless 200 decodes empty', async () => {
+    const refused = makeFetchRemote(async () => ({ ok: false, status: 0, error: 'denylisted: https://evil.test/x.js' }));
+    await expect(refused('https://evil.test/x.js')).rejects.toThrow('denylisted: https://evil.test/x.js');
+    const empty = makeFetchRemote(async () => ({ ok: true, status: 200, bodyB64: null }));
+    expect(await empty('https://cdn.test/empty.js')).toBe('');
   });
 });
 

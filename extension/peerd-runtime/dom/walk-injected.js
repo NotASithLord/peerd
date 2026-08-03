@@ -222,9 +222,35 @@ export function domWalkInjected() {
   // Known miss: querySelector does not pierce shadow roots, so a login form
   // inside a closed or open shadow tree is invisible here. Fail-open, same as
   // the classifier it feeds.
+  //
+  // why `new-password` is EXCLUDED: that autocomplete token means "this field
+  // CREATES a password", i.e. a registration form — which is evidence the user
+  // does NOT have an account here, the exact opposite of what this signal is
+  // asking. Measured: the whole Stack Exchange network ships a hidden signup
+  // modal (action="/users/signup", autocomplete="new-password") in its page
+  // chrome, so reading ONE answer permanently marked stackoverflow.com,
+  // superuser.com, serverfault.com, askubuntu.com and math.stackexchange.com as
+  // sites the user has an identity on — after which a roaming helper could never
+  // drive a tab there again, with no UI to see or undo it.
+  //
+  // why not filter on VISIBILITY instead (the first thing that suggests itself):
+  // it would undo the deliberate choice above. A closed sign-in modal is hidden
+  // AND is a real signal; that case is the reason this reads the document rather
+  // than the walk. `new-password` separates the two without touching it.
+  //
+  // Checked against real pages: this clears 6/7 of the observed false positives
+  // and keeps 7/7 real sign-in pages firing (they use `current-password` or no
+  // autocomplete at all). The one origin still marked, instagram.com, is a
+  // genuine login form on its front page — a correct classification.
   var hasPasswordField = false;
   try {
-    hasPasswordField = !!document.querySelector('input[type="password"]');
+    var pwFields = document.querySelectorAll('input[type="password"]');
+    for (var pwIndex = 0; pwIndex < pwFields.length; pwIndex++) {
+      var pwAutocomplete = pwFields[pwIndex].getAttribute('autocomplete');
+      if (String(pwAutocomplete == null ? '' : pwAutocomplete).toLowerCase() === 'new-password') continue;
+      hasPasswordField = true;
+      break;
+    }
   } catch (e) {
     hasPasswordField = false;
   }
@@ -302,14 +328,23 @@ export function domWalkInjected() {
  *
  * Deliberately ES5 and self-contained: chrome.scripting serializes this source
  * and re-evaluates it in the page's classic-script world, so it can close over
- * nothing. See the header of dom-helpers.js.
+ * nothing. See the header of dom-helpers.js. That is also why the
+ * `new-password` rule is spelled out again here instead of shared — an injected
+ * body closes over nothing, so the two copies must each stand alone. Keep them
+ * in step; the walk copy carries the full rationale.
  *
  * @returns {boolean}
  */
 export function hasPasswordFieldInjected() {
   'use strict';
   try {
-    return !!document.querySelector('input[type="password"]');
+    var fields = document.querySelectorAll('input[type="password"]');
+    for (var i = 0; i < fields.length; i++) {
+      var autocomplete = fields[i].getAttribute('autocomplete');
+      // A registration field is evidence the user has NO account here.
+      if (String(autocomplete == null ? '' : autocomplete).toLowerCase() !== 'new-password') return true;
+    }
+    return false;
   } catch (e) {
     return false;
   }

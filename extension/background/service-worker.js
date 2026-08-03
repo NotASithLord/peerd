@@ -69,6 +69,7 @@ import {
 } from '/peerd-egress/index.js';
 
 import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
+import { applyFetchExtract } from '/shared/fetch-extract.js';
 
 import {
   listProviders,
@@ -97,8 +98,10 @@ import {
   // different provider could get past, and order the candidate chain.
   shouldFailover,
   planFailoverChain,
-  // cost telemetry (feature 06): local pricing table + cost math.
-  costOf,
+  // cost telemetry (feature 06): local pricing table + cost math. hasPricing
+  // also gates the sub-call model arg (design 5): an unpriceable id would
+  // spend invisibly past the spend limit, so the route refuses it up front.
+  costOf, hasPricing,
   // long-session compression: resolve the active model's context window so
   // the trim trigger scales to it (dynamic, not a fixed token count).
   // contextWindowFor returns the resolved number, or null when unknown —
@@ -204,14 +207,24 @@ import {
   createCheckpointManager,
   // cost telemetry (feature 06): normalize for the state push + the
   // per-turn tracker (fold/persist/push/halt with all IO injected).
-  normalizeTally, makeTurnCostTracker,
+  // addUsage/limitExceeded also serve the script/model-call route's cost
+  // fold + spend-limit preflight (design 5).
+  normalizeTally, makeTurnCostTracker, addUsage, limitExceeded,
   // transfer (settings export/import — dual-distribution §10)
   buildExport,
   inspectImport,
   applyImport,
   ExportPassphraseError,
+  // design js-superpower/06 — the toolbox: durable agent-authored modules
+  // (peerd:toolbox/<name>; store + the write-time import-resolution check).
+  createToolboxStore,
+  makeToolboxParseCheck,
   // DESIGN-19 site clients — per-origin derived API clients (store + pure helpers)
   createSiteClientStore,
+  // script's value-spill store (run cache) — read_run_cache pages it back —
+  // and the shared spill-cache entry cap both spill stores use.
+  createRunCacheStore,
+  SPILL_CACHE_MAX_ENTRIES,
   resolveSiteUrl,
   buildMintInjection,
   digestCapture,
@@ -241,6 +254,9 @@ import {
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  // Design 5 — the pure core the script/model-call route runs: text-only arg
+  // validation, per-run quota arithmetic, and the provider-event fold.
+  validateProviderCallArgs, providerQuotaError, foldProviderEvents,
   // A2A — the mesh dispatch + translation the a2a/call route runs.
   makeMeshDispatch, meshCallToOp, shapeMeshResult,
   // Standing peer conversations — the pure thread registry (convId → turns).
@@ -260,14 +276,14 @@ import {
   // live — the state store, the judge, the synchronous credential-scope
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
-  isKnownIdp, describeLandingStop, originPhrase, isUgcHost,
+  isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
   finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
 } from '/peerd-runtime/index.js';
 
-import { flattenCategorisedDenylist, normalizeDenylistPattern } from '/peerd-egress/index.js';
+import { flattenCategorisedDenylist, normalizeDenylistPattern, denylistSessionRuleUpdate } from '/peerd-egress/index.js';
 
 import { createVmClient } from './vm-client.js';
 import { createVmTabTracker } from './vm-tab-tracker.js';
@@ -282,6 +298,7 @@ import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
+import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import {
   createVmRegistry,
@@ -289,6 +306,9 @@ import {
   createAppRegistry,
   // artifact export/import (.peerd envelopes — DESIGN-10)
   opfsHelpers,
+  // design 06: the resolver transform, injected into the toolbox write-time
+  // parse check (functional core — the check itself lives in peerd-runtime).
+  buildModule,
   NOTEBOOK_OPFS_ROOT,
   IMAGE_PIN_STORAGE_KEY,
   buildAppExport,
@@ -313,6 +333,7 @@ import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
 import { makeDenylistStore } from './denylist-store.js';
+import { makeDenylistNetGuard } from './denylist-net-guard.js';
 import { makeSessionState } from './session-state.js';
 import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
@@ -331,10 +352,12 @@ import { makeSessionRoutes } from './routes/sessions.js';
 import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
 import { makeDenylistRoutes } from './routes/denylist.js';
+import { makeLearnedOriginRoutes } from './routes/learned-origins.js';
 import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
+import { makeToolboxRoutes } from './routes/toolbox.js';
 
 // ---------------------------------------------------------------------------
 // 1. Layer 1 instances
@@ -598,12 +621,12 @@ const VM_HTTP_CACHE_STORE = 'vm_http_cache';
 // cutoff key (the vm_http_cache posture: fetched public bytes, best-effort,
 // safe to clear). Bounded so unbounded page-spills can't grow the profile.
 const WEB_EXTRACT_CACHE_STORE = 'web_extract_cache';
-const WEB_EXTRACT_CACHE_MAX_ENTRIES = 40;
+const WEB_EXTRACT_CACHE_MAX_ENTRIES = SPILL_CACHE_MAX_ENTRIES;
 let webCacheSeq = 0;
 const webCache = {
   /** Mint a new time-ordered cache key. */
   key: () => `wc-${Date.now().toString(36)}-${(webCacheSeq += 1).toString(36)}`,
-  /** @param {{ key: string, url?: string, format?: string, text: string, storedAt?: number }} record */
+  /** @param {{ key: string, url?: string, format?: string, text: string, storedAt?: number, ownerSessionId?: string | null }} record */
   put: async (record) => {
     await idb.put(WEB_EXTRACT_CACHE_STORE, { storedAt: Date.now(), ...record });
     // Best-effort eviction: keys sort chronologically (time-prefixed), so
@@ -693,6 +716,38 @@ const memory = createMemoryStore({ idb });
 // loadable as a skill). Injected as ctx.siteClients for the web actor's
 // site_client_* tools and read at mint for fenced dossier injection.
 const siteClientStore = createSiteClientStore();
+
+// The script value-spill store (run cache) — its OWN best-effort IDB DB, the
+// web-extract-cache posture one tier down: an oversized script [VALUE] spills
+// here and read_run_cache pages it back, ownership-stamped per session and
+// fenced per the run's own fence state.
+const runCache = createRunCacheStore();
+
+// Session teardown for the durable script WORKSPACE (['peerd-workspace', sid]
+// — the `script` tool's workspace:true root). Wired into session/archive,
+// the terminal session-lifecycle event. OPFS is reachable from the SW
+// (peerd-engine/opfs.js header); nuke() already swallows a missing subtree.
+const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-workspace', sid]).nuke();
+
+// design js-superpower/06 — the TOOLBOX: durable agent-authored ES modules
+// (peerd:toolbox/<name>), its OWN IDB DB. A distinct trust class from skills
+// AND site clients (a toolbox module is never loadable as a skill and never
+// runnable against an origin pin); keeping the DBs separate makes that
+// boundary structural. Injected as ctx.toolbox for the toolbox_* tools; the
+// resolution hosts read bodies via the toolbox/read route.
+const toolboxStore = createToolboxStore();
+// The write-time import-resolution check: the resolver transform run against a
+// candidate body, siblings read from the store. It validates import resolution,
+// NOT JS syntax. makeBlobUrl inside is a stub — the SW has no
+// URL.createObjectURL, and the check never imports the result.
+const toolboxParseCheck = makeToolboxParseCheck({
+  buildModule,
+  readSibling: async (/** @type {string} */ name) => {
+    const body = await toolboxStore.getBody(name);
+    if (body == null) throw new Error(`unknown toolbox module '${name}' — write it first (toolbox_write)`);
+    return body;
+  },
+});
 
 // Profiles (ROADMAP "Profiles", deprioritized to the default-profile
 // shape). Exactly ONE record exists — 'default' — carrying peerName
@@ -792,9 +847,66 @@ const loadDenylist = async () => {
   }
   await denylistStore.load(seed);
   console.log('[sw] denylist loaded —', denylistStore.patterns().length, 'patterns');
+  // The backstop's rule set is derived from the list, so it has to be rebuilt
+  // the moment the list exists (a live SW restart can find tabs already driven).
+  denylistNetGuard.sync();
 };
 /** @type {Promise<void>} */
 const denylistReady = loadDenylist();
+
+// ── the denylist's NETWORK-level backstop ──────────────────────────────────
+//
+// The gates above are decision-time: they judge a URL the agent hands us. They
+// cannot see what a page does on its OWN initiative — a driven tab that
+// `location =`s onto a bank reaches the bank's DOM through a tool call that
+// never named the bank, so no gate ever got a URL to refuse. Same gap in an App
+// sandbox, whose agent-authored code reaches the network without passing
+// webFetch at all. declarativeNetRequest closes it below the page: one
+// session-scoped rule, blocking denylisted domains in the tabs peerd is
+// CURRENTLY DRIVING and nowhere else. See background/denylist-net-guard.js and
+// peerd-egress/denylist/dnr-rules.js.
+//
+// Deliberately a BACKSTOP, not a replacement: the JS gates still produce the
+// refusal the model reads and the audit entry the user sees. Where DNR is
+// unavailable (Firefox's partial implementation) the guard is a no-op and
+// behavior is exactly what it was before.
+const drivenTabIds = () => {
+  /** @type {Set<number>} */
+  const ids = new Set();
+  // Tabs a web actor owns — the ones it navigates and reads the DOM of.
+  for (const [tabId] of webActorTabBindings.entries()) ids.add(tabId);
+  // Engine tabs. The WebVM's network already proxies through webFetch and the
+  // Notebook worker is sealed, so App tabs are the ones with a real un-gated
+  // network edge — but scoping all three keeps the rule uniform and costs a
+  // rule condition entry, not a check per request.
+  for (const tracker of [vmTabTracker, jsTabTracker, appTabTracker]) {
+    for (const instanceId of tracker.listLive()) {
+      const tabId = tracker.getTabId(instanceId);
+      if (typeof tabId === 'number') ids.add(tabId);
+    }
+  }
+  return [...ids];
+};
+// The IdP registry as bare domains for the allow rule — derived NEXT TO the
+// registry (knownIdpDomains) so a registry edit moves the excursion rule and
+// this carve-out together. Computed once; the registry is a frozen constant.
+const idpExemptDomains = knownIdpDomains();
+
+const denylistNetGuard = makeDenylistNetGuard({
+  dnr: /** @type {any} */ (globalThis).chrome?.declarativeNetRequest,
+  // The IdP carve-out. The origin lock lets a bound actor's tab leave its owned
+  // origin exactly once, for a sign-in, and several identity providers are also
+  // denylist entries — an overlap both halves intend (the denylist stops the
+  // AGENT driving a login box; the excursion keeps the tab usable so the PERSON
+  // can finish signing in and the actor can resume). A blanket network block
+  // would break that, so the rule pair exempts exactly the IdP registry — which
+  // stays the single authority on what counts as one. No authority is granted:
+  // isDenylistedTab still refuses every DOM tool on such a tab.
+  buildUpdate: (/** @type {any} */ input) => denylistSessionRuleUpdate({ ...input, exemptDomains: idpExemptDomains }),
+  getPatterns: () => denylistStore.patterns(),
+  getTabIds: drivenTabIds,
+  audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
+});
 
 // ---------------------------------------------------------------------------
 // issue 251 — the origin lock, made live.
@@ -884,6 +996,14 @@ const learnedOrigins = makeLearnedOrigins({
   // refuse to open that site" deserves a record naming the signal and the moment.
   onLearn: (origin, reason) => {
     auditLog.append({ type: 'origin_learned_sensitive', details: { origin, reason } }).catch(() => {});
+  },
+  // The inverse, from Settings. Recorded per-origin even for a bulk clear: the
+  // learn entries name origins, so the un-learn entries must too or the log
+  // cannot be read as a history of one site's protection.
+  onForget: (origins) => {
+    for (const origin of origins) {
+      auditLog.append({ type: 'origin_unlearned_sensitive', details: { origin } }).catch(() => {});
+    }
   },
   onError: (message, error) => console.warn('[learned-origins]', message, error),
 });
@@ -996,6 +1116,10 @@ const originLockFor = (/** @type {string | null | undefined} */ actorSessionId) 
         if (current) {
           const parkedTab = webActorTabBindings.tabFor(actorSessionId);
           if (typeof parkedTab === 'number' && webActorTabBindings.drop(parkedTab)) persistWebBindings();
+          // The stop hands this tab back to the user (they may want to look at
+          // it), so peerd's group + pill come off with the binding. Without this
+          // a refused tab stays in peerd's group forever, still looking driven.
+          if (typeof parkedTab === 'number') pageActivity.release(parkedTab).catch(() => {});
           // A SITE actor whose very first landing was refused is a dead handle:
           // its owned origin is one the site does not actually serve, and the
           // binding is durable, so retrying the same handle resumed the same
@@ -1130,6 +1254,16 @@ const todoChains = new Map();
  * provider + vault state so tools see a consistent view during a
  * single dispatch.
  */
+// The in-page activity indicator, one per service worker. Holds the set of tabs
+// it has marked so release() only ever undoes its own grouping — a tab the user
+// grouped themselves is none of its business. Best-effort throughout; on Firefox
+// browser.tabGroups is undefined and the group half quietly no-ops.
+const pageActivity = createPageActivityReporter({
+  tabs: browser.tabs,
+  tabGroups: /** @type {any} */ (browser).tabGroups,
+  scripting: browser.scripting,
+});
+
 const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionId, activeTabId, exposure, synthetic, trusted, actorInstanceId, actorType, actorBacking, actorSurface } = {}) => {
   // SECURITY: never build a tool context against an unloaded denylist. The seed
   // loads async; this await closes the cold-start race so the origin gate always
@@ -1137,6 +1271,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
   // dispatch, spawned actors) routes through here, so all are covered.
   await denylistReady;
+  // Same shape, one layer down: never dispatch a tool while the DNR backstop
+  // trails the driven-tab set. Most binding paths kick the sync without awaiting
+  // it (bind() is a sync callback), so an actor's FIRST tool call could
+  // otherwise race the rule landing — adoptWebTab awaits, but the site-actor
+  // path (addressing an existing tab) did not. Awaiting here closes every such
+  // race structurally. Cheap: a no-change sync short-circuits on the
+  // fingerprint, and the promise never rejects.
+  await denylistNetGuard.sync();
   // why: the override lets the actor orchestrator build a context
   // bound to a CHILD session id instead of the chat's current one. With
   // no override this is identical to the original behaviour (the active
@@ -1299,6 +1441,14 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       // later turn to wake, so its actor reply is awaited into the tool
       // result instead of delivered as a re-entry wake.
       kind: activeSession?.kind ?? 'chat',
+      // why: load_skill's trim-aware once-per-session dedup (schema-diet 6b).
+      // messageCount is where this call's result will sit; trimCovered is the
+      // count of leading messages the rolling summary has folded out of the
+      // SENT slice. A re-load re-injects the full body only once trimCovered
+      // has passed the prior load's position — so a skill still in context is
+      // deduped, one that scrolled out is re-paged. Read-only, both default 0.
+      messageCount: Array.isArray(activeSession?.messages) ? activeSession.messages.length : 0,
+      trimCovered: activeSession?.trimSummary?.covered ?? 0,
     },
     // Plan/Act permission policy input. The persona gate reads
     // permission.mode to enforce Plan's read-only block; the dispatcher
@@ -1306,6 +1456,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // action confirms. { mode: 'plan'|'act', confirmActions: boolean }.
     permission,
     activeTab,
+    // The in-page activity indicator (background/page-activity.js). The
+    // dispatcher calls begin/end around every `primitive:'tab'` call, so the
+    // tab peerd is driving marks itself in the tab strip and says what it is
+    // doing. Threaded here rather than imported by the dispatcher so the IO
+    // stays injected and every non-SW dispatch path (tests, the offscreen
+    // worker's own ctx) simply has no indicator.
+    onToolActivity: pageActivity,
     // why: the bound actor orchestrator. The actor_create tool calls
     // ctx.spawnActor(...) to decompose a task into a child session
     // that runs the same loop. Wired below; see makeSpawnActor.
@@ -1501,6 +1658,10 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // read_web_cache pages it back. Stripped to exactly those two tools by
     // spawn.js CAPABILITY_CONSUMERS.webCache.
     webCache,
+    // script's value-spill store: an oversized [VALUE] spills here and
+    // read_run_cache pages it back. Stripped to exactly those two tools by
+    // spawn.js CAPABILITY_CONSUMERS.runCache.
+    runCache,
     // why: web tools open background tabs unconditionally (never-steal-
     // focus policy, 2026-06-12); settings ride along for other consumers.
     settings: { ...settingsStore.get() },
@@ -1527,6 +1688,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // actor whose toolset lacks the site_client_* tools (CAPABILITY_CONSUMERS.siteClients);
     // present on the web actor. Harmless on the main ctx (the tools are hidden + gated).
     siteClients: siteClientStore,
+    // design 06: the toolbox store + write-time parse check (toolbox_write/
+    // list/delete). Stripped from any actor/child whose grants lack the tools
+    // (CAPABILITY_CONSUMERS.toolbox / .toolboxParseCheck).
+    toolbox: toolboxStore,
+    toolboxParseCheck,
     // DESIGN-19: the capture closure for site_capture (Tap A CDP / Tap B scripting),
     // injected ONLY for a tab-backed web actor below (like adoptWebTab). Absent → the
     // tool returns site_capture_unavailable.
@@ -1719,7 +1885,15 @@ const spawnActorCore = makeSpawnActor({
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   // why: resolve background-tabs from CURRENT settings at call time, not
   // boot — settings load async and can change over the SW's life. This
-  renderSystemPrompt: (opts) => renderSystemPrompt(opts),
+  // design 01: a spawned child renders its prompt FRESH per spawn (no cross-turn
+  // cache to bust), so it embeds its own temporal grounding — without this an
+  // ephemeral child gets zero time bytes (the main path's <context> message is
+  // built only in turn-driver and never reaches a child). Caller-supplied
+  // temporalBlock still wins.
+  renderSystemPrompt: (/** @type {any} */ opts) => renderSystemPrompt({
+    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+    ...opts,
+  }),
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
   // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
   // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
@@ -1748,7 +1922,13 @@ const spawnActorCore = makeSpawnActor({
       tools: job.tools ?? [],
     }, opts)
     : Promise.resolve({ ok: false, error: 'child offscreen unavailable' }),
-  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({ taskOverride: task }),
+  // design 01: embed temporal grounding — the offscreen child prompt renders
+  // fresh per spawn (no cache), and the main path's <context> message never
+  // reaches a child, so without this an ephemeral child has zero time bytes.
+  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({
+    taskOverride: task,
+    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+  }),
 });
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
@@ -2272,6 +2452,18 @@ const webOffscreenClient = offscreenAvailable ? makeOffscreenWebClient({
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
 
+// The sw/web-fetch route's extract post-step (see shared/fetch-extract.js) —
+// composed HERE so the route reuses the SAME offscreen extraction client
+// fetch_url rides. Firefox (no offscreen doc): no extractor → the helper
+// passes the body through, extracted:false.
+const applyWebExtract = (/** @type {any} */ resp, /** @type {unknown} */ extract, /** @type {string} */ url) =>
+  applyFetchExtract(resp, {
+    extract, url,
+    extractMarkdown: webOffscreenClient
+      ? (source) => webOffscreenClient.extractMarkdown(source)
+      : null,
+  });
+
 // ── Local WebGPU runner bridge (FEATURE-LOCAL-WEBGPU B / M1) ────────────────
 // The local-webgpu adapter generates by calling generateLocalForAdapter, which
 // drives the offscreen engine (offscreen/local-model.js) and streams its tokens
@@ -2377,10 +2569,13 @@ const closeSidePanel = async () => {
 // calls noteAgentTab/scheduleWebTabHint/broadcastAgentTab/showWebTabHint from
 // its tool-context + port wiring, and setTabAnchor from the actor-turn start.
 const {
-  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab,
+  noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab, syncFrontDoorBehavior,
 } = makeTabAffordances({
   browser, uiPorts, denylistStore, closeSidePanel,
   isWatchOn: () => settingsStore.get().watchAgentTab === true,
+  // Sync read (no await) — the front-door decision must run inside the
+  // click gesture or sidePanel.open() drops its activation.
+  getFrontDoorView: () => (settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel'),
 });
 
 // Confirmation coordinator. The dispatcher's async confirmation step
@@ -2678,19 +2873,24 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
 // chrome.tabs.onRemoved.
 browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!isTrustedSender(sender)) return false;
+  // Each tab-ready is a new tabId entering the driven set, so each one resyncs
+  // the denylist network backstop (idempotent; a no-op when nothing moved).
   if (msg?.type === 'vm/tab-ready') {
     if (typeof msg.vmId !== 'string' || sender?.tab?.id == null) return false;
     vmTabTracker.onTabReady(msg.vmId, sender.tab.id);
+    denylistNetGuard.sync();
     return false;
   }
   if (msg?.type === 'js/tab-ready') {
     if (typeof msg.notebookId !== 'string' || sender?.tab?.id == null) return false;
     jsTabTracker.onTabReady(msg.notebookId, sender.tab.id);
+    denylistNetGuard.sync();
     return false;
   }
   if (msg?.type === 'app/tab-ready') {
     if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
     appTabTracker.onTabReady(msg.appId, sender.tab.id);
+    denylistNetGuard.sync();
     return false;
   }
   return false;
@@ -2713,6 +2913,10 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
+  // ...and drop it out of the network backstop's tab scope. Tab ids are REUSED
+  // within a browser session, so a stale entry would silently apply the block
+  // to whatever unrelated tab inherits the id.
+  denylistNetGuard.sync();
 });
 
 // Invalidate a tab's DOM-nav refs when it starts navigating — the
@@ -3119,16 +3323,28 @@ const mintActor = async (/** @type {{ reg: any, kind: string }} */ entry, /** @t
 // one of these is a routing cache whose durable truth lives on the session record.
 const persistRegistry = (/** @type {string} */ key, /** @type {{ entries: () => any }} */ registry) =>
   () => { sessionCache.sessionSet(key, registry.entries()).catch(() => {}); };
-const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) => {
+// Returns the load promise (never rejects) so a caller whose state DEPENDS on
+// the rehydrated entries — the net guard's driven-tab set — can chain onto it
+// instead of guessing at the timing.
+const hydrateRegistry = (/** @type {string} */ key, /** @type {{ load: (e: any) => void }} */ registry) =>
   Promise.resolve(sessionCache.sessionGet(key))
     .then((e) => { if (Array.isArray(e)) registry.load(/** @type {any} */ (e)); })
     .catch(() => {});
-};
 
 const webActorTabBindings = makeWebActorTabBindings();
 const WEB_BINDINGS_KEY = 'webActorTabBindings';
-const persistWebBindings = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
-hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+const persistWebBindingsOnly = persistRegistry(WEB_BINDINGS_KEY, webActorTabBindings);
+// why compose the net-guard sync in HERE rather than at each call site: every
+// mutation of the tab bindings — bind, drop, re-bind, the onRemoved prune —
+// already funnels through persistWebBindings, so this is the one place that
+// sees the driven-tab set change. A sync is idempotent and skips when nothing
+// moved, so the extra call on a no-op mutation costs nothing.
+const persistWebBindings = () => { persistWebBindingsOnly(); denylistNetGuard.sync(); };
+// Rehydration restores bindings without going through persistWebBindings (an
+// SW restart finds tabs still being driven), so the guard is told once the load
+// lands — not before, or it would re-derive the same empty set it started with.
+hydrateRegistry(WEB_BINDINGS_KEY, webActorTabBindings)
+  .then(() => denylistNetGuard.sync());
 
 // The chat→web-actor registry — the 0-or-1-tab web actor (addressed by `to:'web'`,
 // the SINGLE entry point for web work). Separate from webActorTabBindings because
@@ -3259,7 +3475,20 @@ const siteFetchCallRoute = {
     // the owned origin; the worker never holds a credential.
     let scopedFetch;
     if (owner.backing === 'api') {
-      scopedFetch = withApiCredentials(webFetch, () => pin, {
+      // An API actor OWNS ONE origin (its instanceId), and fetch_url pins its
+      // credentials to that FIXED origin (see the actorBacking==='api' branch in
+      // buildToolContext). This relay must pin the SAME way — `pin` here is
+      // MODEL-supplied (site_client_run's `origin` arg), so without this check a
+      // hijacked API actor bound to origin A could name origin B and spend B's
+      // stored vault key + B's cookies: the cross-origin credential escalation the
+      // "an API actor owns one origin" containment (DESIGN-18) exists to prevent.
+      // Refuse when the named origin is not the actor's owned origin. why this is
+      // the API sibling of the tab branch below: #251 scoped the tab path to the
+      // tab's LIVE origin via the lock and origin-lock.js flagged site_client_* as
+      // uncovered — that fix landed for tab actors; this closes it for API actors.
+      const owned = typeof owner.instanceId === 'string' ? normalizeApiOrigin(owner.instanceId) : null;
+      if (!owned || pin !== owned) return { ok: false, error: 'site_fetch_cross_origin' };
+      scopedFetch = withApiCredentials(webFetch, () => owned, {
         getSecret: (/** @type {string} */ name) => vault.getSecret(name),
         audit: (/** @type {any} */ e) => auditLog.append(e),
       });
@@ -3771,6 +4000,10 @@ const onSettingsChanged = (/** @type {any} */ patch) => {
   // long-dead agent tab. normalizeSettingsPatch only emits keys the caller actually
   // sent, so the key's PRESENCE here is exactly "the user just touched the toggle".
   if (patch?.watchAgentTab === true) focusAgentTab();
+  // Front door: re-mirror the choice into Chrome's native action-click
+  // behavior the moment it changes (key PRESENCE = the user just touched it —
+  // normalizeSettingsPatch only emits keys the caller actually sent).
+  if (patch?.frontDoorView) syncFrontDoorBehavior();
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
 // clear the SW-side membership flag for a clean re-join on the next start.
@@ -3920,6 +4153,13 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
     if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
       return { ok: false, error: 'actors: only a chat session holds the script delegation surface' };
     }
+    // why no inbound re-check HERE: the inbound (untrusted-origin) wall for this
+    // path is enforced at the trusted MINT — script.js refuses to expose the
+    // `actors` surface at all when ctx.inbound === true (folded SW-side by the
+    // turn driver), so an inbound turn never reaches this route with an actors
+    // op. inbound is a per-TURN property the untrusted worker cannot be trusted
+    // to echo, so the mint is the only sound enforcement point; do NOT accept an
+    // inbound flag off the relay message here.
     const { op, args } = actorsCallToOp({ method: msg.method, args: msg.args });
     if (op === 'list') {
       // The roster through the normal tool gates — actor_list with the owner's
@@ -3997,6 +4237,167 @@ const actorsCallRoute = async (/** @type {{ method?: string, args?: any, ownerSe
     // A throw after pushOp('sent') would otherwise leave the live-feed line
     // pulsing 'working…' forever — settle it, then report.
     pushOp('failed', { error: 'error' });
+    return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+  }
+};
+
+// Design 5's session cost fold, SERIALIZED per session. why a chain: the
+// sub-call route below is the first caller that is concurrent with ITSELF by
+// design (a script can Promise.all its provider.call fan-out), and a bare
+// get→setCost read-modify-write interleaves — two folds read the same tally
+// and the later write drops the earlier call's spend from the very tally the
+// spend-limit preflight reads. Entries self-evict once their chain drains.
+/** @type {Map<string, Promise<void>>} */
+const sessionCostFoldTails = new Map();
+const foldSessionCost = (/** @type {string} */ sessionId, /** @type {any} */ usage, /** @type {number} */ cost) => {
+  const tail = (sessionCostFoldTails.get(sessionId) ?? Promise.resolve())
+    .then(async () => {
+      const fresh = await sessions.get(sessionId);
+      await sessions.setCost(sessionId, addUsage(normalizeTally(fresh?.cost), usage, cost));
+    })
+    .catch(() => { /* a persist hiccup must not fail the call */ });
+  sessionCostFoldTails.set(sessionId, tail);
+  tail.then(() => { if (sessionCostFoldTails.get(sessionId) === tail) sessionCostFoldTails.delete(sessionId); });
+  return tail;
+};
+
+// The script/model-call route (design 5) — invoked by the offscreen relay for
+// each peerd.provider.call a provider-enabled `script` run makes. The custody
+// shape is actor/model-call's: getSecret + safeFetch are added HERE, so the
+// key never enters the worker or the offscreen document; ownerSessionId/runId
+// are TRUSTED job params (minted by the script tool SW-side) — the worker's
+// own words buy nothing. On top of that custody this route adds: the live-run
+// owner check, text-only arg validation, the per-run quota, the session
+// provider PIN + model gate, the spend-limit preflight, the cost fold, and the
+// Stop chain (the run's abort signal cancels an in-flight provider fetch).
+const scriptModelCallRoute = async (/** @type {{ ownerSessionId?: string, runId?: string, args?: unknown }} */ msg) => {
+  try {
+    const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    // Same posture as actors/call: v1 is the ORCHESTRATOR's surface only. An
+    // actor or spawned owner is refused even if a job param leaked — the
+    // sub-call lane must never hand a fenced context the user's paid key.
+    if (!owner || owner.kind === 'actor' || owner.kind === 'spawned') {
+      return { ok: false, error: 'provider: only a chat session holds the sub-call surface' };
+    }
+    // The LIVE-RUN check: the runId must be registered (script-runs.js) and
+    // bound to this owner — a call from a dead or foreign run is refused.
+    const runId = typeof msg.runId === 'string' ? msg.runId : '';
+    if (!runId || scriptRuns.ownerFor(runId) !== msg.ownerSessionId) {
+      return { ok: false, error: 'provider: unknown or finished run' };
+    }
+    /** @type {ReturnType<typeof validateProviderCallArgs>} */
+    let call;
+    try { call = validateProviderCallArgs(msg.args); }
+    catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }; }
+    // Quota BEFORE the call, counted before it flies (script-runs.js) —
+    // overflow is a structured refusal the script can catch and degrade on
+    // (ProviderQuotaError message), never a worker kill.
+    const quotaRefusal = providerQuotaError(scriptRuns.providerUsageFor(runId));
+    if (quotaRefusal) return { ok: false, error: quotaRefusal.message };
+    // Spend-limit preflight — cheap-call's posture: sub-calls spend against
+    // the OWNING session, so a session past the user's hard cap must not be
+    // pushed further by its own script.
+    // why no reservation: this reads owner.cost per-invocation with no hold, so
+    // a concurrent fan-out can collectively overshoot the limit between the read
+    // and each fold. That is DELIBERATE — the USD limit is a coarse safety lever,
+    // not a ledger; the tight bound on a single run's spend is the per-run
+    // call/token quota above (recordProviderCall), which the fan-out cannot dodge.
+    const spendLimit = settingsStore.get().spendLimitUsd;
+    if (limitExceeded(normalizeTally(owner.cost).cost, spendLimit)) {
+      return { ok: false, error: `provider quota exceeded: the session spend limit ($${spendLimit}) is reached` };
+    }
+    // The session PIN: the endpoint is ALWAYS the owning session's provider
+    // adapter — there is no provider arg, and an explicit `model` only picks a
+    // model WITHIN it. That is design 5's "cannot name an arbitrary endpoint"
+    // enforced by construction (registry.js resolves the adapter by name).
+    const provider = owner.provider;
+    const providerEntry = listProviders().find((p) => p.name === provider);
+    if (!providerEntry) {
+      return { ok: false, error: `provider: session provider not registered: ${provider}` };
+    }
+    const localProvider = !!providerEntry.keyless;
+    const pricingOverrides = /** @type {any} */ (settingsStore.get().pricingOverrides);
+    // The MODEL gate (design 5: an explicit model arg "must resolve within the
+    // user's configured providers or is refused"): a worker-chosen id must be
+    // the session's own model or one with a LOCAL RATE CARD (built-in table or
+    // Settings override). why pricing as the resolver: costOf() prices an
+    // unknown id at $0, so an unpriced model would spend real credits that the
+    // cost tally — and therefore the spend-limit preflight above — never sees.
+    // A keyless (local) provider genuinely costs $0 for any id, so it is
+    // exempt by the same rule.
+    const model = call.model || owner.model;
+    if (call.model && call.model !== owner.model && !localProvider && !hasPricing(call.model, pricingOverrides)) {
+      return { ok: false, error: `provider.call: unknown model '${call.model}' — use the session's model, or an id with a rate card (Settings → pricing overrides)` };
+    }
+    // Abort rides the RUN's controller (script-runs.js): Stop chains into it,
+    // and release() aborts it when the run ends — either kills this fetch.
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'aborted' };
+    // Admission counts the call AND reserves its clamped maxTokens against the
+    // run's output meter (settled to the actual bill below) — so a concurrent
+    // fan-out is bounded by the run ceiling, not just the per-call clamp.
+    scriptRuns.recordProviderCall(runId, call.maxTokens);
+    /** @type {any[]} */
+    const events = [];
+    /** @type {string | undefined} */
+    let streamError;
+    try {
+      // The context inspector sees the sub-call like every delegated model
+      // call; identity from the trusted params, never a worker claim.
+      contextSnapshots.record({
+        provider, model, system: call.system ?? '', messages: call.messages,
+        maxTokens: call.maxTokens, sessionId: msg.ownerSessionId, label: 'script:sub-call',
+      });
+      for await (const ev of callModel(/** @type {any} */ ({
+        provider, model, system: call.system ?? '', messages: call.messages,
+        maxTokens: call.maxTokens, signal: runSignal ?? undefined, getSecret, safeFetch,
+        // issue #104: a remote Ollama daemon — same threading as turn-driver.
+        ollamaHost: settingsStore.get().ollamaHost,
+      }))) events.push(ev);
+    } catch (e) {
+      // A stream that THROWS mid-iteration (an aborted fetch, a network cut)
+      // may already have yielded billed usage events — capture the error and
+      // fall through to the same fold/cost path an error-EVENT stream takes,
+      // so no billed tokens escape the meter or the tally.
+      streamError = runSignal?.aborted ? 'aborted' : (/** @type {{ message?: string }} */ (e)?.message ?? String(e));
+    }
+    const folded = foldProviderEvents(events);
+    scriptRuns.settleProviderCall(runId, call.maxTokens, folded.usage?.outputTokens ?? 0);
+    // ONE usage shape on every return path — the job-runner meter sums
+    // input+output; cache-token detail stays inside the cost fold.
+    const usage = folded.usage ? { inputTokens: folded.usage.inputTokens, outputTokens: folded.usage.outputTokens } : null;
+    // Cost: fold ANY usage — an errored stream's billed tokens are still
+    // billed. Same fold as cheap-call: price locally, add into the owning
+    // session's persisted tally (the cost meter + next turn's hard-limit
+    // check see it), audit the sub_call so money moving leaves a record.
+    if (folded.usage) {
+      let cost = 0;
+      try { cost = costOf(/** @type {any} */ (model), folded.usage, pricingOverrides, { localProvider })?.cost ?? 0; }
+      catch { cost = 0; }
+      await foldSessionCost(/** @type {string} */ (msg.ownerSessionId), folded.usage, cost);
+      auditLog.append({
+        type: 'provider_sub_call', sessionId: msg.ownerSessionId,
+        details: { runId, provider, model, outputTokens: folded.usage.outputTokens, cost },
+      }).catch(() => {});
+    }
+    // A Stop that fired mid-stream must never deliver a completed answer, even
+    // if the provider flushed before the abort landed (actor/model-call's race
+    // guard 2, same reasoning).
+    if (runSignal?.aborted) return { ok: false, error: 'aborted', ...(usage ? { usage } : {}) };
+    if (streamError) return { ok: false, error: streamError, ...(usage ? { usage } : {}) };
+    if (folded.error) return { ok: false, error: folded.error, ...(usage ? { usage } : {}) };
+    return {
+      ok: true,
+      value: {
+        text: folded.text, model,
+        // stopReason surfaces truncation: a maxTokens-clipped generation
+        // ('max_tokens') must be distinguishable from a complete answer on a
+        // surface whose per-call clamp is this tight.
+        ...(folded.stopReason !== undefined ? { stopReason: folded.stopReason } : {}),
+        ...(usage ? { usage } : {}),
+      },
+    };
+  } catch (e) {
     return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
   }
 };
@@ -4202,6 +4603,10 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
   if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
   webActorTabBindings.bind(tabId, actorSessionId);
   persistWebBindings();
+  // AWAIT the network backstop before handing the tab back: the caller's very
+  // next act is to navigate it. persistWebBindings already kicked the sync off;
+  // this only waits for its turn in the queue, and it never rejects.
+  await denylistNetGuard.sync();
   noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
   return { tabId, windowId: created?.windowId };
 };
@@ -4213,6 +4618,11 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
 // so the two concerns stay independent.
 browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   if (webActorTabBindings.drop(tabId)) persistWebBindings();
+  // The tab is gone, so both halves of the indicator are moot — but the
+  // reporter still holds the id in its marked set, and tab ids are reused
+  // within a session. Release drops it so a LATER tab that inherits the id
+  // isn't mistaken for one peerd already grouped.
+  pageActivity.release(tabId).catch(() => {});
 });
 
 // Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
@@ -4336,6 +4746,13 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
   } finally {
     release();
+    // The turn is over, so the pill comes down — leaving it up through the idle
+    // gap would say "peerd is working" while nothing is happening, which is the
+    // same misreading in the opposite direction. The tab GROUP stays: the actor
+    // still owns this tab and will be back on the next turn, and shuffling it in
+    // and out of the strip every exchange would be its own annoyance.
+    const drivenTabId = webActorTabBindings.tabFor(actorSessionId);
+    if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
   }
 };
 
@@ -4501,7 +4918,18 @@ const actorMessaging = makeActorMessaging({
     // oneShot: the loop synthesizes the reply from the first clean tool round and
     // stops (no summarize inference) — finalAssistantText below reads that synthetic
     // assistant message exactly like a normal reply, so nothing else changes here.
-    await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
+    try {
+      await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
+    } finally {
+      // why here too: runActorTurnOffscreen takes the pill down in its own
+      // finally, but this is the IN-SW fallback the offscreen path returns null
+      // for (Firefox has no offscreen API). Without it the pill outlives the
+      // turn on Firefox and sits on "Thinking…" forever — peerd saying it is
+      // working while nothing is happening, the exact misreading the indicator
+      // exists to prevent. The GROUP still stays; only the pill comes down.
+      const drivenTabId = webActorTabBindings.tabFor(actorSessionId);
+      if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
+    }
     const s = await sessions.get(actorSessionId);
     const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
     return withLandingStop(fresh
@@ -4762,6 +5190,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // actors-enabled headless run makes relays here (owner-verified, fully
   // re-gated through messageActor).
   'actors/call': (/** @type {any} */ msg) => actorsCallRoute(msg),
+  // provider (design 5): the script tool's sub-model surface — each
+  // peerd.provider.call a provider-enabled headless run makes relays here
+  // (owner/run-verified, quota-capped, the key added SW-side).
+  'script/model-call': (/** @type {any} */ msg) => scriptModelCallRoute(msg),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
     pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
@@ -4810,14 +5242,24 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED,
+    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
   }),
   ...makeSystemRoutes({
     vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
     uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
   }),
-  ...makeDenylistRoutes({ denylistStore, auditLog }),
+  // denylistNetGuard: an edit changes what the network backstop blocks, so the
+  // rule is rebuilt on every edit — including the removal path, where a stale
+  // rule would keep blocking a site the user just unblocked.
+  ...makeDenylistRoutes({ denylistStore, auditLog, denylistNetGuard }),
+  // The settings view of the LEARNED origin set (+ the only un-learn path).
+  // Settings-surface only: routes are unreachable from the tool dispatcher, so
+  // no agent or page-fed actor can erase its own containment.
+  // why no auditLog: the STORE's onForget hook appends the audit entry, so
+  // passing one here would double-record every removal (meta test: the deps
+  // object must match what the module destructures).
+  ...makeLearnedOriginRoutes({ learnedOrigins, normalizeApiOrigin }),
   // issue 251 — a READ-ONLY inspection route for the e2e verify loop.
   //
   // why a route at all: the two properties that matter most about the lock are
@@ -4866,6 +5308,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // cascade to its in-flight actors — same primitives agent/stop uses — so
     // background web/VM/App work doesn't keep running on the orphaned session.
     turnSlots, actorMessaging,
+    // Session teardown drops the durable script workspace subtree.
+    nukeSessionWorkspace,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
@@ -4899,13 +5343,22 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
 
   // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
   ...(/** @type {any} */ (siteClientRoutes)),
+
+  // --- design 06: toolbox module resolution (body read for the sealed-worker
+  // resolver) + post-run rot bookkeeping ---
+  ...makeToolboxRoutes({ toolboxStore }),
 })));
 
-// The toolbar icon + Alt+Shift+P front door (open home, or pull the chat panel
-// in) lives in background/tab-affordances.js alongside the agent-tab card and
-// web-tab hint — it owns the sync-gesture pull-in and its listeners.
+// The toolbar icon + Alt+Shift+P front door (open the panel or home, per the
+// frontDoorView setting) lives in background/tab-affordances.js alongside the
+// agent-tab card and web-tab hint — it owns the sync-gesture pull-in and its
+// listeners.
 loadUserEndpoints();
-loadSettings();
+// why the chained mirror: it must apply AFTER hydration (the store serves
+// channel defaults until load() lands), and Chrome persists the behavior
+// browser-side, so by the time a click wakes a future cold SW the native
+// open already reflects the user's real choice.
+loadSettings().then(() => syncFrontDoorBehavior()).catch(() => {});
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears
@@ -5011,6 +5464,9 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
     await appTabTracker.bootstrap();
     console.log('[sw] instance registries initialized — live tabs:',
       { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), app: appTabTracker.listLive() });
+    // An SW restart re-adopts engine tabs that never stopped running, so the
+    // network backstop's tab scope has to be rebuilt from what bootstrap found.
+    denylistNetGuard.sync();
   } catch (e) {
     console.error('[sw] instance init failed', e);
   }

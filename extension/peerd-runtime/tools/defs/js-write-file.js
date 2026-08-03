@@ -1,7 +1,13 @@
 // @ts-check
 // js_write_file — write a string to the Notebook's OPFS scratch.
 
-const MAX_CONTENT_CHARS = 500_000;
+// Exported: the ONE per-file write ceiling for agent-authored OPFS content.
+// The workspace relay (offscreen/job-runner.js, via /peerd-runtime/index.js)
+// enforces the same number on worker-side writes, so `script` can't dodge the
+// tool-side cap by writing from inside the sealed worker. Mirrored by
+// peerd-runtime/toolbox/core.js MAX_TOOLBOX_BODY_CHARS (a toolbox module is the
+// same order of agent-written source) — move them together.
+export const MAX_FILE_CONTENT_CHARS = 500_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const jsWriteFileTool = {
@@ -33,8 +39,8 @@ export const jsWriteFileTool = {
     if (typeof args?.content !== 'string') {
       return { ok: false, error: 'content_required' };
     }
-    if (args.content.length > MAX_CONTENT_CHARS) {
-      return { ok: false, error: `content_too_large: ${args.content.length} > ${MAX_CONTENT_CHARS}` };
+    if (args.content.length > MAX_FILE_CONTENT_CHARS) {
+      return { ok: false, error: `content_too_large: ${args.content.length} > ${MAX_FILE_CONTENT_CHARS}` };
     }
     // why: jsClient rides the opaque ctx contract (not on ToolContext); narrow
     // to the one method this tool calls.

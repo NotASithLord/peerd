@@ -123,6 +123,13 @@ export {
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
+// Design 5 — peerd.provider.call: the pure core (text-only arg validation,
+// per-run quota arithmetic, event fold) the SW script/model-call relay runs.
+// Only the three functions the relay consumes surface here (the a2a-api.js
+// precedent); the error classes + constants stay module-internal.
+export {
+  validateProviderCallArgs, providerQuotaError, foldProviderEvents,
+} from './actor/provider-call-api.js';
 // Standing peer conversations — the pure thread registry (convId → turns),
 // capped + TTL-evicted; the SW singleton drives inbound routing + reply consent.
 export {
@@ -164,7 +171,7 @@ export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
 // A UGC host is by construction a site people have accounts on; that is what
 // made its content attacker-authorable in the first place.
 export { isUgcHost } from './actor/ugc-registry.js';
-export { isKnownIdp, knownIdpSeeds } from './actor/idp-registry.js';
+export { isKnownIdp, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
 export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
@@ -174,6 +181,15 @@ export {
   stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
   createSiteClientStore, digestCapture, redactHeaders,
 } from './site-clients/index.js';
+// design js-superpower/06: the toolbox — durable agent-authored ES modules
+// imported as peerd:toolbox/<name> from the own-compute lanes. Pure core
+// (validation, confirm-gated proposal, write-time parse check, fenced list
+// rendering) + the two-tier store. See toolbox/index.js.
+// Only the SW's wiring needs (store + write-time parse check) cross the module
+// boundary; everything else is consumed intra-module by the toolbox_* tools.
+export {
+  createToolboxStore, makeToolboxParseCheck,
+} from './toolbox/index.js';
 // PR #119: the host-side handler for the web actor's code-REPL arm — turns a
 // page.<method> RPC (made inside the sealed worker) into the SAME gated tool
 // dispatch the tool-call web actor uses, pinned to the actor's owned tab.
@@ -239,6 +255,16 @@ export {
 } from './tools/manifests.js';
 export { makeToolsCommand, describePresets } from './tools/manifest-command.js';
 export { wrapUntrusted } from './tools/prompt-wrap.js';
+// The script value-spill store (run cache) — the SW instantiates it and
+// injects it into tool contexts (read_run_cache pages it back).
+export { createRunCacheStore } from './tools/run-cache.js';
+// The shared spill-cache entry cap — the SW's web extract cache uses the same
+// number as the run cache, imported from ONE home so the twins never drift.
+export { SPILL_CACHE_MAX_ENTRIES } from './tools/web/spill.js';
+// The one per-file OPFS write ceiling — js_write_file enforces it tool-side;
+// the workspace relay (offscreen/job-runner.js) imports it from HERE so
+// worker-side writes share the same number without a deep import.
+export { MAX_FILE_CONTENT_CHARS } from './tools/defs/js-write-file.js';
 
 // --- composer (slash commands + @-references + palette) -----------------
 export {
@@ -358,6 +384,9 @@ export {
   captureSnapshot,
   describeSource,
   domWalkInjected,
+  activityOverlayInjected,
+  clearActivityOverlayInjected,
+  ACTIVITY_OVERLAY_ID,
   pullInHintInjected,
   // DESIGN-19 Tap B — the MAIN-world fetch/XHR tap for site-client capture.
   installFetchTapInjected,

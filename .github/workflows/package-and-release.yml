@@ -74,6 +74,8 @@ jobs:
         run: bun run check:imports
       - name: Doc path references (top-level docs point at real files)
         run: bun run check:docpaths
+      - name: Source hygiene (no control bytes / tracked symlinks in source)
+        run: bun run check:hygiene
       # The web target: stage it fresh from live source, then prove the
       # assembled tree is import-closed (check-web-boundary auto-runs inside
       # package:web; the explicit second run keeps the gate visible in logs).
@@ -98,8 +100,8 @@ jobs:
         run: |
           if [ -d scripts/cdp/baselines/linux-x64 ]; then
             bun run gallery
-            git diff --exit-code scripts/cdp/gallery.html || {
-              echo '::error::scripts/cdp/gallery.html is out of sync with the committed baselines — run `bun run gallery` and commit.'
+            git diff --exit-code scripts/cdp/GALLERY.md || {
+              echo '::error::scripts/cdp/GALLERY.md is out of sync with the committed baselines — run `bun run gallery` and commit.'
               exit 1
             }
           else
@@ -293,6 +295,7 @@ jobs:
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
           UPDATE_BASELINES: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines && '1' || '' }}
+        id: render
         run: bun run test:e2e:visual
 
       - name: Write the render report to the job summary
@@ -307,9 +310,53 @@ jobs:
             echo
             echo "If the change is INTENDED: re-run this workflow on your branch with"
             echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
-            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\` +"
-            echo "\`scripts/cdp/gallery.html\` and commit."
+            echo "LOOK at every PNG, then unzip it over \`scripts/cdp/baselines/linux-x64/\`,"
+            echo "regenerate \`scripts/cdp/GALLERY.md\` with \`bun run gallery\`, and commit."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ALWAYS link the gallery on a PR, with the verdict — pass or drift.
+      #
+      # why unconditional and not only on failure: the failure path already had a
+      # comment, so the only PRs that said anything about the UI were the ones
+      # that broke it. A reviewer of a green PR had no way to know what the visual
+      # gate actually covers, or that it ran at all. A one-line sticky comment
+      # makes the gallery discoverable on every PR and turns "no drift" into a
+      # stated result rather than an absence.
+      #
+      # STICKY by a hidden marker: find our previous comment and PATCH it, so a
+      # branch that is pushed ten times leaves one comment, not ten.
+      #
+      # Same-repo PRs only — a fork PR's GITHUB_TOKEN is read-only. The job
+      # summary carries the same verdict and does work on forks.
+      - name: Link the visual gallery on the PR
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRIFTED: ${{ steps.render.outcome }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- peerd-visual-gallery -->'
+          GALLERY="https://github.com/${GITHUB_REPOSITORY}/blob/${SHA}/scripts/cdp/GALLERY.md"
+          COUNT=$(ls scripts/cdp/baselines/linux-x64/*.png 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          if [ "$DRIFTED" = "success" ]; then
+            VERDICT="✅ **No visual drift.** Every state renders identically to the committed baselines."
+          else
+            VERDICT="⚠️ **Visual drift detected.** One or more states no longer match the committed baselines — see the before/after below and the job summary. If the change is intended, reseed: re-run this workflow with **update_visual_baselines**, then \`bun run gallery\` and commit."
+          fi
+          BODY=$(printf '%s\n### Visual regression\n\n%s\n\n📸 **[Browse the visual gallery](%s)** — %s baseline screens (light + dark) as of this commit.\n' \
+            "$MARKER" "$VERDICT" "$GALLERY" "$COUNT")
+          # Find our previous sticky comment, if any, and update it in place.
+          ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+                 --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty" | head -1)
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${ID}" -f body="$BODY" >/dev/null
+            echo "updated sticky gallery comment $ID"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$BODY" >/dev/null
+            echo "posted gallery comment"
+          fi
 
       # Flat triple per state so before/after/diff sort ADJACENTLY for a human —
       # the raw globs would scatter them across two directories. why the .before
@@ -397,7 +444,7 @@ jobs:
 
       # Reseed mode: regenerate the gallery from the fresh baselines so the two
       # stay in lockstep, then hand BOTH back as a downloadable zip. No token, no
-      # push — a HUMAN looks at them and commits baselines/linux-x64/ + gallery.html.
+      # push — a HUMAN looks at them and commits baselines/linux-x64/ + GALLERY.md.
       - name: Regenerate the gallery from the fresh baselines
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
         run: bun run gallery
@@ -408,7 +455,7 @@ jobs:
           name: visual-baselines-linux-x64
           path: |
             scripts/cdp/baselines/linux-x64/*.png
-            scripts/cdp/gallery.html
+            scripts/cdp/GALLERY.md
           if-no-files-found: error
           retention-days: 7
 

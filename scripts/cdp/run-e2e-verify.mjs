@@ -102,10 +102,17 @@ const makeRecorder = (ctx, state) => {
     },
     // The same dual-theme capture for an arbitrary WIDE page (full-tab surfaces:
     // the home SPA, options) opened via openWidePage — the large in-browser view.
-    async visualPage(name, page, opts = {}) {
+    // beforeShot(page, theme) runs after the theme switch and before the shot,
+    // for a page that is still CHANGING while we capture it. why per-theme and
+    // not once per state: the two captures are ~100ms apart, so a state that
+    // normalises something time-varying (vm-tab-failed pins its boot-log clock)
+    // has to re-normalise for the second one — otherwise whatever moved in that
+    // window lands in the dark shot only, and the state flaps on dark forever.
+    async visualPage(name, page, { beforeShot, ...opts } = {}) {
       for (const theme of THEMES) {
         await setEmulatedTheme(page, theme);
         await sleep(80);
+        if (beforeShot) await beforeShot(page, theme);
         this._record(`${name}.${theme}`, name, theme, await capturePage(page), opts);
       }
     },

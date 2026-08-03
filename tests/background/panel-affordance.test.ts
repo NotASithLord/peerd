@@ -2,29 +2,51 @@ import { describe, test, expect } from 'bun:test';
 import { decidePullIn } from '../../extension/background/panel-affordance.js';
 
 describe('decidePullIn', () => {
-  describe('toolbar icon (fromShortcut: false)', () => {
-    test('opens home when no home surface is open (Chrome)', () => {
+  describe('toolbar icon (fromShortcut: false) — default front door (panel)', () => {
+    test('opens the side panel directly, even with no home open (Chrome)', () => {
       expect(decidePullIn({ homeOpen: false, hasSidePanel: true, hasSidebar: false }))
-        .toBe('home');
+        .toBe('panel');
     });
 
-    test('complements with the side panel when home is already open (Chrome)', () => {
+    test('opens the sidebar directly, even with no home open (Firefox)', () => {
+      expect(decidePullIn({ homeOpen: false, hasSidePanel: false, hasSidebar: true }))
+        .toBe('sidebar');
+    });
+
+    test('still opens the panel when home is already open (Chrome)', () => {
       expect(decidePullIn({ homeOpen: true, hasSidePanel: true, hasSidebar: false }))
         .toBe('panel');
     });
 
+    test('an explicit frontDoorView: "panel" behaves like the default', () => {
+      expect(decidePullIn({ homeOpen: false, hasSidePanel: true, hasSidebar: false, frontDoorView: 'panel' }))
+        .toBe('panel');
+    });
+  });
+
+  describe('toolbar icon (fromShortcut: false) — frontDoorView: "home" (the original model)', () => {
+    test('opens home when no home surface is open (Chrome)', () => {
+      expect(decidePullIn({ homeOpen: false, hasSidePanel: true, hasSidebar: false, frontDoorView: 'home' }))
+        .toBe('home');
+    });
+
+    test('complements with the side panel when home is already open (Chrome)', () => {
+      expect(decidePullIn({ homeOpen: true, hasSidePanel: true, hasSidebar: false, frontDoorView: 'home' }))
+        .toBe('panel');
+    });
+
     test('opens home when no home surface is open (Firefox)', () => {
-      expect(decidePullIn({ homeOpen: false, hasSidePanel: false, hasSidebar: true }))
+      expect(decidePullIn({ homeOpen: false, hasSidePanel: false, hasSidebar: true, frontDoorView: 'home' }))
         .toBe('home');
     });
 
     test('complements with the sidebar when home is already open (Firefox)', () => {
-      expect(decidePullIn({ homeOpen: true, hasSidePanel: false, hasSidebar: true }))
+      expect(decidePullIn({ homeOpen: true, hasSidePanel: false, hasSidebar: true, frontDoorView: 'home' }))
         .toBe('sidebar');
     });
   });
 
-  describe('keyboard command (fromShortcut: true) — toggle', () => {
+  describe('keyboard command (fromShortcut: true) — toggle, regardless of front door', () => {
     test('pulls the side panel in when closed, even with no home open (Chrome)', () => {
       expect(decidePullIn({ homeOpen: false, panelOpen: false, hasSidePanel: true, hasSidebar: false, fromShortcut: true }))
         .toBe('panel');
@@ -44,6 +66,36 @@ describe('decidePullIn', () => {
       expect(decidePullIn({ homeOpen: false, panelOpen: true, hasSidePanel: false, hasSidebar: true, fromShortcut: true }))
         .toBe('close');
     });
+
+    test('frontDoorView: "home" never changes the shortcut — it still pulls the panel in', () => {
+      expect(decidePullIn({ homeOpen: false, panelOpen: false, hasSidePanel: true, hasSidebar: false, fromShortcut: true, frontDoorView: 'home' }))
+        .toBe('panel');
+    });
+
+    test('frontDoorView: "home" never changes the shortcut — an open panel still toggles closed', () => {
+      expect(decidePullIn({ homeOpen: false, panelOpen: true, hasSidePanel: true, hasSidebar: false, fromShortcut: true, frontDoorView: 'home' }))
+        .toBe('close');
+    });
+  });
+
+  describe('the native-mirror inference (Chrome setPanelBehavior)', () => {
+    test('icon + mirror ⇒ home-first, even when the (pre-hydration) setting says panel', () => {
+      // The cold-start case the mirror exists for: the settings store still
+      // serves the channel default 'panel', but onClicked firing at all means
+      // the browser-side behavior was off — the user chose 'home'.
+      expect(decidePullIn({ homeOpen: false, hasSidePanel: true, hasSidebar: false, frontDoorView: 'panel', nativePanelMirror: true }))
+        .toBe('home');
+    });
+
+    test('icon + mirror still complements with the panel once home is open', () => {
+      expect(decidePullIn({ homeOpen: true, hasSidePanel: true, hasSidebar: false, frontDoorView: 'panel', nativePanelMirror: true }))
+        .toBe('panel');
+    });
+
+    test('the shortcut never rides the inference — it pulls the panel in regardless', () => {
+      expect(decidePullIn({ homeOpen: false, panelOpen: false, hasSidePanel: true, hasSidebar: false, fromShortcut: true, nativePanelMirror: true }))
+        .toBe('panel');
+    });
   });
 
   describe('toolbar icon never closes — only the shortcut toggles', () => {
@@ -57,6 +109,8 @@ describe('decidePullIn', () => {
     expect(decidePullIn({ homeOpen: true, hasSidePanel: false, hasSidebar: false, fromShortcut: true }))
       .toBe('home');
     expect(decidePullIn({ homeOpen: false, hasSidePanel: false, hasSidebar: false }))
+      .toBe('home');
+    expect(decidePullIn({ homeOpen: false, hasSidePanel: false, hasSidebar: false, frontDoorView: 'panel' }))
       .toBe('home');
   });
 

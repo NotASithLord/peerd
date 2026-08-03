@@ -87,3 +87,4 @@ scripts/cdp/om2w/data/
 scripts/cdp/om2w/out/
 scripts/cdp/om2w/vendor-repo/
 scripts/cdp/om2w/.venv/
+node_modules

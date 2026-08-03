@@ -90,7 +90,28 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 530 → 534: the security-boundary arc's four pure cores —
 // actor/reply-schema.js (#241), actor/ugc-registry.js (#242),
 // tools/egress-heuristics.js (#243), dom/cdr.js (#244).
-const COVERED_FLOOR = 544;
+// 545/547 → 548: the learned-origins un-learn surface (#262) and the Activity
+// origin-lock rows (#282) land together — both ledgers are kept and the floor
+// is their union, the same shape as the 505/506 → 510 merge above.
+// 548 → 549: the in-page activity indicator's two checked cores (#259) —
+// actor/activity-label.js and background/page-activity.js. The injected
+// overlay body itself is ES5 and exempt, so it does not count.
+// 549 → 551: ratchet hygiene at the 0.4.0 release, not new annotation work.
+// The 548 and 549 steps were each derived from a conflicting base rather than
+// from a fresh scan, so the floor was left trailing the real count by two.
+// Taking the reported number locks the existing gain in.
+// 551 → 553: the denylist's declarativeNetRequest backstop adds two checked
+// files — peerd-egress/denylist/dnr-rules.js (the pure patterns → rule mapping)
+// and background/denylist-net-guard.js (the session-rule sync shell).
+// 553 → 570: the JS-superpower arc — vm-tab/run-capture.js (design 7.1),
+// durable script workspace + run-cache (design 1), extract:'markdown' +
+// peerd:std helpers (design 2), remote module imports via egress (design 3),
+// peerd.provider.call (design 5), and the peerd:toolbox store + tools
+// (design 6); all new files carry // @ts-check.
+// 570 → 572: the tool-ergonomics batch — the shared once-per-session dedup
+// guard (tools/defs/once-per-session.js, design 6) and the pure failure
+// aggregator's home (metrics design 5); all new files carry // @ts-check.
+const COVERED_FLOOR = 572;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

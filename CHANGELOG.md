@@ -10,6 +10,127 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
+### Added
+- **The toolbar button opens the side panel.** Clicking peerd used to
+  take over a whole tab with the full-page home, so the first click of
+  a session landed on a full-tab vault gate instead of next to the page
+  you were already on. It now opens the side panel (the sidebar on
+  Firefox) by default, and Settings, Behavior, Toolbar button switches
+  it back to the full-page home. On Chrome the choice is mirrored into
+  the browser's own action-click behavior, so the panel opens natively
+  before the service worker even wakes and the default can never race a
+  cold start. One consequence of that native path: for panel users the
+  icon becomes a toggle, which is the platform convention. The keyboard
+  shortcut still always toggles the panel, whichever default you pick.
+- **You can see which tab peerd is driving, and what it is doing in
+  it.** The driven page joins a collapsible peerd tab group for as long
+  as peerd owns it, so a glance at the tab strip says which tab is not
+  yours to touch right now. Inside that page, a small corner pill names
+  the current action, shows the origin, and carries a Stop button,
+  softening to "Thinking..." between calls so a slow step never reads
+  as a hang. The pill is invisible to peerd itself, by three
+  independent measures, and its wording comes from a fixed vocabulary:
+  never the text being typed, never page-authored labels or selectors,
+  and only the host of a navigation rather than the full URL.
+- **The orchestrator can wait for a delegation when it needs the
+  answer to speak.** `message_actor` takes an opt-in `await`, which
+  resolves the actor's fenced reply into the tool result so peerd
+  answers in the same turn instead of ending on "I'll report back".
+  Delegation stays async by default, which is still the only shape that
+  fans out. The wait is bounded: past a wall-clock cap it degrades back
+  to the ordinary later-turn reply without cancelling the actor, so a
+  slow delegation is never a lost one. Stop still ends delegated work,
+  and steering mid-wait now keeps the actor running and lands its reply
+  on the turn you steered into, rather than discarding the work.
+
+### Changed
+- **The visual gallery is Markdown and rides every pull request.**
+  GitHub serves a committed `.html` file as source text, so the gallery
+  was unreadable in the one place people actually browse the repo. It
+  is now `scripts/cdp/GALLERY.md`, which renders natively, and the
+  visual job posts a single sticky comment on every PR linking it with
+  a drift verdict, rather than speaking up only when the render broke.
+  Contributor-facing only; nothing in the extension changes.
+
+### Fixed
+- The in-page activity pill is taken down at the end of an actor turn
+  on Firefox too, where turns run in the service worker rather than an
+  offscreen worker. It previously outlived the turn there, parked on
+  "Thinking..." indefinitely.
+- peerd's system prompt described delegation as always asynchronous,
+  which contradicted the new opt-in wait on the same decision and left
+  the model with two conflicting statements of the delegation contract.
+
+## [0.3.0] - 2026-07-31
+
+### Added
+- **The security boundary arc.** Web helpers are now origin-segmented:
+  each one is either roaming, browsing freely while holding no
+  authority, or bound to exactly one origin. The landing rule judges
+  where the tab actually ended up, so a redirect cannot smuggle a
+  roaming helper onto a credentialed origin. Sensitive origins are
+  learned rather than only listed: a curated seed, any origin with a
+  stored key, plus two signals from ordinary use, a walked password
+  field and an approved write. Page text is disarmed before it reaches
+  the model, with zero-width runs, bidi overrides, and Unicode tag
+  characters stripped, leaving Persian, Urdu, and Indic text
+  unaffected. Acting as you on a page strangers wrote asks first, even
+  with confirmations off, and an exfiltration tripwire watches both the
+  navigation and the actor's own fetch, including in the zero-tab
+  state. Accepted residuals are written down in the security docs as
+  R14 through R17.
+- **The Claude redesign.** The side panel gets a design-token system, a
+  mono-stroke SVG icon set, the operator-cyan user bubble, a segmented
+  monochrome Plan/Act row, restyled tool, reasoning, todo, and goal
+  cards, and a sealed-surface lock mark on the vault gate. The brand
+  rule holds: the five color carriers plus failure red are still the
+  only color on the surface.
+- **The reviewer can read the files around a diff.** The clean-context
+  review actor may now call `js_read_file`, `app_read_file`, and
+  `app_list_files` through a positively scoped exemption admitted for
+  exactly those three names and no wider, on the Chrome offscreen path
+  as well as the in-service-worker fallback. The grant is a positive
+  allowlist intersected with the read-tagged set, so it fails closed
+  for every future tool, and the reviewer's summary comes back fenced
+  as untrusted.
+- **A web build target.** `bun run package:web` cuts the library form of
+  the packaging core, with `bun run check:web` gating its boundary in
+  preflight and CI. No demo shell, and no `peerd-distributed`, a
+  posture that is pinned by test.
+
+### Changed
+- **Apps can be 50M chars, up from 2M.** The write-layer backstop was
+  the real ceiling on every App path, `sandbox_create`, `.peerd`
+  import, and `dweb_install` alike, even though the dweb loader already
+  accepted 50M across 256 files. A real dwapp ships a WASM runtime plus
+  a 3D engine, and binary assets ride as base64 today, so 2M made the
+  big ones un-importable by any route.
+
+### Fixed
+- **Watch mode no longer steals focus when nobody is watching.** An
+  adversarial audit found four ways the follow could pull your window
+  over. A parked home tab satisfied "a peerd surface is open" forever,
+  so only a side-panel port counts now. The browser could be hauled in
+  front of another application, so a Chrome-focus gate was added. The
+  "already in front" no-op check was dead after any service-worker
+  respawn and never matched in the two-window layout watch mode
+  encourages, so it is now resolved from live tab state per call. And
+  every settings write re-fired the follow, so picking a model hours
+  later teleported you onto a long-dead agent tab. The follow now fires
+  only when the agent tab actually changes.
+- **A single oversized gossip envelope can no longer amplify across the
+  mesh.** The token bucket counts frames, so it was blind to one huge
+  envelope, which every member re-broadcasts untouched and the sync
+  layer then retains and re-serves to every peer on every new link. A
+  32 KiB per-envelope cap is now enforced at every door an envelope can
+  arrive through, our own publish included, and the size check runs
+  before signature verification. Preview channel only.
+- **A Library avatar keeps its color.** The hue hashed the per-install
+  instance id, so an identity changed color on reinstall. It now
+  hashes a durable identity instead.
+
 ## [0.2.8] - 2026-07-19
 
 ### Added

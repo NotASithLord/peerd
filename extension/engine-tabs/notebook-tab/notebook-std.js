@@ -303,6 +303,170 @@ export const dedupeBy = (xs, key) => {
   return out;
 };
 
+// ── CSV — pure, RFC-4180-quote-aware, dependency-free ─────────────────────
+// why hand-rolled (the JSONL precedent): CSV is the tabular lingua franca of
+// fetched data and OPFS files, and the shapes scripts actually meet — quoted
+// fields, embedded delimiters/newlines, doubled quotes, CRLF — fit in a small
+// state machine; a vendored parser would be all maintenance, no reach.
+
+/**
+ * Parse CSV text. With { header: true } (the default) the first row names the
+ * columns and every later row becomes an object; with { header: false } every
+ * row is a string array. Quote-aware per RFC 4180: a quoted field may contain
+ * the delimiter, doubled quotes ("" → ") and embedded newlines; \n and \r\n
+ * row endings both work; a trailing newline yields no phantom row. Values are
+ * always STRINGS — no number coercion (coerce yourself, exactly).
+ * `delimiter` is a SINGLE character (e.g. '\t' or ';'); anything else falls
+ * back to ','. Non-string input → [].
+ * @param {unknown} text
+ * @param {{ header?: boolean, delimiter?: string }} [opts]
+ * @returns {any[]}
+ */
+export const parseCsv = (text, { header = true, delimiter = ',' } = {}) => {
+  if (typeof text !== 'string' || text.length === 0) return [];
+  // why the guard: the scan below compares one character at a time, so a
+  // multi-character delimiter could never match and would silently mis-parse.
+  if (typeof delimiter !== 'string' || delimiter.length !== 1) delimiter = ',';
+  /** @type {string[][]} */
+  const rows = [];
+  /** @type {string[]} */
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  // why a counting loop: codec work — the "" and \r\n lookaheads need index
+  // control (the sanctioned exception in the house style).
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"' && field === '') {
+      inQuotes = true;
+    } else if (ch === delimiter) {
+      row.push(field); field = '';
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      rows.push(row); row = [];
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  if (!header) return rows;
+  const [names, ...rest] = rows;
+  if (!names) return [];
+  // Short rows pad with '' so every object carries every column — the shape
+  // groupBy/sortBy/table expect.
+  return rest.map((r) => Object.fromEntries(names.map((name, i) => [name, r[i] ?? ''])));
+};
+
+/**
+ * Serialize rows to CSV — the inverse of parseCsv. Row OBJECTS get a header
+ * row (columns = union of keys, first-seen order); row ARRAYS (first element
+ * decides) are written as-is with no header. Fields containing the delimiter,
+ * a quote, or a newline are quoted with "" escaping (RFC 4180); null/undefined
+ * write as empty. \n-joined, no trailing newline. `delimiter` is a SINGLE
+ * character, like parseCsv's (fallback ','). Non-array / empty → ''.
+ * @param {unknown} rows
+ * @param {{ delimiter?: string }} [opts]
+ * @returns {string}
+ */
+export const toCsv = (rows, { delimiter = ',' } = {}) => {
+  const arr = Array.isArray(rows) ? rows : [];
+  if (arr.length === 0) return '';
+  // Same single-character rule as parseCsv, so toCsv output always re-parses.
+  if (typeof delimiter !== 'string' || delimiter.length !== 1) delimiter = ',';
+  /** @param {unknown} v */
+  const escapeField = (v) => {
+    const s = v == null ? '' : String(v);
+    return s.includes(delimiter) || s.includes('"') || s.includes('\n') || s.includes('\r')
+      ? `"${s.replaceAll('"', '""')}"`
+      : s;
+  };
+  if (Array.isArray(arr[0])) {
+    return arr.map((r) => (Array.isArray(r) ? r : []).map(escapeField).join(delimiter)).join('\n');
+  }
+  const names = unique(arr.flatMap((r) => (r && typeof r === 'object' ? Object.keys(r) : [])));
+  const lines = [names.map(escapeField).join(delimiter)];
+  for (const r of arr) {
+    lines.push(names.map((name) => escapeField(/** @type {any} */ (r)?.[name])).join(delimiter));
+  }
+  return lines.join('\n');
+};
+
+// ── HTML string helpers — regex-grade, honestly named ─────────────────────
+// why regex, not a parser: the sealed worker has no DOMParser, and the
+// fetch-level extract (peerd.egress.fetch(url, { extract: 'markdown' }))
+// already covers "give me the readable page". These serve the FRAGMENT cases
+// at regex fidelity: fine on well-formed markup, but NOT a parser — nested
+// same-name tags, conditional comments, script-built markup, and exotic
+// attribute quoting can all fool them. Limits repeated per helper.
+
+// The entities that dominate real markup, plus exact numeric forms. why &amp;
+// last: decoding it first would double-decode ("&amp;lt;" means a literal "&lt;").
+/** @param {string} s @returns {string} */
+const decodeEntities = (s) => s
+  .replace(/&#x([0-9a-f]+);/gi, (m, hex) => { try { return String.fromCodePoint(parseInt(hex, 16)); } catch { return m; } })
+  .replace(/&#(\d+);/g, (m, dec) => { try { return String.fromCodePoint(Number(dec)); } catch { return m; } })
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"')
+  .replace(/&apos;/g, "'")
+  .replace(/&nbsp;/g, ' ')
+  .replace(/&amp;/g, '&');
+
+/**
+ * Strip an HTML fragment to its visible text: <script>/<style> bodies and
+ * comments removed, every tag dropped, common entities decoded, whitespace
+ * collapsed (runs with a newline → one newline, other runs → one space).
+ * Regex-grade — see the block note above for what can fool it.
+ * Non-string → ''.
+ * @param {unknown} html @returns {string}
+ */
+export const stripTags = (html) => {
+  if (typeof html !== 'string') return '';
+  const text = html
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]*>/g, ' ');
+  return decodeEntities(text)
+    .replace(/[^\S\n]*\n\s*/g, '\n')
+    .replace(/[^\S\n]+/g, ' ')
+    .trim();
+};
+
+/**
+ * The visible text of EVERY <tag>…</tag> occurrence, in document order —
+ * textOfTag(html, 'h2') → one string per heading (take [0] for the first).
+ * Regex-grade: a nested same-name tag truncates at the first closing tag, and
+ * void/self-closing tags never match (no body). Invalid tag / non-string → [].
+ * @param {unknown} html @param {unknown} tag @returns {string[]}
+ */
+export const textOfTag = (html, tag) => {
+  if (typeof html !== 'string' || typeof tag !== 'string' || !/^[a-z][a-z0-9-]*$/i.test(tag)) return [];
+  const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}\\s*>`, 'gi');
+  return [...html.matchAll(re)].map((m) => stripTags(m[1]));
+};
+
+/**
+ * Every <a href> in the fragment → [{ href, text }], in document order. href
+ * is entity-decoded but NOT resolved (a relative href stays relative — a
+ * fragment has no base URL); text is the anchor's stripped visible text.
+ * Regex-grade (block note above). Non-string → [].
+ * @param {unknown} html @returns {Array<{ href: string, text: string }>}
+ */
+export const extractLinks = (html) => {
+  if (typeof html !== 'string') return [];
+  const re = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi;
+  return [...html.matchAll(re)].map((m) => ({
+    href: decodeEntities(m[1] ?? m[2] ?? m[3] ?? ''),
+    text: stripTags(m[4] ?? ''),
+  }));
+};
+
 // ── exact integer / ratio math — BigInt in, exact value out ───────────────
 // why: every helper above takes Number, so feeding one a BigInt collapses it to
 // a lossy 53-bit float — the precision footgun called out in JS_PITFALLS_NOTE.

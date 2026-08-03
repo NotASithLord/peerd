@@ -61,7 +61,13 @@ const isPrivateIpv4 = ([a, b]) =>
   || a === 127     // 127.0.0.0/8 loopback
   || (a === 169 && b === 254)            // 169.254.0.0/16 link-local
   || (a === 172 && b >= 16 && b <= 31)   // 172.16.0.0/12
-  || (a === 192 && b === 168);           // 192.168.0.0/16
+  || (a === 192 && b === 168)            // 192.168.0.0/16
+  // Non-routable / internal-use ranges an SSRF guard must also refuse — these
+  // are reachable as INTERNAL space on real deployments, so an actor fetch to
+  // them is the same LAN-pivot risk as 10/8 or 192.168/16.
+  || (a === 100 && b >= 64 && b <= 127)  // 100.64.0.0/10 RFC 6598 shared/CGNAT (mobile/ISP LAN)
+  || (a === 198 && (b === 18 || b === 19)) // 198.18.0.0/15 RFC 2544 benchmarking
+  || a >= 240;                            // 240.0.0.0/4 reserved, incl. 255.255.255.255 broadcast
 
 // Expand an IPv6 string into its 8 16-bit hextets. Handles `::` zero-run
 // compression and an optional trailing dotted-IPv4 tail (IPv4-in-IPv6).

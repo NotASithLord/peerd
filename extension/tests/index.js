@@ -40,6 +40,7 @@ import './unit/peerd-runtime/dispatcher.test.js';
 import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';
 import './unit/peerd-runtime/dom-walk.test.js';
+import './unit/peerd-runtime/activity-overlay.test.js';
 import './unit/peerd-runtime/page-eval.test.js';
 import './unit/peerd-runtime/page-exec.test.js';
 import './unit/peerd-runtime/page-keys.test.js';
@@ -65,6 +66,7 @@ import './unit/peerd-engine/personal-index-durability.test.js';
 
 // --- chassis: notebook-tab ---
 import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
+import './unit/engine-tabs/notebook-tab/notebook-extract.test.js';
 import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
@@ -75,10 +77,13 @@ import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
+import './unit/offscreen/job-runner-workspace.test.js';
+import './unit/offscreen/job-runner-toolbox.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
 import './unit/background/state-get.test.js';
+import './unit/background/script-model-call.test.js';
 
 // --- peerd-distributed ---
 // (none yet — dweb surface reserved for V2+)
@@ -99,6 +104,9 @@ import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/failure-chip.test.js';
 import './unit/sidepanel/confirm-note.test.js';
+import './unit/sidepanel/learned-origins-view.test.js';
+import './unit/options/activity-origin-events.test.js';
+import './unit/options/activity-tool-failed.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

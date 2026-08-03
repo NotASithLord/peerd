@@ -192,10 +192,11 @@ const TopBar = {
           title: 'Settings',
           onclick: () => openOptions(),
         }, icon('set')),
-        // Close the panel. The toolbar action now opens Home rather than
-        // toggling the panel shut, so the panel needs its own dismiss — this
-        // reuses the SW's sidepanel/close (disable+re-arm; Chrome-only, no-op
-        // on Firefox's sidebar). Lock moved to the Home rail.
+        // Close the panel. The toolbar action OPENS peerd (the side panel by
+        // default, or Home via the frontDoorView setting) — only Chrome's
+        // native action-click toggle ever closes it — so the panel keeps its
+        // own dismiss; this reuses the SW's sidepanel/close (disable+re-arm;
+        // Chrome-only, no-op on Firefox's sidebar). Lock moved to the Home rail.
         m('button.icon', {
           title: 'Close panel',
           onclick: () => send({ type: 'sidepanel/close' }),

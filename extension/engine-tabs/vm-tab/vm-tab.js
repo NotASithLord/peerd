@@ -36,7 +36,8 @@ import {
 } from '/peerd-engine/index.js';
 import { base64ToBytes } from '/shared/util.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
-import { PEERD_PRINTF_RE, stripChunk } from '/engine-tabs/vm-tab/marker-strip.js';
+import { stripChunk } from '/engine-tabs/vm-tab/marker-strip.js';
+import { ERRFILE_PREFIX, buildWrappedCommand, parseRunCapture } from '/engine-tabs/vm-tab/run-capture.js';
 import { buildFirefoxWebVmNote } from '/engine-tabs/vm-tab/firefox-webvm-note.js';
 
 // WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
@@ -653,30 +654,12 @@ ${peerdNetBash()}
 // (Same logic as the prior offscreen adapter, simplified.)
 // ---------------------------------------------------------------------------
 
-// PEERD_PRINTF_RE, stripChunk + the chunk-boundary hold logic now live in the pure,
-// bun-tested module marker-strip.js (imported above) — keep the marker MACHINERY here.
+// stripChunk + the chunk-boundary hold logic live in marker-strip.js; the
+// wrapped-run template + capture parser live in run-capture.js — both pure and
+// bun-tested (imported above). Keep only the marker MINT here.
 
 const makeMarker = () =>
   `___PEERD_${Math.random().toString(36).slice(2, 12)}_${Date.now().toString(36)}___`;
-
-/** Find <marker>:<digits>\n in buf, walking past non-matching occurrences. */
-const scanForMarker = (/** @type {string} */ buf, /** @type {string} */ marker) => {
-  let from = 0;
-  while (from <= buf.length) {
-    const idx = buf.indexOf(marker, from);
-    if (idx < 0) return null;
-    const colonIdx = idx + marker.length;
-    if (buf[colonIdx] !== ':') { from = idx + 1; continue; }
-    const nlIdx = buf.indexOf('\n', colonIdx);
-    if (nlIdx < 0) return null;
-    const codeStr = buf.slice(colonIdx + 1, nlIdx);
-    const exitCode = Number.parseInt(codeStr, 10);
-    if (!Number.isFinite(exitCode)) { from = idx + 1; continue; }
-    const startIdx = idx > 0 && buf[idx - 1] === '\n' ? idx - 1 : idx;
-    return { startIdx, exitCode };
-  }
-  return null;
-};
 
 const shellEscape = (/** @type {any} */ s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
@@ -701,14 +684,10 @@ let httpMarkerPending = '';
 // newline) can't grow memory unbounded. Comfortably above a max-size body's
 // base64 (8MB body → ~11MB line); past this we flush it as literal output.
 const MAX_MARKER_PENDING = 24 * 1024 * 1024;
-/** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: (r: {exitCode: number, stdout: string, timing: {totalMs: number, tailMs: number}}) => void } | null} */
+/** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: (r: {exitCode: number, stdout: string, stderr: string, timing: {totalMs: number, tailMs: number}}) => void } | null} */
 let activeRunCapture = null;
 /** @type {string[] | null} */
 let preTerminalBuffer = [];
-
-/** Most recent toolUseId we're capturing stdout for (for streaming chunks to chat). */
-let activeRunToolUseId = null;
-let activeRunSessionId = null;
 
 // Held tail across calls -- catches markers that straddle a chunk
 // boundary (the strip regex only sees one chunk at a time).
@@ -730,12 +709,11 @@ const emitToTerminal = (/** @type {string} */ text) => {
 const emitStripped = (/** @type {string} */ text) => {
   if (activeRunCapture) {
     activeRunCapture.buffer += text;
-    const markerLine = scanForMarker(activeRunCapture.buffer, activeRunCapture.marker);
-    if (markerLine) {
-      const stdout = activeRunCapture.buffer
-        .slice(0, markerLine.startIdx)
-        .replace(/\r/g, '')
-        .replace(PEERD_PRINTF_RE, '');
+    // Completion is the -end marker (run-capture.js), not the exit-code marker:
+    // the stderr section streams BETWEEN them, so resolving earlier would race
+    // a partial stderr.
+    const parsed = parseRunCapture(activeRunCapture.buffer, activeRunCapture.marker);
+    if (parsed) {
       const capture = activeRunCapture;
       activeRunCapture = null;
       // why timing: localize the "output showed, result lagged" gap. tailMs is the
@@ -745,8 +723,9 @@ const emitStripped = (/** @type {string} */ text) => {
       // turn + the orchestrator turn), not the VM. totalMs is the whole run.
       const doneAt = Date.now();
       capture.resolve({
-        exitCode: markerLine.exitCode,
-        stdout,
+        exitCode: parsed.exitCode,
+        stdout: parsed.stdout,
+        stderr: parsed.stderr,
         timing: {
           totalMs: doneAt - capture.startedAt,
           tailMs: capture.lastChunkAt ? doneAt - capture.lastChunkAt : 0,
@@ -990,6 +969,9 @@ const serveVmHttpInner = async (/** @type {any} */ parsed) => {
 const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = {}) => {
   if (shellExit !== null) throw new Error(`persistent shell is dead (exit ${shellExit})`);
   const marker = makeMarker();
+  // Per-call stderr capture file inside the VM (run-capture.js protocol); the
+  // wrapper replays it between the -err/-end markers and removes it.
+  const errFile = `${ERRFILE_PREFIX}${Math.random().toString(36).slice(2, 10)}`;
   /** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: ((r: any) => void) | null }} */
   const capture = { marker, buffer: '', startedAt: Date.now(), lastChunkAt: 0, resolve: null };
   let abortListener;
@@ -1009,15 +991,13 @@ const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = 
   activeRunCapture = /** @type {any} */ (capture);
   const effectiveSilent = !!opts.silent;
   if (effectiveSilent) silentMode = true;
-  const wrappedCmd = `\x15${cmd}\nprintf '\\n%s:%s\\n' '${marker}' "$?"\n`;
+  const wrappedCmd = `\x15${buildWrappedCommand(cmd, marker, errFile)}`;
   for (let i = 0; i < wrappedCmd.length; i++) {
     cxRead(wrappedCmd.charCodeAt(i));
   }
   try {
-    const result = await completion;
-    let stdout = result.stdout;
-    if (stdout.startsWith(`${cmd}\n`)) stdout = stdout.slice(cmd.length + 1);
-    return { ...result, stdout, stderr: '' };
+    // parseRunCapture already sliced the echo off and split stdout/stderr.
+    return await completion;
   } finally {
     if (activeRunCapture === capture) activeRunCapture = null;
     if (effectiveSilent) silentMode = false;
@@ -1505,15 +1485,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
           const start = Date.now();
           const ctrl = new AbortController();
           const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-          activeRunToolUseId = msg.toolUseId ?? null;
-          activeRunSessionId = msg.sessionId ?? null;
           try {
             const result = await runViaShell(msg.cmd, { signal: ctrl.signal });
             sendResponse({
               ok: true,
               result: {
                 stdout: result.stdout,
-                stderr: '',
+                stderr: result.stderr,
                 exitCode: result.exitCode,
                 durationMs: Date.now() - start,
                 // VM-side timing breadcrumb (totalMs run, tailMs = output→marker lag);
@@ -1529,8 +1507,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
             }
           } finally {
             clearTimeout(timer);
-            activeRunToolUseId = null;
-            activeRunSessionId = null;
           }
           return;
         }
@@ -1547,7 +1523,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
             const r = await runViaShell(cmd, { silent: true });
             try { await dataDev.delete(stagingName); } catch { /* ignore */ }
             if (r.exitCode !== 0) {
-              sendResponse({ ok: false, error: `writeFile cp failed (exit ${r.exitCode}): ${r.stdout}` });
+              sendResponse({ ok: false, error: `writeFile cp failed (exit ${r.exitCode}): ${r.stderr || r.stdout}` });
             } else {
               sendResponse({ ok: true });
             }

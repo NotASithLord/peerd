@@ -24,7 +24,7 @@ const MAX_TIMEOUT_MS = 300_000;
 /**
  * The vm run() surface vm_boot exercises (offscreen VM client).
  * @typedef {Object} VmRunner
- * @property {(cmd: string, opts: { timeoutMs: number, sessionId?: string, vmId?: string, toolUseId?: string }) => Promise<VmRunResult>} run
+ * @property {(cmd: string, opts: { timeoutMs: number, sessionId?: string, vmId?: string }) => Promise<VmRunResult>} run
  */
 
 /**
@@ -84,7 +84,9 @@ export const vmBootTool = {
   origins: () => [],
 
   execute: async (args, ctx) => {
-    if (typeof args?.cmd !== 'string' || args.cmd.length === 0) {
+    // why .trim(): a whitespace-only cmd makes the wrapped-run template a bash
+    // syntax error that hangs to the timeout — reject it up front like empty.
+    if (typeof args?.cmd !== 'string' || !args.cmd.trim()) {
       return { ok: false, error: 'cmd_required' };
     }
     // why: ctx.vm is the opaque `Object` contract slot; narrow it to the
@@ -93,9 +95,6 @@ export const vmBootTool = {
     if (!vm || typeof vm.run !== 'function') {
       return { ok: false, error: 'vm_not_available' };
     }
-    // why: toolUseId is an SW-injected context extra not on the ToolContext
-    // contract slot.
-    const toolUseId = /** @type {{ toolUseId?: string }} */ (ctx).toolUseId;
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
     // Resolve `vm` -- accept either id (vm-...) or name. Name lookup
     // is case-insensitive against the registry.
@@ -133,7 +132,6 @@ export const vmBootTool = {
         timeoutMs,
         sessionId: ctx.session?.sessionId,
         vmId: targetVmId,
-        toolUseId,
       });
       return { ok: true, content: formatRunResult(args.cmd, result) };
     } catch (e) {

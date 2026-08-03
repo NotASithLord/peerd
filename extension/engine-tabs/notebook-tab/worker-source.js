@@ -42,8 +42,16 @@ export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WA
 // boundary, exposure.js). The profile is enforced TWICE: here (the surface is
 // absent / throws inside the realm) and in the HOST relay (job-runner.js
 // refuses the bridge message), so a seal escape alone doesn't re-open a lane.
+// caps.provider (design 5) is OFF by default EVERYWHERE: it spends the user's
+// paid key, so only the script tool mints it — per-run, and only when the code
+// actually references peerd.provider.
+// why distributed defaults true: the wired base-network reads are the
+// historical tab surface (the Notebook host answers 'distributed-request');
+// the headless job runner forces it off — it has no handler, so without the
+// in-realm throw a touch of peerd.distributed.* would hang to the job
+// wall-clock (design 7.3).
 export const DEFAULT_WORKER_CAPS = Object.freeze({
-  page: false, egress: true, subagent: true, opfs: true,
+  page: false, egress: true, subagent: true, opfs: true, provider: false, distributed: true,
 });
 
 /**
@@ -53,14 +61,16 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  * @param {Object} opts
  * @param {string} [opts.entryPath]   resolver entry name (default 'notebook.js')
  * @param {string} opts.notebookId    realm id surfaced as peerd.self.id
- * @param {{ readFile: (path: string) => Promise<string>, makeBlobUrl: (source: string) => string, log?: (entry: { type: string, path: string, blobUrl?: string, error?: string }) => void }} opts.resolverDeps  host-injected
+ * @param {import('/peerd-engine/module-resolver.js').ResolverDeps} opts.resolverDeps  host-injected (fetchRemote only in egress-capable lanes — module-resolver.js)
  * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
  * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
- * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean }} [opts.caps]
+ * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
  *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
- *   caps.page is the web actor's page bridge, PR #119)
+ *   caps.page is the web actor's page bridge, PR #119; caps.provider is the
+ *   script tool's sub-model lane, design 5; caps.distributed gates the
+ *   base-network reads — off on hosts with no 'distributed-request' handler)
  * @returns {Promise<{ source: string, cache: Map<string, { blobUrl: string, source: string }>, bodyLine: number }>}
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
@@ -164,7 +174,9 @@ const opfsCall = (op, args) => opfsRelay({ op, args });
 // OWN plumbing (its id, its module loader, its private OPFS scratch).
 //
 // STATUS: most methods are PLACEHOLDERS that throw. WIRED today: egress.fetch,
-// runtime.runAgent, distributed.{whoami,status,peers,presence} (base-network
+// runtime.runAgent, provider.call (capability-gated — the script lane mints
+// caps.provider per-run, quota enforced at the SW relay; design 5),
+// distributed.{whoami,status,peers,presence} (base-network
 // READS, preview only — side-effect-free observation), all of self.
 //
 // SECURITY — READ BEFORE WIRING A PLACEHOLDER. This object is reachable from
@@ -180,7 +192,8 @@ const notWired = (name) => () => {
 };
 
 globalThis.peerd = {
-  // p · provider (cyan) — BYOK model access. PLACEHOLDER.
+  // p · provider (cyan) — BYOK model access. call is WIRED capability-gated
+  // (overridden below per the profile); listModels stays a placeholder.
   provider: {
     listModels: notWired('provider.listModels'),
     call:       notWired('provider.call'),
@@ -234,6 +247,7 @@ globalThis.peerd = {
     import:    (specifier) => globalThis.__peerd_dynamic_import(specifier),
     readFile:  (path) => opfsCall('read', { path }),
     writeFile: (path, content) => opfsCall('write', { path, content }),
+    deleteFile: (path) => opfsCall('delete', { path }),
     listFiles: () => opfsCall('list', {}),
     display:   (value) => { __peerdDisplay(value); return value; },
   },
@@ -312,6 +326,30 @@ const __actors = {
 globalThis.actors = __actors;
 ` : ''}
 
+// --- peerd.provider.call (sub-model text call) — capability-gated (caps.provider) ---
+// Design 5: a pure text transform mid-script ({ system?, prompt | messages,
+// model?, maxTokens? } → { text }). No tools, no streaming — a sub-call that
+// could call tools would be an invisible agent loop (that is runAgent's lane).
+// The host relay refuses 'provider-request' when the cap is off (two walls),
+// the SW route validates args + enforces the per-run quota + holds the key.
+// why no bridge timeout (mirrors the runAgent bridge): a model call's wall is
+// the RUN's wall-clock — the host terminates the worker and the SW aborts the
+// in-flight provider fetch on Stop/release, so a local timer here could only
+// orphan a paid call.
+${profile.provider ? `
+const providerRelay = makeBridge('provider');
+// Re-type quota refusals in-realm: the bridge re-raises plain Errors, so the
+// SW's structured refusal arrives as a message string — restore the name so
+// catch (e) { e.name === 'ProviderQuotaError' } works, not just string-matching.
+globalThis.peerd.provider.call = (args) => providerRelay({ args: args ?? {} }).catch((e) => {
+  if (e && typeof e.message === 'string' && e.message.indexOf('provider quota exceeded') === 0) e.name = 'ProviderQuotaError';
+  throw e;
+});
+` : `
+globalThis.peerd.provider.call = () => {
+  throw new Error('peerd.provider.call is not available in this worker (no-provider capability profile).');
+};
+`}
 // --- page.* (web-actor page control) proxy — capability-gated (caps.page) ---
 // PR #119 code-REPL arm: each page.* call is ONE host round-trip; the host
 // relays it to the SW's 'page/call' route, which dispatches the SAME gated tool
@@ -373,9 +411,23 @@ const noOpfs = (name) => () => {
 };
 globalThis.peerd.self.readFile = noOpfs('readFile');
 globalThis.peerd.self.writeFile = noOpfs('writeFile');
+globalThis.peerd.self.deleteFile = noOpfs('deleteFile');
 globalThis.peerd.self.listFiles = noOpfs('listFiles');
 globalThis.peerd.self.import = noOpfs('import');
 globalThis.__peerd_dynamic_import = noOpfs('import');
+`}${profile.distributed ? '' : `
+// Capability profile: NO distributed. The base-network reads throw
+// synchronously in-realm; the host relay refuses any 'distributed-request'
+// this realm still emits, as the second wall. why: this host has no
+// distributed handler — an unanswered bridge call would hang the run to its
+// wall-clock for a one-word answer.
+const noDistributed = (name) => () => {
+  throw new Error('peerd.distributed.' + name + ' is not available in this worker (no-distributed capability profile).');
+};
+globalThis.peerd.distributed.whoami = noDistributed('whoami');
+globalThis.peerd.distributed.status = noDistributed('status');
+globalThis.peerd.distributed.peers = noDistributed('peers');
+globalThis.peerd.distributed.presence = noDistributed('presence');
 `}
 // ONE listener fans every '<name>-response' out to its bridge. Each bridge's
 // onResponse claims only its own type, so registration order doesn't matter.

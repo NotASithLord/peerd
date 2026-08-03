@@ -93,4 +93,4 @@ if (RUN_URL) {
   console.log(`<sub>Full-res before/after/diff PNGs: **[download the \`visual-diff-…\` artifact](${RUN_URL})**.</sub>`);
 }
 console.log('');
-console.log('<sub>Intended? Re-run this workflow on the branch with **update_visual_baselines** checked, then commit the fresh `baselines/linux-x64/` + `gallery.html`.</sub>');
+console.log('<sub>Intended? Re-run this workflow on the branch with **update_visual_baselines** checked, then commit the fresh `baselines/linux-x64/` and regenerate `GALLERY.md` with `bun run gallery`.</sub>');

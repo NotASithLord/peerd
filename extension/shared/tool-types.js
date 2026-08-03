@@ -83,6 +83,12 @@
  *   persists the bytes (send-once-then-strip, like attachments). content carries
  *   the bytes-free metadata.
  * @property {ToolMeta} [meta]         populated by the dispatcher, not by tools
+ * @property {boolean} [paged]         this result is a deliberately-sized offset/
+ *   limit PAGE the model asked for — set by any offset/limit paging tool. The
+ *   loop redacts a paged result at the larger paged ceiling (loop/redact.js
+ *   PAGED_MAX_CHARS) rather than the 8k backstop, so a requested slice is not
+ *   re-cut. Set by the paging tool; the dispatcher preserves it (like evalError)
+ *   since it spreads the tool result.
  * @property {boolean} [evalError]     the tool ran fine but the CODE it evaluated
  *   errored (a notebook eval's in-band [ERROR]). ok stays true — the error text
  *   is the legitimate result — but the one-shot latch reads this to give the
@@ -94,6 +100,9 @@
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {any} [content]  optional human-readable explanation authored
+ *   alongside the machine `error` code (e.g. "User declined the outbound
+ *   write."); the loop surfaces it on the failure path — see agent-loop.js.
  * @property {ToolMeta} [meta]
  */
 
@@ -109,6 +118,10 @@
 /**
  * @typedef {Object} SessionLite
  * @property {string} sessionId
+ * @property {string} [kind]           session kind ('chat'|'spawned'|'actor'|…); SW-injected
+ * @property {number} [depth]          delegation depth (parent + 1); SW-injected
+ * @property {number} [messageCount]   session message count at ctx-build — the load_skill dedup anchor; SW-injected
+ * @property {number} [trimCovered]    leading messages the rolling summary folded out of the sent slice — the load_skill dedup watermark; SW-injected
  */
 
 /**

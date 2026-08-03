@@ -30,6 +30,7 @@
     "offscreen",
     "notifications",
     "alarms",
+    "declarativeNetRequest",
     "debugger"
   ],
 

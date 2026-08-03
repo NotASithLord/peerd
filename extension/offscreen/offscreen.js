@@ -31,9 +31,12 @@ import { runActor, abortActor } from './actor-runner.js';
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
 // HTML -> markdown extraction (fetch_url's clean-content path): Readability +
-// Turndown need a DOM Document, which the SW can't build. Self-registers a
-// 'web/extract' message handler.
+// Turndown need a DOM Document, which the SW can't build. The shell
+// self-registers a 'web/extract' message handler; the headless job runner's
+// fetch bridge reaches the pipeline DIRECTLY through the core's adapter
+// (same document — no route needed).
 import './web-extract.js';
+import { extractMarkdownLocal } from './web-extract-core.js';
 import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
 import { isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
@@ -341,14 +344,25 @@ const onJobMessage = (msg, sender, sendResponse) => {
       a2a: msg.a2a === true, actors: msg.actors === true,
       // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
       siteFetch: typeof msg.siteFetch === 'string' ? msg.siteFetch : '',
+      // design 06: may this job resolve peerd:toolbox modules (script lane only;
+      // trusted job param — job-runner still refuses it for a2a/site-client runs).
+      toolbox: msg.toolbox === true,
       // caps + ownerSessionId ride from the SW's job/run message (trusted: the
       // sender gate above). The WORKER never supplies either — job-runner
       // attaches them from these params and ignores anything in the worker's
       // own messages.
       caps: msg.caps,
       ownerSessionId: msg.ownerSessionId, ownerToolUseId: msg.ownerToolUseId, runId: msg.runId,
+      // The durable-workspace mount (trusted job param, SW-set — the sender
+      // gate above is what makes it trustworthy; _runJob validates the shape).
+      workspaceSessionId: msg.workspaceSessionId,
     },
-    { sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }) },
+    {
+      sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+      // The bridged fetch's extract:'markdown' post-step — the local pipeline
+      // adapter (see shared/fetch-extract.js for the why + posture).
+      extractMarkdown: extractMarkdownLocal,
+    },
   )
     .then((result) => sendResponse({ ok: true, result }))
     .catch((e) => sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }));

@@ -158,6 +158,15 @@ export const renderLineageLine = (block) => {
 export const defaultClassify = (block) => {
   const meta = (block && typeof block.meta === 'object' && block.meta) || {};
   const se = meta.sideEffect;
+  // why NEVER for load_skill: its repeat-injection dedup (schema-diet 6b,
+  // shouldInjectBody) keys on the ROLLING-SUMMARY watermark to decide whether a
+  // skill body is still in the sent slice — which is only a complete account of
+  // "is it still there?" if the body leaves the slice ONLY via the trim. If we
+  // compacted a skill body to a spine here, the watermark wouldn't have moved,
+  // so shouldInjectBody would still return a "playbook is above" pointer to a
+  // body that's now gone, and the pointer's own "re-load to re-page" advice
+  // would loop forever. Skill bodies are trimmed, never body-compacted.
+  if (meta.toolName === 'load_skill') return NEVER;
   // Decisions & receipts (forms submitted, files deleted) — never compacted
   // to a spine; often non-idempotent to re-run.
   if (se === 'mutate_external' || se === 'destructive') return NEVER;

@@ -4,7 +4,7 @@
 // paging contract honest live here.
 
 import { describe, test, expect } from 'bun:test';
-import { windowText, pagingFooter, pageSlice, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
+import { windowText, pagingFooter, pageSlice, pageStatusLine, SPILL_PAGE_CHARS, PAGED_MAX_CHARS, clampPageLimit, buildPagedResult, excerptRelevant, excerptFooter } from '../../../extension/peerd-runtime/tools/web/spill.js';
 
 describe('windowText', () => {
   test('text at or under the budget passes through whole', () => {
@@ -53,6 +53,55 @@ describe('pageSlice', () => {
     expect(pageSlice(text, 8, 100).slice).toBe('ij');        // limit past the end → to end
     expect(pageSlice(text, 99, 3)).toMatchObject({ slice: '', remaining: 0 });  // offset past end
     expect(pageSlice(text, 0, 0).slice).toBe('a');           // degenerate limit → at least 1 char
+  });
+});
+
+describe('pageStatusLine (the shared offset/limit paging footer)', () => {
+  test('mid-text: names how much remains and the exact next call', () => {
+    const page = pageSlice('z'.repeat(100), 0, 40);   // offset 0, end 40, remaining 60
+    const line = pageStatusLine({ page, nextArgs: '{ "key": "k1", "offset": 40 }' });
+    expect(line).toContain('chars 0–40 of 100');
+    expect(line).toContain('60 remain');
+    expect(line).toContain('next: { "key": "k1", "offset": 40 }.');
+  });
+
+  test('final slice: end-of-text instead of a next-call hint', () => {
+    const page = pageSlice('z'.repeat(100), 90, 50);   // remaining 0
+    const line = pageStatusLine({ page, nextArgs: '{ "path": "f", "offset": 100 }' });
+    expect(line).toContain('end of stored text');
+    expect(line).not.toContain('next:');
+  });
+
+  test('the shared slice size is one constant (page in == page out)', () => {
+    expect(SPILL_PAGE_CHARS).toBe(16_000);
+  });
+});
+
+describe('clampPageLimit (the ONE shared limit clamp)', () => {
+  test('absent / non-positive → the cap; larger → capped; in-range → verbatim', () => {
+    expect(clampPageLimit(undefined)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(0)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(-5)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(999_999)).toBe(SPILL_PAGE_CHARS);
+    expect(clampPageLimit(500)).toBe(500);
+  });
+});
+
+describe('buildPagedResult (fits the FRAMED slice under the paged ceiling)', () => {
+  test('a plain slice frames straight through, flagged paged', () => {
+    const r = buildPagedResult({ text: 'a'.repeat(1000), offset: 0, limit: SPILL_PAGE_CHARS, frame: (p) => p.slice });
+    expect(r).toMatchObject({ ok: true, paged: true });
+    expect(r.content).toBe('a'.repeat(1000));
+    expect(PAGED_MAX_CHARS).toBeGreaterThan(SPILL_PAGE_CHARS);
+  });
+
+  test('shrinks the slice when framing inflates it past PAGED_MAX_CHARS', () => {
+    // A framer that doubles every char: a full 16k slice would frame to 32k —
+    // buildPagedResult must shrink until the framed content fits the ceiling.
+    const inflate = (p: { slice: string }) => p.slice.replace(/./g, 'xx');
+    const r = buildPagedResult({ text: 'a'.repeat(40_000), offset: 0, limit: SPILL_PAGE_CHARS, frame: inflate });
+    expect(r.content.length).toBeLessThanOrEqual(PAGED_MAX_CHARS);
+    expect(r.content.length).toBeGreaterThan(0);
   });
 });
 

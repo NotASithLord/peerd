@@ -1,9 +1,14 @@
 // issue 251 — the half of the classifier that grows with use.
 //
-// The invariant worth guarding: this store can only ever mark an origin as MORE
-// protected. Nothing in it makes an origin ordinary again, because a false
-// positive costs a handoff while a false negative costs a roaming actor loose on
-// a site the user is logged into.
+// The invariant worth guarding: no AUTOMATIC path here makes an origin ordinary
+// again, because a false positive costs a handoff while a false negative costs a
+// roaming actor loose on a site the user is logged into. Hence the cap refuses to
+// learn rather than evicting, and nothing decays.
+//
+// `forget`/`clear` are the deliberate exception, and the tests below pin what
+// makes them safe: they are USER-initiated (settings-only routes, unreachable
+// from the tool dispatcher), and a removal that races the boot read must WIN
+// rather than being resurrected by storage.
 
 import { describe, test, expect } from 'bun:test';
 import { makeLearnedOrigins, MAX_LEARNED } from '../../../extension/peerd-runtime/actor/learned-origins.js';
@@ -175,5 +180,129 @@ describe('the boot read races the first page walk', () => {
     releaseLoad(null);
     await hydrating;
     expect(store.snapshot().get('https://x.test')).toBe('password-field');
+  });
+});
+
+describe('un-learning (user-initiated only)', () => {
+  const forgetHarness = (stored: Record<string, string> | null = null) => {
+    const saves: Array<Record<string, string>> = [];
+    const forgets: string[][] = [];
+    const store = makeLearnedOrigins({
+      load: async () => stored,
+      save: async (all) => { saves.push({ ...all }); },
+      onForget: (origins) => { forgets.push([...origins]); },
+      onError: () => {},
+    });
+    return { store, saves, forgets };
+  };
+
+  test('forget removes the origin from the synchronous read the classifier uses', async () => {
+    const { store } = forgetHarness();
+    await store.hydrate();
+    store.note('https://app.test', 'password-field');
+    expect(store.forget('https://app.test')).toBe(true);
+    expect(store.snapshot().has('https://app.test')).toBe(false);
+  });
+
+  test('forget persists — the removal survives the next boot read', async () => {
+    const { store, saves } = forgetHarness({ 'https://app.test': 'password-field' });
+    await store.hydrate();
+    store.forget('https://app.test');
+    await store.settled();
+    expect(saves.at(-1)).toEqual({});
+  });
+
+  test('forget reports whether it did anything, and is audited once', async () => {
+    const { store, forgets } = forgetHarness({ 'https://app.test': 'password-field' });
+    await store.hydrate();
+    expect(store.forget('https://nope.test')).toBe(false);  // never learned
+    expect(store.forget('https://app.test')).toBe(true);
+    expect(store.forget('https://app.test')).toBe(false);   // already gone
+    expect(forgets).toEqual([['https://app.test']]);
+  });
+
+  test('forget ignores junk rather than throwing', async () => {
+    const { store } = forgetHarness();
+    await store.hydrate();
+    expect(store.forget('')).toBe(false);
+    expect(store.forget(null)).toBe(false);
+    expect(store.forget(undefined)).toBe(false);
+  });
+
+  test('clear empties the set and returns how many it forgot', async () => {
+    const { store, forgets } = forgetHarness({
+      'https://a.test': 'password-field',
+      'https://b.test': 'confirmed-write',
+    });
+    await store.hydrate();
+    expect(store.clear()).toBe(2);
+    expect(store.size()).toBe(0);
+    expect(store.clear()).toBe(0);                 // idempotent
+    expect(forgets).toEqual([['https://a.test', 'https://b.test']]);
+  });
+
+  // THE RACE THAT MATTERS. hydrate() MERGES (it must, so a signal landing during
+  // the boot read is not lost) - so without tombstones a forget issued before the
+  // read lands is undone by the very next line of storage, and the user watches a
+  // row they deleted come back.
+  test('a forget that races the boot read WINS over what storage brings back', async () => {
+    let releaseLoad: (v: any) => void = () => {};
+    const gate = new Promise((r) => { releaseLoad = r; });
+    const store = makeLearnedOrigins({
+      load: async () => { await gate; return { 'https://x.test': 'password-field' }; },
+      save: async () => {},
+      onError: () => {},
+    });
+    const hydrating = store.hydrate();
+    store.note('https://x.test', 'password-field');
+    expect(store.forget('https://x.test')).toBe(true);
+    releaseLoad(null);
+    await hydrating;
+    expect(store.snapshot().has('https://x.test')).toBe(false);
+  });
+
+  test('a clear that races the boot read also suppresses rows this heap never saw', async () => {
+    let releaseLoad: (v: any) => void = () => {};
+    const gate = new Promise((r) => { releaseLoad = r; });
+    const store = makeLearnedOrigins({
+      load: async () => { await gate; return { 'https://unseen.test': 'password-field' }; },
+      save: async () => {},
+      onError: () => {},
+    });
+    const hydrating = store.hydrate();
+    store.note('https://seen.test', 'password-field');
+    store.clear();
+    releaseLoad(null);
+    await hydrating;
+    expect(store.size()).toBe(0);
+  });
+
+  test('after hydrate settles, a later learn is kept normally (tombstones do not linger)', async () => {
+    const { store } = forgetHarness({ 'https://app.test': 'password-field' });
+    await store.hydrate();
+    store.forget('https://app.test');
+    // Re-learning is expected: the signal fires again next time peerd reads a
+    // sign-in form there. A lingering tombstone would silently refuse it.
+    expect(store.note('https://app.test', 'password-field')).toBe(true);
+    expect(store.snapshot().get('https://app.test')).toBe('password-field');
+  });
+});
+
+describe('entries (the settings list)', () => {
+  test('returns a sorted, serializable COPY — not the live Map', async () => {
+    const store = makeLearnedOrigins({
+      load: async () => ({ 'https://b.test': 'password-field', 'https://a.test': 'confirmed-write' }),
+      save: async () => {},
+      onError: () => {},
+    });
+    await store.hydrate();
+    expect(store.entries()).toEqual([
+      { origin: 'https://a.test', reason: 'confirmed-write' },
+      { origin: 'https://b.test', reason: 'password-field' },
+    ]);
+    // Mutating the returned array must not touch the classifier's own state:
+    // this value crosses a message boundary to the settings page.
+    store.entries().length = 0;
+    expect(store.size()).toBe(2);
   });
 });

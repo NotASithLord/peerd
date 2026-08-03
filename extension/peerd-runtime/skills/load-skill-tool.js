@@ -17,6 +17,7 @@
 // The registry is injected onto the ToolContext by the SW (ctx.skills).
 
 import { escapeAttr } from '/shared/util.js';
+import { shouldInjectBody } from '../tools/defs/once-per-session.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const loadSkillTool = {
@@ -49,22 +50,35 @@ export const loadSkillTool = {
     if (!name) return { ok: false, error: 'name_required' };
     try {
       const { meta, body } = await skills.loadBody(name);
+      // why the dedup (schema-diet 6b): a skill's full SKILL.md re-ships every
+      // turn once it's in history, so a second load of the SAME skill this
+      // session is pure repetition — UNLESS the first body has scrolled out of
+      // the sent slice, in which case the model genuinely can't see it and we
+      // must re-page. shouldInjectBody keys on the rolling-summary watermark:
+      // it returns false (dedup to a pointer) only while the prior body is still
+      // in context. ctx.session carries messageCount/trimCovered (SW-injected).
+      const { sessionId, messageCount, trimCovered } = ctx.session ?? {};
+      const inject = shouldInjectBody(sessionId, `skill:${meta.name}`, messageCount ?? 0, trimCovered ?? 0);
       // why: frame the body as an instruction playbook the agent should
       // follow, while reminding the model these are operating
       // instructions for a task — not a new system policy and not a
       // license to skip gates. Mirrors the <untrusted_web_content> framing
       // discipline used elsewhere.
-      return {
-        ok: true,
-        content: [
+      const content = inject
+        ? [
           `<skill name="${meta.name}"${meta.version ? ` version="${escapeAttr(meta.version)}"` : ''}>`,
           'The following is the skill\'s playbook. Follow it for this task.',
           'Tool calls it leads to still pass the normal gates.',
           '',
           body,
           '</skill>',
-        ].join('\n'),
-      };
+        ].join('\n')
+        // Already loaded this session and still in context — a pointer, not the
+        // body again. Re-call load_skill to re-page it if it has scrolled away.
+        : `<skill name="${meta.name}" already-loaded="this session">`
+          + `\nYou already loaded "${meta.name}" earlier this session — its full playbook is above in this conversation; re-read it there. (Call load_skill again to re-page the body if it has scrolled out of view.)`
+          + '\n</skill>';
+      return { ok: true, content };
     } catch (e) {
       // SkillNotFoundError or storage failure — report by name.
       return { ok: false, error: `skill_not_found: ${name}` };

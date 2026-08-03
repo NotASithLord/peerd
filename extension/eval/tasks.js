@@ -10,7 +10,7 @@
 // open-ended tasks; this MVP is all hard checks so the score is objective.
 //
 // state passed to check():
-//   { tabUrl, tabTitle, tabText, answer, steps, tools[], tokens, durationMs, error }
+//   { tabUrl, tabTitle, tabText, answer, steps, tools[], toolResults[], tokens, durationMs, error }
 
 import { includesCI, ok, no, usedAny } from './score.js';
 
@@ -18,7 +18,7 @@ import { includesCI, ok, no, usedAny } from './score.js';
  * The end-state a task's check() scores — exactly the shape eval-engine's
  * runTask builds (every field always present; `error` is the run's failure
  * string or null). Mirrors the doc comment at the top of this file.
- * @typedef {{ tabUrl: string, tabTitle: string, tabText: string, answer: string, steps: number, tools: string[], tokens: number, durationMs: number, error: string | null }} State
+ * @typedef {{ tabUrl: string, tabTitle: string, tabText: string, answer: string, steps: number, tools: string[], toolResults: Array<{ name: string, ok: boolean }>, tokens: number, durationMs: number, error: string | null }} State
  * @typedef {{ pass: boolean, detail?: string }} CheckResult
  * @typedef {{ id: string, title: string, startUrl?: string | null, prompt: string, timeoutMs?: number, check: (s: State) => CheckResult }} Task
  */

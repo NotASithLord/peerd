@@ -16,6 +16,9 @@
 // (the DI rule).
 
 import { draftAgentsMd, deriveChecklist, resolveWorkspaceKey } from './initializer.js';
+// disarmText is PURE (not an IO surface), so importing it directly does not
+// break the module's dependency-injection rule.
+import { disarmText } from '../dom/cdr.js';
 
 /**
  * @param {Object} deps
@@ -44,7 +47,15 @@ export const makeInitOrchestrator = (deps) => {
       if (!tab?.id || !tab.url || /^(chrome|about|devtools|edge):/.test(tab.url)) {
         return tab?.url ? { url: tab.url, title: tab.title } : null;
       }
-      let probe = { url: tab.url, title: tab.title };
+      // why disarmText here: this page-derived probe (title, headings, body
+      // snippet) is composed by draftAgentsMd into ALWAYS-LOADED project memory,
+      // which re-enters the TRUSTED orchestrator system prompt every future
+      // session. It is a read boundary INV-12 must cover — invisible-Unicode /
+      // bidi instructions smuggled in a heading or the body would persist as a
+      // durable injection, and be invisible both at the confirm gate and in the
+      // Memory tab. Strip at the source, exactly as read_page / fetch_url do.
+      /** @type {{ url?: string, title?: string, headings?: string[], textSnippet?: string }} */
+      let probe = { url: tab.url, title: disarmText(tab.title) };
       try {
         const [res] = await scripting.executeScript({
           target: { tabId: tab.id },
@@ -55,7 +66,14 @@ export const makeInitOrchestrator = (deps) => {
             return { headings, textSnippet: text };
           },
         });
-        if (res?.result) probe = { ...probe, ...res.result };
+        if (res?.result) {
+          const r = res.result;
+          probe = {
+            ...probe,
+            headings: Array.isArray(r.headings) ? r.headings.map((/** @type {unknown} */ h) => disarmText(String(h))) : r.headings,
+            textSnippet: typeof r.textSnippet === 'string' ? disarmText(r.textSnippet) : r.textSnippet,
+          };
+        }
       } catch { /* inject blocked — keep url/title only */ }
       return probe;
     } catch {

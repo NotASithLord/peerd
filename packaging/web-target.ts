@@ -97,6 +97,12 @@ export const KNOWN_BROWSER_TOUCHES = new Set<string>([
   'shared/peer-notifications.js|browser.runtime?.onMessage?.addListener((/** @type {unknown} */ raw) => {',
   'shared/open-options.js|browser.runtime.openOptionsPage();',
   'shared/open-options.js|browser.tabs.create({',
+  // The in-page activity pill's Stop button. Guarded by a `typeof chrome` check
+  // and wrapped in try/catch at the call site, so on the web target — where
+  // there is no extension runtime to message — the button simply does nothing
+  // and the pill stays up. The side panel's Stop is the backstop there, exactly
+  // as it is when the extension's own SW has been evicted.
+  "peerd-runtime/dom/activity-overlay-injected.js|chrome.runtime.sendMessage({ type: 'agent/stop' });",
 ]);
 
 // The web shell: a MINIMAL smoke page + the build-stamped service worker.

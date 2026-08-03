@@ -262,15 +262,25 @@ Code: `peerd-distributed/content/manifest.js`, `identity/keypair.js`,
 An inbound (peer-originated) turn can never make the agent delegate, and an actor
 spawned by an inbound or injected turn is tainted for its whole subtree. Forged,
 severed, foreign-rooted, and cyclic lineages fail closed. A poisoned mesh op (bad
-method or args) is rejected, and signing as the user requires per-target consent.
+method or args) is rejected, and signing as the user requires per-target consent. The
+wall covers EVERY door to delegation, not only the direct `message_actor` tool: the
+`script` tool's `actors.send`/`actors.ask` surface reaches the same `messageActor`, so
+it is refused mint on an inbound turn (`tools/defs/script.js` gates `actorsOn` on
+`ctx.inbound !== true` — the trusted turn signal folded SW-side; the untrusted worker
+never echoes it).
 Code: `peerd-runtime/actor/delegation-lineage.js` (`mayMessageActor`,
-`buildAncestry`), `actor/a2a-api.js`. Red-team: scenario 05.
+`buildAncestry`), `tools/defs/script.js`, `actor/a2a-api.js`. Red-team: scenario 05.
 
 <a id="inv-6"></a>
 ### INV-6. Sandboxed code is confined to an audited bridge
 In a Notebook or headless worker realm, every raw network channel throws, the native
 `fetch` is deleted off the prototype chain, and the bridge is pinned non-writable and
-non-configurable so in-realm sabotage cannot unseat it. No fresh un-sealed realm can
+non-configurable so in-realm sabotage cannot unseat it. Same-origin durable stores are
+sealed too — `indexedDB` (the sealed worker runs at the extension origin, so an unsealed
+IDBFactory would reach the `peerd` database: the vault blob, always-loaded memory,
+sessions, grants, and audit) and the Cache API are both replaced with throwing stubs and
+deleted off the prototype chain, so the audited postMessage bridge and the per-instance
+OPFS root remain the only outward edges. No fresh un-sealed realm can
 be created, and OPFS import paths collapse `..` inside the instance root. A wasm32-wasi
 module run in that realm via the `peerd:wasi` builtin holds strictly less than the realm
 itself: its only imports are the vendored shim's WASI preview1 syscalls, and every
@@ -294,10 +304,14 @@ with the real-realm proof in
 ### INV-7. No egress to private, loopback, link-local, or metadata hosts
 `webFetch` refuses a host classified as private, loopback, link-local, `.local`, or
 metadata by `isPrivateOrLocalHost`, across decimal, hex, octal, and short-form IPv4 and
-IPv4-mapped and NAT64 IPv6 encodings, before any network call, ahead of the denylist,
-and fails closed on redirects so a public host cannot pivot to an internal one.
-Code: `peerd-egress/fetch/private-network.js`, `fetch/web-fetch.js`. Red-team:
-scenario 07.
+IPv4-mapped and NAT64 IPv6 encodings — plus the RFC 6598 shared/CGNAT (`100.64.0.0/10`),
+benchmarking (`198.18.0.0/15`), and reserved/broadcast (`240.0.0.0/4`) ranges that are
+internal-use on real deployments — before any network call, ahead of the denylist,
+and fails closed on redirects so a public host cannot pivot to an internal one. The same
+redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.js`,
+`redirect:'manual'`), which previously validated only the pre-redirect host.
+Code: `peerd-egress/fetch/private-network.js`, `fetch/web-fetch.js`,
+`offscreen/pdf-extract.js`. Red-team: scenario 07.
 
 <a id="inv-8"></a>
 ### INV-8. Injected instructions cannot reach a capability
@@ -316,9 +330,15 @@ the side-by-side comparison.
 ### INV-12. What the model reads is what a human could have seen
 Page bytes that are invisible to a person but legible to a model — zero-width and
 soft-hyphen runs, bidi overrides, the Unicode Tags block, variation-selector
-sequences, HTML comments — are removed before the text reaches the model. The strip
-runs at both read boundaries and inside the untrusted-data fence itself, so a new
-web-sourced tool cannot forget it, and it runs TWICE around HTML extraction, because
+sequences, the combining grapheme joiner (`U+034F`, a `gc=Mn` invisible the `\p{Cf}`
+sweep cannot reach), HTML comments — are removed before the text reaches the model. The
+strip runs at both read boundaries and inside the untrusted-data fence itself, so a new
+web-sourced tool cannot forget it, and it also runs at the two boundaries where
+page-derived text becomes DURABLE trusted context rather than a transient tool result:
+the `/init` active-tab probe that seeds always-loaded project memory
+(`memory/init-orchestrator.js`) and the skill descriptions rendered into the system
+prompt at startup (`skills/registry.js`) — a covert channel there would persist,
+invisible at the approval gate, and it runs TWICE around HTML extraction, because
 extraction parses the document and turns `&#8203;` — seven ordinary ASCII characters
 on the way in — into a real zero-width byte on the way out. Legitimate content is
 LARGELY not collateral: the LETTERS of every script survive, including the ZWNJ that
@@ -330,7 +350,8 @@ are ordinary visible characters. The comment-removal pass is applied
 only where a comment is genuinely a comment (markup), never to JSON or plain text
 where `<!--` is visible content.
 Code: `peerd-runtime/dom/cdr.js`, wired at `tools/prompt-wrap.js`,
-`tools/defs/fetch-url.js`, `tools/defs/read-page.js`. Red-team: scenario 09.
+`tools/defs/fetch-url.js`, `tools/defs/read-page.js`, `memory/init-orchestrator.js`,
+`skills/registry.js`. Red-team: scenario 09.
 
 ### INV-13. Borrowing the user's identity on a page strangers wrote takes the user
 An authenticated write on an origin where third parties author the content (issue
@@ -402,16 +423,26 @@ evaluating peerd should know. Each cites where it lives in the code.
   falls back to a keyless in-service-worker loop where the boundary is a prompt
   boundary rather than a memory boundary, which is the pre-heap-split posture. The
   memory boundary is not universal. (`background/service-worker.js` offscreen fallback.)
-- R2. Memory poisoning. The auto-memory digest excludes tool results and synthetic
-  messages, but still includes raw assistant text, which can echo attacker-paraphrased
-  content, and an approved note persists into every future prompt. Approval is the trust
-  boundary. A user who approves a poisoned note owns the consequence.
-  (`peerd-runtime/memory/auto-memory.js`.)
-- R3. A skill body is trusted instructions by design. Skill install fetches through
-  `webFetch` (denylist and caps), and the frontmatter parser refuses unknown keys, but
-  the skill body loads into context as trusted instructions with no untrusted-content
-  fence. A malicious shared skill is a direct instruction-injection vector. Installing a
-  skill runs its author's prompt. (`peerd-runtime/skills/`.)
+- R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
+  synthetic messages, but still includes raw assistant text, which can echo
+  attacker-paraphrased content, and an approved note persists into every future prompt.
+  Approval is the trust boundary. A user who approves a poisoned note owns the
+  consequence. Narrowed: the `/init` seed of always-loaded project memory now
+  CDR-strips its page-derived probe (`memory/init-orchestrator.js`, INV-12), so an
+  INVISIBLE-Unicode instruction can no longer ride into durable memory beneath the
+  approval gate — the note the user reviews is the note the model reads. The residual is
+  the visible channel: content the model paraphrases into ordinary assistant text.
+  (`peerd-runtime/memory/auto-memory.js`, `memory/init-orchestrator.js`.)
+- R3 (narrowed). A skill body is trusted instructions by design. Skill install fetches
+  through `webFetch` (denylist and caps), and the frontmatter parser refuses unknown
+  keys, but the skill body loads into context as trusted instructions with no
+  untrusted-content fence. A malicious shared skill is a direct instruction-injection
+  vector. Installing a skill runs its author's prompt. Narrowed: the skill name and
+  description rendered into the startup prompt — the one skill field shown before any
+  `load_skill` — are now CDR-stripped (`skills/registry.js`, INV-12), so the description
+  the user reviewed in the skills UI is the description the model reads; a covert
+  invisible-Unicode channel in that field is closed. The BODY remains trusted-by-design.
+  (`peerd-runtime/skills/`.)
 - R4 (narrowed). The audit log is tamper-EVIDENT, not tamper-proof. Every entry
   extends a SHA-256 hash chain and a head record pins the newest link, so a rewritten
   entry, a deleted middle entry, a truncated tail, or an inserted record fails
@@ -481,6 +512,14 @@ evaluating peerd should know. Each cites where it lives in the code.
   `read_web_cache` or `site_client_*` in the window before a DOM tool re-enters the
   chokepoint. (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
   `tools/defs/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
+  The #251 arc hardened the TAB actor's `site_client_*` path but left its API-actor
+  sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
+  MODEL-supplied `origin` argument, so an API actor bound to one origin could name a
+  DIFFERENT origin and spend that origin's stored key + cookies — a cross-origin
+  credential escalation past the "an API actor owns one origin" containment (DESIGN-18).
+  Closed: the branch now pins to the actor's own bound origin (`instanceId`) and refuses a
+  cross-origin target, mirroring `fetch_url`'s API pin. (`background/service-worker.js`
+  `siteFetchCallRoute`.)
 - R13. The egress tripwire does not scan the query string or fragment, so the canonical
   exfil GET is uncovered. `attacker.test/?d=<blob>` is not inspected, because that is
   where legitimate long high-entropy values live — OIDC `id_token`s, SAML requests,

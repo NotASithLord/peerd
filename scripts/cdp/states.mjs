@@ -18,7 +18,7 @@
 // screenshot to look at and a structured pass/fail with the "why".
 
 import { createServer } from 'node:http';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openWidePage, PASSPHRASE } from './e2e-harness.mjs';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, openWidePage, sleep, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -887,6 +887,115 @@ export const STATES = [
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-fulltab', page);
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual: the STANDALONE TAB PAGES ---------------------------------------
+  //
+  // Coverage audit finding: every visual baseline photographed the side panel,
+  // home or options, so five shipped pages — the three engine tabs, the mic
+  // permission grant, and the eval runner — had NO pixel guard at all. These are
+  // the cheap half of that gap: each renders fully with no instance, no seeding
+  // and no model traffic, so they cost one openWidePage + a selector wait.
+  //
+  // The engine tabs are captured in their HARD-FAIL state, opened with no URL
+  // hash. That is deliberate rather than a shortcut: the fail card IS the screen
+  // a user meets when an id is stale, an image pin mismatches, or cross-origin
+  // isolation is unavailable, and it is the only explanation they get for why
+  // their VM/Notebook/App did not start. It is also the one state reachable
+  // without booting CheerpX. The booted terminal / editor / render states remain
+  // uncovered and want their own states with a seeded instance.
+  {
+    name: 'vm-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed, #boot-stage' });
+      try {
+        // The boot log stamps each line with the WALL CLOCK, so this baseline
+        // would differ on every single run and the state would flap forever.
+        // Pin it to a fixed time rather than hiding the line — the timestamp's
+        // presence and position are part of what the baseline should guard, its
+        // value is not. (The harness's UTC timezone override does not help: the
+        // problem is the time advancing, not the zone.)
+        const pinClock = () => evalIn(page, `(() => {
+          for (const el of document.querySelectorAll('#boot-log, #boot-log *')) {
+            for (const n of el.childNodes) {
+              if (n.nodeType === 3) n.textContent = n.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00');
+            }
+          }
+          return true;
+        })()`);
+
+        // TWO different nondeterminisms live in this one card, and pinning only
+        // ever addressed the first:
+        //
+        //   the VALUE of each timestamp — pinClock above; and
+        //   HOW MANY lines exist when we shoot. `ready` fires on the failed
+        //   boot-card, but the boot keeps appending for a little longer, so the
+        //   capture could catch N or N+1 lines depending on runner speed.
+        //
+        // The second is what actually made this state flap on main (a dark-only
+        // drift, because dark is the SECOND capture — a line landing between the
+        // two shots reached dark alone, carrying an unpinned clock with it).
+        // So: wait for the log to stop growing before shooting anything, and
+        // re-pin before EACH theme via beforeShot, which closes the window
+        // between the two captures rather than just the one before the first.
+        // waitFor returns null on budget exhaustion rather than throwing. That is
+        // the right shape here: a log that never settles should still produce a
+        // shot (and a visible diff) rather than failing the whole state with a
+        // timeout that says nothing about the render.
+        const logLength = () => evalIn(page, `document.getElementById('boot-log')?.textContent?.length ?? 0`);
+        await waitFor(async () => {
+          const a = await logLength();
+          await sleep(120);
+          return a === await logLength();
+        }, { budgetMs: 5000 });
+
+        await pinClock();
+        await rec.visualPage('vm-tab-failed', page, { beforeShot: pinClock });
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'notebook-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // notebook-tab replaces <body> wholesale with its red no-id paragraph, so
+      // the probe cannot look for a page id — `body > p` is what actually lands.
+      const page = await openWidePage(ctx, 'engine-tabs/notebook-tab/index.html', { ready: 'body > p, #notebook-boot' });
+      try { await rec.visualPage('notebook-tab-failed', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'app-tab-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed, #boot-msg' });
+      try { await rec.visualPage('app-tab-failed', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'mic-permission', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // A plain page with no hash, params or state — its whole value is its copy,
+      // which is precisely what a pixel baseline protects.
+      const page = await openWidePage(ctx, 'permissions/mic.html', { ready: 'button, h1' });
+      try { await rec.visualPage('mic-permission', page); }
+      finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'eval-runner', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // Dev-only and pruned from the store package, but it is a dense control
+      // panel that renders fully at rest and is easy to break with a grid change.
+      const page = await openWidePage(ctx, 'eval/runner.html', { ready: 'button, select' });
+      try { await rec.visualPage('eval-runner', page); }
+      finally { try { page.close(); } catch { /* */ } }
     },
   },
 

@@ -78,6 +78,17 @@ describe('inspect kind:storage', () => {
   });
 });
 
+// The audit_log facet returns peerd's own counts, then the ENTRIES inside an
+// untrusted fence: every successful fetch is audited with an attacker-chosen
+// path, and this facet is on the main agent's surface. These tests read through
+// the fence instead of JSON.parsing the whole payload.
+const parseAudit = (/** @type {string} */ content) => {
+  const at = content.indexOf('<untrusted_web_content');
+  const counts = JSON.parse(content.slice(0, at));
+  const body = content.slice(content.indexOf('>', at) + 1, content.lastIndexOf('</untrusted_web_content>'));
+  return { ...counts, entries: JSON.parse(body) };
+};
+
 describe('inspect kind:audit_log', () => {
   it('returns recent entries newest-first', async () => {
     const entries = [
@@ -87,7 +98,7 @@ describe('inspect kind:audit_log', () => {
     ];
     const ctx = baseCtx({ idb: { getAll: async () => entries } });
     const r = await inspect('audit_log', {}, ctx);
-    const parsed = JSON.parse(okContent(r));
+    const parsed = parseAudit(okContent(r));
     expect(parsed.entries[0].id).toBe('b');
     expect(parsed.entries[1].id).toBe('c');
     expect(parsed.entries[2].id).toBe('a');
@@ -100,7 +111,7 @@ describe('inspect kind:audit_log', () => {
         Array.from({ length: 10 }, (_, i) => ({ id: `${i}`, when: i, type: 't' })) },
     });
     const r = await inspect('audit_log', { limit: 3 }, ctx);
-    const parsed = JSON.parse(okContent(r));
+    const parsed = parseAudit(okContent(r));
     expect(parsed.entries.length).toBe(3);
   });
 
@@ -113,7 +124,7 @@ describe('inspect kind:audit_log', () => {
       ] },
     });
     const r = await inspect('audit_log', { types: ['foo'] }, ctx);
-    const parsed = JSON.parse(okContent(r));
+    const parsed = parseAudit(okContent(r));
     expect(parsed.entries.every((/** @type {{ type: string }} */ e) => e.type === 'foo')).toBe(true);
     expect(parsed.entries.length).toBe(2);
   });

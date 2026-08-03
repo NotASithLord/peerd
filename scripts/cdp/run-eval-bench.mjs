@@ -37,6 +37,9 @@
 //                                            --baseline. Tagged into the scorecard.
 //   --limit=N                                run only the first N tasks (cost control)
 //   --baseline=<path.json>                   diff against a prior scorecard; exit 1 on a regression
+//   --guard-tool-errors                      also exit 1 if avg tool errors/task rose vs the baseline
+//                                            (opt-in — off by default so an existing bench doesn't
+//                                            start failing on the new axis)
 //   --budget-min=N                           max minutes to wait for the run (default 45; smoke 5)
 //   --show-tabs                              open the agent's eval window visibly
 //   --smoke                                  keyless plumbing run (implies provider=ollama, limit=1)
@@ -75,6 +78,7 @@ if (ACTOR_SURFACE && ACTOR_SURFACE !== 'tools' && ACTOR_SURFACE !== 'code') {
 }
 const LIMIT = SMOKE ? 1 : (flag('limit', false) ? Number(flag('limit', 0)) : 0);
 const BASELINE = flag('baseline', false) ? String(flag('baseline', '')) : '';
+const GUARD_TOOL_ERRORS = !!flag('guard-tool-errors', false);
 const SHOW_TABS = !!flag('show-tabs', false);
 const RUN_BUDGET_MS = Number(flag('budget-min', SMOKE ? 5 : 45)) * 60_000;
 
@@ -197,8 +201,20 @@ async function main() {
     if (BASELINE) {
       if (!existsSync(BASELINE)) throw new Error(`baseline not found: ${BASELINE}`);
       const base = JSON.parse(readFileSync(BASELINE, 'utf8'));
-      printDelta(compare(base.card ?? base, card));
-      regressed = compare(base.card ?? base, card).regressions.length > 0;
+      const baseCard = base.card ?? base;
+      const d = compare(baseCard, card);
+      printDelta(d);
+      regressed = d.regressions.length > 0;
+      // Opt-in: a change can lift pass-rate while making the agent thrash more.
+      // With the guard on, more tool errors/task than the baseline fails the run.
+      // Skip when the baseline predates the metric — else its absent avgToolErrors
+      // coerces to 0 and EVERY current error reads as a rise (false regression).
+      if (GUARD_TOOL_ERRORS && baseCard.avgToolErrors === undefined) {
+        log('⚠ baseline has no tool-error metrics — guard skipped; re-baseline to enable it');
+      } else if (GUARD_TOOL_ERRORS && d.toolErrorsDelta > 0) {
+        log(`⚠ TOOL-ERROR REGRESSION: avg tool errors/task +${d.toolErrorsDelta} (guard on)`);
+        regressed = true;
+      }
     }
 
     if (fixture) await fixture.close().catch(() => {});
@@ -219,6 +235,13 @@ function printCard(card) {
   // actually lands. THE number a content-pipeline change moves; the MAIN
   // buckets above barely see it.
   log(`ACTOR ${card.avgRunnerTokens} tok/task ($${card.avgRunnerCostUsd}/task)`);
+  // Tool-outcome health (design 5): failed calls + the wasted-turn proxy. These
+  // sit BESIDE passRate, never replace it — passRate is the correctness truth.
+  if (card.avgToolCalls !== undefined) {
+    log(`TOOLS ${card.avgToolErrors} err/task of ${card.avgToolCalls} calls (${(card.toolErrorRate * 100).toFixed(1)}% error rate)  ·  ${card.avgWastedTurns} wasted turns/task`);
+    const worst = Object.entries(card.toolErrorsByName ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    if (worst.length) log(`  top failing tools: ${worst.map(([n, c]) => `${n}×${c}`).join(', ')}`);
+  }
   if (card.failures?.length) log(`failures (${card.failures.length}): ${card.failures.map((f) => f.id).join(', ')}`);
 }
 
@@ -226,6 +249,8 @@ function printDelta(d) {
   log('=== Δ vs baseline ===');
   const s = (n) => (n >= 0 ? `+${n}` : `${n}`);
   log(`passRate ${s(d.passRateDelta)}%  ·  fresh ${s(d.freshTokensDelta)} tok  ·  ACTOR ${s(d.runnerTokensDelta)} tok  ·  $/task ${s(d.costUsdDelta)}  ·  steps ${s(d.stepsDelta)}`);
+  // Negative = the fix reduced errors / wasted work (the win direction).
+  log(`tool-errors ${s(d.toolErrorsDelta)}/task  ·  wasted ${s(d.wastedTurnsDelta)}/task`);
   if (d.regressions.length) log(`⚠ REGRESSIONS (${d.regressions.length}): ${d.regressions.join(', ')}`);
   else log(`✓ no regressions${d.fixes.length ? `  ·  fixed: ${d.fixes.join(', ')}` : ''}`);
 }

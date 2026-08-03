@@ -66,6 +66,28 @@ export const JS_PITFALLS_NOTE = [
   '  for money/display.',
   '- Default .sort() orders as STRINGS — pass a comparator for numbers,',
   '  .sort((a, b) => a - b).',
+  '- Fanning out over many URLs? Loop chunk(urls, 5) batches with',
+  '  Promise.allSettled (bounded concurrency, per-URL failures kept) — never one',
+  '  unbounded Promise.all.',
   'Then sanity-check the result against one value you already know before trusting it.',
   '</js-correctness>',
+].join('\n');
+
+// The peerd:std / peerd:wasi BUILTINS reference. SCRIPT-ONLY — appended to
+// script's once-per-session first-run disclosure (script.js), NOT folded into
+// JS_PITFALLS_NOTE. why kept separate: JS_PITFALLS_NOTE ALSO rides the Notebook
+// actor's EVERY-turn system prompt (system-prompt.js), so growing it would add
+// this reference to an always-on surface unpaid — schema-diet invariant #2 (no
+// new always-on prompt surface). Here it's paid once, on the first script run.
+export const SCRIPT_BUILTINS_NOTE = [
+  '<js-builtins>',
+  'Also in \'peerd:std\' (beyond the stats/data helpers): parseJsonl, toJsonl,',
+  'parseCsv, toCsv, stripTags, textOfTag, extractLinks, dedupeBy (table/chart',
+  'need a Notebook to render). To run a compiled wasm32-wasi BINARY over an',
+  'in-memory FS, import { runWasi } from \'peerd:wasi\': await runWasi(bytes,',
+  '{ args, env, stdin, files }) → { exitCode, stdout, stderr, files } (bytes from',
+  'peerd.egress.fetch(url).bytes; the module gets NO network and sees ONLY the',
+  'files you pass; demoModule() from the same import is a known-good module —',
+  'smoke-test runWasi(demoModule()) before hunting real binaries).',
+  '</js-builtins>',
 ].join('\n');

@@ -10,6 +10,7 @@ import { describe, test, expect } from 'bun:test';
 import { createSessionStore } from '../../../extension/peerd-runtime/sessions/store.js';
 import {
   renderSystemPrompt,
+  buildTemporalContext,
   _setTemplateForTests,
 } from '../../../extension/peerd-runtime/loop/system-prompt.js';
 import { makeSpawnActor } from '../../../extension/peerd-runtime/actor/spawn.js';
@@ -152,30 +153,39 @@ describe('renderSystemPrompt — <session_instructions> augmentation', () => {
   });
 });
 
-describe('renderSystemPrompt — ephemeral <active_tab> reorientation', () => {
-  const TEMPLATE = 'BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}';
-
-  test('appends the active tab (title + url) after the base, framed as untrusted context', async () => {
-    _setTemplateForTests(TEMPLATE);
-    const out = await renderSystemPrompt({ activeTab: { url: 'https://example.com/p', title: 'Example Page' } });
+describe('buildTemporalContext — ephemeral <active_tab> reorientation', () => {
+  // design 01: the active-tab reorientation moved OUT of the cached system block
+  // (renderSystemPrompt) into the per-turn <context> message so the system string
+  // stays byte-stable. The framing (untrusted CONTEXT, not an instruction) rides
+  // with it unchanged; renderSystemPrompt itself no longer emits <active_tab>.
+  test('carries the active tab (title + url), framed as untrusted context', () => {
+    const out = buildTemporalContext({ activeTab: { url: 'https://example.com/p', title: 'Example Page' } });
+    expect(out.includes('<context>')).toBe(true);
     expect(out.includes('<active_tab>')).toBe(true);
     expect(out.includes('https://example.com/p')).toBe(true);
     expect(out.includes('Example Page')).toBe(true);
-    expect(out.indexOf('BASE-PROMPT')).toBeLessThan(out.indexOf('<active_tab>'));
     // Orienting CONTEXT, not an instruction / not trusted page content.
     expect(out.toLowerCase().includes('not an instruction')).toBe(true);
   });
 
-  test('collapses to nothing when absent or urlless (home / non-web tab)', async () => {
-    _setTemplateForTests(TEMPLATE);
-    expect((await renderSystemPrompt({})).includes('active_tab')).toBe(false);
-    expect((await renderSystemPrompt({ activeTab: null })).includes('active_tab')).toBe(false);
-    expect((await renderSystemPrompt({ activeTab: { url: '' } })).includes('active_tab')).toBe(false);
+  test('renderSystemPrompt no longer embeds the active tab', async () => {
+    _setTemplateForTests('BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}');
+    // activeTab is no longer a renderSystemPrompt param — pass it through `any` to
+    // prove the renderer ignores it (the bytes live in buildTemporalContext now).
+    const out = await renderSystemPrompt(
+      { activeTab: { url: 'https://example.com/p', title: 'Example Page' } } as any,
+    );
+    expect(out.includes('active_tab')).toBe(false);
   });
 
-  test('renders the url even when the title is empty', async () => {
-    _setTemplateForTests(TEMPLATE);
-    const out = await renderSystemPrompt({ activeTab: { url: 'https://no-title.example/', title: '' } });
+  test('collapses to empty when absent or urlless (home / non-web tab)', () => {
+    expect(buildTemporalContext({}).length).toBe(0);
+    expect(buildTemporalContext({ activeTab: null }).length).toBe(0);
+    expect(buildTemporalContext({ activeTab: { url: '' } }).length).toBe(0);
+  });
+
+  test('renders the url even when the title is empty', () => {
+    const out = buildTemporalContext({ activeTab: { url: 'https://no-title.example/', title: '' } });
     expect(out.includes('https://no-title.example/')).toBe(true);
     expect(out.includes('<active_tab>')).toBe(true);
   });

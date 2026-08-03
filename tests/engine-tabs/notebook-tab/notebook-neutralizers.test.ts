@@ -29,6 +29,15 @@ const freshGlobal = () => {
       open: () => 'NATIVE-CACHE-OPEN', match: () => undefined,
       has: () => false, delete: () => false, keys: () => [],
     },
+    // indexedDB is an IDBFactory on WorkerGlobalScope.prototype. It is NOT a
+    // network channel but a same-origin DURABLE edge: the sealed worker inherits
+    // the extension origin (blob: worker of an ordinary extension page), so an
+    // unsealed indexedDB reaches the `peerd` DB — vault blob, durable memory,
+    // sessions, tool_grants, audit. The seal must block it like caches.
+    indexedDB: {
+      open: () => 'NATIVE-IDB-OPEN', deleteDatabase: () => 'NATIVE-IDB-DELETE',
+      databases: () => [], cmp: () => 0,
+    },
   };
   const g: any = Object.create(proto);
   g.XMLHttpRequest = function XMLHttpRequest() {};
@@ -99,6 +108,19 @@ describe('realm seal — raw channels are hard-blocked', () => {
     expect(() => g.caches.match('x')).toThrow('peerd.egress.fetch');
     // the native CacheStorage is gone from the prototype chain, not just shadowed
     expect(Object.getOwnPropertyDescriptor(proto, 'caches')).toBeUndefined();
+  });
+
+  test('IndexedDB is sealed — the same-origin durable store cannot be reached', () => {
+    // The seal's escape the audit found: indexedDB is not a network channel, so
+    // it slipped the egress-only framing, but the sealed worker runs at the
+    // extension origin and would otherwise read/write the `peerd` DB (vault blob,
+    // agents_memory poisoning, tool_grants forgery, audit). It must throw like
+    // caches, and the native IDBFactory must be gone from the prototype chain.
+    const { g, proto } = freshGlobal();
+    applyRealmSeal(g);
+    expect(() => g.indexedDB.open('peerd')).toThrow('peerd.egress.fetch');
+    expect(() => g.indexedDB.deleteDatabase('peerd')).toThrow('peerd.egress.fetch');
+    expect(Object.getOwnPropertyDescriptor(proto, 'indexedDB')).toBeUndefined();
   });
 
   test('survives a navigator with no sendBeacon, and no navigator at all', () => {
@@ -200,6 +222,47 @@ describe('realm seal — the fetch bridge protocol', () => {
     let err: any;
     try { await g.fetch(undefined); } catch (e) { err = e; }
     expect(err?.name).toBe('TypeError');
+  });
+
+  test("extract: 'markdown' rides the fetch-request; other values stay client-side inert (design 02, 2a)", async () => {
+    const { g, posted, listeners } = freshGlobal();
+    applyRealmSeal(g);
+    const p = g.fetch('https://site.example/post', { extract: 'markdown' });
+    expect(posted[0].extract).toBe('markdown');
+    // The host answered with extracted markdown: the fake Response carries the
+    // design's markers (contentType from the rewritten headers + extracted).
+    respond(listeners, {
+      type: 'fetch-response', rid: posted[0].rid, ok: true, status: 200,
+      headers: { 'content-type': 'text/markdown' }, bodyB64: btoa('# Hi'), extracted: true,
+    });
+    const resp = await p;
+    expect(resp.extracted).toBe(true);
+    expect(resp.contentType).toBe('text/markdown');
+    expect(await resp.text()).toBe('# Hi');
+
+    // An unknown mode must NOT cross the bridge — a future value can't change
+    // bytes on a host that doesn't know it.
+    const p2 = g.fetch('https://site.example/x', { extract: 'text' });
+    expect(posted[1].extract).toBeUndefined();
+    expect('extract' in posted[1]).toBe(false);
+    respond(listeners, { type: 'fetch-response', rid: posted[1].rid, ok: true, status: 200, bodyB64: btoa('raw') });
+    const resp2 = await p2;
+    expect(resp2.extracted).toBe(false);
+    expect(await resp2.text()).toBe('raw');
+  });
+
+  test('a plain fetch response surfaces contentType from headers, extracted false', async () => {
+    const { g, posted, listeners } = freshGlobal();
+    applyRealmSeal(g);
+    const p = g.fetch('https://api.example/j');
+    expect('extract' in posted[0]).toBe(false);
+    respond(listeners, {
+      type: 'fetch-response', rid: posted[0].rid, ok: true, status: 200,
+      headers: { 'Content-Type': 'application/json' }, bodyB64: btoa('{}'),
+    });
+    const resp = await p;
+    expect(resp.extracted).toBe(false);
+    expect(resp.contentType).toBe('application/json');   // any header casing
   });
 
   test('unrelated and duplicate responses are ignored', async () => {

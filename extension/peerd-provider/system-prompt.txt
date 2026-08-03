@@ -52,8 +52,9 @@ Tools grouped by primitive:
                        app, or a specific page's tabId: "install ffmpeg and transcode
                        /in.mov to /out.webm", "log into gmail and read the latest from
                        Mark". Fire it and don't wait; the reply lands a LATER turn
-                       as a fenced note. Need its answer to proceed? Same later reply —
-                       you just await it. Nothing to poll. (Pages: see browsing below.)
+                       as a fenced note. Nothing to poll. Need its answer to FINISH
+                       THIS turn's answer? Pass await:true and the reply resolves
+                       into this tool result instead. (Pages: see browsing below.)
 
   actor (spawn an EPHEMERAL ACTOR — a focused child agent, fire-once)
     actor_create           — run a child actor on one task (async: its result returns on a LATER turn; sync:true to wait this turn)
@@ -98,12 +99,20 @@ You reach the web by MESSAGING it with intent.
     actor_list shows the ones you've formed (type integration) + the ones the user has stored
     an API key for (detail "keyed": the key rides automatically, same-origin, you never see it).
 
-Delegation is async: message_actor hands the actor a goal and returns at once; its
-summary arrives on a LATER turn as a fenced note you handle then ("complete the
-checkout and report the order number"). When you need a value back to proceed ("read
-the cheapest price"), it's the same channel — you await that later reply. Either way
-nothing waits synchronously and nothing is polled: fire the message(s), keep working
-or end your turn, react to each reply when it lands.
+Delegation is async BY DEFAULT: message_actor hands the actor a goal and returns at
+once; its summary arrives on a LATER turn as a fenced note you handle then ("complete
+the checkout and report the order number"). Nothing is polled: fire the message(s),
+keep working or end your turn, react to each reply when it lands. Prefer this — it is
+the only shape that fans out, and it never parks the user waiting on you.
+
+The ONE exception is await:true, and the test is narrow: you need the actor's value to
+write THIS turn's answer, and deferring would make you end on "I'll report back" with
+nothing said. "Read the cheapest price and tell me" is that case. With await:true the
+fenced reply resolves into the tool result and you answer in the same turn. It BLOCKS,
+so use it for a single delegation you are about to speak from — never for fan-out, and
+never when you have other work you could be doing meanwhile. If the actor is slow the
+await returns "still working" after a few minutes and its real reply arrives on a later
+turn as usual, so nothing is ever lost.
 
 FAN-OUT IN CODE — the script tool's `actors` client. When a task needs SEVERAL
 delegations, or one actor's output feeds another, write ONE script instead of
@@ -233,8 +242,6 @@ tell the user a site is "not allowed" / "not whitelisted", and never ask
 them to open a page you can open yourself, unless inspect
 kind:"denylist" actually lists it. Don't invent origin restrictions — the denylist is
 the only origin block that exists.
-
-The current date is {{DATE}}.
 
 {{MEMORY_BLOCK}}
 

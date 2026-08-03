@@ -30,6 +30,10 @@ import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } fr
 // prompt only while session.prewalk.phase === 'planning'. Pure text; the
 // swap/restore IO rides the injected reconcilePrewalk/maybePrewalkSwap deps.
 import { PREWALK_NUDGE } from './prewalk.js';
+// Pure helper (no IO) — imported directly, like PREWALK_NUDGE above. Builds the
+// per-turn ephemeral <context> message (temporal + active tab) that keeps the
+// main system string byte-stable and prompt-cacheable (design 01).
+import { buildTemporalContext } from './system-prompt.js';
 
 // pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
 // relay, a security seam — one implementation, no drift).
@@ -216,6 +220,21 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     return '';
   });
 
+  // design 01 (prompt-cache stability): the per-turn-volatile temporal + active-tab
+  // bytes ride a LEADING <context> message in the stream, NOT the cached system
+  // block, so the main system string stays byte-stable and its prefix caches. Built
+  // here (temporalBlock + the foreground tab), handed to the loop, prepended each
+  // step. An actor keeps its temporal block embedded in its own per-turn prompt
+  // (see getSystemPrompt), so it takes no context message — '' skips the injection.
+  // Residual invalidator: memoryBlock (above) is keyed to the LIVE foreground
+  // origin, so the system prefix is byte-stable per (session x foreground
+  // workspace) — a mid-session origin switch re-renders the memory block and
+  // costs one cache write before it caches again. Acceptable; the volatile
+  // seconds-clock (the real per-turn bust) is what moved out.
+  const contextMessage = isActor
+    ? ''
+    : buildTemporalContext({ temporalBlock, activeTab: activeTabContext });
+
   const getSystemPrompt = async () => {
     // why: re-read the session record at render time so a /system change
     // (set or clear) takes effect on the very next turn. The block is the
@@ -233,12 +252,15 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       : '';
     return (await renderSystemPrompt({
       memoryBlock,
-      temporalBlock,
+      // design 01: the MAIN system string must be byte-stable to cache, so the
+      // orchestrator's volatile temporal bytes ride a leading <context> message
+      // (contextMessage below) instead of the system block. An ACTOR re-renders
+      // its system prompt per turn and keeps embedding the block (relocating it
+      // there too would need offscreen-worker plumbing — deferred). '' for the
+      // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
+      temporalBlock: isActor ? temporalBlock : '',
       skillsBlock,
       customSystemPrompt: promptSession?.customSystemPrompt,
-      // Ephemeral active-tab reorientation (null on home / non-web tabs; always
-      // null for an actor).
-      activeTab: activeTabContext,
       // DESIGN-17: an actor gets a kind-specific tuned block appended (the base
       // template — incl. all the security/defense text — survives verbatim).
       // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
@@ -290,6 +312,14 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const toolContext = await buildToolContext(isActor
     ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
+  // why: thread THIS turn's abort signal onto the tool ctx so a tool that can
+  // block IN-BAND unwinds on Stop / the turn timeout instead of parking the
+  // turn — message_actor with await:true (which resolves the actor's reply into
+  // the tool result), and a headless script run. The offscreen actor path
+  // already gets its own signal; this closes the same gap for the orchestrator,
+  // whose awaited web delegation must stay cancellable. The controller aborts on
+  // Stop (turnSlots.claim → abortController.abort()).
+  toolContext.abortSignal = abortController.signal;
 
   // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
   // goal cuts below change mid-turn, so the advertised list must follow.
@@ -515,6 +545,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // mid-flight — no new user message; the loop continues the persisted
       // history. Normal sends pass resume=false.
       resume,
+      // design 01: the per-turn ephemeral <context> message (temporal + active
+      // tab), prepended as message[0] each step. '' (actors) → the loop's own
+      // length>0 guard skips the injection.
+      contextMessage,
       // why: already validated + shaped by loop/attachments.js in
       // agent/send (text payloads inlined there). The loop ships the
       // bytes this turn and persists the stripped metadata shape.

@@ -80,12 +80,20 @@
 //     are URL/form-structural — which lets a deep READABLE path split per `/`
 //     segment (no false block). A STANDARD base64 (`btoa`, `+/`) blob thus
 //     self-fragments and is a REAL residual: measured against this module, a
-//     150-char standard-base64 blob in the PATH blocks only ~11% of the time
-//     (the tail where 100+ consecutive chars happen to avoid both symbols),
-//     versus ~100% for base64url and hex. An earlier version of this comment
-//     called it "moot ... it would only matter in the query/fragment, which we
-//     do not scan anyway" — which is wrong, because the path IS scanned
+//     150-char standard-base64 blob of RANDOM BYTES in the PATH blocks only
+//     ~11% of the time (the tail where 100+ consecutive chars happen to avoid
+//     both symbols), versus ~100% for base64url. An earlier version of this
+//     comment called it "moot ... it would only matter in the query/fragment,
+//     which we do not scan anyway" — which is wrong, because the path IS scanned
 //     (payloadSlots below) and the path is where a URL exfil actually goes.
+//     STATE THE POPULATION, because these rates are not properties of the
+//     encoding alone: the same standard-base64 blob blocks 80–100% of the time
+//     when it encodes TEXT rather than random bytes (text spends fewer
+//     characters on `+`/`/`), and the ~11% figure is the pessimistic end. The
+//     same sensitivity ran the other way for hex and USED to be a hole — this
+//     comment claimed "~100% for base64url and hex", which held only for random
+//     bytes; hex of scraped TEXT measured 0–13% because its entropy falls under
+//     the gate. That is why HEX_RUN now skips the entropy check entirely.
 //     Named properly because the obvious fix — dropping `+`/`/` from RUN_SPLIT
 //     — would re-break the long-readable-path false block that the prose rule
 //     in looksLikeProse and the article-slug tests exist to prevent.
@@ -117,7 +125,10 @@
 //   3. LOW-ENTROPY or SMALL payloads. Data whose OWN entropy is under the gate
 //      (a repeated segment, a short natural-language leak) or a single
 //      high-entropy token under MIN_BLOB_LENGTH slips through — entropy
-//      detection cannot see data that does not look random.
+//      detection cannot see data that does not look random. HEX is the one
+//      encoding carved out of this (HEX_RUN), because hex of ordinary text
+//      lands under the gate while being a perfectly working exfil; every other
+//      under-gate encoding remains uncaught.
 // None of these residuals is CONTAINED elsewhere — the heap fence bounds what
 // a hijacked actor knows, and nothing downstream inspects the URL again. Treat
 // them as accepted exposure, not as covered. A rare legitimate LONG single run
@@ -174,6 +185,38 @@ const MIN_BLOB_LENGTH = 100;
 // (a distinct-char run of length N caps at log2 N, so ~≤11 chars can't clear
 // 3.5), so short benign runs self-exclude.
 const MIN_RUN_ENTROPY_BITS = 3.5;
+
+// A run that is nothing but hex digits. why it has its own rule: the entropy
+// figure quoted above ("random hex ~3.9") is measured on RANDOM BYTES, and the
+// payload this module exists to catch is scraped DOM data — TEXT. Printable
+// ASCII lives in 0x20–0x7e, so the high nibble of every byte is almost always
+// 2–7 and hex-of-text collapses to ~3.2–3.4 bits, UNDER the gate. Measured
+// block rates before this rule: 100% for hex of random bytes, 13% for hex of
+// realistic scraped records, 0% for hex of English prose — while base64url
+// stayed at 100% throughout. So the one encoding the header singled out as
+// covered was the cheapest way past it, and the tests missed it because their
+// hex fixtures are hand-written random hex rather than hex of anything.
+//
+// Hex therefore skips the entropy gate and is judged on length alone. That is
+// safe because hex is the one encoded form with NO separators, so it cannot be
+// confused with a prose slug (looksLikeProse rejects it for the same reason):
+// nothing a person writes is a hundred unbroken hex digits. Measured across
+// 3,579 URLs harvested from live news, docs, shopping and code-hosting sites,
+// this newly blocks ZERO of them. The accepted residual is a ≥100-char hex
+// value that is genuinely load-bearing in a path — a SHA-512 digest is 128 —
+// which is the same accepted-cost class as the large-multihash IPFS CID named
+// in the header.
+//
+// Measured on the LONGEST HEX SUBSTRING of a run rather than on the whole run
+// being hex. why: the hostname slot is scanned DOT-COLLAPSED, so a DNS-label
+// exfil fuses the payload with the attacker's own labels — `<hex>attackertest`
+// — and a whole-run test would stop matching exactly where the evasion this
+// module was built to close actually lives. A substring bar costs nothing on
+// ordinary input: reaching 100 consecutive characters drawn only from
+// `[0-9a-f]` with no separator does not happen in prose (every common word
+// carries a letter outside that alphabet), and short hex-alphabet words like
+// `faced` or `decade` are orders of magnitude below the bar.
+const NON_HEX_SPLIT = /[^0-9a-fA-F]+/;
 
 // The share of a run's characters that must be `-`/`_` for it to read as WORDS
 // rather than payload. Prose slugs measure ~9–16%; base64url spends 2 of its 64
@@ -273,10 +316,30 @@ const payloadSlots = (url) => [
 const looksLikeProse = (run) => {
   // Hex is the one encoded form with NO separators and LOW entropy, so it would
   // otherwise slip through the density test below. Nothing written by a person
-  // is a hundred unbroken hex digits.
+  // is a hundred unbroken hex digits. (Same reasoning lets a long hex substring
+  // skip the entropy gate in largestExfilRun — see NON_HEX_SPLIT.)
   if (/^[0-9a-f]+$/i.test(run)) return false;
   const separators = (run.match(/[-_]/g) ?? []).length;
   return (separators / run.length) >= MIN_PROSE_SEPARATOR_RATIO;
+};
+
+/**
+ * Length of the longest unbroken `[0-9a-f]` span inside a run.
+ *
+ * A SPAN, not the whole run, because the hostname slot is dot-collapsed: a
+ * DNS-label exfil arrives as `<payload-hex>` fused to the attacker's own labels
+ * (`…attackertest`), which is not pure hex. See NON_HEX_SPLIT for why a
+ * substring bar is safe on ordinary input.
+ *
+ * @param {string} run
+ * @returns {number}
+ */
+const longestHexSpan = (run) => {
+  let longest = 0;
+  for (const span of run.split(NON_HEX_SPLIT)) {
+    if (span.length > longest) longest = span.length;
+  }
+  return longest;
 };
 
 /**
@@ -294,6 +357,11 @@ const largestExfilRun = (slots) => {
       // why `run.length <= longest` first: a run that cannot raise the max is
       // irrelevant, so skip the entropy math for it (never changes the verdict).
       if (!run || run.length <= longest) continue;
+      // HEX FIRST, on length alone. Hex of ordinary TEXT sits UNDER the entropy
+      // gate while being a perfectly working exfil, so the gate below would drop
+      // exactly the payload this module exists to catch. See NON_HEX_SPLIT.
+      const hexLength = longestHexSpan(run);
+      if (hexLength >= MIN_BLOB_LENGTH) { longest = Math.max(longest, hexLength); continue; }
       if (shannonEntropyBits(run) < MIN_RUN_ENTROPY_BITS) continue;
       if (looksLikeProse(run)) continue;
       longest = run.length;

@@ -8,6 +8,7 @@
 // have one file, pass `html` for back-compat.
 
 import { APP_RUNTIME_NOTE } from './code-style-note.js';
+import { oncePerSession } from './once-per-session.js';
 
 // Mirrors the write-layer backstop in background/app-client.js — kept aligned
 // with the dweb loader's 50M ceiling so a WASM-heavy dwapp (a game engine, a
@@ -81,10 +82,15 @@ export const createAppSandbox = async (args, ctx) => {
       }, null, 2);
       // The App ACTOR writes the files, so the code-style guidance rides ITS
       // prompt (system-prompt.js actorBlock), not this orchestrator
-      // create-result. Only the runtime note (how the iframe behaves) belongs here.
+      // create-result. Only the runtime note (how the iframe behaves) belongs
+      // here — and once per session (schema-diet 6b): a second app this session
+      // doesn't need the full note re-stated, a pointer suffices.
+      const note = oncePerSession(ctx.session?.sessionId, 'app-runtime-note')
+        ? APP_RUNTIME_NOTE
+        : '(App runtime note shown earlier this session — same iframe rules apply.)';
       return {
         ok: true,
-        content: `${summary}\n\n${APP_RUNTIME_NOTE}`,
+        content: `${summary}\n\n${note}`,
       };
     } catch (e) {
       return { ok: false, error: `app_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
