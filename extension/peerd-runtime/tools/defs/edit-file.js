@@ -194,6 +194,10 @@ export const editFileTool = {
     } catch (e) {
       // Map the typed errors to stable codes the model can react to.
       if (e instanceof SearchNotFoundError) return { ok: false, error: e.message, code: 'search_not_found', blockIndex: e.blockIndex, ...(e.whitespace ? { whitespace: true, line: e.line } : {}) };
+      // why: locations[].preview holds untrusted file bytes — they ride the
+      // STRUCTURED result only, and must never be concatenated into model-visible
+      // text unfenced (the message stays line-numbers-only; agent-loop serializes
+      // only .error). Fence the previews first if that ever changes.
       if (e instanceof SearchAmbiguousError) return { ok: false, error: e.message, code: 'search_ambiguous', blockIndex: e.blockIndex, count: e.count, locations: e.locations };
       if (e instanceof EditParseError) return { ok: false, error: e.message, code: 'edit_parse_error' };
       return { ok: false, error: `edit_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
@@ -212,15 +216,19 @@ export const editFileTool = {
     return {
       ok: true,
       content: JSON.stringify({
-        // path is the resolved target — echoed so a create's destination (3a)
-        // is visible in the result, not just assumed.
+        // echo the target path so a create's destination is visible in the
+        // result (3a), not just assumed.
         path: args.path,
         kind,
         blocks: result.blocks,
         bytes: result.content.length,
-        // 3b: an already-in-place edit succeeds and says so, so the agent
-        // stops retrying instead of reading a search_not_found.
-        ...(result.alreadyApplied.length > 0 ? { alreadyApplied: true } : {}),
+        // 3b: an already-in-place edit succeeds and says so — with the 0-based
+        // block indices, so a multi-block result isn't ambiguous about which
+        // landed vs. was skipped — so the agent stops retrying instead of
+        // reading a search_not_found.
+        ...(result.alreadyApplied.length > 0
+          ? { alreadyApplied: true, alreadyAppliedBlocks: result.alreadyApplied }
+          : {}),
       }, null, 2),
     };
   },

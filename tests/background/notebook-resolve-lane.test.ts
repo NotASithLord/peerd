@@ -30,3 +30,13 @@ describe('notebook-client — implicit resolve is serialized per session', () =>
     expect(queued.length).toBeGreaterThanOrEqual(4); // eval, writeFile, readFile, listFiles
   });
 });
+
+describe('notebook-client — re-inflates the OPFS not-found signal (edit_file 3a)', () => {
+  // why: the tab flattens the NotFoundError DOMException to a message + a
+  // 'not_found' code; the client must restore the NAME so edit_file can tell an
+  // absent notebook file (a legit whole-file create) from a genuine read fault.
+  test("a 'not_found' reply is rethrown as a NotFoundError-named Error", () => {
+    expect(src).toMatch(/code === 'not_found'/);
+    expect(src).toMatch(/err\.name = 'NotFoundError'/);
+  });
+});

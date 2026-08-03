@@ -52,28 +52,16 @@ const REPLACE_RE = /^>{5,9} REPLACE\s*$/;
 const normalizeEol = (s) => s.replace(/\r\n/g, '\n');
 
 /**
- * Count non-overlapping occurrences of `needle` in `haystack`.
+ * Count non-overlapping occurrences of `needle` in `haystack`. Delegates to
+ * offsetsOf (one scan implementation, no drift) with an uncapped collect.
  * Empty needle is handled by the caller (it means whole-file replace).
  *
  * @param {string} haystack
  * @param {string} needle
  * @returns {number}
  */
-const countOccurrences = (haystack, needle) => {
-  if (needle === '') return 0;
-  let count = 0;
-  let from = 0;
-  for (;;) {
-    const idx = haystack.indexOf(needle, from);
-    if (idx === -1) break;
-    count += 1;
-    from = idx + needle.length;
-  }
-  return count;
-};
+const countOccurrences = (haystack, needle) => offsetsOf(haystack, needle, Infinity).length;
 
-// Caps/thresholds for the diagnostics below — named + local so the shape is
-// legible rather than magic. Bounded work: each runs at most once per block.
 const MAX_RENDERED_LOCATIONS = 5;
 const PREVIEW_CAP = 100;
 // why: a trivially short REPLACE (";", "}", a lone common token) can be present
@@ -154,9 +142,15 @@ const offsetsOf = (haystack, needle, cap) => {
  */
 const isAlreadyApplied = (text, search, replace) => {
   if (replace === '' || replace === search) return false;
-  const distinctive = replace.includes('\n')
-    || replace.trim().length >= MIN_ALREADY_APPLIED_REPLACE_CHARS;
-  if (!distinctive) return false;
+  // why: a deletion/trim edit whose REPLACE is a substring of the SEARCH leaves
+  // REPLACE's bytes in the file whether or not the edit ran, so REPLACE being
+  // present can never PROVE the edit landed — refuse to claim already-applied.
+  if (search.includes(replace)) return false;
+  // why: a trivially short REPLACE — even a multi-line one like "  }\n}" — can
+  // be present by coincidence. A lone newline must not confer distinctiveness,
+  // or a missed deletion would falsely read as "already applied" (a silent
+  // no-op the module header forbids). Require real, non-whitespace content.
+  if (replace.trim().length < MIN_ALREADY_APPLIED_REPLACE_CHARS) return false;
   return countOccurrences(text, replace) >= 1;
 };
 
@@ -175,8 +169,20 @@ const whitespaceMissLine = (text, search) => {
   // everywhere; don't claim a whitespace difference for it.
   if (trimmedSearch.trim() === '') return null;
   const trimmedText = trimPerLine(text);
-  const idx = trimmedText.indexOf(trimmedSearch);
-  return idx === -1 ? null : lineOf(trimmedText, idx);
+  // why: only a LINE-ALIGNED trimmed match is a genuine whitespace-only
+  // difference. A mid-line substring match would misattribute a real content
+  // difference (a differing line prefix/suffix) to whitespace, so require both
+  // ends on a line boundary; scan forward until one aligns or we run out.
+  let from = 0;
+  for (;;) {
+    const idx = trimmedText.indexOf(trimmedSearch, from);
+    if (idx === -1) return null;
+    const end = idx + trimmedSearch.length;
+    const alignedStart = idx === 0 || trimmedText[idx - 1] === '\n';
+    const alignedEnd = end === trimmedText.length || trimmedText[end] === '\n';
+    if (alignedStart && alignedEnd) return lineOf(trimmedText, idx);
+    from = idx + 1;
+  }
 };
 
 /**
@@ -332,8 +338,11 @@ export const applyBlocks = (source, blocks) => {
         return { line, preview: previewAround(lines, line) };
       });
       const rendered = locations.map((loc) => `L${loc.line}`).join(', ');
+      // why: mark the unshown remainder so the agent doesn't take the capped
+      // list as exhaustive and build an anchor that still collides elsewhere.
+      const more = count > locations.length ? ` (+${count - locations.length} more)` : '';
       throw new SearchAmbiguousError(
-        `block ${blockIndex}: SEARCH text matched ${count} times: ${rendered} — add surrounding lines so it identifies exactly one location.`,
+        `block ${blockIndex}: SEARCH text matched ${count} times: ${rendered}${more} — add surrounding lines so it identifies exactly one location.`,
         blockIndex,
         count,
         locations,
@@ -358,7 +367,10 @@ export const isWholeFileCreate = (blocks) =>
   blocks.length === 1 && normalizeEol(blocks[0].search) === '';
 
 /**
- * Parse + apply in one shot. The canonical entry point for the tool.
+ * Parse + apply in one shot — a convenience composition of parseEditBlocks and
+ * applyBlocks. The tool shell (edit-file.js) parses separately so it can decide
+ * isWholeFileCreate BEFORE touching IO (3a); this one-shot form is used by the
+ * matcher's own tests.
  *
  * @param {string} source
  * @param {string} rawBlocks  the SEARCH/REPLACE payload

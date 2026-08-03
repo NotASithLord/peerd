@@ -500,7 +500,17 @@ const onNotebookMessage = (msg, _sender, sendResponse) => {
           return;
       }
     } catch (e) {
-      sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+      const err = /** @type {{ message?: string, name?: string }} */ (e);
+      // why: carry the OPFS not-found NAME across the tab RPC. getFileHandle
+      // throws a DOMException named 'NotFoundError' for a missing entry; the
+      // flattened message alone loses the name, and edit_file (3a) would then
+      // read an absent notebook file as a read_failed — breaking whole-file
+      // create. Tag it with a code the client re-inflates into a NotFoundError.
+      sendResponse({
+        ok: false,
+        error: err?.message ?? String(e),
+        ...(err?.name === 'NotFoundError' ? { code: 'not_found' } : {}),
+      });
     }
   })();
   return true;
