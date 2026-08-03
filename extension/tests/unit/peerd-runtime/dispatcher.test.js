@@ -119,19 +119,11 @@ describe('dispatcher', () => {
     expect(audited.some((e) => e.type === 'tool_executed' && e.details.tool === 't')).toBe(true);
   });
 
-  it('audits tool_failed (not tool_executed) when execute() returns { ok: false }', async () => {
-    clearTools();
-    registerTool(makeTool({ execute: async () => ({ ok: false, error: 'declined' }) }));
-    const { ctx, audited } = recorderCtx();
-    await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    await Promise.resolve();
-    const failed = audited.find((e) => e.type === 'tool_failed');
-    expect(!!failed).toBe(true);
-    expect(audited.some((e) => e.type === 'tool_executed')).toBe(false);
-    expect(failed.details.primitive).toBe('inspect');
-    expect(failed.details.error).toBe('declined');
-    expect(typeof failed.details.durationMs).toBe('number');
-  });
+  // why no returned-{ok:false} audit case here: that's pure values-in/out
+  // (dispatcher branch → recorded audit array) and lives in the Bun suite
+  // (tests/peerd-runtime/tools/dispatcher-meta.test.ts). This in-browser
+  // file earns its keep on the REAL-audit-log + render seam — see
+  // tests/unit/options/activity-tool-failed.test.js.
 
   it('catches execute() throw and returns ok:false with meta intact', async () => {
     clearTools();

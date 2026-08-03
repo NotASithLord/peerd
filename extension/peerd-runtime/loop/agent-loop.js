@@ -827,7 +827,9 @@ export async function* runUserTurn(ctx) {
           const failWith = (error, kind) => {
             // why: deadline/abort failures are synthesized HERE, bypassing the
             // dispatcher audit — emit tool_failed so the log matches is_error.
-            if (kind) appendAudit({ type: 'tool_failed', sessionId, details: { tool: tu.name, primitive: 'unknown', error, kind, durationMs: 0 } }).catch(() => {});
+            // A timeout waited the full deadline before we gave up (a real,
+            // known wall-clock); an abort can fire at any moment, so 0.
+            if (kind) appendAudit({ type: 'tool_failed', sessionId, details: { tool: tu.name, primitive: 'unknown', error, kind, durationMs: kind === 'timeout' ? DISPATCH_DEADLINE_MS : 0 } }).catch(() => {});
             return finish({
               ok: false, error,
               meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
@@ -862,12 +864,10 @@ export async function* runUserTurn(ctx) {
       // redacted. See redact.js for the rate-limit rationale.
       // why: on the FAILURE path a tool often authors a human `content`
       // sentence alongside the machine `error` code (e.g. error:'declined',
-      // content:'User declined the outbound write.'). Rendering the code
-      // alone let the model see only `declined` — indistinguishable from a
-      // transient failure it should retry. Join as `code: content` (code
-      // first: it's the stable anchor the model has learned; the prose is the
-      // actionable part). Still short authored strings, still passed through
-      // redactToolResult like the success path.
+      // content:'User declined the outbound write.'). Join as `code: content`
+      // — code first (the stable anchor the model has learned), prose second
+      // (the actionable part), so the model can tell a hard "no" from a
+      // retryable glitch. Still redacted like the success path.
       const rawContent = dispatchResult.ok
         ? (typeof dispatchResult.content === 'string'
             ? dispatchResult.content

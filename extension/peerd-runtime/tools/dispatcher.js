@@ -435,7 +435,10 @@ export const dispatchToolCall = async (call, ctx) => {
     const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
     ctx.audit({
       type: 'tool_failed',
-      details: { tool: call.name, primitive: tool.primitive, error: message, durationMs },
+      // why: same rich shape as the returned-{ok:false} failure above so
+      // BOTH failure sources are uniform — audit mining can group throws and
+      // returned failures by the same primitive/dispatch keys.
+      details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, error: message, durationMs },
     }).catch(() => {});
     // why: post-hooks still observe a FAILED execution — a failure is an
     // observable event (e.g. an audit/metrics hook wants to count it).
