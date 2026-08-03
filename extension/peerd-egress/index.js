@@ -70,6 +70,16 @@ export {
   flattenCategorisedDenylist,
   normalizeDenylistPattern,
 } from './denylist/denylist.js';
+// The denylist's NETWORK-level backstop: the pure denylist →
+// declarativeNetRequest rule mapping. The imperative half (keeping the rule in
+// sync with the driven-tab set) is background/denylist-net-guard.js.
+export {
+  denylistBlockDomains,
+  buildDenylistBlockRule,
+  denylistSessionRuleUpdate,
+  DENYLIST_RULE_ID,
+  DENYLIST_RESOURCE_TYPES,
+} from './denylist/dnr-rules.js';
 
 // --- confirm protocol ---------------------------------------------------
 export { makeConfirmCoordinator } from './confirm/protocol.js';

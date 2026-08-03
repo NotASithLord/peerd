@@ -7,6 +7,7 @@ import { makeDenylistRoutes } from '../../extension/background/routes/denylist.j
 
 const makeDeps = (over: any = {}) => {
   const audits: any[] = [];
+  const syncs: boolean[] = [];
   const deps = {
     denylistStore: {
       patterns: () => ['a.com'],
@@ -16,8 +17,10 @@ const makeDeps = (over: any = {}) => {
       ...over.denylistStore,
     },
     auditLog: { append: async (e: any) => { audits.push(e); } },
+    // The DNR backstop's resync — an edit changes what the rule blocks.
+    denylistNetGuard: { sync: () => { syncs.push(true); } },
   };
-  return { deps, audits };
+  return { deps, audits, syncs };
 };
 
 describe('denylist routes', () => {
@@ -50,5 +53,21 @@ describe('denylist routes', () => {
     const { deps, audits } = makeDeps({ denylistStore: { remove: async () => ({ ok: false, error: 'not-found' }) } });
     expect(await makeDenylistRoutes(deps)['denylist/remove']({ pattern: 'ghost' })).toEqual({ ok: false, error: 'not-found' });
     expect(audits).toEqual([]);
+  });
+
+  // The DNR backstop's rule is derived from the list, so an accepted edit has to
+  // resync it — the remove path especially, where a stale rule would keep
+  // blocking a site the user just unblocked.
+  test('an accepted add or remove resyncs the network backstop', async () => {
+    const { deps, syncs } = makeDeps();
+    await makeDenylistRoutes(deps)['denylist/add']({ pattern: 'x.com' });
+    await makeDenylistRoutes(deps)['denylist/remove']({ pattern: 'b.com' });
+    expect(syncs).toHaveLength(2);
+  });
+
+  test('a rejected edit does not resync', async () => {
+    const { deps, syncs } = makeDeps({ denylistStore: { add: async () => ({ ok: false, error: 'invalid-pattern' }) } });
+    await makeDenylistRoutes(deps)['denylist/add']({ pattern: '' });
+    expect(syncs).toEqual([]);
   });
 });

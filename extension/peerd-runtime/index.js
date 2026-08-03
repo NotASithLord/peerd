@@ -171,7 +171,7 @@ export { makeLearnedOrigins, MAX_LEARNED } from './actor/learned-origins.js';
 // A UGC host is by construction a site people have accounts on; that is what
 // made its content attacker-authorable in the first place.
 export { isUgcHost } from './actor/ugc-registry.js';
-export { isKnownIdp, knownIdpSeeds } from './actor/idp-registry.js';
+export { isKnownIdp, knownIdpSeeds, knownIdpDomains } from './actor/idp-registry.js';
 export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js';
 // DESIGN-19: site clients — per-origin derived API clients. The pure core
 // (validation, confirm-gated proposal, staleness header, fenced dossier, URL pin),
