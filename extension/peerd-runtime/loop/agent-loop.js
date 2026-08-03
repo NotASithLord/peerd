@@ -232,6 +232,11 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   synthesize the reply from the tool results and stop — no second model call
  *   to summarize. An errored round falls through to the normal loop. The caller
  *   (the orchestrator, via message_actor) sets it when one round suffices.
+ * @param {string} [ctx.contextMessage]
+ *   Per-turn EPHEMERAL context (loop/system-prompt.js buildTemporalContext — the
+ *   canonical design-01 rationale): the wall-clock + active-tab bytes relocated OUT
+ *   of the cached system block. Prepended as a leading `user`-role <context> message
+ *   each step, then never persisted. Absent / empty → nothing injected.
  * @returns {AsyncGenerator<LoopEvent>}
  */
 export async function* runUserTurn(ctx) {
@@ -505,6 +510,28 @@ export async function* runUserTurn(ctx) {
           });
           return changed ? { ...msg, toolResults } : msg;
         });
+      }
+      // Prompt-cache stability (design 01 — see buildTemporalContext for the full
+      // rationale): prepend the per-turn ephemeral <context> message (temporal +
+      // active tab) as message[0]. why HERE, after every trim/compaction/splice: it
+      // must be the FIRST message on the wire so it lands right after the system +
+      // tool cache breakpoints — its per-turn variance then leaves those (the
+      // cross-turn win) intact. It DOES sit ahead of the message-history breakpoint,
+      // so history caches only WITHIN a turn (byte-identical across the turn's steps),
+      // not turn-to-turn — a known, accepted tradeoff of the leading-context shape.
+      // Ephemeral: injected on the wire only, never persisted; re-derived each turn.
+      // The converter collapses it into the following user turn's text — harmless,
+      // the <context> tag keeps it legible as injected context, not the user talking.
+      if (typeof ctx.contextMessage === 'string' && ctx.contextMessage.length > 0) {
+        historyForModel = [
+          // Fixed sentinel id/when: nothing persists or correlates this wire-only
+          // message, and the converter emits only {role, content} — so a per-step
+          // uuid/clock would be dead churn (and would stamp msg[0] newest of all).
+          /** @type {InternalMessage} */ ({
+            role: 'user', content: ctx.contextMessage, id: 'ephemeral-context', when: 0,
+          }),
+          ...historyForModel,
+        ];
       }
       // didTrim true ⇒ summaryState non-null (planTrim's contract); the
       // extra truthiness check is runtime-identical and narrows the type.

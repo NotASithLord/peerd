@@ -65,12 +65,14 @@ const loadDwebBlock = async () => {
  * template is cached.
  *
  * @param {Object} ctx
- * @param {Date} [ctx.date]           defaults to new Date()
  * @param {string} [ctx.temporalBlock]
- *   Pre-built <time>…</time> string from `buildTemporalBlock(...)`. The
- *   SW builds this once per turn from the event buffer + lastTurnAt.
- *   Omit to render the prompt with an empty block (system prompt
- *   template has a {{TEMPORAL_BLOCK}} placeholder that collapses cleanly).
+ *   Pre-built <time>…</time> string from `buildTemporalBlock(...)`. why:
+ *   this is now the ACTOR-only path — the main orchestrator relocates its
+ *   volatile temporal bytes to a leading context message (buildTemporalContext)
+ *   so its system string stays byte-stable and prompt-cacheable (design 01);
+ *   an actor re-renders its system prompt per turn and keeps embedding the
+ *   block. Omit (or '') → the {{TEMPORAL_BLOCK}} placeholder collapses cleanly,
+ *   leaving the system string free of any time-derived (wall-clock) bytes.
  * @param {string} [ctx.skillsBlock]
  *   Pre-built skill DESCRIPTIONS block from
  *   `skillRegistry.describeForPrompt()` — the cheap half of progressive
@@ -88,12 +90,6 @@ const loadDwebBlock = async () => {
  * @param {string} [ctx.memoryBlock]
  *   Pre-built <memory>…</memory> block (memory.loadAlwaysLoaded), budget-trimmed
  *   upstream. Omit (or '') → the {{MEMORY_BLOCK}} placeholder collapses.
- * @param {{ url: string, title?: string } | null} [ctx.activeTab]
- *   EPHEMERAL reorientation: the web page the user is looking at when they sent
- *   this turn (side panel open over it). Appended as an <active_tab> CONTEXT
- *   block at the tail and re-derived every turn — never persisted to history, so
- *   it's absent on home / non-web tabs. Framed as untrusted context, never an
- *   instruction. Omit / no url → nothing appended.
  * @param {string} [ctx.taskOverride]
  *   When present, the prompt is for an EPHEMERAL ACTOR (an actor): the
  *   ephemeralActorBlock is appended — an <actor_agent> block (shared with a
@@ -124,7 +120,6 @@ const loadDwebBlock = async () => {
 export const renderSystemPrompt = async (ctx) => {
   const template = await loadTemplate();
   const dwebBlock = await loadDwebBlock();
-  const dateStr = (ctx.date ?? new Date()).toISOString().slice(0, 10);
   const temporalBlock = typeof ctx.temporalBlock === 'string' ? ctx.temporalBlock : '';
   // why: the always-loaded memory block (V1.5). The SW builds it once per
   // turn via memory.loadAlwaysLoaded() and passes the <memory>…</memory>
@@ -139,7 +134,6 @@ export const renderSystemPrompt = async (ctx) => {
   // (ACTOR_TYPE_LORE below), loaded only on an actor turn.
   let out = template
     .replace(/{{DWEB_BLOCK}}/g, dwebBlock)
-    .replace(/{{DATE}}/g, dateStr)
     .replace(/{{MEMORY_BLOCK}}/g, memoryBlock)
     .replace(/{{TEMPORAL_BLOCK}}/g, temporalBlock)
     .replace(/{{SKILLS_BLOCK}}/g, skillsBlock)
@@ -152,15 +146,10 @@ export const renderSystemPrompt = async (ctx) => {
   if (typeof ctx.customSystemPrompt === 'string' && ctx.customSystemPrompt.trim().length > 0) {
     out += sessionInstructionsBlock(ctx.customSystemPrompt.trim());
   }
-  // why: when the user talks to peerd from the side panel while looking at a web
-  // page, that page is almost certainly what a vague message is about. This block
-  // reorients the agent to it. EPHEMERAL by construction — re-derived from the
-  // live active tab every turn and never written to history, so it's gone the
-  // moment the user is back on home (no web tab → no block). At the tail (after
-  // all cache breakpoints) so its per-turn variance never busts the prompt cache.
-  if (ctx.activeTab && typeof ctx.activeTab.url === 'string' && ctx.activeTab.url.length > 0) {
-    out += activeTabBlock(ctx.activeTab);
-  }
+  // why: the ephemeral <active_tab> reorientation NO LONGER rides the system
+  // string — it, like the temporal block, is per-turn-volatile and rides the
+  // leading <context> message instead (design 01 — see buildTemporalContext for
+  // the full rationale).
   // The appended ACTOR PROMPT — one family, two kinds (both <actor_agent>):
   //   - EPHEMERAL actor (an actor): taskOverride set, owns no instance,
   //     fire-once, may itself message_actor. See ephemeralActorBlock.
@@ -184,8 +173,6 @@ export const renderSystemPrompt = async (ctx) => {
 // page-driving tools left the main agent in the actor cutover).
 /** @param {{ url: string, title?: string }} tab */
 const activeTabBlock = ({ url, title }) => [
-  '',
-  '',
   '<active_tab>',
   'The user is looking at this browser tab right now (the side panel is open',
   'over it). If their message is vague or refers to "this", "the page", "here",',
@@ -196,6 +183,43 @@ const activeTabBlock = ({ url, title }) => [
   title ? `${title}\n${url}` : url,
   '</active_tab>',
 ].join('\n');
+
+/**
+ * Build the per-turn EPHEMERAL context message — the wall-clock + active-tab
+ * bytes that used to live INSIDE the cached system block and busted its prompt
+ * cache every turn (the `<time>now …</time>` block changes at seconds
+ * resolution). Relocating them to a leading `user`-role <context> message in the
+ * stream — which lands AFTER the system + tool cache breakpoints — keeps the
+ * system string byte-stable within a session, so the largest cacheable prefix
+ * (system + tools) reads from cache instead of re-billing at full input price
+ * each turn (design 01). Pure: the caller passes the pre-built temporal block +
+ * the live active tab; no clock read here.
+ *
+ * CANONICAL rationale for design 01 lives here; other sites point back with a
+ * one-line reference rather than restating it.
+ *
+ * The content is FENCE-NEUTRAL trusted context (a timestamp + the user's current
+ * tab URL/title). The tab is low-trust — its own <active_tab> framing tells the
+ * model to treat it as orienting context, never an instruction — and it was
+ * already in the prompt before this move, so there is no fence regression.
+ *
+ * @param {Object} [args]
+ * @param {string} [args.temporalBlock]  the <time>…</time> block (clock/context.js)
+ * @param {{ url: string, title?: string } | null} [args.activeTab]
+ *   The foreground web tab, or null on home / non-web tabs.
+ * @returns {string} the <context>…</context> body, or '' when there is nothing
+ *   volatile to send (so the caller can skip injecting an empty message).
+ */
+export const buildTemporalContext = ({ temporalBlock, activeTab } = {}) => {
+  /** @type {string[]} */
+  const parts = [];
+  if (typeof temporalBlock === 'string' && temporalBlock.length > 0) parts.push(temporalBlock);
+  if (activeTab && typeof activeTab.url === 'string' && activeTab.url.length > 0) {
+    parts.push(activeTabBlock(activeTab));
+  }
+  if (parts.length === 0) return '';
+  return ['<context>', ...parts, '</context>'].join('\n');
+};
 
 // why: frame the user's /system text explicitly as USER-authored,
 // session-scoped preferences layered on top of everything above — so a
