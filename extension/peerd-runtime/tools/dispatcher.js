@@ -385,10 +385,20 @@ export const dispatchToolCall = async (call, ctx) => {
     if (activity && typeof activityTabId === 'number') {
       Promise.resolve(activity.end(activityTabId)).catch(() => {});
     }
-    ctx.audit({
-      type: 'tool_executed',
-      details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, durationMs },
-    }).catch(() => {});
+    // why: most tools signal failure by returning { ok: false }, not by
+    // throwing — only one tool file throws. Auditing the whole non-throw
+    // path as tool_executed made the audit log report ≈zero failures while
+    // the transcript's is_error flag showed them. Branch on result.ok so a
+    // returned failure lands in the SAME tool_failed bucket as a throw.
+    ctx.audit(result?.ok === false
+      ? {
+        type: 'tool_failed',
+        details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, durationMs, error: result.error },
+      }
+      : {
+        type: 'tool_executed',
+        details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, durationMs },
+      }).catch(() => {});
     // ---- Post-tool-use hooks --------------------------------------------
     // why: observe-only in V1. Post-hooks see the result but cannot
     // change it — the side effect already happened, so a post-hook throw
@@ -425,7 +435,7 @@ export const dispatchToolCall = async (call, ctx) => {
     const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
     ctx.audit({
       type: 'tool_failed',
-      details: { tool: call.name, error: message },
+      details: { tool: call.name, primitive: tool.primitive, error: message, durationMs },
     }).catch(() => {});
     // why: post-hooks still observe a FAILED execution — a failure is an
     // observable event (e.g. an audit/metrics hook wants to count it).

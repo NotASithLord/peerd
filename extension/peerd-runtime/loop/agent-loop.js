@@ -823,14 +823,19 @@ export async function* runUserTurn(ctx) {
             if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
             resolveDispatch(v);
           };
-          /** @param {string} error */
-          const failWith = (error) => finish({
-            ok: false, error,
-            meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
-          });
-          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled');
+          /** @param {string} error @param {'aborted'|'timeout'} [kind] */
+          const failWith = (error, kind) => {
+            // why: deadline/abort failures are synthesized HERE, bypassing the
+            // dispatcher audit — emit tool_failed so the log matches is_error.
+            if (kind) appendAudit({ type: 'tool_failed', sessionId, details: { tool: tu.name, primitive: 'unknown', error, kind, durationMs: 0 } }).catch(() => {});
+            return finish({
+              ok: false, error,
+              meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
+            });
+          };
+          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled', 'aborted');
           const deadline = setTimeout(
-            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`),
+            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`, 'timeout'),
             DISPATCH_DEADLINE_MS,
           );
           toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
@@ -855,11 +860,21 @@ export async function* runUserTurn(ctx) {
       // UNREDACTED dispatchResult so the side panel renders the full
       // image/text this turn; only the persisted + re-sent copy is
       // redacted. See redact.js for the rate-limit rationale.
+      // why: on the FAILURE path a tool often authors a human `content`
+      // sentence alongside the machine `error` code (e.g. error:'declined',
+      // content:'User declined the outbound write.'). Rendering the code
+      // alone let the model see only `declined` — indistinguishable from a
+      // transient failure it should retry. Join as `code: content` (code
+      // first: it's the stable anchor the model has learned; the prose is the
+      // actionable part). Still short authored strings, still passed through
+      // redactToolResult like the success path.
       const rawContent = dispatchResult.ok
         ? (typeof dispatchResult.content === 'string'
             ? dispatchResult.content
             : JSON.stringify(dispatchResult.content))
-        : (dispatchResult.error ?? 'tool failed');
+        : (typeof dispatchResult.content === 'string' && dispatchResult.content
+            ? `${dispatchResult.error ?? 'error'}: ${dispatchResult.content}`
+            : (dispatchResult.error ?? 'tool failed'));
       // why: a tool that returned vision blocks (view) — stash the bytes for the
       // one-shot splice into the NEXT model call (above). The persisted block
       // stays bytes-free; only content (metadata) is kept here.

@@ -94,6 +94,10 @@
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {any} [content]  optional human-readable explanation authored
+ *   alongside the machine `error` code (e.g. "User declined the outbound
+ *   write."). The loop renders it as `error: content` so the model sees the
+ *   actionable prose, not just the bare token.
  * @property {ToolMeta} [meta]
  */
 
