@@ -23,26 +23,43 @@ export class SearchNotFoundError extends Error {
   /**
    * @param {string} message
    * @param {number} blockIndex 0-based index of the failing block
+   * @param {{ whitespace?: boolean, line?: number | null }} [opts]
    */
-  constructor(message, blockIndex) {
+  constructor(message, blockIndex, opts = {}) {
     super(message);
     this.name = 'SearchNotFoundError';
     this.code = 'search_not_found';
     this.blockIndex = blockIndex;
+    // why: a whitespace/indent-only mismatch is the single most common real
+    // cause of a miss. Flag it (and the line it matched at) so the tool layer
+    // can surface a precise diagnosis instead of the misleading "the file may
+    // have changed" — still a hard error, never a fuzzy apply.
+    this.whitespace = opts.whitespace ?? false;
+    /** @type {number | null} */
+    this.line = opts.line ?? null;
   }
 }
+
+/**
+ * One occurrence of an ambiguous SEARCH: where it is and a peek at the context.
+ * @typedef {{ line: number, preview: string }} MatchLocation
+ */
 
 export class SearchAmbiguousError extends Error {
   /**
    * @param {string} message
    * @param {number} blockIndex 0-based index of the failing block
    * @param {number} count      how many times the search text matched
+   * @param {MatchLocation[]} [locations] where the matches are (capped)
    */
-  constructor(message, blockIndex, count) {
+  constructor(message, blockIndex, count, locations = []) {
     super(message);
     this.name = 'SearchAmbiguousError';
     this.code = 'search_ambiguous';
     this.blockIndex = blockIndex;
     this.count = count;
+    // why: reporting WHERE the matches are lets the agent widen the anchor
+    // without re-reading the whole file to hunt for them (3c).
+    this.locations = locations;
   }
 }

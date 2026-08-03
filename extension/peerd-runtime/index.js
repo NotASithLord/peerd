@@ -204,7 +204,7 @@ export {
 
 // --- edit (SEARCH/REPLACE diff editing + checkpoint/undo) ---------------
 export {
-  parseEditBlocks, applyBlocks, applyEdit,
+  parseEditBlocks, applyBlocks, applyEdit, isWholeFileCreate,
 } from './edit/search-replace.js';
 export {
   EditParseError, SearchNotFoundError, SearchAmbiguousError,
