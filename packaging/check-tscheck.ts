@@ -103,7 +103,12 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 551 → 553: the denylist's declarativeNetRequest backstop adds two checked
 // files — peerd-egress/denylist/dnr-rules.js (the pure patterns → rule mapping)
 // and background/denylist-net-guard.js (the session-rule sync shell).
-const COVERED_FLOOR = 553;
+// 553 → 570: the JS-superpower arc — vm-tab/run-capture.js (design 7.1),
+// durable script workspace + run-cache (design 1), extract:'markdown' +
+// peerd:std helpers (design 2), remote module imports via egress (design 3),
+// peerd.provider.call (design 5), and the peerd:toolbox store + tools
+// (design 6); all new files carry // @ts-check.
+const COVERED_FLOOR = 570;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

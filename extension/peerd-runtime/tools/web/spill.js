@@ -14,6 +14,11 @@
 // 75/25 head/tail split of the window budget.
 const HEAD_FRACTION = 0.75;
 
+// The ONE spill-cache entry cap, shared by every spill store (the SW's web
+// extract cache and the run cache) — a window onto recent oversized texts,
+// not an archive. Lives here so the twins can't silently drift apart.
+export const SPILL_CACHE_MAX_ENTRIES = 40;
+
 /**
  * Window an oversized text: head + tail with an elision marker between.
  * Text at or under the budget is returned whole (windowed:false).

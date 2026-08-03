@@ -1,0 +1,155 @@
+// @ts-check
+// offscreen job-runner — the DURABLE WORKSPACE mount (design 1a).
+//
+// A workspace run mounts ['peerd-workspace', sid] as the sealed worker's OPFS
+// root and SKIPS the per-job nuke, so files persist across runs (and turns).
+// Exercised against a REAL worker + real OPFS, like job-runner.test.js. Pins:
+// persistence across two separate jobs, root isolation from ephemeral runs,
+// the host-set usedWorkspace flag, the per-write relay cap, and that nuking
+// the subtree (what session teardown does) actually empties the workspace.
+
+import { describe, it, expect } from '../../framework.js';
+import { runJob } from '/offscreen/job-runner.js';
+import { opfsHelpers } from '/peerd-engine/index.js';
+
+const noSW = { sendToSW: async () => ({ ok: true }) };
+// Unique per test run so a leftover subtree from a crashed earlier run can't
+// leak state into these assertions.
+const wsid = `ws-test-${Date.now().toString(36)}`;
+const nukeWorkspace = () => opfsHelpers(['peerd-workspace', wsid]).nuke();
+
+describe('offscreen job-runner — durable workspace (workspaceSessionId)', () => {
+  it('a second workspace run sees the first run\'s file (mount + skip-nuke)', async () => {
+    await nukeWorkspace();
+    const w1 = await runJob(
+      { code: 'await peerd.self.writeFile("data/seed.txt", "kept"); return "wrote";', workspaceSessionId: wsid },
+      noSW,
+    );
+    expect(w1.error).toBe(null);
+    expect(w1.usedWorkspace).toBe(true);   // host-set, not inferred from ops
+    const w2 = await runJob(
+      { code: 'return await peerd.self.readFile("data/seed.txt");', workspaceSessionId: wsid },
+      noSW,
+    );
+    expect(w2.error).toBe(null);
+    expect(w2.value).toBe('kept');
+    expect(w2.usedWorkspace).toBe(true);
+  });
+
+  it('an ephemeral run is rooted elsewhere — it cannot see workspace files, and stays unflagged', async () => {
+    const r = await runJob(
+      { code: 'try { return await peerd.self.readFile("data/seed.txt"); } catch (e) { return "isolated"; }' },
+      noSW,
+    );
+    expect(r.error).toBe(null);
+    expect(r.value).toBe('isolated');
+    expect(r.usedWorkspace).toBeFalsy();
+  });
+
+  it('the relay refuses a workspace write over the per-file ceiling (the js_write_file cap)', async () => {
+    const r = await runJob(
+      {
+        code: 'try { await peerd.self.writeFile("big.txt", "x".repeat(500001)); return "reached"; } catch (e) { return "refused:" + e.message; }',
+        workspaceSessionId: wsid,
+      },
+      noSW,
+    );
+    expect(r.error).toBe(null);
+    expect(String(r.value)).toContain('refused:');
+    expect(String(r.value)).toContain('write too large');
+  });
+
+  it('the write cap is shape-allowlisted — binary payloads are measured, unknown shapes refused', async () => {
+    // Blob + ArrayBuffer under the cap pass; an oversized TypedArray is sized
+    // by byteLength; a WriteParams-style object ({type:'write',data}) would
+    // size to 0 under a fall-through — it must be REFUSED, not waved past.
+    const r = await runJob(
+      {
+        code: [
+          'const out = [];',
+          'await peerd.self.writeFile("b.bin", new Blob(["ok"])); out.push("blob-ok");',
+          'await peerd.self.writeFile("a.bin", new Uint8Array(8).buffer); out.push("buf-ok");',
+          'try { await peerd.self.writeFile("big.bin", new Uint8Array(500001)); out.push("typed-passed"); } catch (e) { out.push("typed:" + e.message); }',
+          'try { await peerd.self.writeFile("sneak.txt", { type: "write", data: "x".repeat(600000) }); out.push("params-passed"); } catch (e) { out.push("params:" + e.message); }',
+          'return out.join("|");',
+        ].join('\n'),
+        workspaceSessionId: wsid,
+      },
+      noSW,
+    );
+    expect(r.error).toBe(null);
+    const v = String(r.value);
+    expect(v).toContain('blob-ok');
+    expect(v).toContain('buf-ok');
+    expect(v).toContain('typed:');
+    expect(v).toContain('write too large');
+    expect(v).toContain('params:');
+    expect(v).toContain('unsupported write payload');
+  });
+
+  it('peerd.self.deleteFile removes a workspace file', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'await peerd.self.writeFile("tmp/gone.txt", "bye");',
+          'await peerd.self.deleteFile("tmp/gone.txt");',
+          'try { await peerd.self.readFile("tmp/gone.txt"); return "still-there"; } catch (e) { return "deleted"; }',
+        ].join('\n'),
+        workspaceSessionId: wsid,
+      },
+      noSW,
+    );
+    expect(r.error).toBe(null);
+    expect(r.value).toBe('deleted');
+  });
+
+  it('over budget: writes are refused but delete still works — and the NEXT run passes again', async () => {
+    await nukeWorkspace();      // deterministic budget math — no residue from earlier cases
+    const seed = await runJob(
+      { code: 'await peerd.self.writeFile("fat.txt", "x".repeat(64)); return "seeded";', workspaceSessionId: wsid },
+      noSW,
+    );
+    expect(seed.error).toBe(null);
+    // A 32-byte budget puts the 64-byte workspace over on mount
+    // (workspaceBudgetBytes is the direct-caller test seam — offscreen.js
+    // never forwards it).
+    const over = await runJob(
+      {
+        code: [
+          'const out = [];',
+          'try { await peerd.self.writeFile("more.txt", "y"); out.push("write-passed"); } catch (e) { out.push("write:" + e.message); }',
+          'await peerd.self.deleteFile("fat.txt"); out.push("deleted");',
+          'return out.join("|");',
+        ].join('\n'),
+        workspaceSessionId: wsid, workspaceBudgetBytes: 32,
+      },
+      noSW,
+    );
+    expect(over.error).toBe(null);
+    expect(over.workspaceOverBudget).toBe(true);
+    expect(String(over.value)).toContain('write:');
+    expect(String(over.value)).toContain('over budget');
+    expect(String(over.value)).toContain('deleted');
+    // The budget is recomputed each mount: after the delete the workspace is
+    // back under it, so the same budget now admits writes again.
+    const after = await runJob(
+      { code: 'await peerd.self.writeFile("ok.txt", "z"); return "recovered";', workspaceSessionId: wsid, workspaceBudgetBytes: 32 },
+      noSW,
+    );
+    expect(after.error).toBe(null);
+    expect(after.workspaceOverBudget).toBe(false);
+    expect(after.value).toBe('recovered');
+  });
+
+  it('nuking the subtree (session teardown) empties the workspace for the next run', async () => {
+    await nukeWorkspace();
+    const r = await runJob(
+      { code: 'try { return await peerd.self.readFile("data/seed.txt"); } catch (e) { return "gone"; }', workspaceSessionId: wsid },
+      noSW,
+    );
+    expect(r.error).toBe(null);
+    expect(r.value).toBe('gone');
+    // leave no residue behind the test run
+    await nukeWorkspace();
+  });
+});

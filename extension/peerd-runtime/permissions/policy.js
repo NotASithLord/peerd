@@ -118,7 +118,15 @@ const SHELL_TOOLS = Object.freeze(new Set([
   'js_notebook',     // runs arbitrary JS in the Notebook worker
   'page_exec',   // CDP Runtime.evaluate in a live page
   'page_eval',   // executeScript in a live page
+  'script',      // headless JS with egress + delegation — the strongest code lane must not confirm softer than the rest
 ]));
+// Deliberately NOT in SHELL_TOOLS — don't "fix" these:
+//   site_client_run  runs code, but capability-stripped to an origin-pinned
+//                    fetch whose writes confirm at the SW route (web:write);
+//                    it stays sideEffect:'read' at the tool.
+//   page_code        its every effect crosses the gated DOM tools it maps
+//                    onto, which carry their own classes — classifying the
+//                    wrapper as shell would double-prompt.
 
 /**
  * Classify a tool into one of ACTION_CLASSES. Pure — depends only on the

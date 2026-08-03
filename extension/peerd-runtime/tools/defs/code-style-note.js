@@ -66,6 +66,9 @@ export const JS_PITFALLS_NOTE = [
   '  for money/display.',
   '- Default .sort() orders as STRINGS — pass a comparator for numbers,',
   '  .sort((a, b) => a - b).',
+  '- Fanning out over many URLs? Loop chunk(urls, 5) batches with',
+  '  Promise.allSettled (bounded concurrency, per-URL failures kept) — never one',
+  '  unbounded Promise.all.',
   'Then sanity-check the result against one value you already know before trusting it.',
   '</js-correctness>',
 ].join('\n');

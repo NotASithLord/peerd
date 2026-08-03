@@ -11,7 +11,7 @@
 // js_notebook into the editor's notebook.js, post the result back to the SW.
 
 import browser from '/vendor/browser-polyfill.js';
-import { buildModule, createEditor } from '/peerd-engine/index.js';
+import { buildModule, createEditor, isRemoteSpecifier, makeFetchRemote, TOOLBOX_SPECIFIER_PREFIX } from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
 // with the headless offscreen job runner so the security surface can't diverge.
@@ -122,6 +122,19 @@ const shortenBlob = (url) => {
   return m ? `blob:…${m[0].slice(-8)}` : url;
 };
 
+// design 06 rot bookkeeping: when a run settles, report which toolbox modules
+// it imported and whether it succeeded (runCount/failCount on the meta the
+// agent reads via toolbox_list). Fire-and-forget — bookkeeping never fails a run.
+/** @param {boolean} ok */
+const recordToolboxUse = (ok) => {
+  const names = [...entryCache.keys()]
+    .filter((k) => k.startsWith(TOOLBOX_SPECIFIER_PREFIX))
+    .map((k) => k.slice(TOOLBOX_SPECIFIER_PREFIX.length));
+  if (names.length) {
+    browser.runtime.sendMessage({ type: 'toolbox/record', names, ok }).catch(() => {});
+  }
+};
+
 const makeResolverDeps = () => ({
   /** @param {string} path */
   readFile: (path) => editor.opfs.read(path),
@@ -129,16 +142,31 @@ const makeResolverDeps = () => ({
   makeBlobUrl: (source) => URL.createObjectURL(
     new Blob([source], { type: 'application/javascript' }),
   ),
+  // Remote (https:) module SOURCE rides the audited sw/web-fetch relay —
+  // shared decode in module-resolver.js makeFetchRemote (see its header).
+  fetchRemote: makeFetchRemote(
+    (req) => /** @type {Promise<any>} */ (browser.runtime.sendMessage({ type: 'sw/web-fetch', ...req }))),
   /** @param {{ type: string, path: string, blobUrl?: string, error?: string }} entry */
   log: (entry) => {
+    const label = isRemoteSpecifier(entry.path) ? entry.path : `./${entry.path}`;
     if (entry.type === 'resolved') {
-      appendLine('log-info', `[import] ./${entry.path} → ${shortenBlob(entry.blobUrl)}`);
+      appendLine('log-info', `[import] ${label} → ${shortenBlob(entry.blobUrl)}`);
     } else if (entry.type === 'resolve-failed') {
-      appendLine('log-error', `[import] FAILED ./${entry.path}: ${entry.error}`);
+      appendLine('log-error', `[import] FAILED ${label}: ${entry.error}`);
     }
   },
   // peerd:std for nested/dynamic imports too (compose-module path below).
   builtins: NOTEBOOK_BUILTINS,
+  // design 06: toolbox modules resolve through the SW body store. The Notebook
+  // is an own-compute lane, so the dep is ALWAYS injected here (the lane gate
+  // is dep injection — job hosts that must not resolve toolbox modules simply
+  // never inject it).
+  /** @param {string} name */
+  readToolboxModule: async (name) => {
+    const resp = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'toolbox/read', name }));
+    if (!resp?.ok) throw new Error(resp?.error ?? 'toolbox read failed');
+    return String(resp.body);
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -169,7 +197,18 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   let source;
   let bodyLine = 1;
   try {
-    const built = await buildWorkerSource(code, { entryPath, notebookId, resolverDeps: makeResolverDeps() });
+    // The run deadline covers RESOLUTION too — a remote import graph hits the
+    // network (fetchRemote), so a tarpit CDN must not hang the eval forever
+    // (the worker timer below only starts after the build).
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let buildTimer;
+    const built = await Promise.race([
+      buildWorkerSource(code, { entryPath, notebookId, resolverDeps: makeResolverDeps() }),
+      /** @type {Promise<never>} */ (new Promise((_resolve, reject) => {
+        buildTimer = setTimeout(
+          () => reject(new Error(`import resolution timed out after ${timeoutMs}ms`)), timeoutMs);
+      })),
+    ]).finally(() => clearTimeout(buildTimer));
     source = built.source;
     bodyLine = built.bodyLine;
     entryCache = built.cache;
@@ -196,6 +235,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
         try { worker.terminate(); } catch {}
+        recordToolboxUse(false);
         resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `eval timed out after ${timeoutMs}ms` });
       }, timeoutMs);
 
@@ -244,14 +284,19 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
         }
         if (m.type === 'fetch-request') {
           try {
+            // Design 2a: `extract` rides to the SW route (which owns the
+            // extraction step — the tab never grows its own copy); `extracted`
+            // rides back for the bridge's fake Response marker.
             const resp = /** @type {any} */ (await browser.runtime.sendMessage({
               type: 'sw/web-fetch', url: m.url, method: m.method, headers: m.headers, body: m.body,
+              ...(typeof m.extract === 'string' ? { extract: m.extract } : {}),
             }));
             worker.postMessage({
               type: 'fetch-response', rid: m.rid,
               ok: resp?.ok ?? false, status: resp?.status ?? 0,
               statusText: resp?.statusText ?? '', headers: resp?.headers ?? null,
               bodyB64: resp?.bodyB64 ?? null, error: resp?.error ?? null,
+              ...(typeof resp?.extracted === 'boolean' ? { extracted: resp.extracted } : {}),
             });
           } catch (e) {
             worker.postMessage({
@@ -266,6 +311,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
             let result;
             if (m.op === 'read') result = await editor.opfs.read(m.args.path);
             else if (m.op === 'write') { await editor.opfs.write(m.args.path, m.args.content); result = null; }
+            else if (m.op === 'delete') { await editor.opfs.delete(m.args.path); result = null; }
             else if (m.op === 'list') result = await editor.opfs.list();
             else if (m.op === 'compose-module') {
               // Runtime dynamic-import request. Recursively transforms
@@ -310,6 +356,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           // Map stack frames in the entry blob back to notebook.js:<line> so
           // the pane (and the agent's tool result) point at the user's code.
           const error = m.error ? mapWorkerError(m.error, url, bodyLine, entryPath) : null;
+          recordToolboxUse(!error);
           if (error) appendLine('log-error', error);
           resolve({
             value: m.value, consoleOutput: m.consoleOutput,
@@ -333,6 +380,10 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           ? ` (${entryPath}:${userLine}:${e.colno})`
           : (e.filename ? ` (${e.filename}:${e.lineno}:${e.colno})` : '');
         appendLine('log-error', `[worker crashed] ${detail}${loc}`);
+        // A crash (e.g. a top-level throw in an imported module body) is a
+        // failed run — record it, matching the timeout path and the headless
+        // job-runner's worker-error path.
+        recordToolboxUse(false);
         resolve({
           value: undefined, consoleOutput: [], durationMs: 0,
           error: `worker error: ${detail}${loc}`,

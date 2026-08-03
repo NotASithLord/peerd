@@ -23,6 +23,7 @@ import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { fetchUrlTool }              from './fetch-url.js';
 import { readWebCacheTool }          from './read-web-cache.js';
+import { readRunCacheTool }          from './read-run-cache.js';
 import { siteClientRunTool }         from './site-client-run.js';
 import { siteClientReadTool }        from './site-client-read.js';
 import { siteClientWriteTool }       from './site-client-write.js';
@@ -49,6 +50,9 @@ import { appReadFileTool }            from './app-read-file.js';
 import { appListFilesTool }           from './app-list-files.js';
 import { appDeleteFileTool }          from './app-delete-file.js';
 import { editFileTool }               from './edit-file.js';
+import { toolboxWriteTool }           from './toolbox-write.js';
+import { toolboxListTool }            from './toolbox-list.js';
+import { toolboxDeleteTool }          from './toolbox-delete.js';
 import { actorCreateTool }          from './actor-create.js';
 import { actorTasksTool }          from './actor-tasks.js';
 import { actorCancelTool }         from './actor-cancel.js';
@@ -104,6 +108,7 @@ export {
   // engine (Notebook)
   jsNotebookTool,
   scriptTool,
+  readRunCacheTool,
   pageCodeTool,
   jsWriteFileTool,
   jsReadFileTool,
@@ -119,6 +124,10 @@ export {
   appDeleteFileTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
+  // toolbox (design js-superpower/06 — durable agent-authored modules)
+  toolboxWriteTool,
+  toolboxListTool,
+  toolboxDeleteTool,
   // actor (orchestration over sessions)
   actorCreateTool,
   actorTasksTool,
@@ -205,6 +214,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   // engine (Notebook)
   jsNotebookTool,
   scriptTool,
+  // script's value-spill read side — a MAIN-agent pager (script is a
+  // main-agent tool); ownership is session-stamped and fencing rides the
+  // record's stored flag (tools/defs/read-run-cache.js).
+  readRunCacheTool,
   jsWriteFileTool,
   jsReadFileTool,
   jsDeleteTool,
@@ -219,6 +232,11 @@ export const BUILTIN_TOOLS = Object.freeze([
   appDeleteFileTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
+  // toolbox (design js-superpower/06 — durable agent-authored modules the
+  // script/notebook lanes import as peerd:toolbox/<name>; write confirm-gated)
+  toolboxWriteTool,
+  toolboxListTool,
+  toolboxDeleteTool,
   // actor (orchestration over sessions)
   actorCreateTool,
   actorTasksTool,

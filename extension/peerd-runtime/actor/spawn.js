@@ -127,11 +127,19 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   safeFetch:          [],
   webFetch:           ['vm_import', 'fetch_url'],
   webCache:           ['fetch_url', 'read_web_cache', 'read_page'],
+  // The script value-spill store (tools/run-cache.js): script writes it,
+  // read_run_cache pages it back. Stripped from any child granted neither.
+  runCache:           ['script', 'read_run_cache'],
   // DESIGN-19 site clients — the two-tier store (run/read/write reach it) and the
   // capture closure (site_capture only). Stripped from any child/actor whose
   // toolset lacks them, like every other capability-by-need closure.
   siteClients:        ['site_client_run', 'site_client_read', 'site_client_write'],
   siteCapture:        ['site_capture'],
+  // design js-superpower/06 — the toolbox store + the write-time parse check.
+  // Stripped from any child/actor whose grants lack the toolbox tools, so a
+  // narrowed heap never holds the module store.
+  toolbox:            ['toolbox_write', 'toolbox_list', 'toolbox_delete'],
+  toolboxParseCheck:  ['toolbox_write'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect'],
   idb:                ['inspect'],

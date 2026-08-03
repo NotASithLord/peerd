@@ -4,7 +4,7 @@
 // case: a ~437k-char hand-rolled chart spec).
 
 import { describe, test, expect } from 'bun:test';
-import { pushValueBlock } from '../../extension/peerd-runtime/tools/defs/value-block.js';
+import { pushValueBlock, serializeValue } from '../../extension/peerd-runtime/tools/defs/value-block.js';
 
 describe('pushValueBlock', () => {
   test('small values render in full', () => {
@@ -38,5 +38,43 @@ describe('pushValueBlock', () => {
     cyclic.self = cyclic;
     pushValueBlock(lines, cyclic);
     expect(lines[1]).toBe('[object Object]');
+  });
+});
+
+// The overflow CONTRACT (design 1b): the spill path serializes ONCE via
+// serializeValue (full text + verdict), then threads the result back into
+// pushValueBlock — one serialization chain, two consumers, one stringify pass.
+describe('serializeValue / pushValueBlock precomputed serialization', () => {
+  test('undefined → undefined (no value, nothing to spill, nothing appended)', () => {
+    expect(serializeValue(undefined)).toBeUndefined();
+    const lines: string[] = [];
+    pushValueBlock(lines, undefined);
+    expect(lines.length).toBe(0);
+  });
+
+  test('a small value reports truncated:false with its full text', () => {
+    const sv = serializeValue({ a: 1 });
+    expect(sv?.truncated).toBe(false);
+    expect(sv?.text).toContain('"a": 1');
+  });
+
+  test('an oversized value reports truncated:true and the FULL text survives in the info', () => {
+    const sv = serializeValue('z'.repeat(10_000));
+    expect(sv?.truncated).toBe(true);
+    expect(sv?.text.length).toBeGreaterThan(10_000);  // JSON-quoted full text
+  });
+
+  test('a precomputed serialization is USED, not re-derived (single stringify pass)', () => {
+    const lines: string[] = [];
+    // A deliberately mismatched sv proves pushValueBlock trusts the caller's
+    // precomputed result instead of serializing `value` again.
+    pushValueBlock(lines, { ignored: true }, { text: 'precomputed', truncated: false });
+    expect(lines).toEqual(['[VALUE]', 'precomputed']);
+  });
+
+  test('pushValueBlock and serializeValue agree (same serialization chain)', () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(serializeValue(cyclic)?.text).toBe('[object Object]');
   });
 });

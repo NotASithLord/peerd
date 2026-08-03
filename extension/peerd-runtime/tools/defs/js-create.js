@@ -39,7 +39,9 @@ const NOTEBOOK_NOTE = [
   'runAgent({ task }) embeds an agent inside a Notebook you BUILD FOR THE USER',
   '(e.g. a chat box that reasons); for your own work use the actor_create tool.',
   'Keep approval-needing / money-spending actions as discrete tools, not buried',
-  'in a script.',
+  'in a script. A helper you\'ll want again beyond this Notebook? Persist it',
+  'with toolbox_write and import { … } from \'peerd:toolbox/<name>\' in any',
+  'notebook or script run.',
   '</notebook>',
 ].join('\n');
 

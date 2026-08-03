@@ -61,3 +61,53 @@ describe('createScriptRunRegistry', () => {
     expect(outer._count()).toBe(0);
   });
 });
+
+// Design 5 — the sub-model lane's SW-side state: the owner binding the
+// script/model-call relay checks, and the per-run quota meter (held here so the
+// realm being metered never holds its own meter).
+describe('createScriptRunRegistry — provider (sub-model) accounting', () => {
+  test('ownerFor answers the registered owner, null for unknown or ownerless runs', () => {
+    const r = createScriptRunRegistry();
+    r.register('run-p1', undefined, 'chat-1');
+    r.register('run-p2');
+    expect(r.ownerFor('run-p1')).toBe('chat-1');
+    expect(r.ownerFor('run-p2')).toBe(null);
+    expect(r.ownerFor('nope')).toBe(null);
+    r.release('run-p1');
+    expect(r.ownerFor('run-p1')).toBe(null);   // a dead run buys nothing
+  });
+
+  test('the meter counts calls, RESERVES maxTokens at admission, and settles to the actual bill', () => {
+    const r = createScriptRunRegistry();
+    r.register('run-p3', undefined, 'chat-1');
+    expect(r.providerUsageFor('run-p3')).toEqual({ calls: 0, outputTokens: 0 });
+    // two concurrent admissions: the reservation is visible BEFORE either
+    // settles — a fan-out cannot slip past the token ceiling on a stale read.
+    r.recordProviderCall('run-p3', 1000);
+    r.recordProviderCall('run-p3', 1000);
+    expect(r.providerUsageFor('run-p3')).toEqual({ calls: 2, outputTokens: 2000 });
+    r.settleProviderCall('run-p3', 1000, 100);
+    r.settleProviderCall('run-p3', 1000, 50);
+    expect(r.providerUsageFor('run-p3')).toEqual({ calls: 2, outputTokens: 150 });
+  });
+
+  test('a no-usage settle releases the whole reservation (an errored stream billed nothing)', () => {
+    const r = createScriptRunRegistry();
+    r.register('run-p5', undefined, 'chat-1');
+    r.recordProviderCall('run-p5', 8192);
+    expect(r.providerUsageFor('run-p5')).toEqual({ calls: 1, outputTokens: 8192 });
+    r.settleProviderCall('run-p5', 8192, 0);
+    expect(r.providerUsageFor('run-p5')).toEqual({ calls: 1, outputTokens: 0 });
+  });
+
+  test('bad token values and unknown runs are inert; providerUsageFor is null when unregistered', () => {
+    const r = createScriptRunRegistry();
+    r.register('run-p4', undefined, 'chat-1');
+    r.recordProviderCall('run-p4', NaN);
+    r.settleProviderCall('run-p4', -5, NaN);
+    r.recordProviderCall('ghost');
+    r.settleProviderCall('ghost', 10, 20);
+    expect(r.providerUsageFor('run-p4')).toEqual({ calls: 1, outputTokens: 0 });
+    expect(r.providerUsageFor('ghost')).toBe(null);
+  });
+});

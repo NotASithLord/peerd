@@ -37,6 +37,9 @@ const baseDeps = (over: any = {}) => ({
   ensureOffscreen: async () => {},
   settingsStore: { get: () => ({ dwebEnabled: false }) },
   DWEB_ENABLED: false,
+  // The SW always injects the extract post-step (a passthrough when extract is
+  // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
+  applyWebExtract: async (resp: any) => resp,
   ...over,
 });
 
@@ -62,6 +65,39 @@ describe('sw/web-fetch', () => {
     const res = await r['sw/web-fetch']({ url: 'https://x' });
     expect(res.ok).toBe(false);
     expect(res.error).toContain('body too large');
+  });
+
+  // Design 02, 2a: the Notebook tab's code-mode bridge widened this route with
+  // an `extract` post-step (the SAME shared/fetch-extract.js step the headless
+  // host applies locally). The SW composes it as deps.applyWebExtract; the
+  // route only threads { resp, extract, url } through — pinned here.
+  test('extract rides to the injected applyWebExtract post-step (Notebook tab relay)', async () => {
+    let seen: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      applyWebExtract: async (resp: any, extract: unknown, url: string) => {
+        seen = { extract, url };
+        return { ...resp, bodyB64: btoa('# md'), extracted: true };
+      },
+    }));
+    const res = await r['sw/web-fetch']({ url: 'https://site.example/post', extract: 'markdown' });
+    expect(seen).toEqual({ extract: 'markdown', url: 'https://site.example/post' });
+    expect(res.extracted).toBe(true);
+    expect(atob(res.bodyB64)).toBe('# md');
+  });
+
+  test('without extract the step sees undefined and the response is untouched — the VM path', async () => {
+    let seenExtract: unknown = 'sentinel';
+    const withStep = makeEngineRoutes(baseDeps({
+      applyWebExtract: async (resp: any, extract: unknown) => {
+        // the real step is a no-op passthrough when extract is absent
+        seenExtract = extract;
+        return resp;
+      },
+    }));
+    const raw = await withStep['sw/web-fetch']({ url: 'https://x' });
+    expect(atob(raw.bodyB64)).toBe('hello');
+    expect(raw.extracted).toBeUndefined();
+    expect(seenExtract).toBeUndefined();
   });
 });
 

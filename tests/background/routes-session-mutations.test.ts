@@ -139,6 +139,31 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     const { deps } = baseDeps({ sessions: { archive: async () => { throw new SessionNotFoundError(); } } });
     expect(await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'x' })).toEqual({ ok: false, error: 'session-not-found' });
   });
+  // Archive is the terminal session-lifecycle event (there is no delete route),
+  // so it is where the session's durable script workspace subtree is torn down.
+  test('archive nukes the session\'s script workspace (fire-and-forget, failure-tolerant)', async () => {
+    const nuked: string[] = [];
+    const { deps } = baseDeps({ nukeSessionWorkspace: (sid: string) => { nuked.push(sid); return Promise.resolve(); } });
+    await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
+    expect(nuked).toEqual(['s2']);
+
+    // a rejecting nuke must never fail the archive
+    const rejecting = baseDeps({ nukeSessionWorkspace: () => Promise.reject(new Error('opfs gone')) });
+    expect(await makeSessionMutationRoutes(rejecting.deps)['session/archive']({ sessionId: 's2' })).toEqual({ ok: true });
+
+    // an absent dep (unit fixtures, Firefox edge) is a no-op, not a crash
+    const absent = baseDeps();
+    expect(await makeSessionMutationRoutes(absent.deps)['session/archive']({ sessionId: 's2' })).toEqual({ ok: true });
+  });
+  test('a FAILED archive (unknown session) does not nuke the workspace', async () => {
+    const nuked: string[] = [];
+    const { deps } = baseDeps({
+      sessions: { archive: async () => { throw new SessionNotFoundError(); } },
+      nukeSessionWorkspace: (sid: string) => { nuked.push(sid); return Promise.resolve(); },
+    });
+    await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'ghost' });
+    expect(nuked).toEqual([]);
+  });
 });
 
 describe('permission/set', () => {
