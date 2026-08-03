@@ -60,9 +60,13 @@ jobs:
       # artifacts. Nothing here ships inside the extension (vendor/ is pinned
       # separately by check-vendor), but a compromised build-time dep is the
       # more valuable target anyway.
+      # osv-scanner.toml holds the triaged, EXPIRING ignore list for advisories
+      # that cannot move from here (web-ext pins several of them exactly). New
+      # findings are not on that list and fail this job.
       - uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
+            --config=./osv-scanner.toml
             --lockfile=./bun.lock
 
   dependency-review:
@@ -74,7 +78,14 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Soft until the repo's Dependency graph is switched on (Settings →
+      # Code security): without it the API this action needs returns "not
+      # supported" and the step errors for a REASON THAT IS NOT A FINDING —
+      # which would train everyone to ignore a red security job. Flip
+      # continue-on-error off once the setting is enabled and this has a green
+      # run; the OSV job above covers the same tree unconditionally meanwhile.
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        continue-on-error: true
         with:
           fail-on-severity: moderate
           # Mirrors the PR checklist's "no GPL / AGPL / copyleft" line — the

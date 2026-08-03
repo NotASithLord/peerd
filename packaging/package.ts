@@ -20,7 +20,7 @@
 //   flags: --no-sign (skip signing even if keys exist), --skip-verify
 
 import {
-  cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync,
+  cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync,
   readdirSync, statSync, utimesSync, chmodSync,
 } from 'node:fs';
 import { join, relative, basename } from 'node:path';

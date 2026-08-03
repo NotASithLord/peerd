@@ -1,0 +1,148 @@
+# OSV-Scanner config (.github/workflows/security.yml).
+#
+# The scan covers bun.lock — the BUILD-TIME dependency tree. Nothing in it
+# reaches a user: the extension ships no npm runtime at all (a core project
+# invariant — see CLAUDE.md), third-party runtime code lives in
+# extension/vendor/ and is pinned separately by vendor.lock.json, and
+# packaging/package.ts stages extension/ verbatim without ever resolving a
+# node_modules path into an artifact. So an advisory here is a risk to the
+# machine that BUILDS and SIGNS a release, not to an installed extension —
+# which still matters (that machine handles the signing key), just with a
+# different blast radius and a different set of realistic attackers.
+#
+# Every entry below is a triaged advisory in that build-time tree, reached
+# only through the Firefox signing toolchain (web-ext → addons-linter →
+# addons-scanner-utils). Most are unresolvable from here: web-ext is
+# deliberately exact-pinned (packaging/sign.ts explains why — an unpinned
+# `npx web-ext` on the release-critical path was itself the supply-chain
+# risk we removed), and it pins several of these transitively at exact
+# versions of its own (shell-quote 1.7.3, tmp 0.2.6). They clear when
+# upstream ships a release that moves them, not before.
+#
+# ignoreUntil is load-bearing: these expire, the job goes red, and someone
+# re-triages. An ignore list without an expiry is how a scanner quietly
+# stops meaning anything. Anything NEW — a newly published advisory, or a
+# dependency a PR adds — is not on this list and fails the job today.
+#
+# Re-triage checklist when these expire: `bun outdated`, check whether
+# web-ext has released past 10.3.0, drop any entry that no longer appears
+# in the scan, and extend only what genuinely still cannot move.
+
+[[IgnoredVulns]]
+id = "GHSA-xcpc-8h2w-3j85"
+ignoreUntil = 2026-11-01
+reason = "adm-zip, via addons-scanner-utils (web-ext's xpi linter). Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-3jxr-9vmj-r5cp"
+ignoreUntil = 2026-11-01
+reason = "brace-expansion, transitive glob dependency of the web-ext toolchain. Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-mh99-v99m-4gvg"
+ignoreUntil = 2026-11-01
+reason = "brace-expansion, transitive glob dependency of the web-ext toolchain. Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-rgw5-rvv9-x895"
+ignoreUntil = 2026-11-01
+reason = "brace-expansion, transitive glob dependency of the web-ext toolchain. Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-4c8g-83qw-93j6"
+ignoreUntil = 2026-11-01
+reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-7p8r-x3mc-p8w7"
+ignoreUntil = 2026-11-01
+reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-v2hh-gcrm-f6hx"
+ignoreUntil = 2026-11-01
+reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
+
+[[IgnoredVulns]]
+id = "GHSA-52cp-r559-cp3m"
+ignoreUntil = 2026-11-01
+reason = "js-yaml, via the web-ext toolchain. Build-time only; parses no untrusted input on our path."
+
+[[IgnoredVulns]]
+id = "GHSA-395f-4hp3-45gv"
+ignoreUntil = 2026-11-01
+reason = "shell-quote, exact-pinned at 1.7.3 by web-ext itself — unresolvable until upstream moves. Build-time only."
+
+[[IgnoredVulns]]
+id = "GHSA-w7jw-789q-3m8p"
+ignoreUntil = 2026-11-01
+reason = "shell-quote, exact-pinned at 1.7.3 by web-ext itself — unresolvable until upstream moves. Build-time only."
+
+[[IgnoredVulns]]
+id = "GHSA-7c78-jf6q-g5cm"
+ignoreUntil = 2026-11-01
+reason = "tmp, exact-pinned at 0.2.6 by web-ext itself — unresolvable until upstream moves. Build-time only."
+
+# undici — web-ext's HTTP client for the AMO upload/poll. The closest thing
+# here to a path that matters (it talks to a network service during signing),
+# but it talks only to addons.mozilla.org over TLS, in a release job that is
+# now bound to a protected environment.
+[[IgnoredVulns]]
+id = "GHSA-35p6-xmwp-9g52"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-4cwx-7wf7-3272"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-8xcm-r25x-g524"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-g8m3-5g58-fq7m"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-hm92-r4w5-c3mj"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-jr45-8vmc-qm54"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-m8rv-5g2x-5cg5"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-p88m-4jfj-68fv"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-pr7r-676h-xcf6"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-v3r7-h72x-cjcm"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-vmh5-mc38-953g"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+[[IgnoredVulns]]
+id = "GHSA-vxpw-j846-p89q"
+ignoreUntil = 2026-11-01
+reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
