@@ -286,9 +286,10 @@ export const accessTokenHashFor = async (token, { subtle } = {}) => {
  * Returns null (fail closed) when the input can't be canonicalized or the sign
  * operation throws — never a partial or unsigned proof.
  *
- * `nonce` is the RFC 9449 §8 seam — passed straight through to buildProofInput,
- * which owns the claim's shape. No caller supplies one yet (there is no nonce
- * cache or retry at the boundary); see that function and INV-15's residuals.
+ * `nonce` is the RFC 9449 §8 server challenge — passed straight through to
+ * buildProofInput, which owns the claim's shape. The boundary supplies it from
+ * the per-origin cache in dpop/nonce.js (see fetch/web-fetch.js for the one-shot
+ * retry that re-signs with a freshly issued one).
  *
  * @param {{ privateKey?: CryptoKey, publicJwk?: unknown, method?: unknown, url?: unknown,
  *           jti?: unknown, iatSeconds?: unknown, accessTokenHash?: unknown, nonce?: unknown }} arg

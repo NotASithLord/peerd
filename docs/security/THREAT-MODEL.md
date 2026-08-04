@@ -482,22 +482,32 @@ bounded by the origin binding, by proofs existing only at the audited boundary, 
 by the audit log — but it is not eliminated, and it is the reason this is a strict
 upgrade over a bearer token rather than a complete answer. DPoP also requires SERVER
 support, so bearer remains the fallback for providers that do not implement RFC 9449;
-this raises the ceiling, it does not raise the floor. Two named gaps on our side:
-**server NONCES are not yet handled** — `buildProofInput` can emit the RFC 9449 §8
-`nonce` claim (the seam is in place and tested), but there is no per-origin nonce
-cache and no automatic one-shot retry on a `401` + `DPoP-Nonce`, so an authorization
-server that REQUIRES a nonce will reject every request and the fix today is to use a
-bearer credential for that origin. And key ROTATION is manual: a key lives until the
-integration is removed, so rotating one means removing and re-adding the credential
-(and re-registering the new thumbprint).
+this raises the ceiling, it does not raise the floor. Server NONCES (RFC 9449 §8) are
+now handled: the boundary caches the newest nonce per owned origin, rides it on
+subsequent proofs, and re-signs ONCE on a `400`/`401` carrying a fresh `DPoP-Nonce`.
+The retry is deliberately narrow, and each condition is a failure mode it exists to
+prevent — a repeated nonce does not retry (no request storm against the user's
+credential), a one-shot stream body does not retry (no duplicated write), a bearer
+origin does not retry (it has no dance to run), and a second signing that fails
+returns the server's own answer rather than an unsigned request. The cache is keyed
+by the canonical owned origin and held in memory only, so a nonce is structurally
+incapable of reaching another server and is never persisted. The remaining gap on our
+side is key ROTATION, which is manual: a key lives until the integration is removed,
+so rotating one means removing and re-adding the credential (and re-registering the
+new thumbprint).
 Code: `peerd-egress/dpop/proof.js` (pure canonicalization), `peerd-egress/dpop/keys.js`
 (`generateDpopKeypair`'s non-negotiable `false`, `usableDpopPrivateKey`, the
-mint/read/retire lifecycle), `peerd-egress/fetch/web-fetch.js` (`withDpopCredentials`),
+mint/read/retire lifecycle), `peerd-egress/dpop/nonce.js` (the pure §8 retry
+decisions + the bounded per-origin nonce cache),
+`peerd-egress/fetch/web-fetch.js` (`withDpopCredentials`, which sequences them),
 `peerd-egress/fetch/origin-credentials.js`,
 `peerd-egress/fetch/origin-credential-routes.js` (provision / surface the `jkt` /
 revoke), `extension/options/sections/api-integrations.js` (the user-facing choice).
 Tested: `tests/peerd-egress/dpop.test.ts` (against real WebCrypto — the load-bearing
-case is that `exportKey` on the private key rejects), and
+case is that `exportKey` on the private key rejects),
+`tests/peerd-egress/dpop-nonce.test.ts` (the §8 dance — the load-bearing cases are
+that the retry happens exactly ONCE and that the retried proof is a genuinely new
+signature over the new claims, verified for real), and
 `extension/tests/unit/peerd-egress/dpop-key-idb.test.js` (in-browser, real
 IndexedDB — the handle survives a genuine structured-clone store→evict→load cycle
 still non-extractable, still `exportKey`-rejecting, and still signing a proof that

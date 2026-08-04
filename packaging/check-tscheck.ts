@@ -119,7 +119,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // branch's DPoP work plus the new in-browser dpop-key-idb.test.js, merged with
 // main's two new checked files (settings-row.js, behavior-rows.test.js), put
 // the merged count at 579 (computed on the merged tree, not summed).
-const COVERED_FLOOR = 579;
+const COVERED_FLOOR = 580;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
