@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { launchPeerd, unlockAndReady, resetSession, setEmulatedTheme, capturePage, THEMES, sleep, log } from './e2e-harness.mjs';
 import { STATES } from './states.mjs';
-import { BASELINES_ROOT, VISUAL_AUTHORITY, decodePng, comparePixels, writeDiffImage } from './visual.mjs';
+import { VISUAL_AUTHORITY, decodePng, comparePixels, writeDiffImage } from './visual.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -45,28 +45,58 @@ const arg = (flag) => {
 };
 const forced = new Set((arg('--force') || '').split(',').map((s) => s.trim()).filter(Boolean));
 
-// A state is "new" when THE AUTHORITY has no committed PNG for it — deliberately
-// not the local platform's dir. Only linux-x64 baselines are committed, so
-// checking the local platform would call every state new on a dev machine and
-// render the entire suite twice.
-const AUTHORITY_DIR = join(BASELINES_ROOT, VISUAL_AUTHORITY);
+// The merge-base is both the build we render the "before" against AND the
+// reference that decides which states are new (see isNew below), so it is
+// resolved first. Rationale for the merge-base itself is in the header.
+const baseRef = arg('--base') || execFileSync('git', ['merge-base', 'origin/main', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
+
+// A state is "new" when THE MERGE BASE has no committed PNG for it.
+//
+// why the base and not the working tree: because the question is "did the gate
+// have anything to compare this against", and the gate's answer was fixed
+// before the PR existed. A PR that adds a state AND commits its baseline — the
+// normal way to add one — has the file present locally, so a working-tree check
+// calls it established and skips it. That is precisely the case this script
+// exists for: the render step then compares the new state against the PR's OWN
+// baseline and passes, which is the trivial pass, not a comparison. (Found on
+// #294, which added options-behavior + options-denylist with baselines and so
+// went undetected until it was forced by hand.)
+//
+// THE AUTHORITY's path, deliberately not the local platform's: only linux-x64
+// baselines are committed, so checking the local platform would call every
+// state new on a dev machine and render the entire suite twice.
+const baselinePath = (name, theme) =>
+  `scripts/cdp/baselines/${VISUAL_AUTHORITY}/${name}.${theme}.png`;
+
+/** Did `path` exist, as a file, in the base commit? */
+const existsAtBase = (path) => {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${baseRef}:${path}`], { cwd: ROOT, stdio: 'pipe' });
+    return true;
+  } catch {
+    // Also false when the ref itself is unreachable (a too-shallow fetch). That
+    // direction is the safe one: it renders a before/after that turns out to be
+    // redundant, rather than silently skipping the one comparison worth making.
+    return false;
+  }
+};
+
 const isNew = (name) => forced.has(name)
-  || THEMES.some((t) => !existsSync(join(AUTHORITY_DIR, `${name}.${t}.png`)));
+  || THEMES.some((t) => !existsAtBase(baselinePath(name, t)));
 
 const visualStates = STATES.filter((s) => s.kind === 'visual');
 const newStates = visualStates.filter((s) => isNew(s.name));
 
 if (newStates.length === 0) {
-  log('no new visual states — every state has a committed baseline, nothing to compute');
+  log('no new visual states — every state had a committed baseline at the merge base, nothing to compute');
   process.exit(0);
 }
-log(`new visual state(s) with no baseline: ${newStates.map((s) => s.name).join(', ')}`);
+log(`state(s) with no baseline at ${baseRef.slice(0, 8)}: ${newStates.map((s) => s.name).join(', ')}`);
 
 // ── the "before" build ───────────────────────────────────────────────────────
 // A detached worktree at the merge-base. The STATE DEFINITIONS come from this
 // branch (they have to — the base does not know these states exist); only the
 // EXTENSION under test comes from the base. That separation is the whole trick.
-const baseRef = arg('--base') || execFileSync('git', ['merge-base', 'origin/main', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
 const baseTree = join(ARTIFACTS, `base-${baseRef.slice(0, 8)}`);
 mkdirSync(ARTIFACTS, { recursive: true });
 if (!existsSync(baseTree)) {
