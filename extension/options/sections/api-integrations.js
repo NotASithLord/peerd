@@ -117,7 +117,11 @@ export const ApiIntegrationsSection = {
               m('.provider-card-main', [
                 m('.provider-card-text', [
                   m('span.provider-card-name', it.origin),
-                  m('span.key-badge.key-set', it.scheme === 'dpop' ? '✓ DPoP' : `✓ ${it.header || 'Authorization'}`),
+                  m('span.key-badge.key-set',
+                    { title: it.scheme === 'dpop'
+                      ? 'Proof-of-possession: bound to a device-only key peerd cannot export'
+                      : `Sent as ${it.header || 'Authorization'}` },
+                    it.scheme === 'dpop' ? '✓ DPoP · device-bound' : `✓ ${it.header || 'Authorization'}`),
                 ]),
                 m('span', { style: 'margin-left:auto;' },
                   m('button.linkish', { type: 'button', disabled: ui.busy, onclick: () => remove(it.origin) }, 'Remove')),
@@ -126,9 +130,16 @@ export const ApiIntegrationsSection = {
               // shown in full because pasting it into the server's client registration
               // is the step that makes the token binding real. Removing the
               // integration retires the key, so this fingerprint doesn't outlive it.
+              // The device-bound line is not decoration: a non-extractable key can't
+              // be synced or ride a vault export (buildExport never gathers the key
+              // store, and the material can't be serialized anyway), so moving to
+              // another device means re-registering there — say so before the user is
+              // surprised by a 401 on a machine they restored a vault onto.
               it.scheme === 'dpop'
                 ? m('p.hint', { style: 'margin:4px 0 0;' }, it.jkt
-                  ? ['Key thumbprint (', m('code', 'jkt'), '): ', m('code', it.jkt), ' — register this with ', it.origin, '.']
+                  ? ['Key thumbprint (', m('code', 'jkt'), '): ', m('code', it.jkt),
+                    ' — register this with ', it.origin, '. ', m('strong', 'Device-bound'),
+                    ': the key stays on this device — it doesn’t sync and isn’t part of a vault export, so you’ll register a new one on another device.']
                   : ['Key thumbprint unavailable — it is created on the next request to ', it.origin, '.'])
                 : null,
             ]))),

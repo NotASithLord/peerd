@@ -115,7 +115,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // peerd-egress/dpop/proof.js (the pure RFC 9449 core) and dpop/keys.js (the
 // non-extractable keypair shell); both carry // @ts-check. The +4 (not +2) also
 // locks in two files that had already landed above the stale 572 floor.
-const COVERED_FLOOR = 576;
+const COVERED_FLOOR = 577;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

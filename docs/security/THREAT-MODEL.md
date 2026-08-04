@@ -439,6 +439,17 @@ while resident. It is persisted as a structured-clone handle so it survives a
 service-worker eviction without ever becoming bytes we hold, and there is one key per
 owned origin, so two integrations cannot be correlated by their `jkt`.
 
+The same non-extractability makes the key DEVICE-BOUND, and that cuts both ways as a
+containment property rather than only a limitation. It cannot sync, and a vault
+export/transfer never carries it: `buildExport` gathers secrets, settings, memory,
+hooks and skills — not the DPoP key store — and the private material could not be
+serialized into the file even if it tried. So a stolen or shared vault backup yields
+no usable proof-of-possession credential, and the honest cost is that a credential
+provisioned on one device works only there and must be re-registered on another
+(surfaced in Settings so a restored-vault `401` is not a surprise). Removing an
+integration deletes the token AND the keypair (below), so the fingerprint never
+outlives the credential on the device that held it either.
+
 The key is HALF the credential, so its lifecycle is the credential's. It is minted
 only when provisioning asks for one or when a load RESOLVES with no record — never
 after a load FAILED, because "unreadable" is not "absent" and minting over a key we
@@ -486,7 +497,12 @@ mint/read/retire lifecycle), `peerd-egress/fetch/web-fetch.js` (`withDpopCredent
 `peerd-egress/fetch/origin-credential-routes.js` (provision / surface the `jkt` /
 revoke), `extension/options/sections/api-integrations.js` (the user-facing choice).
 Tested: `tests/peerd-egress/dpop.test.ts` (against real WebCrypto — the load-bearing
-case is that `exportKey` on the private key rejects).
+case is that `exportKey` on the private key rejects), and
+`extension/tests/unit/peerd-egress/dpop-key-idb.test.js` (in-browser, real
+IndexedDB — the handle survives a genuine structured-clone store→evict→load cycle
+still non-extractable, still `exportKey`-rejecting, and still signing a proof that
+verifies against its persisted public key; the Bun tier can only prove this over a
+`Map`, which never crosses the clone boundary).
 
 ### Additional invariants (not scenario-gated, enforced in code)
 
