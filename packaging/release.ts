@@ -24,6 +24,13 @@
 // Keep in sync with the workflow's release job — when Actions billing is
 // healthy, a tag push runs the same flow in CI; this script exists so
 // the tag can also be cut entirely from a dev machine.
+//
+// One DELIBERATE divergence: CI splits packaging in two so that provenance
+// attestation runs before the AMO upload — the one irreversible act in a
+// release (web-ext burns the version on addons.mozilla.org; a later failure
+// cannot take it back). There is no attestation on this path, so there is
+// nothing here that has to precede AMO, and package:all stays one call.
+// If a future step is added here that CAN fail, put it before step 4.
 
 import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';

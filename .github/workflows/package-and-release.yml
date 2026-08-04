@@ -611,45 +611,95 @@ jobs:
           [ -n "$AMO_JWT_SECRET" ] || { echo '::error::AMO_JWT_SECRET secret not set'; exit 1; }
           printf '%s' "$CRX_PRIVATE_KEY" > key.pem
 
-      - name: Package + sign all four artifacts
+      # ORDERING RULE for the rest of this job: the AMO upload is the ONE
+      # irreversible act in a release. `web-ext sign` posts the package to
+      # addons.mozilla.org and burns the version number there — a later failure
+      # cannot take it back, and re-running dies on "Version X already exists"
+      # until someone bumps. So every step that CAN fail runs BEFORE it.
+      #
+      # That is why packaging is split in two here rather than one `package:all`:
+      # everything local (both store zips, and the Chrome CRX, whose signing is an
+      # in-process crx3 call) is built, proved, and ATTESTED first. Attestation is
+      # exactly the kind of gate that belongs on this side of the line — it depends
+      # on org/repo settings and on minting an OIDC token, so it can fail for
+      # reasons that have nothing to do with the artifacts.
+      - name: Package the local artifacts (both store zips + Chrome CRX)
+        shell: bash
+        run: |
+          # why pipefail: without it `bun … | tee` reports tee's exit code, so a
+          # failed packaging run would sail through and the release could ship
+          # partially-packaged artifacts. (`shell: bash` also enables pipefail,
+          # but be explicit — this step is the release gate.)
+          set -euo pipefail
+          { bun packaging/package.ts --channel=store --browser=chrome
+            bun packaging/package.ts --channel=store --browser=firefox
+            bun packaging/package.ts --channel=preview --browser=chrome
+            bun run package:web
+          } 2>&1 | tee package.log
+          if grep -q 'UNSIGNED' package.log; then
+            echo '::error::the Chrome preview artifact was left unsigned — aborting release'
+            exit 1
+          fi
+
+      - name: Assert the Chrome preview CRX is actually signed
+        shell: bash
+        run: |
+          # Positive proof of signing, not just absence of the UNSIGNED marker (a
+          # packaging run that died before sign.ts ran prints no marker at all).
+          set -euo pipefail
+          CRX=artifacts/peerd-preview-chrome.crx
+          [ -f "$CRX" ] || { echo "::error::$CRX missing — CRX signing did not run"; exit 1; }
+          [ "$(head -c4 "$CRX")" = "Cr24" ] || { echo "::error::$CRX lacks the Cr24 CRX3 magic — not a signed CRX"; exit 1; }
+
+      # Signed SLSA-style provenance for everything that exists so far. Runs
+      # BEFORE the AMO upload on purpose (see the ordering rule above): if
+      # attestation is going to fail — settings not enabled, OIDC unavailable —
+      # it fails here, with nothing yet submitted to Mozilla.
+      # Verify with: gh attestation verify <file> --repo <owner>/<repo>
+      - name: Attest build provenance (local artifacts)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            artifacts/peerd-preview-chrome.crx
+            artifacts/peerd-store-chrome.zip
+            artifacts/peerd-store-firefox.xpi
+
+      # ---- the irreversible step ----
+      - name: Package + AMO-sign the Firefox preview (irreversible)
         shell: bash
         env:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
-          # why pipefail: without it `bun … | tee` reports tee's exit code,
-          # so a failed packaging run would sail through and the release could ship
-          # partially-packaged artifacts. (`shell: bash` also enables pipefail,
-          # but be explicit — this step is the release gate.)
           set -euo pipefail
-          bun run package:all 2>&1 | tee package.log
-          if grep -q 'UNSIGNED' package.log; then
-            echo '::error::a preview artifact was left unsigned — aborting release'
+          bun packaging/package.ts --channel=preview --browser=firefox 2>&1 | tee amo.log
+          if grep -q 'UNSIGNED' amo.log; then
+            echo '::error::the Firefox preview artifact was left unsigned — aborting release'
             exit 1
           fi
 
-      - name: Assert preview artifacts are actually signed
+      - name: Assert the Firefox preview XPI carries AMO's signature
         shell: bash
         run: |
-          # Positive proof of signing, not just absence of the UNSIGNED
-          # marker (a packaging run that died before sign.ts ran prints no marker
-          # at all): the CRX must carry the CRX3 magic, and the .xpi must
-          # contain AMO's signature block.
           set -euo pipefail
-          CRX=artifacts/peerd-preview-chrome.crx
           XPI=artifacts/peerd-preview-firefox.xpi
-          [ -f "$CRX" ] || { echo "::error::$CRX missing — CRX signing did not run"; exit 1; }
-          [ "$(head -c4 "$CRX")" = "Cr24" ] || { echo "::error::$CRX lacks the Cr24 CRX3 magic — not a signed CRX"; exit 1; }
           [ -f "$XPI" ] || { echo "::error::$XPI missing — Firefox preview was not built"; exit 1; }
           unzip -l "$XPI" META-INF/mozilla.rsa >/dev/null \
             || { echo "::error::$XPI has no META-INF/mozilla.rsa — AMO signing did not run"; exit 1; }
+
+      # The XPI cannot be attested any earlier — it does not exist in its final
+      # form until AMO returns the signed file. This is the one attestation that
+      # unavoidably follows the irreversible step.
+      - name: Attest build provenance (AMO-signed XPI)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: artifacts/peerd-preview-firefox.xpi
 
       - name: Regenerate update feeds for this release
         run: bun packaging/gen-update-feeds.ts --version="${GITHUB_REF_NAME#v}" --repo="$GITHUB_REPOSITORY"
 
       # Digest manifest: lets anyone verify a downloaded artifact (or a
-      # store-submitted zip) against what this run actually built, and gives
-      # the provenance attestation below stable subjects. Store zips are
+      # store-submitted zip) against what this run actually built. Store zips are
       # included because their upload is manual — the digest is how a human
       # confirms the file they submit is the file CI verified.
       #
@@ -671,18 +721,6 @@ jobs:
           cat artifacts/SHA256SUMS
           echo '--- SHA256SUMS.store (manually submitted store packages) ---'
           cat artifacts/SHA256SUMS.store
-
-      # Signed SLSA-style provenance: binds each artifact digest to this
-      # workflow, commit, and runner via GitHub's attestation service.
-      # Verify with: gh attestation verify <file> --repo <owner>/<repo>
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        with:
-          subject-path: |
-            artifacts/peerd-preview-chrome.crx
-            artifacts/peerd-preview-firefox.xpi
-            artifacts/peerd-store-chrome.zip
-            artifacts/peerd-store-firefox.xpi
 
       - name: Create GitHub Release
         env:
