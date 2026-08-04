@@ -282,6 +282,13 @@ const ACTION_CLASS_LABEL = {
  *   the card does not offer a button that would do nothing.
  * @property {string} [tool]
  * @property {string[]} [origins]
+ * @property {'passkey'|'sso'} [method]   login only: the sign-in method the
+ *   `login` tool derived from the page (ground truth, not a model argument).
+ * @property {string | null} [provider]   login only: the SSO provider name for a
+ *   'sso' method (e.g. 'Google'); null/absent for a passkey.
+ * @property {boolean} [verified]   login only: the DESTINATION was proven a known
+ *   IdP (an href/formAction host passing isKnownIdp). false for a recognized-name-
+ *   only sso — the card must then NOT vouch for where the button leads.
  */
 // Exported so the full-page home renders the SAME permission prompt (DESIGN-12
 // full equality) — a confirm broadcast must be answerable on whichever surface
@@ -292,6 +299,59 @@ export const ConfirmModal = {
     /** @param {string} a */
     const answer = (a) => uiActions?.confirmAnswer?.(prompt.id, a);
     const origins = Array.isArray(prompt.origins) ? prompt.origins.filter(Boolean) : [];
+
+    // Login consent — its own render path, because a sign-in is the highest-stakes
+    // confirm we show and it needs a distinctive, obvious card. The real origin is
+    // the HERO (the anti-phishing anchor the user checks); the method/provider come
+    // from the login tool's ground-truth classifier (never a model string), so the
+    // card cannot be spoofed. No "Allow for session" — every login is fresh consent.
+    if (prompt.kind === 'login') {
+      const origin = origins[0] || '';
+      let host = origin;
+      try { host = new URL(origin).host || origin; } catch { /* malformed → show the raw origin */ }
+      // The origin is the anti-phishing HERO — it must never be BLANK on an approvable
+      // card. The tool guarantees an https origin, but the modal is shared, so guard
+      // defensively: label a blank origin and DISABLE the primary action (nothing to
+      // approve without a verified destination to name).
+      const blankOrigin = !host;
+      if (!host) host = 'an unverified site';
+      const isPasskey = prompt.method === 'passkey';
+      const provider = prompt.provider ? String(prompt.provider) : '';
+      // An UNVERIFIED sso: peerd took origin-named consent but could NOT prove the
+      // button leads to a known IdP. Soften the copy — keep the origin hero, but do
+      // not vouch for the destination.
+      const unverified = prompt.method === 'sso' && prompt.verified === false;
+      return m('.peerd-modal-backdrop', [
+        m('.peerd-modal.confirm-modal.login-modal', [
+          m('h3', 'Approve sign-in'),
+          m('.login-hero', [
+            m('.badge', icon('lock', 18)),
+            m('.ht', [
+              m('.scheme', 'peerd is signing you in to'),
+              m('.host', host),
+            ]),
+          ]),
+          m('.login-method', [
+            m('.mic', icon(isPasskey ? 'key' : 'globe', 15)),
+            isPasskey
+              ? 'Continue with a passkey'
+              : unverified
+                ? `Continue with ${provider || 'your provider'} — peerd could not verify where this leads`
+                : `Continue with ${provider || 'your provider'}`,
+          ]),
+          m('.login-reassure', [
+            m('.ok', icon('check', 15)),
+            m('span', unverified
+              ? `peerd never sees your password and could not confirm this button’s destination — only continue if you trust ${host}. You finish signing in yourself.`
+              : `peerd never sees your password. You finish signing in yourself — with your device${provider ? ` or ${provider}` : ''}.`),
+          ]),
+          m('.peerd-modal-actions', [
+            m('button.secondary', { type: 'button', onclick: () => answer('no') }, 'Cancel'),
+            m('button', { type: 'button', disabled: blankOrigin, onclick: () => { if (!blankOrigin) answer('yes_once'); } }, 'Allow sign-in'),
+          ]),
+        ]),
+      ]);
+    }
     // why: memory writes (lethal-trifecta defense) render the proposed
     // AGENTS.md diff so the user approves the EXACT change, not a one-line
     // summary. The proposal carries op + the full proposed body.

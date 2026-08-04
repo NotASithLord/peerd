@@ -282,13 +282,16 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // not the credential-capable call_api.
     expect(isAllowedForActorType('call_api', 'web')).toBe(false);
     // == DOM toolset + fetch_url + read_web_cache + the 4 DESIGN-19 site-client
-    // tools (run/read/write/capture) (drift: bump if the set grows).
-    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 6);
+    // tools (run/read/write/capture) + login (Tier 0) (drift: bump if the set grows).
+    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 7);
     // DESIGN-19: the site-client family is in the web actor's toolset.
     for (const n of ['site_client_run', 'site_client_read', 'site_client_write', 'site_capture']) {
       expect(isAllowedForActorType(n, 'web')).toBe(true);
       expect(isAllowedForActorType(n, 'app')).toBe(false);
     }
+    // Tier 0 login — web-actor-only, refused for every other kind.
+    expect(isAllowedForActorType('login', 'web')).toBe(true);
+    expect(isAllowedForActorType('login', 'app')).toBe(false);
     // read_web_cache pages a spilled fetch_url body — same tier as the fetch.
     expect(isAllowedForActorType('read_web_cache', 'web')).toBe(true);
     expect(isAllowedForActorType('read_web_cache', 'app')).toBe(false);

@@ -2175,6 +2175,63 @@ button.icon.is-active {
 }
 .confirm-modal .peerd-modal-actions { flex-wrap: wrap; }
 
+/* --- login consent card (the `login` tool, kind:'login') --------------
+ * A sign-in is the highest-stakes confirm, so it gets a distinctive card:
+ * the real origin is the HERO (anti-phishing anchor), a clear method line,
+ * and a "peerd never sees your password" reassurance. Monochrome surfaces +
+ * the single cyan accent + one semantic green check (brand rule). */
+.login-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin: 2px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r3);
+  background: var(--elev);
+}
+.login-hero .badge {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 183, 235, 0.13);   /* cyan (--p) tint */
+  color: var(--accent-ink);
+}
+.login-hero .ht { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.login-hero .scheme { font-size: 11px; color: var(--fg-muted); }
+.login-hero .host {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  word-break: break-all;
+  line-height: 1.2;
+}
+.login-method {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  margin: 10px 0 12px;
+}
+.login-method .mic { color: var(--accent-ink); display: grid; place-items: center; flex: none; }
+.login-reassure {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-muted);
+  padding: 9px 11px;
+  border-radius: var(--r3);
+  background: rgba(127, 127, 127, 0.10);
+}
+.login-reassure .ok { color: var(--ok-ink); flex: none; margin-top: 1px; }
+
 /* --- system notice banner (e.g. /init progress) ---------------------- */
 .notice-bar {
   display: flex;
