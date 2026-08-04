@@ -63,6 +63,10 @@ const main = () => {
   run('typecheck coverage floor', 'bun', ['run', 'check:tscheck']);
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
+  // MUST follow check:imports, which is what stages the four channel×browser
+  // builds this lints. It is the only gate that judges peerd AS a Firefox
+  // extension — every executing lane is Chrome.
+  run('firefox package lint (AMO validator; no unguarded Chrome-only API)', 'bun', ['run', 'check:firefox']);
   run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
   run('source hygiene (no control bytes / tracked symlinks in source)', 'bun', ['run', 'check:hygiene']);
   run('vendor integrity (extension/vendor/ matches vendor.lock.json)', 'bun', ['run', 'check:vendor']);

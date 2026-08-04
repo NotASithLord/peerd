@@ -88,6 +88,11 @@ jobs:
         run: bun run check:boundary
       - name: Packaged import graph (no pruned-but-imported file black-screens a page)
         run: bun run check:imports
+      # The only gate that judges peerd AS a Firefox extension — every executing
+      # lane is Chrome, so a Chrome-only API reaching the Firefox package would
+      # otherwise ship green. Runs after check:imports, which stages the builds.
+      - name: Firefox package lint (AMO validator; no unguarded Chrome-only API)
+        run: bun run check:firefox
       - name: Doc path references (top-level docs point at real files)
         run: bun run check:docpaths
       - name: Source hygiene (no control bytes / tracked symlinks in source)
