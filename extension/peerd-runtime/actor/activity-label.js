@@ -61,6 +61,7 @@ const PHRASES = Object.freeze({
   page_keys: 'Pressing keys',
   read_page: 'Reading the page',
   read_pdf: 'Reading a PDF',
+  read_doc: 'Reading a document',
   snapshot: 'Looking at the page',
   query_dom: 'Looking at the page',
   read_state: 'Looking at the page',

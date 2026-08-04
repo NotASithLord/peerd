@@ -468,6 +468,7 @@
     "engine-tabs/app-tab/app-tab.js": 1,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,
+    "offscreen/doc-extract.js": 1,
     "offscreen/dweb-base.js": 1,
     "offscreen/offscreen.js": 5,
     "offscreen/web-extract.js": 1,

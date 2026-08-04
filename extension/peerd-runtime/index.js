@@ -374,6 +374,14 @@ export {
   PdfFetchError, PdfParseError, OcrUnavailableError,
 } from './pdf/index.js';
 
+// --- doc (read_doc tool: office/publishing formats -> Markdown) ---------
+export {
+  convertToDocument, formatDocBody, toMarkdown, sniffDocFormat,
+  isConvertible, isLegacyBinary, CONVERTIBLE,
+  DocFetchError, DocParseError, UnsupportedDocFormatError,
+  LegacyDocFormatError, ZipError,
+} from './doc/index.js';
+
 // --- dom navigation (a11y tree + element refs; diffable snapshots) ------
 export {
   serializeAxTree,

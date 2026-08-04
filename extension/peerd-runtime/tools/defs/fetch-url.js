@@ -22,6 +22,8 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import { disarmMarkup, disarmText } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
+// The pure "is this response a document file?" test — see peerd-runtime/doc.
+import { sniffResponseAsDocument } from '../../doc/sniff.js';
 
 const MAX_BODY_CHARS = 16_000;   // hard cap to avoid context-blast on huge payloads
 
@@ -71,7 +73,9 @@ export const fetchUrlTool = {
     "carries its session, so hit that SAME origin's endpoints here instead of",
     're-scraping. Rides the denylist + SSRF + audit egress chain; does NOT follow',
     'redirects. Returns status, final URL, body + parsed JSON (capped 16k). HTML',
-    'is extracted to clean markdown by default (raw:true for the full HTML).',
+    'is extracted to clean markdown by default (raw:true for the full HTML). A DOCUMENT',
+    'FILE (.docx/.xlsx/.pptx/.odt/.rtf/.epub, or a PDF) is not readable here — those',
+    'come back as binary; read_doc and read_pdf open them.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -135,6 +139,26 @@ export const fetchUrlTool = {
         ctx,
       );
       const ct = res.headers['content-type'] ?? '';
+      // A DOCUMENT FILE, not a page. fetch_url's primitive decodes every
+      // response with Response.text(), so a .docx/.xlsx/.pptx/PDF arrives as
+      // mojibake — and the paths below would then disarm it, window it, spill
+      // 16k of it to the cache, and hand the model a screenful of garbage it
+      // will nonetheless try to answer from. Hand over the reader that CAN
+      // open it instead. The bytes are re-fetched there (offscreen, under the
+      // same denylist + SSRF gates), which costs one request and is worth it:
+      // the alternative is a confident answer drawn from noise.
+      const asDocument = sniffResponseAsDocument({
+        contentType: ct, url: res.finalUrl || args.url, bodyHead: res.body.slice(0, 4096),
+      });
+      if (asDocument) {
+        return {
+          ok: false,
+          error: 'binary_document',
+          content: `${res.finalUrl || args.url} is a ${asDocument.format.toUpperCase()} document, not a web page — `
+            + `fetch_url can only read text, so its bytes would come back unreadable. `
+            + `Call ${asDocument.tool}({ url: "${res.finalUrl || args.url}" }) to read it.`,
+        };
+      }
       // HTML → clean markdown (the default; raw:true opts out). Boilerplate is
       // most of a page's bytes, and the JSON envelope below escapes every
       // quote in it — raw HTML routinely burns the whole 16k budget on nav and
