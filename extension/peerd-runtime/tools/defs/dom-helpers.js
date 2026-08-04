@@ -162,18 +162,32 @@ export const resolveTargetTab = async (args, ctx) => {
   // issue 267: while we are in there, observe the password field — so every DOM
   // tool teaches the classifier, not just `snapshot`.
   const live = await probeLiveDocument(tab, ctx);
-  if (live?.origin && live.origin !== originOfUrl(tab.url)) {
+  // Only a WEB origin is actionable: the denylist matches hostnames and the
+  // landing rule reasons about http(s) origins, so handing either an opaque
+  // `null`, a data: or a blob: document would be asking a question neither can
+  // answer. Those fall through untouched — fail open, as everywhere else here.
+  const liveOrigin = live?.origin && /^https?:\/\//.test(live.origin) ? live.origin : null;
+  if (liveOrigin && liveOrigin !== originOfUrl(tab.url)) {
+    const liveUrl = live?.href ?? liveOrigin;
     // It moved. Judge where it IS, on the same two rules, and refuse on either.
-    if (isDenylistedTab(live.href ?? live.origin, ctx.denylist)) return null;
+    if (isDenylistedTab(liveUrl, ctx.denylist)) return null;
     if (ctx.judgeLanding) {
-      const verdict = await ctx.judgeLanding(live.href ?? live.origin);
+      const verdict = await ctx.judgeLanding(liveUrl);
       if (verdict && verdict.action !== 'continue') return null;
     }
+    // It moved somewhere allowed — so hand the caller where it IS. A copy, not a
+    // mutation: `tab` is the tabs API's record and navigate.js relies on the pin
+    // objects it shares staying its own. why it matters beyond tidiness: login.js
+    // derives the origin it https-gates, NAMES IN THE CONFIRM, and audits from
+    // this url. A stale one there is the confused deputy in its purest form — the
+    // user approves a sign-in on the origin the tab record remembers while the
+    // ceremony runs in the document that replaced it.
+    if (live?.href) tab = { ...tab, url: live.href };
   }
-  if (live?.hasPasswordField === true && live.origin) {
+  if (live?.hasPasswordField === true && liveOrigin) {
     // Attributed to the origin that REPORTED it, never to the tab record — the
     // #278 rule, held by construction here rather than by comparison.
-    try { ctx.noteLearnedOrigin?.(live.origin, 'password-field'); } catch { /* best-effort */ }
+    try { ctx.noteLearnedOrigin?.(liveOrigin, 'password-field'); } catch { /* best-effort */ }
   }
   // The loop just targeted THIS tab by id (navigate/click/type/read/… on a tab
   // the agent opened) — update the "current agent tab" card so it tracks where

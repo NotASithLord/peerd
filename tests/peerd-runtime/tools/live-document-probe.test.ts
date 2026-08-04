@@ -85,9 +85,12 @@ describe('issue 276 — the live origin is re-judged when the document moved', (
     const judged: string[] = [];
     const ctx: any = baseCtx({
       scripting: scriptingSaying({ has: false, origin: 'https://evil.test', href: 'https://evil.test/x' }),
+      // Exact match, not a prefix: a `startsWith` on a URL is the classic
+      // incomplete-sanitization shape (evil.test.attacker.example passes it), and
+      // a security test should not model the rule it pins with a broken one.
       judgeLanding: async (url: string) => {
         judged.push(url);
-        return url.startsWith('https://evil.test') ? { action: 'end' } : { action: 'continue' };
+        return url === 'https://evil.test/x' ? { action: 'end' } : { action: 'continue' };
       },
     });
     expect(await resolveTargetTab({}, ctx)).toBeNull();
@@ -106,6 +109,33 @@ describe('issue 276 — the live origin is re-judged when the document moved', (
     });
     await resolveTargetTab({}, ctx);
     expect(judged[1]).toBe('https://x.test/u/settings');
+  });
+
+  test('a document that moved somewhere ALLOWED hands the caller where it is', async () => {
+    // login.js derives the origin it https-gates, names in the confirm, and audits
+    // from this url. Stale here is a confused deputy: the user approves a sign-in
+    // on one origin while the ceremony runs in the document that replaced it.
+    const ctx: any = baseCtx({
+      scripting: scriptingSaying({ has: false, origin: 'https://moved.test', href: 'https://moved.test/next' }),
+    });
+    const tab = await resolveTargetTab({}, ctx);
+    expect(tab?.url).toBe('https://moved.test/next');
+    // A COPY — the tabs API record it came from is left alone.
+    expect((await ctx.tabs.get(1)).url).toBe('https://example.com/');
+  });
+
+  test('a non-web live document (opaque, data:, blob:) is left entirely alone', async () => {
+    // The denylist matches hostnames and the landing rule reasons about http(s):
+    // asking either about "null" is asking a question it cannot answer.
+    const judged: string[] = [];
+    const ctx: any = baseCtx({
+      scripting: scriptingSaying({ has: true, origin: 'null', href: 'about:blank' }),
+      judgeLanding: async (url: string) => { judged.push(url); return { action: 'continue' }; },
+      noteLearnedOrigin: () => { throw new Error('must not learn an opaque origin'); },
+    });
+    const tab = await resolveTargetTab({}, ctx);
+    expect(tab?.url).toBe('https://example.com/');
+    expect(judged).toEqual(['https://example.com/']);
   });
 
   test('a document still on the judged origin is NOT re-judged (no second ask)', async () => {
