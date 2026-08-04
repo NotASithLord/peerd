@@ -22,7 +22,7 @@
 // tests/doc/*.test.ts. Nothing here is vendored: DEFLATE is the platform's,
 // and the ZIP/XML readers are small enough to own.
 
-export { convertToDocument, redirectDocument } from './convert.js';
+export { convertToDocument } from './convert.js';
 export { formatDocBody, formatDocHead, formatHeader, DEFAULT_MAX_CHARS } from './format.js';
 export { toMarkdown, renderInlines, renderTable } from './markdown.js';
 export {

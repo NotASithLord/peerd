@@ -185,7 +185,11 @@ export const parseXlsx = async (bytes) => {
     // the human-readable form lives in a number FORMAT we do not read. Silently
     // rendering 45000 as a date would be a guess presented as a fact; saying so
     // lets the reader convert it deliberately.
-    doc.notes.push('Dates are stored as serial numbers in .xlsx and appear here as numbers (day count from 1899-12-30).');
+    // Hedged deliberately: whether a given 5-digit number IS a date lives in a
+    // number FORMAT we do not read, so this says what MAY be true rather than
+    // asserting it. Rendering 45000 as a date would be a guess dressed as a fact.
+    doc.notes.push('Some cells hold 5-digit numbers. If any are dates, note that .xlsx stores dates '
+      + 'as serial day counts from 1899-12-30 — the display format is not read here.');
   }
   return finalizeDocument(doc);
 };

@@ -9,7 +9,7 @@
 import { describe, test, expect } from 'bun:test';
 import { readZipIndex, readZipEntry, MAX_ENTRY_BYTES } from '../../../extension/peerd-runtime/doc/zip.js';
 import { convertToDocument } from '../../../extension/peerd-runtime/doc/convert.js';
-import { toMarkdown } from '../../../extension/peerd-runtime/doc/markdown.js';
+import { toMarkdown, renderTable } from '../../../extension/peerd-runtime/doc/markdown.js';
 import { parseXml } from '../../../extension/peerd-runtime/doc/xml.js';
 import { makeZip } from './fixtures.ts';
 
@@ -126,5 +126,24 @@ describe('nested lists are not duplicated or reordered', () => {
     // The trap: recursing into the block list would emit the sublist BEFORE
     // "Two", which is pushed to the parent list afterwards.
     expect(out.indexOf('One a')).toBeLessThan(out.indexOf('Two'));
+  });
+});
+
+describe('table-cell escaping is complete', () => {
+  test('a backslash before a pipe cannot break out of its cell', () => {
+    // The CodeQL finding: escaping `|` alone turns `a\|b` into `a\\|b`, where
+    // the doubled backslash is an escaped backslash and the pipe is left bare —
+    // so the cell splits and every column after it shifts by one.
+    const out = renderTable([['h1', 'h2'], ['a\\|b', 'x']], true);
+    const body = out.split('\n')[2];
+    // Three separators = two cells. Four would mean the cell split.
+    expect(body.split(/(?<!\\)\|/).filter(Boolean)).toHaveLength(2);
+    expect(body).toContain('a\\\\\\|b');
+  });
+
+  test('a lone backslash at the end of a cell does not escape the delimiter', () => {
+    const body = renderTable([['h1', 'h2'], ['ends\\', 'next']], true).split('\n')[2];
+    expect(body.split(/(?<!\\)\|/).filter(Boolean)).toHaveLength(2);
+    expect(body).toContain('next');
   });
 });

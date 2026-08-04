@@ -24,7 +24,14 @@
 const escapeText = (/** @type {string} */ text) => text.replace(/([\\`])/g, '\\$1');
 
 // A pipe inside a cell ends the cell; a newline ends the row. Both must go.
+//
+// BACKSLASH FIRST, and the order is the whole point: escaping the pipe alone
+// turns a cell containing `a\|b` into `a\\|b`, where the doubled backslash is
+// itself an escaped backslash — leaving the pipe bare, so the cell splits and
+// every column after it shifts. Escaping backslashes first makes each escape
+// independent. (CodeQL flags exactly this as incomplete string escaping.)
 const escapeCell = (/** @type {string} */ text) => text
+  .replace(/\\/g, '\\\\')
   .replace(/\|/g, '\\|')
   .replace(/\s*\r?\n\s*/g, ' ')
   .trim();

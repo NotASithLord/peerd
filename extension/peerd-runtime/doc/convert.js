@@ -17,7 +17,6 @@ import { parseXlsx } from './parse/xlsx.js';
 import { parsePptx } from './parse/pptx.js';
 import { parseOdf } from './parse/odf.js';
 import { parseEpub } from './parse/epub.js';
-import { makeDocument, paragraph, finalizeDocument } from './model.js';
 
 /** Which app wrote a legacy OLE2 file, guessed from the name, for the message only. */
 const legacyHint = (/** @type {string} */ name) => {
@@ -83,15 +82,3 @@ export const convertToDocument = async (bytes, hints = {}) => {
   }
   return doc;
 };
-
-/**
- * A Document standing in for content we deliberately did not convert. Used for
- * the formats that have a better route (PDF → read_pdf) so the caller still
- * gets a well-formed answer instead of an exception.
- *
- * @param {string} format
- * @param {string} message
- */
-export const redirectDocument = (format, message) => finalizeDocument(
-  makeDocument({ format, blocks: [paragraph(message)] }),
-);

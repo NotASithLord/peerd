@@ -73,7 +73,15 @@ export const readDocTool = {
     const docClient = /** @type {{ extract: (source: { url: string }, opts: { format?: string }) => Promise<{ doc: any, bytes: number, sniffedVia: string }> } | undefined} */ (
       /** @type {any} */ (ctx).docOffscreenClient);
     if (!docClient || typeof docClient.extract !== 'function') {
-      return { ok: false, error: 'doc_reader_unavailable' };
+      // Firefox has no offscreen-document API, so the converter has nowhere to
+      // run (read_pdf is unavailable there for the same reason). Say so — an
+      // opaque code reads as "this document is broken" and invites a retry.
+      return {
+        ok: false,
+        error: 'doc_reader_unavailable',
+        content: 'Document conversion is not available in this browser build. '
+          + 'If the document has an HTML version, read that instead.',
+      };
     }
 
     if (typeof args?.url !== 'string' || !args.url) return { ok: false, error: 'url_required' };

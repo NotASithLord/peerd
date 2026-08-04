@@ -88,14 +88,19 @@ const extractDoc = async ({ source, opts = {} }) => {
     };
     const sniffed = sniffDocFormat(bytes, hints);
 
+    // These two redirects are DETECTION-driven, so an explicit opts.format
+    // skips them: overriding a wrong detection is the only reason that
+    // parameter exists, and refusing on the detected format would make the
+    // override unreachable in exactly the case it is for.
+    //
     // PDF has a BETTER reader in this build (pdf.js text layer + opt-in OCR),
     // so read_doc refuses it by NAME rather than by failure — the agent gets a
     // route, not a dead end. Same for a URL that served HTML: that is the
     // ordinary web path, and fetch_url/read_page do it far better.
-    if (sniffed.format === 'pdf') {
+    if (!opts.format && sniffed.format === 'pdf') {
       return { ok: false, error: 'is_pdf', detail: 'This is a PDF. Use read_pdf, which has a text layer and OCR.' };
     }
-    if (sniffed.format === 'html' || sniffed.format === 'text') {
+    if (!opts.format && (sniffed.format === 'html' || sniffed.format === 'text')) {
       return {
         ok: false,
         error: 'is_web_content',
