@@ -111,7 +111,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 570 → 572: the tool-ergonomics batch — the shared once-per-session dedup
 // guard (tools/defs/once-per-session.js, design 6) and the pure failure
 // aggregator's home (metrics design 5); all new files carry // @ts-check.
-const COVERED_FLOOR = 573;
+const COVERED_FLOOR = 576;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
