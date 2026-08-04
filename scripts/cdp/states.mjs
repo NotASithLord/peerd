@@ -907,6 +907,47 @@ export const STATES = [
     },
   },
 
+  // --- visual (WIDE): the two settings pages the redesign rebuilt -------------
+  //
+  // why these exist at all: `options-fulltab` above photographs the DEFAULT
+  // route (Providers & models), so it is the only options screen under the
+  // pixel gate — which meant a rewrite of Behavior and Denylist could land
+  // reporting "no visual drift" because nothing ever looked at them. A gate that
+  // cannot see the page it is meant to guard is worse than no gate: it reads as
+  // proof. These two put the rebuilt surfaces under the same authority as the
+  // rest.
+  //
+  // Both open a specific hash route, so they wait on that page's own first
+  // element rather than `#app` having any child (which is true the moment the
+  // shell mounts, before the section renders).
+  {
+    name: 'options-behavior', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/behavior');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 11`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await rec.visualPage('options-behavior', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-denylist', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/denylist');
+      try {
+        // The seed loads asynchronously in the SW, so wait for the GROUPS —
+        // photographing an empty list would bake "no categories" into the
+        // baseline and then never fail again.
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.denylist-group').length >= 8`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await rec.visualPage('options-denylist', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // --- visual: the STANDALONE TAB PAGES ---------------------------------------
   //
   // Coverage audit finding: every visual baseline photographed the side panel,
