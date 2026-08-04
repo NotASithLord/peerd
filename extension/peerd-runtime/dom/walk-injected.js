@@ -338,8 +338,9 @@ export function domWalkInjected() {
  * body closes over nothing, so the two copies must each stand alone. Keep them
  * in step; the walk copy carries the full rationale.
  *
- * @returns {{ has: boolean, origin: string | null }} the signal, and WHERE it was
- *   observed — the caller must drop it if that disagrees with the tab it resolved.
+ * @returns {{ has: boolean, origin: string | null, href: string | null }} the signal,
+ *   and WHERE it was observed — the caller must drop it if that disagrees with the
+ *   tab it resolved.
  */
 export function hasPasswordFieldInjected() {
   'use strict';
@@ -350,19 +351,28 @@ export function hasPasswordFieldInjected() {
   // still thinks is loaded. Returning location.origin lets the caller drop a
   // signal it cannot attribute. (`origin: null` on a throw, so an opaque or
   // unreadable document is UNKNOWN rather than silently matching.)
+  //
+  // `location` is [Unforgeable] and this body runs in the ISOLATED world, so a
+  // hostile page can neither shadow it nor reach in and rewrite the answer: the
+  // document cannot lie about which document it is. That is what makes this
+  // usable as a live re-check of the caller's frozen tab record and not merely
+  // as a hint. href as well as origin, because the landing judge is asked about
+  // a URL and a path-scoped rule must not be handed a bare origin.
   var origin = null;
+  var href = null;
   try { origin = location.origin; } catch (e) { origin = null; }
+  try { href = location.href; } catch (e) { href = null; }
   try {
     var fields = document.querySelectorAll('input[type="password"]');
     for (var i = 0; i < fields.length; i++) {
       var autocomplete = fields[i].getAttribute('autocomplete');
       // A registration field is evidence the user has NO account here.
       if (String(autocomplete == null ? '' : autocomplete).toLowerCase() !== 'new-password') {
-        return { has: true, origin: origin };
+        return { has: true, origin: origin, href: href };
       }
     }
-    return { has: false, origin: origin };
+    return { has: false, origin: origin, href: href };
   } catch (e) {
-    return { has: false, origin: origin };
+    return { has: false, origin: origin, href: href };
   }
 }

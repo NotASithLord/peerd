@@ -10,6 +10,7 @@ import { snapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapsh
 import { clickTool, clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
 import { typeTool, typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
 import { createRefRegistry } from '../../../extension/peerd-runtime/dom/ref-registry.js';
+import { hasPasswordFieldInjected } from '../../../extension/peerd-runtime/dom/walk-injected.js';
 
 const WALK_RESULT = {
   ok: true,
@@ -29,7 +30,14 @@ const makeCtx = (scriptImpl: (req: any) => any) => {
       query: async () => [{ id: 7, url: 'https://example.com/' }],
     },
     scripting: {
-      executeScript: async (req: any) => { injections.push(req); return scriptImpl(req); },
+      // The chokepoint's live probe (issues 267/276) injects on every DOM tool
+      // call. It is not part of the dispatch under test here, and counting it
+      // would make these assertions about injection ORDER a proxy for an
+      // unrelated feature — so it is recorded out.
+      executeScript: async (req: any) => {
+        if (req?.func !== hasPasswordFieldInjected) injections.push(req);
+        return scriptImpl(req);
+      },
     },
     domRefs: createRefRegistry(),
     // No debuggerPool — the advanced-automation-off / Firefox shape.

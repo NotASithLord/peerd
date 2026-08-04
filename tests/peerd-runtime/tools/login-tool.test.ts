@@ -39,8 +39,14 @@ const makeCtx = (over: Over = {}) => {
     denylist: [],
     scripting: {
       executeScript: async (opts: any) => {
-        calls.execute.push(opts);
         const fn = opts?.func?.name;
+        // The DOM chokepoint's live probe (issues 267/276) injects once per tool
+        // call, BEFORE login's own https/inbound refusals — deliberately, since
+        // those are judged against the live resolved tab. It reads nothing back
+        // into the turn and drives nothing, so it is not "page-driving" in the
+        // sense the counts below pin.
+        if (fn === 'hasPasswordFieldInjected') return [{ result: { has: false, origin, href: `${origin}/login` } }];
+        calls.execute.push(opts);
         if (fn === 'loginTargetReader') {
           return [{ result: over.readerResult ?? { ok: true, descriptor: over.descriptor ?? { tag: 'button', name: 'x' } } }];
         }
