@@ -318,6 +318,27 @@ jobs:
         id: render
         run: bun run test:e2e:visual
 
+      # A state ADDED by this PR has no committed baseline, so the step above can
+      # only seed it — it passes trivially and the PR reports "no visual drift"
+      # for a screen nobody ever photographed. This computes that missing
+      # "before" by rendering the same state definitions against the MERGE-BASE
+      # build (peerd has no build step, so that is a checkout and a render).
+      #
+      # Non-gating on purpose: it reports what changed, it does not decide. The
+      # committed baselines remain the approved-look record, and the human
+      # checkpoint that comes with reseeding them.
+      - name: Compute before/after for states with no baseline
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        id: newstates
+        run: |
+          # The merge-base needs main's history; the PR checkout is shallow.
+          git fetch --no-tags --depth=50 origin main || true
+          bun scripts/cdp/new-state-before-after.mjs > "$RUNNER_TEMP/new-states.md" || true
+          cat "$RUNNER_TEMP/new-states.md"
+
       - name: Write the render report to the job summary
         if: always()
         run: |
@@ -327,6 +348,7 @@ jobs:
             bun scripts/cdp/visual-report.mjs
             echo
             echo "Before / after / diff PNGs are attached to this run as the \`visual-diff-…\` artifact."
+            if [ -s "$RUNNER_TEMP/new-states.md" ]; then echo; cat "$RUNNER_TEMP/new-states.md"; fi
             echo
             echo "If the change is INTENDED: re-run this workflow on your branch with"
             echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
