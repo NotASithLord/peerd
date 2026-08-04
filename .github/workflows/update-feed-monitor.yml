@@ -6,6 +6,11 @@
 
 name: update-feed-monitor
 
+# Read-only token: this probe only reads the latest-release tag and fetches
+# public feeds — it must never be able to write to the repo.
+permissions:
+  contents: read
+
 on:
   schedule:
     - cron: '17 9 * * *'   # daily; odd minute to dodge the cron stampede

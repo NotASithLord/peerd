@@ -65,6 +65,8 @@ const main = () => {
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   run('doc path references (top-level docs point at real files)', 'bun', ['run', 'check:docpaths']);
   run('source hygiene (no control bytes / tracked symlinks in source)', 'bun', ['run', 'check:hygiene']);
+  run('vendor integrity (extension/vendor/ matches vendor.lock.json)', 'bun', ['run', 'check:vendor']);
+  run('security invariants (manifest surface / dynamic code / message hosts)', 'bun', ['run', 'check:invariants']);
   // Web target: stage it fresh from source, then prove the tree is import-closed
   // (nothing curated reaches pruned chassis; the browser-polyfill shim is in
   // place). This is what makes the web tree safely inherit upstream — an escape

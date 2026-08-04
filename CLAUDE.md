@@ -327,12 +327,21 @@ gotchas to know going in:
   call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
   and every tool call (the SW rebuilds the caller's instance-pinned or
   `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
-  args). So the actor fence is a MEMORY boundary, not a prompt boundary:
-  untrusted page/instance/response content stays behind the heap, one
-  process-eviction from the vault DK no longer reachable. Chrome-only (needs
-  the offscreen API); Firefox falls back to the keyless in-SW loop until it
-  has one. why it matters: prompt injection has no filter — the fix is to
-  never hand untrusted reasoning the authority in the first place.
+  args). Both relays are pinned to the OFFSCREEN DOCUMENT as sender and carry a
+  per-run GRANT minted SW-side (`isOffscreenSender` + the grants map): the sender
+  check is the boundary — `runtime.sendMessage` can't address one context, so the
+  job and its token reach every extension page — and the token adds run identity
+  plus liveness on top, so a replayed relay from a settled run is refused. So the
+  actor fence is a MEMORY boundary, not a prompt boundary: untrusted
+  page/instance/response content stays behind the heap, one process-eviction from
+  the vault DK no longer reachable. Chrome-only (needs the offscreen API); Firefox
+  falls back to an in-SW loop with no heap separation — its SPAWNED children keep
+  the keyless custody (throwing credential stubs; the SW-owned `callModel` wrapper
+  adds the real ones at the call boundary), its BOUND actors go through
+  `runAgentTurn` and still hold live credentials — the honest residual,
+  THREAT-MODEL R1. why it matters: prompt
+  injection has no filter — the fix is to never hand untrusted reasoning the
+  authority in the first place.
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
   download, OPFS-cached) with a Web Speech API fallback. Hosted in the
   offscreen doc (`peerd-runtime/voice/`).

@@ -20,7 +20,7 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string }} job
+ * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any> }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>}
  */
@@ -28,6 +28,11 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
   if (active >= MAX_CONCURRENT) return { ok: false, started: false, error: `actor worker rejected: ${MAX_CONCURRENT} already running` };
   active++;
   const runId = job.runId ?? `aw-${++seq}`;
+  // The SW-minted relay grant for this run. It stays in THIS scope — never posted to
+  // the Worker — so the untrusted heap can't lift it, and every relay below carries it
+  // as proof of which run is speaking. The SW derives the run + session from it and
+  // ignores whatever the payload claims.
+  const relayToken = job.relayToken;
   const budgetMs = Number.isFinite(job.budgetMs) && /** @type {number} */ (job.budgetMs) > 0 ? /** @type {number} */ (job.budgetMs) : 10 * 60_000;
   /** @type {Worker | null} */
   let worker = null;
@@ -45,7 +50,7 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         if (!m || typeof m !== 'object') return;
         if (m.type === 'model-request') {
           try {
-            const resp = await sendToSW('actor/model-call', { runId, args: m.args });
+            const resp = await sendToSW('actor/model-call', { relayToken, args: m.args });
             if (resp?.ok) w.postMessage({ type: 'model-response', rid: m.rid, events: resp.events ?? [] });
             else w.postMessage({ type: 'model-error', rid: m.rid, error: resp?.error ?? 'model call failed' });
           } catch (e) { w.postMessage({ type: 'model-error', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) }); }
@@ -54,14 +59,15 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         if (m.type === 'tool-request') {
           try {
             // The SW pins the bound instance + gates + dispatches (never trusts the
-            // worker's call args) and returns the ToolResult. actorSessionId keys
-            // the actor ctx it builds.
-            const reply = await sendToSW('actor/tool-dispatch', { runId, actorSessionId: job.actorSessionId, call: m.call });
+            // worker's call args) and returns the ToolResult. The relay grant keys
+            // the actor ctx it builds — the session is no longer sent at all, so
+            // neither this runner nor any other first-party page can name one.
+            const reply = await sendToSW('actor/tool-dispatch', { relayToken, call: m.call });
             w.postMessage({ type: 'tool-response', rid: m.rid, reply });
           } catch (e) { w.postMessage({ type: 'tool-response', rid: m.rid, reply: { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) } }); }
           return;
         }
-        if (m.type === 'loop-event') { sendToSW('actor/loop-event', { runId, event: m.event }).catch(() => {}); return; }
+        if (m.type === 'loop-event') { sendToSW('actor/loop-event', { relayToken, event: m.event }).catch(() => {}); return; }
         if (m.type === 'done') {
           clearTimeout(timer); try { w.terminate(); } catch { /* gone */ }
           const r = m.result ?? {};

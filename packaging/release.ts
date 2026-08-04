@@ -24,9 +24,17 @@
 // Keep in sync with the workflow's release job — when Actions billing is
 // healthy, a tag push runs the same flow in CI; this script exists so
 // the tag can also be cut entirely from a dev machine.
+//
+// One DELIBERATE divergence: CI splits packaging in two so that provenance
+// attestation runs before the AMO upload — the one irreversible act in a
+// release (web-ext burns the version on addons.mozilla.org; a later failure
+// cannot take it back). There is no attestation on this path, so there is
+// nothing here that has to precede AMO, and package:all stays one call.
+// If a future step is added here that CAN fail, put it before step 4.
 
 import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, basename } from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { REPO_ROOT, ARTIFACTS_DIR, readVersion, parseArgs } from './lib.ts';
 import { fetchFeedVersions } from './check-feeds.ts';
@@ -114,8 +122,22 @@ const main = async () => {
 
   step('package all four artifacts');
   run('bun', ['packaging/package.ts', '--all']);
-  if (!dryRun && !existsSync(join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'))) {
-    die('peerd-preview-chrome.crx was not produced — signing failed?');
+  // Positive signing proof, matching the CI release job's gate: the .crx must
+  // carry the CRX3 magic and the .xpi must contain AMO's signature block.
+  // File-exists alone let a run that died before sign.ts pass this step.
+  if (!dryRun) {
+    const crx = join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx');
+    const xpi = join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi');
+    if (!existsSync(crx)) die('peerd-preview-chrome.crx was not produced — signing failed?');
+    const magic = readFileSync(crx).subarray(0, 4).toString('latin1');
+    if (magic !== 'Cr24') die('peerd-preview-chrome.crx lacks the Cr24 CRX3 magic — not a signed CRX');
+    if (!existsSync(xpi)) die('peerd-preview-firefox.xpi was not produced — AMO signing failed?');
+    try {
+      execFileSync('unzip', ['-l', xpi, 'META-INF/mozilla.rsa'], { cwd: REPO_ROOT, stdio: 'ignore' });
+    } catch {
+      die('peerd-preview-firefox.xpi has no META-INF/mozilla.rsa — AMO signing did not run');
+    }
+    console.log('signing proof OK (CRX3 magic + AMO signature block)');
   }
 
   step('regenerate update feeds');
@@ -176,9 +198,37 @@ const main = async () => {
   }
 
   step('create GitHub release (idempotent)');
+  // Digest manifest, matching the CI release job: sha256sum-format lines so
+  // `sha256sum -c` / `shasum -a 256 -c` verify downloads directly. Store zips
+  // are included because their store upload is manual — the digest is how a
+  // human confirms the submitted file is the one that was verified.
+  // Split exactly as the CI job does: SHA256SUMS covers the PUBLISHED assets, so
+  // `sha256sum -c SHA256SUMS` over a full download succeeds. The store packages are
+  // uploaded by hand and get their own file — listing them in the main manifest
+  // would make the canonical verification command fail on an authentic release.
+  const digest = (f: string) => `${createHash('sha256').update(readFileSync(f)).digest('hex')}  ${basename(f)}`;
+  const writeSums = (name: string, files: string[]) => {
+    const present = files.filter((f) => existsSync(f));
+    const p = join(ARTIFACTS_DIR, name);
+    writeFileSync(p, present.map(digest).join('\n') + '\n');
+    console.log(`wrote ${relative(REPO_ROOT, p)} (${present.length} files)`);
+    return p;
+  };
+  const sumsPath = writeSums('SHA256SUMS', [
+    join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
+    join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
+    join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
+    join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
+  ]);
+  const storeSumsPath = writeSums('SHA256SUMS.store', [
+    join(ARTIFACTS_DIR, 'peerd-store-chrome.zip'),
+    join(ARTIFACTS_DIR, 'peerd-store-firefox.xpi'),
+  ]);
   const assets = [
     join(ARTIFACTS_DIR, 'peerd-preview-chrome.crx'),
     join(ARTIFACTS_DIR, 'peerd-preview-firefox.xpi'),
+    sumsPath,
+    storeSumsPath,
     join(REPO_ROOT, 'update-feeds', 'chrome-preview.xml'),
     join(REPO_ROOT, 'update-feeds', 'firefox-preview.json'),
   ];

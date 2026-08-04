@@ -634,7 +634,30 @@ export const makeSpawnActor = (deps) => {
     /** @param {object} modelArgs */
     const cappedCallModel = (modelArgs) => {
       recordModelCall({ ...modelArgs, sessionId: child.sessionId, label: `actor d${depth} (in-SW)` });
-      return callModel({ ...modelArgs, maxTokens: maxOutputTokens });
+      // The credentials are added HERE, at the call boundary, and nowhere else —
+      // the same custody shape the offscreen relay uses (actor/model-call adds
+      // getSecret + safeFetch to the worker's relayed args). See keylessCredentials
+      // below for why the loop itself is handed throwing stubs instead.
+      return callModel({ ...modelArgs, getSecret, safeFetch, maxTokens: maxOutputTokens });
+    };
+
+    // The in-SW fallback's keyless custody. This path runs a CHILD loop — whose
+    // context is untrusted by construction — in the service-worker realm, so it
+    // cannot have heap separation (that is the standing residual: on Chrome every
+    // child gets its own offscreen Worker; this branch exists for Firefox, which
+    // has no offscreen API, and for a run that never started).
+    //
+    // What it CAN have, and now does, is the same credential custody as the
+    // offscreen path: the loop is handed stubs that throw, and the real
+    // getSecret/safeFetch are closed over by cappedCallModel above. Previously the
+    // live credentials were passed straight into runUserTurn, which forwards them
+    // into every model call AND leaves them reachable from the loop's own frame —
+    // so the "keyless fallback" the docs claimed was true of the tool context
+    // (restrictCtxCapabilities strips both unconditionally) but not of the loop.
+    // Now it is true of both, and the residual is honestly just the shared heap.
+    const keylessCredentials = {
+      getSecret: async () => { throw new Error('actor loop has no secret access'); },
+      safeFetch: async () => { throw new Error('actor loop has no egress'); },
     };
 
     // why: the child's model usage is yielded as 'usage' events but is NOT
@@ -727,8 +750,9 @@ export const makeSpawnActor = (deps) => {
           sessionId: child.sessionId,
           userText: task,
           callModel: cappedCallModel,
-          getSecret,
-          safeFetch,
+          // Stubs, not the live credentials — cappedCallModel adds the real ones at
+          // the call boundary. See keylessCredentials above.
+          ...keylessCredentials,
           sessions,
           getSystemPrompt,
           appendAudit: taggedAudit,

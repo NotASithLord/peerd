@@ -19,7 +19,10 @@
 //   bun run package:all
 //   flags: --no-sign (skip signing even if keys exist), --skip-verify
 
-import { cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
+import {
+  cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync,
+  readdirSync, statSync, utimesSync, chmodSync,
+} from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
@@ -45,6 +48,54 @@ const PRUNE_ALWAYS = ['tests', 'manifest.json', 'shared/channel-config.js'];
 // describes it (the loader inserts it only when DWEB_ENABLED — a store prompt
 // must make no dweb claims).
 const PRUNE_STORE = ['eval', 'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
+
+// Reproducible artifacts: two builds of the same tree must produce
+// byte-identical zips, so a shipped artifact can be independently rebuilt
+// and digest-compared against the release (CI builds every matrix cell
+// twice and asserts the digests match). Three sources of nondeterminism
+// are normalized before zipping:
+//   mtimes  — cpSync stamps copy wall-clock time into every staged file,
+//             and zip embeds it; every entry is reset to SOURCE_DATE_EPOCH
+//             (the reproducible-builds.org convention; the default is an
+//             arbitrary fixed date, not a real build time).
+//   modes   — a contributor's umask or a stray +x rides into the zip's
+//             external attributes; normalize to 0644/0755.
+//   order   — `zip -r` walks readdir order; feed it an explicitly sorted
+//             entry list instead. TZ is pinned for the zip child because
+//             DOS timestamps in zip headers are local time.
+// Validated, not coerced: an exported-but-EMPTY SOURCE_DATE_EPOCH is not nullish, so
+// `??` doesn't fire and Number('') is 0 — every entry would silently stamp at the 1980
+// DOS floor, a rebuilder's digests wouldn't match, and nothing would say why. A
+// non-numeric value dies inside utimesSync naming neither the variable nor the cause.
+// Both are configuration mistakes that must fail loudly at the source.
+const readSourceDateEpoch = (): number => {
+  const raw = process.env.SOURCE_DATE_EPOCH;
+  if (raw === undefined || raw === '') return 946684800; // 2000-01-01T00:00:00Z
+  // 315532800 = 1980-01-01, the earliest timestamp the zip format can represent.
+  if (!/^\d+$/.test(raw) || Number(raw) < 315532800) {
+    throw new Error(
+      `SOURCE_DATE_EPOCH must be a positive integer unix timestamp at or after 315532800 (1980-01-01, the zip format floor); got "${raw}"`,
+    );
+  }
+  return Number(raw);
+};
+const SOURCE_DATE_EPOCH = readSourceDateEpoch();
+
+const listEntriesSorted = (root: string): string[] =>
+  (readdirSync(root, { recursive: true }) as string[])
+    .map((p) => p.split('\\').join('/'))
+    .sort();
+
+const normalizeStagingForZip = (staging: string): string[] => {
+  const entries = listEntriesSorted(staging);
+  const stamp = new Date(SOURCE_DATE_EPOCH * 1000);
+  for (const rel of ['.', ...entries]) {
+    const abs = join(staging, rel);
+    chmodSync(abs, statSync(abs).isDirectory() ? 0o755 : 0o644);
+    utimesSync(abs, stamp, stamp);
+  }
+  return entries;
+};
 
 const shouldCopy = (src: string, channel: Channel): boolean => {
   const rel = relative(EXTENSION_DIR, src);
@@ -87,8 +138,14 @@ export const packageArtifact = async (
   const ext = browser === 'firefox' ? 'xpi' : 'zip';
   const artifact = join(ARTIFACTS_DIR, `peerd-${channel}-${browser}.${ext}`);
   rmSync(artifact, { force: true });
-  // -X: no platform extra fields, keeps artifacts reproducible-ish.
-  execFileSync('zip', ['-q', '-r', '-X', artifact, '.'], { cwd: staging });
+  // -X strips platform extra fields; -@ takes the sorted entry list on stdin
+  // (see normalizeStagingForZip — mtimes/modes/order are already normalized).
+  const entries = normalizeStagingForZip(staging);
+  execFileSync('zip', ['-q', '-X', artifact, '-@'], {
+    cwd: staging,
+    input: entries.join('\n') + '\n',
+    env: { ...process.env, TZ: 'UTC' },
+  });
 
   console.log(`built ${relative(REPO_ROOT, artifact)} (${channel}/${browser} v${version})`);
 

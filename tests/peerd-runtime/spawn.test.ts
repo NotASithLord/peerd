@@ -234,6 +234,69 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
   };
 };
 
+// The in-SW fallback path (Firefox / a run that never started offscreen) has no
+// heap separation — that is the standing residual. What it MUST have is the
+// offscreen path's credential custody: the child loop is handed throwing stubs and
+// the real getSecret/safeFetch are added by the SW-owned callModel wrapper at the
+// call boundary. Before this, the live credentials went straight into runUserTurn,
+// so the "keyless fallback" claim held for the tool context but not for the loop.
+describe('makeSpawnActor — the in-SW fallback loop is keyless', () => {
+  test('the loop gets THROWING credential stubs, never the live ones', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let loopCtx: any = null;
+    async function* loop(ctx: any) {
+      loopCtx = ctx;
+      for await (const _ of ctx.callModel({ messages: [], system: 's', tools: [] })) { /* drain */ }
+      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
+      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
+    }
+    const { deps } = baseDeps(store, loop);
+    await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
+
+    expect(loopCtx).not.toBeNull();
+    // Not the injected live credentials — and not merely absent: calling them
+    // throws, so a loop (or anything reachable from its frame) that reaches for
+    // the key fails loudly instead of silently succeeding.
+    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
+    await expect(loopCtx.safeFetch('https://example.com')).rejects.toThrow(/no egress/);
+  });
+
+  test('the model call still receives the REAL credentials from the wrapper', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    // The loop must forward ctx.getSecret/ctx.safeFetch into ctx.callModel, exactly as
+    // the real agent-loop does. why that matters here: the stubs and the real
+    // credentials COLLIDE in cappedCallModel's object literal, and only the spread
+    // order ({...modelArgs, getSecret, safeFetch}) decides which wins. A mock that
+    // omits the forward never creates the collision, so the natural deps-first
+    // ordering — which hands every in-SW model call a getSecret that throws and kills
+    // the whole fallback lane — would pass. Mutation-checked: flipping the order in
+    // spawn.js fails this test.
+    let loopCtx: any = null;
+    async function* loop(ctx: any) {
+      loopCtx = ctx;
+      const stream = ctx.callModel({
+        messages: [], system: 's', tools: [],
+        getSecret: ctx.getSecret, safeFetch: ctx.safeFetch,
+      });
+      for await (const _ of stream) { /* drain */ }
+      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
+      yield { type: 'stop', sessionId: ctx.sessionId, stopReason: 'end_turn' };
+    }
+    const { deps, modelCalls } = baseDeps(store, loop);
+    await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
+
+    // Custody moved to the call boundary, so the child can still think — the
+    // point is WHERE the key is reachable, not that the lane stops working.
+    expect(modelCalls.length).toBeGreaterThan(0);
+    expect(await modelCalls[0].getSecret('anthropic')).toBe('sk-test');
+    expect(typeof modelCalls[0].safeFetch).toBe('function');
+    // And the loop's own view is still the stub, even though it forwarded it.
+    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
+  });
+});
+
 describe('makeSpawnActor', () => {
   test('creates an actor session with parentage and inherits the parent model', async () => {
     const store = makeStore();

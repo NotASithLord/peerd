@@ -77,14 +77,19 @@ const signFirefoxXpi = async (xpiArtifact: string, stagingDir: string): Promise<
   const attempts = 3;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
+      // why env, not --api-secret argv: web-ext reads WEB_EXT_-prefixed env
+      // vars for any option, and argv is visible in the process table for the
+      // whole multi-minute AMO signing poll — env keeps the secret out of ps.
       execFileSync(webExt, [
         'sign',
         `--source-dir=${stagingDir}`,
         `--artifacts-dir=${amoOut}`,
         '--channel=unlisted',
-        `--api-key=${issuer}`,
-        `--api-secret=${secret}`,
-      ], { stdio: 'inherit', timeout: 15 * 60 * 1000 });
+      ], {
+        stdio: 'inherit',
+        timeout: 15 * 60 * 1000,
+        env: { ...process.env, WEB_EXT_API_KEY: issuer, WEB_EXT_API_SECRET: secret },
+      });
       break;
     } catch (e) {
       if (attempt === attempts) {
