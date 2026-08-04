@@ -55,7 +55,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // page DOM toolset (inherited by the web actor, which DOES the page work —
       // see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
-      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
+      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'read_doc', 'view',
       // memory
       'remember', 'read_memory',
       // sovereignty / sessions introspection (one kind-discriminated tool)
@@ -72,7 +72,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // it can observe but not click/type — the manifest constrains the actor too).
       'actor_list', 'open_tab', 'navigate', 'message_actor',
       // read-only DOM subset (observe, never mutate) — inherited by the web actor.
-      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'view',
+      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'read_doc', 'view',
       // web reads: fetch_url (the web actor's sessionless fetch) + its pager.
       // read_web_cache pages a spilled fetch_url / read_page body — it must be
       // present wherever a spill producer is, or the trusted paging footer names

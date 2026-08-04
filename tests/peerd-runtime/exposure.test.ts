@@ -281,9 +281,14 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // call_api stays OUT — the web actor's open-web read is fetch_url (sessionless),
     // not the credential-capable call_api.
     expect(isAllowedForActorType('call_api', 'web')).toBe(false);
-    // == DOM toolset + fetch_url + read_web_cache + the 4 DESIGN-19 site-client
-    // tools (run/read/write/capture) + login (Tier 0) (drift: bump if the set grows).
-    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 7);
+    // == DOM toolset + fetch_url + read_doc + read_web_cache + the 4 DESIGN-19
+    // site-client tools (run/read/write/capture) + login (Tier 0)
+    // (drift: bump if the set grows).
+    expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 8);
+    // read_doc reads an office/ebook FILE by url (no tab) — same tier as
+    // fetch_url, and refused for every other actor kind.
+    expect(isAllowedForActorType('read_doc', 'web')).toBe(true);
+    expect(isAllowedForActorType('read_doc', 'app')).toBe(false);
     // DESIGN-19: the site-client family is in the web actor's toolset.
     for (const n of ['site_client_run', 'site_client_read', 'site_client_write', 'site_capture']) {
       expect(isAllowedForActorType(n, 'web')).toBe(true);

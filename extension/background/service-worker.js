@@ -307,6 +307,7 @@ import { createContextSnapshots } from './context-snapshots.js';
 import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
+import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
 import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
@@ -1601,6 +1602,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // read_pdf — PDF text extraction in the offscreen doc (pdf.js needs a
     // Worker the SW can't host). Defined after ensureOffscreen below.
     pdfOffscreenClient,
+    // read_doc — office/publishing formats (Word/Excel/PowerPoint/ODF/RTF/EPUB/
+    // CSV) converted to Markdown in the offscreen doc. Defined after
+    // ensureOffscreen below. NOT in spawn.js CAPABILITY_CONSUMERS (like
+    // pdfOffscreenClient), so it survives the web actor's capability strip.
+    docOffscreenClient,
     // fetch_url's clean-content extraction — HTML -> markdown in the offscreen
     // doc (Readability needs a DOM Document the SW can't build). Defined after
     // ensureOffscreen below. NOT in spawn.js CAPABILITY_CONSUMERS (like
@@ -2553,6 +2559,15 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
 const pdfOffscreenClient = offscreenAvailable ? makeOffscreenPdfClient({
+  ensureOffscreen,
+  sendMessage: (m) => browser.runtime.sendMessage(m),
+}) : null;
+
+// The office-document conversion client (the read_doc tool). ensureOffscreen,
+// then a 'doc/extract' message to offscreen/doc-extract.js. The conversion
+// itself is pure (peerd-runtime/doc) — it runs offscreen so the multi-megabyte
+// byte buffer, and the untrusted document behind it, stay out of the SW.
+const docOffscreenClient = offscreenAvailable ? makeOffscreenDocClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
