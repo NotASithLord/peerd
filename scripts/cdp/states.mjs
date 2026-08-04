@@ -871,6 +871,23 @@ export const STATES = [
         await waitFor(() => evalIn(page,
           `!!document.querySelector('.home-shell, .home-rail, .empty-state--home, .path-menu--home')`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        // …and then past the FIRST-RUN SEED INSTALL, which is what made this
+        // state flaky. home.js seeds the commons app on first unlock and the
+        // Library re-renders when it lands, so the camera raced it: some runs
+        // photographed "1 app", others "No apps yet", and the 0.78% diff read as
+        // a UI regression when it was a lifecycle race. The seed is a PACKAGED
+        // asset, not a network fetch, so waiting for it is deterministic — it
+        // always arrives; the only question was whether we waited for it.
+        //
+        // Bounded and swallowed on purpose: a build with the dweb pruned (the
+        // store channel) installs nothing, and there an empty Library IS the
+        // settled state. Falling through then is correct, not a miss.
+        //
+        // Known residual: the card carries a relative timestamp ("just now").
+        // It is stable for anything under a minute, which every run is, but a
+        // pathologically slow runner would drift it.
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.library-grid > *').length > 0`),
+          { budgetMs: 10_000, pollMs: 100 }).catch(() => {});
         await rec.visualPage('home-fulltab', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
