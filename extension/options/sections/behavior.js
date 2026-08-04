@@ -178,7 +178,7 @@ export const BehaviorSection = {
         }),
     ];
 
-    // ── Behaviour — changes how it works, not what it may do ─────────────────
+    // ── Behavior — changes how it works, not what it may do ─────────────────
     const frontDoor = s.frontDoorView === 'home' ? 'home' : 'panel';
     const reasoningEnabled = s.reasoningEnabled !== false;
     const effort = s.reasoningEffort ?? 'medium';
@@ -188,7 +188,7 @@ export const BehaviorSection = {
     const fallbacks = Array.isArray(s.providerFallbacks) ? s.providerFallbacks : [];
     const otherProviders = listProviders().map((p) => p.name).filter((n) => n !== activeProvider);
 
-    const behaviourRows = [
+    const behaviorRows = [
       settingsRow({
         label: 'Toolbar button',
         summary: frontDoor === 'panel'
@@ -411,7 +411,7 @@ export const BehaviorSection = {
         name: 'Safety', subtitle: 'changes what peerd may do', safety: true, rows: safetyRows,
       }),
       settingsBand({
-        name: 'Behaviour', subtitle: 'changes how it works, not what it may do', rows: behaviourRows,
+        name: 'Behavior', subtitle: 'changes how it works, not what it may do', rows: behaviorRows,
       }),
       settingsBand({ name: 'Experimental & diagnostics', rows: experimentalRows }),
 

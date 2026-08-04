@@ -34,7 +34,7 @@ describe('options.behavior — settings rows', () => {
     try {
       expect(root.querySelectorAll('.set-row').length).toBe(11);
       const bands = [...root.querySelectorAll('.set-band-name')].map((e) => e.textContent);
-      expect(bands).toEqual(['Safety', 'Behaviour', 'Experimental & diagnostics']);
+      expect(bands).toEqual(['Safety', 'Behavior', 'Experimental & diagnostics']);
     } finally { unmount(); }
   });
 
