@@ -38,9 +38,11 @@ For orientation — enforced by CI, not by this prose:
   (`packaging/check-invariants.ts`): it pins the generated manifest surface for
   store, preview AND dev, every dynamic-code site, and every `runtime.onMessage`
   listener against a blessed baseline, and hard-refuses `content_scripts` /
-  `externally_connectable` in any channel. PR dependency review runs alongside
-  but is ADVISORY (`continue-on-error`) until the repository's Dependency graph
-  setting is enabled — so the copyleft denylist reports without gating today.
+  `externally_connectable` in any channel. PR dependency review gates alongside
+  it (the repository's Dependency graph is enabled), failing a PR that
+  introduces a dependency carrying a known advisory or a copyleft license —
+  the only control enforcing the license policy at all, since OSV reads the
+  resolved lockfile for vulnerabilities rather than the PR's dependency diff.
 - The actor relay sender-pin + grant, the actor-lane spend preflight + cost fold,
   and keyless custody on the spawned-child fallback — see P0-1..3 below, which
   record precisely what shipped and what remains.

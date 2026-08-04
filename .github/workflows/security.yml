@@ -3,11 +3,8 @@
 #
 #   codeql            semantic analysis of the extension + tooling JS/TS
 #   osv               known-vulnerability scan of the resolved dependency tree
-#   dependency-review ADVISORY until the repository's Dependency graph setting is
-#                     enabled (the action errors "not supported" without it, which
-#                     is not a finding). Reports a new dependency carrying a known
-#                     advisory or a copyleft license; flip off continue-on-error
-#                     to make it gate once the setting is on.
+#   dependency-review the PR-time diff gate: a new dependency carrying a known
+#                     advisory (or a copyleft license) fails the PR
 #   invariants        peerd-SPECIFIC architectural rules that no generic scanner
 #                     knows about (packaging/check-invariants.ts)
 #
@@ -84,14 +81,15 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Soft until the repo's Dependency graph is switched on (Settings →
-      # Code security): without it the API this action needs returns "not
-      # supported" and the step errors for a REASON THAT IS NOT A FINDING —
-      # which would train everyone to ignore a red security job. Flip
-      # continue-on-error off once the setting is enabled and this has a green
-      # run; the OSV job above covers the same tree unconditionally meanwhile.
+      # GATING. This ran continue-on-error while the repo's Dependency graph
+      # setting was off, because without it the action errors "not supported" —
+      # red for a reason that is not a finding, which is how people learn to
+      # ignore a security job. The setting is on now, so the softener is gone and
+      # a PR that introduces an advisory-carrying or copyleft dependency fails.
+      # why it is worth gating even though OSV also scans: OSV reads the resolved
+      # lockfile for KNOWN VULNERABILITIES; this reads the PR's dependency DIFF and
+      # is the only control enforcing the license policy at all.
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
-        continue-on-error: true
         with:
           fail-on-severity: moderate
           # Mirrors the PR checklist's "no GPL / AGPL / copyleft" line — the
