@@ -310,9 +310,14 @@ export function domWalkInjected() {
     pushChildren(el, parentNodeId);
   }
 
+  // probeOrigin: where this walk ACTUALLY ran. See hasPasswordFieldInjected —
+  // the caller's tab record is a snapshot taken before injection, so the
+  // password-field signal is only attributable if these agree.
+  var probeOrigin = null;
+  try { probeOrigin = location.origin; } catch (e) { probeOrigin = null; }
   return {
     ok: true, nodes: nodes, refElementCount: els.size, capped: capped,
-    hasPasswordField: hasPasswordField,
+    hasPasswordField: hasPasswordField, probeOrigin: probeOrigin,
   };
 }
 
@@ -333,19 +338,31 @@ export function domWalkInjected() {
  * body closes over nothing, so the two copies must each stand alone. Keep them
  * in step; the walk copy carries the full rationale.
  *
- * @returns {boolean}
+ * @returns {{ has: boolean, origin: string | null }} the signal, and WHERE it was
+ *   observed — the caller must drop it if that disagrees with the tab it resolved.
  */
 export function hasPasswordFieldInjected() {
   'use strict';
+  // Reports WHERE it ran, not just what it saw. The caller resolves the tab
+  // first and reads `tab.url` from that frozen record, but this body runs later,
+  // in whatever document is committed by then — so a page that navigates in
+  // between could have its password field attributed to the origin the caller
+  // still thinks is loaded. Returning location.origin lets the caller drop a
+  // signal it cannot attribute. (`origin: null` on a throw, so an opaque or
+  // unreadable document is UNKNOWN rather than silently matching.)
+  var origin = null;
+  try { origin = location.origin; } catch (e) { origin = null; }
   try {
     var fields = document.querySelectorAll('input[type="password"]');
     for (var i = 0; i < fields.length; i++) {
       var autocomplete = fields[i].getAttribute('autocomplete');
       // A registration field is evidence the user has NO account here.
-      if (String(autocomplete == null ? '' : autocomplete).toLowerCase() !== 'new-password') return true;
+      if (String(autocomplete == null ? '' : autocomplete).toLowerCase() !== 'new-password') {
+        return { has: true, origin: origin };
+      }
     }
-    return false;
+    return { has: false, origin: origin };
   } catch (e) {
-    return false;
+    return { has: false, origin: origin };
   }
 }

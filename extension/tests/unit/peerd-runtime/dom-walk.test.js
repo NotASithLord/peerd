@@ -288,21 +288,21 @@ describe('dom walk — the password-field signal', () => {
   it('no password field anywhere: both entry points say false', async () => {
     await withInputs('<input type="text" name="q">', () => {
       expect(domWalkInjected().hasPasswordField).toBe(false);
-      expect(hasPasswordFieldInjected()).toBe(false);
+      expect(hasPasswordFieldInjected().has).toBe(false);
     });
   });
 
   it('a bare password field marks the origin', async () => {
     await withInputs('<input type="password" name="pass">', () => {
       expect(domWalkInjected().hasPasswordField).toBe(true);
-      expect(hasPasswordFieldInjected()).toBe(true);
+      expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
 
   it('autocomplete="current-password" marks the origin — that IS a sign-in box', async () => {
     await withInputs('<input type="password" autocomplete="current-password">', () => {
       expect(domWalkInjected().hasPasswordField).toBe(true);
-      expect(hasPasswordFieldInjected()).toBe(true);
+      expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
 
@@ -313,7 +313,7 @@ describe('dom walk — the password-field signal', () => {
     // reads the document rather than the walk.
     await withInputs('<div style="display:none"><input type="password" autocomplete="current-password"></div>', () => {
       expect(domWalkInjected().hasPasswordField).toBe(true);
-      expect(hasPasswordFieldInjected()).toBe(true);
+      expect(hasPasswordFieldInjected().has).toBe(true);
     });
   });
 
@@ -327,7 +327,7 @@ describe('dom walk — the password-field signal', () => {
       + '</form>',
       () => {
         expect(domWalkInjected().hasPasswordField).toBe(false);
-        expect(hasPasswordFieldInjected()).toBe(false);
+        expect(hasPasswordFieldInjected().has).toBe(false);
       },
     );
   });
@@ -350,7 +350,7 @@ describe('dom walk — the password-field signal', () => {
       + '<input type="password" autocomplete="current-password">',
       () => {
         expect(domWalkInjected().hasPasswordField).toBe(true);
-        expect(hasPasswordFieldInjected()).toBe(true);
+        expect(hasPasswordFieldInjected().has).toBe(true);
       },
     );
   });
@@ -358,7 +358,30 @@ describe('dom walk — the password-field signal', () => {
   it('the token is matched case-insensitively', async () => {
     await withInputs('<input type="password" autocomplete="NEW-PASSWORD">', () => {
       expect(domWalkInjected().hasPasswordField).toBe(false);
-      expect(hasPasswordFieldInjected()).toBe(false);
+      expect(hasPasswordFieldInjected().has).toBe(false);
     });
+  });
+});
+
+// ── attribution (issue 278) ─────────────────────────────────────────────────
+// The caller resolves the tab BEFORE injecting, so `tab.url` is a snapshot; the
+// probe runs later, in whatever document is committed by then. Without the probe
+// saying where it ran, a page that navigates inside that window gets its password
+// field credited to the origin the caller started on — which lets a hostile page
+// mark arbitrary third parties as "the user has an account here", and, repeated,
+// fill the 500-entry cap so nothing further is ever learned.
+describe('peerd-runtime.dom-walk · the probe reports where it ran', () => {
+  it('hasPasswordFieldInjected returns the observing origin alongside the boolean', () => {
+    const r = hasPasswordFieldInjected();
+    expect(typeof r).toBe('object');
+    expect(typeof r.has).toBe('boolean');
+    // In the test page this is the extension origin; what matters is that it is
+    // the DOCUMENT's own origin, not anything the caller passed in.
+    expect(r.origin).toBe(location.origin);
+  });
+
+  it('the full walk reports it too — the dom-walk path races identically', () => {
+    const walk = domWalkInjected();
+    expect(walk.probeOrigin).toBe(location.origin);
   });
 });

@@ -728,12 +728,16 @@ evaluating peerd should know. Each cites where it lives in the code.
   hosts, asked at origin level), origins with a stored credential, and two signals
   LEARNED from ordinary use — a password field seen on a page, and a write the user
   approved. It fails open, so an unlisted credentialed site is treated as ordinary until
-  a signal fires. In practice the password-field signal fires on the first page walk of
-  any sign-in surface, so the exposure is narrower than "until you configure something";
-  but the FIRST landing on a site whose login the actor never sees is unprotected by
-  construction, and nothing un-learns, so an origin stays classified until the profile
-  is reset. Detecting credentials directly would need the `cookies` permission, which is
-  not requested for the same reason `webNavigation` is not.
+  a signal fires. The password-field signal fires on a SNAPSHOT specifically — not on
+  any page walk — so which tool the actor reaches for decides whether peerd learns at
+  all: an actor that perceives with `read_page` or `query_dom` never teaches the
+  classifier, and that choice belongs to whoever is driving it (#267). The FIRST landing
+  on a site whose login the actor never sees is unprotected by construction. An origin
+  can now be un-learned: Settings → Learned sites lists what was inferred and removes it
+  (#262), and a signal the probe cannot attribute to the page the caller resolved is
+  dropped rather than credited to the wrong origin (#278). Detecting credentials
+  directly would need the `cookies` permission, which is not requested for the same
+  reason `webNavigation` is not.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
