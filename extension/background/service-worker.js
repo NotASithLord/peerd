@@ -59,6 +59,10 @@ import {
   withDpopCredentials,
   getOrCreateDpopKey,
   makeDpopKeyStore,
+  // The credential LIFECYCLE seams the Settings routes close over: mint-at-provision
+  // (so the thumbprint exists to register), read-only surfacing, and retirement.
+  ensureDpopJkt,
+  loadDpopJkt,
   makeOriginCredentialRoutes,
   // DESIGN-18 P2: map a vault secret name → its origin (actor_list integration discovery).
   originFromSecretName,
@@ -408,9 +412,13 @@ const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxE
 // over by a boundary wrapper: like getSecret, it must never appear on an actor's
 // ctx. Unlike getSecret it is not even a secret to leak — the handle it returns
 // cannot be exported by anyone, including this file.
-const dpopKeyStore = makeDpopKeyStore({ get: idb.get, put: idb.put });
+const dpopKeyStore = makeDpopKeyStore({ get: idb.get, put: idb.put, del: idb.del });
+// A MINT is audited: a new key means a new `jkt`, so every token bound to the old
+// one stops working — the one silent re-key that would otherwise look like an
+// unexplained wall of 401s.
+const dpopKeyDeps = { ...dpopKeyStore, audit: (/** @type {any} */ e) => { auditLog.append(e).catch(() => {}); } };
 /** @param {string} origin @returns {Promise<{ privateKey: CryptoKey, publicJwk: any } | null>} */
-const getDpopKeyForOrigin = (origin) => getOrCreateDpopKey(origin, dpopKeyStore);
+const getDpopKeyForOrigin = (origin) => getOrCreateDpopKey(origin, dpopKeyDeps);
 
 /** User-added provider endpoints; safeFetch reads via callback. */
 let userEndpoints = new Set();
@@ -695,6 +703,13 @@ const gitCredentialRoutes = makeGitCredentialRoutes({
 const originCredentialRoutes = makeOriginCredentialRoutes({
   vault,
   isLockedError: (e) => e instanceof VaultLockedError,
+  // The DPoP half of the credential's lifecycle. Provisioning mints the keypair so
+  // the user has a thumbprint to register with the authorization server BEFORE the
+  // token is issued; listing reads it without minting; revoking retires it, so the
+  // stable per-origin fingerprint doesn't outlive the credential the user removed.
+  ensureDpopKey: (origin) => ensureDpopJkt(origin, dpopKeyDeps),
+  readDpopJkt: (origin) => loadDpopJkt(origin, dpopKeyStore),
+  deleteDpopKey: (origin) => dpopKeyStore.remove(origin),
   audit: (e) => {
     auditLog.append(e).catch(() => {});
     // issue 251: storing a key for an origin is the strongest "I have an account
@@ -3541,11 +3556,13 @@ const siteFetchCallRoute = {
       );
     }
     // Strip tool-supplied credential headers (a laundered injection forging one) —
-    // the real same-origin cookies come from the jar via the boundary.
+    // the real same-origin cookies come from the jar via the boundary. `dpop` is on
+    // the list because the RFC 9449 proof slot is the boundary's to fill
+    // (withDpopCredentials); anything a tool puts there is forged by construction.
     /** @type {Record<string, string>} */
     const safeHeaders = {};
     for (const [k, v] of Object.entries(headers ?? {})) {
-      if (['cookie', 'authorization', 'proxy-authorization'].includes(k.toLowerCase())) continue;
+      if (['cookie', 'authorization', 'proxy-authorization', 'dpop'].includes(k.toLowerCase())) continue;
       if (typeof v === 'string') safeHeaders[k] = v;
     }
     let reqBody = body;

@@ -93,16 +93,28 @@ export const isPlausibleApiKey = (key) =>
  * set is FIXED by the RFC (`Authorization: DPoP …` + `DPoP: <proof>`), so letting it
  * be configured could only produce a token sent without its proof.
  * Returns null if the key isn't plausible.
+ *
+ * SCHEME HANDLING IS FAIL-CLOSED, and that is a security rule, not tidiness. The
+ * scheme is normalized (`trim().toLowerCase()`, so `'DPoP'` and `' Raw '` mean what
+ * they say) and then matched against a CLOSED set; anything else returns null.
+ * why a refusal rather than a fallback: this used to fall through to bearer, so one
+ * typo at a credential constructor — `'DPoP'`, `'dpop '`, `'bearar'` — silently
+ * stored a proof-of-possession token as a bare bearer secret, i.e. quietly downgraded
+ * the strongest credential peerd can hold to the weakest. An unrecognized scheme means
+ * the caller wanted something we do not implement; the safe answer is to store nothing.
+ * An ABSENT scheme still means bearer, unchanged — that is the documented default, not
+ * a guess about an unknown name.
  * @param {{ key?: string, header?: string, scheme?: 'bearer' | 'raw' | 'dpop' }} arg
  * @returns {string | null}
  */
 export const buildOriginSecret = ({ key, header, scheme } = {}) => {
   const k = typeof key === 'string' ? key.trim() : '';
   if (!isPlausibleApiKey(k)) return null;
-  if (scheme === 'dpop') return JSON.stringify({ scheme: 'dpop', value: k });
-  const useScheme = scheme === 'raw' ? 'raw' : 'bearer';
-  const name = useScheme === 'bearer' ? 'Authorization' : (typeof header === 'string' && header.trim() ? header.trim() : 'Authorization');
-  const value = useScheme === 'bearer' ? `Bearer ${k}` : k;
+  const named = (scheme == null ? '' : String(scheme).trim().toLowerCase()) || 'bearer';
+  if (named === 'dpop') return JSON.stringify({ scheme: 'dpop', value: k });
+  if (named !== 'bearer' && named !== 'raw') return null;          // closed set: refuse, never downgrade
+  const name = named === 'bearer' ? 'Authorization' : (typeof header === 'string' && header.trim() ? header.trim() : 'Authorization');
+  const value = named === 'bearer' ? `Bearer ${k}` : k;
   return JSON.stringify({ header: name, value });
 };
 
@@ -132,7 +144,11 @@ export const parseOriginAuth = (stored) => {
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     // Proof-of-possession first: the header set is fixed by RFC 9449, so a stored
     // `header` (if some future writer adds one) is deliberately ignored here.
-    if (parsed.scheme === 'dpop') {
+    // The scheme is case-normalized on the READ side too, matching buildOriginSecret:
+    // a record that says `'DPoP'` must be recognized as proof-of-possession, because
+    // the alternative is falling through to a shape that spends the token as a bearer.
+    const storedScheme = typeof parsed.scheme === 'string' ? parsed.scheme.trim().toLowerCase() : '';
+    if (storedScheme === 'dpop') {
       return (typeof parsed.value === 'string' && parsed.value)
         ? { header: 'Authorization', value: `DPoP ${parsed.value}`, scheme: 'dpop', token: parsed.value }
         : null;

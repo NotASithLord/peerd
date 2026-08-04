@@ -197,6 +197,17 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
   let headers = init.headers;
   const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
   if (authOrigin) {
+    // Rule 5, UNCONDITIONALLY and BEFORE any decision: both slots the RFC fixes are
+    // cleared the moment we know this request is to the owned origin. why not inside
+    // the "we minted a proof" branch, where these used to live: every path that does
+    // NOT mint one — locked vault, no stored secret, a bearer secret, a failed
+    // signature — then left a CALLER-SUPPLIED `DPoP:` header standing on a request
+    // to the credentialed origin. The actor is untrusted; a header it chose must
+    // never reach the owned server in the slot the boundary owns, whether or not the
+    // boundary ends up filling it. Clearing first also makes "we sent nothing" mean
+    // exactly that.
+    headers = stripHeaderName(headers, DPOP_AUTH_HEADER);
+    headers = stripHeaderName(headers, DPOP_PROOF_HEADER);
     // ONE try/catch around the whole credential attempt: rule 7 says every failure
     // mode — locked vault, absent key, unsupported crypto, a throwing audit sink —
     // degrades to the same anonymous request rather than surfacing to the caller.
@@ -220,8 +231,7 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
             accessTokenHash: await accessTokenHashFor(auth.token),
           });
           if (proof) {
-            headers = stripHeaderName(headers, DPOP_AUTH_HEADER);          // rule 5
-            headers = stripHeaderName(headers, DPOP_PROOF_HEADER);
+            // Both slots are already empty (stripped above) — set ours, last-wins.
             headers = { ...(headers || {}), [DPOP_AUTH_HEADER]: auth.value, [DPOP_PROOF_HEADER]: proof };
             const jkt = await dpopJkt(key.publicJwk);
             try { audit?.({ type: 'dpop_auth_attached', details: { origin: authOrigin, jkt } }); }

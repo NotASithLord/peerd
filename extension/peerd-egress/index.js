@@ -76,6 +76,7 @@ export {
 } from './dpop/proof.js';
 export {
   DPOP_KEY_STORE, generateDpopKeypair, makeDpopKeyStore, getOrCreateDpopKey,
+  usableDpopPrivateKey, loadDpopJkt, ensureDpopJkt,
   dpopJkt, accessTokenHashFor, signDpopProof,
 } from './dpop/keys.js';
 

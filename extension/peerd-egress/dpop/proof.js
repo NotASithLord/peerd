@@ -124,7 +124,7 @@ export const jwkThumbprintInput = (jwk) => {
  * @typedef {Object} ProofInput
  * @property {string} signingInput  `<b64url(header)>.<b64url(payload)>`
  * @property {{ typ: string, alg: string, jwk: { kty: string, crv: string, x: string, y: string } }} header
- * @property {{ jti: string, htm: string, htu: string, iat: number, ath?: string }} payload
+ * @property {{ jti: string, htm: string, htu: string, iat: number, nonce?: string, ath?: string }} payload
  */
 
 /**
@@ -136,11 +136,21 @@ export const jwkThumbprintInput = (jwk) => {
  * canonicalized, the JWK is not a usable public JWK, or jti/iat are missing.
  * The boundary treats null as "send anonymous", never as "send unsigned".
  *
+ * `nonce` (RFC 9449 §8) is the SEAM, not the feature: a server that requires a
+ * nonce answers the first request with 401 + `DPoP-Nonce: <n>`, and the client
+ * re-sends one proof carrying that `nonce` claim. This function can already emit
+ * the claim correctly; what is NOT built yet is the boundary machinery around it
+ * (caching the newest nonce per origin and the automatic one-shot retry). why put
+ * the seam in first: the claim is normative, opaque, and echoed VERBATIM — getting
+ * its shape and placement settled here means the retry loop is later a change to
+ * fetch/web-fetch.js alone, with no re-litigation of the signed bytes. Named as a
+ * gap in THREAT-MODEL.md INV-15's residuals until then.
+ *
  * @param {{ publicJwk?: unknown, method?: unknown, url?: unknown, jti?: unknown,
- *           iatSeconds?: unknown, accessTokenHash?: unknown }} arg
+ *           iatSeconds?: unknown, accessTokenHash?: unknown, nonce?: unknown }} arg
  * @returns {ProofInput | null}
  */
-export const buildProofInput = ({ publicJwk, method, url, jti, iatSeconds, accessTokenHash } = {}) => {
+export const buildProofInput = ({ publicJwk, method, url, jti, iatSeconds, accessTokenHash, nonce } = {}) => {
   const pub = publicJwkOnly(publicJwk);
   if (!pub) return null;
   const htu = canonicalHtu(url);
@@ -151,8 +161,14 @@ export const buildProofInput = ({ publicJwk, method, url, jti, iatSeconds, acces
   const iat = Math.floor(iatSeconds);
 
   const header = { typ: 'dpop+jwt', alg: 'ES256', jwk: pub };
-  /** @type {{ jti: string, htm: string, htu: string, iat: number, ath?: string }} */
+  /** @type {{ jti: string, htm: string, htu: string, iat: number, nonce?: string, ath?: string }} */
   const payload = { jti: id, htm: htmOf(method), htu, iat };
+  // `nonce` (RFC 9449 §8) is the server's own freshness challenge, echoed back
+  // EXACTLY as received — never trimmed, normalized or re-encoded, because the
+  // server compares it byte-for-byte against what it issued. Omitted entirely when
+  // absent: an empty `nonce` claim is not the same as no claim, and servers that
+  // don't use nonces reject proofs carrying one.
+  if (typeof nonce === 'string' && nonce) payload.nonce = nonce;
   // `ath` binds the proof to the ACCESS TOKEN as well as the request, so a proof
   // captured off one request cannot be replayed with a different token.
   if (typeof accessTokenHash === 'string' && accessTokenHash) payload.ath = accessTokenHash;

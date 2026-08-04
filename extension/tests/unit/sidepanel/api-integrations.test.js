@@ -93,6 +93,47 @@ describe('options.api-integrations', () => {
     } finally { unmount(); }
   });
 
+  // INV-15's reachability. DPoP was shipped with no way to SAVE a bound credential
+  // and no way to READ the key thumbprint back, which made the whole
+  // proof-of-possession path dead code from the user's side. These two tests are
+  // the loop closed on this surface: the auth-style choice exists, and the public
+  // `jkt` (the thing you paste into the server's client registration) is shown.
+  it('shows the public key thumbprint for a DPoP integration', async () => {
+    const { root, unmount } = await mountView(makeSend({
+      'origin-cred/list': () => ({
+        ok: true,
+        integrations: [{ origin: 'https://api.dpop.test', header: 'Authorization', scheme: 'dpop', jkt: 'JKT_THUMBPRINT_1' }],
+      }),
+    }));
+    try {
+      const card = need(root, '.provider-card');
+      expect(card.textContent).toContain('DPoP');
+      expect(card.textContent).toContain('JKT_THUMBPRINT_1');   // public — must be readable
+    } finally { unmount(); }
+  });
+
+  it('choosing DPoP dispatches origin-cred/set with scheme:dpop and no header', async () => {
+    const send = makeSend();
+    const { root, unmount } = await mountView(send);
+    try {
+      const apiForm = root.querySelectorAll('.provider-card-form')[0];
+      const inputs = apiForm.querySelectorAll('input');
+      const origin = /** @type {HTMLInputElement} */ (inputs[0]);
+      const key = /** @type {HTMLInputElement} */ (inputs[1]);
+      const scheme = /** @type {HTMLSelectElement} */ (apiForm.querySelector('select'));
+      origin.value = 'api.dpop.test'; origin.dispatchEvent(new Event('input'));
+      key.value = 'at_abcdefghijklmnop'; key.dispatchEvent(new Event('input'));
+      scheme.value = 'dpop'; scheme.dispatchEvent(new Event('change'));
+      await flush();
+      apiForm.dispatchEvent(new Event('submit'));
+      await flush();
+      const set = send.calls.find((c) => c.type === 'origin-cred/set');
+      expect(set.scheme).toBe('dpop');
+      expect(set.header).toBe(undefined);   // the header set is fixed by RFC 9449
+      expect(set.key).toBe('at_abcdefghijklmnop');
+    } finally { unmount(); }
+  });
+
   it('Save dispatches origin-cred/set with the typed origin + key (Bearer when header blank)', async () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);

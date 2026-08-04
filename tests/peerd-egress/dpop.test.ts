@@ -16,9 +16,11 @@ import {
 import {
   generateDpopKeypair, getOrCreateDpopKey, makeDpopKeyStore, dpopJkt,
   accessTokenHashFor, signDpopProof, DPOP_KEY_STORE,
+  usableDpopPrivateKey, loadDpopJkt, ensureDpopJkt,
 } from '../../extension/peerd-egress/dpop/keys.js';
 import { buildOriginSecret, parseOriginAuth } from '../../extension/peerd-egress/fetch/origin-credentials.js';
 import { withApiCredentials, withDpopCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
+import { makeOriginCredentialRoutes } from '../../extension/peerd-egress/fetch/origin-credential-routes.js';
 
 // ── THE claim: peerd holds a key it can use but cannot read ─────────────────
 
@@ -47,6 +49,36 @@ describe('the private key is NON-EXTRACTABLE — the whole point', () => {
     const { privateKey } = await generateDpopKeypair();
     expect(privateKey.usages).toEqual(['sign']);
     expect(privateKey.algorithm).toMatchObject({ name: 'ECDSA', namedCurve: 'P-256' });
+  });
+
+  // The claim above used to rest on ONE `false` literal that nothing asserted.
+  // usableDpopPrivateKey makes it a runtime property, checked at both ends of the
+  // key's life; these tests are what keep that guard honest.
+  test('usableDpopPrivateKey accepts the real thing and refuses every near-miss', async () => {
+    const { privateKey, publicKey } = await generateDpopKeypair();
+    expect(usableDpopPrivateKey(privateKey)).toBe(true);
+    expect(usableDpopPrivateKey(publicKey)).toBe(false);                 // public half is not it
+    expect(usableDpopPrivateKey(null)).toBe(false);
+    expect(usableDpopPrivateKey({ type: 'private', extractable: false, algorithm: { name: 'ECDSA', namedCurve: 'P-256' } })).toBe(false);   // a look-alike object
+
+    // An EXTRACTABLE P-256 private key — the exact regression the guard exists for.
+    const leaky = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']) as CryptoKeyPair;
+    expect(leaky.privateKey.extractable).toBe(true);
+    expect(usableDpopPrivateKey(leaky.privateKey)).toBe(false);
+
+    // Right extractability, WRONG curve: it cannot make an ES256 proof.
+    const p384 = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-384' }, false, ['sign', 'verify']) as CryptoKeyPair;
+    expect(usableDpopPrivateKey(p384.privateKey)).toBe(false);
+  });
+
+  test('a runtime that ignores extractable:false makes generateDpopKeypair THROW', async () => {
+    // A `subtle` that quietly hands back an EXTRACTABLE pair — a polyfill, a shim, a
+    // future refactor that flipped the argument. Generating one must be loud.
+    const leakySubtle = {
+      generateKey: (alg: any, _extractable: boolean, usages: any) => crypto.subtle.generateKey(alg, true, usages),
+      exportKey: (fmt: any, k: any) => crypto.subtle.exportKey(fmt, k),
+    } as unknown as SubtleCrypto;
+    await expect(generateDpopKeypair({ subtle: leakySubtle })).rejects.toThrow(/non-extractable/);
   });
 });
 
@@ -136,6 +168,35 @@ describe('buildProofInput — shape + fail-closed', () => {
   test('assembleProof refuses a malformed signing input', () => {
     expect(assembleProof('nodot', new Uint8Array(64))).toBeNull();
     expect(assembleProof('a.b', null as any)).toBeNull();
+  });
+
+  // RFC 9449 §8 — the nonce SEAM. The claim's shape and placement are settled here;
+  // the boundary machinery around it (a per-origin nonce cache + the one-shot retry
+  // on 401 + DPoP-Nonce) is NOT built yet and is named as a gap in INV-15.
+  test('a non-empty nonce rides the payload, right after iat and before ath', () => {
+    const built = buildProofInput({ ...ok, nonce: 'eyJ7S_zG', accessTokenHash: 'AAA' })!;
+    expect(built.payload.nonce).toBe('eyJ7S_zG');
+    expect(Object.keys(built.payload)).toEqual(['jti', 'htm', 'htu', 'iat', 'nonce', 'ath']);
+  });
+  test('the nonce is echoed VERBATIM — never trimmed, normalized or re-encoded', () => {
+    // The server compares byte-for-byte against what it issued.
+    const odd = ' A+b/c=\n';
+    expect(buildProofInput({ ...ok, nonce: odd })!.payload.nonce).toBe(odd);
+  });
+  test('an absent / empty / non-string nonce omits the claim entirely', () => {
+    for (const nonce of [undefined, '', null, 0, {}] as any[]) {
+      expect(buildProofInput({ ...ok, nonce })!.payload).not.toHaveProperty('nonce');
+    }
+    expect(buildProofInput(ok)!.payload).not.toHaveProperty('nonce');
+  });
+  test('the nonce threads through signDpopProof into a proof that still verifies', async () => {
+    const { privateKey, publicKey, publicJwk } = await generateDpopKeypair();
+    const proof = (await signDpopProof({
+      privateKey, publicJwk, method: 'GET', url: 'https://api.example.com/v1',
+      jti: 'j', iatSeconds: 1700000000, nonce: 'server-nonce-1',
+    }))!;
+    expect(await verifyProof(proof, publicKey)).toBe(true);
+    expect(JSON.parse(Buffer.from(proof.split('.')[1], 'base64url').toString('utf8')).nonce).toBe('server-nonce-1');
   });
 });
 
@@ -236,6 +297,7 @@ const memoryStore = () => {
     idb: {
       get: async (_store: string, key: any) => rows.get(String(key)),
       put: async (_store: string, value: any) => { rows.set(String(value.origin), value); },
+      del: async (_store: string, key: any) => { rows.delete(String(key)); },
     },
   };
 };
@@ -268,14 +330,109 @@ describe('getOrCreateDpopKey — one key per origin, injected IO', () => {
     expect(await getOrCreateDpopKey('', deps)).toBeNull();
   });
 
-  test('a throwing store still yields a usable key; a throwing generate yields null', async () => {
-    const thrower = { load: async () => { throw new Error('idb dead'); }, save: async () => { throw new Error('idb dead'); } };
-    const key = await getOrCreateDpopKey('https://api.example.com', thrower);
+  // ── THE LIFECYCLE RULE: an unreadable store is not an absent key ───────────
+  //
+  // The key IS the token binding, so overwriting it retires a `jkt` the
+  // authorization server has a live token bound to. A transient IDB read failure
+  // that fell through to mint-and-put would destroy the credential permanently and
+  // leave nothing but unexplained 401s. "We don't know" must never become "mint".
+
+  test('a load FAILURE never mints and never writes — it fails closed', async () => {
+    const { rows, idb } = memoryStore();
+    const store = makeDpopKeyStore(idb);
+    // Seed a real key, then make reads fail while writes still "work".
+    const before = await getOrCreateDpopKey('https://api.example.com', store);
+    expect(before).toBeTruthy();
+    const seeded = rows.get('https://api.example.com');
+
+    const blindStore = { ...store, load: async () => { throw new Error('idb dead'); } };
+    expect(await getOrCreateDpopKey('https://api.example.com', blindStore)).toBeNull();
+    // The server-bound key is UNTOUCHED — not re-minted, not overwritten.
+    expect(rows.get('https://api.example.com')).toBe(seeded);
+    expect(rows.size).toBe(1);
+
+    // …and it self-heals: once the store reads again, the SAME key comes back.
+    const after = await getOrCreateDpopKey('https://api.example.com', store);
+    expect(after!.privateKey).toBe(before!.privateKey);
+  });
+
+  test('a load that RESOLVES with no record does mint (the only mint path)', async () => {
+    const { rows, idb } = memoryStore();
+    const key = await getOrCreateDpopKey('https://api.example.com', makeDpopKeyStore(idb));
     expect(key?.privateKey).toBeTruthy();
-    const noGen = await getOrCreateDpopKey('https://api.example.com', {
-      ...thrower, generate: async () => { throw new Error('no crypto'); },
+    expect(rows.size).toBe(1);
+  });
+
+  test('a loaded record with an UNUSABLE private key is treated as absent and re-minted', async () => {
+    const { rows, idb } = memoryStore();
+    const store = makeDpopKeyStore(idb);
+    // An extractable key — a record an older/broken build could have written. The
+    // guard must not let it become the credential.
+    const leaky = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']) as CryptoKeyPair;
+    const publicJwk = await crypto.subtle.exportKey('jwk', leaky.publicKey);
+    rows.set('https://api.example.com', {
+      origin: 'https://api.example.com', privateKey: leaky.privateKey, publicJwk, createdAt: 1,
+    });
+    const key = await getOrCreateDpopKey('https://api.example.com', store);
+    expect(key!.privateKey).not.toBe(leaky.privateKey);
+    expect(key!.privateKey.extractable).toBe(false);
+    expect(rows.get('https://api.example.com').privateKey.extractable).toBe(false);
+  });
+
+  test('a throwing SAVE still yields a usable key; a throwing generate yields null', async () => {
+    const { idb } = memoryStore();
+    const store = { ...makeDpopKeyStore(idb), save: async () => { throw new Error('quota'); } };
+    const key = await getOrCreateDpopKey('https://api.example.com', store);
+    expect(key?.privateKey).toBeTruthy();          // persist is best-effort; the request works
+    const noGen = await getOrCreateDpopKey('https://other.example.com', {
+      ...store, generate: async () => { throw new Error('no crypto'); },
     });
     expect(noGen).toBeNull();
+  });
+
+  test('minting is AUDITED (with the public jkt) so a silent re-key is diagnosable', async () => {
+    const { idb } = memoryStore();
+    const audits: any[] = [];
+    const store = { ...makeDpopKeyStore(idb), audit: (e: any) => audits.push(e) };
+    const key = await getOrCreateDpopKey('https://api.example.com', store);
+    expect(audits).toEqual([{ type: 'dpop_key_minted', details: { origin: 'https://api.example.com', jkt: await dpopJkt(key!.publicJwk) } }]);
+    // A REUSE is not a mint — no second event.
+    await getOrCreateDpopKey('https://api.example.com', store);
+    expect(audits).toHaveLength(1);
+    // A throwing audit sink never fails the mint.
+    const loud = { ...makeDpopKeyStore(memoryStore().idb), audit: () => { throw new Error('audit dead'); } };
+    expect(await getOrCreateDpopKey('https://api.example.com', loud)).toBeTruthy();
+  });
+
+  test('remove() retires the keypair — the other half of a revoked credential', async () => {
+    const { rows, idb } = memoryStore();
+    const store = makeDpopKeyStore(idb);
+    const first = await getOrCreateDpopKey('https://api.example.com', store);
+    await store.remove('https://api.example.com');
+    expect(rows.size).toBe(0);
+    // A later credential for the same origin gets a DIFFERENT fingerprint — the
+    // whole point: the device identity the user removed does not come back.
+    const second = await getOrCreateDpopKey('https://api.example.com', store);
+    expect(await dpopJkt(second!.publicJwk)).not.toBe(await dpopJkt(first!.publicJwk));
+  });
+
+  test('loadDpopJkt reads the thumbprint WITHOUT minting; ensureDpopJkt mints', async () => {
+    const { rows, idb } = memoryStore();
+    const store = makeDpopKeyStore(idb);
+    expect(await loadDpopJkt('https://api.example.com', store)).toBeNull();
+    expect(rows.size).toBe(0);                       // listing must never create a key
+
+    const jkt = await ensureDpopJkt('https://api.example.com', store);
+    expect(jkt).toBeTruthy();
+    expect(rows.size).toBe(1);
+    expect(await loadDpopJkt('https://api.example.com', store)).toBe(jkt!);
+    // It is the thumbprint of the PUBLIC key, and carries no key material.
+    expect(jkt).toBe(await dpopJkt(rows.get('https://api.example.com').publicJwk));
+
+    // Fail closed everywhere: bad origin, throwing store, unusable record.
+    expect(await loadDpopJkt('http://api.example.com', store)).toBeNull();
+    expect(await loadDpopJkt('https://api.example.com', { load: async () => { throw new Error('dead'); } })).toBeNull();
+    expect(await ensureDpopJkt('http://api.example.com', store)).toBeNull();
   });
 
   test('the store name is the one idb.js declares', () => {
@@ -303,6 +460,37 @@ describe('buildOriginSecret / parseOriginAuth — the dpop shape', () => {
     expect(parseOriginAuth('{"scheme":"dpop"}')).toBeNull();
     expect(parseOriginAuth('{"scheme":"dpop","value":""}')).toBeNull();
   });
+  // An unrecognized scheme is a REFUSAL, not a downgrade. This used to fall through
+  // to bearer, so `'DPoP'` (wrong case) or any typo silently stored the strongest
+  // credential peerd can hold as the weakest — a bare bearer token on the wire.
+  test('the scheme is case-normalized: DPoP / Dpop / " dpop " all mean dpop', () => {
+    for (const scheme of ['DPoP', 'Dpop', ' dpop ', 'DPOP'] as any[]) {
+      expect(JSON.parse(buildOriginSecret({ key: 'at_abcdefghijklmnop', scheme })!))
+        .toEqual({ scheme: 'dpop', value: 'at_abcdefghijklmnop' });
+    }
+    expect(JSON.parse(buildOriginSecret({ key: 'abcdefgh', header: 'X-API-Key', scheme: 'RAW' as any })!))
+      .toEqual({ header: 'X-API-Key', value: 'abcdefgh' });
+    expect(JSON.parse(buildOriginSecret({ key: 'sk_live_abcdefgh', scheme: 'Bearer' as any })!))
+      .toEqual({ header: 'Authorization', value: 'Bearer sk_live_abcdefgh' });
+  });
+
+  test('an UNKNOWN scheme returns null — never a silent bearer downgrade', () => {
+    for (const scheme of ['bearar', 'oauth', 'dpop2', 'basic', 'x', 42, {}] as any[]) {
+      expect(buildOriginSecret({ key: 'at_abcdefghijklmnop', scheme })).toBeNull();
+    }
+    // Absent / empty still means bearer — the documented default, not a guess.
+    expect(JSON.parse(buildOriginSecret({ key: 'sk_live_abcdefgh' })!).value).toBe('Bearer sk_live_abcdefgh');
+    expect(JSON.parse(buildOriginSecret({ key: 'sk_live_abcdefgh', scheme: '' as any })!).value).toBe('Bearer sk_live_abcdefgh');
+  });
+
+  test('parseOriginAuth recognizes a case-variant stored dpop record (never as bearer)', () => {
+    for (const stored of ['{"scheme":"DPoP","value":"at_abcdefghijklmnop"}', '{"scheme":" Dpop ","value":"at_abcdefghijklmnop"}']) {
+      expect(parseOriginAuth(stored)).toEqual({
+        header: 'Authorization', value: 'DPoP at_abcdefghijklmnop', scheme: 'dpop', token: 'at_abcdefghijklmnop',
+      });
+    }
+  });
+
   test('REGRESSION — bearer and raw are byte-for-byte unchanged (no extra members)', () => {
     expect(parseOriginAuth(buildOriginSecret({ key: 'sk_live_abcdefgh' })!))
       .toEqual({ header: 'Authorization', value: 'Bearer sk_live_abcdefgh' });
@@ -375,6 +563,31 @@ describe('withDpopCredentials — proof minted at the boundary, nowhere else', (
     expect(auths).toEqual([`DPoP ${TOKEN}`]);
     expect(proofs).toHaveLength(1);
     expect(proofs[0]).not.toBe('FORGED-PROOF');
+  });
+
+  // Rule 5 is UNCONDITIONAL. Both strips used to sit inside the "we minted a proof"
+  // branch, so every path that declined to mint left a caller-supplied `DPoP:` header
+  // standing on a request to the credentialed origin.
+  test('rule 5: the DPoP slot is cleared even when NO proof is minted', async () => {
+    const forged = { headers: { 'X-Keep': 'ok', DPoP: 'FORGED-PROOF', authorization: 'Bearer FORGED' } };
+    const noProofCases = [
+      { name: 'no stored secret', over: { getSecret: async () => null } },
+      { name: 'locked vault', over: { getSecret: async () => { throw new Error('VaultLocked'); } } },
+      { name: 'no key', over: { getDpopKey: async () => null } },
+    ];
+    for (const { over } of noProofCases) {
+      const { wf, seen } = await mkBoundary(over);
+      await wf(`${OWNED}/v1/x`, { ...forged, headers: { ...forged.headers } });
+      const sent = seen.init.headers ?? {};
+      expect(Object.keys(sent).filter((k) => k.toLowerCase() === 'dpop')).toEqual([]);
+      expect(Object.keys(sent).filter((k) => k.toLowerCase() === 'authorization')).toEqual([]);
+      expect(sent['X-Keep']).toBe('ok');            // only the credential slots go
+    }
+    // …and on the plain-BEARER path, where the boundary sets Authorization but not DPoP.
+    const { wf, seen } = await mkBoundary({ getSecret: async () => buildOriginSecret({ key: 'sk_live_abcdefgh' }) });
+    await wf(`${OWNED}/v1/x`, { headers: { ...forged.headers } });
+    expect(Object.keys(seen.init.headers).filter((k) => k.toLowerCase() === 'dpop')).toEqual([]);
+    expect(seen.init.headers.Authorization).toBe('Bearer sk_live_abcdefgh');
   });
 
   test('rule 6: the audit carries the origin + the public jkt ONLY', async () => {
@@ -470,6 +683,126 @@ describe('withDpopCredentials — proof minted at the boundary, nowhere else', (
     const pub = await crypto.subtle.importKey('jwk', header.jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
     expect(await verifyProof(proof, pub)).toBe(true);
     expect(header.jwk.d).toBeUndefined();
+  });
+});
+
+// ── the credential LIFECYCLE at the Settings routes ─────────────────────────
+//
+// DPoP shipped UNREACHABLE: nothing wrote scheme:'dpop' and nothing surfaced a
+// `jkt`, so no token could ever be bound to the key. These tests are the loop
+// closed — provision mints the keypair, list surfaces the public thumbprint the
+// user registers with the server, and revoking retires BOTH halves.
+
+describe('origin-cred routes — the DPoP credential lifecycle', () => {
+  const mkVault = () => {
+    const store: Record<string, string> = {};
+    return {
+      store,
+      listSecretNames: async () => Object.keys(store),
+      getSecret: async (n: string) => store[n] ?? null,
+      setSecret: async (n: string, v: string) => { store[n] = v; },
+      deleteSecret: async (n: string) => { delete store[n]; },
+    };
+  };
+  const mkRoutes = () => {
+    const vault = mkVault();
+    const { rows, idb } = memoryStore();
+    const keys = makeDpopKeyStore(idb);
+    const audits: any[] = [];
+    const routes = makeOriginCredentialRoutes({
+      vault,
+      isLockedError: (e: any) => /lock/i.test(String(e?.message)),
+      audit: (e: any) => audits.push(e),
+      ensureDpopKey: (origin: string) => ensureDpopJkt(origin, keys),
+      readDpopJkt: (origin: string) => loadDpopJkt(origin, keys),
+      deleteDpopKey: (origin: string) => keys.remove(origin),
+    });
+    return { vault, rows, keys, audits, routes };
+  };
+
+  test('set(dpop) stores the token AND mints the keypair, returning the public jkt', async () => {
+    const { vault, rows, routes, audits } = mkRoutes();
+    const set = await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'at_abcdefghijklmnop', scheme: 'dpop' });
+    expect(set.ok).toBe(true);
+    expect(JSON.parse(vault.store['origin:https://api.stripe.com'])).toEqual({ scheme: 'dpop', value: 'at_abcdefghijklmnop' });
+    // The keypair exists NOW — the thumbprint has to be registrable before the
+    // authorization server issues the token, not after the first request.
+    expect(rows.size).toBe(1);
+    expect(set.jkt).toBe(await dpopJkt(rows.get('https://api.stripe.com').publicJwk));
+    expect(audits.find((e) => e.type === 'origin_credential_added').details.jkt).toBe(set.jkt);
+    // The token never rides the response or the audit.
+    expect(JSON.stringify({ set, audits })).not.toContain('at_abcdefghijklmnop');
+  });
+
+  test('list surfaces scheme + the public jkt for dpop, and nothing extra for bearer', async () => {
+    const { routes, rows } = mkRoutes();
+    await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'at_abcdefghijklmnop', scheme: 'dpop' });
+    await routes['origin-cred/set']({ origin: 'api.github.com', key: 'ghp_abcdefgh1234' });
+    const list = await routes['origin-cred/list']({});
+    const byOrigin = Object.fromEntries(list.integrations.map((i: any) => [i.origin, i]));
+    expect(byOrigin['https://api.stripe.com'].scheme).toBe('dpop');
+    expect(byOrigin['https://api.stripe.com'].jkt).toBe(await dpopJkt(rows.get('https://api.stripe.com').publicJwk));
+    expect(byOrigin['https://api.github.com'].scheme).toBeUndefined();
+    expect(byOrigin['https://api.github.com'].jkt).toBeUndefined();
+    expect(byOrigin['https://api.github.com'].header).toBe('Authorization');
+    expect(JSON.stringify(list)).not.toContain('at_abcdefghijklmnop');   // still write-only
+  });
+
+  test('LISTING never mints a key (a list after a revoke must not resurrect the fingerprint)', async () => {
+    const { vault, rows, routes } = mkRoutes();
+    // A dpop secret with no keypair behind it (the pre-existing-credential case).
+    vault.store['origin:https://api.stripe.com'] = buildOriginSecret({ key: 'at_abcdefghijklmnop', scheme: 'dpop' })!;
+    const list = await routes['origin-cred/list']({});
+    expect(list.integrations[0]).toMatchObject({ scheme: 'dpop', jkt: null });
+    expect(rows.size).toBe(0);
+  });
+
+  test('delete retires BOTH halves — the token AND the keypair behind the jkt', async () => {
+    const { vault, rows, routes, audits } = mkRoutes();
+    await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'at_abcdefghijklmnop', scheme: 'dpop' });
+    const firstJkt = (await routes['origin-cred/list']({})).integrations[0].jkt;
+
+    expect(await routes['origin-cred/delete']({ origin: 'api.stripe.com' })).toEqual({ ok: true });
+    expect(vault.store['origin:https://api.stripe.com']).toBeUndefined();
+    expect(rows.size).toBe(0);                       // the keypair went with it
+    expect(audits.at(-1)).toEqual({ type: 'origin_credential_removed', details: { origin: 'https://api.stripe.com', dpopKeyRemoved: true } });
+
+    // A NEW credential for the same origin gets a NEW device fingerprint — the one
+    // the user removed does not quietly come back and re-link the two integrations.
+    const again = await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'at_zyxwvutsrqponm', scheme: 'dpop' });
+    expect(again.jkt).toBeTruthy();
+    expect(again.jkt).not.toBe(firstJkt);
+  });
+
+  test('a key store that throws on delete still reports the vault delete as done', async () => {
+    const vault = mkVault();
+    const audits: any[] = [];
+    const routes = makeOriginCredentialRoutes({
+      vault,
+      isLockedError: (e: any) => /lock/i.test(String(e?.message)),
+      audit: (e: any) => audits.push(e),
+      deleteDpopKey: async () => { throw new Error('idb dead'); },
+    });
+    await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'at_abcdefghijklmnop', scheme: 'dpop' });
+    expect(await routes['origin-cred/delete']({ origin: 'api.stripe.com' })).toEqual({ ok: true });
+    expect(vault.store['origin:https://api.stripe.com']).toBeUndefined();
+    // …and the stranded keypair is legible in the audit rather than invisible.
+    expect(audits.at(-1).details.dpopKeyRemoved).toBe(false);
+  });
+
+  test('an unknown scheme is refused at the route, never stored as a bearer token', async () => {
+    const { vault, routes } = mkRoutes();
+    expect(await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'at_abcdefghijklmnop', scheme: 'oauth' as any }))
+      .toEqual({ ok: false, error: 'bad-key' });
+    expect(vault.store['origin:https://api.stripe.com']).toBeUndefined();
+  });
+
+  test('the routes work with NO dpop seams injected (unchanged bearer behavior)', async () => {
+    const vault = mkVault();
+    const routes = makeOriginCredentialRoutes({ vault, isLockedError: () => false });
+    await routes['origin-cred/set']({ origin: 'api.stripe.com', key: 'sk_live_abcdefgh' });
+    expect((await routes['origin-cred/list']({})).integrations).toEqual([{ origin: 'https://api.stripe.com', header: 'Authorization' }]);
+    expect(await routes['origin-cred/delete']({ origin: 'api.stripe.com' })).toEqual({ ok: true });
   });
 });
 

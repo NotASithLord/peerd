@@ -8,16 +8,32 @@
 // (withApiCredentials), injected ONLY on a same-origin HTTPS request the API actor
 // makes, and NEVER shown to the agent. This UI only ever sees the ORIGINS + the header
 // NAME (origin-cred/list returns no values).
+//
+// One exception to "no values", and it is the point of the DPoP option: for a
+// proof-of-possession credential the list also returns the `jkt` — the PUBLIC
+// thumbprint of the origin's non-extractable keypair (INV-15). It is a hash of a
+// public key, not a secret, and the user MUST be able to read it: it is what they
+// paste into the authorization server's client registration so the token it issues
+// is bound to this device's key. Without a way to save `scheme:'dpop'` and a way to
+// read the thumbprint back, the whole proof-of-possession path was unreachable.
 
 import m from '/vendor/mithril/mithril.js';
 import { GitCredentialsSection } from './git-credentials.js';
 
+/** The three auth styles a credential can be saved as, in the order shown. */
+const SCHEMES = [
+  { value: 'bearer', label: 'Bearer token' },
+  { value: 'raw', label: 'Custom header' },
+  { value: 'dpop', label: 'DPoP (proof of possession)' },
+];
+
 export const ApiIntegrationsSection = {
   oninit(/** @type {any} */ vnode) {
-    vnode.state.integrations = null;   // Array<{origin, header}> | null (loading)
+    vnode.state.integrations = null;   // Array<{origin, header, scheme?, jkt?}> | null (loading)
     vnode.state.originInput = '';
     vnode.state.keyInput = '';
-    vnode.state.headerInput = '';      // blank = Authorization: Bearer
+    vnode.state.headerInput = '';      // only used by the 'raw' scheme
+    vnode.state.schemeInput = 'bearer';
     vnode.state.busy = false;
     vnode.state.msg = null;
     ApiIntegrationsSection.load(vnode);
@@ -43,19 +59,24 @@ export const ApiIntegrationsSection = {
       const origin = ui.originInput.trim();
       const key = ui.keyInput.trim();
       const header = ui.headerInput.trim();
+      const scheme = ui.schemeInput;
       ui.msg = null;
       if (!origin) { ui.msg = { ok: false, text: 'Enter an API host (e.g. api.stripe.com).' }; m.redraw(); return; }
       if (key.length < 8) { ui.msg = { ok: false, text: 'Paste a complete key.' }; m.redraw(); return; }
+      if (scheme === 'raw' && !header) { ui.msg = { ok: false, text: 'Enter the header name to send the key in (e.g. X-API-Key).' }; m.redraw(); return; }
       ui.busy = true; m.redraw();
-      // Blank header → Bearer (the common case); a custom header → the key verbatim.
-      const arg = header
-        ? { type: 'origin-cred/set', origin, key, header, scheme: 'raw' }
+      // Bearer is the default and sends no `scheme` at all — the same message this
+      // form has always sent, so the common case is byte-for-byte unchanged.
+      const arg = scheme === 'raw' ? { type: 'origin-cred/set', origin, key, header, scheme: 'raw' }
+        : scheme === 'dpop' ? { type: 'origin-cred/set', origin, key, scheme: 'dpop' }
         : { type: 'origin-cred/set', origin, key };
       const r = await send(arg);
       ui.busy = false;
       if (r?.ok) {
-        ui.originInput = ''; ui.keyInput = ''; ui.headerInput = '';
-        ui.msg = { ok: true, text: `Saved for ${r.origin} — encrypted in the vault.` };
+        ui.originInput = ''; ui.keyInput = ''; ui.headerInput = ''; ui.schemeInput = 'bearer';
+        ui.msg = { ok: true, text: scheme === 'dpop'
+          ? `Saved for ${r.origin} — encrypted in the vault. Register the key thumbprint below with ${r.origin}.`
+          : `Saved for ${r.origin} — encrypted in the vault.` };
         const lr = await send({ type: 'origin-cred/list' });
         if (lr?.ok) ui.integrations = lr.integrations;
       } else {
@@ -96,19 +117,33 @@ export const ApiIntegrationsSection = {
               m('.provider-card-main', [
                 m('.provider-card-text', [
                   m('span.provider-card-name', it.origin),
-                  m('span.key-badge.key-set', `✓ ${it.header || 'Authorization'}`),
+                  m('span.key-badge.key-set', it.scheme === 'dpop' ? '✓ DPoP' : `✓ ${it.header || 'Authorization'}`),
                 ]),
                 m('span', { style: 'margin-left:auto;' },
                   m('button.linkish', { type: 'button', disabled: ui.busy, onclick: () => remove(it.origin) }, 'Remove')),
               ]),
+              // The public thumbprint of this origin's key. Shown ONLY for DPoP, and
+              // shown in full because pasting it into the server's client registration
+              // is the step that makes the token binding real. Removing the
+              // integration retires the key, so this fingerprint doesn't outlive it.
+              it.scheme === 'dpop'
+                ? m('p.hint', { style: 'margin:4px 0 0;' }, it.jkt
+                  ? ['Key thumbprint (', m('code', 'jkt'), '): ', m('code', it.jkt), ' — register this with ', it.origin, '.']
+                  : ['Key thumbprint unavailable — it is created on the next request to ', it.origin, '.'])
+                : null,
             ]))),
 
       m('.settings-divider'),
       m('h3', 'Add an API key'),
       m('p.hint', [
-        'The API host + your key. Leave ', m('strong', 'Header'), ' blank for the common ',
-        m('code', 'Authorization: Bearer <key>'), '. Set a header name (e.g. ',
-        m('code', 'X-API-Key'), ') to send the key verbatim in that header instead.',
+        'The API host + your key. ', m('strong', 'Bearer token'), ' is the common ',
+        m('code', 'Authorization: Bearer <key>'), '. ', m('strong', 'Custom header'),
+        ' sends the key verbatim in a header you name (e.g. ', m('code', 'X-API-Key'), '). ',
+        m('strong', 'DPoP'), ' stores an OAuth token that is only spendable alongside a '
+        + 'proof signed by a key peerd generates on this device and ',
+        m('em', 'cannot read or export'),
+        ' — peerd shows you the key’s public thumbprint to register with the server. '
+        + 'Needs a server that implements RFC 9449.',
       ]),
       m('form.provider-card-form', { onsubmit: (/** @type {any} */ e) => { e.preventDefault(); save(); } }, [
         m('.input-row', [
@@ -128,9 +163,17 @@ export const ApiIntegrationsSection = {
         // margin:0 and is reused by the single-row git section): this form has TWO stacked
         // rows, so the second needs its own vertical gap from the first.
         m('.input-row', { style: 'margin-top:8px;' }, [
+          // The auth style, explicit. It used to be INFERRED from whether the header
+          // field was blank, which left the strongest option (DPoP) with no way to
+          // reach it at all. Same 11rem lead column as the origin field above.
+          m('select', {
+            value: ui.schemeInput, disabled: ui.busy, style: 'flex:0 0 11rem;',
+            onchange: (/** @type {any} */ e) => { ui.schemeInput = e.target.value; },
+          }, SCHEMES.map((s) => m('option', { value: s.value }, s.label))),
           m('input', {
             type: 'text', spellcheck: false, autocapitalize: 'none', autocomplete: 'off',
-            placeholder: 'Header (blank = Authorization: Bearer)', value: ui.headerInput, disabled: ui.busy,
+            placeholder: ui.schemeInput === 'raw' ? 'Header name (e.g. X-API-Key)' : 'Header name (Custom header only)',
+            value: ui.headerInput, disabled: ui.busy || ui.schemeInput !== 'raw',
             oninput: (/** @type {any} */ e) => { ui.headerInput = e.target.value; },
             style: 'flex:1;',
           }),
