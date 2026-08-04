@@ -53,7 +53,10 @@ export {
   originOf,
   isAllowed,
 } from './fetch/safe-fetch.js';
-export { makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials, withApiCredentials } from './fetch/web-fetch.js';
+export {
+  makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials,
+  withApiCredentials, withDpopCredentials,
+} from './fetch/web-fetch.js';
 // DESIGN-18 P1: origin-bound API-key policy (the origin:<origin> analog of git:<host>).
 export {
   ORIGIN_SECRET_PREFIX, originSecretName, originFromSecretName,
@@ -62,6 +65,20 @@ export {
 } from './fetch/origin-credentials.js';
 export { makeOriginCredentialRoutes } from './fetch/origin-credential-routes.js';
 export { EgressDeniedError } from './fetch/errors.js';
+
+// --- DPoP (RFC 9449) proof-of-possession credentials ---------------------
+// The "use but can't see" credential: a private key generated extractable:false
+// (so no in-origin code can ever export it) + a fresh per-request signed proof
+// minted at the egress boundary. THREAT-MODEL.md INV-15.
+export {
+  base64url, base64urlFromString, utf8Bytes, canonicalHtu, htmOf,
+  publicJwkOnly, jwkThumbprintInput, buildProofInput, assembleProof,
+} from './dpop/proof.js';
+export {
+  DPOP_KEY_STORE, generateDpopKeypair, makeDpopKeyStore, getOrCreateDpopKey,
+  usableDpopPrivateKey, loadDpopJkt, ensureDpopJkt,
+  dpopJkt, accessTokenHashFor, signDpopProof,
+} from './dpop/keys.js';
 
 // --- denylist -----------------------------------------------------------
 export {

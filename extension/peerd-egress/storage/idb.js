@@ -14,6 +14,7 @@
 //   notebooks    keyPath: key         Notebook catalog blob ({ key:'notebooks.v1', value })
 //   vms          keyPath: key         WebVM catalog blob ({ key:'webvms.v1', value })
 //   contacts     keyPath: did         per-peer overlay (user name/notes/tags), keyed by did:key
+//   dpop_keys    keyPath: origin      DPoP keypair handles, one per owned https origin
 //
 // The apps/notebooks/vms stores hold the per-kind catalog as a SINGLE
 // { key, value } blob (the registry-factory's load-all / persist-all
@@ -75,7 +76,17 @@ const DB_NAME = 'peerd';
 // logged into, so an entry can hold authenticated page text; it is not purged
 // on vault lock (same at-rest posture as session_messages/memory, which also
 // persist plaintext here).
-const DB_VERSION = 11;
+// v12 — dpop_keys: one proof-of-possession keypair per owned https origin
+// (records { origin, privateKey, publicJwk, createdAt }, keyPath 'origin').
+// The stored `privateKey` is a NON-EXTRACTABLE CryptoKey — a structured-clone
+// HANDLE, not bytes: the key material never leaves the browser's crypto
+// implementation, so unlike every other store here this record is not readable
+// even by us (`exportKey` on it rejects). That is what makes an IDB scrape, an
+// OPFS dump, or a compromised in-origin caller unable to exfiltrate the
+// credential. why persist it at all: the key must survive an MV3 service-worker
+// eviction, and a handle is the only form of it we can hold. Additive,
+// forward-only. See peerd-egress/dpop/keys.js.
+const DB_VERSION = 12;
 
 /**
  * Open the database. Cached after first call. Re-opens on connection
@@ -169,6 +180,12 @@ export const openDB = () => {
       // migrates pre-v9 inline-message sessions lazily on read.
       if (!db.objectStoreNames.contains('session_messages')) {
         db.createObjectStore('session_messages', { keyPath: 'id' });
+      }
+      // v12 — DPoP proof-of-possession keypairs, one per owned https origin
+      // (see the DB_VERSION note above). Keyed by origin so a credential is
+      // structurally unable to be spent at a different site.
+      if (!db.objectStoreNames.contains('dpop_keys')) {
+        db.createObjectStore('dpop_keys', { keyPath: 'origin' });
       }
     };
     req.onsuccess = () => {

@@ -38,7 +38,12 @@ const isMarkupType = (/** @type {string} */ ct) =>
 // Stripped unconditionally (case-insensitive). The keyless actor has no
 // credential to begin with; this is the wall against a laundered injection
 // trying to add one (e.g. a Cookie copied out of page text).
-const SESSION_HEADERS = new Set(['cookie', 'authorization', 'proxy-authorization']);
+// `dpop` rides this list for the same reason `authorization` does: it is a
+// credential slot the EGRESS BOUNDARY owns (RFC 9449 — peerd-egress/dpop/), so a
+// tool-supplied value in it is by definition forged. A proof the actor wrote is
+// worthless to a server, but it must not be the thing on the wire when the
+// boundary declines to mint a real one.
+const SESSION_HEADERS = new Set(['cookie', 'authorization', 'proxy-authorization', 'dpop']);
 
 /** @param {Record<string, unknown>} headers @returns {Record<string, string>} */
 const stripSessionHeaders = (headers) => {

@@ -20,7 +20,18 @@
 //                                RAM-only and cleared on browser restart, and
 //                                the MV3 threat model is "anything running
 //                                extension code already has the live DK." It
-//                                is dropped on lock/auto-lock (`_clearPersistedDK`).
+//                                is dropped by `lock()` (`_clearPersistedDK`),
+//                                which clears it regardless of whether SW
+//                                MEMORY still holds the DK — the mirror
+//                                outlives the worker, so a lock on a worker
+//                                that never resumed must still erase it.
+//                                The idle auto-lock TIMER does not bound this
+//                                record (it dies with the SW), so the record
+//                                carries its OWN deadline — `{ dk, unlockedAt,
+//                                autoLockMs }` — and `attemptResume` refuses
+//                                and purges anything past it, or any record
+//                                with no timestamp at all. Do not write this
+//                                key from anywhere but vault.js.
 //                                NOTE: this is the one place the otherwise
 //                                non-extractable DK is serialized — see the
 //                                security note in vault.js. (Earlier revisions

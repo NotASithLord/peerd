@@ -119,6 +119,7 @@ malicious separate extension, and physical device access.
 |---|---|---|
 | Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never enters a keyless heap, egress allowlist |
 | Origin-bound API keys (per integration) | Vault, injected at the egress boundary only | `origin-credentials.js`. Sent only to the exact owned https origin |
+| Proof-of-possession key (DPoP, per origin — opt-in per integration) | A non-extractable `CryptoKey` handle in IndexedDB — the key material never leaves the browser's crypto implementation and peerd never holds it as bytes | Non-extractable by construction, checked at generate and on every load (`usableDpopPrivateKey`; `exportKey` rejects for every caller, including us); usable only at the audited egress boundary, which mints a fresh per-request proof and never exposes one to the agent. Minted when the user saves a DPoP credential, retired when they remove it (INV-15) |
 | The user's session cookies (logged-in tabs) | The browser's cookie jar. peerd never reads cookies | Sensitive-origin denylist, Plan and Act mode, confirm gate |
 | User authentication factor (login) | Never held by the agent — a passkey stays on the user's device; an SSO session stays with the provider; a password is never read or filled | The agent never holds it; a login is initiated only through a gated, origin-verified, always-confirmed, affordance-verified action (`tools/defs/login.js`, Tier 0). The factor stays with the user |
 | Page content the agent reads | Transiently, inside an actor heap | The memory boundary (B1) and the untrusted-content fence |
@@ -418,6 +419,91 @@ Code: `peerd-runtime/tools/defs/login.js`, `peerd-runtime/tools/login-affordance
 `peerd-runtime/tools/exposure.js`, `peerd-runtime/actor/idp-registry.js`. Red-team:
 scenario 11.
 
+<a id="inv-15"></a>
+### INV-15. A proof-of-possession credential cannot be exfiltrated
+**Status: opt-in and reachable.** A user turns this on per integration in Settings →
+API integrations by saving a credential with the **DPoP** auth style; peerd mints
+that origin's keypair at that moment and shows the public `jkt` thumbprint to
+register with the authorization server. Bearer remains the default and the fallback.
+What follows is the guarantee for an origin that has it on.
+
+peerd holds a HANDLE to a key it cannot read. A DPoP (RFC 9449) private key is
+generated with `extractable: false`, so no in-origin code — not the agent, not a
+prompt-injected or outright compromised service worker, not a co-extension that
+somehow reached our IndexedDB — can ever export it: `crypto.subtle.exportKey` on it
+REJECTS, for every format and every caller including us. That is enforced, not
+asserted in prose: `usableDpopPrivateKey` is checked when a key is generated (a
+runtime that ignored `extractable:false` THROWS) and again on every load (a record
+that fails it is treated as absent, never used). The key can only be USED, on-device,
+while resident. It is persisted as a structured-clone handle so it survives a
+service-worker eviction without ever becoming bytes we hold, and there is one key per
+owned origin, so two integrations cannot be correlated by their `jkt`.
+
+The same non-extractability makes the key DEVICE-BOUND, and that cuts both ways as a
+containment property rather than only a limitation. It cannot sync, and a vault
+export/transfer never carries it: `buildExport` gathers secrets, settings, memory,
+hooks and skills — not the DPoP key store — and the private material could not be
+serialized into the file even if it tried. So a stolen or shared vault backup yields
+no usable proof-of-possession credential, and the honest cost is that a credential
+provisioned on one device works only there and must be re-registered on another
+(surfaced in Settings so a restored-vault `401` is not a surprise). Removing an
+integration deletes the token AND the keypair (below), so the fingerprint never
+outlives the credential on the device that held it either.
+
+The key is HALF the credential, so its lifecycle is the credential's. It is minted
+only when provisioning asks for one or when a load RESOLVES with no record — never
+after a load FAILED, because "unreadable" is not "absent" and minting over a key we
+could not read would retire the `jkt` a live token is bound to, permanently 401-ing
+the integration with nothing to explain it; that path fails closed to an anonymous
+request and self-heals on the next call. Every mint is audited (origin + public
+`jkt`), so a re-key is never silent. Removing an integration deletes the token AND
+the keypair, so the stable per-origin fingerprint does not outlive the credential the
+user revoked and cannot re-link a later one to it.
+
+Each request carries a FRESHLY minted proof binding the method (`htm`), the request
+URI without query or fragment (`htu`), the current time (`iat`), a single-use `jti`,
+and a hash of the access token (`ath`). So a stolen access token alone is unusable —
+spending it requires signing with a key that cannot be stolen — and a captured proof
+is bound to one request at one moment and cannot be replayed against another. Proofs
+are minted ONLY at the service worker's egress chokepoint: they never reach the
+agent, never enter an actor heap, and do not outlive the request. The binding rules
+are the origin-credential rules unchanged — same-origin and https ONLY
+(`authOriginForRequestUrl`), so peerd never signs a statement about a URL the actor
+does not own and never over cleartext. Every failure mode is fail-closed and SILENT:
+a locked vault, an absent key, or a failed signature sends the request ANONYMOUS with
+no throw, and the token is never sent unsigned as a consolation prize (the bearer
+wrapper `withApiCredentials` refuses a DPoP-scheme secret for exactly that reason).
+The audit records the origin and the PUBLIC `jkt` thumbprint only — never the token,
+never the proof, never any key material.
+
+**Honest residuals.** Non-extractability prevents EXFILTRATION, not USE: while the
+key is resident, in-origin code can still ask the service worker to sign. That is
+bounded by the origin binding, by proofs existing only at the audited boundary, and
+by the audit log — but it is not eliminated, and it is the reason this is a strict
+upgrade over a bearer token rather than a complete answer. DPoP also requires SERVER
+support, so bearer remains the fallback for providers that do not implement RFC 9449;
+this raises the ceiling, it does not raise the floor. Two named gaps on our side:
+**server NONCES are not yet handled** — `buildProofInput` can emit the RFC 9449 §8
+`nonce` claim (the seam is in place and tested), but there is no per-origin nonce
+cache and no automatic one-shot retry on a `401` + `DPoP-Nonce`, so an authorization
+server that REQUIRES a nonce will reject every request and the fix today is to use a
+bearer credential for that origin. And key ROTATION is manual: a key lives until the
+integration is removed, so rotating one means removing and re-adding the credential
+(and re-registering the new thumbprint).
+Code: `peerd-egress/dpop/proof.js` (pure canonicalization), `peerd-egress/dpop/keys.js`
+(`generateDpopKeypair`'s non-negotiable `false`, `usableDpopPrivateKey`, the
+mint/read/retire lifecycle), `peerd-egress/fetch/web-fetch.js` (`withDpopCredentials`),
+`peerd-egress/fetch/origin-credentials.js`,
+`peerd-egress/fetch/origin-credential-routes.js` (provision / surface the `jkt` /
+revoke), `extension/options/sections/api-integrations.js` (the user-facing choice).
+Tested: `tests/peerd-egress/dpop.test.ts` (against real WebCrypto — the load-bearing
+case is that `exportKey` on the private key rejects), and
+`extension/tests/unit/peerd-egress/dpop-key-idb.test.js` (in-browser, real
+IndexedDB — the handle survives a genuine structured-clone store→evict→load cycle
+still non-extractable, still `exportKey`-rejecting, and still signing a proof that
+verifies against its persisted public key; the Bun tier can only prove this over a
+`Map`, which never crosses the clone boundary).
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`
@@ -564,12 +650,37 @@ evaluating peerd should know. Each cites where it lives in the code.
   defenses (the keyless heap, the gates) are the real story. The red-team benchmark
   (scenario 08) tests the gates, not the prompt text.
   (`peerd-provider/system-prompt.txt`, `peerd-runtime/loop/system-prompt.js`.)
-- R11. Key extractability and open-web exfil. The key is generated `extractable:true`
-  because `SubtleCrypto.wrapKey` requires it, so a bug holding the key reference could
-  export it. The open-web `webFetch` path is allowlist-free, so exfil to an arbitrary
-  public host is not prevented by the allowlist. It is mitigated only by the
-  keyless-web-actor architecture (INV-3). (`peerd-egress/vault/keys.js`, and the header of
-  `peerd-egress/fetch/safe-fetch.js`.)
+- R11. Open-web exfil, and what is left of key extractability. The extractability half is
+  now narrowed rather than open. The data key the vault holds while unlocked is unwrapped
+  NON-EXTRACTABLE, so `exportKey` on the handle the vault passes to its encrypt/decrypt
+  primitives rejects, and a bug that leaks that reference can no longer turn it into
+  bytes. Extractable handles still exist — transiently, inside the vault, on the paths
+  that must feed the key to `wrapKey`, which refuses a non-extractable key: creation, and
+  the two enrollment operations that seal the key under a NEW factor. Because neither
+  enrollment is given the factor the stored blob is already sealed under, the vault keeps
+  the key a second time as ciphertext under an ephemeral non-extractable AES-KW key, and
+  those operations materialize an extractable handle from it, spend it on one wrap, and
+  drop it. What this does NOT buy: non-extractability prevents EXPORT, not USE — anything
+  running in the extension origin can still use the live key to decrypt every stored
+  secret (R7) — and while the vault is unlocked its raw key bytes are still mirrored into
+  `chrome.storage.session` so a service-worker restart resumes unlocked, readable by that
+  same code. That mirror is BOUNDED, which it previously was not. `lock()` clears it
+  whatever the state of service-worker memory (so a lock on a worker that never resumed,
+  or a second lock, still erases bytes that instance never held), every mirror write is
+  serialized behind the same chain and re-checked against a lock counter (so a persist
+  in flight when the lock lands cannot resurrect it), and the record carries the unlock
+  time plus the auto-lock policy in force — a resume past that deadline is refused and
+  the mirror purged, a resume PRESERVES the original timestamp so it cannot extend the
+  window, and a mirror with no timestamp fails closed. That deadline is an absolute cap
+  from the last real unlock, not idle-refreshed: at or tighter than what the idle
+  setting promises, never looser. Two things it still does not do: the bytes are not
+  scrubbed AT the deadline (nothing runs while the worker is dead — they linger in
+  RAM-only session storage until the next resume attempt refuses them, or the browser
+  closes), and a user who set auto-lock to "never" keeps the unbounded mirror they asked
+  for. Separately, the open-web `webFetch` path is allowlist-free, so exfil to an
+  arbitrary public host is not prevented by the allowlist; that half is mitigated only by
+  the keyless-web-actor architecture (INV-3). (`peerd-egress/vault/keys.js`,
+  `peerd-egress/vault/vault.js`, and the header of `peerd-egress/fetch/safe-fetch.js`.)
 - R12. CLOSED (issue #251), and what replaced it is worth stating precisely because the
   original wording was about a pin. A web actor is still pinned to a TAB rather than an
   origin, and `tools/defs/navigate.js` still re-stamps that pin to wherever the tab

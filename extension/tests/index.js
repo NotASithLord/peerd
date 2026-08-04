@@ -16,6 +16,7 @@ import './unit/peerd-egress/denylist.test.js';
 import './unit/peerd-egress/safe-fetch.test.js';
 import './unit/peerd-egress/vault.test.js';
 import './unit/peerd-egress/vault-blob-idb.test.js';
+import './unit/peerd-egress/dpop-key-idb.test.js';
 import './unit/peerd-egress/vault-kdf.test.js';
 import './unit/peerd-egress/vault-prf.test.js';
 import './unit/peerd-egress/web-fetch.test.js';

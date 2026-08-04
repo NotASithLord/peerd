@@ -30,6 +30,7 @@
 import { EgressDeniedError } from './errors.js';
 import { isPrivateOrLocalHost } from './private-network.js';
 import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './origin-credentials.js';
+import { accessTokenHashFor, dpopJkt, signDpopProof } from '../dpop/keys.js';
 
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
@@ -125,12 +126,126 @@ export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit 
     try { secret = await getSecret(originSecretName(authOrigin)); }
     catch { /* rule 7: vault locked → anonymous (public / cookie requests still work) */ }
     const auth = secret ? parseOriginAuth(secret) : null;
-    if (auth) {
+    // why the dpop refusal: a proof-of-possession token is NOT a bearer token. Sent
+    // without its `DPoP:` proof it is (a) rejected by any RFC 9449 server anyway and
+    // (b) a needless exposure of the token on the wire. This wrapper cannot mint a
+    // proof (it holds no key seam), so it fails CLOSED and sends anonymous — the
+    // credentialed path for those origins is withDpopCredentials below.
+    if (auth && auth.scheme !== 'dpop') {
       headers = stripHeaderName(headers, auth.header);                  // rule 5: drop caller's
       headers = { ...(headers || {}), [auth.header]: auth.value };      // last-wins
       try { audit?.({ type: 'origin_auth_attached', details: { origin: authOrigin, header: auth.header } }); }
       catch { /* best effort — never let auditing leak the value or throw */ }
     }
+  }
+  return webFetch(resource, { ...init, headers, credentials });
+};
+
+// ── DPoP — proof-of-possession at the same boundary ─────────────────────────
+//
+// Tier 1 of the credential roadmap. Everything above about origin binding holds
+// unchanged; what changes is WHAT rides the wire. Instead of a bearer secret
+// (bytes: whoever holds them is the client), the origin holds an ACCESS TOKEN
+// plus a NON-EXTRACTABLE private key (peerd-egress/dpop/keys.js), and each
+// request carries a FRESHLY signed proof binding this method + this URI + now +
+// this token. A stolen token is unusable without the key, and the key cannot be
+// stolen — `exportKey` on it rejects for every caller, including us.
+//
+// The proof is minted HERE and nowhere else: it never reaches the agent, never
+// reaches an actor heap, and never survives the request. Fresh per call, so
+// there is nothing cacheable to steal either.
+
+/**
+ * The exact header slots RFC 9449 fixes. Both are stripped from the caller before
+ * either is set (rule 5), so an actor can neither pre-seed a token nor smuggle a
+ * proof of its own choosing.
+ */
+const DPOP_PROOF_HEADER = 'DPoP';
+const DPOP_AUTH_HEADER = 'Authorization';
+
+/**
+ * The credentialed boundary fetch for a PROOF-OF-POSSESSION origin (RFC 9449).
+ * A strict superset of withApiCredentials: a non-dpop secret takes the plain
+ * header path unchanged, so this is a drop-in for an actor whose origin may hold
+ * either credential kind.
+ *
+ * The eight normative rules are unchanged and re-enforced here:
+ *   2+3. `authOriginForRequestUrl` — same-origin + https ONLY. peerd never signs a
+ *        proof for a URL the actor does not own, and never over cleartext: a proof
+ *        is a signed statement of intent, so signing one for someone else's URL
+ *        would hand them an authenticated artifact.
+ *   4.   single-shot, PRE-fetch — webFetch still refuses redirects, so neither the
+ *        token nor the proof ever rides a hop to an unvalidated host.
+ *   5.   both slots stripped, then set last-wins.
+ *   6.   the audit records the origin + the public `jkt` thumbprint ONLY — never
+ *        the token, never the proof, never any key material.
+ *   7.   fail closed and SILENT: a locked vault, a missing key, or a failed
+ *        signature all send the request ANONYMOUS, with no throw. An unsigned
+ *        token is never sent as a consolation prize.
+ *
+ * @param {(resource:any, init?:any)=>Promise<Response>} webFetch
+ * @param {()=>string|null|undefined} getOwnedOrigin  the actor's fixed owned origin
+ * @param {{ getSecret:(name:string)=>Promise<string|null>,
+ *           getDpopKey:(origin:string)=>Promise<{ privateKey: CryptoKey, publicJwk: any } | null>,
+ *           audit?:(e:any)=>void, now?:()=>number, randomJti?:()=>string }} deps
+ * @returns {(resource:any, init?:any)=>Promise<Response>}
+ */
+export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti }) => async (resource, init = {}) => {
+  const url = resource instanceof Request ? resource.url : String(resource);
+  const owned = getOwnedOrigin();
+  const credentials = sessionScopedCredentials(url, owned);
+  let headers = init.headers;
+  const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
+  if (authOrigin) {
+    // Rule 5, UNCONDITIONALLY and BEFORE any decision: both slots the RFC fixes are
+    // cleared the moment we know this request is to the owned origin. why not inside
+    // the "we minted a proof" branch, where these used to live: every path that does
+    // NOT mint one — locked vault, no stored secret, a bearer secret, a failed
+    // signature — then left a CALLER-SUPPLIED `DPoP:` header standing on a request
+    // to the credentialed origin. The actor is untrusted; a header it chose must
+    // never reach the owned server in the slot the boundary owns, whether or not the
+    // boundary ends up filling it. Clearing first also makes "we sent nothing" mean
+    // exactly that.
+    headers = stripHeaderName(headers, DPOP_AUTH_HEADER);
+    headers = stripHeaderName(headers, DPOP_PROOF_HEADER);
+    // ONE try/catch around the whole credential attempt: rule 7 says every failure
+    // mode — locked vault, absent key, unsupported crypto, a throwing audit sink —
+    // degrades to the same anonymous request rather than surfacing to the caller.
+    try {
+      const secret = await getSecret(originSecretName(authOrigin));
+      const auth = secret ? parseOriginAuth(secret) : null;
+      if (auth && auth.scheme === 'dpop' && auth.token) {
+        const key = await getDpopKey(authOrigin);
+        if (key?.privateKey && key.publicJwk) {
+          // init.method wins over a Request's own method, mirroring fetch itself, so
+          // the `htm` we bind is the method that actually goes out.
+          const method = typeof init.method === 'string' ? init.method
+            : (resource instanceof Request ? resource.method : 'GET');
+          const proof = await signDpopProof({
+            privateKey: key.privateKey,
+            publicJwk: key.publicJwk,
+            method,
+            url,
+            jti: (randomJti ?? (() => crypto.randomUUID()))(),
+            iatSeconds: Math.floor((now ?? Date.now)() / 1000),
+            accessTokenHash: await accessTokenHashFor(auth.token),
+          });
+          if (proof) {
+            // Both slots are already empty (stripped above) — set ours, last-wins.
+            headers = { ...(headers || {}), [DPOP_AUTH_HEADER]: auth.value, [DPOP_PROOF_HEADER]: proof };
+            const jkt = await dpopJkt(key.publicJwk);
+            try { audit?.({ type: 'dpop_auth_attached', details: { origin: authOrigin, jkt } }); }
+            catch { /* best effort — never let auditing leak a value or throw */ }
+          }
+        }
+      } else if (auth) {
+        // A plain bearer/raw secret on this origin: identical to withApiCredentials.
+        headers = stripHeaderName(headers, auth.header);
+        headers = { ...(headers || {}), [auth.header]: auth.value };
+        try { audit?.({ type: 'origin_auth_attached', details: { origin: authOrigin, header: auth.header } }); }
+        catch { /* best effort */ }
+      }
+    } catch { /* rule 7: anonymous, never a throw, never an unsigned token */ }
   }
   return webFetch(resource, { ...init, headers, credentials });
 };

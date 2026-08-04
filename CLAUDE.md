@@ -199,6 +199,31 @@ prose orientation is this file, and the rest is the source itself.
 - **`index.js` is the public API per module.** ESLint
   `no-restricted-imports` forbids deep paths from outside the module.
   Inside the module, deep imports are fine.
+- **The credential ladder — prefer the credential peerd cannot read.**
+  When the agent must act as the user, climb DOWN this ladder and stop at
+  the first rung that works; never drop a rung for convenience:
+    1. **The browser holds it.** Drive the authenticated tab and let the
+       browser attach the session. peerd requests no `cookies` permission,
+       so it *structurally cannot* read what it is using — a platform
+       guarantee, not a discipline one (`site_client_*`, the web actor).
+    2. **A key peerd cannot export.** A proof-of-possession keypair
+       generated `extractable: false`: peerd holds a HANDLE, mints a
+       per-request DPoP proof at the egress boundary, and no in-origin
+       code — ours or an attacker's — can export the key material. Needs
+       provider support, RFC 9449 (`peerd-egress/dpop/`).
+    3. **A bearer secret in the vault.** The fallback the ecosystem forces:
+       bytes that must be sent verbatim, so *someone* holds them.
+       Encrypted at rest, decrypted only in the SW, injected at the egress
+       boundary, never on the agent's ctx, bound to exactly one https
+       origin (`fetch/origin-credentials.js`).
+    4. **The user's own hands.** If none of the above is safe, verify the
+       origin, take consent, and hand the gesture back to the user (the
+       `login` tool, INV-14).
+  why an explicit ladder: "can the AGENT see it" and "does PEERD hold it"
+  are different questions, and only the second decides whether a
+  compromise yields a portable, replayable secret. A rung-1 or rung-2
+  credential cannot be walked away with; a rung-3 one can. A new
+  integration must justify every step down.
 - **Comments explain *why*, not *what*.** Every architectural choice
   gets a `// why:` comment. Code without rationale rots fast.
 - **Modern, functional JS — lint-enforced.** `eslint.config.js`'s
