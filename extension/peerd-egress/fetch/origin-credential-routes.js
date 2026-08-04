@@ -51,7 +51,10 @@ export const makeOriginCredentialRoutes = ({ vault, isLockedError, audit }) => {
       return { ok: true, integrations };
     }),
 
-    /** @param {{ origin?: string, key?: string, header?: string, scheme?: 'bearer' | 'raw' }} arg */
+    // scheme 'dpop' provisions a proof-of-possession ACCESS TOKEN; the keypair it
+    // is spent with is minted lazily at the boundary (peerd-egress/dpop/keys.js),
+    // so provisioning stays a one-field write and the key never passes through here.
+    /** @param {{ origin?: string, key?: string, header?: string, scheme?: 'bearer' | 'raw' | 'dpop' }} arg */
     'origin-cred/set': ({ origin, key, header, scheme }) => guard(async () => {
       const canonical = normalizeKeyedOrigin(String(origin ?? ''));
       if (!canonical) return { ok: false, error: 'bad-origin' };   // rule 2: https public host only

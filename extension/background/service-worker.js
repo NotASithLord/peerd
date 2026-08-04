@@ -49,9 +49,16 @@ import {
   makeSafeFetch,
   makeWebFetch,
   withSessionScopedCredentials,
-  // DESIGN-18 P1: the API actor's credentialed boundary fetch (session scope + the
-  // keyless origin:<origin> key injection) + the Settings → API integrations routes.
-  withApiCredentials,
+  // DESIGN-18 P1 + Tier 1 / INV-15: the API actor's credentialed boundary fetch
+  // (session scope + the keyless origin:<origin> injection), upgraded to
+  // proof-of-possession. withDpopCredentials is a strict SUPERSET of
+  // withApiCredentials — a bearer/raw secret behaves identically — and a
+  // dpop-scheme secret additionally rides a fresh RFC 9449 proof signed by a
+  // NON-EXTRACTABLE key that never leaves the SW and that nothing, including this
+  // file, can export. Plus the Settings → API integrations routes.
+  withDpopCredentials,
+  getOrCreateDpopKey,
+  makeDpopKeyStore,
   makeOriginCredentialRoutes,
   // DESIGN-18 P2: map a vault secret name → its origin (actor_list integration discovery).
   originFromSecretName,
@@ -394,6 +401,16 @@ const vault = createVault({
 // maxEntries: capped retention — oldest entries pruned, amortized on
 // append — so a long-lived install's audit log doesn't grow unbounded.
 const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxEntries });
+
+// INV-15 — the proof-of-possession key seam. Backed by the `dpop_keys` IDB store
+// (one non-extractable keypair per owned https origin, minted lazily on the first
+// credentialed request to that origin). why it lives HERE and is only ever closed
+// over by a boundary wrapper: like getSecret, it must never appear on an actor's
+// ctx. Unlike getSecret it is not even a secret to leak — the handle it returns
+// cannot be exported by anyone, including this file.
+const dpopKeyStore = makeDpopKeyStore({ get: idb.get, put: idb.put });
+/** @param {string} origin @returns {Promise<{ privateKey: CryptoKey, publicJwk: any } | null>} */
+const getDpopKeyForOrigin = (origin) => getOrCreateDpopKey(origin, dpopKeyStore);
 
 /** User-added provider endpoints; safeFetch reads via callback. */
 let userEndpoints = new Set();
@@ -1751,8 +1768,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
       const ownedOrigin = typeof actorInstanceId === 'string' ? actorInstanceId : undefined;
       // DESIGN-18 P1: session-scope cookies AND inject the vault origin:<origin> key
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
-      resCtx.webFetch = withApiCredentials(webFetch, () => ownedOrigin, {
+      resCtx.webFetch = withDpopCredentials(webFetch, () => ownedOrigin, {
         getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+        getDpopKey: getDpopKeyForOrigin,
         audit: (/** @type {any} */ e) => auditLog.append(e),
       });
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
@@ -3488,8 +3506,9 @@ const siteFetchCallRoute = {
       // uncovered — that fix landed for tab actors; this closes it for API actors.
       const owned = typeof owner.instanceId === 'string' ? normalizeApiOrigin(owner.instanceId) : null;
       if (!owned || pin !== owned) return { ok: false, error: 'site_fetch_cross_origin' };
-      scopedFetch = withApiCredentials(webFetch, () => owned, {
+      scopedFetch = withDpopCredentials(webFetch, () => owned, {
         getSecret: (/** @type {string} */ name) => vault.getSecret(name),
+        getDpopKey: getDpopKeyForOrigin,
         audit: (/** @type {any} */ e) => auditLog.append(e),
       });
     } else {

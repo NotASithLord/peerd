@@ -111,7 +111,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 570 → 572: the tool-ergonomics batch — the shared once-per-session dedup
 // guard (tools/defs/once-per-session.js, design 6) and the pure failure
 // aggregator's home (metrics design 5); all new files carry // @ts-check.
-const COVERED_FLOOR = 572;
+// 572 → 576: the DPoP proof-of-possession credential path (INV-15) adds
+// peerd-egress/dpop/proof.js (the pure RFC 9449 core) and dpop/keys.js (the
+// non-extractable keypair shell); both carry // @ts-check. The +4 (not +2) also
+// locks in two files that had already landed above the stale 572 floor.
+const COVERED_FLOOR = 576;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

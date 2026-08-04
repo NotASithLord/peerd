@@ -86,14 +86,20 @@ export const isPlausibleApiKey = (key) =>
  * Build the vault secret string for an origin key. Stored as JSON {header, value} so
  * the boundary knows the exact header to set (rule 5) and its full value. `scheme`
  * shapes the value: 'bearer' (default) → `Authorization: Bearer <key>`; 'raw' → the
- * key verbatim in `header` (default Authorization), for X-API-Key-style schemes.
+ * key verbatim in `header` (default Authorization), for X-API-Key-style schemes;
+ * 'dpop' → `{scheme:'dpop', value:<token>}`, an ACCESS TOKEN that is useless on its
+ * own — the boundary must pair it with a freshly signed proof of possession
+ * (RFC 9449; peerd-egress/dpop/). why the dpop shape stores no `header`: the header
+ * set is FIXED by the RFC (`Authorization: DPoP …` + `DPoP: <proof>`), so letting it
+ * be configured could only produce a token sent without its proof.
  * Returns null if the key isn't plausible.
- * @param {{ key?: string, header?: string, scheme?: 'bearer' | 'raw' }} arg
+ * @param {{ key?: string, header?: string, scheme?: 'bearer' | 'raw' | 'dpop' }} arg
  * @returns {string | null}
  */
 export const buildOriginSecret = ({ key, header, scheme } = {}) => {
   const k = typeof key === 'string' ? key.trim() : '';
   if (!isPlausibleApiKey(k)) return null;
+  if (scheme === 'dpop') return JSON.stringify({ scheme: 'dpop', value: k });
   const useScheme = scheme === 'raw' ? 'raw' : 'bearer';
   const name = useScheme === 'bearer' ? 'Authorization' : (typeof header === 'string' && header.trim() ? header.trim() : 'Authorization');
   const value = useScheme === 'bearer' ? `Bearer ${k}` : k;
@@ -102,10 +108,18 @@ export const buildOriginSecret = ({ key, header, scheme } = {}) => {
 
 /**
  * Parse a stored origin secret into the header to inject. Accepts the JSON {header,
- * value} shape, OR a bare token (legacy / hand-entered) → Authorization: Bearer.
+ * value} shape, the JSON {scheme:'dpop', value} shape, OR a bare token (legacy /
+ * hand-entered) → Authorization: Bearer.
  * Returns null for an empty/garbage secret (→ the wrapper sends anonymous).
+ *
+ * The dpop result carries the extra `scheme:'dpop'` + `token` members so the
+ * boundary can tell a self-sufficient BEARER credential from one that is only
+ * spendable alongside a freshly signed proof. why the extra members rather than a
+ * separate parser: every existing caller reads `.header`/`.value` and keeps working,
+ * while a caller that does NOT understand proof-of-possession can (and does — see
+ * withApiCredentials) refuse the credential by checking one field.
  * @param {string | null | undefined} stored
- * @returns {{ header: string, value: string } | null}
+ * @returns {{ header: string, value: string, scheme?: 'dpop', token?: string } | null}
  */
 export const parseOriginAuth = (stored) => {
   if (typeof stored !== 'string' || !stored.trim()) return null;
@@ -116,6 +130,13 @@ export const parseOriginAuth = (stored) => {
   // A JSON OBJECT is meant to be our {header,value} shape — honor it, or reject if
   // malformed (structured but wrong is "no usable secret", not a token).
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    // Proof-of-possession first: the header set is fixed by RFC 9449, so a stored
+    // `header` (if some future writer adds one) is deliberately ignored here.
+    if (parsed.scheme === 'dpop') {
+      return (typeof parsed.value === 'string' && parsed.value)
+        ? { header: 'Authorization', value: `DPoP ${parsed.value}`, scheme: 'dpop', token: parsed.value }
+        : null;
+    }
     return (typeof parsed.header === 'string' && parsed.header.trim() && typeof parsed.value === 'string' && parsed.value)
       ? { header: parsed.header.trim(), value: parsed.value }
       : null;

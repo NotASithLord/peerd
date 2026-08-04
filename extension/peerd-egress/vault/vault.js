@@ -53,6 +53,17 @@
 // once a passkey is enrolled (unlockWithPrf). The default bounds how long
 // the unwrapped DK sits live within a browser session.
 //
+// The resident DK is non-extractable
+// -----------------------------------
+// The DK this file holds in `dk` — the one handed to encryptString /
+// decryptString — is unwrapped NON-EXTRACTABLE, so `exportKey` on it
+// rejects and a bug that leaks the reference cannot turn it into bytes
+// (residual R11). The two operations that must WRAP the live DK under a
+// NEW factor (setRecoveryPassphrase, enrollPrf) are never given the
+// factor the blob is already sealed under, so they cannot re-derive a
+// KEK and re-unwrap it. They go through `_wrappableDK()` instead — see
+// the "Re-wrap seam" block below.
+//
 // What this file deliberately does NOT do
 // ---------------------------------------
 //  - Persist the unwrapped DK to DISK. It is mirrored to
@@ -64,7 +75,8 @@
 //  - Cache decrypted plaintext. Every getSecret() does a fresh decrypt.
 
 import {
-  generateDK, wrapDK, unwrapDK,
+  generateDK, wrapDK, unwrapDK, unwrapWrappableDK,
+  importWrappableDK, exportRawDK, generateRewrapKEK,
   encryptString, decryptString, generateSalt,
   importPrfKEK, importRawKEK,
 } from './keys.js';
@@ -202,8 +214,31 @@ export const createVault = (deps) => {
   // which happens AFTER the vault is constructed).
   let autoLockMs = deps.autoLockMs ?? DEFAULT_AUTO_LOCK_MS;
 
-  /** @type {CryptoKey | null} */
+  /** The resident data key. NON-EXTRACTABLE — see the file header.
+   * @type {CryptoKey | null} */
   let dk = null;
+  // ---- Re-wrap seam ------------------------------------------------------
+  // The DK, kept a second time as CIPHERTEXT under an ephemeral,
+  // non-extractable AES-KW key that never leaves this closure. Both halves
+  // are minted at adopt time and dropped on lock().
+  //
+  // why this exists: enrollPrf / setRecoveryPassphrase have to feed the
+  // live DK to wrapKey, which refuses a non-extractable key, and they
+  // arrive holding only the NEW factor — nothing that opens the stored
+  // blob. Rather than keep an extractable DK resident for the whole
+  // session (exactly what R11 names), they materialize one here, spend it
+  // on a single wrapKey, and drop it.
+  //
+  // why ciphertext + a browser-held key rather than the raw bytes: a heap
+  // dump, a stray log, or an accidental serialization of this closure
+  // yields a 40-byte AES-KW blob, not a key. Recovering the DK from it
+  // takes a reference to `rewrapKek` too, and that one is non-extractable
+  // by construction. This is defense in depth, not a new trust boundary:
+  // code that already owns the vault closure can just call getSecret.
+  /** @type {CryptoKey | null} */
+  let rewrapKek = null;
+  /** @type {Uint8Array | null} */
+  let rewrappedDK = null;
   /** @type {ReturnType<typeof setTimer> | null} */
   let timerHandle = null;
   let unlockedAt = 0;
@@ -250,9 +285,47 @@ export const createVault = (deps) => {
     if (!isLocked()) armAutoLock();
   };
 
+  /**
+   * Take a freshly obtained EXTRACTABLE data key and make it the
+   * resident one. Mints the re-wrap material, then re-derives `dk` as a
+   * non-extractable handle on the same key. The caller's `fresh` handle
+   * is the transient one — it must not be stored.
+   *
+   * why all three assignments land together at the end: a throw part-way
+   * (generateKey/wrap/unwrap) must leave the vault LOCKED rather than
+   * half-unlocked with no way to re-wrap.
+   *
+   * @param {CryptoKey} fresh   extractable; from generateDK, unwrapWrappableDK
+   *                            or importWrappableDK
+   */
+  const _adoptDK = async (fresh) => {
+    const kek = await generateRewrapKEK();
+    const rewrapped = await wrapDK(fresh, kek);
+    const resident = await unwrapDK(rewrapped, kek);
+    rewrapKek = kek;
+    rewrappedDK = rewrapped;
+    dk = resident;
+  };
+
+  /**
+   * Materialize a transient EXTRACTABLE handle on the live DK, for the
+   * one wrapKey the caller is about to do. Never store the result.
+   *
+   * @returns {Promise<CryptoKey>}
+   */
+  const _wrappableDK = async () => {
+    // why re-check rather than trust the caller's isLocked() guard: this
+    // is the only door to extractable key material in the vault, so it
+    // states its own precondition.
+    if (rewrapKek === null || rewrappedDK === null) throw new VaultLockedError();
+    return unwrapWrappableDK(rewrappedDK, rewrapKek);
+  };
+
   const lock = () => {
     if (dk === null) return;
     dk = null;
+    rewrapKek = null;
+    rewrappedDK = null;
     if (timerHandle !== null) {
       clearTimer(timerHandle);
       timerHandle = null;
@@ -357,13 +430,27 @@ export const createVault = (deps) => {
   // Threat model: anything with extension code execution already has
   // access to SW memory (and thus the DK). Persisting to session
   // storage exposes the DK to the same set of attackers; no new surface.
+  // It IS the honest limit on the non-extractable-DK hardening above:
+  // while the vault is unlocked the bytes are readable via
+  // chrome.storage.session by any in-origin code (R7), so R11's export
+  // concern is narrowed to a leaked key REFERENCE, not eliminated.
 
-  const _persistDK = async () => {
-    if (!sessionCache || dk === null) return;
+  /**
+   * Mirror the DK bytes into chrome.storage.session.
+   *
+   * why it takes the key instead of reading `dk`: `dk` is
+   * non-extractable, and every call site is a path that JUST obtained
+   * the transient extractable handle (generate / unwrap / import). Taking
+   * it as an argument keeps this the only exportKey in the vault and
+   * avoids re-materializing one.
+   *
+   * @param {CryptoKey} wrappable
+   */
+  const _persistDK = async (wrappable) => {
+    if (!sessionCache || isLocked()) return;
     try {
-      const raw = await crypto.subtle.exportKey('raw', dk);
       await sessionCache.sessionSet(SESSION_DK_KEY,
-        bytesToBase64(new Uint8Array(raw)));
+        bytesToBase64(await exportRawDK(wrappable)));
     } catch (e) {
       console.error('[vault] persist DK failed', e);
     }
@@ -390,16 +477,9 @@ export const createVault = (deps) => {
     const stored = await sessionCache.sessionGet(SESSION_DK_KEY);
     if (!stored) return false;
     try {
-      const bytes = base64ToBytes(stored);
-      dk = await crypto.subtle.importKey(
-        'raw',
-        // why the cast: see keys.js — a plain Uint8Array isn't a
-        // BufferSource to the DOM types, but the vault never SAB-backs one.
-        /** @type {BufferSource} */ (bytes),
-        { name: 'AES-GCM', length: 256 },
-        true,
-        ['encrypt', 'decrypt'],
-      );
+      // Adopt-and-drop, same as every unlock path: the imported handle is
+      // extractable only long enough to mint the re-wrap material.
+      await _adoptDK(await importWrappableDK(base64ToBytes(stored)));
       unlockedAt = now();
       armAutoLock();
       notify({ type: 'unlocked' });
@@ -482,10 +562,10 @@ export const createVault = (deps) => {
       ...withPassphraseWrap({}, wrap),
       createdAt: now(),
     });
-    dk = newDK;
+    await _adoptDK(newDK);
     unlockedAt = now();
     armAutoLock();
-    _persistDK();
+    _persistDK(newDK);
     notify({ type: 'initialized' });
   };
 
@@ -522,10 +602,10 @@ export const createVault = (deps) => {
       ...(prfTransports ? { prfTransports } : {}),
       createdAt: now(),
     });
-    dk = newDK;
+    await _adoptDK(newDK);
     unlockedAt = now();
     armAutoLock();
-    _persistDK();
+    _persistDK(newDK);
     notify({ type: 'initialized' });
     notify({ type: 'prf_enrolled' });
   };
@@ -550,20 +630,28 @@ export const createVault = (deps) => {
     // Only the 'argon2id' path remains, and planPassphraseUnlock always
     // carries the descriptor on it — narrow the optional field.
     const kek = await _deriveArgon2KEK(passphrase, /** @type {import('./kdf.js').Argon2Descriptor} */ (plan.kdf));
+    /** @type {CryptoKey} */
+    let fresh;
     try {
-      // unwrapDK throws on tampered ciphertext or wrong KEK; either way
-      // we surface WrongPassphraseError. We intentionally don't leak the
-      // underlying SubtleCrypto error to the caller — that would be a
-      // small side channel for distinguishing "wrong passphrase" from
-      // "tampered ciphertext" which an attacker with storage access
-      // shouldn't get to differentiate.
-      dk = await unwrapDK(_bytes(stored.wrappedDK), kek);
+      // unwrapWrappableDK throws on tampered ciphertext or wrong KEK;
+      // either way we surface WrongPassphraseError. We intentionally
+      // don't leak the underlying SubtleCrypto error to the caller —
+      // that would be a small side channel for distinguishing "wrong
+      // passphrase" from "tampered ciphertext" which an attacker with
+      // storage access shouldn't get to differentiate.
+      //
+      // why ONLY the unwrap sits in the try: _adoptDK failing is a
+      // crypto-plumbing bug, not a bad passphrase, and mapping it to
+      // WrongPassphraseError would send the user round a retry loop
+      // that can never succeed.
+      fresh = await unwrapWrappableDK(_bytes(stored.wrappedDK), kek);
     } catch (_e) {
       throw new WrongPassphraseError();
     }
+    await _adoptDK(fresh);
     unlockedAt = now();
     armAutoLock();
-    _persistDK();
+    _persistDK(fresh);
     notify({ type: 'unlocked' });
   };
 
@@ -629,9 +717,10 @@ export const createVault = (deps) => {
     if (isLocked()) throw new VaultLockedError();
     const stored = await getBlob();
     if (!stored) throw new VaultNotInitializedError();
-    // dk is non-null here: isLocked() threw above otherwise. The checker
-    // can't narrow through the isLocked() helper, so assert it.
-    const wrap = await _makePassphraseWrap(passphrase, /** @type {CryptoKey} */ (dk));
+    // why _wrappableDK() and not `dk`: the resident DK is non-extractable
+    // and wrapKey would refuse it. This mints a transient extractable
+    // handle on the same key, spends it here, and lets it go.
+    const wrap = await _makePassphraseWrap(passphrase, await _wrappableDK());
     await setBlob(withPassphraseWrap(stored, wrap));
     notify({ type: 'recovery_set' });
   };
@@ -658,8 +747,9 @@ export const createVault = (deps) => {
     const stored = await getBlob();
     if (!stored) throw new VaultNotInitializedError();
     const prfKEK = await importPrfKEK(prfOutput);
-    // dk is non-null here: isLocked() threw above otherwise.
-    const wrapped = await wrapDK(/** @type {CryptoKey} */ (dk), prfKEK);
+    // why _wrappableDK(): see setRecoveryPassphrase — the resident DK is
+    // non-extractable, so wrapKey needs a transient extractable handle.
+    const wrapped = await wrapDK(await _wrappableDK(), prfKEK);
     const prfTransports = sanitizeTransports(transports);
     const next = {
       ...stored,
@@ -690,16 +780,20 @@ export const createVault = (deps) => {
     if (!stored) throw new VaultNotInitializedError();
     if (!stored.wrappedDK_prf) throw new PrfNotEnrolledError();
     const prfKEK = await importPrfKEK(prfOutput);
+    /** @type {CryptoKey} */
+    let fresh;
     try {
-      dk = await unwrapDK(_bytes(stored.wrappedDK_prf), prfKEK);
+      fresh = await unwrapWrappableDK(_bytes(stored.wrappedDK_prf), prfKEK);
     } catch (_e) {
       // why: do not leak whether the bytes were wrong or the ciphertext
       // tampered — same side-channel concern as WrongPassphraseError.
+      // (And, as in unlock(), _adoptDK stays outside the try.)
       throw new PrfUnlockFailedError();
     }
+    await _adoptDK(fresh);
     unlockedAt = now();
     armAutoLock();
-    _persistDK();
+    _persistDK(fresh);
     notify({ type: 'unlocked' });
   };
 
