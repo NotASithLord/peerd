@@ -29,6 +29,7 @@
 
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
+import { isOffscreenSender } from '/shared/sender-trust.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
@@ -868,12 +869,30 @@ const denylistStore = makeDenylistStore({
 // rejects) when the load finishes or fails — it can't hang a turn, and
 // fails-closed to [] (the seed is a bundled extension asset, so a real failure
 // is near-impossible).
+/**
+ * The seed's OWN category map ({ banks_us: [...], health_us: [...], … }), kept
+ * for the settings list to group by.
+ *
+ * why keep it: the seed ships curated and categorised, but the store only ever
+ * needed a flat match list, so the taxonomy was thrown away one line after it
+ * was read — leaving the UI to render 164 undifferentiated chips. Grouping is a
+ * read-only presentation concern, so this stays out of the matcher entirely:
+ * `patterns()` is still the flat list every gate consults.
+ * @type {Record<string, string[]>}
+ */
+let seedCategories = {};
+/** Live read for the settings list — the map is replaced when the seed loads. */
+const getSeedCategories = () => seedCategories;
 const loadDenylist = async () => {
   /** @type {any[]} */ let seed = [];
   try {
     const res = await fetch('/peerd-egress/denylist/default.json');
     if (!res.ok) console.error('[sw] denylist seed fetch failed:', res.status);
-    else seed = flattenCategorisedDenylist(await res.json());
+    else {
+      const json = await res.json();
+      seedCategories = (json && typeof json === 'object' && json.categories) ? json.categories : {};
+      seed = flattenCategorisedDenylist(json);
+    }
   } catch (e) {
     console.error('[sw] denylist load threw', e);
   }
@@ -2432,6 +2451,34 @@ const scriptRuns = createScriptRunRegistry();
 // route below); read by the debug-bundle route and the inspector view.
 const contextSnapshots = createContextSnapshots();
 
+/**
+ * Walk parentSessionId up from any actor / spawned session to the CHAT at the base
+ * of its lineage — the session that carries the user-visible cost tally the spend
+ * limit is measured against. Returns the record, or null when the chain is broken
+ * (a reaped parent) or the id is already a chat.
+ *
+ * why bounded + cycle-guarded rather than a plain while: this walks persisted
+ * records, and a corrupt or hand-edited chain must degrade to "no root" instead of
+ * spinning the service worker.
+ * @param {string} sessionId
+ * @returns {Promise<any | null>}
+ */
+const rootChatSessionFor = async (sessionId) => {
+  const seen = new Set();
+  let id = sessionId;
+  for (let hop = 0; hop < 16; hop++) {
+    if (!id || seen.has(id)) return null;
+    seen.add(id);
+    const rec = await sessions.get(id).catch(() => null);
+    if (!rec) return null;
+    if (rec.kind !== 'actor' && rec.kind !== 'spawned') return rec;
+    // A reaped or never-set parent ends the walk (the `!id` guard above) rather
+    // than climbing into undefined — an orphaned actor simply has no root.
+    id = rec.parentSessionId ?? '';
+  }
+  return null;
+};
+
 // The heap split: the ONE offscreen agent-loop client. It runs every non-
 // orchestrator loop — an ephemeral reasoning actor (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
@@ -2466,6 +2513,41 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // in-SW only), so without this the eval harness's OM2W recorder — and any
   // activity view — is blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
+  // The relay boundary. `runtime.sendMessage` cannot address one extension
+  // context, so the actor/run job (grant token included) is broadcast to every
+  // listener — the side panel and the engine tab pages among them. Pinning the
+  // three relay routes to the offscreen document is therefore what actually
+  // keeps another first-party page from dispatching as an actor; the token
+  // carries run identity and liveness on top of it.
+  isOffscreenSender: (/** @type {any} */ sender) => isOffscreenSender(sender, {
+    runtimeId: browser.runtime?.id,
+    extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+    offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
+  }),
+  // Spend-limit preflight for the actor lane. Two tallies, because they fail in
+  // different directions and each alone leaves a hole:
+  //
+  //   the ACTOR's own record — the one runActorTurnOffscreen folds this lane's
+  //     cost into. This is the check that actually bounds actor spend, and it is
+  //     the only one that works for the dweb daemon actor, a global singleton with
+  //     no parent chat to walk to. Same shape as cheap-call.js: preflight and fold
+  //     name the same record, so the number being tested is the number being
+  //     incremented.
+  //   the ROOT CHAT — so a conversation that has already blown the cap cannot keep
+  //     spending by delegating.
+  //
+  // Refusing is all this does; it never bills. NOT closed by this: a fan-out across
+  // MANY actors, each individually under the cap. That needs one budget spanning the
+  // lineage — see HARDENING-ROADMAP.md P0-3, still open.
+  spendRefusalFor: async (/** @type {string} */ actorSessionId) => {
+    const spendLimit = settingsStore.get().spendLimitUsd;
+    const over = (/** @type {any} */ rec) => !!rec && limitExceeded(normalizeTally(rec.cost).cost, spendLimit);
+    const own = await sessions.get(actorSessionId).catch(() => null);
+    if (over(own)) return `actor refused: this actor has reached the session spend limit ($${spendLimit})`;
+    const root = await rootChatSessionFor(actorSessionId);
+    if (over(root)) return `actor refused: the session spend limit ($${spendLimit}) is reached`;
+    return null;
+  },
 }) : null;
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
@@ -4765,16 +4847,29 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     for (const m of newMessages) {
       await sessions.appendMessage(actorSessionId, /** @type {any} */ (m)).catch(() => { persistOk = false; });
     }
-    // Cost PARITY: price the turn's usage and surface it on the card (the reducer
-    // reads `cost`, not raw usage — the earlier `usage` field never populated).
-    if (display && uiConnected() && r.usage) {
+    // Cost PARITY: price the turn's usage, PERSIST it on the actor's own session,
+    // and surface it on the card (the reducer reads `cost`, not raw usage — the
+    // earlier `usage` field never populated).
+    //
+    // why the fold is separate from the broadcast: an offscreen actor turn's spend
+    // used to be broadcast to the UI and then dropped — nothing wrote it to a tally,
+    // and the broadcast itself was conditional on a connected side panel, so a
+    // headless/goal-mode actor turn cost nothing on the record at all. The fold runs
+    // unconditionally now, and spendRefusalFor preflights THIS record, so the number
+    // being tested is the number being incremented. It stays on the actor's own
+    // session (not rolled up to the parent) — spawn.js documents that separation
+    // deliberately, and changing it changes user-visible chat cost.
+    if (r.usage) {
       try {
         const localProvider = !!listProviders().find((/** @type {any} */ p) => p.name === rec.provider)?.keyless;
         const cost = costOf(/** @type {any} */ (rec.model), /** @type {any} */ (r.usage), /** @type {any} */ (settingsStore.get().pricingOverrides), { localProvider });
+        foldSessionCost(actorSessionId, r.usage, /** @type {any} */ (cost)?.cost ?? 0);
         // usage rides along RAW: costOf returns only { cost: USD } — consumers
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
-        uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
+        if (display && uiConnected()) {
+          uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
+        }
       } catch { /* cost telemetry is best-effort */ }
     }
     auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
@@ -5288,7 +5383,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
   // rule is rebuilt on every edit — including the removal path, where a stale
   // rule would keep blocking a site the user just unblocked.
-  ...makeDenylistRoutes({ denylistStore, auditLog, denylistNetGuard }),
+  ...makeDenylistRoutes({ denylistStore, auditLog, getSeedCategories, denylistNetGuard }),
   // The settings view of the LEARNED origin set (+ the only un-learn path).
   // Settings-surface only: routes are unreachable from the tool dispatcher, so
   // no agent or page-fed actor can erase its own containment.

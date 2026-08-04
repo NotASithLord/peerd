@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**17 states · 34 screens · baselines `linux-x64`**
+**19 states · 38 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -141,7 +141,23 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/notebook-tab-failed.light.png" alt="notebook-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/notebook-tab-failed.dark.png" alt="notebook-tab-failed (dark)" width="380"> |
 
-### 17 · vm-tab-failed
+### 17 · options-behavior
+
+`options-behavior`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/options-behavior.light.png" alt="options-behavior (light)" width="380"> | <img src="baselines/linux-x64/options-behavior.dark.png" alt="options-behavior (dark)" width="380"> |
+
+### 18 · options-denylist
+
+`options-denylist`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/options-denylist.light.png" alt="options-denylist (light)" width="380"> | <img src="baselines/linux-x64/options-denylist.dark.png" alt="options-denylist (dark)" width="380"> |
+
+### 19 · vm-tab-failed
 
 `vm-tab-failed`
 

@@ -1,0 +1,17 @@
+# Keeps the SHA-pinned GitHub Actions current: every action in the workflows
+# is pinned to a full commit SHA with the version in a trailing comment
+# (see package-and-release.yml), and Dependabot understands that format —
+# its PRs bump the SHA and the comment together, so pins never rot into
+# "immutable but ancient". Actions only, deliberately: the Bun devDependency
+# tree is governed by the committed bun.lock + `bun install --frozen-lockfile`
+# in CI, and its updates are curated by hand (signing-critical deps like crx3
+# and web-ext are exact-pinned in package.json on purpose).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']

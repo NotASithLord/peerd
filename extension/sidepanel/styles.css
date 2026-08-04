@@ -1918,6 +1918,46 @@ button.icon.is-active {
 }
 .log-time { font-size: 11px; color: var(--fg-muted); margin-top: 2px; }
 .denylist-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+/* Denylist groups (P4). The seed ships 164 patterns already categorised; flat,
+   that was a wall nobody read. Collapsed a group is one scannable line; expanded
+   it is the same chips as before, so provenance and the confirm flow are
+   untouched. All colour comes from tokens, so dark is inherited rather than
+   restated — the one place the design specified a literal rgba focus ring had no
+   dark value, so it uses --selbg (which already differs per theme) instead. */
+.denylist-groups { display: flex; flex-direction: column; gap: 4px; }
+.denylist-group { border: 1px solid var(--border); border-radius: 7px; }
+.denylist-group.is-empty { border-style: dashed; opacity: 0.6; }
+.denylist-group-head {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 7px 11px; background: none; border: 0; border-radius: 7px;
+  cursor: pointer; text-align: left; font: inherit; color: inherit;
+}
+.denylist-group.is-open > .denylist-group-head { padding-bottom: 8px; }
+.denylist-group-head:hover { background: var(--elev); }
+.denylist-group-head:focus-visible {
+  outline: none; box-shadow: 0 0 0 2px var(--selbg); border-radius: 7px;
+}
+.denylist-group-chev {
+  font-size: 11px; line-height: 1; color: var(--muted);
+  transition: transform .12s ease; transform-origin: 50% 50%;
+}
+.denylist-group-chev.is-open { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .denylist-group-chev { transition: none; } }
+.denylist-group-label {
+  flex: 1; font: 500 11.5px/1 var(--sans); color: var(--muted);
+}
+.denylist-group.is-open .denylist-group-label { font-weight: 600; color: var(--text); }
+.denylist-group-count { font: 600 9.5px/1 var(--mono); color: var(--muted); }
+/* The user's own patterns carry a bordered count — their group is the one that
+   is theirs to edit freely, and the pill says so without adding a colour. */
+.denylist-group.is-user .denylist-group-count {
+  padding: 2px 6px; border: 1px solid var(--text); border-radius: 4px; color: var(--text);
+}
+.denylist-group-body {
+  display: flex; flex-wrap: wrap; gap: 5px; padding: 0 11px 9px;
+}
+.denylist-group-empty { margin: 0; padding: 0 11px 9px; font-size: 10.5px; }
+
 .denylist-item {
   font-size: 11px;
   padding: 2px 6px;

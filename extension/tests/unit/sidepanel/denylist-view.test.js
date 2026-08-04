@@ -108,8 +108,11 @@ const setSearch = async (root, value) => {
 };
 
 /** @param {ParentNode} root */
+// Enforced chips live inside their category group; the disabled section keeps
+// its own grid. Both are chips, so the helper spans both containers.
 const chipTexts = (root) =>
-  [...root.querySelectorAll('.denylist-grid code.denylist-item')].map((c) => c.textContent);
+  [...root.querySelectorAll('.denylist-group-body code.denylist-item, .denylist-grid code.denylist-item')]
+    .map((c) => c.textContent);
 
 describe('sidepanel.denylist-view', () => {
   describe('rendering', () => {
@@ -281,5 +284,109 @@ describe('sidepanel.denylist-view', () => {
         expect(changed).toBe(1);
       } finally { unmount(); }
     });
+  });
+});
+
+// ── grouping (P4) ───────────────────────────────────────────────────────────
+// 164 seed patterns flat was a wall nobody read. What has to hold once they are
+// grouped: a group never disappears (an absent group reads as "no such
+// protection"), a search opens the group holding its match, and the provenance
+// rules from above still apply inside a group.
+describe('sidepanel.denylist-view · categories', () => {
+  const CATEGORISED = {
+    patterns: ['chase.com', 'uhc.com', 'mine.example'],
+    added: ['mine.example'],
+    disabled: [],
+    categories: { banks_us: ['chase.com', 'wellsfargo.com'], health_us: ['uhc.com'] },
+  };
+  const sendCategorised = () => Object.assign(
+    async (/** @type {any} */ msg) => (msg.type === 'denylist/list'
+      ? { ok: true, ...structuredClone(CATEGORISED) }
+      : { ok: true }),
+    { calls: [] },
+  );
+
+  it('renders one group per seed category, plus the user’s own, with counts from the data', async () => {
+    const { root, unmount } = await mountView(sendCategorised());
+    try {
+      const labels = [...root.querySelectorAll('.denylist-group-label')].map((e) => e.textContent);
+      expect(labels.includes('Banks (US)')).toBe(true);
+      expect(labels.includes('Health (US)')).toBe(true);
+      expect(labels.includes('Your patterns')).toBe(true);
+      const counts = [...root.querySelectorAll('.denylist-group-count')].map((e) => e.textContent);
+      // Unfiltered, a group shows its plain size — the fraction is reserved for
+      // "the search narrowed this", where it carries information.
+      expect(counts.includes('2')).toBe(true);
+    } finally { unmount(); }
+  });
+
+  it('collapses seed categories by default and opens the user’s own', async () => {
+    const { root, unmount } = await mountView(sendCategorised());
+    try {
+      const open = [...root.querySelectorAll('.denylist-group.is-open .denylist-group-label')]
+        .map((e) => e.textContent);
+      expect(open).toEqual(['Your patterns']);
+      // A collapsed group shows no chips…
+      expect(root.querySelector('.denylist-group:not(.is-open) .denylist-group-body')).toBe(null);
+      // …but is still announced as collapsed rather than missing.
+      const heads = [...root.querySelectorAll('.denylist-group-head')];
+      expect(heads.some((h) => h.getAttribute('aria-expanded') === 'false')).toBe(true);
+    } finally { unmount(); }
+  });
+
+  it('clicking a group header expands it', async () => {
+    const { root, unmount } = await mountView(sendCategorised());
+    try {
+      const banks = /** @type {HTMLButtonElement | undefined} */ (
+        [...root.querySelectorAll('.denylist-group-head')]
+          .find((h) => h.textContent?.includes('Banks (US)')));
+      expect(!!banks).toBe(true);
+      if (!banks) return;
+      banks.click();
+      await flush();
+      const openLabels = [...root.querySelectorAll('.denylist-group.is-open .denylist-group-label')]
+        .map((e) => e.textContent);
+      expect(openLabels.includes('Banks (US)')).toBe(true);
+    } finally { unmount(); }
+  });
+
+  it('a group with no search hits STAYS listed, marked empty', async () => {
+    // Hiding it would read as "peerd does not block banks".
+    const { root, unmount } = await mountView(sendCategorised());
+    try {
+      await setSearch(root, 'uhc');
+      const labels = [...root.querySelectorAll('.denylist-group-label')].map((e) => e.textContent);
+      expect(labels.includes('Banks (US)')).toBe(true);
+      const banksGroup = [...root.querySelectorAll('.denylist-group')]
+        .find((g) => g.textContent?.includes('Banks (US)'));
+      expect(!!banksGroup).toBe(true);
+      if (!banksGroup) return;
+      expect(banksGroup.classList.contains('is-empty')).toBe(true);
+      // …and while filtered it reads as a fraction, so "0 of 2" states the miss.
+      expect(need(banksGroup, '.denylist-group-count').textContent).toBe('0 of 2');
+    } finally { unmount(); }
+  });
+
+  it('a search hit opens the group holding it', async () => {
+    // A filter that leaves its own match hidden behind a click is broken.
+    const { root, unmount } = await mountView(sendCategorised());
+    try {
+      await setSearch(root, 'uhc');
+      const health = [...root.querySelectorAll('.denylist-group')]
+        .find((g) => g.textContent?.includes('Health (US)'));
+      expect(!!health).toBe(true);
+      if (!health) return;
+      expect(health.classList.contains('is-open')).toBe(true);
+      expect(need(health, 'code.denylist-item').textContent).toBe('uhc.com');
+    } finally { unmount(); }
+  });
+
+  it('an old SW reply with no categories still renders every pattern', async () => {
+    // Forward-compat in the other direction: no taxonomy → one group, nothing lost.
+    const { root, unmount } = await mountView(makeSend());
+    try {
+      expect(chipTexts(root).includes('chase.com')).toBe(true);
+      expect(chipTexts(root).includes('evil.example')).toBe(true);
+    } finally { unmount(); }
   });
 });

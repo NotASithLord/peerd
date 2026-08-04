@@ -55,3 +55,36 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
   if (typeof sender.url !== 'string') return false;
   return sender.url.startsWith(extensionOrigin);
 };
+
+/**
+ * Is this sender specifically the OFFSCREEN DOCUMENT?
+ *
+ * why a second, narrower predicate: isFirstPartySender answers "one of ours",
+ * which is every extension page — the side panel, the home tab, and the three
+ * engine tab pages that host agent-authored code. For most routes that is the
+ * right question. For the few that carry an actor's authority (the offscreen
+ * relay: tool dispatch on a pinned instance, and a model call the service
+ * worker adds the vault key to) it is far too wide: an engine tab is a
+ * first-party page that shows untrusted content, and `runtime.sendMessage`
+ * from the service worker BROADCASTS to every one of them, so anything the
+ * relay job carries — including a per-run grant token — is visible there.
+ * Binding those routes to the offscreen document is what makes the grant a
+ * real boundary rather than a shared secret.
+ *
+ * Exact-match on the document URL, not a prefix: a prefix would also admit
+ * `offscreen/offscreen.html.evil.html` or any deeper path under it. Query and
+ * hash are tolerated (Chrome does not add them today, but a future
+ * createDocument call might) by comparing only the part before `?` or `#`.
+ *
+ * @param {{ id?: string, url?: string } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, offscreenUrl?: string }} [trust]
+ *   offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html'). Missing or
+ *   blank fails closed, so an unwired caller is "untrusted" rather than a crash.
+ * @returns {boolean}
+ */
+export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscreenUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof offscreenUrl !== 'string' || offscreenUrl.length === 0) return false;
+  const url = /** @type {string} */ (sender?.url).split('?')[0].split('#')[0];
+  return url === offscreenUrl;
+};

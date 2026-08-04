@@ -52,6 +52,8 @@
     "check:pages": "bun scripts/cdp/check-packaged-pages.mjs",
     "check:docpaths": "bun packaging/check-doc-paths.ts",
     "check:hygiene": "bun packaging/check-source-hygiene.ts",
+    "check:vendor": "bun packaging/check-vendor.ts",
+    "check:invariants": "bun packaging/check-invariants.ts",
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
     "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"
@@ -71,7 +73,7 @@
     "@types/chrome": "^0.2.0",
     "@types/webextension-polyfill": "^0.12.5",
     "codemirror": "^6.0.2",
-    "crx3": "^2.0.0",
+    "crx3": "2.0.0",
     "es-module-lexer": "^2.3.0",
     "eslint": "10.4.1",
     "fake-indexeddb": "^6.2.5",

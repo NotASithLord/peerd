@@ -1,0 +1,112 @@
+# Security CI — the lane that looks for VULNERABILITIES, as opposed to the
+# correctness/packaging gates in package-and-release.yml.
+#
+#   codeql            semantic analysis of the extension + tooling JS/TS
+#   osv               known-vulnerability scan of the resolved dependency tree
+#   dependency-review ADVISORY until the repository's Dependency graph setting is
+#                     enabled (the action errors "not supported" without it, which
+#                     is not a finding). Reports a new dependency carrying a known
+#                     advisory or a copyleft license; flip off continue-on-error
+#                     to make it gate once the setting is on.
+#   invariants        peerd-SPECIFIC architectural rules that no generic scanner
+#                     knows about (packaging/check-invariants.ts)
+#
+# Actions are SHA-pinned for the same reason as the packaging workflow: a
+# mutable major tag is arbitrary code in CI. See that file's header for the
+# bump procedure.
+
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a newly-published advisory against an UNCHANGED tree still
+    # surfaces — the PR-time gates only ever see what a diff touches.
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL (javascript-typescript)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload the SARIF result to the Security tab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
+        with:
+          languages: javascript-typescript
+          # security-and-quality is noisier than the default suite; the extra
+          # queries are worth it on a codebase whose whole thesis is isolation.
+          queries: security-and-quality
+      # No build step by design (vanilla JS, no bundler), so the JS extractor
+      # just reads the tree — nothing to compile.
+      - uses: github/codeql-action/analyze@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
+        with:
+          category: /language:javascript-typescript
+
+  osv:
+    name: OSV scan (resolved dependency tree)
+    runs-on: ubuntu-latest
+    permissions:
+      # read only: this job runs a third-party CONTAINER over the repo tree and
+      # never uploads SARIF (no --format=sarif, no upload-sarif step), so granting
+      # security-events: write would hand it an API scope it has no use for —
+      # the same over-grant the top-level `contents: read` default exists to avoid.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Scans bun.lock — the devDependency tree that builds and SIGNS the
+      # artifacts. Nothing here ships inside the extension (vendor/ is pinned
+      # separately by check-vendor), but a compromised build-time dep is the
+      # more valuable target anyway.
+      # osv-scanner.toml holds the triaged, EXPIRING ignore list for advisories
+      # that cannot move from here (web-ext pins several of them exactly). New
+      # findings are not on that list and fail this job.
+      - uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --config=./osv-scanner.toml
+            --lockfile=./bun.lock
+
+  dependency-review:
+    name: Dependency review (PR diff)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Soft until the repo's Dependency graph is switched on (Settings →
+      # Code security): without it the API this action needs returns "not
+      # supported" and the step errors for a REASON THAT IS NOT A FINDING —
+      # which would train everyone to ignore a red security job. Flip
+      # continue-on-error off once the setting is enabled and this has a green
+      # run; the OSV job above covers the same tree unconditionally meanwhile.
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        continue-on-error: true
+        with:
+          fail-on-severity: moderate
+          # Mirrors the PR checklist's "no GPL / AGPL / copyleft" line — the
+          # extension is Apache-2.0 and vendors only permissive code.
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0
+          comment-summary-in-pr: on-failure
+
+  invariants:
+    name: peerd security invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.9"
+      - run: bun install --frozen-lockfile
+      - name: Architectural security invariants
+        run: bun run check:invariants

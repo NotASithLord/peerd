@@ -26,7 +26,7 @@
 // list is visibly filtered.
 
 import m from '/vendor/mithril/mithril.js';
-import { denylistModel, removalCopy } from './denylist-format.js';
+import { denylistModel, removalCopy, groupDenylist } from './denylist-format.js';
 
 /**
  * Component-local state for DenylistView.
@@ -36,6 +36,8 @@ import { denylistModel, removalCopy } from './denylist-format.js';
  * @property {string[]} disabled        seed patterns the user disabled
  * @property {string} draft             add-pattern input
  * @property {string} query            live search filter
+ * @property {Record<string, string[]>} categories  the seed's own category map
+ * @property {Set<string>} openGroups   category keys currently expanded
  * @property {{ ok: boolean, text: string }|null} note
  * @property {string|null} confirm      pattern with the armed remove/disable confirm
  * @property {boolean} busy
@@ -52,6 +54,7 @@ export const DenylistView = {
     vnode.state.disabled = [];     // seed patterns the user disabled
     vnode.state.draft = '';        // add-pattern input
     vnode.state.query = '';        // live search filter
+    vnode.state.openGroups = new Set(['__user']);   // your own patterns open; the seed's categories collapsed
     vnode.state.note = null;       // { ok, text } action banner
     vnode.state.confirm = null;    // pattern with the armed remove/disable confirm
     vnode.state.busy = false;
@@ -65,6 +68,9 @@ export const DenylistView = {
         vnode.state.patterns = r.patterns ?? [];
         vnode.state.added = r.added ?? [];
         vnode.state.disabled = r.disabled ?? [];
+        // The seed's own taxonomy, read-only. Absent (old SW, failed seed fetch)
+        // → {} → one ungrouped list, which is the pre-grouping rendering.
+        vnode.state.categories = r.categories ?? {};
       } else {
         vnode.state.patterns = vnode.state.patterns ?? [];
         vnode.state.note = { ok: false, text: r?.error ?? 'failed to load denylist' };
@@ -121,9 +127,9 @@ export const DenylistView = {
 
     return m('.denylist-pane', [
       m('p.muted', { style: 'font-size:12px; margin:0 0 8px;' },
-        'Origins the agent will never touch — the built-in seed list plus '
-        + 'your own patterns. Your patterns can be removed; built-in ones '
-        + 'can only be disabled (reversible). Every change is audited.'),
+        'Origins the agent will never touch — the built-in list plus your own '
+        + 'patterns. Your patterns can be removed; built-in ones can only be '
+        + 'disabled, and a disabled one stays visible below. Every change is audited.'),
 
       // Add form. Enter or the button both submit; the draft survives a
       // failed add so an invalid pattern can be fixed in place.
@@ -171,10 +177,18 @@ export const DenylistView = {
 
       ui.note ? m(`p.key-msg${ui.note.ok ? '.ok' : '.err'}`, ui.note.text) : null,
 
-      model.active.length === 0
-        ? m('p.muted', model.filtered ? 'No patterns match the search.' : 'Denylist is empty.')
-        : m('.denylist-grid', model.active.map(({ pattern: p, user }) =>
-            ui.confirm === p ? confirmStrip(vnode, p, user) : patternChip(vnode, p, user))),
+      // A search that matches nothing says so ONCE, at the top. The groups stay
+      // listed underneath (a category that vanishes reads as "peerd does not
+      // block this"), so without this line the page would show eight headings
+      // and no statement that the search itself came up empty.
+      model.filtered && model.shown === 0
+        ? m('p.muted', 'No patterns match the search.')
+        : null,
+
+      model.active.length === 0 && !model.filtered && ui.disabled.length === 0
+        ? m('p.muted', 'Denylist is empty.')
+        : m('.denylist-groups', groupDenylist(model.active, ui.categories, ui.patterns ?? [])
+          .map((g) => groupBlock(vnode, g))),
 
       // Disabled seed patterns — kept visible so protection that's been
       // turned off is never invisible. One click re-enables (no confirm:
@@ -198,6 +212,57 @@ export const DenylistView = {
       ]) : null,
     ]);
   },
+};
+
+// One category block. Collapsed it is a single line you can scan; expanded it
+// shows its chips. why a group is never hidden when it has no search hits: a
+// list that drops empty groups reads as "these protections don't exist", which
+// is the opposite of the truth — it stays, dimmed, at `0 of N`.
+/**
+ * @param {DenylistVnode} vnode
+ * @param {{ key: string, label: string, rows: { pattern: string, user: boolean }[], shown: number, total: number, user: boolean }} g
+ */
+const groupBlock = (vnode, g) => {
+  const ui = vnode.state;
+  // A search HIT opens its group on its own: hiding the match behind a click is
+  // the one thing a filter must never do. The user's own toggle is untouched, so
+  // clearing the search returns the page to how they left it.
+  const open = ui.openGroups.has(g.key) || (ui.query.trim().length > 0 && g.shown > 0);
+  const empty = g.shown === 0;
+  // The fraction only means something while a search is narrowing the list;
+  // unfiltered, "38 of 38" is noise where "38" is the fact. ("Your patterns"
+  // has no seed total to be a fraction of, so it is always a plain count.)
+  const count = (g.user || !ui.query.trim()) ? String(g.total) : `${g.shown} of ${g.total}`;
+  const header = m('button.denylist-group-head', {
+    type: 'button',
+    'aria-expanded': open ? 'true' : 'false',
+    'aria-label': `${g.label}, ${count} patterns`,
+    onclick: () => {
+      if (ui.openGroups.has(g.key)) ui.openGroups.delete(g.key);
+      else ui.openGroups.add(g.key);
+      m.redraw();
+    },
+  }, [
+    m('span.denylist-group-chev', { class: open ? 'is-open' : '', 'aria-hidden': 'true' }, '›'),
+    m('span.denylist-group-label', g.label),
+    m('span.denylist-group-count', count),
+  ]);
+
+  return m('.denylist-group', {
+    key: g.key,
+    class: `${open ? 'is-open' : ''} ${empty ? 'is-empty' : ''} ${g.user ? 'is-user' : ''}`.trim(),
+  }, [
+    header,
+    open && g.rows.length > 0
+      ? m('.denylist-group-body', g.rows.map(({ pattern: p, user }) =>
+        ui.confirm === p ? confirmStrip(vnode, p, user) : patternChip(vnode, p, user)))
+      : null,
+    open && g.rows.length === 0
+      ? m('p.muted.denylist-group-empty', ui.query.trim()
+        ? 'No patterns in this group match the search.'
+        : 'Every pattern in this group is currently disabled.')
+      : null,
+  ]);
 };
 
 // One enforced pattern chip with its remove/disable arm button. The

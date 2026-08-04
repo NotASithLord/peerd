@@ -559,10 +559,32 @@ verifies against its persisted public key; the Bun tier can only prove this over
 These are stated plainly. Several are deliberate tradeoffs. All are things a reader
 evaluating peerd should know. Each cites where it lives in the code.
 
-- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox the actor
-  falls back to a keyless in-service-worker loop where the boundary is a prompt
-  boundary rather than a memory boundary, which is the pre-heap-split posture. The
-  memory boundary is not universal. (`background/service-worker.js` offscreen fallback.)
+- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox — and for
+  a run that never started offscreen — the actor falls back to an in-service-worker
+  loop where the boundary is a prompt boundary rather than a memory boundary, which
+  is the pre-heap-split posture. The memory boundary is not universal.
+  (`background/service-worker.js` offscreen fallback.)
+
+  Scoped precisely, because the two fallback lanes differ:
+
+  - A SPAWNED (ephemeral) child is keyless in the same sense the offscreen worker is.
+    `restrictCtxCapabilities` strips `getSecret`/`safeFetch` from the tool context
+    unconditionally, and the loop itself is handed throwing stubs while the real
+    credentials are closed over by the SW-owned `callModel` wrapper and added at the
+    call boundary (`actor/spawn.js`, `keylessCredentials`).
+  - A BOUND actor (web, webvm, notebook, app, dweb) does NOT take that path. With no
+    offscreen client, `runActorTurnOffscreen` returns null and the turn falls through
+    to `runAgentTurn`, which comes from the turn driver and forwards the live
+    `getSecret`/`safeFetch` into the loop. So on Firefox a web actor ingesting page
+    content, and the dweb actor consuming peer bytes, still run with live credentials
+    reachable from the loop frame.
+
+  Neither lane has heap separation, which is the deeper point: the child's untrusted
+  transcript shares a realm with the vault broker and the engine clients, so a
+  memory-disclosure bug there is not fenced the way it is on Chrome. Extending the
+  stub custody to the bound-actor lane, and retiring this branch in favor of an
+  isolated Firefox host — or failing closed — is P0-1 in
+  [`HARDENING-ROADMAP.md`](HARDENING-ROADMAP.md).
 - R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
   synthetic messages, but still includes raw assistant text, which can echo
   attacker-paraphrased content, and an approved note persists into every future prompt.

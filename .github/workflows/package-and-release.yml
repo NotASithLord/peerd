@@ -34,11 +34,27 @@ on:
         type: boolean
         default: false
 
-# why these pins: every action below runs on the Node 24 JS-action runtime
-# (checkout@v5, upload-artifact@v6, setup-chrome@v2, setup-bun@v2 — the first
-# major of each that targets node24). That clears GitHub's Node-20 deprecation
-# warnings at the source; no FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 shim needed.
-# (This is GitHub's *action* runtime — peerd's own tooling is 100% Bun.)
+# Default the workflow token to read-only; jobs that write (visual's diff
+# branch + PR comment, release's assets) elevate per-job. why: the default
+# GITHUB_TOKEN grant is workflow-wide, so one compromised step in ANY job
+# could otherwise push refs or rewrite releases.
+permissions:
+  contents: read
+
+# why these pins: two constraints at once.
+#   1. Node-24 runtime — every action below is the first major of its line
+#      that targets node24 (clears GitHub's Node-20 deprecation warnings; no
+#      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 shim. This is GitHub's *action*
+#      runtime — peerd's own tooling is 100% Bun).
+#   2. Immutable SHAs, not tags — a major tag (`@v5`) is a mutable ref the
+#      action publisher can move; a moved tag means arbitrary code running in
+#      release CI. Every third-party action is pinned to a full commit SHA
+#      with the human-readable version in a trailing comment (the format
+#      Dependabot understands and keeps updated — see .github/dependabot.yml).
+#      When bumping: resolve the new tag with
+#      `git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'`
+#      (fall back to the bare tag ref when there is no ^{} line) and update
+#      the comment to match.
 jobs:
   test:
     # Keep this job's display name stable — it predates the packaging matrix
@@ -46,22 +62,22 @@ jobs:
     name: bun test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - run: bun test ./tests
 
   checks:
     name: lint + boundary + drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - name: ESLint
         run: bun run lint
       - name: Typecheck (bun suite + // @ts-check extension files)
@@ -76,6 +92,10 @@ jobs:
         run: bun run check:docpaths
       - name: Source hygiene (no control bytes / tracked symlinks in source)
         run: bun run check:hygiene
+      - name: Vendor integrity (extension/vendor/ matches vendor.lock.json)
+        run: bun run check:vendor
+      - name: Security invariants (manifest surface / dynamic code / message hosts)
+        run: bun run check:invariants
       # The web target: stage it fresh from live source, then prove the
       # assembled tree is import-closed (check-web-boundary auto-runs inside
       # package:web; the explicit second run keeps the gate visible in logs).
@@ -115,11 +135,11 @@ jobs:
     name: in-browser tests (headless Chrome)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         id: chrome
         with:
           chrome-version: stable
@@ -139,15 +159,15 @@ jobs:
     name: dweb two-peer (headless WebRTC)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
         id: chrome
         with:
           chrome-version: stable
-      - run: bun install
+      - run: bun install --frozen-lockfile
       - name: Run the two-peer harness over CDP
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
@@ -195,11 +215,11 @@ jobs:
     name: dweb netproc (multi-process nodes)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       # Retry: cross-process port/timing in the multi-node mesh can flake.
       - name: Run the netproc harness (retry)
         run: |
@@ -217,14 +237,14 @@ jobs:
     name: e2e (side panel)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
       # why setup-chrome: it installs the system libraries headless Chrome
       # needs. We then run against Chrome for Testing (branded Chrome ignores
       # --load-extension), which reuses those libs.
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
       - name: Generate dev manifest
         run: bun run gen:dev
       - name: Provision Chrome for Testing
@@ -270,19 +290,19 @@ jobs:
       VISUAL_PLATFORM: linux-x64
       TZ: UTC
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
       # why setup-chrome: installs the system libraries headless Chrome needs.
       # We then run the PINNED Chrome for Testing build against them.
-      - uses: browser-actions/setup-chrome@v2
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
       - name: Read the pinned Chrome for Testing version
         id: pin
         run: echo "version=$(cat scripts/cdp/chrome-version.txt)" >> "$GITHUB_OUTPUT"
       # why cache: the CfT zip is ~150 MB per run, and the key IS the pin, so a
       # hit is always the exact build the baselines were seeded against.
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/peerd-cft/${{ steps.pin.outputs.version }}
           key: peerd-cft-${{ runner.os }}-${{ steps.pin.outputs.version }}
@@ -298,6 +318,27 @@ jobs:
         id: render
         run: bun run test:e2e:visual
 
+      # A state ADDED by this PR has no committed baseline, so the step above can
+      # only seed it — it passes trivially and the PR reports "no visual drift"
+      # for a screen nobody ever photographed. This computes that missing
+      # "before" by rendering the same state definitions against the MERGE-BASE
+      # build (peerd has no build step, so that is a checkout and a render).
+      #
+      # Non-gating on purpose: it reports what changed, it does not decide. The
+      # committed baselines remain the approved-look record, and the human
+      # checkpoint that comes with reseeding them.
+      - name: Compute before/after for states with no baseline
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        id: newstates
+        run: |
+          # The merge-base needs main's history; the PR checkout is shallow.
+          git fetch --no-tags --depth=50 origin main || true
+          bun scripts/cdp/new-state-before-after.mjs > "$RUNNER_TEMP/new-states.md" || true
+          cat "$RUNNER_TEMP/new-states.md"
+
       - name: Write the render report to the job summary
         if: always()
         run: |
@@ -307,6 +348,7 @@ jobs:
             bun scripts/cdp/visual-report.mjs
             echo
             echo "Before / after / diff PNGs are attached to this run as the \`visual-diff-…\` artifact."
+            if [ -s "$RUNNER_TEMP/new-states.md" ]; then echo; cat "$RUNNER_TEMP/new-states.md"; fi
             echo
             echo "If the change is INTENDED: re-run this workflow on your branch with"
             echo "**update_visual_baselines** checked, download \`visual-baselines-linux-x64\`,"
@@ -380,7 +422,7 @@ jobs:
       # runtime token, not GITHUB_TOKEN. This is the fork-safe evidence channel.
       - name: Upload before / after / diff renders
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: visual-diff-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
           path: visual-review/
@@ -450,7 +492,7 @@ jobs:
         run: bun run gallery
       - name: Upload the reseeded baselines + gallery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_visual_baselines }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: visual-baselines-linux-x64
           path: |
@@ -469,12 +511,12 @@ jobs:
     name: packaged page boot
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - uses: browser-actions/setup-chrome@v2
-      - run: bun install
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+      - run: bun install --frozen-lockfile
       - name: Provision Chrome for Testing
         id: cft
         run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
@@ -497,15 +539,37 @@ jobs:
         channel: [store, preview]
         browser: [chrome, firefox]
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
       # --no-sign: matrix packages prove packageability + boundary on every
       # push (store artifacts are verified inside package.ts); signing
       # happens only in the release job, where the secrets live.
       - run: bun packaging/package.ts --channel=${{ matrix.channel }} --browser=${{ matrix.browser }} --no-sign
+      # Reproducibility gate: package.ts normalizes mtimes/modes/entry order,
+      # so a second build of the same tree must be byte-identical. If this
+      # fails, a nondeterministic input crept into the staging pass — and the
+      # "rebuild the release from source and compare digests" verification
+      # story silently stops working.
+      - name: Rebuild and assert byte-identical artifact
+        run: |
+          set -euo pipefail
+          # nullglob: each matrix cell produces only .zip (chrome) OR .xpi
+          # (firefox) — without it the unmatched pattern reaches sha256sum
+          # as a literal and fails the step under pipefail.
+          shopt -s nullglob
+          artifacts=(artifacts/*.zip artifacts/*.xpi)
+          [ ${#artifacts[@]} -gt 0 ] || { echo '::error::no artifact produced to digest'; exit 1; }
+          sha256sum "${artifacts[@]}" | sort > first.sums
+          bun packaging/package.ts --channel=${{ matrix.channel }} --browser=${{ matrix.browser }} --no-sign --skip-verify
+          sha256sum "${artifacts[@]}" | sort > second.sums
+          diff first.sums second.sums || {
+            echo '::error::packaging is not reproducible — two builds of the same tree produced different bytes'
+            exit 1
+          }
+          cat first.sums
       # why upload only off PRs: a PR build's job is to prove the package
       # COMPILES and passes the dweb-trace verify — both run in package.ts above,
       # BEFORE this step — and nobody downloads a PR's artifact. Uploading every
@@ -513,7 +577,7 @@ jobs:
       # hit the upload step itself errors and reds the whole matrix on changes
       # that built + verified fine. Keep uploads for main + tags (the release/QA
       # inputs); cap retention so they can't pile up indefinitely.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: github.event_name != 'pull_request'
         with:
           name: peerd-${{ matrix.channel }}-${{ matrix.browser }}
@@ -528,14 +592,24 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     needs: [test, checks, package]
+    # The one job that holds signing secrets. Bound to a GitHub Environment so
+    # the secrets can be scoped to it AND protection rules (required reviewers,
+    # tag-pattern restrictions) can gate every run that touches the signing
+    # key — configure those under Settings → Environments → release. The
+    # environment is auto-created on first run; the protection rules are the
+    # part only a human can add.
+    environment: release
     permissions:
       contents: write
+      # For the signed build-provenance attestation on the release artifacts.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.9"
-      - run: bun install
+      - run: bun install --frozen-lockfile
 
       - name: Check tag matches package.json version
         run: |
@@ -559,41 +633,116 @@ jobs:
           [ -n "$AMO_JWT_SECRET" ] || { echo '::error::AMO_JWT_SECRET secret not set'; exit 1; }
           printf '%s' "$CRX_PRIVATE_KEY" > key.pem
 
-      - name: Package + sign all four artifacts
+      # ORDERING RULE for the rest of this job: the AMO upload is the ONE
+      # irreversible act in a release. `web-ext sign` posts the package to
+      # addons.mozilla.org and burns the version number there — a later failure
+      # cannot take it back, and re-running dies on "Version X already exists"
+      # until someone bumps. So every step that CAN fail runs BEFORE it.
+      #
+      # That is why packaging is split in two here rather than one `package:all`:
+      # everything local (both store zips, and the Chrome CRX, whose signing is an
+      # in-process crx3 call) is built, proved, and ATTESTED first. Attestation is
+      # exactly the kind of gate that belongs on this side of the line — it depends
+      # on org/repo settings and on minting an OIDC token, so it can fail for
+      # reasons that have nothing to do with the artifacts.
+      - name: Package the local artifacts (both store zips + Chrome CRX)
+        shell: bash
+        run: |
+          # why pipefail: without it `bun … | tee` reports tee's exit code, so a
+          # failed packaging run would sail through and the release could ship
+          # partially-packaged artifacts. (`shell: bash` also enables pipefail,
+          # but be explicit — this step is the release gate.)
+          set -euo pipefail
+          { bun packaging/package.ts --channel=store --browser=chrome
+            bun packaging/package.ts --channel=store --browser=firefox
+            bun packaging/package.ts --channel=preview --browser=chrome
+            bun run package:web
+          } 2>&1 | tee package.log
+          if grep -q 'UNSIGNED' package.log; then
+            echo '::error::the Chrome preview artifact was left unsigned — aborting release'
+            exit 1
+          fi
+
+      - name: Assert the Chrome preview CRX is actually signed
+        shell: bash
+        run: |
+          # Positive proof of signing, not just absence of the UNSIGNED marker (a
+          # packaging run that died before sign.ts ran prints no marker at all).
+          set -euo pipefail
+          CRX=artifacts/peerd-preview-chrome.crx
+          [ -f "$CRX" ] || { echo "::error::$CRX missing — CRX signing did not run"; exit 1; }
+          [ "$(head -c4 "$CRX")" = "Cr24" ] || { echo "::error::$CRX lacks the Cr24 CRX3 magic — not a signed CRX"; exit 1; }
+
+      # Signed SLSA-style provenance for everything that exists so far. Runs
+      # BEFORE the AMO upload on purpose (see the ordering rule above): if
+      # attestation is going to fail — settings not enabled, OIDC unavailable —
+      # it fails here, with nothing yet submitted to Mozilla.
+      # Verify with: gh attestation verify <file> --repo <owner>/<repo>
+      - name: Attest build provenance (local artifacts)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            artifacts/peerd-preview-chrome.crx
+            artifacts/peerd-store-chrome.zip
+            artifacts/peerd-store-firefox.xpi
+
+      # ---- the irreversible step ----
+      - name: Package + AMO-sign the Firefox preview (irreversible)
         shell: bash
         env:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
-          # why pipefail: without it `bun … | tee` reports tee's exit code,
-          # so a failed packaging run would sail through and the release could ship
-          # partially-packaged artifacts. (`shell: bash` also enables pipefail,
-          # but be explicit — this step is the release gate.)
           set -euo pipefail
-          bun run package:all 2>&1 | tee package.log
-          if grep -q 'UNSIGNED' package.log; then
-            echo '::error::a preview artifact was left unsigned — aborting release'
+          bun packaging/package.ts --channel=preview --browser=firefox 2>&1 | tee amo.log
+          if grep -q 'UNSIGNED' amo.log; then
+            echo '::error::the Firefox preview artifact was left unsigned — aborting release'
             exit 1
           fi
 
-      - name: Assert preview artifacts are actually signed
+      - name: Assert the Firefox preview XPI carries AMO's signature
         shell: bash
         run: |
-          # Positive proof of signing, not just absence of the UNSIGNED
-          # marker (a packaging run that died before sign.ts ran prints no marker
-          # at all): the CRX must carry the CRX3 magic, and the .xpi must
-          # contain AMO's signature block.
           set -euo pipefail
-          CRX=artifacts/peerd-preview-chrome.crx
           XPI=artifacts/peerd-preview-firefox.xpi
-          [ -f "$CRX" ] || { echo "::error::$CRX missing — CRX signing did not run"; exit 1; }
-          [ "$(head -c4 "$CRX")" = "Cr24" ] || { echo "::error::$CRX lacks the Cr24 CRX3 magic — not a signed CRX"; exit 1; }
           [ -f "$XPI" ] || { echo "::error::$XPI missing — Firefox preview was not built"; exit 1; }
           unzip -l "$XPI" META-INF/mozilla.rsa >/dev/null \
             || { echo "::error::$XPI has no META-INF/mozilla.rsa — AMO signing did not run"; exit 1; }
 
+      # The XPI cannot be attested any earlier — it does not exist in its final
+      # form until AMO returns the signed file. This is the one attestation that
+      # unavoidably follows the irreversible step.
+      - name: Attest build provenance (AMO-signed XPI)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: artifacts/peerd-preview-firefox.xpi
+
       - name: Regenerate update feeds for this release
         run: bun packaging/gen-update-feeds.ts --version="${GITHUB_REF_NAME#v}" --repo="$GITHUB_REPOSITORY"
+
+      # Digest manifest: lets anyone verify a downloaded artifact (or a
+      # store-submitted zip) against what this run actually built. Store zips are
+      # included because their upload is manual — the digest is how a human
+      # confirms the file they submit is the file CI verified.
+      #
+      # why the store lines get their OWN file: they are NOT release assets (store
+      # uploads are manual), so a user who downloads everything the release
+      # publishes and runs `sha256sum -c SHA256SUMS` would get two
+      # "FAILED open or read" lines and exit 1 on a perfectly authentic release —
+      # the canonical verification command reporting failure is how people learn to
+      # stop running it. SHA256SUMS covers exactly the published assets.
+      - name: Write SHA256SUMS for all release artifacts
+        run: |
+          set -euo pipefail
+          # Basename-relative lines so `sha256sum -c SHA256SUMS` verifies
+          # files downloaded from the release page directly.
+          (cd artifacts && sha256sum peerd-preview-chrome.crx peerd-preview-firefox.xpi > SHA256SUMS)
+          (cd update-feeds && sha256sum chrome-preview.xml firefox-preview.json) >> artifacts/SHA256SUMS
+          (cd artifacts && sha256sum peerd-store-chrome.zip peerd-store-firefox.xpi > SHA256SUMS.store)
+          echo '--- SHA256SUMS (release assets; verify with `sha256sum -c SHA256SUMS`) ---'
+          cat artifacts/SHA256SUMS
+          echo '--- SHA256SUMS.store (manually submitted store packages) ---'
+          cat artifacts/SHA256SUMS.store
 
       - name: Create GitHub Release
         env:
@@ -607,6 +756,8 @@ jobs:
           ASSETS=(
             artifacts/peerd-preview-chrome.crx
             artifacts/peerd-preview-firefox.xpi
+            artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.store
             update-feeds/chrome-preview.xml
             update-feeds/firefox-preview.json
           )
