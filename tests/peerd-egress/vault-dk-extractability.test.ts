@@ -333,8 +333,11 @@ describe('re-wrapping the live DK under a new factor', () => {
     await v.initialize(PASS);
     await new Promise((r) => setTimeout(r, 0));
     const stored = sessionCache.store.get(SESSION_DK_KEY);
-    expect(typeof stored).toBe('string');
-    expect(Uint8Array.from(atob(stored), (c) => c.charCodeAt(0)).byteLength).toBe(32);
+    expect(typeof stored.dk).toBe('string');
+    expect(Uint8Array.from(atob(stored.dk), (c) => c.charCodeAt(0)).byteLength).toBe(32);
+    // …carried with the deadline that now bounds how long it is usable.
+    expect(stored.unlockedAt).toBeGreaterThan(0);
+    expect(stored.autoLockMs).toBe(0);   // this vault opted out of auto-lock
   });
 
   test('lock() drops the re-wrap material, so enrollment refuses while locked', async () => {

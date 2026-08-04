@@ -53,6 +53,10 @@
 // once a passkey is enrolled (unlockWithPrf). The default bounds how long
 // the unwrapped DK sits live within a browser session.
 //
+// The idle TIMER only bounds THIS service worker's memory — it dies with
+// the SW. The session mirror below outlives it, so it carries its own
+// deadline and attemptResume() enforces it; see "DK persistence".
+//
 // The resident DK is non-extractable
 // -----------------------------------
 // The DK this file holds in `dk` — the one handed to encryptString /
@@ -68,8 +72,10 @@
 // ---------------------------------------
 //  - Persist the unwrapped DK to DISK. It is mirrored to
 //    chrome.storage.session (RAM-only, cleared on browser close) so the DK
-//    survives an MV3 SW restart within a session — never the disk. See the
-//    "DK persistence" block below for the threat model.
+//    survives an MV3 SW restart within a session — never the disk. That
+//    mirror is bounded: it carries the unlock time + the auto-lock policy
+//    in force, and a resume past that deadline is refused and the mirror
+//    purged. See the "DK persistence" block below for the threat model.
 //  - Talk to the side panel directly. The SW glues the vault to the
 //    side panel via the messaging layer.
 //  - Cache decrypted plaintext. Every getSecret() does a fresh decrypt.
@@ -184,6 +190,84 @@ const SECRET_PREFIX = 'secret:';
 // survive SW restart during a single browser session.
 const SESSION_DK_KEY = 'vault.unlocked.v1';
 
+// ---- The session DK mirror: pure core ------------------------------------
+// The mirror is the one piece of vault state that OUTLIVES the service
+// worker, so it cannot rely on anything held in SW memory (the idle timer
+// dies with the SW). It therefore carries its own deadline, and every boot
+// re-judges it before touching the bytes. The decision is a pure function so
+// the interesting cases — stale, legacy, malformed, opted-out — are testable
+// without a browser; all IO (read, purge, import) stays in the vault shell.
+
+/**
+ * The record written to chrome.storage.session under SESSION_DK_KEY.
+ *
+ * @typedef {Object} DKMirror
+ * @property {string} dk           raw DK bytes, base64
+ * @property {number} unlockedAt   ms epoch of the unlock this mirror belongs
+ *                                 to — the deadline anchor. PRESERVED across a
+ *                                 resume, so resuming can never extend the
+ *                                 window.
+ * @property {number} autoLockMs   the idle policy in force when the mirror was
+ *                                 written; 0 = the user's "never" opt-out
+ *                                 (unbounded mirror). why it is RECORDED rather
+ *                                 than read at resume time: the SW constructs
+ *                                 the vault with the DEFAULT interval and only
+ *                                 applies the user's stored setting once
+ *                                 storage has loaded — a boot-time resume races
+ *                                 that, and would otherwise judge the mirror
+ *                                 against a policy the user never chose.
+ */
+
+/**
+ * Build the mirror record. Normalizes the "never auto-lock" opt-out (≤ 0 or
+ * non-finite) to a plain 0 so the planner has exactly one shape to read.
+ *
+ * @param {{ dk: string, unlockedAt: number, autoLockMs: number }} args
+ * @returns {DKMirror}
+ */
+export const makeMirrorRecord = ({ dk, unlockedAt, autoLockMs }) => ({
+  dk,
+  unlockedAt,
+  autoLockMs: (Number.isFinite(autoLockMs) && autoLockMs > 0) ? autoLockMs : 0,
+});
+
+/**
+ * Decide what a fresh service worker may do with whatever sits under
+ * SESSION_DK_KEY. Pure — the caller does the read, the purge and the import.
+ *
+ * why 'refuse' is distinct from 'absent': a refused mirror must also be
+ * PURGED. Anything we decline to use is either past its deadline or
+ * unreadable, and leaving it there just hands the next boot the same
+ * decision over older bytes.
+ *
+ * why a missing or unparseable timestamp fails CLOSED: without one the age of
+ * the bytes is unknowable, and "unknown age" is exactly the unbounded
+ * lifetime this check exists to close. That also covers the pre-deadline
+ * mirror format (a bare base64 string): one re-unlock, once, on upgrade.
+ *
+ * @param {Object} args
+ * @param {unknown} args.stored       whatever sessionGet returned
+ * @param {number} args.now           ms epoch
+ * @param {number} args.autoLockMs    fallback policy, used only when the
+ *                                    record does not carry its own
+ * @returns {{ action: 'absent' }
+ *          | { action: 'refuse', reason: 'legacy' | 'malformed' | 'expired' }
+ *          | { action: 'resume', dk: string, unlockedAt: number }}
+ */
+export const planMirrorResume = ({ stored, now, autoLockMs }) => {
+  if (stored === undefined || stored === null || stored === '') return { action: 'absent' };
+  if (typeof stored === 'string') return { action: 'refuse', reason: 'legacy' };
+  if (typeof stored !== 'object') return { action: 'refuse', reason: 'malformed' };
+  const { dk, unlockedAt, autoLockMs: written } = /** @type {any} */ (stored);
+  if (typeof dk !== 'string' || dk === '') return { action: 'refuse', reason: 'malformed' };
+  if (!Number.isFinite(unlockedAt) || unlockedAt <= 0) return { action: 'refuse', reason: 'malformed' };
+  const policy = Number.isFinite(written) ? written : autoLockMs;
+  // The "never auto-lock" opt-out: an unbounded mirror, today's behavior.
+  if (!(policy > 0)) return { action: 'resume', dk, unlockedAt };
+  if (now - unlockedAt >= policy) return { action: 'refuse', reason: 'expired' };
+  return { action: 'resume', dk, unlockedAt };
+};
+
 /**
  * Factory for the vault. The vault is a long-lived singleton in the SW
  * (one per extension instance); tests build a fresh one per case with
@@ -242,6 +326,15 @@ export const createVault = (deps) => {
   /** @type {ReturnType<typeof setTimer> | null} */
   let timerHandle = null;
   let unlockedAt = 0;
+  /** Bumped by every lock() call, including a lock on an already-locked
+   * vault. Anything that wants to WRITE the session mirror captures it
+   * first and re-checks before the write: a lock that lands mid-flight
+   * must win, or an in-flight persist would resurrect bytes the user just
+   * asked us to forget. */
+  let lockEpoch = 0;
+  /** Tail of the serialized session-mirror write/delete chain.
+   * @type {Promise<void>} */
+  let mirrorQueue = Promise.resolve();
   /** @type {Set<(e: VaultEvent) => void>} */
   const listeners = new Set();
 
@@ -282,7 +375,10 @@ export const createVault = (deps) => {
    */
   const setAutoLockMs = (ms) => {
     autoLockMs = (Number.isFinite(ms) && ms > 0) ? ms : 0;
-    if (!isLocked()) armAutoLock();
+    if (isLocked()) return;
+    armAutoLock();
+    // The mirror outlives this SW, so the new policy has to reach it too.
+    _restampMirrorPolicy();
   };
 
   /**
@@ -322,6 +418,14 @@ export const createVault = (deps) => {
   };
 
   const lock = () => {
+    // why the epoch bump + the clear come FIRST, ABOVE the already-locked
+    // early return: the mirror lives in chrome.storage.session, which
+    // outlives this service worker's memory. A lock that arrives when `dk`
+    // is already null — a double lock, or a lock on a fresh SW that has not
+    // resumed yet — must still be able to erase bytes THIS instance never
+    // held. Lock is idempotent against STORAGE, not merely against memory.
+    lockEpoch += 1;
+    _clearPersistedDK();
     if (dk === null) return;
     dk = null;
     rewrapKek = null;
@@ -331,8 +435,6 @@ export const createVault = (deps) => {
       timerHandle = null;
     }
     unlockedAt = 0;
-    // Clear the persisted DK so a SW restart doesn't auto-unlock.
-    _clearPersistedDK();
     notify({ type: 'locked' });
   };
 
@@ -423,9 +525,10 @@ export const createVault = (deps) => {
 
   // ---- DK persistence (chrome.storage.session) ---------------------------
   // When sessionCache is wired, we export the unwrapped DK as raw bytes,
-  // base64 them, and store under SESSION_DK_KEY so the next SW boot can
-  // restore the unlocked state via attemptResume(). Session storage is
-  // RAM-only and cleared on browser close, so this never lands on disk.
+  // base64 them, and store a DKMirror record under SESSION_DK_KEY so the
+  // next SW boot can restore the unlocked state via attemptResume().
+  // Session storage is RAM-only and cleared on browser close, so this never
+  // lands on disk.
   //
   // Threat model: anything with extension code execution already has
   // access to SW memory (and thus the DK). Persisting to session
@@ -434,6 +537,44 @@ export const createVault = (deps) => {
   // while the vault is unlocked the bytes are readable via
   // chrome.storage.session by any in-origin code (R7), so R11's export
   // concern is narrowed to a leaked key REFERENCE, not eliminated.
+  //
+  // Lifetime — the two properties that make "unlocked" bounded even though
+  // the idle timer dies with the SW:
+  //   1. After lock() returns, no write can resurrect the mirror. lock()
+  //      clears it regardless of memory state and bumps lockEpoch; every
+  //      write is queued behind the same chain and re-checks the epoch at
+  //      write time, so last-CALL wins rather than last-COMPLETION.
+  //   2. The mirror carries its own deadline (unlockedAt + the auto-lock
+  //      policy in force). attemptResume refuses and purges a mirror past
+  //      it, and PRESERVES unlockedAt on a successful resume, so resuming
+  //      cannot extend the window. NOT idle-refreshed: touch() re-arms the
+  //      in-memory timer but does not re-stamp the mirror, so the mirror's
+  //      lifetime is an ABSOLUTE cap measured from the last real unlock —
+  //      deliberately at or tighter than what the user's idle setting
+  //      promises, never looser. The `autoLockMs: 0` opt-out keeps today's
+  //      unbounded behavior.
+
+  /**
+   * Serialize every mirror write and delete through one chain.
+   *
+   * why: lock() must be able to erase a mirror an in-flight _persistDK is
+   * about to write. With both on this chain the LAST CALLER WINS BY CALL
+   * ORDER — a delete issued after a set can never be overtaken by it,
+   * whatever chrome.storage does with two concurrent ops on one key.
+   *
+   * @param {(cache: SessionCacheLike) => Promise<void>} op
+   * @returns {Promise<void>}
+   */
+  const _enqueueMirror = (op) => {
+    const cache = sessionCache;
+    if (!cache) return Promise.resolve();
+    // why the catch is INSIDE the assignment: a rejected link would poison
+    // every later op on the chain, including the lock's delete.
+    mirrorQueue = mirrorQueue
+      .then(() => op(cache))
+      .catch((e) => console.error('[vault] session DK mirror op failed', e));
+    return mirrorQueue;
+  };
 
   /**
    * Mirror the DK bytes into chrome.storage.session.
@@ -448,18 +589,55 @@ export const createVault = (deps) => {
    */
   const _persistDK = async (wrappable) => {
     if (!sessionCache || isLocked()) return;
+    // Snapshot the state this write belongs to BEFORE the async export: a
+    // lock (or a second unlock) can land while exportRawDK is in flight.
+    const epoch = lockEpoch;
+    const at = unlockedAt;
+    const policy = autoLockMs;
     try {
-      await sessionCache.sessionSet(SESSION_DK_KEY,
-        bytesToBase64(await exportRawDK(wrappable)));
+      const dkBase64 = bytesToBase64(await exportRawDK(wrappable));
+      await _enqueueMirror(async (cache) => {
+        // why re-check here and not only above: this runs after the export
+        // AND after everything already queued. A lock that landed anywhere
+        // in between wins — it has already issued its delete.
+        if (lockEpoch !== epoch || isLocked()) return;
+        await cache.sessionSet(SESSION_DK_KEY, makeMirrorRecord({
+          dk: dkBase64, unlockedAt: at, autoLockMs: policy,
+        }));
+      });
     } catch (e) {
       console.error('[vault] persist DK failed', e);
     }
   };
 
   const _clearPersistedDK = () => {
-    if (!sessionCache) return;
-    sessionCache.sessionDelete(SESSION_DK_KEY).catch((e) =>
-      console.error('[vault] clear persisted DK failed', e));
+    _enqueueMirror((cache) => cache.sessionDelete(SESSION_DK_KEY));
+  };
+
+  /**
+   * Re-stamp the mirror's recorded policy after a live setAutoLockMs.
+   *
+   * why: the record carries the policy in force when it was WRITTEN (see
+   * DKMirror), so a policy the user TIGHTENS mid-session has to reach the
+   * copy that outlives this SW too. Read-modify-write of a record we
+   * already wrote — no key material is exported, the DK bytes are copied
+   * back verbatim, and a mirror that is absent, stale or unreadable is
+   * left alone for attemptResume to refuse and purge.
+   */
+  const _restampMirrorPolicy = () => {
+    const epoch = lockEpoch;
+    const policy = autoLockMs;
+    _enqueueMirror(async (cache) => {
+      if (lockEpoch !== epoch || isLocked()) return;
+      const plan = planMirrorResume({
+        stored: await cache.sessionGet(SESSION_DK_KEY), now: now(), autoLockMs: policy,
+      });
+      if (plan.action !== 'resume') return;
+      if (lockEpoch !== epoch || isLocked()) return;
+      await cache.sessionSet(SESSION_DK_KEY, makeMirrorRecord({
+        dk: plan.dk, unlockedAt: plan.unlockedAt, autoLockMs: policy,
+      }));
+    });
   };
 
   /**
@@ -470,17 +648,39 @@ export const createVault = (deps) => {
    * false otherwise (vault remains in its prior state — typically
    * locked). Safe to call when already unlocked (returns true) or
    * when no sessionCache is wired (returns false).
+   *
+   * A mirror past its deadline (or from before mirrors carried one) is
+   * REFUSED and purged: the user believes an idle vault auto-locked, and
+   * the timer that would have done it died with the previous SW.
    */
   const attemptResume = async () => {
     if (!sessionCache) return false;
     if (!isLocked()) return true;
+    const epoch = lockEpoch;
     const stored = await sessionCache.sessionGet(SESSION_DK_KEY);
-    if (!stored) return false;
+    const plan = planMirrorResume({ stored, now: now(), autoLockMs });
+    if (plan.action === 'absent') return false;
+    if (plan.action === 'refuse') {
+      console.warn(`[vault] refusing session DK mirror (${plan.reason}); clearing`);
+      _clearPersistedDK();
+      return false;
+    }
     try {
       // Adopt-and-drop, same as every unlock path: the imported handle is
       // extractable only long enough to mint the re-wrap material.
-      await _adoptDK(await importWrappableDK(base64ToBytes(stored)));
-      unlockedAt = now();
+      await _adoptDK(await importWrappableDK(base64ToBytes(plan.dk)));
+      if (lockEpoch !== epoch) {
+        // A lock landed while we were reading + unwrapping. It wins: drop
+        // what we just adopted rather than coming back UNLOCKED after the
+        // user asked for locked. lock() also re-purges the mirror.
+        lock();
+        return false;
+      }
+      // why the ORIGINAL timestamp rather than now(): the deadline is
+      // anchored to the unlock this mirror belongs to. Re-stamping it here
+      // would let a vault live forever by being resumed once per window —
+      // precisely the unbounded lifetime the deadline exists to close.
+      unlockedAt = plan.unlockedAt;
       armAutoLock();
       notify({ type: 'unlocked' });
       return true;

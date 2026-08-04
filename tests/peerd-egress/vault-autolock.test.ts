@@ -20,11 +20,16 @@ const makeTimers = () => {
   };
 };
 
+// A mirror stamped at the same instant the fake clock reports, so it is
+// always inside its window. It deliberately omits `autoLockMs` — the
+// planner then falls back to the vault's current policy, the branch that
+// covers a record written before the SW applied the user's setting.
 const makeSession = () => {
-  const store = new Map<string, string>([[SESSION_DK_KEY, RAW_KEY_B64]]);
+  const store = new Map<string, any>([[SESSION_DK_KEY, { dk: RAW_KEY_B64, unlockedAt: 1 }]]);
   return {
+    store,
     sessionGet: async (k: string) => store.get(k),
-    sessionSet: async (k: string, v: string) => { store.set(k, v); },
+    sessionSet: async (k: string, v: any) => { store.set(k, v); },
     sessionDelete: async (k: string) => { store.delete(k); },
   };
 };
