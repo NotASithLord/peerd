@@ -837,12 +837,30 @@ const denylistStore = makeDenylistStore({
 // rejects) when the load finishes or fails — it can't hang a turn, and
 // fails-closed to [] (the seed is a bundled extension asset, so a real failure
 // is near-impossible).
+/**
+ * The seed's OWN category map ({ banks_us: [...], health_us: [...], … }), kept
+ * for the settings list to group by.
+ *
+ * why keep it: the seed ships curated and categorised, but the store only ever
+ * needed a flat match list, so the taxonomy was thrown away one line after it
+ * was read — leaving the UI to render 164 undifferentiated chips. Grouping is a
+ * read-only presentation concern, so this stays out of the matcher entirely:
+ * `patterns()` is still the flat list every gate consults.
+ * @type {Record<string, string[]>}
+ */
+let seedCategories = {};
+/** Live read for the settings list — the map is replaced when the seed loads. */
+const getSeedCategories = () => seedCategories;
 const loadDenylist = async () => {
   /** @type {any[]} */ let seed = [];
   try {
     const res = await fetch('/peerd-egress/denylist/default.json');
     if (!res.ok) console.error('[sw] denylist seed fetch failed:', res.status);
-    else seed = flattenCategorisedDenylist(await res.json());
+    else {
+      const json = await res.json();
+      seedCategories = (json && typeof json === 'object' && json.categories) ? json.categories : {};
+      seed = flattenCategorisedDenylist(json);
+    }
   } catch (e) {
     console.error('[sw] denylist load threw', e);
   }
@@ -5329,7 +5347,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
   // rule is rebuilt on every edit — including the removal path, where a stale
   // rule would keep blocking a site the user just unblocked.
-  ...makeDenylistRoutes({ denylistStore, auditLog, denylistNetGuard }),
+  ...makeDenylistRoutes({ denylistStore, auditLog, getSeedCategories, denylistNetGuard }),
   // The settings view of the LEARNED origin set (+ the only un-learn path).
   // Settings-surface only: routes are unreachable from the tool dispatcher, so
   // no agent or page-fed actor can erase its own containment.
