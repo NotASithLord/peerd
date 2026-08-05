@@ -119,7 +119,12 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // branch's DPoP work plus the new in-browser dpop-key-idb.test.js, merged with
 // main's two new checked files (settings-row.js, behavior-rows.test.js), put
 // the merged count at 579 (computed on the merged tree, not summed).
-const COVERED_FLOOR = 580;
+// peerd-runtime/doc + its offscreen/SW/tool wiring (the read_doc document
+// reader) all landed // @ts-check-clean, so the floor moves up to lock them in.
+// Merge with main (#311 read_doc): main's floor was 599; this branch adds
+// peerd-egress/dpop/nonce.js (the RFC 9449 §8 core). Computed on the MERGED
+// tree, not summed — the same shape as the 579 merge above.
+const COVERED_FLOOR = 600;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

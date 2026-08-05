@@ -30,6 +30,11 @@ import { runActor, abortActor } from './actor-runner.js';
 // PDF text extraction (the read_pdf runner tool): pdf.js needs a Worker, which
 // the SW can't host. Self-registers a 'pdf/extract' message handler.
 import './pdf-extract.js';
+// Office/publishing document conversion (the read_doc tool): Word, Excel,
+// PowerPoint, OpenDocument, RTF, EPUB, CSV -> Markdown. Self-registers a
+// 'doc/extract' message handler. Offscreen for the same reason as the PDF
+// reader: the untrusted bytes (tens of MB) never enter the SW.
+import './doc-extract.js';
 // HTML -> markdown extraction (fetch_url's clean-content path): Readability +
 // Turndown need a DOM Document, which the SW can't build. The shell
 // self-registers a 'web/extract' message handler; the headless job runner's

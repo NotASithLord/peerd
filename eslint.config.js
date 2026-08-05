@@ -273,10 +273,15 @@ export default [
   // as voice/model-store — DATA verified by SRI, not a provider API call.
   // offscreen/pdf-extract fetches the PDF bytes for the read_pdf tool (the
   // target is denylist-checked at the tool boundary before we get here).
+  // offscreen/doc-extract is the exact same posture for read_doc: the office
+  // document's bytes, whose target read-doc.js denylist- and SSRF-checked
+  // before dispatching, fetched with redirect:'manual' so a 3xx cannot pivot
+  // the request onto a host no gate saw.
   {
     files: [
       'extension/peerd-runtime/pdf/ocr-store.js',
       'extension/offscreen/pdf-extract.js',
+      'extension/offscreen/doc-extract.js',
     ],
     rules: { 'no-restricted-globals': 'off' },
   },

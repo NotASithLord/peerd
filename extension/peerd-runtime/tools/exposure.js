@@ -33,8 +33,10 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
   'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
   // read_pdf returns untrusted PDF text — same boundary as read_page; the
-  // web actor reaches it directly.
-  'read_pdf',
+  // web actor reaches it directly. read_doc is its office-format sibling
+  // (Word/Excel/PowerPoint/OpenDocument/RTF/EPUB/CSV) and returns the same
+  // thing — untrusted document text — so it sits on the same tier.
+  'read_pdf', 'read_doc',
   // view returns an UNTRUSTED page screenshot as a model-visible image — same
   // boundary as read_page (raw page content), so it stays actor-only; the web
   // actor sees the pixels and reports back. (capture is NOT here: its image is
@@ -234,7 +236,11 @@ const ACTOR_TYPE_TOOLS = Object.freeze({
   // per-origin API clients; site_capture records traffic to derive them (tab only —
   // an API actor has no tab, so the WEB_API_TOOLS set below drops site_capture).
   web: Object.freeze(new Set([
-    ...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_web_cache',
+    // read_doc rides beside fetch_url rather than in WEB_ACTOR_DOM_TOOLS for the
+    // same reason fetch_url does: it takes a URL and owns no tab, so it is not
+    // part of the DOM set. (read_pdf IS in that set — it reads the PDF sitting
+    // in the actor's own tab, which is where the browser puts one.)
+    ...WEB_ACTOR_DOM_TOOLS, 'fetch_url', 'read_doc', 'read_web_cache',
     'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
     // login (Tier 0) — the web actor drives a page's sign-in affordance; keyless
     // by construction (it holds no secret and fills no password).

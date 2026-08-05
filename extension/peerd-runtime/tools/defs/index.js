@@ -22,6 +22,7 @@ import { loginTool }                 from './login.js';
 import { typeTool }                  from './type.js';
 import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
+import { readDocTool }               from './read-doc.js';
 import { fetchUrlTool }              from './fetch-url.js';
 import { readWebCacheTool }          from './read-web-cache.js';
 import { readRunCacheTool }          from './read-run-cache.js';
@@ -92,6 +93,7 @@ export {
   typeTool,
   navigateTool,
   readPdfTool,
+  readDocTool,
   // sessions
   actorListTool,
   openTabTool,
@@ -188,6 +190,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   // main in exposure.js, allowed for kind:'web'). Holds no secret, fills no password.
   loginTool,
   readPdfTool,
+  // read_doc — the OFFICE-format sibling of read_pdf (Word/Excel/PowerPoint/
+  // OpenDocument/RTF/EPUB/CSV). Registered + hidden from main (actor-only, like
+  // every other reader of untrusted document content); allowed for kind:'web'.
+  readDocTool,
   // the web actor's SESSIONLESS secure fetch (its non-render web mechanism).
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
