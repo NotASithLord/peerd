@@ -61,7 +61,9 @@ export { renderSystemPrompt, _setTemplateForTests } from './loop/system-prompt.j
 // same caps/classifier for instant pre-send feedback; the loop strips.
 export {
   classifyAttachment, validateAttachment, validateAttachments,
-  prepareUserAttachments, stripAttachment, stripAttachments,
+  prepareUserAttachments, prepareUserAttachmentsWithDocs, convertDocAttachments,
+  stripAttachment, stripAttachments,
+  AttachmentConversionError, DOC_MEDIA_TYPES, DOC_EXTENSIONS, DOC_TEXT_MAX_CHARS,
   attachmentBytes, formatBytes,
   ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE, IMAGE_MEDIA_TYPES, PDF_MEDIA_TYPE,
   UnsupportedAttachmentError, AttachmentTooLargeError, TooManyAttachmentsError,

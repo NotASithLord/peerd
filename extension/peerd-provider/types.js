@@ -28,7 +28,10 @@
  * @typedef {Object} Attachment
  * @property {string} name                       original filename (chip label)
  * @property {string} mediaType                  e.g. 'image/png', 'application/pdf', 'text/plain'
- * @property {'image'|'pdf'|'text'} kind         classified by peerd-runtime/loop/attachments.js
+ * @property {'image'|'pdf'|'text'|'doc'} kind   classified by peerd-runtime/loop/attachments.js.
+ *                                               'text' and 'doc' never become content blocks —
+ *                                               their payload is inlined into the message text
+ *                                               upstream, so only the metadata reaches here
  * @property {number} size                       decoded byte size
  * @property {string} [data]                     base64 payload — present ONLY on the turn the
  *                                               attachment is sent (send-once-then-strip)

@@ -131,8 +131,12 @@ import {
   detectInterruptedTurn,
   RESUME_NUDGE,
   // file attachments — agent/send validates + shapes through the pure
-  // core (fail closed) before the turn starts.
-  prepareUserAttachments,
+  // core (fail closed) before the turn starts. Office/e-book files get one
+  // extra, IMPURE step first (convertDocAttachments) — the converter is
+  // injected, so the pure core never imports a parser.
+  prepareUserAttachmentsWithDocs,
+  formatDocBody,
+  DOC_TEXT_MAX_CHARS,
   makeSpawnActor,
   makeRequestReview,
   createRefRegistry,
@@ -2571,6 +2575,23 @@ const docOffscreenClient = offscreenAvailable ? makeOffscreenDocClient({
   ensureOffscreen,
   sendMessage: (m) => browser.runtime.sendMessage(m),
 }) : null;
+
+// Convert an ATTACHED office/e-book file to Markdown. Same offscreen reader as
+// read_doc, handed the bytes directly — so an attached .docx and a linked one
+// go through exactly one implementation. Returns the formatted body (header,
+// conversion notes, truncation announcement) that gets inlined into the turn.
+// null where offscreen is unavailable (Firefox): convertDocAttachments turns a
+// missing converter into a clear refusal.
+const convertDocAttachment = offscreenAvailable
+  ? async (/** @type {{ name: string, mediaType: string, data?: string }} */ att) => {
+    if (!att?.data) throw new Error('the file was empty');
+    if (!docOffscreenClient) throw new Error('document conversion is not available in this browser build');
+    const { doc } = await docOffscreenClient.extract(
+      { bytesB64: att.data, name: att.name, contentType: att.mediaType }, {},
+    );
+    return formatDocBody({ doc, maxChars: DOC_TEXT_MAX_CHARS, source: att.name });
+  }
+  : null;
 
 // The HTML -> markdown extraction client (fetch_url's clean-content path).
 // Readability/Turndown need a DOM Document only the offscreen doc can build
@@ -5368,7 +5389,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
-    applyComposer, commandSources, prepareUserAttachments, runAgentTurn, runInit,
+    applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,
+    // Attached-document conversion: the SAME offscreen reader read_doc uses,
+    // fed inline bytes instead of a URL (doc-extract has always accepted a
+    // bytesB64 source). null on Firefox — the prepare step then refuses with
+    // a legible message rather than attaching an empty file.
+    convertDocAttachment,
     handleSystemCommand, handleToolsCommand, postChatNote, spawnActor, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt

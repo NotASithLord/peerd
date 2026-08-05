@@ -34,7 +34,7 @@
 import m from '/vendor/mithril/mithril.js';
 import {
   MicButton, activeTrigger,
-  classifyAttachment, ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE,
+  classifyAttachment, ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE, DOC_MEDIA_TYPES,
   IMAGE_MEDIA_TYPES, formatBytes,
 } from '/peerd-runtime/index.js';
 import { CommandPalette, visibleCandidates, PALETTE_OPTION_ID } from './command-palette.js';
@@ -96,7 +96,20 @@ const PAPERCLIP_ICON = () => m('svg', {
 }));
 
 // What the picker offers = exactly what classifyAttachment admits.
-const ATTACH_ACCEPT = [...IMAGE_MEDIA_TYPES, 'application/pdf', 'text/*'].join(',');
+//
+// The office/e-book types are listed by EXTENSION as well as media type, and
+// that is load-bearing rather than belt-and-braces: the OS media-type registry
+// often has no entry for .docx, so a media-type-only `accept` greys the file
+// out in the picker even though peerd can read it. classifyAttachment applies
+// the same extension fallback, so the two stay in step.
+const DOC_ACCEPT_EXTENSIONS = [
+  '.docx', '.xlsx', '.pptx', '.odt', '.ods', '.odp', '.rtf', '.epub',
+  '.doc', '.xls', '.ppt',
+];
+const ATTACH_ACCEPT = [
+  ...IMAGE_MEDIA_TYPES, 'application/pdf', 'text/*',
+  ...DOC_MEDIA_TYPES, ...DOC_ACCEPT_EXTENSIONS,
+].join(',');
 
 // File → base64 payload (no data: prefix). FileReader keeps the panel
 // off raw ArrayBuffer/btoa chunking for multi-MB files.
@@ -312,7 +325,8 @@ export const InputBar = {
         }
         const kind = classifyAttachment({ name: f.name, mediaType: f.type, size: f.size });
         if (kind === 'unsupported') {
-          ui.attachError = `"${f.name}": unsupported type — images (PNG/JPEG/GIF/WebP), PDF, or text files.`;
+          ui.attachError = `"${f.name}": unsupported type — images (PNG/JPEG/GIF/WebP), PDF, `
+            + 'Word/Excel/PowerPoint/OpenDocument, RTF, EPUB, or text files.';
           continue;
         }
         if (f.size > ATTACHMENT_CAPS[kind]) {

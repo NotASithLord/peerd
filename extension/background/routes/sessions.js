@@ -16,7 +16,8 @@
 export const makeSessionRoutes = (deps) => {
   const {
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel,
-    buildToolContext, applyComposer, commandSources, prepareUserAttachments,
+    buildToolContext, applyComposer, commandSources, prepareUserAttachmentsWithDocs,
+    convertDocAttachment,
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnActor, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
@@ -175,7 +176,14 @@ export const makeSessionRoutes = (deps) => {
       let turnAttachments = null;
       if (Array.isArray(attachments) && attachments.length > 0) {
         try {
-          const prepared = prepareUserAttachments({ text: userText, attachments });
+          // Office/e-book attachments are CONVERTED to Markdown on the way
+          // through (the offscreen doc reader — the same converter read_doc
+          // uses), so by the time the pure inlining step runs they are
+          // ordinary text. Validate-then-convert-then-inline is sequenced
+          // inside prepareUserAttachmentsWithDocs.
+          const prepared = await prepareUserAttachmentsWithDocs({
+            text: userText, attachments, convert: convertDocAttachment,
+          });
           userText = prepared.text;
           turnAttachments = prepared.attachments;
         } catch (e) {

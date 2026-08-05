@@ -25,7 +25,7 @@ const baseDeps = (over: any = {}) => {
       buildToolContext: async () => ({}),
       applyComposer: async ({ text }: any) => ({ text: `${text}!`, refs: [], command: null }),
       commandSources: { list: async () => [{ name: 'c', description: 'd' }] },
-      prepareUserAttachments: ({ text }: any) => ({ text, attachments: [] }),
+      prepareUserAttachmentsWithDocs: async ({ text }: any) => ({ text, attachments: [] }),
       runAgentTurn: async (a: any) => { calls.turns.push(a); },
       runInit: async () => { calls.runInit += 1; },
       startGoalRun: async (req: any) => { calls.goal.push(req); },
@@ -94,7 +94,7 @@ describe('agent/send slash-command routing', () => {
     expect(calls.turns[0].userText).toBe('hello!');
   });
   test('invalid attachment batch fails closed', async () => {
-    const { deps } = baseDeps({ prepareUserAttachments: () => { throw new Error('bad file'); } });
+    const { deps } = baseDeps({ prepareUserAttachmentsWithDocs: async () => { throw new Error('bad file'); } });
     expect(await makeSessionRoutes(deps)['agent/send']({ text: 'hi', attachments: [{}] })).toEqual({ ok: false, error: 'bad file' });
   });
 });
