@@ -403,6 +403,47 @@ export {
   drainFetchTapInjected,
 } from './dom/index.js';
 
+// --- lifecycle (the interruption/recovery contract's functional core) ---
+// Canonical operation states + the retry-class recovery decision, SW/actor
+// generations (authority never survives restart by assumption), single-use
+// confirmation binding, the startup reconciler, versioned-store migration
+// guard, the durable operation log, and the paired user/agent recovery
+// reports. The vault session-mirror side of the contract already lives in
+// peerd-egress/vault; this is the operation/authority side.
+export {
+  OPERATION_STATES, TERMINAL_STATES, isTerminal, isOperationState,
+  canTransition, assertTransition, IllegalTransitionError,
+  provesCompletion, provesFailure, resolveUnknownOutcome,
+  UnknownOutcomeUnresolvedError,
+} from './lifecycle/operation-state.js';
+export {
+  RETRY_CLASSES, isRetryClass, normalizeRetryClass, decideRecovery,
+} from './lifecycle/retry-class.js';
+export {
+  mintGeneration, authorityValid, sweepStaleAuthority, acceptActorMessage,
+} from './lifecycle/generation.js';
+export {
+  bindConfirmation, confirmationSatisfies, consumeConfirmation,
+  normalizeConfirmationTarget, CONFIRMATION_TTL_MS,
+} from './lifecycle/confirmation.js';
+export {
+  reconcileAtStartup, buildTurnRecoveryRecord,
+} from './lifecycle/reconcile.js';
+export {
+  classifyStoreVersion, guardStore, runMigration, StoreVersionError,
+} from './lifecycle/store-version.js';
+export {
+  LIFECYCLE_EVENTS, lifecycleAuditEntry, sanitizeDetail,
+} from './lifecycle/audit-events.js';
+export {
+  createOperationLog, OperationNotFoundError,
+  OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL,
+} from './lifecycle/operation-log.js';
+export {
+  RECOVERY_CATEGORIES, categorizeRecovery, describeRecovery,
+  securityDegradationReport, migrationBlockedReport,
+} from './lifecycle/recovery-report.js';
+
 // --- errors -------------------------------------------------------------
 export {
   SessionNotFoundError,

@@ -121,7 +121,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // the merged count at 579 (computed on the merged tree, not summed).
 // peerd-runtime/doc + its offscreen/SW/tool wiring (the read_doc document
 // reader) all landed // @ts-check-clean, so the floor moves up to lock them in.
-const COVERED_FLOOR = 599;
+const COVERED_FLOOR = 608;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
