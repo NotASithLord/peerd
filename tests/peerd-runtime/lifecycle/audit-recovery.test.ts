@@ -94,6 +94,16 @@ describe('recovery reports — §14 categories', () => {
     expect(report.user).toContain('saved files remain');
   });
 
+  test('settled verdicts are refused — a completed Class E action must never be labelled "safe to retry"', () => {
+    const completedVerdict = decideRecovery({
+      retryClass: 'E', dispatched: true, evidence: { kind: 'success-response' },
+    });
+    expect(() => categorizeRecovery(completedVerdict, { retryClass: 'E' }))
+      .toThrow(TypeError);
+    expect(() => describeRecovery(completedVerdict, { retryClass: 'E' }))
+      .toThrow(TypeError);
+  });
+
   test('the two explicit builders: security degradation and migration blocked', () => {
     const security = securityDegradationReport({ detail: 'offscreen doc refused' });
     expect(security.category).toBe(RECOVERY_CATEGORIES.SECURITY_DEGRADATION);

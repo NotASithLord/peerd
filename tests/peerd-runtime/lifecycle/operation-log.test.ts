@@ -55,7 +55,7 @@ describe('begin — recorded before dispatch', () => {
   test('missing identities throw', async () => {
     const { adapter } = makeStorage();
     const log = createOperationLog({ storage: adapter });
-    expect(log.begin({ ...beginInput, generationId: '' } as any))
+    await expect(log.begin({ ...beginInput, generationId: '' } as any))
       .rejects.toThrow(TypeError);
   });
 });
@@ -80,16 +80,15 @@ describe('transitions', () => {
     const log = createOperationLog({ storage: adapter, now: () => 1 });
     await log.begin(beginInput);
     const before = writes.length;
-    expect(log.transition('op-1', S.OUTCOME_UNKNOWN))
+    await expect(log.transition('op-1', S.OUTCOME_UNKNOWN))
       .rejects.toThrow(IllegalTransitionError);
-    await Bun.sleep(0);
     expect(writes.length).toBe(before);
   });
 
   test('unknown operations throw the named error', async () => {
     const { adapter } = makeStorage();
     const log = createOperationLog({ storage: adapter });
-    expect(log.transition('nope', S.RUNNING))
+    await expect(log.transition('nope', S.RUNNING))
       .rejects.toThrow(OperationNotFoundError);
   });
 });
@@ -126,7 +125,7 @@ describe('newAttempt — Class B retries', () => {
     await log.begin(beginInput);
     await log.transition('op-1', S.RUNNING);
     await log.transition('op-1', S.OUTCOME_UNKNOWN);
-    expect(log.newAttempt('op-1')).rejects.toThrow('interrupted');
+    await expect(log.newAttempt('op-1')).rejects.toThrow('interrupted');
   });
 });
 

@@ -37,14 +37,29 @@ const USER_TEXT = Object.freeze({
     'This profile requires a newer or supported peerd version. No data was changed.',
 });
 
+// Recovery reports describe RECOVERY outcomes only. A verdict that settled
+// on positive evidence (completed/failed/cancelled) must never reach the
+// category mapper: labelling a COMPLETED Class E action "safe to retry"
+// would invite exactly the duplicate side effect the contract forbids, so
+// the mismatch throws instead of guessing.
+const RECOVERY_STATES = Object.freeze(
+  /** @type {ReadonlySet<import('./operation-state.js').OperationState>} */ (new Set([
+    OPERATION_STATES.INTERRUPTED, OPERATION_STATES.OUTCOME_UNKNOWN,
+  ])));
+
 /**
- * Map a recovery verdict (retry-class.js) to its §14 category.
+ * Map a recovery verdict (retry-class.js) to its §14 category. Only
+ * interrupted/outcome_unknown verdicts qualify; settled verdicts throw.
  *
  * @param {import('./retry-class.js').RecoveryVerdict} recoveryVerdict
  * @param {{ retryClass?: unknown }} [context]
  * @returns {typeof RECOVERY_CATEGORIES[keyof typeof RECOVERY_CATEGORIES]}
  */
 export const categorizeRecovery = (recoveryVerdict, context = {}) => {
+  if (!RECOVERY_STATES.has(recoveryVerdict.state)) {
+    throw new TypeError('recovery reports describe interrupted/outcome_unknown '
+      + `verdicts; got ${String(recoveryVerdict.state)}`);
+  }
   if (recoveryVerdict.state === OPERATION_STATES.OUTCOME_UNKNOWN
       || recoveryVerdict.verificationRequired) {
     return RECOVERY_CATEGORIES.VERIFY_BEFORE_RETRY;
