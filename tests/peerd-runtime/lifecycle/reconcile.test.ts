@@ -6,7 +6,9 @@ import {
   reconcileAtStartup, buildTurnRecoveryRecord,
 } from '../../../extension/peerd-runtime/lifecycle/reconcile.js';
 import { mintGeneration } from '../../../extension/peerd-runtime/lifecycle/generation.js';
-import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
+import {
+  OPERATION_STATES, TERMINAL_STATES, canRecoverySettle,
+} from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { LIFECYCLE_EVENTS } from '../../../extension/peerd-runtime/lifecycle/audit-events.js';
 
 const S = OPERATION_STATES;
@@ -105,6 +107,55 @@ describe('settling by retry class', () => {
   });
 });
 
+describe('every planned transition is applicable', () => {
+  test('exhaustive sweep: the plan only ever emits transitions settle() accepts', () => {
+    // The applicator is operationLog.settle (canRecoverySettle); a plan the
+    // applicator throws on would strand the orphan nonterminal forever.
+    const nonterminal = Object.values(OPERATION_STATES)
+      .filter((s) => !TERMINAL_STATES.has(s));
+    const evidences = [undefined, { kind: 'success-response' },
+      { kind: 'verified-absent' }, { kind: 'timeout' }];
+    const records = [];
+    let i = 0;
+    for (const state of nonterminal) {
+      for (const retryClass of ['A', 'B', 'C', 'D', 'E', 'F', undefined]) {
+        for (const dispatched of [false, true]) {
+          for (const cancelRequested of [false, true]) {
+            for (const evidence of evidences) {
+              records.push(record({
+                operationId: `op-${i += 1}`, state, retryClass,
+                dispatched, cancelRequested, evidence,
+              }));
+            }
+          }
+        }
+      }
+    }
+    const plan = reconcileAtStartup({ records, generation });
+    expect(plan.transitions.length).toBe(records.length);
+    for (const t of plan.transitions) {
+      expect(canRecoverySettle(t.from, t.to)).toBe(true);
+    }
+  });
+});
+
+describe('stale authority sweep', () => {
+  test('prior-generation and expired stamps land in staleAuthority with audit entries', () => {
+    const plan = reconcileAtStartup({
+      records: [],
+      generation,
+      authorityRecords: [
+        { generationId: generation.id },                    // live
+        { generationId: 'gen-6-old' },                      // stale generation
+        { generationId: generation.id, expiresAt: 1 },      // expired window
+      ],
+    });
+    expect(plan.staleAuthority.length).toBe(2);
+    const staleEvents = plan.auditEvents.filter((e) => e.event === 'lifecycle.grant.stale-refused');
+    expect(staleEvents.length).toBe(2);
+  });
+});
+
 describe('notifications and audit', () => {
   test('each settled operation notifies its parent session with the §5.4 record', () => {
     const plan = reconcileAtStartup({
@@ -138,6 +189,26 @@ describe('notifications and audit', () => {
     );
     expect(rr.sideEffectStatus).toBe('none attempted');
     expect(rr).not.toHaveProperty('verificationRequired');
+  });
+
+  test('an awaiting_user record with a bogus dispatched flag still reports "none attempted"', () => {
+    const plan = reconcileAtStartup({
+      records: [record({ state: S.AWAITING_USER, dispatched: true })],
+      generation,
+    });
+    expect(plan.notifications[0].recoveryRecord.sideEffectStatus).toBe('none attempted');
+  });
+
+  test('an evidence-settled operation records the COMPLETED audit event, not "interrupted"', () => {
+    const plan = reconcileAtStartup({
+      records: [record({
+        state: S.AWAITING_REMOTE, dispatched: true,
+        evidence: { kind: 'success-response' },
+      })],
+      generation,
+    });
+    expect(plan.transitions[0].to).toBe(S.COMPLETED);
+    expect(plan.auditEvents[1].event).toBe(LIFECYCLE_EVENTS.OPERATION_COMPLETED);
   });
 
   test('the plan always opens with the generation-changed audit event, and settles append theirs', () => {

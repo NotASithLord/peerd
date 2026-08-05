@@ -61,11 +61,26 @@ export const bindConfirmation = ({ operationId, action, target, generationId, no
   if (!operationId || !action || !generationId) {
     throw new TypeError('bindConfirmation: operationId, action and generationId are required');
   }
-  const ttl = typeof ttlMs === 'number' && ttlMs > 0 ? ttlMs : CONFIRMATION_TTL_MS;
+  // A target that does not normalize to a non-empty string must REFUSE, not
+  // bind: a proof with target '' would match any other empty-normalizing
+  // request — a wildcard approval, the exact opposite of "bound to one
+  // normalized target". (A URL object passed where a string was meant is an
+  // ordinary call-site mistake; it must fail loudly here, not silently
+  // widen the approval.)
+  const normalizedTarget = normalizeConfirmationTarget(target);
+  if (!normalizedTarget) {
+    throw new TypeError('bindConfirmation: target must normalize to a non-empty string');
+  }
+  if (typeof now !== 'number' || !Number.isFinite(now)) {
+    throw new TypeError('bindConfirmation: now must be a finite epoch-ms number');
+  }
+  const ttl = typeof ttlMs === 'number' && Number.isFinite(ttlMs) && ttlMs > 0
+    ? ttlMs
+    : CONFIRMATION_TTL_MS;
   return {
     operationId,
     action,
-    target: normalizeConfirmationTarget(target),
+    target: normalizedTarget,
     generationId,
     grantedAt: now,
     expiresAt: now + ttl,
@@ -95,7 +110,14 @@ export const confirmationSatisfies = (proof, request) => {
   if (proof.action !== request.action) {
     return { valid: false, reason: 'confirmation bound to a different action' };
   }
-  if (proof.target !== normalizeConfirmationTarget(request.target)) {
+  // Empty targets refuse on BOTH sides: a legacy/crafted proof with target
+  // '' must never act as a wildcard, and a request whose target normalizes
+  // to '' has nothing to match against.
+  const requestTarget = normalizeConfirmationTarget(request.target);
+  if (typeof proof.target !== 'string' || !proof.target || !requestTarget) {
+    return { valid: false, reason: 'confirmation target missing or unnormalizable; re-confirm required' };
+  }
+  if (proof.target !== requestTarget) {
     return { valid: false, reason: 'confirmation bound to a different target' };
   }
   if (proof.generationId !== request.generationId) {
@@ -103,6 +125,13 @@ export const confirmationSatisfies = (proof, request) => {
       valid: false,
       reason: 'capability generation changed since approval; re-confirm required',
     };
+  }
+  // The window fails CLOSED on a malformed deadline: a proof whose
+  // expiresAt is missing or non-numeric (legacy schema, crafted storage)
+  // would otherwise pass every NaN comparison and become an eternal
+  // standing approval.
+  if (typeof proof.expiresAt !== 'number' || !Number.isFinite(proof.expiresAt)) {
+    return { valid: false, reason: 'confirmation window malformed; re-confirm required' };
   }
   if (request.now >= proof.expiresAt) {
     return { valid: false, reason: 'confirmation window expired' };

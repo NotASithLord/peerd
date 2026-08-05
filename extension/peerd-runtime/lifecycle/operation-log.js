@@ -5,29 +5,67 @@
 // (contract §8): created before dispatch, dispatched marked before the
 // effect leaves peerd, results persisted before success is reported to the
 // agent. Storage is injected (the SW passes a chrome.storage.local
-// adapter), mirroring the other runtime stores; state changes go through
-// the operation-state legality table, and result metadata passes the audit
-// sanitizer so a bearer token or raw header can never reach disk.
+// adapter), mirroring the other runtime stores. State changes go through
+// the operation-state legality table for live transitions, canRecoverySettle
+// for reconcile verdicts, and resolveUnknownOutcome for evidence-gated
+// resolution — the three sanctioned regimes, nothing free-form. Result
+// metadata is digest-only and passes the audit sanitizer; full payloads and
+// raw headers are never accepted by this API, so they have no path to disk
+// through it.
+//
+// All mutations are serialized through an internal queue: begin/transition/
+// settle each do load → mutate → persist, and two interleaved callers (a
+// parallel tool batch, an actor relay racing the main turn) would otherwise
+// silently lose the first write. The queue makes the read-modify-write
+// atomic within this context; cross-context writers must share ONE log
+// instance (the SW owns it).
 
 import {
-  OPERATION_STATES, assertTransition, isTerminal,
+  OPERATION_STATES, assertTransition, isTerminal, canRecoverySettle,
+  resolveUnknownOutcome,
 } from './operation-state.js';
-import { normalizeRetryClass } from './retry-class.js';
+import { RETRY_CLASSES, normalizeRetryClass } from './retry-class.js';
 import { sanitizeDetail } from './audit-events.js';
 
 export const OPERATION_LOG_KEY = 'peerd.lifecycle.operations';
 
-// Terminal records kept for correlation before the oldest are pruned. why a
+// Settled records kept for correlation before the oldest are pruned. why a
 // cap: the log is a recovery + audit correlation surface, not history —
 // unbounded growth would make the startup reconcile scan pay for every
-// operation ever run.
+// operation ever run. outcome_unknown records are deliberately EXEMPT from
+// pruning: deleting one silently discards the uncertainty the contract
+// exists to surface — they leave only via resolveUnknown.
 export const OPERATION_LOG_MAX_TERMINAL = 500;
+
+const PRUNABLE_STATES = Object.freeze(
+  /** @type {ReadonlySet<import('./operation-state.js').OperationState>} */ (new Set([
+    OPERATION_STATES.COMPLETED, OPERATION_STATES.FAILED,
+    OPERATION_STATES.CANCELLED, OPERATION_STATES.INTERRUPTED,
+  ])));
 
 export class OperationNotFoundError extends Error {
   /** @param {string} operationId */
   constructor(operationId) {
     super(`no operation record: ${operationId}`);
     this.name = 'OperationNotFoundError';
+  }
+}
+
+export class OperationExistsError extends Error {
+  /** @param {string} operationId @param {string} state */
+  constructor(operationId, state) {
+    super(`operation ${operationId} already recorded (state: ${state}); `
+      + 'a re-drive needs a fresh operationId — overwriting would erase the '
+      + 'dispatch evidence the recovery contract rides on');
+    this.name = 'OperationExistsError';
+  }
+}
+
+export class RetryRefusedError extends Error {
+  /** @param {string} operationId @param {string} reason */
+  constructor(operationId, reason) {
+    super(`retry refused for ${operationId}: ${reason}`);
+    this.name = 'RetryRefusedError';
   }
 }
 
@@ -42,6 +80,17 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     throw new TypeError('createOperationLog: storage adapter is required');
   }
 
+  // The mutation queue. Every writer runs load → mutate → persist inside
+  // one slot; reads outside the queue are fine (they see a committed map).
+  /** @type {Promise<unknown>} */
+  let queueTail = Promise.resolve();
+  /** @template T @param {() => Promise<T>} job @returns {Promise<T>} */
+  const enqueue = (job) => {
+    const run = queueTail.then(job, job);
+    queueTail = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
   /** @returns {Promise<Record<string, import('./reconcile.js').OperationRecord>>} */
   const load = async () => {
     const map = await storage.get(OPERATION_LOG_KEY);
@@ -50,19 +99,21 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
 
   /** @param {Record<string, import('./reconcile.js').OperationRecord>} map */
   const persist = async (map) => {
-    const terminal = Object.values(map)
-      .filter((record) => isTerminal(record.state))
+    const prunable = Object.values(map)
+      .filter((record) => PRUNABLE_STATES.has(record.state))
       .sort((a, b) => a.createdAt - b.createdAt);
-    const excess = terminal.length - OPERATION_LOG_MAX_TERMINAL;
+    const excess = prunable.length - OPERATION_LOG_MAX_TERMINAL;
     if (excess > 0) {
-      for (const record of terminal.slice(0, excess)) delete map[record.operationId];
+      for (const record of prunable.slice(0, excess)) delete map[record.operationId];
     }
     await storage.set(OPERATION_LOG_KEY, map);
   };
 
   /**
    * Record a new operation BEFORE dispatch (§8.1). Persists, then returns
-   * the stored record.
+   * the stored record. An operationId already on record — live OR settled —
+   * refuses (OperationExistsError): overwriting would erase the dispatched/
+   * evidence flags that decide interrupted vs outcome_unknown on recovery.
    *
    * @param {Object} input
    * @param {string} input.operationId
@@ -75,11 +126,13 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * @param {string} [input.target]
    * @param {string} [input.confirmationRef]
    */
-  const begin = async (input) => {
+  const begin = (input) => enqueue(async () => {
     if (!input?.operationId || !input.sessionId || !input.toolName || !input.generationId) {
       throw new TypeError('operationLog.begin: operationId, sessionId, toolName and generationId are required');
     }
     const map = await load();
+    const existing = map[input.operationId];
+    if (existing) throw new OperationExistsError(input.operationId, existing.state);
     /** @type {import('./reconcile.js').OperationRecord} */
     const record = {
       operationId: input.operationId,
@@ -99,7 +152,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     map[record.operationId] = record;
     await persist(map);
     return record;
-  };
+  });
 
   /** @param {string} operationId */
   const get = async (operationId) => (await load())[operationId];
@@ -108,56 +161,114 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   const listNonterminal = async () =>
     Object.values(await load()).filter((record) => !isTerminal(record.state));
 
+  /** @param {import('./reconcile.js').OperationRecord} record
+   *  @param {import('./operation-state.js').OperationState} to
+   *  @param {{ resultDigest?: string, lastDurableStep?: number,
+   *    dispatched?: boolean, cancelRequested?: boolean,
+   *    evidence?: { kind?: string } }} patch */
+  const patched = (record, to, patch) => ({
+    ...record,
+    state: to,
+    ...(patch.dispatched === true ? { dispatched: true } : {}),
+    ...(patch.cancelRequested === true ? { cancelRequested: true } : {}),
+    ...(patch.evidence ? { evidence: patch.evidence } : {}),
+    ...(typeof patch.lastDurableStep === 'number'
+      ? { lastDurableStep: patch.lastDurableStep } : {}),
+    // Result metadata is digest-only and scrubbed: the log stores
+    // correlation, never payloads (§8.2).
+    ...(typeof patch.resultDigest === 'string'
+      ? { resultDigest: String(sanitizeDetail(patch.resultDigest)) } : {}),
+  });
+
   /**
-   * Move an operation through the state machine. Illegal transitions throw
-   * (IllegalTransitionError) — recovery paths must go through the
-   * reconciler/resolver, not free-form writes. Persists before returning.
+   * Move a LIVE operation through the state machine. Illegal transitions
+   * throw (IllegalTransitionError) — recovery paths go through settle()/
+   * resolveUnknown(), not free-form writes. Persists before returning.
    *
    * @param {string} operationId
    * @param {import('./operation-state.js').OperationState} to
    * @param {{ resultDigest?: string, lastDurableStep?: number,
    *   dispatched?: boolean, cancelRequested?: boolean,
-   *   evidence?: { kind?: string }, detail?: unknown }} [patch]
+   *   evidence?: { kind?: string } }} [patch]
    */
-  const transition = async (operationId, to, patch = {}) => {
+  const transition = (operationId, to, patch = {}) => enqueue(async () => {
     const map = await load();
     const record = map[operationId];
     if (!record) throw new OperationNotFoundError(operationId);
     assertTransition(record.state, to);
-    const next = {
-      ...record,
-      state: to,
-      ...(patch.dispatched === true ? { dispatched: true } : {}),
-      ...(patch.cancelRequested === true ? { cancelRequested: true } : {}),
-      ...(patch.evidence ? { evidence: patch.evidence } : {}),
-      ...(typeof patch.lastDurableStep === 'number'
-        ? { lastDurableStep: patch.lastDurableStep } : {}),
-      // Result metadata is digest-only and scrubbed: the log stores
-      // correlation, never payloads or credentials (§8.2).
-      ...(typeof patch.resultDigest === 'string'
-        ? { resultDigest: String(sanitizeDetail(patch.resultDigest)) } : {}),
-    };
+    const next = patched(record, to, patch);
     map[operationId] = next;
     await persist(map);
     return next;
-  };
+  });
 
   /** Mark the moment the effect leaves peerd. @param {string} operationId */
   const markDispatched = (operationId) =>
     transition(operationId, OPERATION_STATES.AWAITING_REMOTE, { dispatched: true });
 
   /**
-   * Class B retries: a fresh attempt number on the same operation. Refused
-   * on terminal records other than `interrupted` — a retry re-drives an
-   * interrupted read, never a settled outcome.
+   * Apply a startup reconcile verdict (reconcileAtStartup's plan) to an
+   * orphaned record — the recovery regime. canRecoverySettle governs
+   * legality: any nonterminal state may settle to any terminal one, except
+   * awaiting_user → outcome_unknown.
+   *
+   * @param {string} operationId
+   * @param {import('./retry-class.js').RecoveryVerdict} verdict
+   */
+  const settle = (operationId, verdict) => enqueue(async () => {
+    const map = await load();
+    const record = map[operationId];
+    if (!record) throw new OperationNotFoundError(operationId);
+    if (!canRecoverySettle(record.state, verdict.state)) {
+      throw new TypeError(`recovery settle refused: ${record.state} -> ${String(verdict.state)}`);
+    }
+    const next = { ...record, state: verdict.state };
+    map[operationId] = next;
+    await persist(map);
+    return next;
+  });
+
+  /**
+   * The ONE exit from outcome_unknown: positive after-the-fact evidence
+   * (resolveUnknownOutcome throws on anything weaker, including timeouts).
+   * Persists the settled state together with the evidence that earned it.
+   *
+   * @param {string} operationId
+   * @param {{ kind?: string }} evidence
+   */
+  const resolveUnknown = (operationId, evidence) => enqueue(async () => {
+    const map = await load();
+    const record = map[operationId];
+    if (!record) throw new OperationNotFoundError(operationId);
+    if (record.state !== OPERATION_STATES.OUTCOME_UNKNOWN) {
+      throw new TypeError(`resolveUnknown requires outcome_unknown; got ${record.state}`);
+    }
+    const resolved = resolveUnknownOutcome(evidence);
+    const next = { ...record, state: resolved, evidence };
+    map[operationId] = next;
+    await persist(map);
+    return next;
+  });
+
+  /**
+   * Class A–D retries: a fresh attempt number on the same operation.
+   * Refused for Class E (a user-instructed repeat of a non-idempotent
+   * action is a NEW operation with a fresh confirmation, never a re-drive
+   * of the old record) and for any state but `interrupted` — settled
+   * outcomes are never re-driven.
    * @param {string} operationId
    */
-  const newAttempt = async (operationId) => {
+  const newAttempt = (operationId) => enqueue(async () => {
     const map = await load();
     const record = map[operationId];
     if (!record) throw new OperationNotFoundError(operationId);
     if (record.state !== OPERATION_STATES.INTERRUPTED) {
-      throw new TypeError(`newAttempt requires an interrupted operation; got ${record.state}`);
+      throw new RetryRefusedError(operationId,
+        `requires an interrupted operation; got ${record.state}`);
+    }
+    if (normalizeRetryClass(record.retryClass) === RETRY_CLASSES.SIDE_EFFECT) {
+      throw new RetryRefusedError(operationId,
+        'Class E repeats as a new operation with a fresh confirmation, never a re-drive');
     }
     const next = {
       ...record,
@@ -168,7 +279,10 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     map[operationId] = next;
     await persist(map);
     return next;
-  };
+  });
 
-  return { begin, get, listNonterminal, transition, markDispatched, newAttempt };
+  return {
+    begin, get, listNonterminal, transition, markDispatched,
+    settle, resolveUnknown, newAttempt,
+  };
 };

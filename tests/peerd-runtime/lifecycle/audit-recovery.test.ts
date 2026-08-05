@@ -32,6 +32,24 @@ describe('audit sanitization', () => {
     expect(detail.nested.ok).toBe('kept');
   });
 
+  test('__proto__/constructor/prototype keys are dropped, not assigned — no prototype pollution', () => {
+    const detail = sanitizeDetail(JSON.parse('{"__proto__":{"polluted":true},"constructor":1,"ok":2}')) as Record<string, unknown>;
+    expect(Object.hasOwn(detail, '__proto__')).toBe(false);
+    expect(Object.hasOwn(detail, 'constructor')).toBe(false);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(detail)).toBe(Object.prototype);
+    expect(detail.ok).toBe(2);
+  });
+
+  test('Errors keep name+message; Dates become ISO strings', () => {
+    const detail = sanitizeDetail({
+      error: new RangeError('too big'),
+      when: new Date('2026-08-05T00:00:00Z'),
+    }) as Record<string, any>;
+    expect(detail.error).toEqual({ name: 'RangeError', message: 'too big' });
+    expect(detail.when).toBe('2026-08-05T00:00:00.000Z');
+  });
+
   test('strings are truncated and depth is bounded', () => {
     const long = 'x'.repeat(2000);
     expect((sanitizeDetail(long) as string).length).toBeLessThan(600);
@@ -67,6 +85,12 @@ describe('recovery reports — §14 categories', () => {
   test('Class B → retry requires budget confirmation', () => {
     const verdict = decideRecovery({ retryClass: 'B', dispatched: false });
     expect(categorizeRecovery(verdict, { retryClass: 'B' }))
+      .toBe(RECOVERY_CATEGORIES.RETRY_REQUIRES_BUDGET);
+  });
+
+  test('a budget-exhausted verdict is the budget case even without class context', () => {
+    const verdict = decideRecovery({ retryClass: 'B', dispatched: false, budgetRemaining: false });
+    expect(categorizeRecovery(verdict, {}))
       .toBe(RECOVERY_CATEGORIES.RETRY_REQUIRES_BUDGET);
   });
 

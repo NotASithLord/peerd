@@ -33,12 +33,14 @@ export const OPERATION_STATES = Object.freeze({
 });
 
 // Terminal states — nothing moves OUT of these through the transition
-// table. The two sanctioned exits live elsewhere and are deliberate:
+// table. The sanctioned exits live elsewhere and are deliberate:
 // resolveUnknownOutcome (below) settles outcome_unknown on positive
-// evidence, and the operation log's newAttempt re-queues an `interrupted`
+// evidence, the operation log's newAttempt re-queues an `interrupted`
 // record with an incremented attempt number (contract §4 Class B: "the
-// retry must receive a new operation attempt number"). why: free-form
-// rewinds would erase the evidence trail the contract exists to preserve.
+// retry must receive a new operation attempt number"), and recovery
+// settling (canRecoverySettle below + the log's settle()) applies a
+// startup reconcile verdict. why: free-form rewinds would erase the
+// evidence trail the contract exists to preserve.
 export const TERMINAL_STATES = Object.freeze(
   /** @type {ReadonlySet<OperationState>} */ (new Set([
   OPERATION_STATES.COMPLETED,
@@ -163,6 +165,26 @@ export const provesCompletion = (kind) =>
 /** @param {unknown} kind */
 export const provesFailure = (kind) =>
   FAILURE_EVIDENCE.has(/** @type {any} */ (kind));
+
+// --- Recovery settling -----------------------------------------------------
+//
+// The transition table above governs a LIVE operation moving under its own
+// driver. Startup reconciliation is a different regime: a new generation
+// settling a dead generation's orphans, where the source state only says
+// where the record was parked when the driver died. A recovery settle may
+// take any nonterminal state to any terminal state, with one carve-out:
+// awaiting_user can never settle to outcome_unknown (no side effect is in
+// flight while waiting on the user). The operation log's settle() enforces
+// this instead of the live table.
+
+/** @param {unknown} from @param {unknown} to */
+export const canRecoverySettle = (from, to) => {
+  if (!isOperationState(from) || !isOperationState(to)) return false;
+  if (isTerminal(from) || !isTerminal(to)) return false;
+  if (from === OPERATION_STATES.AWAITING_USER
+      && to === OPERATION_STATES.OUTCOME_UNKNOWN) return false;
+  return true;
+};
 
 export class UnknownOutcomeUnresolvedError extends Error {
   /** @param {unknown} evidence */

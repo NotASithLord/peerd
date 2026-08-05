@@ -30,16 +30,24 @@ export const LIFECYCLE_EVENTS = Object.freeze({
 });
 
 // Keys that must never appear in a lifecycle audit entry's detail, at any
-// depth. Substring match on the lowercased key — 'authorization',
-// 'x-api-key', 'setCookie' and friends all trip it.
+// depth. Substring match on the lowercased key — 'auth' subsumes
+// 'authorization'; 'x-api-key', 'setCookie', 'bearerToken', 'dpopProof'
+// and friends all trip it.
 const FORBIDDEN_KEY_FRAGMENTS = Object.freeze([
   'secret', 'token', 'password', 'passphrase', 'credential', 'apikey',
-  'api_key', 'authorization', 'cookie', 'dpop', 'proof', 'header', 'body',
+  'api_key', 'auth', 'cookie', 'dpop', 'proof', 'header', 'body',
+  'bearer', 'jwt', 'signature', 'private',
   'pagecontent', 'page_content',
 ]);
 
+// Keys whose ASSIGNMENT is itself the attack: writing out['__proto__']
+// mutates the sanitized object's prototype instead of adding a property.
+// Dropped outright before the fragment check ever runs.
+const DANGEROUS_KEYS = Object.freeze(new Set(['__proto__', 'constructor', 'prototype']));
+
 /** @param {string} key */
 const keyForbidden = (key) => {
+  if (DANGEROUS_KEYS.has(key)) return true;
   const lower = key.toLowerCase();
   return FORBIDDEN_KEY_FRAGMENTS.some((fragment) => lower.includes(fragment));
 };
@@ -62,6 +70,13 @@ export const sanitizeDetail = (value, depth = 0) => {
     return value.length > MAX_STRING_CHARS ? `${value.slice(0, MAX_STRING_CHARS)}…` : value;
   }
   if (depth >= MAX_DETAIL_DEPTH) return '[depth-capped]';
+  // The two non-plain shapes audit detail legitimately carries: an Error
+  // (keep its name+message — the reason the entry exists) and a Date.
+  // Everything else exotic falls through to its type name below.
+  if (value instanceof Error) {
+    return { name: value.name, message: String(sanitizeDetail(value.message)) };
+  }
+  if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.slice(0, 64).map((v) => sanitizeDetail(v, depth + 1));
   if (typeof value === 'object') {
     /** @type {Record<string, unknown>} */ const out = {};

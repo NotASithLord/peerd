@@ -13,15 +13,6 @@
 //
 // Pure: steps are injected functions; no IO, no clock.
 
-export class StoreVersionError extends Error {
-  /** @param {string} message @param {string} diagnosticId */
-  constructor(message, diagnosticId) {
-    super(message);
-    this.name = 'StoreVersionError';
-    this.diagnosticId = diagnosticId;
-  }
-}
-
 /**
  * @typedef {'current' | 'migratable' | 'newer' | 'unsupported' | 'malformed'}
  *   VersionClass
@@ -139,8 +130,9 @@ export const runMigration = ({ store, data, fromVersion, toVersion, steps, check
     failedStep,
     data,               // the original, untouched
     version: fromVersion,
-    resumeFrom: typeof checkpointVersion === 'number'
-      ? Math.max(checkpointVersion, typeof fromVersion === 'number' ? fromVersion : 0)
+    resumeFrom: Number.isInteger(checkpointVersion)
+      ? Math.max(/** @type {number} */ (checkpointVersion),
+        typeof fromVersion === 'number' ? fromVersion : 0)
       : (typeof fromVersion === 'number' ? fromVersion : 0),
     reason,
   });
@@ -154,9 +146,15 @@ export const runMigration = ({ store, data, fromVersion, toVersion, steps, check
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     return fail('malformed-data', 'stored payload is not a record; retained for diagnosis');
   }
+  // A malformed checkpoint fails closed rather than being coerced: treating
+  // it as absent would RE-RUN steps against already-migrated data, and NaN
+  // arithmetic would corrupt the resume cursor.
+  if (checkpointVersion !== undefined
+      && (typeof checkpointVersion !== 'number' || !Number.isInteger(checkpointVersion))) {
+    return fail('malformed-checkpoint', 'checkpoint cursor is not an integer; retained for diagnosis');
+  }
 
-  const start = Math.max(fromVersion,
-    typeof checkpointVersion === 'number' ? checkpointVersion : fromVersion);
+  const start = Math.max(fromVersion, checkpointVersion ?? fromVersion);
 
   // Order and validate the chain before touching data: forward-only,
   // contiguous from `start` to `toVersion`.
@@ -169,7 +167,11 @@ export const runMigration = ({ store, data, fromVersion, toVersion, steps, check
     }
   }
 
-  let current = /** @type {Record<string, unknown>} */ ({ ...data });
+  // Deep-cloned at entry: steps receive an isolated copy, so a step that
+  // mutates a NESTED object cannot reach back into the caller's original —
+  // "failure preserves the original data" has to hold at every depth, not
+  // just the top level.
+  let current = /** @type {Record<string, unknown>} */ (structuredClone(data));
   let version = start;
   /** @type {number[]} */ const completedSteps = [];
 
@@ -191,12 +193,17 @@ export const runMigration = ({ store, data, fromVersion, toVersion, steps, check
         `migration step v${step.from}->v${step.to} did not return a record`,
         { from: step.from, to: step.to });
     }
-    // Unknown-field guard: a step may only remove keys it declared. This is
-    // what makes "silently discard unknown fields" structurally impossible
+    // Unknown-field guard: a step may only remove keys it declared. A key
+    // set to `undefined` counts as dropped too — undefined does not survive
+    // structured-clone/JSON persistence, so `{ ...d, field: undefined }`
+    // would be a silent discard the moment it hits storage. This is what
+    // makes "silently discard unknown fields" structurally impossible
     // rather than a review convention.
     const allowedDrops = new Set(step.drops ?? []);
     for (const key of Object.keys(before)) {
-      if (!Object.hasOwn(after, key) && !allowedDrops.has(key)) {
+      const removed = !Object.hasOwn(after, key)
+        || (after[key] === undefined && before[key] !== undefined);
+      if (removed && !allowedDrops.has(key)) {
         return fail(`step-v${step.from}-dropped-${key}`,
           `migration step v${step.from}->v${step.to} dropped undeclared field "${key}"`,
           { from: step.from, to: step.to });

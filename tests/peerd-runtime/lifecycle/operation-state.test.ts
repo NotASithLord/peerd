@@ -8,7 +8,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   OPERATION_STATES, TERMINAL_STATES, isTerminal, isOperationState,
-  canTransition, assertTransition, IllegalTransitionError,
+  canTransition, assertTransition, canRecoverySettle, IllegalTransitionError,
   provesCompletion, provesFailure, resolveUnknownOutcome,
   UnknownOutcomeUnresolvedError,
 } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
@@ -79,6 +79,25 @@ describe('transition legality', () => {
     expect(() => assertTransition(S.COMPLETED, S.RUNNING))
       .toThrow(IllegalTransitionError);
     expect(assertTransition(S.RUNNING, S.COMPLETED)).toBe(S.COMPLETED);
+  });
+});
+
+describe('recovery settling — the reconcile regime', () => {
+  test('any nonterminal state may settle to any terminal state…', () => {
+    const nonterminal = Object.values(S).filter((s) => !TERMINAL_STATES.has(s));
+    for (const from of nonterminal) {
+      for (const to of TERMINAL_STATES) {
+        if (from === S.AWAITING_USER && to === S.OUTCOME_UNKNOWN) continue;
+        expect(canRecoverySettle(from, to)).toBe(true);
+      }
+    }
+  });
+
+  test('…except awaiting_user → outcome_unknown, and never terminal→anything or →nonterminal', () => {
+    expect(canRecoverySettle(S.AWAITING_USER, S.OUTCOME_UNKNOWN)).toBe(false);
+    expect(canRecoverySettle(S.COMPLETED, S.FAILED)).toBe(false);
+    expect(canRecoverySettle(S.RUNNING, S.QUEUED)).toBe(false);
+    expect(canRecoverySettle('exploded', S.FAILED)).toBe(false);
   });
 });
 

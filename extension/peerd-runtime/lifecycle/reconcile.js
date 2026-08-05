@@ -16,6 +16,7 @@
 
 import { OPERATION_STATES, isTerminal } from './operation-state.js';
 import { decideRecovery, normalizeRetryClass } from './retry-class.js';
+import { sweepStaleAuthority } from './generation.js';
 import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
 
 /**
@@ -75,6 +76,18 @@ export const buildTurnRecoveryRecord = (record, recoveryVerdict) => {
   };
 };
 
+// The audit event a reconcile verdict earns. An evidence-settled verdict is
+// COMPLETED, uncertainty is OUTCOME_UNKNOWN, everything else (interrupted,
+// cancelled, evidence-proven failed) records as the interruption it is —
+// labelling a completed operation "interrupted" would misfile the one
+// event chain audits reconstruct from.
+/** @param {import('./operation-state.js').OperationState} state */
+const auditEventFor = (state) => {
+  if (state === OPERATION_STATES.OUTCOME_UNKNOWN) return LIFECYCLE_EVENTS.OUTCOME_UNKNOWN;
+  if (state === OPERATION_STATES.COMPLETED) return LIFECYCLE_EVENTS.OPERATION_COMPLETED;
+  return LIFECYCLE_EVENTS.OPERATION_INTERRUPTED;
+};
+
 /**
  * @typedef {Object} ReconcilePlan
  * @property {Array<{ operationId: string,
@@ -101,14 +114,23 @@ export const buildTurnRecoveryRecord = (record, recoveryVerdict) => {
  *  - a record still stamped with the CURRENT generation is not an orphan
  *    (the shell may pass records mid-write) and is left alone;
  *  - each settled operation notifies its parent session with the §5.4
- *    recovery record and appends the matching audit entries.
+ *    recovery record and appends the matching audit entries;
+ *  - every stamped authority record passed in (grants, approval tokens,
+ *    leases, tab/actor ownership) is swept: prior-generation or expired
+ *    stamps land in staleAuthority with a STALE_GRANT_REFUSED audit entry
+ *    each — the shell releases them (§5.3 steps 5 and 7).
+ *
+ * The plan's transitions apply through operationLog.settle() — the recovery
+ * regime — never through the live transition table.
  *
  * @param {Object} input
  * @param {OperationRecord[]} input.records
  * @param {import('./generation.js').Generation} input.generation  freshly minted
+ * @param {import('./generation.js').StampedAuthority[]} [input.authorityRecords]
+ * @param {number} [input.now]  defaults to the new generation's mint time
  * @returns {ReconcilePlan}
  */
-export const reconcileAtStartup = ({ records, generation }) => {
+export const reconcileAtStartup = ({ records, generation, authorityRecords, now }) => {
   /** @type {ReconcilePlan} */
   const plan = {
     transitions: [], staleAuthority: [], notifications: [],
@@ -118,26 +140,37 @@ export const reconcileAtStartup = ({ records, generation }) => {
     })],
   };
 
+  const { stale } = sweepStaleAuthority(authorityRecords ?? [], {
+    generation, now: typeof now === 'number' ? now : generation.mintedAt,
+  });
+  for (const entry of stale) {
+    plan.staleAuthority.push(entry);
+    plan.auditEvents.push(lifecycleAuditEntry({
+      event: LIFECYCLE_EVENTS.STALE_GRANT_REFUSED,
+      generationId: generation.id,
+      detail: { reason: entry.reason },
+    }));
+  }
+
   for (const record of Array.isArray(records) ? records : []) {
     if (!record || typeof record.operationId !== 'string') continue;
     if (isTerminal(record.state) || !RECONCILABLE.has(record.state)) continue;
     if (record.generationId === generation.id) continue; // ours, in flight
 
-    const verdict = record.state === OPERATION_STATES.AWAITING_USER
-      // Waiting on the user = nothing dispatched; the pending confirmation
-      // is dead either way (generation changed). Force the safe shape.
-      ? decideRecovery({
-        retryClass: normalizeRetryClass(record.retryClass),
-        dispatched: false,
-        cancelRequested: record.cancelRequested,
-        evidence: record.evidence,
-      })
-      : decideRecovery({
-        retryClass: normalizeRetryClass(record.retryClass),
-        dispatched: record.dispatched,
-        cancelRequested: record.cancelRequested,
-        evidence: record.evidence,
-      });
+    // Waiting on the user = nothing dispatched; the pending confirmation is
+    // dead either way (generation changed). Force the safe shape onto BOTH
+    // the decision and the recovery record — a bogus dispatched flag on an
+    // awaiting_user record must not surface as "dispatched" to the parent.
+    const effective = record.state === OPERATION_STATES.AWAITING_USER
+      ? { ...record, dispatched: false }
+      : record;
+
+    const verdict = decideRecovery({
+      retryClass: normalizeRetryClass(effective.retryClass),
+      dispatched: effective.dispatched,
+      cancelRequested: effective.cancelRequested,
+      evidence: effective.evidence,
+    });
 
     plan.transitions.push({
       operationId: record.operationId,
@@ -146,7 +179,7 @@ export const reconcileAtStartup = ({ records, generation }) => {
       verdict,
     });
 
-    const recoveryRecord = buildTurnRecoveryRecord(record, verdict);
+    const recoveryRecord = buildTurnRecoveryRecord(effective, verdict);
     plan.notifications.push({
       sessionId: record.sessionId,
       ...(record.actorId ? { actorId: record.actorId } : {}),
@@ -154,9 +187,7 @@ export const reconcileAtStartup = ({ records, generation }) => {
     });
 
     plan.auditEvents.push(lifecycleAuditEntry({
-      event: verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN
-        ? LIFECYCLE_EVENTS.OUTCOME_UNKNOWN
-        : LIFECYCLE_EVENTS.OPERATION_INTERRUPTED,
+      event: auditEventFor(verdict.state),
       sessionId: record.sessionId,
       actorId: record.actorId,
       operationId: record.operationId,

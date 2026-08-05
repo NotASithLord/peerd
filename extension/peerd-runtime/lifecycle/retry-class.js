@@ -164,6 +164,12 @@ export const decideRecovery = (input) => {
           + '— verify before treating it as cancelled',
       });
     }
+    if (retryClass === RETRY_CLASSES.RESOURCE) {
+      return verdict({
+        state: OPERATION_STATES.CANCELLED,
+        reason: 'cancelled; any partially created resource is settled by orphan reaping',
+      });
+    }
     return verdict({
       state: OPERATION_STATES.CANCELLED,
       reason: 'cancelled; any in-flight effect is idempotent or invisible',

@@ -40,8 +40,14 @@ describe('the downgrade contract: newer schemas fail read-only', () => {
 });
 
 const steps = [
-  { from: 1, to: 2, migrate: (d: Record<string, unknown>) => ({ ...d, renamed: d.old, old: undefined as unknown }), drops: [] },
-  { from: 2, to: 3, migrate: (d: Record<string, unknown>) => { const { legacy, ...rest } = d; return { ...rest, count: 0 }; }, drops: ['legacy'] },
+  {
+    from: 1, to: 2, drops: ['old'],
+    migrate: (d: Record<string, unknown>) => { const { old, ...rest } = d; return { ...rest, renamed: old }; },
+  },
+  {
+    from: 2, to: 3, drops: ['legacy'],
+    migrate: (d: Record<string, unknown>) => { const { legacy, ...rest } = d; return { ...rest, count: 0 }; },
+  },
 ];
 
 describe('runMigration — the happy chain', () => {
@@ -107,6 +113,44 @@ describe('runMigration — failure preserves the original', () => {
     if (result.ok) return;
     expect(result.diagnosticId).toBe('migrate-memory-step-v1-dropped-quietly_dropped');
     expect(result.data).toEqual({ keep: 1, quietly_dropped: 2 });
+  });
+
+  test('setting a key to undefined is a drop too — it would vanish at the persistence layer', () => {
+    const result = runMigration({
+      store: 'memory', data: { keep: 1, erased: 2 },
+      fromVersion: 1, toVersion: 2,
+      steps: [{ from: 1, to: 2, migrate: (d: Record<string, unknown>) => ({ ...d, erased: undefined }) }],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.diagnosticId).toBe('migrate-memory-step-v1-dropped-erased');
+  });
+
+  test('a step mutating a NESTED object cannot corrupt the caller\'s original', () => {
+    const data = { settings: { theme: 'dark' } };
+    const result = runMigration({
+      store: 'settings', data, fromVersion: 1, toVersion: 2,
+      steps: [{
+        from: 1, to: 2,
+        migrate: (d: Record<string, unknown>) => {
+          (d.settings as Record<string, unknown>).theme = 'CLOBBERED';
+          throw new Error('boom after mutation');
+        },
+      }],
+    });
+    expect(result.ok).toBe(false);
+    expect(data.settings.theme).toBe('dark'); // original untouched at depth
+  });
+
+  test('a malformed checkpoint fails closed instead of re-running or NaN-ing the cursor', () => {
+    const result = runMigration({
+      store: 's', data: { a: 1 }, fromVersion: 1, toVersion: 3, steps,
+      checkpointVersion: Number.NaN,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.diagnosticId).toBe('migrate-s-malformed-checkpoint');
+    expect(result.resumeFrom).toBe(1);
   });
 
   test('downgrade is refused', () => {

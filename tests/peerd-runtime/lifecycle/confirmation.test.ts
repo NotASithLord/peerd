@@ -106,3 +106,36 @@ describe('single use', () => {
     expect(() => bindConfirmation({ ...base, generationId: '' })).toThrow(TypeError);
   });
 });
+
+describe('fail-closed bindings — no wildcard approvals', () => {
+  test('a target that does not normalize to a non-empty string refuses to bind', () => {
+    // A URL object where a string was meant is an ordinary call-site
+    // mistake; silently binding target '' would mint a wildcard approval.
+    expect(() => bindConfirmation({ ...base, target: new URL('https://bank.example/pay') as unknown as string }))
+      .toThrow(TypeError);
+    expect(() => bindConfirmation({ ...base, target: undefined })).toThrow(TypeError);
+    expect(() => bindConfirmation({ ...base, target: '   ' })).toThrow(TypeError);
+  });
+
+  test('a crafted/legacy proof with an empty target never matches an empty-normalizing request', () => {
+    const proof = { ...bindConfirmation(base), target: '' };
+    const verdict = confirmationSatisfies(proof, {
+      ...base, target: new URL('https://evil.example/steal') as unknown as string, now: base.now + 1,
+    });
+    expect(verdict.valid).toBe(false);
+    expect(verdict.reason).toContain('target missing');
+  });
+
+  test('a proof with a missing or non-numeric expiresAt fails closed, not eternal', () => {
+    const fresh = bindConfirmation(base);
+    for (const expiresAt of [undefined, Number.NaN, '99999999999999', {}]) {
+      const proof = { ...fresh, expiresAt: expiresAt as unknown as number };
+      const verdict = confirmationSatisfies(proof, { ...base, now: base.now + 1 });
+      expect(verdict.valid).toBe(false);
+    }
+  });
+
+  test('a non-finite clock refuses to bind (a NaN deadline would never expire)', () => {
+    expect(() => bindConfirmation({ ...base, now: Number.NaN })).toThrow(TypeError);
+  });
+});

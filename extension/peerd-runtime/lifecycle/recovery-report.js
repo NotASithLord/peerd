@@ -65,7 +65,11 @@ export const categorizeRecovery = (recoveryVerdict, context = {}) => {
     return RECOVERY_CATEGORIES.VERIFY_BEFORE_RETRY;
   }
   if (recoveryVerdict.recreateResource) return RECOVERY_CATEGORIES.RESOURCE_LOST;
-  if (normalizeRetryClass(context.retryClass) === RETRY_CLASSES.COSTED_READ) {
+  // The verdict's own preconditions outrank the class lookup: a verdict
+  // that names 'budget' is the budget case even when the caller forgot to
+  // pass the class in context.
+  if (recoveryVerdict.retryRequires.includes('budget')
+      || normalizeRetryClass(context.retryClass) === RETRY_CLASSES.COSTED_READ) {
     return RECOVERY_CATEGORIES.RETRY_REQUIRES_BUDGET;
   }
   return RECOVERY_CATEGORIES.SAFE_TO_RETRY;

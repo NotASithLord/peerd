@@ -412,7 +412,8 @@ export {
 // peerd-egress/vault; this is the operation/authority side.
 export {
   OPERATION_STATES, TERMINAL_STATES, isTerminal, isOperationState,
-  canTransition, assertTransition, IllegalTransitionError,
+  canTransition, assertTransition, canRecoverySettle, IllegalTransitionError,
+  COMPLETION_EVIDENCE, FAILURE_EVIDENCE,
   provesCompletion, provesFailure, resolveUnknownOutcome,
   UnknownOutcomeUnresolvedError,
 } from './lifecycle/operation-state.js';
@@ -430,13 +431,14 @@ export {
   reconcileAtStartup, buildTurnRecoveryRecord,
 } from './lifecycle/reconcile.js';
 export {
-  classifyStoreVersion, guardStore, runMigration, StoreVersionError,
+  classifyStoreVersion, guardStore, runMigration,
 } from './lifecycle/store-version.js';
 export {
   LIFECYCLE_EVENTS, lifecycleAuditEntry, sanitizeDetail,
 } from './lifecycle/audit-events.js';
 export {
-  createOperationLog, OperationNotFoundError,
+  createOperationLog,
+  OperationNotFoundError, OperationExistsError, RetryRefusedError,
   OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL,
 } from './lifecycle/operation-log.js';
 export {
