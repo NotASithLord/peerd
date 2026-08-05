@@ -445,6 +445,30 @@ export {
   RECOVERY_CATEGORIES, categorizeRecovery, describeRecovery,
   securityDegradationReport, migrationBlockedReport,
 } from './lifecycle/recovery-report.js';
+// §16.1: every tool resolves to a retry class — explicit field, name
+// override table, then the sideEffect/primitive taxonomy, failing closed
+// to E. The inventory test asserts totality over the live tool set.
+export { retryClassForTool, RETRY_CLASS_OVERRIDES } from './lifecycle/tool-retry-class.js';
+// §9: engine-resource recovery decisions — tab revalidation, notebook
+// output labelling, VM reboot plans, App sandbox recreation.
+export {
+  revalidateDrivenTab, TAB_DISPOSITIONS,
+  notebookCellState, NOTEBOOK_CELL_STATES,
+  vmRecoveryPlan, appSandboxRebuild,
+} from './lifecycle/resource-recovery.js';
+// §11.1/§12: independent per-store schema versions + durability tiers.
+export {
+  DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
+  storeEntry, portableStores, omittedDeviceBoundStores,
+  checkStores, stampStores,
+} from './lifecycle/store-registry.js';
+// The wiring shells: dispatch tracking (the dispatcher consumes it via
+// ctx.lifecycle) and the SW boot sequence (generation + reconcile +
+// notices).
+export { makeDispatchTracker } from './lifecycle/dispatch-tracking.js';
+export {
+  makeLifecycleBoot, GENERATION_KEY, PENDING_NOTICES_KEY,
+} from './lifecycle/boot.js';
 
 // --- errors -------------------------------------------------------------
 export {

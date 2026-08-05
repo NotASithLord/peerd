@@ -1,0 +1,321 @@
+// @ts-check
+// Dispatch tracking — the lifecycle contract wired into the tool choke point.
+//
+// The dispatcher calls beginTracking() after every gate/confirm/hook has
+// passed and before execute(), and settleTracking() with the outcome. In
+// between, the durable operation record exists with dispatched:true — so a
+// service-worker eviction at ANY point leaves evidence the startup
+// reconciler can settle truthfully (interrupted vs outcome_unknown).
+//
+// This file also enforces contract guarantee 2 at the seam where it was
+// weakest: the auto-resume path re-drives a dead turn's pending tool calls
+// with their ORIGINAL tool_use ids. Without tracking, that silently
+// re-executes a non-idempotent action whose first dispatch may have landed.
+// beginTracking recognizes the operationId and REFUSES the re-execution
+// with the semantic outcome instead of running the effect twice.
+//
+// Failure semantics (§16.2 — no generic timeouts): a settled failure is
+// classified. A definitive error response is `failed`; an ambiguous
+// transport loss (timeout, dropped connection) settles by retry class —
+// interrupted for A/B/C, outcome_unknown for D/E — and the tool result's
+// error string carries that state, so the agent hears the distinction, not
+// "timeout".
+//
+// Functional core over the injected operation log; no chrome.*, bun-tested.
+
+import { OPERATION_STATES, canTransition } from './operation-state.js';
+import { RETRY_CLASSES, decideRecovery, normalizeRetryClass } from './retry-class.js';
+import { describeRecovery } from './recovery-report.js';
+import { OperationExistsError } from './operation-log.js';
+
+// Error shapes that mean "the wire died with the request possibly delivered"
+// — the ambiguous bucket. Kept alongside the classifier kind 'timeout'
+// because fetch-layer failures surface as bare TypeError messages that the
+// taxonomy files under 'environment'/'internal'.
+// HTTP 5xx is here on purpose: the server RECEIVED the request before
+// erroring, so for a non-idempotent action the effect may have landed
+// before the failure was minted. Only pre-effect refusals (4xx validation,
+// gate blocks) are definitive.
+const AMBIGUOUS_ERROR = /timed? ?out|timeout|failed to fetch|networkerror|network error|connection (reset|closed|lost|refused)|socket hang ?up|ERR_(NETWORK|CONNECTION|INTERNET|TIMED_OUT)|fetch failed|load failed|HTTP 5\d\d|\b50[0-4]\b.*(server|gateway)|internal server error|bad gateway|service unavailable|gateway time/i;
+
+/** @param {string | undefined} error @param {string} kind */
+const isAmbiguousLoss = (error, kind) =>
+  kind === 'timeout' || (typeof error === 'string' && AMBIGUOUS_ERROR.test(error));
+
+/**
+ * @typedef {Object} TrackingHandle
+ * @property {string} operationId
+ * @property {import('./retry-class.js').RetryClass} retryClass
+ * @property {string} toolName
+ */
+
+/**
+ * @typedef {{ refuse: { error: string, recovery: ReturnType<typeof describeRecovery>['agent'] } }
+ *   | { handle: TrackingHandle } | null} BeginOutcome
+ */
+
+/**
+ * @param {Object} deps
+ * @param {ReturnType<import('./operation-log.js').createOperationLog>} deps.operationLog
+ * @param {() => string} deps.generationId    current SW generation id
+ * @param {(tool: { name?: string, sideEffect?: string, primitive?: string,
+ *   retryClass?: unknown }) => import('./retry-class.js').RetryClass} deps.retryClassFor
+ * @param {(error: string) => string | { kind: string }} [deps.classifyFailure]
+ *   observability taxonomy (its native shape is { kind, label }); absent →
+ *   only the transport regex decides ambiguity
+ */
+export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor, classifyFailure }) => {
+  if (!operationLog || typeof generationId !== 'function' || typeof retryClassFor !== 'function') {
+    throw new TypeError('makeDispatchTracker: operationLog, generationId and retryClassFor are required');
+  }
+
+  /** @param {string | undefined} error */
+  const failureKind = (error) => {
+    try {
+      const out = classifyFailure?.(error ?? '');
+      if (typeof out === 'string') return out;
+      return out?.kind ?? 'internal';
+    } catch { return 'internal'; }
+  };
+
+  /**
+   * Decide what an EXISTING record for this operationId means for a fresh
+   * dispatch attempt. This is the auto-replay guard.
+   *
+   * @param {import('./reconcile.js').OperationRecord} record
+   * @param {import('./retry-class.js').RetryClass} retryClass
+   * @returns {Promise<BeginOutcome>}
+   */
+  const resumeExisting = async (record, retryClass) => {
+    const settledUnknown = record.state === OPERATION_STATES.OUTCOME_UNKNOWN;
+    const inFlightUnproven = !record.state || !record.dispatched
+      ? false
+      : record.state !== OPERATION_STATES.COMPLETED
+        && record.state !== OPERATION_STATES.FAILED
+        && record.state !== OPERATION_STATES.CANCELLED;
+
+    if (record.state === OPERATION_STATES.COMPLETED) {
+      // The first dispatch provably landed; re-running it is exactly the
+      // duplicate the contract forbids. Refuse with the truth.
+      return {
+        refuse: {
+          error: `completed: ${record.toolName} already completed on a previous `
+            + 'dispatch of this same call — not re-executing. Use the recorded '
+            + 'result or issue a NEW operation.',
+          recovery: {
+            category: 'verify_before_retry', state: OPERATION_STATES.COMPLETED,
+            autoRetry: false, retryRequires: [], verificationRequired: false,
+            keepIdempotencyKey: false, reason: 'duplicate of a completed dispatch',
+          },
+        },
+      };
+    }
+
+    if ((settledUnknown || inFlightUnproven)
+        && (retryClass === RETRY_CLASSES.SIDE_EFFECT
+          || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION)) {
+      // Class D/E whose earlier dispatch has no proven outcome: the
+      // re-dispatch is automatic (same tool_use id ⇒ nobody instructed it),
+      // so it must not run.
+      const verdict = decideRecovery({ retryClass, dispatched: true });
+      const report = describeRecovery(verdict, {
+        retryClass, operationId: record.operationId, toolName: record.toolName,
+      });
+      if (!settledUnknown && canTransition(record.state, OPERATION_STATES.OUTCOME_UNKNOWN)) {
+        await operationLog.transition(record.operationId, OPERATION_STATES.OUTCOME_UNKNOWN)
+          .catch(() => {});
+      } else if (!settledUnknown) {
+        await operationLog.settle(record.operationId, verdict).catch(() => {});
+      }
+      return {
+        refuse: {
+          error: `outcome_unknown: ${record.toolName} was already dispatched and `
+            + 'its result was lost. It may have completed — verify the external '
+            + 'state before repeating it. Not re-executing automatically.',
+          recovery: report.agent,
+        },
+      };
+    }
+
+    if (record.state === OPERATION_STATES.INTERRUPTED
+        && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
+      // A/B/C/D-undispatched interruption: the sanctioned retry — same
+      // operation, fresh attempt number.
+      const next = await operationLog.newAttempt(record.operationId);
+      await operationLog.transition(record.operationId, OPERATION_STATES.RUNNING);
+      return { handle: { operationId: next.operationId, retryClass, toolName: next.toolName } };
+    }
+
+    if (record.state === OPERATION_STATES.INTERRUPTED) {
+      // Interrupted Class E, re-driven with the same id: still automatic.
+      // Safe (nothing dispatched) but Class E repeats only on explicit
+      // instruction, which arrives as a NEW call id, never a replay.
+      const verdict = decideRecovery({ retryClass, dispatched: false });
+      const report = describeRecovery(verdict, {
+        retryClass, operationId: record.operationId, toolName: record.toolName,
+      });
+      return {
+        refuse: {
+          error: `interrupted: ${record.toolName} was interrupted before any `
+            + 'external change and is safe to retry — but not automatically. '
+            + 'Ask the user, or re-issue it as a new call.',
+          recovery: report.agent,
+        },
+      };
+    }
+
+    // A live nonterminal record that is NOT dispatched (created/queued/
+    // running pre-dispatch orphan of this same generation, or a failed/
+    // cancelled terminal): settle the orphan as interrupted where legal and
+    // let the fresh dispatch proceed under a new attempt via newAttempt
+    // when possible; otherwise refuse duplicates conservatively.
+    if (record.state === OPERATION_STATES.CREATED
+        || record.state === OPERATION_STATES.QUEUED
+        || record.state === OPERATION_STATES.RUNNING) {
+      const verdict = decideRecovery({ retryClass, dispatched: false });
+      await operationLog.settle(record.operationId, verdict).catch(() => {});
+      const fresh = await operationLog.get(record.operationId);
+      if (fresh?.state === OPERATION_STATES.INTERRUPTED
+          && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
+        const next = await operationLog.newAttempt(record.operationId);
+        await operationLog.transition(record.operationId, OPERATION_STATES.RUNNING);
+        return { handle: { operationId: next.operationId, retryClass, toolName: next.toolName } };
+      }
+    }
+    return {
+      refuse: {
+        error: `interrupted: a previous dispatch of this exact call is on record `
+          + `(state: ${record.state}); not re-executing automatically.`,
+        recovery: {
+          category: 'verify_before_retry', state: record.state,
+          autoRetry: false, retryRequires: ['user-instruction'],
+          verificationRequired: false, keepIdempotencyKey: false,
+          reason: 'duplicate dispatch of a recorded operation',
+        },
+      },
+    };
+  };
+
+  /**
+   * Record the operation and mark it dispatched. Returns null for Class A
+   * (pure reads are reconstructible and duplicate-invisible — tracking
+   * them would put a storage write on every read), a handle to settle
+   * later, or a refusal the dispatcher must return WITHOUT executing.
+   *
+   * @param {Object} input
+   * @param {string} input.callId       the tool_use id — the operation identity
+   * @param {{ name?: string, sideEffect?: string, primitive?: string, retryClass?: unknown }} input.tool
+   * @param {string} [input.sessionId]
+   * @param {string} [input.actorId]
+   * @param {string} [input.target]
+   * @returns {Promise<BeginOutcome>}
+   */
+  const beginTracking = async ({ callId, tool, sessionId, actorId, target }) => {
+    const retryClass = normalizeRetryClass(retryClassFor(tool));
+    if (retryClass === RETRY_CLASSES.PURE_READ) return null;
+    if (typeof callId !== 'string' || !callId) return null;
+
+    // The operation identity is SESSION-scoped. why: the replay guard must
+    // fire on the same call re-driven within its own session (auto-resume
+    // replaying pending tool_use ids), and must NOT fire when two unrelated
+    // sessions happen to see the same provider call id — that is a new
+    // operation, not a replay.
+    const operationId = sessionId ? `${sessionId}:${callId}` : callId;
+    try {
+      await operationLog.begin({
+        operationId,
+        sessionId: sessionId || 'unknown-session',
+        ...(actorId ? { actorId } : {}),
+        toolName: tool.name ?? 'unknown-tool',
+        retryClass,
+        generationId: generationId(),
+        ...(target ? { target } : {}),
+      });
+    } catch (error) {
+      if (error instanceof OperationExistsError) {
+        const record = await operationLog.get(operationId);
+        if (record) return resumeExisting(record, retryClass);
+      }
+      // Tracking must never make a healthy dispatch impossible: a broken
+      // storage layer degrades to untracked execution (and the audit trail
+      // shows the begin failure via the thrown error's absence), not a
+      // hard-down tool surface. The CONTRACT-critical direction — refusing
+      // replays — only needs begin() to fail on DUPLICATES, which it did not.
+      return null;
+    }
+    await operationLog.transition(operationId, OPERATION_STATES.RUNNING);
+    // Dispatched is stamped BEFORE execute(): once execute starts, an
+    // effect may leave peerd at any instant, and the record must already
+    // say so if the SW dies mid-flight.
+    await operationLog.markDispatched(operationId);
+    return { handle: { operationId, retryClass, toolName: tool.name ?? 'unknown-tool' } };
+  };
+
+  /**
+   * Settle a tracked dispatch from its outcome. Returns null (nothing to
+   * change) or a semantic rewrite the dispatcher applies to the result.
+   *
+   * @param {TrackingHandle} handle
+   * @param {{ ok: boolean, error?: string, aborted?: boolean, resultDigest?: string }} outcome
+   * @returns {Promise<{ error: string, recovery: ReturnType<typeof describeRecovery>['agent'] } | null>}
+   */
+  const settleTracking = async (handle, outcome) => {
+    const { operationId, retryClass } = handle;
+    try {
+      if (outcome.ok) {
+        await operationLog.transition(operationId, OPERATION_STATES.COMPLETED, {
+          evidence: { kind: 'success-response' },
+          ...(outcome.resultDigest ? { resultDigest: outcome.resultDigest } : {}),
+        });
+        return null;
+      }
+
+      const kind = failureKind(outcome.error);
+      const cancelRequested = outcome.aborted === true || kind === 'aborted';
+      const ambiguous = isAmbiguousLoss(outcome.error, kind);
+
+      if (!ambiguous && !cancelRequested) {
+        // A definitive error response — the target refused before the
+        // effect. Honest `failed`.
+        await operationLog.transition(operationId, OPERATION_STATES.FAILED, {
+          evidence: { kind: 'error-response-before-effect' },
+        });
+        return null;
+      }
+
+      const verdict = decideRecovery({ retryClass, dispatched: true, cancelRequested });
+      const record = await operationLog.get(operationId);
+      if (record && canTransition(record.state, verdict.state)) {
+        await operationLog.transition(operationId, verdict.state);
+      } else if (record) {
+        await operationLog.settle(operationId, verdict);
+      }
+      if (verdict.state === OPERATION_STATES.CANCELLED) {
+        // A clean cancel is settled, not a recovery case — describeRecovery
+        // deliberately refuses settled verdicts, and the abort surface
+        // already tells the user what happened.
+        return {
+          error: `cancelled: ${handle.toolName} was stopped before its effect `
+            + `landed (${outcome.error ?? 'aborted'})`,
+          recovery: {
+            category: 'safe_to_retry', state: verdict.state, autoRetry: false,
+            retryRequires: ['user-instruction'], verificationRequired: false,
+            keepIdempotencyKey: verdict.keepIdempotencyKey, reason: verdict.reason,
+          },
+        };
+      }
+      const report = describeRecovery(verdict, {
+        retryClass, operationId, toolName: handle.toolName,
+      });
+      return {
+        error: `${verdict.state}: ${report.user} (${handle.toolName}: ${outcome.error ?? 'connection lost'})`,
+        recovery: report.agent,
+      };
+    } catch {
+      // Settling must never mask the tool's own outcome.
+      return null;
+    }
+  };
+
+  return { beginTracking, settleTracking };
+};

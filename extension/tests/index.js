@@ -50,6 +50,9 @@ import './unit/peerd-runtime/prompt-wrap.test.js';
 import './unit/peerd-runtime/system-prompt.test.js';
 import './unit/peerd-runtime/tool-manifests.test.js';
 import './unit/peerd-runtime/redact.test.js';
+// Lifecycle recovery contract — the SW-eviction sequence over REAL
+// chrome.storage (the bun suite proves the decisions; this proves the IO).
+import './unit/peerd-runtime/lifecycle-recovery.test.js';
 import './unit/peerd-runtime/trim.test.js';
 import './unit/peerd-runtime/clock/now.test.js';
 import './unit/peerd-runtime/clock/context.test.js';

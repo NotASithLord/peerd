@@ -35,6 +35,13 @@
 //                      notice. (This comment says "the dweb module"
 //                      because this file ships in store packages and the
 //                      artifact verifier greps everything.)
+//   durability         §12 labels for THIS file: the durability tier of
+//                      each section actually included, plus the names of
+//                      the device-bound surfaces an export structurally
+//                      cannot carry. Purely additive (older files simply
+//                      lack it), so EXPORT_VERSION is unchanged.
+
+import { omittedDeviceBoundStores, portableStores } from '../lifecycle/store-registry.js';
 
 export const EXPORT_VERSION = 1;
 export const EXPORT_FORMAT = 'peerd-export';
@@ -124,6 +131,39 @@ export const decryptWithPassphrase = async (passphrase, box) => {
 
 // ── export ───────────────────────────────────────────────────────────
 
+// why this map lives here and not in the registry: the registry names
+// durable SURFACES, this file names payload SECTIONS. Keeping the
+// translation on the transfer side lets §12's tier labels ride along
+// without the lifecycle registry knowing a thing about this file format.
+/** @type {Readonly<Record<string, string>>} */
+const SECTION_OF_STORE = Object.freeze({
+  vault: 'secrets',
+  memory: 'memory',
+  skills: 'skills',
+  hooks: 'hooks',
+});
+
+/**
+ * The §12 durability block for a shaped payload: tier labels for the
+ * sections this file actually carries, and the device-bound surfaces it
+ * left behind ("the export format must identify omitted device-bound
+ * state" — a profile arriving without them is incomplete, not corrupt).
+ *
+ * @param {Record<string, unknown>} payload  the shaped export, pre-durability
+ */
+const durabilitySection = (payload) => {
+  /** @type {Record<string, string>} */
+  const tiers = {};
+  for (const entry of portableStores()) {
+    const section = SECTION_OF_STORE[entry.store];
+    if (!section) continue;
+    const value = payload[section];
+    const present = value != null && !(Array.isArray(value) && value.length === 0);
+    if (present) tiers[entry.store] = entry.tier;
+  }
+  return { tiers, omittedDeviceBound: omittedDeviceBoundStores() };
+};
+
 /**
  * Assemble the export payload. The SW gathers the pieces (vault must be
  * unlocked to read secrets) and passes them in; this function only
@@ -146,7 +186,7 @@ export const buildExport = async ({
   if (secretNames.length > 0 && !passphrase) {
     throw new ExportPassphraseError();
   }
-  return {
+  const payload = {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
     exportedAt: new Date().toISOString(),
@@ -158,6 +198,7 @@ export const buildExport = async ({
     hooks: hooks ?? [],
     skills: skills ?? [],
   };
+  return { ...payload, durability: durabilitySection(payload) };
 };
 
 // ── import ───────────────────────────────────────────────────────────
@@ -174,6 +215,8 @@ export const buildExport = async ({
  * @property {string[]} skills
  * @property {boolean} dwebPresent
  * @property {boolean} dwebDropped
+ * @property {Record<string, string>} durabilityTiers  §12 labels ({} on older files)
+ * @property {string[]} omittedDeviceBound             device-bound surfaces not carried
  * @property {string[]} notices
  */
 
@@ -227,6 +270,18 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   if (hookIds.length > 0) {
     notices.push(`${hookIds.length} hook(s) will be imported DISABLED and untrusted (${hookIds.join(', ')}) — review and re-enable them in Settings → Hooks.`);
   }
+  // §12 durability labels. Additive to the format, so an export written
+  // before this section existed is fully valid: absent means "unlabelled",
+  // never "nothing was omitted" — hence the empty defaults and no notice.
+  const durability = (payload.durability && typeof payload.durability === 'object') ? payload.durability : null;
+  const durabilityTiers = (durability?.tiers && typeof durability.tiers === 'object') ? durability.tiers : {};
+  /** @type {string[]} */
+  const omittedDeviceBound = Array.isArray(durability?.omittedDeviceBound)
+    ? durability.omittedDeviceBound.map((/** @type {unknown} */ s) => String(s))
+    : [];
+  if (omittedDeviceBound.length > 0) {
+    notices.push(`Device-bound state cannot travel and was not exported (${omittedDeviceBound.join(', ')}) — this build re-creates it locally.`);
+  }
   return {
     ok: true,
     summary: {
@@ -242,6 +297,8 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
       skills: skills.map((s) => s?.name ?? s?.id ?? 'unknown'),
       dwebPresent,
       dwebDropped: channel === 'store' && dwebPresent,
+      durabilityTiers,
+      omittedDeviceBound,
       notices,
     },
   };

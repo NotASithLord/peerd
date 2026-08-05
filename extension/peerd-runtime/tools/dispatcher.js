@@ -120,6 +120,7 @@ const liveTabUrl = async (ctx) => {
  *     begin: (tabId: number, label: string, origin: string) => unknown,
  *     end: (tabId: number) => unknown,
  *   } | null,
+ *   lifecycle?: ReturnType<import('../lifecycle/dispatch-tracking.js').makeDispatchTracker> | null,
  * }} DispatchContext
  */
 
@@ -129,7 +130,12 @@ const liveTabUrl = async (ctx) => {
  * UI hint, off the wire), so we widen locally; the widened meta is still
  * structurally a ToolMeta where the result type needs one.
  *
- * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned' }} DispatchMeta
+ * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned',
+ *   recovery?: Record<string, unknown> }} DispatchMeta
+ *   `recovery` is the lifecycle contract's agent-facing semantic record —
+ *   present only when a dispatch settled as interrupted/outcome_unknown/
+ *   refused-replay, so the agent hears the recovery category, not a
+ *   generic error string.
  */
 
 /**
@@ -351,6 +357,46 @@ export const dispatchToolCall = async (call, ctx) => {
   // Adopt any args the pre-hooks rewrote. execute() + the audit see these.
   args = pre.args;
 
+  // ---- Lifecycle tracking (the recovery contract) ------------------------
+  // why HERE: every gate/confirm/hook has passed, so what follows is a real
+  // dispatch — the durable operation record must exist BEFORE execute() so
+  // an SW eviction mid-effect leaves evidence (interrupted vs
+  // outcome_unknown) instead of silence. beginTracking may also REFUSE the
+  // call outright: the auto-resume path re-drives pending tool calls with
+  // their original tool_use ids, and re-running a non-idempotent action
+  // whose first dispatch has no proven outcome is the unsafe replay the
+  // contract forbids. Absent ctx.lifecycle (tests, Firefox pre-init), the
+  // dispatch is byte-for-byte unchanged.
+  let tracking = null;
+  if (ctx.lifecycle?.beginTracking) {
+    const begun = await ctx.lifecycle.beginTracking({
+      callId: call.id,
+      tool,
+      sessionId: ctx.session?.sessionId ?? undefined,
+      actorId: /** @type {{ actorInstanceId?: string }} */ (ctx).actorInstanceId,
+      target: safeOrigins(tool, args, ctx)[0],
+    }).catch(() => null);
+    if (begun && 'refuse' in begun && begun.refuse) {
+      ctx.audit({
+        type: 'tool_blocked',
+        details: { tool: call.name, gate: 'lifecycle-replay-guard', reason: begun.refuse.error },
+      }).catch(() => {});
+      return {
+        ok: false,
+        error: begun.refuse.error,
+        meta: /** @type {DispatchMeta} */ ({
+          toolName: call.name,
+          primitive: tool.primitive, dispatch: tool.dispatch,
+          gates: gateResults,
+          hooks: hookOutcomes,
+          durationMs: 0,
+          recovery: begun.refuse.recovery,
+        }),
+      };
+    }
+    tracking = begun && 'handle' in begun ? begun.handle : null;
+  }
+
   // ---- Execute -----------------------------------------------------------
   // why: thread the call's tool_use_id into ctx so tools that stream
   // intermediate state back to the UI (currently vm_boot) can key their
@@ -406,9 +452,27 @@ export const dispatchToolCall = async (call, ctx) => {
     // here would mean misreporting an effect that already occurred).
     const post = await runPostToolUse({ hooks, toolName: call.name, args, result, ctx: hookCtx });
     hookOutcomes.push(...post.outcomes);
+    // Settle the lifecycle record from the tool's own outcome. A returned
+    // failure whose error is an ambiguous transport loss is REWRITTEN to
+    // the semantic state (interrupted / outcome_unknown) — §16.2: the agent
+    // never sees a bare timeout on a tracked side effect.
+    /** @type {{ error: string, recovery: Record<string, unknown> } | null} */
+    let recoveryRewrite = null;
+    if (tracking && ctx.lifecycle?.settleTracking) {
+      recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
+        ok: result?.ok !== false,
+        error: result?.ok === false ? String(result.error ?? '') : undefined,
+      }).catch(() => null);
+    }
+    // A rewrite replaces the failure shape wholesale (it only ever fires on
+    // an already-failed result) so the discriminated ok:false stays literal.
+    /** @type {ToolResult} */
+    const settled = recoveryRewrite
+      ? { ok: false, error: recoveryRewrite.error }
+      : result;
     /** @type {ToolResult} */
     const enriched = {
-      ...result,
+      ...settled,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
         primitive: tool.primitive, dispatch: tool.dispatch,
@@ -421,6 +485,7 @@ export const dispatchToolCall = async (call, ctx) => {
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
+        ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
       }),
     };
     return enriched;
@@ -446,9 +511,20 @@ export const dispatchToolCall = async (call, ctx) => {
       hooks, toolName: call.name, args, result: { ok: false, error: message }, ctx: hookCtx,
     });
     hookOutcomes.push(...post.outcomes);
+    // A THROW after dispatch is the most ambiguous shape of all — settle
+    // the lifecycle record and adopt the semantic error where it applies.
+    /** @type {{ error: string, recovery: Record<string, unknown> } | null} */
+    let recoveryRewrite = null;
+    if (tracking && ctx.lifecycle?.settleTracking) {
+      recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
+        ok: false,
+        error: message,
+        aborted: /** @type {{ name?: string }} */ (e)?.name === 'AbortError',
+      }).catch(() => null);
+    }
     return {
       ok: false,
-      error: message,
+      error: recoveryRewrite?.error ?? message,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
         primitive: tool.primitive, dispatch: tool.dispatch,
@@ -459,6 +535,7 @@ export const dispatchToolCall = async (call, ctx) => {
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
+        ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
       }),
     };
   }

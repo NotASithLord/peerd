@@ -163,6 +163,16 @@ import {
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
+  // lifecycle — the recovery contract's shells: SW-generation boot +
+  // startup reconcile, the dispatch tracker every tool ctx carries, the
+  // per-tool retry classifier, and the per-store schema stamps.
+  makeLifecycleBoot,
+  makeDispatchTracker,
+  retryClassForTool,
+  checkStores,
+  stampStores,
+  VERSION_STAMP_KEY,
+  classifyFailure,
   // hooks (pre/post-tool-use lifecycle)
   registerHook,
   listHooks,
@@ -411,6 +421,61 @@ const vault = createVault({
 // maxEntries: capped retention — oldest entries pruned, amortized on
 // append — so a long-lived install's audit log doesn't grow unbounded.
 const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxEntries });
+
+// ---- Lifecycle boot (the recovery contract's imperative shell) -------------
+// Every SW start mints a new generation, settles the previous generation's
+// orphaned operation records (interrupted vs outcome_unknown by retry
+// class), stamps the per-store schema versions, and arms the dispatch
+// tracker that buildToolContext hands to every dispatch. Posture: fail-OPEN
+// on tracking (a broken boot must never brick the tool surface — dispatches
+// just run untracked, as they did before this landed), fail-CLOSED on
+// replay (once armed, the tracker refuses automatic re-dispatch of an
+// unproven side effect).
+const lifecycleBoot = makeLifecycleBoot({
+  storage: kv,
+  appendAudit: (/** @type {any} */ entry) =>
+    auditLog.append({ type: entry.event, details: entry }),
+  // postChatNote is declared far below — the standard late-dep deferral.
+  notify: (/** @type {string} */ _sessionId, /** @type {string} */ text) =>
+    postChatNote(`Recovered from a browser interruption: ${text}`),
+  nonce: () => crypto.randomUUID(),
+});
+/** @type {ReturnType<typeof makeDispatchTracker> | null} */
+let lifecycleTracker = null;
+const lifecycleReady = lifecycleBoot.init()
+  .then(async ({ generation }) => {
+    lifecycleTracker = makeDispatchTracker({
+      operationLog: lifecycleBoot.operationLog,
+      generationId: () => generation.id,
+      retryClassFor: retryClassForTool,
+      classifyFailure: /** @type {any} */ (classifyFailure),
+    });
+    // §11.1 — independent per-store schema stamps. A newer stamp than this
+    // build supports leaves that store read-only (refuse-newer); the check
+    // result is audited so a blocked profile is diagnosable, and stamping
+    // only proceeds when every store is writable.
+    const readStamps = async () => (await kv.get(VERSION_STAMP_KEY)) ?? undefined;
+    const storesCheck = await checkStores({ read: readStamps });
+    if (storesCheck.ok) {
+      await stampStores({
+        read: readStamps,
+        write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
+      });
+    } else {
+      for (const s of storesCheck.stores.filter((/** @type {any} */ x) => x.mode === 'read-only')) {
+        console.error('[sw] store schema blocked:', s.store, s.reason);
+        auditLog.append({
+          type: 'lifecycle.migration.failed',
+          details: { store: s.store, reason: s.reason, diagnosticId: s.diagnosticId },
+        }).catch(() => {});
+      }
+    }
+    return generation;
+  })
+  .catch((/** @type {unknown} */ e) => {
+    console.error('[sw] lifecycle boot failed; dispatches run untracked', e);
+    return null;
+  });
 
 // INV-15 — the proof-of-possession key seam. Backed by the `dpop_keys` IDB store
 // (one non-extractable keypair per owned https origin, minted lazily on the first
@@ -1431,6 +1496,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
     synthetic: synthetic === true,
+    // The recovery contract's dispatch tracker (lifecycle/dispatch-tracking.js).
+    // Read at ctx-build time: before the async boot resolves this is null and
+    // the dispatch runs untracked (pre-lifecycle behavior); once armed, every
+    // path through this builder — main turn, actor relay, page-call — records
+    // side-effecting calls durably and refuses unproven replays.
+    lifecycle: lifecycleTracker,
     // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
@@ -3226,6 +3297,8 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  // Lifecycle recovery notices → the next turn's <context> message (read-once).
+  drainRecoveryNotices: (/** @type {string} */ sid) => lifecycleBoot.drainNoticesFor(sid),
   recordModelCall: contextSnapshots.record,
   // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate,
   // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
