@@ -10,6 +10,69 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-06
+
+### Added
+- **Interrupted work can recover instead of disappearing.** peerd now
+  records the lifecycle of operations and reconciles them after a
+  service-worker restart, browser interruption, or execution-host loss.
+  Recovery distinguishes safe retries from writes that need confirmation,
+  restores durable resources where possible, and reports what resumed,
+  stopped, or needs attention instead of silently repeating an action.
+- **Credentials can be usable without being readable.** Origin credentials
+  may now be bound to a non-extractable vault key and presented with DPoP
+  proof-of-possession. RFC 9449 server nonces are handled across retries, and
+  the implementation is exercised through Firefox as Firefox rather than
+  relying only on Chrome-compatible behavior.
+- **Office documents and ebooks are first-class inputs.** Attachments and
+  `read_doc` accept Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, and CSV,
+  converting their structure to Markdown locally. Parsing is format-sniffed,
+  bounded, hardened against archive and XML abuse, and keeps document bytes
+  out of the model context when only extracted text is needed.
+- **The JavaScript workspace grew into a durable agent workbench.** `script`
+  can use a per-session workspace, pageable run results, Markdown extraction,
+  audited remote imports with optional integrity pins, keyless sub-model
+  calls, and reusable agent-authored toolbox modules. The same work improves
+  module resolution, failure reporting, and Stop behavior without widening
+  the authority of page, site, or peer lanes.
+- **The web actor can initiate safe, user-driven sign-in.** A new Tier 0
+  `login` tool recognizes passkey and known identity-provider affordances,
+  verifies the live origin, and always asks the user before proceeding. It
+  never fills a password or stores a token; ambiguous or unverified targets
+  fall back to an assisted-manual handoff rather than an automated click.
+- **The denylist has a browser-level backstop.** Session-scoped declarative
+  network rules protect only the tabs peerd is actively driving, catching
+  page-initiated navigation and App traffic that bypass the ordinary fetch
+  gate. A higher-priority identity-provider corridor preserves legitimate
+  sign-in redirects, and browsers without the API retain the previous
+  policy-gate posture.
+
+### Changed
+- **Tool calls are cheaper to describe and easier to recover from.** Stable
+  prompt content can now remain cacheable, authored failures reach the model,
+  file edits diagnose already-applied and ambiguous changes, large reads page
+  consistently, and repeated guidance is injected once per session. Tool
+  error and wasted-turn metrics were added to the evaluation surface.
+- **Settings are easier to scan.** Behavior controls use consistent setting
+  rows and the denylist is grouped into meaningful sections with visible
+  state, while preserving the monochrome brand system and both visual themes.
+- **Release and dependency integrity are stricter.** CI pins third-party
+  actions, verifies vendored bytes and reproducible packages, checks source
+  hygiene and architectural invariants, emits separate artifact digests, and
+  attests release provenance before the irreversible Firefox signing upload.
+
+### Fixed
+- Closed prompt-injection blast-radius gaps in the sealed worker, inbound
+  actor delegation, API-origin credential pinning, redirected PDF fetches,
+  private-network classification, persistent prompt inputs, and dweb inbound
+  rate limiting.
+- Closed follow-up findings in origin segmentation, credential routing, and
+  lifecycle wiring, including cases where untrusted or stale state could
+  cross an ownership boundary or survive an interrupted turn incorrectly.
+- Visual regression reporting now computes a real merge-base "before" image
+  for newly added states and waits for first-run Library seeding before it
+  captures the full-page home.
+
 ## [0.4.0] - 2026-08-01
 
 ### Added
