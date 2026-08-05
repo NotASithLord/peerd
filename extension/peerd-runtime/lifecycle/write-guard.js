@@ -39,6 +39,10 @@ export const makeWriteGuard = () => {
   /** @type {Map<string, string>} idb object store → store */
   const blockedIdbStores = new Map();
 
+  /** @type {Set<string>} every blocked registry store, by NAME — the
+   *  assertWritable gate for self-hosted stores keys on this. */
+  const blockedNames = new Set();
+
   /**
    * Block the named registry stores. Unknown names are ignored (the check
    * that produced them is the authority); calling again is additive.
@@ -47,6 +51,8 @@ export const makeWriteGuard = () => {
   const block = (storeNames) => {
     for (const name of Array.isArray(storeNames) ? storeNames : []) {
       const entry = STORE_REGISTRY.find((s) => s.store === name);
+      if (!entry) continue; // unknown names are ignored — the check is the authority
+      blockedNames.add(name);
       const physical = /** @type {{ kvKeys?: string[], kvPrefixes?: string[],
         idbStores?: string[] } | undefined} */ (
         /** @type {any} */ (entry)?.physical);
@@ -127,11 +133,19 @@ export const makeWriteGuard = () => {
     },
   });
 
-  const blockedStores = () => [...new Set([
-    ...blockedKvKeys.values(),
-    ...blockedKvPrefixes.map(([, s]) => s),
-    ...blockedIdbStores.values(),
-  ])];
+  const blockedStores = () => [...blockedNames];
 
-  return { block, wrapKv, wrapIdb, wrapIdbKvAdapter, blockedStores };
+  /**
+   * The gate for SELF-HOSTED stores (own databases the adapters can't
+   * reach — skills, app bodies): injected into those stores' mutators so
+   * the same schema verdict refuses their writes too. Throws when blocked.
+   * @param {string} storeName
+   */
+  const assertWritable = (storeName) => {
+    if (blockedNames.has(storeName)) {
+      throw new StoreReadOnlyError(storeName, `self-hosted:${storeName}`);
+    }
+  };
+
+  return { block, wrapKv, wrapIdb, wrapIdbKvAdapter, blockedStores, assertWritable };
 };

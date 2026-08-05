@@ -18,6 +18,7 @@ import { reconcileAtStartup } from './reconcile.js';
 import { describeRecovery } from './recovery-report.js';
 import { OPERATION_STATES } from './operation-state.js';
 import { createOperationLog } from './operation-log.js';
+import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
 
 export const GENERATION_KEY = 'peerd.lifecycle.generation';
 export const PENDING_NOTICES_KEY = 'peerd.lifecycle.pendingNotices';
@@ -134,6 +135,36 @@ export const makeLifecycleBoot = ({
     // turn drains into the agent's context; notify() is the immediate
     // user-facing surface (a chat note) — best-effort, the durable copy is
     // the one that matters.
+    // Surface any unknown-compaction evidence from prior sessions: the
+    // discard of unresolved uncertainty is itself reported (§14), never
+    // silent. Audited + parked for each affected session's next turn.
+    const overflow = await operationLog.drainUnknownOverflow?.().catch(() => null);
+    if (overflow) {
+      if (appendAudit) {
+        await Promise.resolve(appendAudit(lifecycleAuditEntry({
+          event: LIFECYCLE_EVENTS.OUTCOME_UNKNOWN_OVERFLOW,
+          detail: {
+            droppedCount: overflow.droppedCount,
+            oldestDroppedAt: overflow.oldestDroppedAt,
+          },
+        }))).catch(() => {});
+      }
+      const affected = Array.isArray(overflow.sessionsAffected)
+        ? overflow.sessionsAffected : [];
+      for (const sid of affected.slice(0, 8)) {
+        await parkNotice(sid, {
+          recoveryRecord: {
+            operation: 'outcome_unknown_overflow',
+            droppedCount: overflow.droppedCount,
+            recoveryState: 'compacted',
+          },
+          user: `${overflow.droppedCount} unresolved operation record(s) with `
+            + 'uncertain outcomes were compacted to bound storage. Verify the '
+            + 'audit log or external state before repeating older actions.',
+        }).catch(() => {});
+      }
+    }
+
     for (const notification of plan.notifications) {
       const { recoveryRecord } = notification;
       const transition = plan.transitions.find(

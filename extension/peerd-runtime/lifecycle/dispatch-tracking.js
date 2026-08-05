@@ -30,6 +30,20 @@ import { RETRY_CLASSES, decideRecovery, normalizeRetryClass } from './retry-clas
 import { describeRecovery } from './recovery-report.js';
 import { OperationExistsError } from './operation-log.js';
 import { FAILURE_OUTCOMES, isFailureOutcomeKind } from './failure-taxonomy.js';
+import { bindConfirmation, consumeConfirmation } from './confirmation.js';
+
+// FNV-1a over a stable serialization — the deterministic idempotency key
+// for Class C/D records (§8: same call + same args = same operation; a
+// retry must reuse this key, never mint a fresh one).
+/** @param {string} text */
+const fnv1a = (text) => {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+};
 
 // Error shapes that mean "the wire died with the request possibly delivered"
 // — the ambiguous bucket. Kept alongside the classifier kind 'timeout'
@@ -131,8 +145,9 @@ export const makeFailClosedTracker = ({ reason, retryClassFor }) => ({
  * @param {(error: string) => string | { kind: string }} [deps.classifyFailure]
  *   observability taxonomy (its native shape is { kind, label }); absent →
  *   only the transport regex decides ambiguity
+ * @param {() => number} [deps.now]  injectable clock (confirmation proofs)
  */
-export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor, classifyFailure }) => {
+export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor, classifyFailure, now = Date.now }) => {
   if (!operationLog || typeof generationId !== 'function' || typeof retryClassFor !== 'function') {
     throw new TypeError('makeDispatchTracker: operationLog, generationId and retryClassFor are required');
   }
@@ -306,9 +321,16 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    * @param {string} [input.sessionId]
    * @param {string} [input.actorId]
    * @param {string} [input.target]
+   * @param {boolean} [input.confirmed]  the user approved a confirm
+   *   round-trip for exactly this dispatch — a single-use, generation-bound
+   *   proof is minted, CONSUMED, and persisted on the record (§8.3: the
+   *   durable forensic chain shows what was approved, under which
+   *   generation, and that the approval covers exactly one dispatch)
+   * @param {Record<string, unknown>} [input.args]  post-hook args; C/D
+   *   records derive their deterministic idempotency key from these
    * @returns {Promise<BeginOutcome>}
    */
-  const beginTracking = async ({ callId, tool, sessionId, actorId, target }) => {
+  const beginTracking = async ({ callId, tool, sessionId, actorId, target, confirmed, args }) => {
     const retryClass = normalizeRetryClass(retryClassFor(tool));
     if (retryClass === RETRY_CLASSES.PURE_READ) return null;
     if (typeof callId !== 'string' || !callId) return null;
@@ -319,6 +341,57 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // sessions happen to see the same provider call id — that is a new
     // operation, not a replay.
     const operationId = sessionId ? `${sessionId}:${callId}` : callId;
+    // Tombstone check (D/E only — the only classes that mint them): a call
+    // id whose FULL record was pruned still carries compact replay
+    // identity; re-presenting it is refused exactly as the record would
+    // have. Best-effort read — a failed lookup falls through to begin().
+    if (retryClass === RETRY_CLASSES.SIDE_EFFECT
+        || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
+      const tombstone = await operationLog.getTombstone?.(operationId)
+        ?? undefined;
+      if (tombstone) {
+        return {
+          refuse: {
+            error: tombstone.terminalState === OPERATION_STATES.COMPLETED
+              ? `completed: ${tool.name ?? 'this action'} already completed on a `
+                + 'previous dispatch of this same call (compacted record) — not '
+                + 're-executing. Issue a NEW operation if a repeat is intended.'
+              : `outcome_unknown: a previous dispatch of this same call ended `
+                + `${tombstone.terminalState} and its full record was compacted. `
+                + 'Verify the external state before repeating it. Not re-executing '
+                + 'automatically.',
+            recovery: {
+              category: 'verify_before_retry',
+              state: /** @type {import('./operation-state.js').OperationState} */ (
+                tombstone.terminalState),
+              autoRetry: false, retryRequires: ['user-instruction'],
+              verificationRequired: tombstone.terminalState !== OPERATION_STATES.COMPLETED,
+              keepIdempotencyKey: false,
+              reason: 'replay of a compacted (tombstoned) operation',
+            },
+          },
+        };
+      }
+    }
+    // Class C/D: the deterministic idempotency key (same call + same args =
+    // same operation; retries reuse it, never mint fresh — §4/§8).
+    const idempotencyKey = (retryClass === RETRY_CLASSES.IDEMPOTENT_WRITE
+      || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION)
+      ? `${tool.name ?? 'tool'}:${fnv1a(JSON.stringify(args ?? {}))}`
+      : undefined;
+    // An approved confirmation becomes a single-use proof, consumed BEFORE
+    // dispatch and persisted on the record: generation-bound (a restart
+    // invalidates it), target-bound, expiring — the durable chain the
+    // contract's §8.3 verification asks for.
+    const confirmationProof = confirmed === true
+      ? consumeConfirmation(bindConfirmation({
+        operationId,
+        action: tool.name ?? 'unknown-tool',
+        target: target || `tool:${tool.name ?? 'unknown-tool'}`,
+        generationId: generationId(),
+        now: now(),
+      }))
+      : undefined;
     try {
       await operationLog.begin({
         operationId,
@@ -328,6 +401,11 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
         retryClass,
         generationId: generationId(),
         ...(target ? { target } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(confirmationProof ? {
+          confirmationRef: `${operationId}:confirm`,
+          confirmationProof,
+        } : {}),
       });
       await operationLog.transition(operationId, OPERATION_STATES.RUNNING);
       // Dispatched is stamped BEFORE execute(): once execute starts, an
@@ -408,9 +486,18 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     const typedKind = isFailureOutcomeKind(outcome.outcomeKind)
       ? outcome.outcomeKind
       : undefined;
+    // The burden of proof is INVERTED by class. For a DISPATCHED Class D/E
+    // action, `failed` is a positive claim — "the effect did not occur" —
+    // and only an explicit typed pre-effect-failure carries that proof. An
+    // unrecognized error string proves nothing about whether the effect
+    // landed, so the default is uncertainty; the string heuristics may only
+    // WIDEN ambiguity, never establish definitive non-execution. A/B/C keep
+    // the heuristic split: a wrong `failed` there is retryable and harmless.
+    const conservative = retryClass === RETRY_CLASSES.SIDE_EFFECT
+      || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION;
     const ambiguous = typedKind
       ? typedKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE
-      : isAmbiguousLoss(outcome.error, kind);
+      : (conservative || isAmbiguousLoss(outcome.error, kind));
 
     if (!ambiguous && !cancelRequested) {
       // A definitive error response — the target refused before the

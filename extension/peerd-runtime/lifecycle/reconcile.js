@@ -35,6 +35,8 @@ import { LIFECYCLE_EVENTS, lifecycleAuditEntry } from './audit-events.js';
  * @property {string} [idempotencyKey]
  * @property {string} [target]
  * @property {string} [confirmationRef]
+ * @property {Record<string, unknown>} [confirmationProof]  consumed
+ *   single-use approval proof (§8.3 forensic chain)
  * @property {number} [lastDurableStep]
  * @property {string} [resultDigest]
  * @property {string} [generationId]   generation that was driving it

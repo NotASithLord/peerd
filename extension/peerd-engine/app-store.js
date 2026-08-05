@@ -20,6 +20,18 @@ const DB_VERSION = 1;
  * @type {Promise<IDBDatabase> | null}
  */
 let openPromise = null;
+
+// §11.5 write gate: App bodies live in their OWN database (peerd-app-bodies),
+// outside the shared kv/idb write guard — the SW installs the same schema
+// verdict here (throws StoreReadOnlyError when the profile is newer than
+// this build supports). why a module-level setter: this store is a module
+// of free functions, not a factory; the gate mirrors the tool-registry
+// registration shape. Unset → always writable.
+/** @type {(() => void) | null} */
+let writeGate = null;
+/** @param {(() => void) | null} gate */
+export const setAppBodyWriteGate = (gate) => { writeGate = typeof gate === 'function' ? gate : null; };
+
 const openDb = () => {
   if (openPromise) return openPromise;
   openPromise = new Promise((resolve, reject) => {
@@ -80,6 +92,7 @@ export const getAppBody = async (id) => {
  * @param {string} html
  */
 export const putAppBody = async (id, html) => {
+  writeGate?.();
   return tx('readwrite', (store) => /** @type {Promise<void>} */ (new Promise(
     (resolve, reject) => {
       const r = store.put({ id, html, updatedAt: Date.now() });
@@ -90,6 +103,7 @@ export const putAppBody = async (id, html) => {
 
 /** @param {string} id */
 export const deleteAppBody = async (id) => {
+  writeGate?.();
   return tx('readwrite', (store) => /** @type {Promise<void>} */ (new Promise(
     (resolve, reject) => {
       const r = store.delete(id);

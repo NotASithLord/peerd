@@ -82,7 +82,7 @@ export const typeTool = {
       return { ok: false, error: 'text_required' };
     }
     const tab = await resolveTargetTab(args, ctx);
-    if (!tab?.id) return { ok: false, error: 'no_target_tab' };
+    if (!tab?.id) return { ok: false, error: 'no_target_tab', outcomeKind: 'pre-effect-failure' };
 
     // why: domRefs/debuggerPool are SW-injected onto ctx but absent from the
     // ToolContext typedef; scripting is typed opaquely — narrow all three.
@@ -104,14 +104,14 @@ export const typeTool = {
     if (typeof args?.ref === 'string' && args.ref.trim()) {
       const ref = args.ref.trim();
       const entry = domRefs?.resolve?.(tab.id, ref);
-      if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first` };
+      if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first`, outcomeKind: 'pre-effect-failure' };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.setValueBackendNode === 'function') {
         // Cardinality guard on the CDP channel too (#36 consistency): a resolved
         // backendDOMNodeId ref IS exactly one node, so any expectedCount other
         // than 1 is a mismatch — same shape the walk-ref/selector paths return.
         if (expectedCount != null && expectedCount !== 1) {
-          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount };
+          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
           const r = await debuggerPool.setValueBackendNode(tab.id, entry.backendDOMNodeId, args.text, !!args.submit);
@@ -141,7 +141,7 @@ export const typeTool = {
           });
           scriptResult = results[0]?.result;
         } catch (e) {
-          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
         }
         if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
         if (!scriptResult.ok) return { ok: false, error: scriptResult.error ?? 'ref_type_failed' };
@@ -186,7 +186,7 @@ export const typeTool = {
       });
       scriptResult = results[0]?.result;
     } catch (e) {
-      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
     }
     if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
     if (!scriptResult.ok) return { ok: false, error: scriptResult.error ?? 'type_failed' };

@@ -361,6 +361,8 @@ import {
   // DESIGN-19: the shared non-GET web-write predicate (site-fetch/call gates a
   // non-GET through the same web:write confirm as fetch_url / call_api).
   needsWebWriteConfirm,
+  // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
+  setAppBodyWriteGate,
 } from '/peerd-engine/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
@@ -406,6 +408,11 @@ const kv = storeWriteGuard.wrapKv(rawKv);
 const idb = storeWriteGuard.wrapIdb(rawIdb);
 const idbKV = (/** @type {string} */ store) =>
   storeWriteGuard.wrapIdbKvAdapter(store, rawIdbKV(store));
+// The two SELF-HOSTED databases (own IDB, unreachable through the wrapped
+// adapters) get the same verdict via injected gates: skills below at its
+// construction, App bodies here (dormant store, gate installed anyway so a
+// future consumer can never ship ungated).
+setAppBodyWriteGate(() => storeWriteGuard.assertWritable('app-manifests'));
 
 // ---------------------------------------------------------------------------
 // 1. Layer 1 instances
@@ -970,7 +977,11 @@ loadUserHooks({ kv })
 // the ToolContext (ctx.skills) in buildToolContext so the tool can read a
 // body on invocation. Descriptions are injected into the system prompt
 // per turn (skillsBlock below) — bodies never are.
-const skillStore = createSkillStore();
+// §11.5: skills live in their own database — the write guard's verdict is
+// injected here since the wrapped adapters can't reach it.
+const skillStore = createSkillStore({
+  canWrite: () => storeWriteGuard.assertWritable('skills'),
+});
 const skillRegistry = createSkillRegistry({ store: skillStore, audit: auditLog.append });
 registerTool(loadSkillTool);
 

@@ -50,9 +50,18 @@ const BODY_STORE = 'bodies';
  *
  * @param {Object} [deps]
  * @param {IDBFactory} [deps.idbFactory]  defaults to globalThis.indexedDB
+ * @param {() => void} [deps.canWrite]  the 11.5 write gate — throws
+ *   StoreReadOnlyError when the profile schema is newer than this build
+ *   supports; the SW injects the shared verdict (self-hosted DB, see
+ *   lifecycle/write-guard.js)
  */
 export const createSkillStore = (deps = {}) => {
   const idbFactory = deps.idbFactory ?? globalThis.indexedDB;
+  // the 11.5 write gate: skills live in their OWN database (peerd-skills), so
+  // the shared kv/idb write guard cannot reach them — the SW injects the
+  // same schema verdict here instead (throws StoreReadOnlyError when the
+  // profile is newer than this build supports). Absent → always writable.
+  const canWrite = typeof deps.canWrite === 'function' ? deps.canWrite : null;
   /** @type {Promise<IDBDatabase> | null} */
   let openPromise = null;
 
@@ -125,10 +134,13 @@ export const createSkillStore = (deps = {}) => {
      * @param {SkillMeta} meta
      * @param {string} body
      */
-    put: (meta, body) => tx([META_STORE, BODY_STORE], 'readwrite', (t) => {
-      t.objectStore(META_STORE).put(meta);
-      t.objectStore(BODY_STORE).put({ id: meta.id, body });
-    }),
+    put: (meta, body) => {
+      canWrite?.();
+      return tx([META_STORE, BODY_STORE], 'readwrite', (t) => {
+        t.objectStore(META_STORE).put(meta);
+        t.objectStore(BODY_STORE).put({ id: meta.id, body });
+      });
+    },
 
     /**
      * List ALL skill metas. This is the startup hot path — it touches the
@@ -153,10 +165,13 @@ export const createSkillStore = (deps = {}) => {
      * uninstallable). Drops both records.
      * @param {string} id
      */
-    remove: (id) => tx([META_STORE, BODY_STORE], 'readwrite', (t) => {
-      t.objectStore(META_STORE).delete(id);
-      t.objectStore(BODY_STORE).delete(id);
-    }),
+    remove: (id) => {
+      canWrite?.();
+      return tx([META_STORE, BODY_STORE], 'readwrite', (t) => {
+        t.objectStore(META_STORE).delete(id);
+        t.objectStore(BODY_STORE).delete(id);
+      });
+    },
   };
 };
 

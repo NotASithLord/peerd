@@ -43,6 +43,25 @@ export const OPERATION_LOG_KEY = 'peerd.lifecycle.operations';
 export const OPERATION_LOG_MAX_TERMINAL = 500;
 export const OPERATION_LOG_MAX_UNKNOWN = 200;
 
+// Replay tombstones — compact identity that OUTLIVES the full record. why:
+// pruning a completed Class D/E record would otherwise age its replay
+// protection out (the same call id re-presented after 500 later operations
+// would read as new and re-execute the side effect), and pruning an
+// unresolved outcome_unknown would silently forget that an external effect
+// may have occurred. A tombstone is four small fields; thousands are
+// cheaper than one duplicate payment. Only D/E mint them — A/B/C
+// duplicates are invisible or idempotent by classification.
+export const TOMBSTONES_KEY = 'peerd.lifecycle.tombstones';
+export const TOMBSTONES_MAX = 5000;
+// The §14-honest overflow accumulator: when unresolved unknowns are
+// compacted past their cap, the DISCARD ITSELF is recorded (count, oldest,
+// affected sessions) and surfaced by the next boot — a documented compaction
+// with evidence, never a silent forget.
+export const UNKNOWN_OVERFLOW_KEY = 'peerd.lifecycle.unknownOverflow';
+
+/** @param {unknown} v */
+const isConservativeClass = (v) => v === 'D' || v === 'E';
+
 const PRUNABLE_STATES = Object.freeze(
   /** @type {ReadonlySet<import('./operation-state.js').OperationState>} */ (new Set([
     OPERATION_STATES.COMPLETED, OPERATION_STATES.FAILED,
@@ -117,24 +136,107 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     return clean;
   };
 
+  /** @param {import('./reconcile.js').OperationRecord[]} pruned */
+  const mintTombstones = async (pruned) => {
+    const candidates = pruned.filter((r) => isConservativeClass(r.retryClass));
+    if (candidates.length === 0) return;
+    const raw = await storage.get(TOMBSTONES_KEY).catch(() => null);
+    /** @type {Record<string, { terminalState: string, retryClass: string, completedAt: number }>} */
+    const tombs = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    for (const record of candidates) {
+      tombs[record.operationId] = {
+        terminalState: record.state,
+        retryClass: String(record.retryClass),
+        completedAt: now(),
+      };
+    }
+    const keys = Object.keys(tombs);
+    if (keys.length > TOMBSTONES_MAX) {
+      keys.sort((a, b) => tombs[a].completedAt - tombs[b].completedAt);
+      for (const key of keys.slice(0, keys.length - TOMBSTONES_MAX)) delete tombs[key];
+    }
+    await storage.set(TOMBSTONES_KEY, tombs).catch(() => {});
+  };
+
+  /** @param {import('./reconcile.js').OperationRecord[]} droppedUnknowns */
+  const recordUnknownOverflow = async (droppedUnknowns) => {
+    if (droppedUnknowns.length === 0) return;
+    const raw = await storage.get(UNKNOWN_OVERFLOW_KEY).catch(() => null);
+    const prior = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? /** @type {{ droppedCount?: number, oldestDroppedAt?: number, sessionsAffected?: string[] }} */ (raw)
+      : {};
+    const sessions = new Set(Array.isArray(prior.sessionsAffected) ? prior.sessionsAffected : []);
+    for (const record of droppedUnknowns) sessions.add(record.sessionId);
+    await storage.set(UNKNOWN_OVERFLOW_KEY, {
+      droppedCount: (typeof prior.droppedCount === 'number' ? prior.droppedCount : 0)
+        + droppedUnknowns.length,
+      oldestDroppedAt: typeof prior.oldestDroppedAt === 'number'
+        ? prior.oldestDroppedAt
+        : Math.min(...droppedUnknowns.map((r) => r.createdAt)),
+      sessionsAffected: [...sessions].slice(0, 32),
+    }).catch(() => {});
+  };
+
   /** @param {Record<string, import('./reconcile.js').OperationRecord>} map */
   const persist = async (map) => {
     const prunable = Object.values(map)
       .filter((record) => PRUNABLE_STATES.has(record.state))
       .sort((a, b) => a.createdAt - b.createdAt);
     const excess = prunable.length - OPERATION_LOG_MAX_TERMINAL;
+    /** @type {import('./reconcile.js').OperationRecord[]} */
+    const prunedTerminal = [];
     if (excess > 0) {
-      for (const record of prunable.slice(0, excess)) delete map[record.operationId];
+      for (const record of prunable.slice(0, excess)) {
+        prunedTerminal.push(record);
+        delete map[record.operationId];
+      }
     }
     const unknowns = Object.values(map)
       .filter((record) => record.state === OPERATION_STATES.OUTCOME_UNKNOWN)
       .sort((a, b) => a.createdAt - b.createdAt);
     const unknownExcess = unknowns.length - OPERATION_LOG_MAX_UNKNOWN;
+    /** @type {import('./reconcile.js').OperationRecord[]} */
+    const prunedUnknowns = [];
     if (unknownExcess > 0) {
-      for (const record of unknowns.slice(0, unknownExcess)) delete map[record.operationId];
+      for (const record of unknowns.slice(0, unknownExcess)) {
+        prunedUnknowns.push(record);
+        delete map[record.operationId];
+      }
     }
     await storage.set(OPERATION_LOG_KEY, map);
+    // Tombstones + overflow evidence ride the same queue slot as the prune
+    // that made them necessary (persist only runs inside enqueue).
+    await mintTombstones([...prunedTerminal, ...prunedUnknowns]);
+    await recordUnknownOverflow(prunedUnknowns);
   };
+
+  /**
+   * Compact replay identity for a pruned D/E operation. Consulted by the
+   * tracker BEFORE begin(), so a call id whose full record aged out still
+   * refuses re-execution.
+   * @param {string} operationId
+   */
+  const getTombstone = async (operationId) => {
+    const raw = await storage.get(TOMBSTONES_KEY).catch(() => null);
+    const tombs = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const entry = /** @type {Record<string, unknown>} */ (tombs)[operationId];
+    return entry && typeof entry === 'object'
+      ? /** @type {{ terminalState: string, retryClass: string, completedAt: number }} */ (entry)
+      : undefined;
+  };
+
+  /**
+   * Read-and-clear the unknown-compaction evidence (the boot surfaces it).
+   */
+  const drainUnknownOverflow = () => enqueue(async () => {
+    const raw = await storage.get(UNKNOWN_OVERFLOW_KEY).catch(() => null);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    await storage.set(UNKNOWN_OVERFLOW_KEY, null).catch(() => {});
+    const overflow = /** @type {{ droppedCount?: number }} */ (raw);
+    return typeof overflow.droppedCount === 'number' && overflow.droppedCount > 0
+      ? /** @type {{ droppedCount: number, oldestDroppedAt?: number, sessionsAffected?: string[] }} */ (raw)
+      : null;
+  });
 
   /**
    * Record a new operation BEFORE dispatch (§8.1). Persists, then returns
@@ -152,6 +254,9 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * @param {string} [input.idempotencyKey]
    * @param {string} [input.target]
    * @param {string} [input.confirmationRef]
+   * @param {Record<string, unknown>} [input.confirmationProof]  the consumed
+   *   single-use approval proof (no secrets — action/target/generation/
+   *   window/consumed), persisted for the §8.3 forensic chain
    */
   const begin = (input) => enqueue(async () => {
     if (!input?.operationId || !input.sessionId || !input.toolName || !input.generationId) {
@@ -175,6 +280,7 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.target ? { target: input.target } : {}),
       ...(input.confirmationRef ? { confirmationRef: input.confirmationRef } : {}),
+      ...(input.confirmationProof ? { confirmationProof: input.confirmationProof } : {}),
     };
     map[record.operationId] = record;
     await persist(map);
@@ -318,5 +424,6 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   return {
     begin, get, listNonterminal, transition, markDispatched,
     settle, resolveUnknown, newAttempt,
+    getTombstone, drainUnknownOverflow,
   };
 };

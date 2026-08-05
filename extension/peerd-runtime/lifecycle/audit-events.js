@@ -15,6 +15,7 @@ export const LIFECYCLE_EVENTS = Object.freeze({
   OPERATION_COMPLETED: /** @type {const} */ ('lifecycle.operation.completed'),
   OPERATION_INTERRUPTED: /** @type {const} */ ('lifecycle.operation.interrupted'),
   OUTCOME_UNKNOWN: /** @type {const} */ ('lifecycle.operation.outcome_unknown'),
+  OUTCOME_UNKNOWN_OVERFLOW: /** @type {const} */ ('lifecycle.operation.unknown-overflow'),
   RETRY_ATTEMPTED: /** @type {const} */ ('lifecycle.retry.attempted'),
   RETRY_REFUSED: /** @type {const} */ ('lifecycle.retry.refused'),
   SW_GENERATION_CHANGED: /** @type {const} */ ('lifecycle.generation.sw-changed'),

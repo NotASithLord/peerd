@@ -79,8 +79,17 @@ describe('settleTracking — §16.2 semantic failures', () => {
     expect((await log.get('s:c1'))!.state).toBe(S.COMPLETED);
   });
 
-  test('a definitive error settles failed, no rewrite', async () => {
+  test('an UNTYPED error on a dispatched Class E defaults to outcome_unknown — burden of proof inverted', async () => {
+    // 'element not found' READS definitive, but an unstamped string proves
+    // nothing about whether the effect landed. Only a typed
+    // pre-effect-failure carries the "did not occur" claim for D/E.
     const { rewrite, record } = await settle('E', 'element not found: #missing');
+    expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
+    expect(rewrite!.error).toStartWith('outcome_unknown:');
+  });
+
+  test('an untyped definitive error on a Class B read still settles failed (heuristics decide for A/B/C)', async () => {
+    const { rewrite, record } = await settle('B', 'element not found: #missing');
     expect(rewrite).toBeNull();
     expect(record!.state).toBe(S.FAILED);
   });
@@ -110,9 +119,10 @@ describe('settleTracking — §16.2 semantic failures', () => {
       const { record } = await settle('E', error);
       expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
     }
-    // …while a genuine pre-effect refusal from the tool itself stays failed.
+    // …and an untyped tool string ALSO lands unknown (inverted burden);
+    // only the typed pre-effect stamp settles failed for a dispatched E.
     const { record } = await settle('E', 'element not found: #missing');
-    expect(record!.state).toBe(S.FAILED);
+    expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
   });
 
   test('a timeout on a Class B read settles interrupted — retryable, budget-worded', async () => {

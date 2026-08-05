@@ -253,6 +253,9 @@ export const dispatchToolCall = async (call, ctx) => {
     })
     : null;
 
+  // Whether the USER approved this exact dispatch via a confirm round-trip
+  // — the lifecycle tracker turns it into a durable single-use proof.
+  let userApprovedThisDispatch = false;
   if (verdict.allowed && (verdict.confirm || ugcRuleId) && !selfConfirms) {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
@@ -281,6 +284,7 @@ export const dispatchToolCall = async (call, ctx) => {
       answer = 'no';  // fail closed — a broken confirm channel blocks the action
     }
     const approved = answer === 'yes_once' || answer === 'yes_session';
+    userApprovedThisDispatch = approved;
     if (confirmEntry) {
       confirmEntry.allowed = approved;
       // why the ruleId rides in the reason: the lineage chip in the transcript
@@ -375,6 +379,13 @@ export const dispatchToolCall = async (call, ctx) => {
       sessionId: ctx.session?.sessionId ?? undefined,
       actorId: /** @type {{ actorInstanceId?: string }} */ (ctx).actorInstanceId,
       target: safeOrigins(tool, args, ctx)[0],
+      // The user's approval, if a confirm round-trip ran above — the
+      // tracker mints + consumes the single-use, generation-bound proof
+      // and persists it on the durable record (§8.3).
+      confirmed: userApprovedThisDispatch,
+      // Post-hook args: Class C/D records derive their deterministic
+      // idempotency key from these.
+      args,
     }).catch(() => null);
     if (begun && 'refuse' in begun && begun.refuse) {
       ctx.audit({
