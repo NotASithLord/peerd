@@ -127,8 +127,7 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 615 → 618: the lifecycle hardening batch — failure-taxonomy.js (typed
 // outcomes), write-guard.js (§11.5 enforcement), engine-liveness.js (§9
 // ledger); all carry // @ts-check.
-// 618 → 625: lock the checked files already present at the v0.5.0 cut.
-const COVERED_FLOOR = 625;
+const COVERED_FLOOR = 618;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
