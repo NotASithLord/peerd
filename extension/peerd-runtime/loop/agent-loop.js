@@ -862,7 +862,13 @@ export async function* runUserTurn(ctx) {
               meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
             });
           };
-          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled', 'aborted');
+          // why "may still settle": the loser of this race keeps running
+          // detached — a tracked side effect can land AFTER the abort, and
+          // the durable operation log records that truth. Asserting a
+          // definite "never happened" here would contradict it.
+          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled — '
+            + 'it may still settle in the background; a side effect\'s recorded outcome '
+            + 'arrives via interruption-recovery if it does', 'aborted');
           const deadline = setTimeout(
             () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`, 'timeout'),
             DISPATCH_DEADLINE_MS,

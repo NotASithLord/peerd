@@ -49,6 +49,13 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     ['the actor turn failed: pytest exited 1', 'agent'],
     ['(the actor produced no text reply)', 'agent'],
     ['TypeError: cannot read properties of undefined', 'internal'],
+    // The lifecycle contract's stable result prefixes (PR #314).
+    ['outcome_unknown: This action may have completed, but peerd did not receive confirmation. Check the target before repeating it. (submit_form: request timed out)', 'environment'],
+    ['interrupted: The read or model call was interrupted. Retrying may incur additional network or model cost. (fetch_url: connection reset)', 'environment'],
+    ['cancelled: submit_form was stopped before its effect landed (aborted)', 'aborted'],
+    ['outcome_unknown: submit_form was already dispatched and its result is lost. It may have completed — verify the external state before repeating it. Not re-executing automatically.', 'policy'],
+    ['completed: submit_form already completed on a previous dispatch of this same call — not re-executing. Use the recorded result or issue a NEW operation.', 'policy'],
+    ['failed: submit_form was NOT executed — lifecycle tracking is unavailable (quota exceeded) and a non-idempotent action must not run untracked: an interruption could then never be reported or guarded against. Retry once storage recovers, or run a read-only alternative.', 'policy'],
   ];
   for (const [text, kind] of cases) {
     test(`"${text.slice(0, 52)}…" → ${kind}`, () => {

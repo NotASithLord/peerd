@@ -44,6 +44,16 @@ const RULES = [
   // auth beats provider (a 401 is a key problem before an API problem).
   { kind: 'aborted', test: /^script_aborted:|stopped before the (actor|run)|aborted \(Stop\)|aborted \(timeout or cancel\)|\bstop was pressed\b/i },
   { kind: 'aborted', test: /^the turn was stopped\b|\bcancelled by the user\b/i },
+  // Lifecycle recovery outcomes (PR #314, dispatch-tracking.js) — the
+  // contract's stable result prefixes. Precedence: the replay-guard and
+  // fail-closed REFUSALS are peerd's own policy speaking ('not
+  // re-executing' / 'was NOT executed'), before the settled-state rows;
+  // 'cancelled:' is a Stop shape; 'outcome_unknown:'/'interrupted:' are
+  // the world not cooperating (transport/host loss), with the raw cause
+  // in the parenthetical right next to the chip.
+  { kind: 'policy', test: /^(outcome_unknown|interrupted|completed):.*\bnot re-executing\b|^failed: .*\bNOT executed\b/i },
+  { kind: 'aborted', test: /^cancelled: / },
+  { kind: 'environment', test: /^(outcome_unknown|interrupted): / },
   // why gate_blocked/hook_blocked (not 'tool_blocked'): these are the
   // dispatcher's ACTUAL refusal prefixes in tool results (dispatcher.js);
   // tool_blocked is only the audit event's type and never reaches a card.

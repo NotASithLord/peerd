@@ -1,0 +1,248 @@
+{
+  "_provenance": {
+    "peerdVersion": "0.2.8",
+    "shapeCommit": "9eeda20",
+    "shapeDate": "2026-07-19",
+    "notes": [
+      "peerd 0.2.8 (9eeda20:package.json). The last shape before the 0.3.0 security arc.",
+      "67d46d5 (#178, 2026-07-06, shipped 0.2.6) renamed SessionKind 'subagent' -> 'spawned'. Records written before it keep 'subagent' forever (see the v0.1.0 / v0.2.2 fixtures) — there is no rewrite pass.",
+      "65bac25 (#210, 2026-07-15, shipped 0.2.8) added session.todos (todo/core.js TodoItem[]) and session.prewalk (loop/prewalk.js PrewalkState), plus the prewalkEnabled / enginePrewalkEnabled / prewalkExecutorModel settings; a94df66 (#216) extended prewalk to engine actors.",
+      "9f9d0bc (#219, 2026-07-19) added the watchAgentTab setting.",
+      "STILL ABSENT at this version: review (419ecb6, #228, 0.3.0) and originState (1455923, #255, 0.3.0) — so a 0.2.8 review child and a 0.2.8 bound web actor both read as unmarked/unbound today, fail-closed.",
+      "exportEnvelope still carries no `durability` block (added 70f6e42, 2026-08-05).",
+      "storeVersions is null: the lifecycle store registry landed 2026-08-05, after 0.4.0."
+    ]
+  },
+
+  "storeVersions": null,
+
+  "settings": {
+    "providerName": "anthropic",
+    "providerModel": "claude-sonnet-4-6",
+    "prewalkEnabled": true,
+    "enginePrewalkEnabled": true,
+    "prewalkExecutorModel": "claude-haiku-4-5",
+    "watchAgentTab": true,
+    "webActorActionSurface": "code",
+    "spendLimitUsd": 50,
+    "vaultAutoLockMs": 1800000,
+    "unknownSettingFromANewerBuild": { "shape": "forward-compat", "keep": true }
+  },
+
+  "sessions": [
+    {
+      "sessionId": "0198f7c0-1000-7000-8000-00000000e001",
+      "createdAt": 1752883200000,
+      "provider": "anthropic",
+      "model": "claude-opus-4-1",
+      "title": "migrate the docs site to the new theme",
+      "kind": "chat",
+      "depth": 0,
+      "permissionMode": "act",
+      "confirmActions": false,
+      "messagesV2": true,
+      "msgIndex": [
+        "0198f7c0-1001-7000-8000-00000000f001",
+        "0198f7c0-1002-7000-8000-00000000f002"
+      ],
+      "todos": [
+        { "id": 1, "text": "inventory the current theme tokens", "status": "done" },
+        { "id": 2, "text": "port the tokens to the new theme", "status": "pending", "validation": "the built site renders with no unresolved token" },
+        { "id": 3, "text": "spot-check three pages in light and dark", "status": "pending" }
+      ],
+      "prewalk": {
+        "phase": "executing",
+        "plannerProvider": "anthropic",
+        "plannerModel": "claude-opus-4-1",
+        "executorProvider": "anthropic",
+        "executorModel": "claude-haiku-4-5",
+        "armedAt": 1752883200500,
+        "swappedAt": 1752883260000
+      },
+      "cost": {
+        "inputTokens": 41200,
+        "outputTokens": 5300,
+        "cacheReadTokens": 33000,
+        "cacheWriteTokens": 4100,
+        "cost": 0.3142,
+        "turns": 9
+      },
+      "unknownRecordFieldFromANewerBuild": { "why": "forward-compat: must survive every read path" }
+    },
+    {
+      "sessionId": "0198f7c0-2000-7000-8000-00000000e002",
+      "createdAt": 1752883300000,
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "kind": "spawned",
+      "parentSessionId": "0198f7c0-1000-7000-8000-00000000e001",
+      "task": "list every CSS custom property the old theme defines",
+      "depth": 1,
+      "spawnedTrusted": true,
+      "grantedTools": ["js_notebook", "read_doc"],
+      "messagesV2": true,
+      "msgIndex": ["0198f7c0-2001-7000-8000-00000000f003"],
+      "futureSpawnedField": ["planted", "unknown"]
+    },
+    {
+      "sessionId": "0198f7c0-3000-7000-8000-00000000e003",
+      "createdAt": 1752883400000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "kind": "actor",
+      "parentSessionId": "0198f7c0-1000-7000-8000-00000000e001",
+      "depth": 1,
+      "instanceId": "nb_01H9Z0",
+      "actorType": "notebook",
+      "spawnedTrusted": true,
+      "grantedTools": ["js_notebook", "notebook_write", "notebook_read"],
+      "prewalk": {
+        "phase": "planning",
+        "plannerProvider": "anthropic",
+        "plannerModel": "claude-sonnet-4-6",
+        "executorProvider": "anthropic",
+        "executorModel": "claude-haiku-4-5",
+        "armedAt": 1752883400500
+      },
+      "messagesV2": true,
+      "msgIndex": ["0198f7c0-3001-7000-8000-00000000f004"]
+    }
+  ],
+
+  "sessionMessages": [
+    {
+      "id": "0198f7c0-1001-7000-8000-00000000f001",
+      "sessionId": "0198f7c0-1000-7000-8000-00000000e001",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "migrate the docs site to the new theme",
+        "id": "0198f7c0-1001-7000-8000-00000000f001",
+        "when": 1752883200100
+      }
+    },
+    {
+      "id": "0198f7c0-1002-7000-8000-00000000f002",
+      "sessionId": "0198f7c0-1000-7000-8000-00000000e001",
+      "seq": 1,
+      "message": {
+        "role": "assistant",
+        "content": "Planned it out; starting on the token inventory.",
+        "id": "0198f7c0-1002-7000-8000-00000000f002",
+        "when": 1752883201000,
+        "model": "claude-opus-4-1",
+        "provider": "anthropic",
+        "stopReason": "tool_use",
+        "thinking": "The theme tokens are the load-bearing part; enumerate before porting.",
+        "thinkingBlocks": [
+          { "type": "thinking", "thinking": "enumerate before porting", "signature": "sig_opaque_0198f7c0" }
+        ],
+        "toolUses": [
+          { "id": "toolu_101", "name": "todo_init", "input": { "items": [{ "text": "inventory the current theme tokens" }] } }
+        ],
+        "unknownMessageFieldFromANewerBuild": "keep-me"
+      }
+    },
+    {
+      "id": "0198f7c0-2001-7000-8000-00000000f003",
+      "sessionId": "0198f7c0-2000-7000-8000-00000000e002",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "list every CSS custom property the old theme defines",
+        "id": "0198f7c0-2001-7000-8000-00000000f003",
+        "when": 1752883300100
+      }
+    },
+    {
+      "id": "0198f7c0-3001-7000-8000-00000000f004",
+      "sessionId": "0198f7c0-3000-7000-8000-00000000e003",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "port the tokens in the notebook",
+        "id": "0198f7c0-3001-7000-8000-00000000f004",
+        "when": 1752883400100
+      }
+    }
+  ],
+
+  "hooks": [
+    {
+      "id": "audit-every-write",
+      "event": "post-tool-use",
+      "kind": "declarative",
+      "match": "*",
+      "order": 90,
+      "enabled": false,
+      "rule": {
+        "matchArg": "path",
+        "pattern": "^/etc/",
+        "onMatch": "block",
+        "reason": "system paths are out of scope"
+      },
+      "unknownHookFieldFromANewerBuild": "keep-me"
+    }
+  ],
+
+  "memory": {
+    "version": 1,
+    "exportedAt": 1752883500000,
+    "docs": [
+      {
+        "id": "user",
+        "kind": "user",
+        "workspace": "",
+        "body": "# About me\n\nDark mode first. Never ship a theme without a light check.\n",
+        "createdAt": 1750000000000,
+        "updatedAt": 1752883500000,
+        "unknownDocFieldFromANewerBuild": 7
+      },
+      {
+        "id": "project:docs.example.test",
+        "kind": "project",
+        "workspace": "docs.example.test",
+        "body": "# docs.example.test\n\nTokens live in tokens.css.\n",
+        "createdAt": 1751000000000,
+        "updatedAt": 1752883500000
+      },
+      {
+        "id": "subtree:docs.example.test:/themes",
+        "kind": "subtree",
+        "workspace": "docs.example.test",
+        "subpath": "/themes",
+        "body": "# /themes\n\nThe old theme is theme-classic.css.\n",
+        "createdAt": 1751500000000,
+        "updatedAt": 1752883500000
+      }
+    ]
+  },
+
+  "exportEnvelope": {
+    "format": "peerd-export",
+    "version": 1,
+    "exportedAt": "2026-07-19T18:00:00.000Z",
+    "channel": "store",
+    "settings": {
+      "prewalkEnabled": true,
+      "prewalkExecutorModel": "claude-haiku-4-5",
+      "watchAgentTab": true,
+      "aSettingThisBuildNeverHeardOf": 42
+    },
+    "providerEndpoints": { "endpoints": [{ "url": "https://proxy.example.test/v1" }] },
+    "secrets": null,
+    "memory": {
+      "version": 1,
+      "docs": [
+        { "id": "user", "body": "# About me\n", "updatedAt": 1752883500000 },
+        { "id": "project:docs.example.test", "body": "# docs\n", "updatedAt": 1752883500000 }
+      ]
+    },
+    "hooks": [{ "id": "audit-every-write", "event": "post-tool-use", "kind": "declarative" }],
+    "skills": [
+      { "id": "sk-theme", "name": "theme-porter" },
+      { "id": "sk-a11y", "name": "contrast-checker" }
+    ],
+    "unknownEnvelopeSectionFromANewerBuild": { "keep": true }
+  }
+}

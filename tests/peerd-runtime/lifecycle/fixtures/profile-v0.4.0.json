@@ -1,0 +1,378 @@
+{
+  "_provenance": {
+    "peerdVersion": "0.4.0",
+    "shapeCommit": "86aaa0a",
+    "shapeDate": "2026-08-01",
+    "notes": [
+      "peerd 0.4.0 (86aaa0a:package.json, the CURRENT release) — the shapes today's build itself writes, so this fixture is the 'no drift on the way out' anchor the three older files can't be: a regression here means the build stopped round-tripping its OWN records.",
+      "Sessions are v2 (msgIndex + messagesV2:true, bodies in the sibling session_messages store) and carry the full modern field set: todos (todo/core.js TodoItem[]), prewalk (loop/prewalk.js PrewalkState), toolManifest (tools/manifests.js), trimSummary, customSystemPrompt, cost.",
+      "419ecb6 (#228, 0.3.0) added session.review — the SW-stamped review-exemption marker on a SPAWNED child (never on a chat), so the review child below is where the field can honestly appear.",
+      "1455923 (#255, 0.3.0) added session.originState — a TAB-backed web actor's origin authority (actor/origin-lock.js ActorOriginState: mode, ownedOrigin, provisional, excursion, excursionsUsed). Durable BECAUSE it is the authority: losing it across an eviction turns a bound actor back into an unbounded one.",
+      "There is no settings-level confirm toggle: the Act sub-axis is persisted PER SESSION as `confirmActions` (sessions/types.js; permissions/policy.js confirmActionsFromRecord). So 'confirmations disabled' is the explicit `confirmActions:false` on the two chats here — an explicit false, not an absent key, which is the only value that turns confirmation off.",
+      "settings hold NON-DEFAULT values on purpose (advancedAutomationEnabled false against the preview default true, a 5-minute vaultAutoLockMs against 45 minutes, confirmWebWrites false, autoMemoryEnabled false, watchAgentTab true): §11 Option A says a stored value always wins over CHANNEL_DEFAULTS, so a fixture full of defaults would prove nothing about the upgrade path.",
+      "exportEnvelope is today's transfer.js buildExport output — the FIRST fixture carrying the §12 `durability` block (70f6e42, 2026-08-05): tier labels for the sections actually present plus omittedDeviceBound, the device-bound surfaces an export structurally cannot carry.",
+      "storeVersions is null: the lifecycle store registry landed 2026-08-05 (3c5566d/70f6e42), AFTER the 0.4.0 release — so even a profile written by the CURRENT release is unstamped, and checkStores must read that as a fresh profile, never as a version skew.",
+      "Planted `unknown*FromANewerBuild` / `future*` fields at every level (settings, session record, message body, hook, memory doc, export envelope) — forward-compat data a LATER build wrote that today's build must carry through untouched."
+    ]
+  },
+
+  "storeVersions": null,
+
+  "settings": {
+    "providerName": "anthropic",
+    "providerModel": "claude-opus-4-1",
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "advancedAutomationEnabled": false,
+    "watchAgentTab": true,
+    "frontDoorView": "home",
+    "webActorActionSurface": "code",
+    "schemaValidatedReplies": true,
+    "prewalkEnabled": true,
+    "enginePrewalkEnabled": true,
+    "prewalkExecutorModel": "claude-haiku-4-5",
+    "runnerModel": "",
+    "ollamaHost": "http://192.168.1.4:11434",
+    "openrouterModels": ["anthropic/claude-3.7-sonnet", "google/gemini-2.5-pro"],
+    "spendLimitUsd": 125,
+    "pricingOverrides": { "claude-opus-4-1": { "input": 15, "output": 75 } },
+    "confirmWebWrites": false,
+    "autoMemoryEnabled": false,
+    "autoResumeInterruptedTurns": true,
+    "providerFailoverEnabled": true,
+    "providerFallbacks": ["openrouter", "ollama"],
+    "vaultAutoLockMs": 300000,
+    "auditLogMaxEntries": 20000,
+    "dwebEnabled": true,
+    "dwebAgentEnabled": true,
+    "unknownSettingFromANewerBuild": { "shape": "forward-compat", "keep": true }
+  },
+
+  "sessions": [
+    {
+      "sessionId": "01990a00-1000-7000-8000-000000010001",
+      "createdAt": 1754049600000,
+      "provider": "anthropic",
+      "model": "claude-opus-4-1",
+      "title": "reconcile the July invoices against the ledger",
+      "kind": "chat",
+      "depth": 0,
+      "permissionMode": "act",
+      "confirmActions": false,
+      "customSystemPrompt": "Never guess a figure. If a number isn't on the page, say so.",
+      "toolManifest": {
+        "preset": "research",
+        "allow": ["fetch_url", "read_web_cache", "actor_list", "open_tab", "message_actor", "inspect"]
+      },
+      "messagesV2": true,
+      "msgIndex": [
+        "01990a00-1001-7000-8000-000000011001",
+        "01990a00-1002-7000-8000-000000011002"
+      ],
+      "todos": [
+        { "id": 1, "text": "pull the July invoice list", "status": "done" },
+        { "id": 2, "text": "match each invoice to a ledger line", "status": "pending", "validation": "every invoice id appears exactly once in the ledger export" },
+        { "id": 3, "text": "report the unmatched rows", "status": "pending" }
+      ],
+      "prewalk": {
+        "phase": "executing",
+        "plannerProvider": "anthropic",
+        "plannerModel": "claude-opus-4-1",
+        "executorProvider": "anthropic",
+        "executorModel": "claude-haiku-4-5",
+        "armedAt": 1754049601000,
+        "swappedAt": 1754049688000
+      },
+      "trimSummary": {
+        "v": 1,
+        "covered": 22,
+        "coveredLastId": "01990a00-1009-7000-8000-000000011099",
+        "users": 6,
+        "assistants": 8,
+        "toolResults": 8,
+        "errors": 0,
+        "tools": { "fetch_url": 5, "message_actor": 3 },
+        "task": "reconcile the July invoices",
+        "goal": "every invoice matched or explicitly reported unmatched",
+        "facts": ["the ledger export is CSV, one row per posting"],
+        "decisions": ["match on invoice id, not amount"],
+        "threads": [],
+        "artifacts": [],
+        "handles": ["web:1734"],
+        "lastWhen": 1754049700000
+      },
+      "cost": {
+        "inputTokens": 128400,
+        "outputTokens": 9120,
+        "cacheReadTokens": 96000,
+        "cacheWriteTokens": 12400,
+        "cost": 1.2871,
+        "turns": 14
+      },
+      "unknownRecordFieldFromANewerBuild": { "why": "forward-compat: must survive every read path" }
+    },
+    {
+      "sessionId": "01990a00-2000-7000-8000-000000010002",
+      "createdAt": 1754053200000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "title": "read up on the new invoicing rules",
+      "kind": "chat",
+      "depth": 0,
+      "permissionMode": "plan",
+      "confirmActions": false,
+      "toolManifest": { "preset": "browse-only" },
+      "messagesV2": true,
+      "msgIndex": ["01990a00-2001-7000-8000-000000011003"],
+      "todos": [
+        { "id": 1, "text": "find the rules page", "status": "done" },
+        { "id": 2, "text": "summarize the changes that affect us", "status": "pending" }
+      ],
+      "cost": {
+        "inputTokens": 8100,
+        "outputTokens": 640,
+        "cacheReadTokens": 4200,
+        "cacheWriteTokens": 900,
+        "cost": 0.0412,
+        "turns": 2
+      },
+      "futureChatFieldFromANewerBuild": ["planted", "unknown"]
+    },
+    {
+      "sessionId": "01990a00-3000-7000-8000-000000010003",
+      "createdAt": 1754049660000,
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "kind": "actor",
+      "parentSessionId": "01990a00-1000-7000-8000-000000010001",
+      "depth": 1,
+      "instanceId": "1734",
+      "actorType": "web",
+      "backing": "tab",
+      "spawnedTrusted": true,
+      "grantedTools": [
+        "snapshot", "read_page", "read_state", "click", "type", "navigate",
+        "query_dom", "fetch_url", "read_web_cache", "site_client_run"
+      ],
+      "originState": {
+        "mode": "bound",
+        "ownedOrigin": "https://billing.example.test",
+        "provisional": false,
+        "excursion": null,
+        "excursionsUsed": 1
+      },
+      "prewalk": {
+        "phase": "planning",
+        "plannerProvider": "anthropic",
+        "plannerModel": "claude-opus-4-1",
+        "executorProvider": "anthropic",
+        "executorModel": "claude-haiku-4-5",
+        "armedAt": 1754049661000
+      },
+      "messagesV2": true,
+      "msgIndex": ["01990a00-3001-7000-8000-000000011004"],
+      "unknownActorFieldFromANewerBuild": { "boundSince": 1754049661000 }
+    },
+    {
+      "sessionId": "01990a00-4000-7000-8000-000000010004",
+      "createdAt": 1754049900000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "kind": "spawned",
+      "parentSessionId": "01990a00-1000-7000-8000-000000010001",
+      "task": "review the reconciliation notebook for off-by-one errors",
+      "depth": 1,
+      "spawnedTrusted": true,
+      "review": true,
+      "grantedTools": ["js_read_file", "app_read_file", "read_doc"],
+      "messagesV2": true,
+      "msgIndex": ["01990a00-4001-7000-8000-000000011005"],
+      "futureReviewFieldFromANewerBuild": "keep-me"
+    }
+  ],
+
+  "sessionMessages": [
+    {
+      "id": "01990a00-1001-7000-8000-000000011001",
+      "sessionId": "01990a00-1000-7000-8000-000000010001",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "reconcile the July invoices against the ledger",
+        "id": "01990a00-1001-7000-8000-000000011001",
+        "when": 1754049600100
+      }
+    },
+    {
+      "id": "01990a00-1002-7000-8000-000000011002",
+      "sessionId": "01990a00-1000-7000-8000-000000010001",
+      "seq": 1,
+      "message": {
+        "role": "assistant",
+        "content": "Planning first: I'll pull the invoice list, then match line by line.",
+        "id": "01990a00-1002-7000-8000-000000011002",
+        "when": 1754049601500,
+        "model": "claude-opus-4-1",
+        "provider": "anthropic",
+        "stopReason": "tool_use",
+        "thinking": "Matching on id is the only stable key; amounts repeat.",
+        "thinkingBlocks": [
+          { "type": "thinking", "thinking": "match on id, not amount", "signature": "sig_opaque_01990a00" }
+        ],
+        "toolUses": [
+          { "id": "toolu_401", "name": "todo_init", "input": { "items": [{ "text": "pull the July invoice list" }] } },
+          { "id": "toolu_402", "name": "message_actor", "input": { "handle": "web:1734", "message": "open the billing portal's July invoice list" } }
+        ],
+        "unknownMessageFieldFromANewerBuild": "keep-me"
+      }
+    },
+    {
+      "id": "01990a00-2001-7000-8000-000000011003",
+      "sessionId": "01990a00-2000-7000-8000-000000010002",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "read up on the new invoicing rules",
+        "id": "01990a00-2001-7000-8000-000000011003",
+        "when": 1754053200100
+      }
+    },
+    {
+      "id": "01990a00-3001-7000-8000-000000011004",
+      "sessionId": "01990a00-3000-7000-8000-000000010003",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "open the billing portal's July invoice list",
+        "id": "01990a00-3001-7000-8000-000000011004",
+        "when": 1754049661100
+      }
+    },
+    {
+      "id": "01990a00-4001-7000-8000-000000011005",
+      "sessionId": "01990a00-4000-7000-8000-000000010004",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "review the reconciliation notebook for off-by-one errors",
+        "id": "01990a00-4001-7000-8000-000000011005",
+        "when": 1754049900100
+      }
+    }
+  ],
+
+  "hooks": [
+    {
+      "id": "no-writes-to-billing",
+      "event": "pre-tool-use",
+      "kind": "declarative",
+      "match": "call_api",
+      "order": 40,
+      "enabled": true,
+      "rule": {
+        "matchArg": "url",
+        "pattern": "^https://billing\\.example\\.test/",
+        "onMatch": "block",
+        "reason": "the billing portal is read-only for the agent"
+      },
+      "doc": "Refuse any API write against the billing portal.",
+      "unknownHookFieldFromANewerBuild": "keep-me"
+    },
+    {
+      "id": "tag-every-result",
+      "event": "post-tool-use",
+      "kind": "js",
+      "match": "*",
+      "order": 95,
+      "enabled": false,
+      "trusted": true,
+      "body": "return { action: 'allow', reason: `saw ${inv.toolName}` };",
+      "doc": "A trusted JS hook — kind:'js' only compiles with trusted:true.",
+      "unknownHookFieldFromANewerBuild": "keep-me"
+    }
+  ],
+
+  "memory": {
+    "version": 1,
+    "exportedAt": 1754054000000,
+    "docs": [
+      {
+        "id": "user",
+        "kind": "user",
+        "workspace": "",
+        "body": "# About me\n\nFinance ops. Numbers must be sourced, never inferred.\n",
+        "createdAt": 1750000000000,
+        "updatedAt": 1754054000000,
+        "unknownDocFieldFromANewerBuild": 7
+      },
+      {
+        "id": "project:billing.example.test",
+        "kind": "project",
+        "workspace": "billing.example.test",
+        "body": "# billing.example.test\n\nInvoice list is at /invoices?period=YYYY-MM.\n",
+        "createdAt": 1751000000000,
+        "updatedAt": 1754054000000
+      },
+      {
+        "id": "subtree:billing.example.test:/invoices",
+        "kind": "subtree",
+        "workspace": "billing.example.test",
+        "subpath": "/invoices",
+        "body": "# /invoices\n\nThe export button is behind the 'More' menu.\n",
+        "createdAt": 1751500000000,
+        "updatedAt": 1754054000000
+      }
+    ]
+  },
+
+  "exportEnvelope": {
+    "format": "peerd-export",
+    "version": 1,
+    "exportedAt": "2026-08-01T09:30:00.000Z",
+    "channel": "preview",
+    "settings": {
+      "reasoningEffort": "high",
+      "advancedAutomationEnabled": false,
+      "vaultAutoLockMs": 300000,
+      "confirmWebWrites": false,
+      "prewalkEnabled": true,
+      "dwebEnabled": true,
+      "dwebAgentEnabled": true,
+      "aSettingThisBuildNeverHeardOf": 42
+    },
+    "providerEndpoints": { "endpoints": [{ "url": "https://gateway.example.test/v1" }] },
+    "secrets": {
+      "kdf": "PBKDF2-SHA256",
+      "iterations": 600000,
+      "salt": "c2FsdHNhbHRzYWx0c2FsdA==",
+      "cipher": "AES-GCM",
+      "data": "aXZpdml2aXZpdml2aXZjaXBoZXJ0ZXh0Ynl0ZXNoZXJl"
+    },
+    "memory": {
+      "version": 1,
+      "docs": [
+        { "id": "user", "body": "# About me\n", "updatedAt": 1754054000000 },
+        { "id": "project:billing.example.test", "body": "# billing\n", "updatedAt": 1754054000000 },
+        { "id": "subtree:billing.example.test:/invoices", "body": "# /invoices\n", "updatedAt": 1754054000000 }
+      ]
+    },
+    "hooks": [
+      { "id": "no-writes-to-billing", "event": "pre-tool-use", "kind": "declarative" },
+      { "id": "tag-every-result", "event": "post-tool-use", "kind": "js" }
+    ],
+    "skills": [
+      { "id": "sk-ledger", "name": "ledger-matcher" },
+      { "id": "sk-csv", "name": "csv-reader" }
+    ],
+    "durability": {
+      "tiers": {
+        "vault": "profile",
+        "memory": "portable",
+        "skills": "portable",
+        "hooks": "portable"
+      },
+      "omittedDeviceBound": ["dpop-keys", "engine-registries", "opfs-workspaces"]
+    },
+    "unknownEnvelopeSectionFromANewerBuild": { "keep": true }
+  }
+}

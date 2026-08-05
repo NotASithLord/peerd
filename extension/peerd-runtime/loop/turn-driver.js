@@ -65,6 +65,12 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // Engine-actor prewalk: swaps a VM/Notebook/App actor to its cheap executor
     // from its second turn onward. Optional so actor/test drivers stay inert.
     reconcileEngineActor = null,
+    // Lifecycle recovery notices (lifecycle/boot.js drainNoticesFor):
+    // read-once per session, folded into the leading <context> message so the
+    // AGENT hears the same §14 semantic distinction the user's chat note
+    // carried — including the do-not-repeat instruction for outcome_unknown.
+    // Optional so actor/test drivers stay inert.
+    drainRecoveryNotices = null,
   } = deps;
 
 /**
@@ -231,9 +237,18 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // workspace) — a mid-session origin switch re-renders the memory block and
   // costs one cache write before it caches again. Acceptable; the volatile
   // seconds-clock (the real per-turn bust) is what moved out.
+  // Interruption-recovery notices ride the same per-turn context message:
+  // volatile, delivered once, never part of the cached system prefix. An
+  // actor turn skips them (notices are parented to the CHAT session).
+  let recoveryBlock = '';
+  if (!isActor && typeof drainRecoveryNotices === 'function') {
+    recoveryBlock = await Promise.resolve(drainRecoveryNotices(sessionId))
+      .catch(() => '');
+  }
   const contextMessage = isActor
     ? ''
-    : buildTemporalContext({ temporalBlock, activeTab: activeTabContext });
+    : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext }), recoveryBlock]
+      .filter(Boolean).join('\n\n');
 
   const getSystemPrompt = async () => {
     // why: re-read the session record at render time so a /system change

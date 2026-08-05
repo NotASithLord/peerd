@@ -48,6 +48,11 @@ import browser from '/vendor/browser-polyfill.js';
  *   Injected by the SW (announceAgentTab); null when no announcer is wired.
  * @property {string} [kindLabel]
  *   Human noun for the announce card ('a Linux VM', 'a Notebook', 'an App').
+ * @property {((id: string, tabId: number) => void) | null} [onAdopt]
+ *   Lifecycle liveness hook: fired on every id↔tab association (spawn,
+ *   tab-ready, bootstrap re-adoption). Best-effort — see the §9 ledger.
+ * @property {((id: string) => void) | null} [onDrop]
+ *   Lifecycle liveness hook: fired on a clean tab removal.
  */
 
 /**
@@ -66,6 +71,12 @@ export const createTabTracker = ({
   // human noun for the card ('a Linux VM', 'a Notebook', 'an App').
   announce = null,
   kindLabel = 'a tab',
+  // Lifecycle liveness hooks (§9): fired on every id↔tab association and
+  // clean drop, so the durable ledger knows which instances were HOSTED if
+  // an eviction hits. Optional + best-effort — tracker bookkeeping never
+  // depends on them.
+  onAdopt = /** @type {((id: string, tabId: number) => void) | null} */ (null),
+  onDrop = /** @type {((id: string) => void) | null} */ (null),
 }) => {
   const tabUrlPrefix = browser.runtime.getURL(tabPath);
 
@@ -111,6 +122,7 @@ export const createTabTracker = ({
       entry.tabId = tabId;
     }
     tabIdToId.set(tabId, id);
+    try { onAdopt?.(id, tabId); } catch { /* liveness is best-effort */ }
     return entry;
   };
 
@@ -195,6 +207,7 @@ export const createTabTracker = ({
       entry.rejectReady?.(closedError(id));
       byId.delete(id);
     }
+    try { onDrop?.(id); } catch { /* liveness is best-effort */ }
     return id;
   };
 

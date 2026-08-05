@@ -271,7 +271,12 @@ const repairOrphanToolCalls = (msgs) => {
         out.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content: 'tool dispatch did not complete. Treat as failed and retry if needed.',
+          // Mirrors to-anthropic.js: defer to an interruption-recovery
+          // note when one covers this call — a tracked side effect may
+          // have landed, and "retry" would contradict it.
+          content: 'tool dispatch did not complete before an interruption. If an '
+            + 'interruption-recovery note covers this call, follow it; '
+            + 'otherwise treat as failed and retry if needed.',
         });
       }
     }

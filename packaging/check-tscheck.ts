@@ -121,10 +121,13 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // the merged count at 579 (computed on the merged tree, not summed).
 // peerd-runtime/doc + its offscreen/SW/tool wiring (the read_doc document
 // reader) all landed // @ts-check-clean, so the floor moves up to lock them in.
-// Merge with main (#311 read_doc): main's floor was 599; this branch adds
-// peerd-egress/dpop/nonce.js (the RFC 9449 §8 core). Computed on the MERGED
+// Merge with main (#309 dpop nonces): this branch's lifecycle files put the
+// floor at 614; main adds peerd-egress/dpop/nonce.js. Computed on the MERGED
 // tree, not summed — the same shape as the 579 merge above.
-const COVERED_FLOOR = 600;
+// 615 → 618: the lifecycle hardening batch — failure-taxonomy.js (typed
+// outcomes), write-guard.js (§11.5 enforcement), engine-liveness.js (§9
+// ledger); all carry // @ts-check.
+const COVERED_FLOOR = 618;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

@@ -24,6 +24,11 @@ import {
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
 } from '../permissions/index.js';
+// The lifecycle classifier — pure, no IO. Used ONLY by the fail-closed
+// backstop below, so the dispatcher never has to duplicate (and drift
+// from) the retry-class taxonomy.
+import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
+import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 
@@ -120,6 +125,7 @@ const liveTabUrl = async (ctx) => {
  *     begin: (tabId: number, label: string, origin: string) => unknown,
  *     end: (tabId: number) => unknown,
  *   } | null,
+ *   lifecycle?: ReturnType<import('../lifecycle/dispatch-tracking.js').makeDispatchTracker> | null,
  * }} DispatchContext
  */
 
@@ -129,7 +135,12 @@ const liveTabUrl = async (ctx) => {
  * UI hint, off the wire), so we widen locally; the widened meta is still
  * structurally a ToolMeta where the result type needs one.
  *
- * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned' }} DispatchMeta
+ * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned',
+ *   recovery?: Record<string, unknown> }} DispatchMeta
+ *   `recovery` is the lifecycle contract's agent-facing semantic record —
+ *   present only when a dispatch settled as interrupted/outcome_unknown/
+ *   refused-replay, so the agent hears the recovery category, not a
+ *   generic error string.
  */
 
 /**
@@ -247,6 +258,9 @@ export const dispatchToolCall = async (call, ctx) => {
     })
     : null;
 
+  // Whether the USER approved this exact dispatch via a confirm round-trip
+  // — the lifecycle tracker turns it into a durable single-use proof.
+  let userApprovedThisDispatch = false;
   if (verdict.allowed && (verdict.confirm || ugcRuleId) && !selfConfirms) {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
@@ -275,6 +289,7 @@ export const dispatchToolCall = async (call, ctx) => {
       answer = 'no';  // fail closed — a broken confirm channel blocks the action
     }
     const approved = answer === 'yes_once' || answer === 'yes_session';
+    userApprovedThisDispatch = approved;
     if (confirmEntry) {
       confirmEntry.allowed = approved;
       // why the ruleId rides in the reason: the lineage chip in the transcript
@@ -351,6 +366,90 @@ export const dispatchToolCall = async (call, ctx) => {
   // Adopt any args the pre-hooks rewrote. execute() + the audit see these.
   args = pre.args;
 
+  // ---- Lifecycle tracking (the recovery contract) ------------------------
+  // why HERE: every gate/confirm/hook has passed, so what follows is a real
+  // dispatch — the durable operation record must exist BEFORE execute() so
+  // an SW eviction mid-effect leaves evidence (interrupted vs
+  // outcome_unknown) instead of silence. beginTracking may also REFUSE the
+  // call outright: the auto-resume path re-drives pending tool calls with
+  // their original tool_use ids, and re-running a non-idempotent action
+  // whose first dispatch has no proven outcome is the unsafe replay the
+  // contract forbids. Absent ctx.lifecycle (tests, Firefox pre-init), the
+  // dispatch is byte-for-byte unchanged.
+  let tracking = null;
+  if (ctx.lifecycle?.beginTracking) {
+    const begun = await ctx.lifecycle.beginTracking({
+      callId: call.id,
+      tool,
+      sessionId: ctx.session?.sessionId ?? undefined,
+      actorId: /** @type {{ actorInstanceId?: string }} */ (ctx).actorInstanceId,
+      target: safeOrigins(tool, args, ctx)[0],
+      // The user's approval, if a confirm round-trip ran above — the
+      // tracker mints + consumes the single-use, generation-bound proof
+      // and persists it on the durable record (§8.3).
+      confirmed: userApprovedThisDispatch,
+      // Post-hook args: Class C/D records derive their deterministic
+      // idempotency key from these.
+      args,
+    }).catch((error) => {
+      // beginTracking is a TOTAL function (see its wrapper) — reaching this
+      // catch means something violated that contract. The old behavior here
+      // was `() => null`, i.e. "run untracked", which for a non-idempotent
+      // action is the one degradation the contract cannot allow: no record
+      // means a later interruption is unreportable AND unguarded.
+      //
+      // So this is an INDEPENDENT fail-closed decision, deliberately not
+      // routed through the tracker that just failed: classify the tool
+      // directly and refuse D/E. A/B/C keep the historical degradation —
+      // duplicate reads are invisible and idempotent writes are safe to
+      // repeat, so a broken tracker must not take the read surface down
+      // with it.
+      const retryClass = (() => {
+        try { return retryClassForTool(tool); }
+        catch { return RETRY_CLASSES.SIDE_EFFECT; } // classification threw: assume the worst
+      })();
+      if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
+          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return null;
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        refuse: {
+          error: `failed: ${call.name} was NOT executed — lifecycle tracking `
+            + `failed unexpectedly (${detail}) and a non-idempotent action must `
+            + 'not run untracked: an interruption could then never be reported '
+            + 'or guarded against.',
+          recovery: {
+            category: 'security_degradation',
+            state: 'failed',
+            autoRetry: false,
+            retryRequires: ['lifecycle-storage'],
+            verificationRequired: false,
+            keepIdempotencyKey: false,
+            reason: `tracking rejected unexpectedly: ${detail}`,
+          },
+        },
+      };
+    });
+    if (begun && 'refuse' in begun && begun.refuse) {
+      ctx.audit({
+        type: 'tool_blocked',
+        details: { tool: call.name, gate: 'lifecycle-replay-guard', reason: begun.refuse.error },
+      }).catch(() => {});
+      return {
+        ok: false,
+        error: begun.refuse.error,
+        meta: /** @type {DispatchMeta} */ ({
+          toolName: call.name,
+          primitive: tool.primitive, dispatch: tool.dispatch,
+          gates: gateResults,
+          hooks: hookOutcomes,
+          durationMs: 0,
+          recovery: begun.refuse.recovery,
+        }),
+      };
+    }
+    tracking = begun && 'handle' in begun ? begun.handle : null;
+  }
+
   // ---- Execute -----------------------------------------------------------
   // why: thread the call's tool_use_id into ctx so tools that stream
   // intermediate state back to the UI (currently vm_boot) can key their
@@ -406,9 +505,30 @@ export const dispatchToolCall = async (call, ctx) => {
     // here would mean misreporting an effect that already occurred).
     const post = await runPostToolUse({ hooks, toolName: call.name, args, result, ctx: hookCtx });
     hookOutcomes.push(...post.outcomes);
+    // Settle the lifecycle record from the tool's own outcome. A returned
+    // failure whose error is an ambiguous transport loss is REWRITTEN to
+    // the semantic state (interrupted / outcome_unknown) — §16.2: the agent
+    // never sees a bare timeout on a tracked side effect.
+    /** @type {{ error: string, recovery: Record<string, unknown> } | null} */
+    let recoveryRewrite = null;
+    if (tracking && ctx.lifecycle?.settleTracking) {
+      recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
+        ok: result?.ok !== false,
+        error: result?.ok === false ? String(result.error ?? '') : undefined,
+        // A typed failure outcome a tool stamped on its result — the
+        // deterministic path (lifecycle/failure-taxonomy.js).
+        outcomeKind: /** @type {{ outcomeKind?: any }} */ (result)?.outcomeKind,
+      }).catch(() => null);
+    }
+    // A rewrite replaces the failure shape wholesale (it only ever fires on
+    // an already-failed result) so the discriminated ok:false stays literal.
+    /** @type {ToolResult} */
+    const settled = recoveryRewrite
+      ? { ok: false, error: recoveryRewrite.error }
+      : result;
     /** @type {ToolResult} */
     const enriched = {
-      ...result,
+      ...settled,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
         primitive: tool.primitive, dispatch: tool.dispatch,
@@ -421,6 +541,7 @@ export const dispatchToolCall = async (call, ctx) => {
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
+        ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
       }),
     };
     return enriched;
@@ -446,9 +567,23 @@ export const dispatchToolCall = async (call, ctx) => {
       hooks, toolName: call.name, args, result: { ok: false, error: message }, ctx: hookCtx,
     });
     hookOutcomes.push(...post.outcomes);
+    // A THROW after dispatch is the most ambiguous shape of all — settle
+    // the lifecycle record and adopt the semantic error where it applies.
+    /** @type {{ error: string, recovery: Record<string, unknown> } | null} */
+    let recoveryRewrite = null;
+    if (tracking && ctx.lifecycle?.settleTracking) {
+      recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
+        ok: false,
+        error: message,
+        aborted: /** @type {{ name?: string }} */ (e)?.name === 'AbortError',
+        // A typed outcome stamped on the thrown error (survives relay
+        // boundaries as a plain field — see lifecycle/failure-taxonomy.js).
+        outcomeKind: /** @type {{ outcomeKind?: any }} */ (e)?.outcomeKind,
+      }).catch(() => null);
+    }
     return {
       ok: false,
-      error: message,
+      error: recoveryRewrite?.error ?? message,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
         primitive: tool.primitive, dispatch: tool.dispatch,
@@ -459,6 +594,7 @@ export const dispatchToolCall = async (call, ctx) => {
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
+        ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
       }),
     };
   }

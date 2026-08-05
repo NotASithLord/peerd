@@ -14,14 +14,18 @@ import { NOTEBOOK_TAB_PATH } from '/peerd-engine/index.js';
 
 const READY_TIMEOUT_MS = 15_000;       // Notebooks boot fast; tighter than VMs
 
-/** @param {{ announce?: import('./tab-tracker.js').TabTrackerConfig['announce'] }} [deps] */
-export const createJsTabTracker = ({ announce } = {}) => {
+/** @param {{ announce?: import('./tab-tracker.js').TabTrackerConfig['announce'],
+ *   onAdopt?: import('./tab-tracker.js').TabTrackerConfig['onAdopt'],
+ *   onDrop?: import('./tab-tracker.js').TabTrackerConfig['onDrop'] }} [deps] */
+export const createJsTabTracker = ({ announce, onAdopt, onDrop } = {}) => {
   const tracker = createTabTracker({
     tabPath: NOTEBOOK_TAB_PATH,
     readyTimeoutMs: READY_TIMEOUT_MS,
     closedError: () => new Error('Notebook tab closed before ready'),
     notReadyMessage: (id) => `Notebook ${id} did not become ready in ${READY_TIMEOUT_MS}ms`,
     announce,
+    onAdopt,
+    onDrop,
     kindLabel: 'a Notebook',
   });
 

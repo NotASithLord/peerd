@@ -15,14 +15,18 @@ import { APP_TAB_PATH } from '/peerd-engine/index.js';
 
 const READY_TIMEOUT_MS = 15_000;
 
-/** @param {{ announce?: import('./tab-tracker.js').TabTrackerConfig['announce'] }} [deps] */
-export const createAppTabTracker = ({ announce } = {}) => {
+/** @param {{ announce?: import('./tab-tracker.js').TabTrackerConfig['announce'],
+ *   onAdopt?: import('./tab-tracker.js').TabTrackerConfig['onAdopt'],
+ *   onDrop?: import('./tab-tracker.js').TabTrackerConfig['onDrop'] }} [deps] */
+export const createAppTabTracker = ({ announce, onAdopt, onDrop } = {}) => {
   const tracker = createTabTracker({
     tabPath: APP_TAB_PATH,
     readyTimeoutMs: READY_TIMEOUT_MS,
     closedError: () => new Error('app tab closed before ready'),
     notReadyMessage: (id) => `app ${id} did not become ready`,
     announce,
+    onAdopt,
+    onDrop,
     kindLabel: 'an App',
   });
 

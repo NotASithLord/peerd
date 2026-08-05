@@ -403,6 +403,85 @@ export {
   drainFetchTapInjected,
 } from './dom/index.js';
 
+// --- lifecycle (the interruption/recovery contract's functional core) ---
+// Canonical operation states + the retry-class recovery decision, SW/actor
+// generations (authority never survives restart by assumption), single-use
+// confirmation binding, the startup reconciler, versioned-store migration
+// guard, the durable operation log, and the paired user/agent recovery
+// reports. The vault session-mirror side of the contract already lives in
+// peerd-egress/vault; this is the operation/authority side.
+export {
+  OPERATION_STATES, TERMINAL_STATES, isTerminal, isOperationState,
+  canTransition, assertTransition, canRecoverySettle, IllegalTransitionError,
+  COMPLETION_EVIDENCE, FAILURE_EVIDENCE,
+  provesCompletion, provesFailure, resolveUnknownOutcome,
+  UnknownOutcomeUnresolvedError,
+} from './lifecycle/operation-state.js';
+export {
+  RETRY_CLASSES, isRetryClass, normalizeRetryClass, decideRecovery,
+} from './lifecycle/retry-class.js';
+export {
+  mintGeneration, authorityValid, sweepStaleAuthority, acceptActorMessage,
+} from './lifecycle/generation.js';
+export {
+  bindConfirmation, confirmationSatisfies, consumeConfirmation,
+  normalizeConfirmationTarget, CONFIRMATION_TTL_MS,
+} from './lifecycle/confirmation.js';
+export {
+  reconcileAtStartup, buildTurnRecoveryRecord,
+} from './lifecycle/reconcile.js';
+export {
+  classifyStoreVersion, guardStore, runMigration,
+} from './lifecycle/store-version.js';
+export {
+  LIFECYCLE_EVENTS, lifecycleAuditEntry, sanitizeDetail,
+} from './lifecycle/audit-events.js';
+export {
+  createOperationLog,
+  OperationNotFoundError, OperationExistsError, RetryRefusedError,
+  OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL, OPERATION_LOG_MAX_UNKNOWN,
+} from './lifecycle/operation-log.js';
+export {
+  RECOVERY_CATEGORIES, categorizeRecovery, describeRecovery,
+  securityDegradationReport, migrationBlockedReport,
+} from './lifecycle/recovery-report.js';
+// §16.1: every tool resolves to a retry class — explicit field, name
+// override table, then the sideEffect/primitive taxonomy, failing closed
+// to E. The inventory test asserts totality over the live tool set.
+export { retryClassForTool, RETRY_CLASS_OVERRIDES } from './lifecycle/tool-retry-class.js';
+// §9: engine-resource recovery decisions — tab revalidation, notebook
+// output labelling, VM reboot plans, App sandbox recreation.
+export {
+  revalidateDrivenTab, TAB_DISPOSITIONS,
+  notebookCellState, NOTEBOOK_CELL_STATES,
+  vmRecoveryPlan, appSandboxRebuild,
+} from './lifecycle/resource-recovery.js';
+// §11.1/§12: independent per-store schema versions + durability tiers.
+export {
+  DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
+  storeEntry, portableStores, omittedDeviceBoundStores,
+  checkStores, stampStores,
+} from './lifecycle/store-registry.js';
+// §11.5 enforced: the SW wraps its kv/idb adapters through the guard once
+// and a read-only verdict refuses writes at the shared chokepoint.
+export { makeWriteGuard, StoreReadOnlyError } from './lifecycle/write-guard.js';
+// §9: the durable engine-liveness ledger the tab trackers feed and the
+// boot sweep reaps orphans from.
+export { makeEngineLiveness, ENGINE_LIVENESS_KEY } from './lifecycle/engine-liveness.js';
+// The wiring shells: dispatch tracking (the dispatcher consumes it via
+// ctx.lifecycle) and the SW boot sequence (generation + reconcile +
+// notices).
+export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';
+// Typed failure outcomes — throw sites stamp outcomeKind so recovery is a
+// table lookup, not a regex (adoption is incremental; see the module).
+export {
+  FAILURE_OUTCOMES, isFailureOutcomeKind, outcomeKindOf,
+  TransportLostError, ExecutionHostLostError, PreEffectFailureError,
+} from './lifecycle/failure-taxonomy.js';
+export {
+  makeLifecycleBoot, GENERATION_KEY, PENDING_NOTICES_KEY,
+} from './lifecycle/boot.js';
+
 // --- errors -------------------------------------------------------------
 export {
   SessionNotFoundError,

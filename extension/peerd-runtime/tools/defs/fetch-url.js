@@ -290,9 +290,22 @@ export const fetchUrlTool = {
           error: `blocked: ${args.url} is a private/loopback host, which fetch_url cannot reach (SSRF defense) — `
             + 'this does NOT mean the site is unreachable. Open it with navigate and read the rendered page '
             + 'with snapshot/read_page instead. If you already rendered the page, read that DOM — do not re-fetch it.',
+          // The SSRF guard refuses BEFORE any request leaves peerd — typed
+          // positive failure evidence for the lifecycle settle path.
+          outcomeKind: 'pre-effect-failure',
         };
       }
-      return { ok: false, error: err?.message ?? 'fetch_failed' };
+      // A bare network throw (TypeError: Failed to fetch / AbortError) is
+      // the wire dying with the request possibly delivered — stamp the
+      // typed ambiguous outcome so the lifecycle settle path decides
+      // deterministically instead of regex-matching the message.
+      const name = /** @type {{ name?: string }} */ (e)?.name;
+      const transportLost = name === 'AbortError' || name === 'TypeError';
+      return {
+        ok: false,
+        error: err?.message ?? 'fetch_failed',
+        ...(transportLost ? { outcomeKind: 'transport-lost' } : {}),
+      };
     }
   },
 };

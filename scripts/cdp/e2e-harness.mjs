@@ -54,12 +54,33 @@ export const sseText = (text) => [
 
 // A turn that calls ONE tool: role(+optional text) → a tool_calls delta →
 // finish 'tool_calls' + usage → [DONE]. Drives the dispatcher for real.
-export const sseToolCall = (name, args, { text = '' } = {}) => [
-  `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] })}`,
-  `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_e2e_1', type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] })}`,
-  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } })}`,
-  'data: [DONE]', '',
-].join('\n\n') + '\n\n';
+// why unique ids: real providers mint a fresh id per tool call, and the
+// lifecycle replay guard keys on (session, id) — a fixed id would make two
+// UNRELATED scripted calls in one session read as a replay of each other,
+// which no real wire ever produces.
+let sseToolCallSeq = 0;
+export const sseToolCall = (name, args, { text = '' } = {}) => {
+  sseToolCallSeq += 1;
+  // Built as plain statements (no keyword-named keys inside template
+  // expressions) — the CodeQL extractor rejected the denser one-liner shape
+  // twice; runtime behavior is identical.
+  const toolCall = {
+    index: 0,
+    id: `call_e2e_${sseToolCallSeq}`,
+    type: 'function',
+    'function': { name, 'arguments': JSON.stringify(args) },
+  };
+  const openDelta = JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] });
+  const callDelta = JSON.stringify({ choices: [{ delta: { tool_calls: [toolCall] } }] });
+  const finishDelta = JSON.stringify({
+    choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  });
+  return [
+    `data: ${openDelta}`, `data: ${callDelta}`, `data: ${finishDelta}`,
+    'data: [DONE]', '',
+  ].join('\n\n') + '\n\n';
+};
 
 // ---- Chrome binary resolution (mirrors run-inbrowser-tests.mjs) -------------
 export function resolveChrome() {

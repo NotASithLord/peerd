@@ -383,7 +383,14 @@ const repairOrphanToolUses = (msgs, causeByToolUseId = new Map()) => {
       type: 'tool_result',
       tool_use_id: id,
       content: causeByToolUseId.get(id)
-        ?? 'tool dispatch did not complete. Treat as failed and retry if needed.',
+        // why the recovery-note deferral: for a tracked side effect the
+        // dispatch may have LANDED before the interruption — the same
+        // request can carry an <interruption-recovery> block saying
+        // outcome_unknown/do-not-repeat, and this synthesized result must
+        // not contradict it with a flat "retry".
+        ?? 'tool dispatch did not complete before an interruption. If an '
+          + 'interruption-recovery note covers this call, follow it; '
+          + 'otherwise treat as failed and retry if needed.',
       is_error: true,
     }));
 

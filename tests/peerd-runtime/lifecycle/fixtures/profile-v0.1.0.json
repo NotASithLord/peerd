@@ -1,0 +1,210 @@
+{
+  "_provenance": {
+    "peerdVersion": "0.1.0",
+    "shapeCommit": "bd7a135",
+    "shapeDate": "2026-06-21",
+    "notes": [
+      "Session/settings/export shapes as written by peerd 0.1.0 (bd7a135:package.json). Unchanged through 0.1.5 (caed35e).",
+      "Every session here is in the PRE-per-message-store v1 shape: inline `messages`, no messagesV2/msgIndex — a profile last written before the split. That shape predates the flattened-history root (bd7a135 already writes v2), so it is reconstructed from the v1 -> v2 header note + the migrate() path sessions/store.js still carries and still reads on every get().",
+      "kind:'subagent' is the value bd7a135:sessions/types.js declared; renamed to 'spawned' in 67d46d5 (0.2.6).",
+      "actTier is the pre-collapse Codex-style Act tier; bd7a135:docs/DECISIONS.md section 18 promised it would be 'read forever' by confirmActionsFromRecord. Those docs were deleted in 5b386dd (0.2.1).",
+      "toolManifest.allow carries the tool names bd7a135's `research` preset listed (do/get/check/list_tabs/read_article/call_api/web_search/inspect_*) — do/get/check + the browser-runner were culled in 8d78709 (#133), the inspect_* family folded into one `inspect` tool.",
+      "settings keys are the bd7a135:packaging/default-settings.mjs set, plus backgroundTabsEnabled (removed 2026-06-12, still on disk for an upgraded profile) and voiceVariant:'small' (the old default) — both named as removed in today's packaging/default-settings.mjs.",
+      "exportEnvelope is bd7a135:transfer/transfer.js buildExport output: no `durability` block (added in 70f6e42).",
+      "storeVersions is null because the lifecycle store registry landed 2026-08-05, after 0.4.0 — every real 0.x profile is UNSTAMPED."
+    ]
+  },
+
+  "storeVersions": null,
+
+  "settings": {
+    "providerName": "anthropic",
+    "providerModel": "claude-sonnet-4-5",
+    "devMode": true,
+    "reasoningEnabled": true,
+    "reasoningEffort": "high",
+    "voiceEnabled": true,
+    "voiceVariant": "small",
+    "advancedAutomationEnabled": true,
+    "autoMemoryEnabled": true,
+    "spendLimitUsd": 25,
+    "vaultAutoLockMs": 900000,
+    "backgroundTabsEnabled": false,
+    "unknownSettingFromANewerBuild": { "shape": "forward-compat", "keep": true }
+  },
+
+  "sessions": [
+    {
+      "sessionId": "0197c4a1-1000-7000-8000-00000000a001",
+      "createdAt": 1750464000000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "title": "read the changelog and summarize it",
+      "kind": "chat",
+      "depth": 0,
+      "permissionMode": "act",
+      "actTier": "suggest",
+      "messages": [
+        {
+          "role": "user",
+          "content": "read the changelog and summarize it",
+          "id": "0197c4a1-1001-7000-8000-00000000b001",
+          "when": 1750464000100
+        },
+        {
+          "role": "assistant",
+          "content": "Opening the page now.",
+          "id": "0197c4a1-1002-7000-8000-00000000b002",
+          "when": 1750464001000,
+          "model": "claude-sonnet-4-5",
+          "provider": "anthropic",
+          "stopReason": "tool_use",
+          "toolUses": [
+            { "id": "toolu_legacy_1", "name": "get", "input": { "url": "https://example.test/changelog" } }
+          ]
+        }
+      ],
+      "cost": {
+        "inputTokens": 1820,
+        "outputTokens": 310,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "cost": 0.0121,
+        "turns": 1
+      },
+      "unknownRecordFieldFromANewerBuild": { "why": "forward-compat: must survive every read path" }
+    },
+    {
+      "sessionId": "0197c4a1-2000-7000-8000-00000000a002",
+      "createdAt": 1750464100000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "title": "check the pricing table",
+      "kind": "subagent",
+      "parentSessionId": "0197c4a1-1000-7000-8000-00000000a001",
+      "task": "open the pricing page and report the per-seat price",
+      "depth": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "open the pricing page and report the per-seat price",
+          "id": "0197c4a1-2001-7000-8000-00000000b003",
+          "when": 1750464100100
+        }
+      ],
+      "futureSubagentField": ["planted", "unknown"]
+    },
+    {
+      "sessionId": "0197c4a1-3000-7000-8000-00000000a003",
+      "createdAt": 1750464200000,
+      "provider": "openrouter",
+      "model": "anthropic/claude-3.7-sonnet",
+      "title": "research: competitor landscape",
+      "kind": "chat",
+      "depth": 0,
+      "confirmActions": true,
+      "customSystemPrompt": "Prefer primary sources. Cite every claim.",
+      "toolManifest": {
+        "preset": "research",
+        "allow": [
+          "do", "get", "check", "list_tabs", "open_tab",
+          "read_article", "call_api", "web_search", "capture",
+          "inspect_storage", "inspect_audit_log", "inspect_denylist",
+          "inspect_provider_config", "inspect_session_access"
+        ]
+      },
+      "trimSummary": {
+        "v": 1,
+        "covered": 12,
+        "coveredLastId": "0197c4a1-3009-7000-8000-00000000b099",
+        "users": 4,
+        "assistants": 4,
+        "toolResults": 4,
+        "errors": 0,
+        "tools": { "get": 3, "web_search": 1 },
+        "task": "map the competitor landscape",
+        "goal": "compare per-seat pricing across four competitors",
+        "facts": ["Acme lists $12/seat/mo"],
+        "decisions": ["use the public pricing pages, not sales decks"],
+        "threads": [],
+        "artifacts": [],
+        "handles": [],
+        "lastWhen": 1750464250000
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "map the competitor landscape",
+          "id": "0197c4a1-3001-7000-8000-00000000b004",
+          "when": 1750464200100
+        }
+      ]
+    }
+  ],
+
+  "sessionMessages": [],
+
+  "hooks": [
+    {
+      "id": "block-paste-secrets",
+      "event": "pre-tool-use",
+      "kind": "declarative",
+      "match": "type",
+      "order": 50,
+      "rule": {
+        "matchArg": "text",
+        "pattern": "sk-[a-zA-Z0-9]{20,}",
+        "onMatch": "block",
+        "reason": "looks like an API key"
+      },
+      "doc": "Block the `type` tool from typing anything that looks like an API key.",
+      "unknownHookFieldFromANewerBuild": "keep-me"
+    }
+  ],
+
+  "memory": {
+    "version": 1,
+    "exportedAt": 1750464300000,
+    "docs": [
+      {
+        "id": "user",
+        "kind": "user",
+        "workspace": "",
+        "body": "# About me\n\nSolo dev. Prefers terse answers.\n",
+        "createdAt": 1750000000000,
+        "updatedAt": 1750464300000,
+        "unknownDocFieldFromANewerBuild": 7
+      },
+      {
+        "id": "project:example.test",
+        "kind": "project",
+        "workspace": "example.test",
+        "body": "# example.test\n\nChangelog lives at /changelog.\n",
+        "createdAt": 1750100000000,
+        "updatedAt": 1750464300000
+      }
+    ]
+  },
+
+  "exportEnvelope": {
+    "format": "peerd-export",
+    "version": 1,
+    "exportedAt": "2026-06-21T12:00:00.000Z",
+    "channel": "preview",
+    "settings": {
+      "devMode": true,
+      "reasoningEffort": "high",
+      "backgroundTabsEnabled": false,
+      "voiceVariant": "small"
+    },
+    "providerEndpoints": { "endpoints": [{ "url": "https://gateway.example.test/v1" }] },
+    "secrets": null,
+    "memory": {
+      "version": 1,
+      "docs": [{ "id": "user", "body": "# About me\n", "updatedAt": 1750464300000 }]
+    },
+    "hooks": [{ "id": "block-paste-secrets", "event": "pre-tool-use", "kind": "declarative" }],
+    "skills": [{ "id": "sk-1", "name": "changelog-reader" }],
+    "unknownEnvelopeSectionFromANewerBuild": { "keep": true }
+  }
+}

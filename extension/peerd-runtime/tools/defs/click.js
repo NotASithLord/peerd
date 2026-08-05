@@ -82,7 +82,7 @@ export const clickTool = {
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
-    if (!tab?.id) return { ok: false, error: 'no_target_tab' };
+    if (!tab?.id) return { ok: false, error: 'no_target_tab', outcomeKind: 'pre-effect-failure' };
 
     // why: domRefs/debuggerPool are SW-injected onto ctx but absent from the
     // ToolContext typedef; scripting is typed opaquely — narrow all three.
@@ -105,7 +105,7 @@ export const clickTool = {
     if (typeof args?.ref === 'string' && args.ref.trim()) {
       const ref = args.ref.trim();
       const entry = domRefs?.resolve?.(tab.id, ref);
-      if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first` };
+      if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first`, outcomeKind: 'pre-effect-failure' };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.clickBackendNode === 'function') {
         // Cardinality guard on the CDP channel too (#36 consistency): a resolved
@@ -113,7 +113,7 @@ export const clickTool = {
         // than 1 is a mismatch — same shape the walk-ref/selector paths return,
         // so the guard the schema promises holds identically across channels.
         if (expectedCount != null && expectedCount !== 1) {
-          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount };
+          return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
           const r = await debuggerPool.clickBackendNode(tab.id, entry.backendDOMNodeId);
@@ -142,7 +142,7 @@ export const clickTool = {
           });
           scriptResult = results[0]?.result;
         } catch (e) {
-          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
         }
         if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
         if (!scriptResult.ok) return { ok: false, error: scriptResult.error ?? 'ref_click_failed' };
@@ -188,7 +188,7 @@ export const clickTool = {
       });
       scriptResult = results[0]?.result;
     } catch (e) {
-      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
     }
 
     if (!scriptResult) {

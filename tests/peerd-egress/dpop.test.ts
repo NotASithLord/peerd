@@ -238,8 +238,11 @@ describe('signDpopProof — real ES256, real verification', () => {
       jti: 'jti-raw', iatSeconds: 1700000000,
     }))!;
     const sig = Buffer.from(proof.split('.')[2], 'base64url');
+    // Length alone distinguishes the forms: raw r||s for P-256 is exactly 64
+    // bytes; a DER ECDSA-Sig-Value is 70–72. (A first-byte 0x30 check was
+    // removed — r's leading byte is effectively uniform, so it IS 0x30 in
+    // ~1/256 runs, a real CI flake.)
     expect(sig.length).toBe(64);
-    expect(sig[0]).not.toBe(0x30);   // a DER SEQUENCE tag would mean we re-encoded
   });
 
   test('two proofs for the SAME request differ (fresh jti) and both verify', async () => {

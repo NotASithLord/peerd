@@ -73,12 +73,15 @@ import {
   createAuditLog,
   // confirmation protocol (SW ↔ side panel round-trip)
   makeConfirmCoordinator,
-  // storage namespaces
-  kv,
-  idb,
-  idbKV,
+  // storage namespaces — imported RAW; the write guard below wraps them
+  // once, and every store in this file is constructed on the wrapped pair.
+  kv as rawKv,
+  idb as rawIdb,
+  idbKV as rawIdbKV,
   sessionCache,
 } from '/peerd-egress/index.js';
+
+
 
 import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
@@ -163,6 +166,19 @@ import {
   makeToolsCommand,
   dispatchToolCall,
   BUILTIN_TOOLS,
+  // lifecycle — the recovery contract's shells: SW-generation boot +
+  // startup reconcile, the dispatch tracker every tool ctx carries, the
+  // per-tool retry classifier, and the per-store schema stamps.
+  makeLifecycleBoot,
+  makeDispatchTracker,
+  makeFailClosedTracker,
+  makeWriteGuard,
+  makeEngineLiveness,
+  retryClassForTool,
+  checkStores,
+  stampStores,
+  VERSION_STAMP_KEY,
+  classifyFailure,
   // hooks (pre/post-tool-use lifecycle)
   registerHook,
   listHooks,
@@ -345,6 +361,8 @@ import {
   // DESIGN-19: the shared non-GET web-write predicate (site-fetch/call gates a
   // non-GET through the same web:write confirm as fetch_url / call_api).
   needsWebWriteConfirm,
+  // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
+  setAppBodyWriteGate,
 } from '/peerd-engine/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
@@ -375,6 +393,26 @@ import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
+
+// ---- §11.5 universal write guard -------------------------------------------
+// EVERY store this file constructs gets its storage through these wrapped
+// adapters, so a read-only verdict from the §11.1 schema check (a NEWER
+// stamp than this build supports) is enforced at the one chokepoint all
+// writes share — no per-store wiring, no store left out. The blocked set
+// starts empty (zero overhead until a store is actually blocked) and is
+// filled inside the lifecycle boot chain below. Two self-hosted databases
+// (peerd-skills, peerd-app-bodies) sit outside the adapters — the registry
+// marks them and their enforcement is a per-module follow-up.
+const storeWriteGuard = makeWriteGuard();
+const kv = storeWriteGuard.wrapKv(rawKv);
+const idb = storeWriteGuard.wrapIdb(rawIdb);
+const idbKV = (/** @type {string} */ store) =>
+  storeWriteGuard.wrapIdbKvAdapter(store, rawIdbKV(store));
+// The two SELF-HOSTED databases (own IDB, unreachable through the wrapped
+// adapters) get the same verdict via injected gates: skills below at its
+// construction, App bodies here (dormant store, gate installed anyway so a
+// future consumer can never ship ungated).
+setAppBodyWriteGate(() => storeWriteGuard.assertWritable('app-manifests'));
 
 // ---------------------------------------------------------------------------
 // 1. Layer 1 instances
@@ -411,6 +449,94 @@ const vault = createVault({
 // maxEntries: capped retention — oldest entries pruned, amortized on
 // append — so a long-lived install's audit log doesn't grow unbounded.
 const auditLog = createAuditLog({ idb, maxEntries: CHANNEL_DEFAULTS.auditLogMaxEntries });
+
+// ---- Lifecycle boot (the recovery contract's imperative shell) -------------
+// Every SW start mints a new generation, settles the previous generation's
+// orphaned operation records (interrupted vs outcome_unknown by retry
+// class), stamps the per-store schema versions, and arms the dispatch
+// tracker that buildToolContext hands to every dispatch. Posture: fail-OPEN
+// on tracking (a broken boot must never brick the tool surface — dispatches
+// just run untracked, as they did before this landed), fail-CLOSED on
+// replay (once armed, the tracker refuses automatic re-dispatch of an
+// unproven side effect).
+// §9: the durable engine-liveness ledger — the tab trackers write it on
+// adopt/drop; the registry-init sweep below reaps instances whose tabs did
+// not survive the interruption.
+const engineLiveness = makeEngineLiveness({ storage: kv });
+const lifecycleBoot = makeLifecycleBoot({
+  storage: kv,
+  appendAudit: (/** @type {any} */ entry) =>
+    auditLog.append({ type: entry.event, details: entry }),
+  // postChatNote is declared far below — the standard late-dep deferral.
+  notify: (/** @type {string} */ _sessionId, /** @type {string} */ text) =>
+    postChatNote(`Recovered from a browser interruption: ${text}`),
+  // Actor sessions may never take another turn, so their recovery notices
+  // walk parentSessionId up to the root chat (bounded — a corrupt chain
+  // stops at the depth cap and falls back to the child).
+  resolveNoticeSession: async (/** @type {string} */ sid) => {
+    let cursor = sid;
+    for (let hops = 0; hops < 8; hops += 1) {
+      const record = await sessions.get(cursor).catch(() => null);
+      if (!record?.parentSessionId) break;
+      cursor = record.parentSessionId;
+    }
+    return cursor;
+  },
+  nonce: () => crypto.randomUUID(),
+});
+/** @type {ReturnType<typeof makeDispatchTracker> | ReturnType<typeof makeFailClosedTracker> | null} */
+let lifecycleTracker = null;
+// buildToolContext awaits this before handing out a ctx, which closes the
+// boot window: a Class D/E dispatch can never race the tracker into
+// running untracked. The chain NEVER rejects — on boot failure it arms
+// the fail-closed tracker instead (D/E refused with the reason, A/B/C
+// untracked), so a broken storage layer degrades the side-effect surface
+// loudly rather than silently, and never bricks reads.
+const lifecycleArmed = lifecycleBoot.init()
+  .then(async ({ generation }) => {
+    lifecycleTracker = makeDispatchTracker({
+      operationLog: lifecycleBoot.operationLog,
+      generationId: () => generation.id,
+      retryClassFor: retryClassForTool,
+      classifyFailure: /** @type {any} */ (classifyFailure),
+    });
+    // §11.1 — independent per-store schema stamps. A newer stamp than this
+    // build supports leaves that store read-only (refuse-newer); the check
+    // result is audited so a blocked profile is diagnosable, and stamping
+    // only proceeds when every store is writable.
+    const readStamps = async () => (await kv.get(VERSION_STAMP_KEY)) ?? undefined;
+    const storesCheck = await checkStores({ read: readStamps });
+    if (storesCheck.ok) {
+      await stampStores({
+        read: readStamps,
+        write: (/** @type {any} */ map) => kv.set(VERSION_STAMP_KEY, map),
+      });
+    } else {
+      const blocked = storesCheck.stores
+        .filter((/** @type {any} */ x) => x.mode === 'read-only');
+      // §11.5 ENFORCED: the guard flips these surfaces' physical locations
+      // to refuse-writes at the shared adapter chokepoint. Reads keep
+      // working; the thrown StoreReadOnlyError names the store and says no
+      // data was changed.
+      storeWriteGuard.block(blocked.map((/** @type {any} */ x) => x.store));
+      for (const s of blocked) {
+        console.error('[sw] store schema blocked (writes refused):', s.store, s.reason);
+        auditLog.append({
+          type: 'lifecycle.migration.failed',
+          details: { store: s.store, reason: s.reason, diagnosticId: s.diagnosticId },
+        }).catch(() => {});
+      }
+    }
+    return generation;
+  })
+  .catch((/** @type {unknown} */ e) => {
+    console.error('[sw] lifecycle boot failed; Class D/E dispatches fail closed', e);
+    lifecycleTracker = makeFailClosedTracker({
+      reason: 'lifecycle boot failed',
+      retryClassFor: retryClassForTool,
+    });
+    return null;
+  });
 
 // INV-15 — the proof-of-possession key seam. Backed by the `dpop_keys` IDB store
 // (one non-extractable keypair per owned https origin, minted lazily on the first
@@ -851,7 +977,11 @@ loadUserHooks({ kv })
 // the ToolContext (ctx.skills) in buildToolContext so the tool can read a
 // body on invocation. Descriptions are injected into the system prompt
 // per turn (skillsBlock below) — bodies never are.
-const skillStore = createSkillStore();
+// §11.5: skills live in their own database — the write guard's verdict is
+// injected here since the wrapped adapters can't reach it.
+const skillStore = createSkillStore({
+  canWrite: () => storeWriteGuard.assertWritable('skills'),
+});
 const skillRegistry = createSkillRegistry({ store: skillStore, audit: auditLog.append });
 registerTool(loadSkillTool);
 
@@ -1327,6 +1457,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // rejects) — it cannot hang the turn. Every dispatch path (main turn, direct
   // dispatch, spawned actors) routes through here, so all are covered.
   await denylistReady;
+  // The lifecycle tracker must be ARMED before any ctx exists — otherwise a
+  // Class D/E dispatch could race the boot into running untracked. The
+  // promise settles once (subsequent awaits are free) and never rejects; a
+  // failed boot arms the fail-closed tracker instead.
+  await lifecycleArmed;
   // Same shape, one layer down: never dispatch a tool while the DNR backstop
   // trails the driven-tab set. Most binding paths kick the sync without awaiting
   // it (bind() is a sync callback), so an actor's FIRST tool call could
@@ -1431,6 +1566,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // the capability strip below makes its ctx keyless).
     exposure: exposure ?? null,
     synthetic: synthetic === true,
+    // The recovery contract's dispatch tracker (lifecycle/dispatch-tracking.js).
+    // Read at ctx-build time: before the async boot resolves this is null and
+    // the dispatch runs untracked (pre-lifecycle behavior); once armed, every
+    // path through this builder — main turn, actor relay, page-call — records
+    // side-effecting calls durably and refuses unproven replays.
+    lifecycle: lifecycleTracker,
     // DESIGN-17: the message_actor sender gate's untrusted-ORIGIN signal. A
     // synthetic turn (goal continuation / async wake / actor reply-wake) is
     // "inbound" — refused — UNLESS it is an explicit first-party continuation
@@ -2221,7 +2362,11 @@ const trackerNote = (/** @type {any} */ registry, /** @type {string} */ kind) =>
     .then((r) => noteAgentTab(tabId, { kind, name: r?.name ?? null }))
     .catch(() => noteAgentTab(tabId, { kind }));
 };
-const vmTabTracker = createVmTabTracker({ announce: trackerNote(vmRegistry, 'WebVM') });
+const vmTabTracker = createVmTabTracker({
+  announce: trackerNote(vmRegistry, 'WebVM'),
+  onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('vm', id, tabId),
+  onDrop: (/** @type {string} */ id) => engineLiveness.drop('vm', id),
+});
 const vmClient = createVmClient({ registry: vmRegistry, tracker: vmTabTracker });
 
 // Notebook registry + tracker + client. Same lifecycle pattern as
@@ -2229,13 +2374,21 @@ const vmClient = createVmClient({ registry: vmRegistry, tracker: vmTabTracker })
 // via chrome.tabs.sendMessage to the Notebook's host page. (The IDB
 // store name 'notebooks' is the persistence key — see notebook-registry.)
 const jsRegistry = createNotebookRegistry({ storage: idbKV('notebooks'), onActorArchive: archiveOrphanedActor });
-const jsTabTracker = createJsTabTracker({ announce: trackerNote(jsRegistry, 'Notebook') });
+const jsTabTracker = createJsTabTracker({
+  announce: trackerNote(jsRegistry, 'Notebook'),
+  onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('notebook', id, tabId),
+  onDrop: (/** @type {string} */ id) => engineLiveness.drop('notebook', id),
+});
 const jsClient = createJsClient({ registry: jsRegistry, tracker: jsTabTracker });
 
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
-const appTabTracker = createAppTabTracker({ announce: trackerNote(appRegistry, 'App') });
+const appTabTracker = createAppTabTracker({
+  announce: trackerNote(appRegistry, 'App'),
+  onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
+  onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
+});
 const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
@@ -3226,6 +3379,8 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   resolveFailoverChain, shouldFailover, callModel, runUserTurn, getSecret,
   safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
   contextWindowFor, liveContextWindow, currentAppScope, checkpointMgr, detectInterruptedTurn,
+  // Lifecycle recovery notices → the next turn's <context> message (read-once).
+  drainRecoveryNotices: (/** @type {string} */ sid) => lifecycleBoot.drainNoticesFor(sid),
   recordModelCall: contextSnapshots.record,
   // prewalk: the turn-boundary reconcile (swap/restore) + the per-tool-call gate,
   // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
@@ -5307,6 +5462,9 @@ const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ r
 // run, so a vault-lock-PAUSED run (evicted from the runner's map but kept in the
 // kv mirror for resume) would survive a Stop and resurrect on the next unlock.
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.stop(sid);
+// §2.5: session archive/delete purges its lifecycle state — pending recovery
+// notices + nonterminal operations settle cancelled (boot.purgeSession).
+const purgeLifecycleSession = (/** @type {string} */ sid) => lifecycleBoot.purgeSession(sid);
 const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
 // Background scheduling: drive a full scheduler catch-up. The SINGLE entry point
 // for every wake (alarm, onStartup, cold boot, vault unlock) so the ordering is
@@ -5482,6 +5640,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     turnSlots, actorMessaging,
     // Session teardown drops the durable script workspace subtree.
     nukeSessionWorkspace,
+    // …and the session's lifecycle state (§2.5 cancellation dominance).
+    purgeLifecycleSession,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
@@ -5636,6 +5796,48 @@ ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed',
     await appTabTracker.bootstrap();
     console.log('[sw] instance registries initialized — live tabs:',
       { vm: vmTabTracker.listLive(), js: jsTabTracker.listLive(), app: appTabTracker.listLive() });
+    // §9 engine orphan reap — instances the liveness ledger says were
+    // HOSTED before this SW start whose tabs did not survive. The
+    // registry catalog (files, metadata) persists; the running process is
+    // gone. Reap → audit → the §14 resource-lost notice to the owner's
+    // chat + the agent's next turn.
+    try {
+      const surviving = [
+        ...vmTabTracker.listLive().map((/** @type {string} */ id) => `vm:${id}`),
+        ...jsTabTracker.listLive().map((/** @type {string} */ id) => `notebook:${id}`),
+        ...appTabTracker.listLive().map((/** @type {string} */ id) => `app:${id}`),
+      ];
+      const lost = await engineLiveness.sweep({ surviving });
+      const KIND_LABEL = { vm: 'Linux VM', notebook: 'Notebook', app: 'App' };
+      const REGISTRY_OF = { vm: vmRegistry, notebook: jsRegistry, app: appRegistry };
+      for (const entry of lost) {
+        auditLog.append({
+          type: 'lifecycle.engine.orphan-reaped',
+          details: { kind: entry.kind, id: entry.id },
+        }).catch(() => {});
+        const registry = /** @type {any} */ (REGISTRY_OF)[entry.kind];
+        const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
+        const owner = record?.ownerSessionId;
+        if (!owner) continue; // no owner to tell; the audit entry stands
+        await lifecycleBoot.parkNotice(owner, {
+          recoveryRecord: {
+            operation: `${entry.kind}:${entry.id}`,
+            recoveryState: 'interrupted',
+            sideEffectStatus: 'none attempted',
+            resourceLost: true,
+          },
+          user: `The ${/** @type {any} */ (KIND_LABEL)[entry.kind] ?? entry.kind} `
+            + `"${record?.name ?? entry.id}" stopped with the browser session. `
+            + 'Your saved files remain, but live process state was lost.',
+        }).catch(() => {});
+      }
+      if (lost.length) {
+        console.log('[sw] engine orphans reaped:',
+          lost.map((/** @type {any} */ l) => `${l.kind}:${l.id}`));
+      }
+    } catch (e) {
+      console.warn('[sw] engine orphan sweep failed', e);
+    }
     // An SW restart re-adopts engine tabs that never stopped running, so the
     // network backstop's tab scope has to be rebuilt from what bootstrap found.
     denylistNetGuard.sync();

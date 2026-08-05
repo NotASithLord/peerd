@@ -100,3 +100,18 @@ describe('page-call handler — failures surface as the worker sees them', () =>
     expect(dispatchToolCall).not.toHaveBeenCalled();
   });
 });
+
+describe('dispatch call identity', () => {
+  test('every page.* dispatch mints a UNIQUE call id — even with no rid', async () => {
+    // The lifecycle tracker keys operations on (sessionId, call id); a
+    // constant id made the second page write in a session read as a replay
+    // of the first and refuse (wiring-review finding, PR #314).
+    const { handle, dispatched } = harness();
+    await handle({ method: 'click', args: { selector: 'a' }, sessionId: 's1', tabId: 42 });
+    await handle({ method: 'click', args: { selector: 'a' }, sessionId: 's1', tabId: 42 });
+    await handle({ method: 'goto', args: { url: 'https://example.com' }, sessionId: 's1', tabId: 42 });
+    const ids = dispatched.map((d) => d.call.id);
+    expect(new Set(ids).size).toBe(3);
+    for (const id of ids) expect(id.startsWith('page-')).toBe(true);
+  });
+});
