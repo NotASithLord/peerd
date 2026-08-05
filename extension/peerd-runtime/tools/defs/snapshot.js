@@ -19,7 +19,7 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
-import { captureSnapshot, describeSource, diffSnapshots } from '../../dom/index.js';
+import { captureSnapshot, signalIsAttributable, describeSource, diffSnapshots } from '../../dom/index.js';
 
 /** @typedef {import('../../dom/snapshot-diff.js').SnapRef} SnapRef */
 /**
@@ -89,7 +89,17 @@ export const snapshotTool = {
     // which origins peerd treats as the user's. Strictly `=== true`, because
     // `null` from the capture means the probe could not run — unknown, not
     // absent. Best-effort: a learning failure must never fail a snapshot.
-    if (cap.hasPasswordField === true) {
+    //
+    // ATTRIBUTION. `origin` above comes from the tab record resolved BEFORE the
+    // capture; the probe runs after, in whatever document is committed by then.
+    // A page that navigates cross-origin inside that window would otherwise have
+    // its password field recorded against the origin we started on — letting a
+    // hostile page mark arbitrary third parties as "the user has an account
+    // here" (and, repeated, fill the 500-entry cap so nothing further is ever
+    // learned). So the probe reports where it ran, and a signal we cannot
+    // attribute is DROPPED: unknown, not absent, which is the same posture as
+    // the `=== true` check itself.
+    if (cap.hasPasswordField === true && signalIsAttributable(cap.probeOrigin, origin)) {
       try { /** @type {any} */ (ctx).noteLearnedOrigin?.(origin, 'password-field'); }
       catch { /* best-effort */ }
     }

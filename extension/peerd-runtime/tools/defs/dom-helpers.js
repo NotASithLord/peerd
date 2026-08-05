@@ -13,6 +13,10 @@
 // break this module's unit tests. composer/resolvers.js imports it the
 // same way for the same reason.
 import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
+// The one live look at the target document (issues 267 + 276). Deep import for
+// the same reason as above — dom/index.js is fine, but this file is unit-tested
+// without a browser and the barrel is wider than the one function needed.
+import { hasPasswordFieldInjected } from '../../dom/walk-injected.js';
 //
 //   2. Functions that get INJECTED into the page via
 //      chrome.scripting.executeScript. Those functions:
@@ -22,6 +26,63 @@ import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
 //          (closed-over imports don't get serialized)
 //      So every injected fn is self-contained. We keep them here for
 //      organization but each is independently executable.
+
+/**
+ * How long the live probe gets before the chokepoint gives up on it.
+ *
+ * why a timeout at all: the probe is the only thing on this path that depends
+ * on the RENDERER answering. A tool that drives the page through CDP (page_exec,
+ * page_keys) never needed the renderer's cooperation, and a wedged main thread
+ * must not turn into a hung tool call. Short enough to be invisible next to the
+ * injections the DOM tools already do, long enough that an ordinary busy page
+ * still answers.
+ */
+const LIVE_PROBE_TIMEOUT_MS = 400;
+
+/**
+ * Ask the document that is ACTUALLY committed in the target tab where it is and
+ * whether it is showing a password field. Best-effort by construction: null
+ * means "could not look", never "nothing there".
+ *
+ * why here and not in each tool: this is the only place that knows the tool is
+ * about to touch a specific tab, and it is the only place every DOM tool passes
+ * through. Before this, the password-field signal was observed in exactly ONE
+ * tool (`snapshot`) — so an actor that perceived with `read_page` instead never
+ * taught the classifier anything, and staying unlearned was a matter of which
+ * tool it chose to call (issue 267). Tool choice belongs to whoever is driving
+ * the actor, which is precisely the party the classifier exists to constrain.
+ *
+ * @param {{ id?: number }} tab
+ * @param {{ scripting?: any }} ctx
+ * @returns {Promise<{ origin: string | null, href: string | null, hasPasswordField: boolean | null } | null>}
+ */
+const probeLiveDocument = async (tab, ctx) => {
+  if (typeof tab?.id !== 'number' || typeof ctx?.scripting?.executeScript !== 'function') return null;
+  /** @type {any} */
+  let timer = null;
+  try {
+    const probe = ctx.scripting.executeScript({ target: { tabId: tab.id }, func: hasPasswordFieldInjected });
+    const raced = await Promise.race([
+      probe,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), LIVE_PROBE_TIMEOUT_MS); }),
+    ]);
+    const v = raced?.[0]?.result;
+    if (!v) return null;
+    return {
+      origin: typeof v.origin === 'string' ? v.origin : null,
+      href: typeof v.href === 'string' ? v.href : null,
+      hasPasswordField: typeof v.has === 'boolean' ? v.has : null,
+    };
+  } catch {
+    // Pages the browser refuses to inject into (chrome:, the extension stores,
+    // a tab mid-navigation) land here. FAIL OPEN: the caller keeps the verdict
+    // it already reached on tab.url. Refusing instead would break every
+    // CDP-driven tool on exactly the pages CDP exists for.
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
 
 /**
  * Get the tab the tool should operate on. Returns the chrome.tabs Tab
@@ -39,7 +100,7 @@ import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
  * yields null, which every caller already surfaces as a refusal.
  *
  * @param {{ tabId?: number }} args
- * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null> }} ctx
+ * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void }} ctx
  *
  * `judgeLanding` (issue 251) is the origin lock, injected by the SW so this
  * file stays free of actor state and the policy stays pure and unit-tested
@@ -85,6 +146,48 @@ export const resolveTargetTab = async (args, ctx) => {
   if (ctx.judgeLanding) {
     const verdict = await ctx.judgeLanding(tab.url);
     if (verdict && verdict.action !== 'continue') return null;
+  }
+  // ONE live look at the document that is actually there — the answer to two
+  // findings, and the reason it is worth a round trip.
+  //
+  // issue 276: everything above judged `tab.url`, which is what the BROWSER
+  // recorded, read out of a record frozen before this function was called. The
+  // document committed right now can be a different origin, and the tool's own
+  // injection lands in that one. Re-checking the origin the document reports
+  // about ITSELF narrows the window from "however stale the tab record is" to
+  // "one message round trip". It does not close it: the tool injects after we
+  // return, and only pinning the judged documentId at injection time would make
+  // that airtight. Stated plainly so the next reader does not over-trust it.
+  //
+  // issue 267: while we are in there, observe the password field — so every DOM
+  // tool teaches the classifier, not just `snapshot`.
+  const live = await probeLiveDocument(tab, ctx);
+  // Only a WEB origin is actionable: the denylist matches hostnames and the
+  // landing rule reasons about http(s) origins, so handing either an opaque
+  // `null`, a data: or a blob: document would be asking a question neither can
+  // answer. Those fall through untouched — fail open, as everywhere else here.
+  const liveOrigin = live?.origin && /^https?:\/\//.test(live.origin) ? live.origin : null;
+  if (liveOrigin && liveOrigin !== originOfUrl(tab.url)) {
+    const liveUrl = live?.href ?? liveOrigin;
+    // It moved. Judge where it IS, on the same two rules, and refuse on either.
+    if (isDenylistedTab(liveUrl, ctx.denylist)) return null;
+    if (ctx.judgeLanding) {
+      const verdict = await ctx.judgeLanding(liveUrl);
+      if (verdict && verdict.action !== 'continue') return null;
+    }
+    // It moved somewhere allowed — so hand the caller where it IS. A copy, not a
+    // mutation: `tab` is the tabs API's record and navigate.js relies on the pin
+    // objects it shares staying its own. why it matters beyond tidiness: login.js
+    // derives the origin it https-gates, NAMES IN THE CONFIRM, and audits from
+    // this url. A stale one there is the confused deputy in its purest form — the
+    // user approves a sign-in on the origin the tab record remembers while the
+    // ceremony runs in the document that replaced it.
+    if (live?.href) tab = { ...tab, url: live.href };
+  }
+  if (live?.hasPasswordField === true && liveOrigin) {
+    // Attributed to the origin that REPORTED it, never to the tab record — the
+    // #278 rule, held by construction here rather than by comparison.
+    try { ctx.noteLearnedOrigin?.(liveOrigin, 'password-field'); } catch { /* best-effort */ }
   }
   // The loop just targeted THIS tab by id (navigate/click/type/read/… on a tab
   // the agent opened) — update the "current agent tab" card so it tracks where
