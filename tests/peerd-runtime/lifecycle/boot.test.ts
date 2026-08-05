@@ -165,6 +165,47 @@ describe('notices — both audiences, delivered once', () => {
     expect(block).toContain('outcome_unknown');
   });
 
+  test('concurrent park and drain never lose or resurrect a notice (the queue)', async () => {
+    const storage = makeStorage();
+    const b = boot(storage);
+    await b.init();
+    // Interleave heavily: parks for T racing drains of S. Every parked
+    // notice must be drained exactly once, no loss, no duplication.
+    await b.parkNotice('S', { recoveryRecord: { operationId: 'op-s' }, user: 'notice S' });
+    const results = await Promise.all([
+      b.parkNotice('T', { recoveryRecord: { operationId: 'op-t1' }, user: 'notice T1' }),
+      b.drainNoticesFor('S'),
+      b.parkNotice('T', { recoveryRecord: { operationId: 'op-t2' }, user: 'notice T2' }),
+      b.drainNoticesFor('S'),
+    ]);
+    const sDrains = [results[1], results[3]].filter((x) => x !== '');
+    expect(sDrains.length).toBe(1); // read-once held under the race
+    const tBlock = await b.drainNoticesFor('T');
+    expect(tBlock).toContain('notice T1'); // neither park was lost
+    expect(tBlock).toContain('notice T2');
+    expect(await b.drainNoticesFor('T')).toBe(''); // and delivered once
+  });
+
+  test('purgeSession: a deleted session\'s notices vanish and its open operations settle cancelled', async () => {
+    const storage = makeStorage();
+    const b = boot(storage);
+    const { generation } = await b.init();
+    await b.operationLog.begin({
+      operationId: 'op-open', sessionId: 'sess-del', toolName: 'submit_form',
+      retryClass: 'E', generationId: generation.id,
+    });
+    await b.operationLog.transition('op-open', S.RUNNING);
+    await b.operationLog.markDispatched('op-open');
+    await b.parkNotice('sess-del', { recoveryRecord: { operationId: 'op-old' }, user: 'stale' });
+
+    await b.purgeSession('sess-del');
+    expect(await b.drainNoticesFor('sess-del')).toBe('');
+    expect((await b.operationLog.get('op-open'))!.state).toBe(S.CANCELLED);
+    // A fresh boot has nothing to resurrect for the deleted session.
+    const { plan } = await boot(storage).init();
+    expect(plan.transitions.length).toBe(0);
+  });
+
   test('a throwing resolver falls back to the operation\'s own session', async () => {
     const storage = makeStorage();
     const gen1 = boot(storage);

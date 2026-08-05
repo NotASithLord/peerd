@@ -29,7 +29,7 @@ import { OPERATION_STATES, canTransition } from './operation-state.js';
 import { RETRY_CLASSES, decideRecovery, normalizeRetryClass } from './retry-class.js';
 import { describeRecovery } from './recovery-report.js';
 import { OperationExistsError } from './operation-log.js';
-import { FAILURE_OUTCOMES } from './failure-taxonomy.js';
+import { FAILURE_OUTCOMES, isFailureOutcomeKind } from './failure-taxonomy.js';
 
 // Error shapes that mean "the wire died with the request possibly delivered"
 // — the ambiguous bucket. Kept alongside the classifier kind 'timeout'
@@ -185,28 +185,47 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       // Class D/E whose earlier dispatch has no proven outcome: the
       // re-dispatch is automatic (same tool_use id ⇒ nobody instructed it),
       // so it must not run.
+      //
+      // why the force-settle is GENERATION-GATED: "in flight, unproven" only
+      // means "outcome lost" when the driving generation is DEAD. A
+      // current-generation record in awaiting_remote is still being driven
+      // by a live handle in THIS SW — its execute() may resolve seconds
+      // from now with real evidence, and pre-settling it to outcome_unknown
+      // would discard that evidence (the duplicate is refused either way;
+      // the mutation is the bug, not the refusal).
+      const driverIsDead = record.generationId !== generationId();
       const verdict = decideRecovery({ retryClass, dispatched: true });
       const report = describeRecovery(verdict, {
         retryClass, operationId: record.operationId, toolName: record.toolName,
       });
-      if (!settledUnknown && canTransition(record.state, OPERATION_STATES.OUTCOME_UNKNOWN)) {
-        await operationLog.transition(record.operationId, OPERATION_STATES.OUTCOME_UNKNOWN)
-          .catch(() => {});
-      } else if (!settledUnknown) {
-        await operationLog.settle(record.operationId, verdict).catch(() => {});
+      if (!settledUnknown && driverIsDead) {
+        if (canTransition(record.state, OPERATION_STATES.OUTCOME_UNKNOWN)) {
+          await operationLog.transition(record.operationId, OPERATION_STATES.OUTCOME_UNKNOWN)
+            .catch(() => {});
+        } else {
+          await operationLog.settle(record.operationId, verdict).catch(() => {});
+        }
       }
       return {
         refuse: {
           error: `outcome_unknown: ${record.toolName} was already dispatched and `
-            + 'its result was lost. It may have completed — verify the external '
-            + 'state before repeating it. Not re-executing automatically.',
+            + `its result is ${driverIsDead ? 'lost' : 'still pending'}. It may `
+            + 'have completed — verify the external state before repeating it. '
+            + 'Not re-executing automatically.',
           recovery: report.agent,
         },
       };
     }
 
     if (record.state === OPERATION_STATES.INTERRUPTED
-        && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
+        && retryClass !== RETRY_CLASSES.SIDE_EFFECT
+        // The RECORD's class binds too: a call id whose recorded operation
+        // was Class E re-presented under a softer classification is a
+        // class-confusion replay, not a sanctioned retry — newAttempt would
+        // refuse it anyway (RetryRefusedError), and that rejection must
+        // surface as a REFUSAL, not bubble into the dispatcher's fail-open
+        // catch and run untracked.
+        && normalizeRetryClass(record.retryClass) !== RETRY_CLASSES.SIDE_EFFECT) {
       // A/B/C/D-undispatched interruption: the sanctioned retry — same
       // operation, fresh attempt number, re-stamped with the LIVE
       // generation. markDispatched mirrors the fresh path: the retry's
@@ -317,8 +336,17 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       await operationLog.markDispatched(operationId);
     } catch (error) {
       if (error instanceof OperationExistsError) {
-        const record = await operationLog.get(operationId);
-        if (record) return resumeExisting(record, retryClass);
+        // resumeExisting must never REJECT into the dispatcher's fail-open
+        // catch — that would convert a refusal-worthy replay into an
+        // UNTRACKED execution. Any error inside the resume decision takes
+        // the same fail-closed posture as a storage failure.
+        try {
+          const record = await operationLog.get(operationId);
+          if (record) return await resumeExisting(record, retryClass);
+        } catch (resumeError) {
+          return refuseUntracked(retryClass, tool.name,
+            `replay resolution failed (${resumeError instanceof Error ? resumeError.message : String(resumeError)})`);
+        }
       }
       // Tracking storage is DOWN (or died mid-sequence). Two postures:
       //   A/B/C — degrade to untracked execution: duplicates are invisible
@@ -356,10 +384,16 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     if (outcome.ok) {
       // A lost success-settle only costs a false uncertainty at the next
       // boot — never a false claim — so success stays reported as success.
+      // If the record was force-parked outcome_unknown while this dispatch
+      // was executing (a refused duplicate of a dead generation's record),
+      // the LATE positive evidence is exactly what resolveUnknown exists
+      // for — record it rather than discard it.
       await operationLog.transition(operationId, OPERATION_STATES.COMPLETED, {
         evidence: { kind: 'success-response' },
         ...(outcome.resultDigest ? { resultDigest: outcome.resultDigest } : {}),
-      }).catch(() => {});
+      }).catch(() =>
+        operationLog.resolveUnknown(operationId, { kind: 'success-response' })
+          .catch(() => {}));
       return null;
     }
 
@@ -369,16 +403,24 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // heuristic (failure-taxonomy.js): pre-effect-failure is definitive,
     // transport/host loss is ambiguous, full stop. Unstamped failures
     // fall back to the regex + taxonomy guesswork below.
-    const ambiguous = outcome.outcomeKind
-      ? outcome.outcomeKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE
+    // VALIDATED first — outcomeKind can cross relay boundaries carrying
+    // garbage; an unknown value falls back to the heuristics, never trusted.
+    const typedKind = isFailureOutcomeKind(outcome.outcomeKind)
+      ? outcome.outcomeKind
+      : undefined;
+    const ambiguous = typedKind
+      ? typedKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE
       : isAmbiguousLoss(outcome.error, kind);
 
     if (!ambiguous && !cancelRequested) {
       // A definitive error response — the target refused before the
-      // effect. Honest `failed`.
+      // effect. Honest `failed`. Same late-evidence recovery as the
+      // success path for a record parked outcome_unknown mid-execute.
       await operationLog.transition(operationId, OPERATION_STATES.FAILED, {
         evidence: { kind: 'error-response-before-effect' },
-      }).catch(() => {});
+      }).catch(() =>
+        operationLog.resolveUnknown(operationId, { kind: 'error-response-before-effect' })
+          .catch(() => {}));
       return null;
     }
 

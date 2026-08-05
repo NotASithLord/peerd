@@ -5451,6 +5451,9 @@ const startGoalRun = async (/** @type {{ sessionId: string, goal: string }} */ r
 // run, so a vault-lock-PAUSED run (evicted from the runner's map but kept in the
 // kv mirror for resume) would survive a Stop and resurrect on the next unlock.
 const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunner)?.stop(sid);
+// §2.5: session archive/delete purges its lifecycle state — pending recovery
+// notices + nonterminal operations settle cancelled (boot.purgeSession).
+const purgeLifecycleSession = (/** @type {string} */ sid) => lifecycleBoot.purgeSession(sid);
 const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
 // Background scheduling: drive a full scheduler catch-up. The SINGLE entry point
 // for every wake (alarm, onStartup, cold boot, vault unlock) so the ordering is
@@ -5626,6 +5629,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     turnSlots, actorMessaging,
     // Session teardown drops the durable script workspace subtree.
     nukeSessionWorkspace,
+    // …and the session's lifecycle state (§2.5 cancellation dominance).
+    purgeLifecycleSession,
   }),
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({

@@ -50,12 +50,37 @@ export const makeLifecycleBoot = ({
 
   const operationLog = createOperationLog({ storage, now });
 
+  // The notices mutation queue. why: park (init + engine reaps) and drain
+  // (every turn start) are read-modify-writes of ONE kv key from
+  // concurrent callers — exactly the post-restart moment when both fire.
+  // Unserialized, a stale drain write erases a just-parked notice forever
+  // (the agent never hears the do-not-repeat instruction), and a stale
+  // park write resurrects a just-delivered one (read-once broken). The
+  // queue holds only the RMW; slow work (session resolution's parent
+  // walk) stays outside the slot.
+  /** @type {Promise<unknown>} */
+  let noticesQueueTail = Promise.resolve();
+  /** @template T @param {() => Promise<T>} job @returns {Promise<T>} */
+  const enqueueNotices = (job) => {
+    const run = noticesQueueTail.then(job, job);
+    noticesQueueTail = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
+  /** @returns {Promise<Record<string, unknown[]>>} fail-safe normalized */
+  const loadPending = async () => {
+    const raw = await storage.get(PENDING_NOTICES_KEY).catch(() => null);
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? /** @type {Record<string, unknown[]>} */ (raw)
+      : {};
+  };
+
   /**
    * Park one notice for a session's next turn (+ the immediate user note).
-   * Routed through resolveNoticeSession; fail-safe normalization on a
-   * corrupted pending store (a torn write can leave a primitive here —
-   * treat it as empty and repair by overwrite). Used by init() for
-   * reconcile notifications and by the shell for engine-orphan reaps.
+   * Routed through resolveNoticeSession (outside the queue slot); fail-safe
+   * normalization on a corrupted pending store (a torn write can leave a
+   * primitive here — treat it as empty and repair by overwrite). Used by
+   * init() for reconcile notifications and by the shell for engine reaps.
    *
    * @param {string} operationSessionId
    * @param {{ recoveryRecord: Record<string, unknown>, user: string }} notice
@@ -64,14 +89,13 @@ export const makeLifecycleBoot = ({
     const sessionId = await Promise.resolve(
       resolveNoticeSession?.(operationSessionId) ?? operationSessionId,
     ).catch(() => operationSessionId) || operationSessionId;
-    const raw = await storage.get(PENDING_NOTICES_KEY).catch(() => null);
-    const pending = raw && typeof raw === 'object' && !Array.isArray(raw)
-      ? /** @type {Record<string, unknown[]>} */ (raw)
-      : {};
-    const list = Array.isArray(pending[sessionId]) ? pending[sessionId] : [];
-    list.push({ recoveryRecord, user, at: now() });
-    pending[sessionId] = list.slice(-MAX_NOTICES_PER_SESSION);
-    await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
+    await enqueueNotices(async () => {
+      const pending = await loadPending();
+      const list = Array.isArray(pending[sessionId]) ? pending[sessionId] : [];
+      list.push({ recoveryRecord, user, at: now() });
+      pending[sessionId] = list.slice(-MAX_NOTICES_PER_SESSION);
+      await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
+    });
     try { notify?.(sessionId, user); } catch { /* panel gone */ }
   };
 
@@ -137,13 +161,19 @@ export const makeLifecycleBoot = ({
    */
   const drainNoticesFor = async (sessionId) => {
     if (!sessionId) return '';
-    const pending = (await storage.get(PENDING_NOTICES_KEY).catch(() => null)) ?? {};
-    const list = pending[sessionId];
-    if (!Array.isArray(list) || list.length === 0) return '';
-    delete pending[sessionId];
-    await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
-    const lines = list.map((/** @type {{ user: string, recoveryRecord: unknown }} */ n) =>
-      `- ${n.user}\n  ${JSON.stringify(n.recoveryRecord)}`);
+    // The read-and-clear rides the same queue as park — a stale drain
+    // write must never erase a notice parked between its read and write.
+    const list = await enqueueNotices(async () => {
+      const pending = await loadPending();
+      const entry = pending[sessionId];
+      if (!Array.isArray(entry) || entry.length === 0) return null;
+      delete pending[sessionId];
+      await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
+      return entry;
+    }).catch(() => null);
+    if (!list) return '';
+    const lines = /** @type {Array<{ user: string, recoveryRecord: unknown }>} */ (list)
+      .map((n) => `- ${n.user}\n  ${JSON.stringify(n.recoveryRecord)}`);
     return '<interruption-recovery>\nA previous browser session ended while '
       + 'work was in flight. Recovered operation states:\n'
       + `${lines.join('\n')}\n`
@@ -151,5 +181,37 @@ export const makeLifecycleBoot = ({
       + 'the external state first.\n</interruption-recovery>';
   };
 
-  return { operationLog, init, drainNoticesFor, parkNotice };
+  /**
+   * §2.5 — explicit user cancellation dominates recovery: when a session is
+   * deleted/archived, its pending notices are purged (a deleted chat's
+   * operations must not resurrect as notes elsewhere) and its nonterminal
+   * operations settle `cancelled` (the user ended the work; nothing may
+   * auto-resume it at the next boot). Best-effort per record.
+   *
+   * @param {string} sessionId
+   */
+  const purgeSession = async (sessionId) => {
+    if (!sessionId) return;
+    await enqueueNotices(async () => {
+      const pending = await loadPending();
+      if (sessionId in pending) {
+        delete pending[sessionId];
+        await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
+      }
+    }).catch(() => {});
+    const open = await operationLog.listNonterminal().catch(() => []);
+    for (const record of open.filter((r) => r.sessionId === sessionId)) {
+      await operationLog.settle(record.operationId, {
+        state: OPERATION_STATES.CANCELLED,
+        autoRetry: false,
+        retryRequires: [],
+        keepIdempotencyKey: false,
+        verificationRequired: false,
+        recreateResource: false,
+        reason: 'session deleted by the user; cancellation dominates recovery',
+      }).catch(() => {});
+    }
+  };
+
+  return { operationLog, init, drainNoticesFor, parkNotice, purgeSession };
 };

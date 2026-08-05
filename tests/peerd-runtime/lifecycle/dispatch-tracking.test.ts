@@ -250,20 +250,75 @@ describe('typed failure outcomes outrank string heuristics', () => {
 });
 
 describe('the replay guard — guarantee 2', () => {
-  test('re-dispatching an unproven Class E call is REFUSED with outcome_unknown', async () => {
+  test('a CURRENT-generation duplicate is refused WITHOUT mutating the live record', async () => {
+    // The first dispatch is still executing in this very SW — its outcome
+    // is pending, not lost. The duplicate must be refused, but force-
+    // settling the record would discard the evidence about to arrive.
     const { tracker, log } = makeTracker();
     await tracker.beginTracking({
       callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' }, sessionId: 's',
     });
-    // SW dies here: dispatched, no settle. New generation re-drives the
-    // same tool_use id.
     const begun = await tracker.beginTracking({
       callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' }, sessionId: 's',
     });
     expect(begun && 'refuse' in begun).toBe(true);
     const refusal = (begun as { refuse: { error: string } }).refuse;
     expect(refusal.error).toStartWith('outcome_unknown:');
+    expect(refusal.error).toContain('still pending');
+    expect((await log.get('s:c1'))!.state).toBe(S.AWAITING_REMOTE); // NOT mutated
+  });
+
+  test('a DEAD-generation unproven Class E record IS force-settled outcome_unknown on replay', async () => {
+    const { tracker, log } = makeTracker();
+    // The record as a dead SW left it: dispatched under gen-0, unsettled.
+    await log.begin({
+      operationId: 's:c1', sessionId: 's', toolName: 'submit_form',
+      retryClass: 'E', generationId: 'gen-0-dead',
+    });
+    await log.transition('s:c1', S.RUNNING);
+    await log.markDispatched('s:c1');
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' }, sessionId: 's',
+    });
+    expect((begun as { refuse: { error: string } }).refuse.error).toStartWith('outcome_unknown:');
     expect((await log.get('s:c1'))!.state).toBe(S.OUTCOME_UNKNOWN);
+  });
+
+  test('late positive evidence resolves a force-parked outcome_unknown record', async () => {
+    const { tracker, log } = makeTracker();
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' }, sessionId: 's',
+    });
+    // Simulate the mid-execute force-park (as a dead-generation replay
+    // would have done it) …
+    await log.settle('s:c1', {
+      state: S.OUTCOME_UNKNOWN, autoRetry: false, retryRequires: [],
+      keepIdempotencyKey: false, verificationRequired: true,
+      recreateResource: false, reason: 'force-parked',
+    });
+    // … then the ORIGINAL dispatch resolves with proof. resolveUnknown is
+    // the sanctioned evidence-gated exit; the evidence must not be dropped.
+    await tracker.settleTracking((begun as { handle: any }).handle, { ok: true });
+    expect((await log.get('s:c1'))!.state).toBe(S.COMPLETED);
+  });
+
+  test('a class-confusion replay (recorded E, presented D) is REFUSED, never run untracked', async () => {
+    const { tracker, log } = makeTracker();
+    await log.begin({
+      operationId: 's:c1', sessionId: 's', toolName: 'submit_form',
+      retryClass: 'E', generationId: 'gen-0-dead',
+    });
+    await log.settle('s:c1', {
+      state: S.INTERRUPTED, autoRetry: false, retryRequires: ['user-instruction'],
+      keepIdempotencyKey: false, verificationRequired: false,
+      recreateResource: false, reason: 'pre-dispatch death',
+    });
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'D' }, sessionId: 's',
+    });
+    // Previously this path REJECTED (newAttempt's class check), and the
+    // dispatcher's fail-open catch executed the replay untracked.
+    expect(begun && 'refuse' in begun).toBe(true);
   });
 
   test('a completed call refuses re-execution — duplicates are named, not run', async () => {

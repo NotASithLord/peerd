@@ -211,6 +211,27 @@ describe('newAttempt — Class B retries', () => {
   });
 });
 
+describe('poisoned entries', () => {
+  test('a null/garbage value in the stored map never crashes the recovery sweep', async () => {
+    const { adapter, map } = makeStorage();
+    const log = createOperationLog({ storage: adapter, now: () => 1 });
+    await log.begin(beginInput);
+    // Poison the stored map the way corruption or an in-origin writer would.
+    const stored = structuredClone(map.get(OPERATION_LOG_KEY)) as Record<string, unknown>;
+    stored.poison = null;
+    stored.garbage = 'not-a-record';
+    stored.noId = { state: 'running' };
+    map.set(OPERATION_LOG_KEY, stored);
+
+    const open = await log.listNonterminal(); // must not throw
+    expect(open.map((r) => r.operationId)).toEqual(['op-1']);
+    // The next persist self-heals: invalid entries are gone.
+    await log.transition('op-1', S.RUNNING);
+    const healed = map.get(OPERATION_LOG_KEY) as Record<string, unknown>;
+    expect(Object.keys(healed).sort()).toEqual(['op-1']);
+  });
+});
+
 describe('bounded growth', () => {
   test('oldest terminal records are pruned past the cap; nonterminal ones survive', async () => {
     const { adapter } = makeStorage();

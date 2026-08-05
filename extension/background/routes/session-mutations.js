@@ -17,6 +17,7 @@ export const makeSessionMutationRoutes = (deps) => {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResume, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
+    purgeLifecycleSession,
   } = deps;
 
   return {
@@ -139,6 +140,12 @@ export const makeSessionMutationRoutes = (deps) => {
         // Fire-and-forget + guarded: workspace bytes are agent scratch,
         // best-effort cleanup must never fail the archive.
         Promise.resolve(nukeSessionWorkspace?.(sessionId)).catch(() => {});
+        // Lifecycle §2.5: the user's archive dominates recovery — purge the
+        // session's pending recovery notices (a put-away chat's operations
+        // must not resurrect as notes elsewhere) and settle its nonterminal
+        // operations cancelled so no future boot reconciles them back.
+        // Fire-and-forget: best-effort cleanup never fails the archive.
+        Promise.resolve(purgeLifecycleSession?.(sessionId)).catch(() => {});
         return { ok: true };
       } catch (e) {
         if (e instanceof SessionNotFoundError) return { ok: false, error: 'session-not-found' };

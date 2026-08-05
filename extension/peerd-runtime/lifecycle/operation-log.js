@@ -100,7 +100,21 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
   /** @returns {Promise<Record<string, import('./reconcile.js').OperationRecord>>} */
   const load = async () => {
     const map = await storage.get(OPERATION_LOG_KEY);
-    return map && typeof map === 'object' ? map : {};
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return {};
+    // Entry-level validation: one corrupted/adversarial value (null, a
+    // primitive, a record with no identity) must not crash listNonterminal
+    // and take the whole recovery sweep down with it. Invalid entries are
+    // dropped — self-healing on the next persist, and infinitely better
+    // than a boot with no reconciliation at all.
+    /** @type {Record<string, import('./reconcile.js').OperationRecord>} */
+    const clean = {};
+    for (const [key, record] of Object.entries(map)) {
+      if (record && typeof record === 'object' && !Array.isArray(record)
+          && typeof (/** @type {any} */ (record).operationId) === 'string') {
+        clean[key] = /** @type {any} */ (record);
+      }
+    }
+    return clean;
   };
 
   /** @param {Record<string, import('./reconcile.js').OperationRecord>} map */
