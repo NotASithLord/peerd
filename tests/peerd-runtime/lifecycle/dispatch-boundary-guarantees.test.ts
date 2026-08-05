@@ -138,7 +138,7 @@ describe('§8 persist-before-report: the settle write lands before the dispatche
 
 describe('replay identity survives compaction (tombstones)', () => {
   test('a completed Class E call refuses re-execution even after its record was pruned past the cap', async () => {
-    const { storage, log } = makeLog();
+    const { storage } = makeLog();
     let t = 0;
     const agedLog = createOperationLog({ storage, now: () => ++t });
     // The Class E operation completes…
