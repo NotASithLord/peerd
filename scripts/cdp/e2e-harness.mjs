@@ -59,12 +59,16 @@ export const sseText = (text) => [
 // UNRELATED scripted calls in one session read as a replay of each other,
 // which no real wire ever produces.
 let sseToolCallSeq = 0;
-export const sseToolCall = (name, args, { text = '' } = {}) => [
-  `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] })}`,
-  `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call_e2e_${sseToolCallSeq += 1}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] })}`,
-  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } })}`,
-  'data: [DONE]', '',
-].join('\n\n') + '\n\n';
+export const sseToolCall = (name, args, { text = '' } = {}) => {
+  sseToolCallSeq += 1;
+  const id = `call_e2e_${sseToolCallSeq}`;
+  return [
+    `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] })}`,
+    `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] })}`,
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } })}`,
+    'data: [DONE]', '',
+  ].join('\n\n') + '\n\n';
+};
 
 // ---- Chrome binary resolution (mirrors run-inbrowser-tests.mjs) -------------
 export function resolveChrome() {

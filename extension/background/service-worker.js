@@ -442,7 +442,11 @@ const lifecycleBoot = makeLifecycleBoot({
 });
 /** @type {ReturnType<typeof makeDispatchTracker> | null} */
 let lifecycleTracker = null;
-const lifecycleReady = lifecycleBoot.init()
+// Fire-and-forget by design: nothing awaits the boot — a dispatch that
+// races it simply runs untracked (the pre-lifecycle behavior), and the
+// chain's own catch keeps a failed boot from surfacing as an unhandled
+// rejection.
+lifecycleBoot.init()
   .then(async ({ generation }) => {
     lifecycleTracker = makeDispatchTracker({
       operationLog: lifecycleBoot.operationLog,
