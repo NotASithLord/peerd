@@ -78,6 +78,10 @@ let a2aState = { delegates: 0, actorCalls: 0 };
 let reasoningState = { spawned: 0, childCalls: 0 };
 // heap-split phase 4: the offscreen TOOL-BEARING actor state.
 let actorToolsState = { spawned: 0, childCalls: 0 };
+// issue #324: an offscreen actor delegating FROM its granted script surface.
+let actorCodeDelegatesState = {
+  spawned: 0, childCalls: 0, webCalls: 0, sawComposedResult: false,
+};
 // heap-split phase 4: an offscreen actor DELEGATING to its own web actor.
 let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
@@ -1075,11 +1079,12 @@ export const STATES = [
       scriptFanState.seen.push({
         isActor,
         isWebActor: body.includes("You are peerd's web actor"),
-        // why GOT: (not '[DELEGATIONS]'): the prompt lore itself mentions the
-        // trace header now, so every request body contains it — the round-trip
-        // VALUE marker (built by the script FROM the actor's reply) is the
-        // discriminator that proves the reply entered the script's realm.
-        hasScriptResult: body.includes('GOT:WIDGET_PRICE_777'),
+        // why all three: GOT proves the script shaped the value, the price
+        // proves the actor reply entered the realm, and the fence proves code
+        // could not launder that reply back into authoritative prompt text.
+        hasScriptResult: body.includes('GOT:')
+          && body.includes('WIDGET_PRICE_777')
+          && body.includes('<untrusted_web_content'),
       });
       // WEB ACTOR turn (spawned by the script's ask): answer in plain text.
       // why delayMs: the live-feed check below observes the PENDING script
@@ -1090,7 +1095,9 @@ export const STATES = [
       if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 1500 };
       // ORCHESTRATOR sees the script result (value derived from the reply) →
       // final answer.
-      if (body.includes('GOT:WIDGET_PRICE_777')) return { sse: sseText('SCRIPT-FAN-DONE') };
+      if (body.includes('GOT:')
+        && body.includes('WIDGET_PRICE_777')
+        && body.includes('<untrusted_web_content')) return { sse: sseText('SCRIPT-FAN-DONE') };
       // ORCHESTRATOR first step: ONE script that asks the web actor and
       // returns a value computed FROM the reply (proves the reply entered
       // the script's realm, not just the chat).
@@ -1470,6 +1477,72 @@ export const STATES = [
       rec.check('script actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
       rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
+      rec.check('the turn settles idle', out.busy === false);
+      await rec.shot('final');
+    },
+  },
+
+  // --- functional: a trusted spawned actor delegates FROM CODE (#324) -------
+  // Direct message_actor already admitted this trusted lineage. This state proves
+  // the code hand has exact parity: actor heap -> script worker -> actors.ask relay
+  // -> web-actor heap -> reply back into code -> child -> orchestrator.
+  {
+    name: 'actor-code-delegates-offscreen', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes("You are peerd's web actor")) {
+        actorCodeDelegatesState.webCalls += 1;
+        return { sse: sseText('WEB-CODE-PRICE-101') };
+      }
+      if (body.includes('You are an EPHEMERAL ACTOR')) {
+        actorCodeDelegatesState.childCalls += 1;
+        if (body.includes('CODE:')
+          && body.includes('WEB-CODE-PRICE-101')
+          && body.includes('untrusted')) {
+          actorCodeDelegatesState.sawComposedResult = true;
+        }
+        if (actorCodeDelegatesState.childCalls === 1) {
+          return { sse: sseToolCall('script', {
+            code: "const r = await actors.ask('web', 'get the code-path price'); return 'CODE:' + r.reply;",
+          }) };
+        }
+        return { sse: sseText('CHILD-CODE-GOT-WEB') };
+      }
+      if (actorCodeDelegatesState.spawned === 0) {
+        actorCodeDelegatesState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'use one script to ask the web actor for the price and report it',
+          tools: ['script', 'message_actor'], sync: true,
+        }) };
+      }
+      return { sse: sseText('FINAL-VIA-ACTOR-CODE') };
+    },
+    async run(ctx, rec) {
+      actorCodeDelegatesState = {
+        spawned: 0, childCalls: 0, webCalls: 0, sawComposedResult: false,
+      };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor script to ask the web actor for the price' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      let out = {};
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, `(() => {
+          const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
+          const busy = !!document.querySelector('form.input-bar button.stop');
+          return { bubbles, busy };
+        })()`) || {};
+        return (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE') && !out.busy;
+      }, { budgetMs: 45_000 });
+
+      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
+      const entries = (audit && audit.entries) || [];
+      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
+      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
+      rec.check('the actor script ran through the SW-gated relay', jsRan === true, `jsRan=${jsRan}`);
+      rec.check('the actor looped after code received the web reply', actorCodeDelegatesState.childCalls >= 2 && actorCodeDelegatesState.sawComposedResult, `childCalls=${actorCodeDelegatesState.childCalls} composed=${actorCodeDelegatesState.sawComposedResult}`);
+      rec.check('actors.ask reached a real web-actor heap', actorCodeDelegatesState.webCalls >= 1, `webCalls=${actorCodeDelegatesState.webCalls}`);
+      rec.check('the actor stayed in its isolated offscreen heap', ranOffscreen === true && fellBack === false, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the composed result reached the orchestrator', (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },

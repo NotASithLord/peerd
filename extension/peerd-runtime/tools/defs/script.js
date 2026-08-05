@@ -62,8 +62,7 @@ export const scriptTool = {
     'markdown — res.extracted says whether it ran);',
     '(3) ORCHESTRATION — the `actors` client drives your OWN actors in code:',
     'await actors.ask(to, goal, {timeoutMs, oneShot}) delegates and returns',
-    '{ reply, failed }; actors.send(to, goal) hands off without waiting (the',
-    'reply lands in chat later); await actors.list() is the roster. Fan out to',
+    '{ reply, failed }; await actors.list() is the roster. Fan out to',
     'several actors, feed one\'s output to the next as a variable, retry/timeout',
     'in code. `to` is anything message_actor accepts; a failed ask returns',
     'failed:true (actor-level) or throws (refusal/timeout — the message says',
@@ -105,7 +104,7 @@ export const scriptTool = {
     }
     // why: jsOffscreenClient/scriptRuns/messageActor ride the opaque ctx
     // contract (not on ToolContext); narrow to what this tool touches.
-    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, inbound?: boolean, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function }, toolUseId?: string }} */ (
+    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string, capabilities?: { actors?: boolean, provider?: boolean }) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, toolAllow?: Set<string> | null, inbound?: boolean, abortSignal?: AbortSignal, toolUseId?: string }} */ (
       /** @type {unknown} */ (ctx));
     const jsOffscreenClient = c.jsOffscreenClient;
     if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
@@ -117,9 +116,11 @@ export const scriptTool = {
     //   • the ctx carries the messageActor capability + the run registry (a
     //     chat's main turn — an actor's keyless narrowing strips it, a child
     //     without the message_actor grant loses the closure);
-    //   • the SESSION is a top-level chat (the actors/call route refuses
-    //     actor/actor owners — minting the stub for them would advertise a
-    //     surface every op then refuses);
+    //   • a bound environment actor is refused (its authority stays pinned to
+    //     one environment), while a spawned actor gets parity with its existing
+    //     direct message_actor grant — no grant, no closure, no client;
+    //   • a chat manifest that removed message_actor cannot recover it through
+    //     script (spawned grants are already manifest-intersected);
     //   • the CODE references `actors` at all (any use requires the
     //     identifier, aliasing included) — a pure-compute script must keep the
     //     30s compute wall-clock, not inherit the ~5-minute delegation one.
@@ -129,15 +130,17 @@ export const scriptTool = {
     // async-actor reintegration wake or the dweb agent's trickle-up, both fenced
     // attacker-derived bytes — is refused a DIRECT message_actor by the sender
     // gate's Wall 1 (mayMessageActor: inbound === true → false). The script tool's
-    // actors.send/ask reach the SAME messageActor through the actors/call relay,
+    // actors.ask reaches the SAME messageActor through the actors/call relay,
     // so minting that surface on an inbound turn would be a SECOND, ungated door
     // through the inbound wall (the relay never carried the flag). Fail closed at
     // the mint — no surface advertised — and thread the flag to the SW route below
     // (defense-in-depth: the route re-checks, consistent with "SW re-verifies
     // every op"). Direct message_actor already gates on c.inbound the same way.
     const inbound = c.inbound === true;
+    const messageActorAllowed = !(c.toolAllow instanceof Set) || c.toolAllow.has('message_actor');
     const actorsOn = typeof c.messageActor === 'function' && !!c.scriptRuns && !!sid
-      && sessionKind !== 'spawned' && sessionKind !== 'actor'
+      && sessionKind !== 'actor'
+      && messageActorAllowed
       && !inbound
       && /\bactors\b/.test(args.code);
     // The durable workspace is a CHAT-SESSION surface: a spawned/actor child's
@@ -173,29 +176,36 @@ export const scriptTool = {
     /** @type {(() => void) | undefined} */
     let onAbort;
     try {
-      /** @type {{ timeoutMs: number, toolbox: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, caps?: { provider?: boolean } }} */
+      /** @type {{ timeoutMs: number, toolbox: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, caps?: { provider?: boolean, subagent?: boolean }, signal?: AbortSignal }} */
       // toolbox: the script lane resolves peerd:toolbox modules (design 06) —
       // a trusted job param, not a worker choice; the other headless lanes
       // (a2a/site-client/page_code) never set it.
-      const opts = { timeoutMs, toolbox: true };
+      // `script` is compute/orchestration, never a hidden second actor_create.
+      // The default worker also supports embedded artifacts that call
+      // peerd.runtime.runAgent, but here that would bypass the session manifest
+      // and the caller's narrowed grant. Explicit actor_create remains the only
+      // subtask authority; Notebook/App runtimes keep their separate profile.
+      const opts = { timeoutMs, toolbox: true, caps: { subagent: false }, signal: c.abortSignal };
       // The durable workspace mount — the SESSION id rides as a TRUSTED job
       // param (invariant: the worker never names its own root; the SW-side tool
       // is the only place the owning session is resolved).
       if (workspaceOn) opts.workspaceSessionId = sid;
-      if ((actorsOn || workspaceOn || providerOn) && c.scriptRuns) {
+      if (sid && c.scriptRuns) {
         runId = c.scriptRuns.mintRunId(sid);
         // Stop plumbing: register the run under the dispatch abort signal so a
         // Stop (a) aborts every pending actors.ask AND in-flight sub-model
         // fetches (both race the run's signal SW-side) and (b) terminates the
-        // worker instead of letting it run to its cap. Workspace runs register
-        // too, actors or not: their writes are DURABLE, so a zombie run
-        // outliving Stop would keep mutating an archived session's workspace —
-        // runId forwards on any lane (#153). The owner binds the runId to this
-        // session for the script/model-call relay's check.
-        c.scriptRuns.register(runId, c.abortSignal, sid);
+        // worker instead of letting compute, egress, or workspace writes run to
+        // their cap. Every session-owned lane registers; the capability flags
+        // still decide what its run id may redeem at a relay. The owner binds
+        // the runId to this session for those checks.
+        c.scriptRuns.register(runId, c.abortSignal, sid, {
+          actors: actorsOn,
+          provider: providerOn,
+        });
         if (c.abortSignal && jsOffscreenClient.abortHeadless) {
           const rid = runId;
-          onAbort = () => { jsOffscreenClient.abortHeadless?.(rid); };
+          onAbort = () => { jsOffscreenClient.abortHeadless?.(rid, sid); };
           if (c.abortSignal.aborted) onAbort();
           else c.abortSignal.addEventListener('abort', onAbort, { once: true });
         }
@@ -206,7 +216,10 @@ export const scriptTool = {
         // ownerSessionId binds the run to this session for the SW
         // script/model-call route's owner check (set here for a providerOn run
         // that isn't also an actors run, which already set it above).
-        if (providerOn) Object.assign(opts, { ownerSessionId: sid, caps: { provider: true } });
+        if (providerOn) Object.assign(opts, {
+          ownerSessionId: sid,
+          caps: { ...(opts.caps ?? {}), provider: true },
+        });
       }
       const result = await jsOffscreenClient.execHeadless(args.code, opts);
       // Value spill (run cache): when the serialized [VALUE] overflows its cap,

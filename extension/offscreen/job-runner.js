@@ -27,7 +27,7 @@
 
 import { opfsHelpers, buildModule, makeFetchRemote, TOOLBOX_SPECIFIER_PREFIX } from '/peerd-engine/index.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/engine-tabs/notebook-tab/worker-source.js';
-import { ACTORS_BRIDGE_GUARD_MS, MAX_FILE_CONTENT_CHARS } from '/peerd-runtime/index.js';
+import { ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS, MAX_FILE_CONTENT_CHARS } from '/peerd-runtime/index.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 
 // The workspace's total-size SOFT budget: over it the run still executes but
@@ -40,8 +40,8 @@ const WORKSPACE_BUDGET_BYTES = 200 * 1024 * 1024;
 let jobSeq = 0;
 
 // Live jobs by the SW-minted runId, so a Stop can TERMINATE the worker instead
-// of letting an abandoned script run to its wall-clock. Registered only for
-// runs that carry a runId (the actors-enabled script path mints one).
+// of letting an abandoned script run to its wall-clock. Every session-owned
+// `script` invocation carries one; other headless lanes may omit it.
 /** @type {Map<string, { kill: () => void, owner?: string }>} */
 const liveJobs = new Map();
 // An abort that arrives BEFORE the job registers (Stop racing job startup —
@@ -347,6 +347,13 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, s
           }
           usedActors = true;   // actor replies are untrusted content → fence the run's output
           const seq = ++actorsSeq;
+          if (seq > ACTORS_RUN_MAX_OPS) {
+            worker.postMessage({
+              type: 'actors-response', rid: m.rid,
+              error: 'actors: this script run reached its delegation-operation limit',
+            });
+            return;
+          }
           const goalRaw = m?.args?.goal;
           /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }} */
           const entry = {
@@ -358,6 +365,7 @@ const _runJob = async ({ code, timeoutMs = 30000, a2a = false, actors = false, s
             // reports this op as IN FLIGHT, never as an instant failure.
             ok: false, ms: 0, settled: false,
           };
+          if (actorsTrace.length >= ACTORS_RUN_MAX_OPS) actorsTrace.shift();
           actorsTrace.push(entry);
           const t0 = performance.now();
           try {

@@ -337,9 +337,8 @@ export const makeActorMessaging = (deps) => {
     // `synthetic` alone can't carry this — it also marks truncation/resume
     // nudges, which must stay hidden. name is sanitized the same way replyText's
     // lead is (it renders un-fenced in the bubble's attribution line). `via`
-    // marks a delegation a SCRIPT fired (actors.send): its reply can land
-    // minutes later mid-unrelated-conversation, and an unattributed bubble
-    // would be unexplainable to a user who never saw the fan-out.
+    // attributes a mediated delegation if a future async code surface routes
+    // its reply here; without that, a late bubble would be unexplainable.
     const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
     const actorReply = { kind, instanceId, ...(safeName ? { name: safeName } : {}), failed, ...(via ? { via } : {}) };
     turnSlots.runWhenIdle(senderSessionId, () => {

@@ -14,9 +14,10 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string }} [opts]
+   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, signal?: AbortSignal }} [opts]
    *   a2a: expose the `mesh` agent-to-agent client; actors: expose the `actors`
-   *   delegation client (the script surface). caps: capability profile for the
+   *   delegation client (the script surface for chat or a granted spawned actor).
+   *   caps: capability profile for the
    *   sealed worker (default = the historical js_run surface); caps.page also
    *   needs ownerSessionId — the actor session the page bridge dispatches FOR,
    *   set only from a trusted ctx (PR #119). ownerSessionId / ownerToolUseId /
@@ -28,8 +29,14 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
    *   worker can never name its own root).
    * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
    */
-  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, toolbox, workspaceSessionId } = {}) => {
+  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, toolbox, workspaceSessionId, signal } = {}) => {
     await ensureOffscreen();
+    // why: Stop may arrive while the offscreen document is still being
+    // created. In that window job/abort has nowhere to leave its early-abort
+    // tombstone, so launching after ensureOffscreen would orphan the worker
+    // until its wall-clock. The signal is local-only (never cloned into the
+    // message); there is no await between this check and dispatch.
+    if (signal?.aborted) throw new Error('headless job aborted before dispatch');
     const reply = await sendMessage({
       type: 'job/run', code, timeoutMs,
       ...(a2a ? { a2a: true, ownerSessionId } : {}),

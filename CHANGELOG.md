@@ -10,6 +10,17 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Changed
+- **Trusted spawned actors can orchestrate delegations in JavaScript.** When a
+  spawned actor is explicitly granted both `script` and `message_actor`, its
+  code can fan out, chain replies, and handle retries through the `actors`
+  client's awaited `ask` plus roster-only `list` surface. The earlier
+  `actors.send` code method is retired pending a genuine no-reply `cast`
+  design; the direct `message_actor` tool remains the asynchronous path.
+  Every delegation still crosses the original lineage, grant, manifest, rate,
+  audit, fencing, and Stop gates; bound environment actors remain pinned and
+  non-delegating.
+
 ## [0.5.0] - 2026-08-06
 
 ### Added
