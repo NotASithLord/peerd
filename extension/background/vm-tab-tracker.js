@@ -21,14 +21,18 @@ const READY_TIMEOUT_MS = 30_000;
  * @param {import('webextension-polyfill').Tabs.Static} [deps.tabs]
  *   Injected tabs API; defaults to the real browser.tabs.
  * @param {import('./tab-tracker.js').TabTrackerConfig['announce']} [deps.announce]
+ * @param {import('./tab-tracker.js').TabTrackerConfig['onAdopt']} [deps.onAdopt]
+ * @param {import('./tab-tracker.js').TabTrackerConfig['onDrop']} [deps.onDrop]
  */
-export const createVmTabTracker = ({ tabs, announce } = {}) => {
+export const createVmTabTracker = ({ tabs, announce, onAdopt, onDrop } = {}) => {
   const tracker = createTabTracker({
     tabPath: VM_TAB_PATH,
     readyTimeoutMs: READY_TIMEOUT_MS,
     closedError: (vmId) => new VMTabClosedError(vmId),
     notReadyMessage: (vmId) => `vm tab ${vmId} did not become ready in ${READY_TIMEOUT_MS}ms`,
     announce,
+    onAdopt,
+    onDrop,
     kindLabel: 'a Linux VM',
     ...(tabs ? { tabs } : {}),
   });

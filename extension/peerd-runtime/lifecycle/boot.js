@@ -51,6 +51,31 @@ export const makeLifecycleBoot = ({
   const operationLog = createOperationLog({ storage, now });
 
   /**
+   * Park one notice for a session's next turn (+ the immediate user note).
+   * Routed through resolveNoticeSession; fail-safe normalization on a
+   * corrupted pending store (a torn write can leave a primitive here —
+   * treat it as empty and repair by overwrite). Used by init() for
+   * reconcile notifications and by the shell for engine-orphan reaps.
+   *
+   * @param {string} operationSessionId
+   * @param {{ recoveryRecord: Record<string, unknown>, user: string }} notice
+   */
+  const parkNotice = async (operationSessionId, { recoveryRecord, user }) => {
+    const sessionId = await Promise.resolve(
+      resolveNoticeSession?.(operationSessionId) ?? operationSessionId,
+    ).catch(() => operationSessionId) || operationSessionId;
+    const raw = await storage.get(PENDING_NOTICES_KEY).catch(() => null);
+    const pending = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? /** @type {Record<string, unknown[]>} */ (raw)
+      : {};
+    const list = Array.isArray(pending[sessionId]) ? pending[sessionId] : [];
+    list.push({ recoveryRecord, user, at: now() });
+    pending[sessionId] = list.slice(-MAX_NOTICES_PER_SESSION);
+    await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
+    try { notify?.(sessionId, user); } catch { /* panel gone */ }
+  };
+
+  /**
    * Run the §5.3 startup sequence. Idempotent per SW start; a repeated call
    * mints a fresh generation and finds nothing left to settle.
    */
@@ -85,30 +110,17 @@ export const makeLifecycleBoot = ({
     // turn drains into the agent's context; notify() is the immediate
     // user-facing surface (a chat note) — best-effort, the durable copy is
     // the one that matters.
-    if (plan.notifications.length > 0) {
-      const pending = (await storage.get(PENDING_NOTICES_KEY).catch(() => null)) ?? {};
-      for (const notification of plan.notifications) {
-        const { recoveryRecord } = notification;
-        // Route to the session that will actually take a next turn. A
-        // failed resolution falls back to the operation's own session —
-        // a possibly-undrained notice beats a lost one.
-        const sessionId = await Promise.resolve(
-          resolveNoticeSession?.(notification.sessionId) ?? notification.sessionId,
-        ).catch(() => notification.sessionId) || notification.sessionId;
-        const transition = plan.transitions.find(
-          (t) => t.operationId === recoveryRecord.operationId);
-        const verdict = transition?.verdict;
-        const user = verdict
-          && (verdict.state === OPERATION_STATES.INTERRUPTED
-            || verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN)
-          ? describeRecovery(verdict, { toolName: recoveryRecord.operation }).user
-          : `${recoveryRecord.operation} was settled as ${recoveryRecord.recoveryState} after an interruption.`;
-        const list = Array.isArray(pending[sessionId]) ? pending[sessionId] : [];
-        list.push({ recoveryRecord, user, at: now() });
-        pending[sessionId] = list.slice(-MAX_NOTICES_PER_SESSION);
-        try { notify?.(sessionId, user); } catch { /* panel gone */ }
-      }
-      await storage.set(PENDING_NOTICES_KEY, pending).catch(() => {});
+    for (const notification of plan.notifications) {
+      const { recoveryRecord } = notification;
+      const transition = plan.transitions.find(
+        (t) => t.operationId === recoveryRecord.operationId);
+      const verdict = transition?.verdict;
+      const user = verdict
+        && (verdict.state === OPERATION_STATES.INTERRUPTED
+          || verdict.state === OPERATION_STATES.OUTCOME_UNKNOWN)
+        ? describeRecovery(verdict, { toolName: recoveryRecord.operation }).user
+        : `${recoveryRecord.operation} was settled as ${recoveryRecord.recoveryState} after an interruption.`;
+      await parkNotice(notification.sessionId, { recoveryRecord, user });
     }
 
     return { generation, plan };
@@ -139,5 +151,5 @@ export const makeLifecycleBoot = ({
       + 'the external state first.\n</interruption-recovery>';
   };
 
-  return { operationLog, init, drainNoticesFor };
+  return { operationLog, init, drainNoticesFor, parkNotice };
 };

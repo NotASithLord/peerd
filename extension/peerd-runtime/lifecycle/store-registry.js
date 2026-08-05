@@ -52,6 +52,14 @@ export const DURABILITY_TIERS = Object.freeze({
  * @property {DurabilityTier} tier   §12 durability tier
  * @property {boolean} portable      may this surface cross installs?
  * @property {boolean} [deviceBound] structurally untransferable state
+ * @property {{ kvKeys?: string[], kvPrefixes?: string[], idbStores?: string[],
+ *   selfHosted?: string[] }} [physical]
+ *   where the surface's bytes actually live — the write guard
+ *   (write-guard.js) maps a read-only verdict onto these locations.
+ *   kvKeys/kvPrefixes: chrome.storage.local via the egress kv adapter;
+ *   idbStores: object stores in the `peerd` IndexedDB; selfHosted: whole
+ *   DATABASES a module opens itself, which the guard cannot reach through
+ *   the injected adapters (documented enforcement gap).
  */
 
 /**
@@ -71,31 +79,80 @@ export const DURABILITY_TIERS = Object.freeze({
 export const STORE_REGISTRY = Object.freeze([
   // Conversation state: durable across service-worker generations, but
   // its meaning dies with the session it belongs to.
-  Object.freeze({ store: 'sessions', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false }),
+  Object.freeze({
+    store: 'sessions', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false,
+    physical: Object.freeze({ idbStores: ['sessions', 'session_messages'] }),
+  }),
   // The encrypted blob travels; the DK does not (transfer re-encrypts the
   // plaintext secrets under a passphrase the user types at export time).
-  Object.freeze({ store: 'vault', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: true }),
-  Object.freeze({ store: 'memory', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true }),
-  // Skill METADATA travels; bodies reinstall from their origin.
-  Object.freeze({ store: 'skills', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true }),
-  Object.freeze({ store: 'hooks', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true }),
+  // The session DK mirror lives in chrome.storage.session — session-tier
+  // by definition, outside the guard's remit.
+  Object.freeze({
+    store: 'vault', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: true,
+    physical: Object.freeze({ idbStores: ['vault'], kvKeys: ['vault.v1'], kvPrefixes: ['secret:'] }),
+  }),
+  Object.freeze({
+    store: 'memory', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true,
+    physical: Object.freeze({ idbStores: ['agents_memory'], kvKeys: ['memory_suggestions.v1'] }),
+  }),
+  // Skill METADATA travels; bodies reinstall from their origin. The store
+  // opens its OWN database (peerd-skills) — unreachable through the
+  // injected adapters, so read-only enforcement is a per-module follow-up.
+  Object.freeze({
+    store: 'skills', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true,
+    physical: Object.freeze({ selfHosted: ['peerd-skills'] }),
+  }),
+  Object.freeze({
+    store: 'hooks', version: 1, tier: DURABILITY_TIERS.PORTABLE, portable: true,
+    physical: Object.freeze({ kvKeys: ['hooks.user.v1'] }),
+  }),
   // Consent is granted to THIS install by THIS user; a transplanted grant
-  // would be consent nobody gave here, so it never travels.
-  Object.freeze({ store: 'permission-grants', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false }),
+  // would be consent nobody gave here, so it never travels. (The durable
+  // tool_grants object store exists in the schema but nothing writes it
+  // yet — live grants are in-memory; the entry is the reserved seat.)
+  Object.freeze({
+    store: 'permission-grants', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    physical: Object.freeze({ idbStores: ['tool_grants'], kvKeys: ['learnedOrigins.v1'] }),
+  }),
   // Append-only local record; importing one elsewhere would misattribute
   // history to a device that never did it.
-  Object.freeze({ store: 'audit', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false }),
+  Object.freeze({
+    store: 'audit', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    physical: Object.freeze({ idbStores: ['audit_log', 'audit_meta'] }),
+  }),
   // Rung 2 of the credential ladder: non-extractable keypair HANDLES. Not
   // "policy says no" — the platform cannot export the key material at all.
-  Object.freeze({ store: 'dpop-keys', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true }),
+  Object.freeze({
+    store: 'dpop-keys', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
+    physical: Object.freeze({ idbStores: ['dpop_keys'] }),
+  }),
   // Live instance bookkeeping (tab ids, engine handles) — valid only for
-  // the browser session that minted it.
-  Object.freeze({ store: 'engine-registries', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false, deviceBound: true }),
+  // the browser session that minted it. NOTE: the `apps` blob is shared
+  // with app-manifests below — the two surfaces version independently but
+  // physically co-locate, so blocking either blocks the shared blob.
+  Object.freeze({
+    store: 'engine-registries', version: 1, tier: DURABILITY_TIERS.SESSION, portable: false, deviceBound: true,
+    physical: Object.freeze({ idbStores: ['vms', 'notebooks', 'apps'] }),
+  }),
   // Workspace METADATA outlives sessions, but it points at OPFS roots that
-  // exist only in this browser profile's origin storage.
-  Object.freeze({ store: 'opfs-workspaces', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true }),
-  Object.freeze({ store: 'app-manifests', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false }),
-  Object.freeze({ store: 'dweb-identity', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false }),
+  // exist only in this browser profile's origin storage. The bytes
+  // themselves are OPFS — outside both adapters.
+  Object.freeze({
+    store: 'opfs-workspaces', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false, deviceBound: true,
+    physical: Object.freeze({ selfHosted: ['opfs'] }),
+  }),
+  // Manifest metadata shares the `apps` blob (see engine-registries); the
+  // HTML bodies live in the self-opened peerd-app-bodies database.
+  Object.freeze({
+    store: 'app-manifests', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    physical: Object.freeze({ idbStores: ['apps'], selfHosted: ['peerd-app-bodies'] }),
+  }),
+  // The did:key keypair is a vault secret — physically under the vault's
+  // secret: prefix, encrypted under the DK.
+  Object.freeze({
+    store: 'dweb-identity', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    physical: Object.freeze({ kvKeys: ['secret:distributed/identity/v1', 'dweb.seededApps'] }),
+  }),
 ]);
 
 /**

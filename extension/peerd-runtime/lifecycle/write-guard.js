@@ -1,0 +1,137 @@
+// @ts-check
+// The store write guard — §11.5's "refuse to mutate" made universal.
+//
+// checkStores can mark a durable surface read-only (a NEWER schema stamp
+// than this build supports). Detection alone is a log line; this module is
+// the enforcement: the SW wraps its kv and idb adapters through the guard
+// ONCE at construction, and every store built on those adapters — sessions,
+// vault, memory, hooks, audit, dpop, engine registries — inherits the
+// refusal with zero per-store wiring. The blocked set starts empty (all
+// writes allowed) and is filled from the §11.1 check at boot; reads always
+// pass (read-only means READABLE).
+//
+// Physical mapping lives on STORE_REGISTRY entries (store-registry.js
+// `physical`): registry store name → kv keys/prefixes + idb object stores.
+// Two surfaces open their OWN IndexedDB databases and cannot be guarded
+// through the injected adapters — skills (peerd-skills) and App bodies
+// (peerd-app-bodies); the registry marks them selfHosted and their
+// enforcement rides those modules (documented gap, THREAT-MODEL follow-up).
+//
+// Pure factory; the wrappers close over the mutable blocked set.
+
+import { STORE_REGISTRY } from './store-registry.js';
+
+export class StoreReadOnlyError extends Error {
+  /** @param {string} store @param {string} target */
+  constructor(store, target) {
+    super(`store '${store}' is read-only (newer schema than this peerd supports); `
+      + `refusing write to ${target}. Upgrade peerd or restore a compatible backup — no data was changed.`);
+    this.name = 'StoreReadOnlyError';
+    this.store = store;
+  }
+}
+
+export const makeWriteGuard = () => {
+  /** @type {Map<string, string>} kv exact key → store */
+  const blockedKvKeys = new Map();
+  /** @type {Array<[string, string]>} kv key prefix → store */
+  let blockedKvPrefixes = [];
+  /** @type {Map<string, string>} idb object store → store */
+  const blockedIdbStores = new Map();
+
+  /**
+   * Block the named registry stores. Unknown names are ignored (the check
+   * that produced them is the authority); calling again is additive.
+   * @param {string[]} storeNames
+   */
+  const block = (storeNames) => {
+    for (const name of Array.isArray(storeNames) ? storeNames : []) {
+      const entry = STORE_REGISTRY.find((s) => s.store === name);
+      const physical = /** @type {{ kvKeys?: string[], kvPrefixes?: string[],
+        idbStores?: string[] } | undefined} */ (
+        /** @type {any} */ (entry)?.physical);
+      if (!physical) continue;
+      for (const key of physical.kvKeys ?? []) blockedKvKeys.set(key, name);
+      blockedKvPrefixes = blockedKvPrefixes.concat(
+        (physical.kvPrefixes ?? []).map((p) => /** @type {[string, string]} */ ([p, name])));
+      for (const os of physical.idbStores ?? []) blockedIdbStores.set(os, name);
+    }
+  };
+
+  /** @param {string} key @returns {string | undefined} blocking store name */
+  const kvBlockedBy = (key) => {
+    const exact = blockedKvKeys.get(key);
+    if (exact) return exact;
+    const prefix = blockedKvPrefixes.find(([p]) => key.startsWith(p));
+    return prefix?.[1];
+  };
+
+  /**
+   * Wrap the chrome.storage.local kv adapter. set/delete refuse for blocked
+   * targets; get/list/clear pass through (clear is the user's own explicit
+   * reset surface, not a store mutation this guard arbitrates).
+   * @template {{ set: Function, delete?: Function }} KV
+   * @param {KV} kv @returns {KV}
+   */
+  const wrapKv = (kv) => /** @type {KV} */ ({
+    ...kv,
+    set: (/** @type {string} */ key, /** @type {unknown} */ value) => {
+      const store = kvBlockedBy(key);
+      if (store) throw new StoreReadOnlyError(store, `kv:${key}`);
+      return kv.set(key, value);
+    },
+    ...(typeof kv.delete === 'function' ? {
+      delete: (/** @type {string} */ key) => {
+        const store = kvBlockedBy(key);
+        if (store) throw new StoreReadOnlyError(store, `kv:${key}`);
+        return /** @type {Function} */ (kv.delete)(key);
+      },
+    } : {}),
+  });
+
+  // The idb namespace's write verbs, all (storeName, ...) shaped.
+  const IDB_WRITE_VERBS = Object.freeze(['put', 'del', 'clear', 'delUpTo', 'write']);
+
+  /**
+   * Wrap the idb module namespace (or any object exposing the same
+   * (store, ...) verbs). Write verbs refuse for blocked object stores.
+   * @template {Record<string, any>} IDB
+   * @param {IDB} idb @returns {IDB}
+   */
+  const wrapIdb = (idb) => {
+    /** @type {Record<string, any>} */
+    const wrapped = { ...idb };
+    for (const verb of IDB_WRITE_VERBS) {
+      const original = idb[verb];
+      if (typeof original !== 'function') continue;
+      wrapped[verb] = (/** @type {string} */ objectStore, /** @type {any[]} */ ...rest) => {
+        const store = blockedIdbStores.get(objectStore);
+        if (store) throw new StoreReadOnlyError(store, `idb:${objectStore}`);
+        return original(objectStore, ...rest);
+      };
+    }
+    return /** @type {IDB} */ (wrapped);
+  };
+
+  /**
+   * Wrap an idbKV single-blob adapter for a given object store.
+   * @param {string} objectStore
+   * @param {{ get: (key: string) => Promise<any>, set: (key: string, value: any) => Promise<void> }} adapter
+   */
+  const wrapIdbKvAdapter = (objectStore, adapter) => ({
+    ...adapter,
+    set: (/** @type {string} */ key, /** @type {unknown} */ value) => {
+      const store = blockedIdbStores.get(objectStore);
+      if (store) throw new StoreReadOnlyError(store, `idb:${objectStore}/${key}`);
+      return adapter.set(key, value);
+    },
+  });
+
+  const blockedStores = () => [...new Set([
+    ...blockedKvKeys.values(),
+    ...blockedKvPrefixes.map(([, s]) => s),
+    ...blockedIdbStores.values(),
+  ])];
+
+  return { block, wrapKv, wrapIdb, wrapIdbKvAdapter, blockedStores };
+};

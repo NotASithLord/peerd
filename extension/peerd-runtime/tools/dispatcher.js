@@ -462,6 +462,9 @@ export const dispatchToolCall = async (call, ctx) => {
       recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
         ok: result?.ok !== false,
         error: result?.ok === false ? String(result.error ?? '') : undefined,
+        // A typed failure outcome a tool stamped on its result — the
+        // deterministic path (lifecycle/failure-taxonomy.js).
+        outcomeKind: /** @type {{ outcomeKind?: any }} */ (result)?.outcomeKind,
       }).catch(() => null);
     }
     // A rewrite replaces the failure shape wholesale (it only ever fires on
@@ -520,6 +523,9 @@ export const dispatchToolCall = async (call, ctx) => {
         ok: false,
         error: message,
         aborted: /** @type {{ name?: string }} */ (e)?.name === 'AbortError',
+        // A typed outcome stamped on the thrown error (survives relay
+        // boundaries as a plain field — see lifecycle/failure-taxonomy.js).
+        outcomeKind: /** @type {{ outcomeKind?: any }} */ (e)?.outcomeKind,
       }).catch(() => null);
     }
     return {

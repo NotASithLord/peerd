@@ -124,7 +124,10 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // Merge with main (#309 dpop nonces): this branch's lifecycle files put the
 // floor at 614; main adds peerd-egress/dpop/nonce.js. Computed on the MERGED
 // tree, not summed — the same shape as the 579 merge above.
-const COVERED_FLOOR = 615;
+// 615 → 618: the lifecycle hardening batch — failure-taxonomy.js (typed
+// outcomes), write-guard.js (§11.5 enforcement), engine-liveness.js (§9
+// ledger); all carry // @ts-check.
+const COVERED_FLOOR = 618;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

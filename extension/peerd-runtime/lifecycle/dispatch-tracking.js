@@ -29,6 +29,7 @@ import { OPERATION_STATES, canTransition } from './operation-state.js';
 import { RETRY_CLASSES, decideRecovery, normalizeRetryClass } from './retry-class.js';
 import { describeRecovery } from './recovery-report.js';
 import { OperationExistsError } from './operation-log.js';
+import { FAILURE_OUTCOMES } from './failure-taxonomy.js';
 
 // Error shapes that mean "the wire died with the request possibly delivered"
 // — the ambiguous bucket. Kept alongside the classifier kind 'timeout'
@@ -65,6 +66,61 @@ const isAmbiguousLoss = (error, kind) =>
  * @typedef {{ refuse: { error: string, recovery: ReturnType<typeof describeRecovery>['agent'] } }
  *   | { handle: TrackingHandle } | null} BeginOutcome
  */
+
+/**
+ * The fail-closed refusal for a Class D/E dispatch whose tracking cannot
+ * start; A/B/C degrade to untracked (null). Shared by the live tracker's
+ * storage-failure path and makeFailClosedTracker below.
+ *
+ * @param {import('./retry-class.js').RetryClass} retryClass
+ * @param {string | undefined} toolName
+ * @param {string} reason
+ * @returns {BeginOutcome}
+ */
+const refuseUntracked = (retryClass, toolName, reason) => {
+  if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
+      && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) {
+    return null;
+  }
+  return {
+    refuse: {
+      error: `failed: ${toolName ?? 'this action'} was NOT executed — lifecycle `
+        + `tracking is unavailable (${reason}) and a non-idempotent action must `
+        + 'not run untracked: an interruption could then never be reported or '
+        + 'guarded against. Retry once storage recovers, or run a read-only '
+        + 'alternative.',
+      recovery: {
+        category: 'security_degradation',
+        state: OPERATION_STATES.FAILED,
+        autoRetry: false,
+        retryRequires: ['lifecycle-storage'],
+        verificationRequired: false,
+        keepIdempotencyKey: false,
+        reason: `tracking unavailable: ${reason}`,
+      },
+    },
+  };
+};
+
+/**
+ * The tracker the shell arms when lifecycle BOOT itself failed: Class D/E
+ * dispatches are refused (fail closed — same rationale as a mid-flight
+ * storage failure), everything else runs untracked as it did before the
+ * lifecycle landed. settleTracking is a no-op (nothing was recorded).
+ *
+ * @param {Object} input
+ * @param {string} input.reason
+ * @param {(tool: { name?: string, sideEffect?: string, primitive?: string,
+ *   retryClass?: unknown }) => import('./retry-class.js').RetryClass} input.retryClassFor
+ */
+export const makeFailClosedTracker = ({ reason, retryClassFor }) => ({
+  /** @param {{ tool: { name?: string, sideEffect?: string, primitive?: string,
+   *   retryClass?: unknown } }} input
+   *  @returns {Promise<BeginOutcome>} */
+  beginTracking: async ({ tool }) =>
+    refuseUntracked(normalizeRetryClass(retryClassFor(tool)), tool?.name, reason),
+  settleTracking: async () => null,
+});
 
 /**
  * @param {Object} deps
@@ -254,23 +310,28 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
         generationId: generationId(),
         ...(target ? { target } : {}),
       });
+      await operationLog.transition(operationId, OPERATION_STATES.RUNNING);
+      // Dispatched is stamped BEFORE execute(): once execute starts, an
+      // effect may leave peerd at any instant, and the record must already
+      // say so if the SW dies mid-flight.
+      await operationLog.markDispatched(operationId);
     } catch (error) {
       if (error instanceof OperationExistsError) {
         const record = await operationLog.get(operationId);
         if (record) return resumeExisting(record, retryClass);
       }
-      // Tracking must never make a healthy dispatch impossible: a broken
-      // storage layer degrades to untracked execution (and the audit trail
-      // shows the begin failure via the thrown error's absence), not a
-      // hard-down tool surface. The CONTRACT-critical direction — refusing
-      // replays — only needs begin() to fail on DUPLICATES, which it did not.
-      return null;
+      // Tracking storage is DOWN (or died mid-sequence). Two postures:
+      //   A/B/C — degrade to untracked execution: duplicates are invisible
+      //   or idempotent, so losing the record loses nothing the contract
+      //   protects, and a broken log must not brick the read/write surface.
+      //   D/E — REFUSE. An untracked non-idempotent effect is one whose
+      //   outcome could never be recovered: no record means a later
+      //   interruption silently violates guarantee 1 (uncertainty would be
+      //   unreportable) and guarantee 2 (nothing would stop the replay).
+      //   The action is NOT run; that is the §14 security-degradation case.
+      return refuseUntracked(retryClass, tool.name,
+        `operation log unavailable (${error instanceof Error ? error.message : String(error)})`);
     }
-    await operationLog.transition(operationId, OPERATION_STATES.RUNNING);
-    // Dispatched is stamped BEFORE execute(): once execute starts, an
-    // effect may leave peerd at any instant, and the record must already
-    // say so if the SW dies mid-flight.
-    await operationLog.markDispatched(operationId);
     return { handle: { operationId, retryClass, toolName: tool.name ?? 'unknown-tool' } };
   };
 
@@ -279,40 +340,58 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    * change) or a semantic rewrite the dispatcher applies to the result.
    *
    * @param {TrackingHandle} handle
-   * @param {{ ok: boolean, error?: string, aborted?: boolean, resultDigest?: string }} outcome
+   * @param {{ ok: boolean, error?: string, aborted?: boolean, resultDigest?: string,
+   *   outcomeKind?: import('./failure-taxonomy.js').FailureOutcomeKind }} outcome
    * @returns {Promise<{ error: string, recovery: ReturnType<typeof describeRecovery>['agent'] } | null>}
    */
   const settleTracking = async (handle, outcome) => {
     const { operationId, retryClass } = handle;
+    // Persistence failures are isolated per-branch below, NEVER allowed to
+    // swallow the semantic report: if the settle write dies, the durable
+    // record stays awaiting_remote and the next boot reconciles it to
+    // outcome_unknown (a truthful uncertainty) — but the AGENT must still
+    // hear the semantic state NOW, or it reads a raw timeout as a definite
+    // failure and re-issues the non-idempotent action under a fresh call
+    // id the replay guard cannot key on.
+    if (outcome.ok) {
+      // A lost success-settle only costs a false uncertainty at the next
+      // boot — never a false claim — so success stays reported as success.
+      await operationLog.transition(operationId, OPERATION_STATES.COMPLETED, {
+        evidence: { kind: 'success-response' },
+        ...(outcome.resultDigest ? { resultDigest: outcome.resultDigest } : {}),
+      }).catch(() => {});
+      return null;
+    }
+
+    const kind = failureKind(outcome.error);
+    const cancelRequested = outcome.aborted === true || kind === 'aborted';
+    // A TYPED outcome stamped at the throw site outranks every string
+    // heuristic (failure-taxonomy.js): pre-effect-failure is definitive,
+    // transport/host loss is ambiguous, full stop. Unstamped failures
+    // fall back to the regex + taxonomy guesswork below.
+    const ambiguous = outcome.outcomeKind
+      ? outcome.outcomeKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE
+      : isAmbiguousLoss(outcome.error, kind);
+
+    if (!ambiguous && !cancelRequested) {
+      // A definitive error response — the target refused before the
+      // effect. Honest `failed`.
+      await operationLog.transition(operationId, OPERATION_STATES.FAILED, {
+        evidence: { kind: 'error-response-before-effect' },
+      }).catch(() => {});
+      return null;
+    }
+
+    const verdict = decideRecovery({ retryClass, dispatched: true, cancelRequested });
     try {
-      if (outcome.ok) {
-        await operationLog.transition(operationId, OPERATION_STATES.COMPLETED, {
-          evidence: { kind: 'success-response' },
-          ...(outcome.resultDigest ? { resultDigest: outcome.resultDigest } : {}),
-        });
-        return null;
-      }
-
-      const kind = failureKind(outcome.error);
-      const cancelRequested = outcome.aborted === true || kind === 'aborted';
-      const ambiguous = isAmbiguousLoss(outcome.error, kind);
-
-      if (!ambiguous && !cancelRequested) {
-        // A definitive error response — the target refused before the
-        // effect. Honest `failed`.
-        await operationLog.transition(operationId, OPERATION_STATES.FAILED, {
-          evidence: { kind: 'error-response-before-effect' },
-        });
-        return null;
-      }
-
-      const verdict = decideRecovery({ retryClass, dispatched: true, cancelRequested });
       const record = await operationLog.get(operationId);
       if (record && canTransition(record.state, verdict.state)) {
         await operationLog.transition(operationId, verdict.state);
       } else if (record) {
         await operationLog.settle(operationId, verdict);
       }
+    } catch { /* durable copy deferred to the next boot's reconcile */ }
+    try {
       if (verdict.state === OPERATION_STATES.CANCELLED) {
         // A clean cancel is settled, not a recovery case — describeRecovery
         // deliberately refuses settled verdicts, and the abort surface
@@ -335,7 +414,8 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
         recovery: report.agent,
       };
     } catch {
-      // Settling must never mask the tool's own outcome.
+      // Report building itself failed (should be unreachable) — fall back
+      // to the tool's own outcome rather than masking it with a throw.
       return null;
     }
   };

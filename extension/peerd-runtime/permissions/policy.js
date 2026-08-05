@@ -284,12 +284,23 @@ export const normalizeConfirmActions = (v) => v !== false;
 /**
  * Read the effective confirmActions off a stored record (session record,
  * sessionCache snapshot). An explicit `confirmActions` boolean wins;
- * otherwise undefined, so callers can fall through their resolution chain.
+ * otherwise a LEGACY `actTier` (the pre-collapse Codex tiers, DECISIONS
+ * §18: "read forever, a migration must never widen authority") maps
+ * conservatively — 'full-auto' was the only tier that ran unconfirmed, so
+ * only it maps to OFF; 'suggest'/'auto-edit' (and any unknown tier value)
+ * map to ON. Otherwise undefined, so callers fall through their chain.
  *
- * @param {{ confirmActions?: unknown } | null | undefined} record
+ * why this matters for recovery: the SW's fallthrough lands on
+ * confirm-OFF, so dropping the tier's meaning silently widened an old
+ * profile's authority — the historical-fixture suite caught it.
+ *
+ * @param {{ confirmActions?: unknown, actTier?: unknown } | null | undefined} record
  * @returns {boolean | undefined}
  */
 export const confirmActionsFromRecord = (record) => {
   const v = record?.confirmActions;
-  return v === true || v === false ? v : undefined;
+  if (v === true || v === false) return v;
+  const tier = record?.actTier;
+  if (typeof tier === 'string' && tier) return tier !== 'full-auto';
+  return undefined;
 };

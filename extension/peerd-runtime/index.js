@@ -462,10 +462,22 @@ export {
   storeEntry, portableStores, omittedDeviceBoundStores,
   checkStores, stampStores,
 } from './lifecycle/store-registry.js';
+// §11.5 enforced: the SW wraps its kv/idb adapters through the guard once
+// and a read-only verdict refuses writes at the shared chokepoint.
+export { makeWriteGuard, StoreReadOnlyError } from './lifecycle/write-guard.js';
+// §9: the durable engine-liveness ledger the tab trackers feed and the
+// boot sweep reaps orphans from.
+export { makeEngineLiveness, ENGINE_LIVENESS_KEY } from './lifecycle/engine-liveness.js';
 // The wiring shells: dispatch tracking (the dispatcher consumes it via
 // ctx.lifecycle) and the SW boot sequence (generation + reconcile +
 // notices).
-export { makeDispatchTracker } from './lifecycle/dispatch-tracking.js';
+export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';
+// Typed failure outcomes — throw sites stamp outcomeKind so recovery is a
+// table lookup, not a regex (adoption is incremental; see the module).
+export {
+  FAILURE_OUTCOMES, isFailureOutcomeKind, outcomeKindOf,
+  TransportLostError, ExecutionHostLostError, PreEffectFailureError,
+} from './lifecycle/failure-taxonomy.js';
 export {
   makeLifecycleBoot, GENERATION_KEY, PENDING_NOTICES_KEY,
 } from './lifecycle/boot.js';

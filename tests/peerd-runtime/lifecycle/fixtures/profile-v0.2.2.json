@@ -1,0 +1,217 @@
+{
+  "_provenance": {
+    "peerdVersion": "0.2.2",
+    "shapeCommit": "e66d6b9",
+    "shapeDate": "2026-07-04",
+    "notes": [
+      "peerd 0.2.2 (e66d6b9:package.json). The actor arc has landed but the rename has not.",
+      "747ed0b (the web-actor architecture, shipped 0.2.0/0.2.1) added kind:'actor' plus instanceId / actorType ('webvm'|'notebook'|'app'|'web') / backing ('tab'|'api') to sessions/types.js.",
+      "0f280da (#134/#135, 2026-07-03) added spawnedTrusted — the per-hop trusted-lineage verdict. A PARENTED record written BEFORE it (see the v0.1.0 fixture) reads as untrusted, fail-closed.",
+      "509c946 (#138, the heap split, 2026-07-03) added grantedTools — the child's persisted narrowed toolset.",
+      "2818b13 (#141, 2026-07-04) widened actorType with 'dweb'.",
+      "kind is still 'subagent' here: 67d46d5 (#178) renamed it to 'spawned' two days later, in 0.2.6.",
+      "STILL ABSENT at this version: todos + prewalk (65bac25, 0.2.8), review (419ecb6, 0.3.0), originState (1455923, 0.3.0).",
+      "Records are v2-shaped (msgIndex + messagesV2:true, bodies in the sibling session_messages store) — that split predates the flattened-history root.",
+      "settings keys are the e66d6b9:packaging/default-settings.mjs set (ollamaHost had landed in 0e9d159; watchAgentTab/prewalk*/frontDoorView had not).",
+      "exportEnvelope is the transfer.js shape after bf7484a (#168) — still no `durability` block (added in 70f6e42, 2026-08-05).",
+      "storeVersions is null: the lifecycle store registry landed 2026-08-05, after 0.4.0."
+    ]
+  },
+
+  "storeVersions": null,
+
+  "settings": {
+    "providerName": "anthropic",
+    "providerModel": "claude-sonnet-4-6",
+    "ollamaHost": "http://127.0.0.1:11434",
+    "advancedAutomationEnabled": true,
+    "confirmWebWrites": true,
+    "autoResumeInterruptedTurns": true,
+    "providerFailoverEnabled": true,
+    "providerFallbacks": [{ "provider": "openrouter", "model": "anthropic/claude-3.7-sonnet" }],
+    "auditLogMaxEntries": 5000,
+    "dwebEnabled": true,
+    "dwebAgentEnabled": true,
+    "unknownSettingFromANewerBuild": { "shape": "forward-compat", "keep": true }
+  },
+
+  "sessions": [
+    {
+      "sessionId": "0198a2b0-1000-7000-8000-00000000c001",
+      "createdAt": 1751587200000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "title": "file the expense report",
+      "kind": "chat",
+      "depth": 0,
+      "permissionMode": "act",
+      "confirmActions": false,
+      "messagesV2": true,
+      "msgIndex": [
+        "0198a2b0-1001-7000-8000-00000000d001",
+        "0198a2b0-1002-7000-8000-00000000d002"
+      ],
+      "cost": {
+        "inputTokens": 9400,
+        "outputTokens": 1210,
+        "cacheReadTokens": 6100,
+        "cacheWriteTokens": 900,
+        "cost": 0.0487,
+        "turns": 3
+      },
+      "unknownRecordFieldFromANewerBuild": { "why": "forward-compat: must survive every read path" }
+    },
+    {
+      "sessionId": "0198a2b0-2000-7000-8000-00000000c002",
+      "createdAt": 1751587300000,
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "kind": "actor",
+      "parentSessionId": "0198a2b0-1000-7000-8000-00000000c001",
+      "depth": 1,
+      "instanceId": "481",
+      "actorType": "web",
+      "backing": "tab",
+      "spawnedTrusted": true,
+      "grantedTools": [
+        "snapshot", "read_page", "read_state", "query_dom",
+        "click", "type", "navigate", "page_keys", "fetch_url"
+      ],
+      "permissionMode": "act",
+      "messagesV2": true,
+      "msgIndex": ["0198a2b0-2001-7000-8000-00000000d003"],
+      "futureActorField": ["planted", "unknown"]
+    },
+    {
+      "sessionId": "0198a2b0-3000-7000-8000-00000000c003",
+      "createdAt": 1751587400000,
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "kind": "subagent",
+      "parentSessionId": "0198a2b0-1000-7000-8000-00000000c001",
+      "task": "extract every line item from the receipt PDF",
+      "depth": 1,
+      "grantedTools": ["read_pdf", "read_doc"],
+      "toolManifest": { "allow": ["read_pdf", "read_doc"] },
+      "messagesV2": true,
+      "msgIndex": ["0198a2b0-3001-7000-8000-00000000d004"]
+    }
+  ],
+
+  "sessionMessages": [
+    {
+      "id": "0198a2b0-1001-7000-8000-00000000d001",
+      "sessionId": "0198a2b0-1000-7000-8000-00000000c001",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "file the expense report from the receipt in my downloads",
+        "id": "0198a2b0-1001-7000-8000-00000000d001",
+        "when": 1751587200100
+      }
+    },
+    {
+      "id": "0198a2b0-1002-7000-8000-00000000d002",
+      "sessionId": "0198a2b0-1000-7000-8000-00000000c001",
+      "seq": 1,
+      "message": {
+        "role": "assistant",
+        "content": "Delegating the page work to the tab's actor.",
+        "id": "0198a2b0-1002-7000-8000-00000000d002",
+        "when": 1751587201000,
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "stopReason": "tool_use",
+        "toolUses": [
+          {
+            "id": "toolu_022",
+            "name": "message_actor",
+            "input": { "target": "tab:481", "message": "open the expenses form" }
+          }
+        ],
+        "unknownMessageFieldFromANewerBuild": "keep-me"
+      }
+    },
+    {
+      "id": "0198a2b0-2001-7000-8000-00000000d003",
+      "sessionId": "0198a2b0-2000-7000-8000-00000000c002",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "open the expenses form",
+        "id": "0198a2b0-2001-7000-8000-00000000d003",
+        "when": 1751587300100
+      }
+    },
+    {
+      "id": "0198a2b0-3001-7000-8000-00000000d004",
+      "sessionId": "0198a2b0-3000-7000-8000-00000000c003",
+      "seq": 0,
+      "message": {
+        "role": "user",
+        "content": "extract every line item from the receipt PDF",
+        "id": "0198a2b0-3001-7000-8000-00000000d004",
+        "when": 1751587400100
+      }
+    }
+  ],
+
+  "hooks": [
+    {
+      "id": "no-checkout-clicks",
+      "event": "pre-tool-use",
+      "kind": "declarative",
+      "match": "click",
+      "order": 40,
+      "enabled": true,
+      "rule": {
+        "matchArg": "selector",
+        "pattern": "(checkout|place-order)",
+        "onMatch": "block",
+        "reason": "never click a purchase control unattended"
+      },
+      "unknownHookFieldFromANewerBuild": "keep-me"
+    }
+  ],
+
+  "memory": {
+    "version": 1,
+    "exportedAt": 1751587500000,
+    "docs": [
+      {
+        "id": "user",
+        "kind": "user",
+        "workspace": "",
+        "body": "# About me\n\nExpenses go to the finance portal, never email.\n",
+        "createdAt": 1750000000000,
+        "updatedAt": 1751587500000,
+        "unknownDocFieldFromANewerBuild": 7
+      }
+    ]
+  },
+
+  "exportEnvelope": {
+    "format": "peerd-export",
+    "version": 1,
+    "exportedAt": "2026-07-04T09:30:00.000Z",
+    "channel": "preview",
+    "settings": {
+      "providerName": "anthropic",
+      "ollamaHost": "http://127.0.0.1:11434",
+      "dwebAgentEnabled": true
+    },
+    "providerEndpoints": null,
+    "secrets": {
+      "kdf": "PBKDF2-SHA256",
+      "iterations": 600000,
+      "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "cipher": "AES-GCM",
+      "data": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "memory": { "version": 1, "docs": [{ "id": "user", "body": "# About me\n", "updatedAt": 1751587500000 }] },
+    "hooks": [{ "id": "no-checkout-clicks", "event": "pre-tool-use", "kind": "declarative" }],
+    "skills": [],
+    "dweb": { "note": "preview-channel dweb state — a store build must DROP this with the section-10 notice" },
+    "unknownEnvelopeSectionFromANewerBuild": { "keep": true }
+  }
+}

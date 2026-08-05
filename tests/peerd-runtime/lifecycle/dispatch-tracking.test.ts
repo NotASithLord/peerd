@@ -143,6 +143,112 @@ describe('settleTracking — §16.2 semantic failures', () => {
   });
 });
 
+describe('fail closed when tracking cannot start', () => {
+  const brokenStorage = () => createOperationLog({
+    storage: {
+      get: async () => { throw new Error('quota exceeded'); },
+      set: async () => { throw new Error('quota exceeded'); },
+    },
+    now: () => 1,
+  });
+
+  test('Class E and D are REFUSED, not executed untracked, when the log is down', async () => {
+    for (const retryClass of ['E', 'D']) {
+      const tracker = makeDispatchTracker({
+        operationLog: brokenStorage(),
+        generationId: () => 'gen-1-x',
+        retryClassFor: (tool) => (tool as { retryClass?: string }).retryClass as any,
+      });
+      const begun = await tracker.beginTracking({
+        callId: 'c1', tool: { name: 'submit_form', retryClass }, sessionId: 's',
+      });
+      expect(begun && 'refuse' in begun).toBe(true);
+      const refusal = (begun as { refuse: { error: string, recovery: any } }).refuse;
+      expect(refusal.error).toContain('NOT executed');
+      expect(refusal.recovery.category).toBe('security_degradation');
+    }
+  });
+
+  test('Class B degrades to untracked — a broken log must not brick reads', async () => {
+    const tracker = makeDispatchTracker({
+      operationLog: brokenStorage(),
+      generationId: () => 'gen-1-x',
+      retryClassFor: () => 'B' as any,
+    });
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'fetch_url', retryClass: 'B' }, sessionId: 's',
+    });
+    expect(begun).toBeNull();
+  });
+
+  test('a death MID-SEQUENCE (begin ok, markDispatched fails) also refuses D/E', async () => {
+    let writes = 0;
+    const log = createOperationLog({
+      storage: {
+        get: async () => undefined,
+        set: async () => { writes += 1; if (writes > 1) throw new Error('storage died'); },
+      },
+      now: () => 1,
+    });
+    const tracker = makeDispatchTracker({
+      operationLog: log, generationId: () => 'gen-1-x',
+      retryClassFor: () => 'E' as any,
+    });
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'submit_form', retryClass: 'E' }, sessionId: 's',
+    });
+    expect(begun && 'refuse' in begun).toBe(true);
+  });
+
+  test('makeFailClosedTracker: the boot-failure tracker refuses D/E and passes A/B/C', async () => {
+    const { makeFailClosedTracker } = await import(
+      '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js');
+    const tracker = makeFailClosedTracker({
+      reason: 'lifecycle boot failed',
+      retryClassFor: (tool) => (tool as { retryClass?: string }).retryClass as any,
+    });
+    const refused = await tracker.beginTracking({ tool: { name: 'submit_form', retryClass: 'E' } });
+    expect(refused && 'refuse' in refused).toBe(true);
+    expect((refused as any).refuse.error).toContain('boot failed');
+    expect(await tracker.beginTracking({ tool: { name: 'read_page', retryClass: 'A' } })).toBeNull();
+    expect(await tracker.beginTracking({ tool: { name: 'fetch_url', retryClass: 'B' } })).toBeNull();
+    expect(await tracker.settleTracking()).toBeNull();
+  });
+});
+
+describe('typed failure outcomes outrank string heuristics', () => {
+  const settleTyped = async (retryClass: string, error: string, outcomeKind?: string) => {
+    const { tracker, log } = makeTracker();
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 't', retryClass }, sessionId: 's',
+    });
+    const rewrite = await tracker.settleTracking(
+      (begun as { handle: any }).handle,
+      { ok: false, error, outcomeKind: outcomeKind as any });
+    return { rewrite, record: await log.get('s:c1') };
+  };
+
+  test('pre-effect-failure settles failed even when the message LOOKS like a timeout', async () => {
+    const { record } = await settleTyped('E', 'gateway timed out validating the payload', 'pre-effect-failure');
+    expect(record!.state).toBe(S.FAILED);
+  });
+
+  test('transport-lost settles ambiguous even when the message looks definitive', async () => {
+    const { record } = await settleTyped('E', 'element not found: #missing', 'transport-lost');
+    expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
+  });
+
+  test('host-lost is ambiguous for E, interrupted for B', async () => {
+    expect((await settleTyped('E', 'x', 'host-lost')).record!.state).toBe(S.OUTCOME_UNKNOWN);
+    expect((await settleTyped('B', 'x', 'host-lost')).record!.state).toBe(S.INTERRUPTED);
+  });
+
+  test('an unstamped failure still takes the heuristic path', async () => {
+    const { record } = await settleTyped('E', 'request timed out');
+    expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
+  });
+});
+
 describe('the replay guard — guarantee 2', () => {
   test('re-dispatching an unproven Class E call is REFUSED with outcome_unknown', async () => {
     const { tracker, log } = makeTracker();
