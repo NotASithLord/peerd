@@ -120,6 +120,109 @@ describe('GUARANTEE 2 + fail-closed: Class D/E never execute when tracking canno
   });
 });
 
+describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed for D/E', () => {
+  // The tracker's own failure paths are covered above. This is the harder
+  // question: the dispatcher used to swallow ANY beginTracking rejection
+  // with `.catch(() => null)` and run untracked. These tests force
+  // beginTracking ITSELF to reject — the contract-violating case — and
+  // prove the dispatcher refuses independently of the broken tracker.
+  const rejectingTracker = {
+    beginTracking: async () => { throw new Error('tracker contract violated'); },
+    settleTracking: async () => null,
+  };
+
+  test('Class E: execute() never entered, dispatcher refuses, nothing persisted', async () => {
+    const { storage, log } = makeLog();
+    const calls = spyTool('submit_form', 'mutate_external');
+    const result = await dispatchToolCall(
+      { id: 'tu-1', name: 'submit_form', args: {} },
+      baseCtx(rejectingTracker) as any);
+
+    expect(calls.count).toBe(0);                                  // no side effect
+    expect(result.ok).toBe(false);                                // refusal
+    expect((result as { error: string }).error).toContain('NOT executed');
+    expect((result.meta as any).recovery.category).toBe('security_degradation');
+    // No half-written lifecycle state: the log was never touched, so a
+    // later boot has nothing to reconcile and nothing to misreport.
+    expect(storage.journal).toEqual([]);
+    expect(await log.get('sess-1:tu-1')).toBeUndefined();
+    expect(await log.listNonterminal()).toEqual([]);
+  });
+
+  test('Class D refuses the same way', async () => {
+    const calls = spyTool('dweb_share', 'mutate_external'); // named D override
+    const result = await dispatchToolCall(
+      { id: 'tu-1', name: 'dweb_share', args: {} },
+      baseCtx(rejectingTracker) as any);
+    expect(calls.count).toBe(0);
+    expect(result.ok).toBe(false);
+    expect((result as { error: string }).error).toContain('NOT executed');
+  });
+
+  test('Class A/B/C keep the safe degradation — a broken tracker cannot take reads down', async () => {
+    const a = spyTool('read_page', 'read');
+    const b = spyTool('fetch_url_like', 'read', 'B');
+    const c = spyTool('js_write_file_like', 'write', 'C');
+    for (const [name, calls] of [['read_page', a], ['fetch_url_like', b], ['js_write_file_like', c]] as const) {
+      const result = await dispatchToolCall(
+        { id: `tu-${name}`, name, args: {} }, baseCtx(rejectingTracker) as any);
+      expect(result.ok).toBe(true);
+      expect(calls.count).toBe(1);
+    }
+  });
+
+  test('the real tracker is TOTAL: internals that blow up produce a refusal, never a rejection', async () => {
+    // Each of these breaks a different internal the tracker depends on.
+    const cases = [
+      ['throwing classifier', makeDispatchTracker({
+        operationLog: createOperationLog({ storage: makeStorage() }),
+        generationId: () => 'gen-1-x',
+        retryClassFor: () => { throw new Error('classifier exploded'); },
+      })],
+      ['throwing generationId', makeDispatchTracker({
+        operationLog: createOperationLog({ storage: makeStorage() }),
+        generationId: () => { throw new Error('no generation'); },
+        retryClassFor: retryClassForTool,
+      })],
+      ['unreadable replay identity (tombstone store down)', makeDispatchTracker({
+        operationLog: {
+          ...createOperationLog({ storage: makeStorage() }),
+          getTombstone: async () => { throw new Error('tombstone store unreadable'); },
+        } as any,
+        generationId: () => 'gen-1-x',
+        retryClassFor: retryClassForTool,
+      })],
+    ] as const;
+
+    for (const [label, tracker] of cases) {
+      const begun = await tracker.beginTracking({
+        callId: 'c1', tool: { name: 'submit_form', sideEffect: 'mutate_external' },
+        sessionId: 's',
+      });
+      expect(begun && 'refuse' in begun, label).toBe(true);
+      expect((begun as any).refuse.error, label).toContain('NOT executed');
+    }
+  });
+
+  test('an unreadable replay-identity store never silently proceeds for Class E', async () => {
+    // The question "has this exact call already run?" is unanswered — the
+    // one answer that is NOT allowed is assuming "no".
+    const tracker = makeDispatchTracker({
+      operationLog: {
+        ...createOperationLog({ storage: makeStorage() }),
+        getTombstone: async () => { throw new Error('store unreadable'); },
+      } as any,
+      generationId: () => 'gen-1-x',
+      retryClassFor: retryClassForTool,
+    });
+    const calls = spyTool('submit_form', 'mutate_external');
+    const result = await dispatchToolCall(
+      { id: 'tu-1', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
+    expect(calls.count).toBe(0);
+    expect((result as { error: string }).error).toContain('replay-identity lookup failed');
+  });
+});
+
 describe('§8 persist-before-report: the settle write lands before the dispatcher returns', () => {
   test('the COMPLETED transition is journaled before dispatchToolCall resolves', async () => {
     const { storage, log } = makeLog();
@@ -236,6 +339,47 @@ describe('§8.3 the confirmation forensic chain on the durable record', () => {
       operationId: 'sess-1:tu-1', action: 'submit_form',
       target: 'https://example.com/pay', generationId: 'gen-2-y', now: 50_001,
     }).valid).toBe(false);
+  });
+
+  test('idempotency keys are ORDER-INDEPENDENT and SHA-256 wide', async () => {
+    const { log } = makeLog();
+    const tracker = makeDispatchTracker({
+      operationLog: log, generationId: () => 'gen-1-x', retryClassFor: () => 'D' as any,
+    });
+    const keyFor = async (callId: string, args: Record<string, unknown>) => {
+      await tracker.beginTracking({
+        callId, tool: { name: 'dweb_share' }, sessionId: 's', args,
+      });
+      return (await log.get(`s:${callId}`))!.idempotencyKey!;
+    };
+    // Same content, different property order at two depths — one key.
+    const a = await keyFor('c1', { title: 'post', meta: { x: 1, y: 2 }, body: 'hi' });
+    const b = await keyFor('c2', { body: 'hi', meta: { y: 2, x: 1 }, title: 'post' });
+    expect(a).toBe(b);
+    // Array ORDER is semantic — it must still separate operations.
+    const c = await keyFor('c3', { tags: ['x', 'y'] });
+    const d = await keyFor('c4', { tags: ['y', 'x'] });
+    expect(c).not.toBe(d);
+    // SHA-256 hex, not a 32-bit digest.
+    expect(a).toMatch(/^dweb_share:[0-9a-f]{64}$/);
+  });
+
+  test('canonicalJson: stable across key order, faithful to arrays, depth-bounded', async () => {
+    const { canonicalJson, sha256Hex, idempotencyKeyFor } = await import(
+      '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js');
+    expect(canonicalJson({ b: 1, a: 2 })).toBe(canonicalJson({ a: 2, b: 1 }));
+    expect(canonicalJson({ a: [1, 2] })).not.toBe(canonicalJson({ a: [2, 1] }));
+    expect(canonicalJson({ a: undefined })).toBe('{"a":null}');
+    // A pathological nest terminates instead of blowing the stack.
+    let deep: Record<string, unknown> = { end: true };
+    for (let i = 0; i < 200; i += 1) deep = { nest: deep };
+    expect(() => canonicalJson(deep)).not.toThrow();
+    expect(canonicalJson(deep)).toContain('depth-capped');
+    // Known-answer check that this really is SHA-256.
+    expect(await sha256Hex('abc')).toBe(
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(await idempotencyKeyFor('t', { a: 1 }))
+      .toBe(`t:${await sha256Hex('{"a":1}')}`);
   });
 
   test('Class C/D records carry a deterministic idempotency key (same args → same key; retries reuse it)', async () => {

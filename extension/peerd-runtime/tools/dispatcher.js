@@ -24,6 +24,11 @@ import {
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
 } from '../permissions/index.js';
+// The lifecycle classifier — pure, no IO. Used ONLY by the fail-closed
+// backstop below, so the dispatcher never has to duplicate (and drift
+// from) the retry-class taxonomy.
+import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
+import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 
@@ -386,7 +391,44 @@ export const dispatchToolCall = async (call, ctx) => {
       // Post-hook args: Class C/D records derive their deterministic
       // idempotency key from these.
       args,
-    }).catch(() => null);
+    }).catch((error) => {
+      // beginTracking is a TOTAL function (see its wrapper) — reaching this
+      // catch means something violated that contract. The old behavior here
+      // was `() => null`, i.e. "run untracked", which for a non-idempotent
+      // action is the one degradation the contract cannot allow: no record
+      // means a later interruption is unreportable AND unguarded.
+      //
+      // So this is an INDEPENDENT fail-closed decision, deliberately not
+      // routed through the tracker that just failed: classify the tool
+      // directly and refuse D/E. A/B/C keep the historical degradation —
+      // duplicate reads are invisible and idempotent writes are safe to
+      // repeat, so a broken tracker must not take the read surface down
+      // with it.
+      const retryClass = (() => {
+        try { return retryClassForTool(tool); }
+        catch { return RETRY_CLASSES.SIDE_EFFECT; } // classification threw: assume the worst
+      })();
+      if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
+          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION) return null;
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        refuse: {
+          error: `failed: ${call.name} was NOT executed — lifecycle tracking `
+            + `failed unexpectedly (${detail}) and a non-idempotent action must `
+            + 'not run untracked: an interruption could then never be reported '
+            + 'or guarded against.',
+          recovery: {
+            category: 'security_degradation',
+            state: 'failed',
+            autoRetry: false,
+            retryRequires: ['lifecycle-storage'],
+            verificationRequired: false,
+            keepIdempotencyKey: false,
+            reason: `tracking rejected unexpectedly: ${detail}`,
+          },
+        },
+      };
+    });
     if (begun && 'refuse' in begun && begun.refuse) {
       ctx.audit({
         type: 'tool_blocked',

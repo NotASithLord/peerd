@@ -32,18 +32,70 @@ import { OperationExistsError } from './operation-log.js';
 import { FAILURE_OUTCOMES, isFailureOutcomeKind } from './failure-taxonomy.js';
 import { bindConfirmation, consumeConfirmation } from './confirmation.js';
 
-// FNV-1a over a stable serialization — the deterministic idempotency key
-// for Class C/D records (§8: same call + same args = same operation; a
-// retry must reuse this key, never mint a fresh one).
-/** @param {string} text */
-const fnv1a = (text) => {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+// --- Idempotency keys ------------------------------------------------------
+//
+// The deterministic key for Class C/D records (§8: same call + same args =
+// same operation; a retry must reuse this key, never mint a fresh one).
+//
+// why CANONICAL serialization and not JSON.stringify: property order is an
+// accident of how the args object was built — a model re-emitting the same
+// call with `{b,a}` instead of `{a,b}`, or a hook rewriting args through a
+// different code path, must produce the SAME key or the "reuse the original
+// key on retry" rule silently breaks. Keys are sorted at every depth;
+// ARRAY order is preserved because it is semantic.
+//
+// why SHA-256 and not a 32-bit hash: these keys are durable metadata today
+// and the intended carrier for external idempotency headers (RFC-style
+// Idempotency-Key) tomorrow. A 32-bit digest collides at ~77k distinct
+// argument sets by the birthday bound — fine for a local dedup hint, not
+// fine for something that may one day tell a payment API "this is the same
+// request". 256 bits makes the collision question moot before it is asked.
+
+// why a depth cap: args come from the model and could nest adversarially
+// deep; a bounded walk keeps a pathological payload from blowing the stack
+// on a path that must never fail a dispatch.
+const CANONICAL_MAX_DEPTH = 8;
+
+/**
+ * Order-independent, stable serialization of an arbitrary args value.
+ * Undefined/functions/symbols collapse to null (JSON.stringify's own
+ * behavior for them), so the output is always valid JSON text.
+ *
+ * @param {unknown} value @param {number} [depth]
+ * @returns {string}
+ */
+export const canonicalJson = (value, depth = 0) => {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'null';
   }
-  return hash.toString(16).padStart(8, '0');
+  if (depth >= CANONICAL_MAX_DEPTH) return '"[depth-capped]"';
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry, depth + 1)).join(',')}]`;
+  }
+  const entries = Object.keys(value).sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(
+      /** @type {Record<string, unknown>} */ (value)[key], depth + 1)}`);
+  return `{${entries.join(',')}}`;
 };
+
+/**
+ * SHA-256 of a string, lowercase hex. WebCrypto is present in every context
+ * this runs in (service worker, offscreen worker, the bun test runner).
+ * @param {string} text @returns {Promise<string>}
+ */
+export const sha256Hex = async (text) => {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+/**
+ * The durable idempotency key for one call: tool name + canonical args
+ * digest. Same tool + same args (in any property order) → same key.
+ *
+ * @param {string} toolName @param {unknown} args @returns {Promise<string>}
+ */
+export const idempotencyKeyFor = async (toolName, args) =>
+  `${toolName}:${await sha256Hex(canonicalJson(args ?? {}))}`;
 
 // Error shapes that mean "the wire died with the request possibly delivered"
 // — the ambiguous bucket. Kept alongside the classifier kind 'timeout'
@@ -80,6 +132,19 @@ const isAmbiguousLoss = (error, kind) =>
  * @typedef {{ refuse: { error: string, recovery: ReturnType<typeof describeRecovery>['agent'] } }
  *   | { handle: TrackingHandle } | null} BeginOutcome
  */
+
+/**
+ * The replay-identity store could not be read, so "has this already run?"
+ * is unanswered. Named so the total wrapper's refusal reason says which
+ * question went unanswered rather than leaking a raw storage message.
+ */
+class TombstoneUnreadableError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(`replay-identity lookup failed: ${message}`);
+    this.name = 'TombstoneUnreadableError';
+  }
+}
 
 /**
  * The fail-closed refusal for a Class D/E dispatch whose tracking cannot
@@ -330,7 +395,7 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
    *   records derive their deterministic idempotency key from these
    * @returns {Promise<BeginOutcome>}
    */
-  const beginTracking = async ({ callId, tool, sessionId, actorId, target, confirmed, args }) => {
+  const beginTrackingInner = async ({ callId, tool, sessionId, actorId, target, confirmed, args }) => {
     const retryClass = normalizeRetryClass(retryClassFor(tool));
     if (retryClass === RETRY_CLASSES.PURE_READ) return null;
     if (typeof callId !== 'string' || !callId) return null;
@@ -344,11 +409,21 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     // Tombstone check (D/E only — the only classes that mint them): a call
     // id whose FULL record was pruned still carries compact replay
     // identity; re-presenting it is refused exactly as the record would
-    // have. Best-effort read — a failed lookup falls through to begin().
+    // have.
+    //
+    // why an unreadable tombstone store FAILS CLOSED rather than falling
+    // through to begin(): this branch only runs for non-idempotent classes,
+    // and the question it answers is "has this exact call already run?".
+    // A storage error means that question is UNANSWERED — proceeding would
+    // be assuming "no" with no evidence, which is the replay the guard
+    // exists to prevent.
     if (retryClass === RETRY_CLASSES.SIDE_EFFECT
         || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION) {
-      const tombstone = await operationLog.getTombstone?.(operationId)
-        ?? undefined;
+      const tombstone = await Promise.resolve(operationLog.getTombstone?.(operationId))
+        .catch((error) => {
+          throw new TombstoneUnreadableError(
+            error instanceof Error ? error.message : String(error));
+        });
       if (tombstone) {
         return {
           refuse: {
@@ -375,14 +450,35 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     }
     // Class C/D: the deterministic idempotency key (same call + same args =
     // same operation; retries reuse it, never mint fresh — §4/§8).
+    // Best-effort: the key is durable METADATA, not a gate — the replay
+    // guard keys on operationId — so a digest failure degrades the record's
+    // richness, never the dispatch's safety.
     const idempotencyKey = (retryClass === RETRY_CLASSES.IDEMPOTENT_WRITE
       || retryClass === RETRY_CLASSES.CONDITIONAL_ACTION)
-      ? `${tool.name ?? 'tool'}:${fnv1a(JSON.stringify(args ?? {}))}`
+      ? await idempotencyKeyFor(tool.name ?? 'tool', args).catch(() => undefined)
       : undefined;
     // An approved confirmation becomes a single-use proof, consumed BEFORE
     // dispatch and persisted on the record: generation-bound (a restart
     // invalidates it), target-bound, expiring — the durable chain the
     // contract's §8.3 verification asks for.
+    //
+    // TRUST BOUNDARY — what this proof does and does not mean. It is the
+    // DISPATCHER'S OWN RECORD that it observed a valid approval for exactly
+    // this operation and consumed it before dispatching. It is NOT a
+    // cryptographic attestation from the UI: nothing here is signed, and
+    // the side panel does not hand back a token peerd verifies. The proof
+    // is minted service-worker-side from `confirmed`, which is the confirm
+    // coordinator's own return value.
+    //
+    // So it defends against the failures inside peerd's trust boundary —
+    // an approval being REPLAYED onto a second dispatch, SURVIVING a
+    // restart that should have invalidated it, drifting to a DIFFERENT
+    // target or operation, or outliving its window — and it gives audit a
+    // truthful record of what was approved. It does not, and cannot,
+    // defend against a compromised service worker: code that can call this
+    // function can also fabricate `confirmed: true`. Raising that bar
+    // needs a signed capability from the UI surface, which is a separate
+    // design (and would change this from evidence into attestation).
     const confirmationProof = confirmed === true
       ? consumeConfirmation(bindConfirmation({
         operationId,
@@ -546,6 +642,38 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       // Report building itself failed (should be unreachable) — fall back
       // to the tool's own outcome rather than masking it with a throw.
       return null;
+    }
+  };
+
+  /**
+   * beginTracking is a TOTAL function: it resolves to a refusal, a handle,
+   * or null — it never rejects. why this matters more than it looks: the
+   * dispatcher's call site is the last branch point before execute(), so a
+   * rejection there is indistinguishable from "tracking is optional" and
+   * would degrade a non-idempotent dispatch to untracked execution. Every
+   * expected failure is already handled inside (storage down, duplicate
+   * record, unreadable replay identity); this wrapper is the backstop for
+   * the UNexpected — a throwing injected classifier, a generationId() that
+   * blows up, a storage layer rejecting somewhere new after a refactor.
+   *
+   * The refusal it produces is class-correct: if even classification threw,
+   * the class defaults to E (refuse), never to "probably safe".
+   *
+   * @param {Parameters<typeof beginTrackingInner>[0]} input
+   * @returns {Promise<BeginOutcome>}
+   */
+  const beginTracking = async (input) => {
+    try {
+      return await beginTrackingInner(input);
+    } catch (error) {
+      /** @type {import('./retry-class.js').RetryClass} */
+      let retryClass = RETRY_CLASSES.SIDE_EFFECT;
+      try { retryClass = normalizeRetryClass(retryClassFor(input?.tool)); }
+      catch { /* classification itself threw — stay at E, the closed default */ }
+      return refuseUntracked(retryClass, input?.tool?.name,
+        error instanceof TombstoneUnreadableError
+          ? error.message
+          : `tracking failed unexpectedly (${error instanceof Error ? error.message : String(error)})`);
     }
   };
 
