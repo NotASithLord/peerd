@@ -136,15 +136,14 @@ export const jwkThumbprintInput = (jwk) => {
  * canonicalized, the JWK is not a usable public JWK, or jti/iat are missing.
  * The boundary treats null as "send anonymous", never as "send unsigned".
  *
- * `nonce` (RFC 9449 §8) is the SEAM, not the feature: a server that requires a
- * nonce answers the first request with 401 + `DPoP-Nonce: <n>`, and the client
- * re-sends one proof carrying that `nonce` claim. This function can already emit
- * the claim correctly; what is NOT built yet is the boundary machinery around it
- * (caching the newest nonce per origin and the automatic one-shot retry). why put
- * the seam in first: the claim is normative, opaque, and echoed VERBATIM — getting
- * its shape and placement settled here means the retry loop is later a change to
- * fetch/web-fetch.js alone, with no re-litigation of the signed bytes. Named as a
- * gap in THREAT-MODEL.md INV-15's residuals until then.
+ * `nonce` (RFC 9449 §8) is the server's freshness challenge: a server that wants
+ * one answers the first request with 401 + `DPoP-Nonce: <n>`, and the client
+ * re-sends one proof carrying that `nonce` claim. This function owns the claim's
+ * SHAPE only — opaque, echoed VERBATIM, omitted when absent. The machinery around
+ * it (validating the challenge, caching the newest nonce per origin, and deciding
+ * the one-shot retry) is dpop/nonce.js, sequenced by fetch/web-fetch.js. That
+ * split is why the retry landed as a change to the boundary alone, with no
+ * re-litigation of the signed bytes.
  *
  * @param {{ publicJwk?: unknown, method?: unknown, url?: unknown, jti?: unknown,
  *           iatSeconds?: unknown, accessTokenHash?: unknown, nonce?: unknown }} arg
