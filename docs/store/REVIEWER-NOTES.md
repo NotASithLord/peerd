@@ -1,7 +1,7 @@
-# Chrome Web Store — reviewer notes (paste into "Notes for reviewer")
+# Chrome Web Store reviewer notes
 
-One placeholder to fill before submitting, marked `«…»` below: the
-demo video URL. No test API key is provided — the demo video covers
+One placeholder must be filled before submitting: the demo video URL below.
+No test API key is provided. The demo video covers
 the full flow instead.
 
 ---
@@ -12,9 +12,10 @@ peerd is an AI assistant in the browser side panel. The user types or
 speaks a task; the assistant performs it by reading and interacting
 with web pages, and by running computations in sandboxes (a WebAssembly
 Linux VM and a JavaScript sandbox that can also run WebAssembly (WASI)
-programs) that exist entirely inside the browser. It is local-first: bring-your-own-API-key, no accounts, no
-backend, no analytics or telemetry of any kind. The developer operates
-no servers and receives no data.
+programs) that exist entirely inside the browser. It is local-first, uses
+bring-your-own-key providers, and has no account, hosted agent backend,
+analytics, or telemetry. The developer does not receive or store extension
+data through the extension.
 
 ## How to test
 
@@ -33,7 +34,9 @@ no servers and receives no data.
 **Demo video** (full agent flow, VM boot, automation, audit log):
 «VIDEO URL»
 
-## Remotely hosted code — none. Pre-answering the five places a scan
+## Remotely hosted code
+
+There is no remotely hosted code. These are the five places a scan
 will flag:
 
 1. **CheerpX (x86-in-WASM runtime) is fully vendored** in
@@ -43,7 +46,7 @@ will flag:
    treatment. No CDN script loading anywhere; the package is vanilla,
    unobfuscated ES modules.
 2. **`disks.webvm.io` (vm-tab)** streams a stock Debian *filesystem
-   image* — bytes interpreted as an ext2 disk by the sandboxed WASM VM.
+   image*. These bytes are interpreted as an ext2 disk by the sandboxed WASM VM.
    It is data, not extension code, equivalent to a game loading an
    asset file. It is the public image published by Leaning Technologies
    (CheerpX's authors), fetched read-only when the user boots a VM.
@@ -55,29 +58,29 @@ will flag:
    refuses to download in production. ONNX model weights are data
    consumed by the bundled inference runtime, not executable code.
 4. **Skills (`peerd-runtime/skills/`)** let the user import a SKILL.md
-   instruction file — markdown *instructions for the AI model* (the same
-   category as a user typing a long prompt), parsed and stored locally,
-   never evaluated as code. In this V1 build the ONLY install path is
+   instruction file. It contains markdown instructions for the model, in the
+   same category as a user typing a long prompt. It is parsed and stored locally,
+   never evaluated as code. In the store build the only install path is
    pasting text: remote install (fetch a SKILL.md from a git/manifest
    URL) is gated OFF via `extension/shared/flags.js`
    (`REMOTE_SKILL_INSTALL = false`). The side panel hides the URL tabs
    and, more importantly, the service worker refuses the
-   `skills/installGit` / `skills/installManifest` messages outright — so
+   `skills/installGit` / `skills/installManifest` messages outright, so
    no remote fetch of agent-actioned files can happen, even from a
    crafted message. The installer code ships but is unreachable; the
    remote paths return in a later version with their own review.
-5. **WASI modules (`engine-tabs/notebook-tab/notebook-wasi.js`)** — the JavaScript
+5. **WASI modules (`engine-tabs/notebook-tab/notebook-wasi.js`)**. The JavaScript
    sandbox can run wasm32-wasi programs (e.g. query a SQLite file the
    user provides, decode an archive) via `WebAssembly.compile`, under
    the same `wasm-unsafe-eval` CSP allowance the bundled WASM above
    already uses. The runtime that hosts them is fully vendored and
    audited (`vendor/browser-wasi-shim/SOURCE.txt`); the module bytes
-   are user-directed data on the same footing as item 2's disk image —
-   and confined strictly tighter than the JS around them: a module's
+   are user-directed data on the same footing as item 2's disk image and are
+   confined more tightly than the JavaScript around them. A module's
    only imports are the bundled shim's WASI syscalls, every descriptor
    behind those syscalls is constructed by our wrapper (stdin bytes,
    size-capped stdout/stderr, an in-memory file table built from the
-   call), and it has **no network, DOM, storage, or `chrome.*` reach —
+   call), and it has **no network, DOM, storage, or `chrome.*` reach because
    no such import exists to link against**. It executes inside the
    already-sealed Notebook/worker realm described below, bounded by
    that run's timeout.
@@ -87,7 +90,7 @@ will flag:
 This store package does **not** request the `debugger` permission. The
 assistant operates pages entirely through `chrome.scripting`: it reads
 content, builds an accessibility-style snapshot by walking the DOM, and
-performs selector/element click & type — all with bundled, in-package
+performs selector and element click or type actions with bundled, in-package
 code (nothing fetched or generated remotely). There is no Chrome
 DevTools Protocol use in this package.
 
@@ -104,8 +107,8 @@ and three things keep that honest regardless of channel:
 - Every action goes to the local audit log, including denied attempts.
 
 Maintainer note (not for the dashboard): an optional Chrome DevTools
-Protocol path — for sites that ship Trusted Types / strict CSP (Gmail,
-Notion, Slack), which reject injected scripts — ships in the separate
+Protocol path for sites that ship Trusted Types or strict CSP (Gmail,
+Notion, Slack), which reject injected scripts, ships in the separate
 GitHub-distributed *preview* channel, gated by the in-app "Advanced
 automation" switch and Chrome's visible "is debugging this browser"
 banner. It is intentionally held out of the initial store submission so
@@ -123,43 +126,43 @@ task and is constrained by the same denylist + SSRF block + audit log.
 
 We separate two things on purpose:
 - **Credentialed provider path** (`safeFetch`): a hardcoded allowlist.
-  Your API key can only reach a provider you configured — exfil of the
+  Your API key can only reach a provider you configured. Sending the
   key/conversation to an arbitrary host is closed as a class.
 - **Open-web path** (`webFetch`: the agent's web-read tools, the VM HTTP
-  egress, and the Notebook's `peerd.egress.fetch` bridge): deliberately
-  allowlist-FREE — the whole web is the point. It enforces a scheme
+  egress, and the Notebook's `peerd.egress.fetch` bridge): this path has no host
+  allowlist because the target is user-selected. It enforces a scheme
   check, an SSRF/private-network block (IPv4 + structural IPv6, incl.
   the cloud-metadata IP and IPv4-mapped forms), a sensitive-site
-  denylist, fail-closed redirect handling, and a full audit log — but
-  **not** a per-host allowlist. So exfil to an arbitrary *public* domain
-  over this path is not categorically prevented; the architectural
-  mitigations are (a) the do/get/check runner has no web tools, and (b)
-  the audit log records every request. We do not claim otherwise.
+  denylist, fail-closed redirect handling, and a full audit log, but
+  **not** a per-host allowlist. Traffic to an arbitrary *public* domain
+  over this path is not categorically prevented. The web actor is keyless, its tool access is
+  narrowed, and the audit log records every request. We do not claim otherwise.
 
 The Notebook specifically: the `js_notebook` Web Worker runs
 agent-authored code, so its raw network primitives (XHR / WebSocket /
 EventSource / WebTransport, plus native `fetch` recovered off the
 prototype, and any nested `Worker`) are neutralized at the boundary by
-the host page's CSP `connect-src 'self'` (extension/engine-tabs/notebook-tab/index.html),
-which the worker and its descendants inherit — verified empirically. The
+the host page's CSP `connect-src 'none'` (extension/engine-tabs/notebook-tab/index.html),
+which the worker and its descendants inherit and which tests verify. The
 only egress that leaves the Notebook is the audited `peerd.egress.fetch` bridge,
 which is governed by the open-web `webFetch` gates above.
 
 ## CSP note
 
 `connect-src` includes `https:` deliberately: the assistant fetches
-pages the user asks it to read, from the extension's service worker —
-the target set is user-chosen and cannot be enumerated in a manifest.
+pages the user asks it to read from the extension's service worker.
+The target set is user-chosen and cannot be enumerated in a manifest.
 The egress layer enforces what the manifest cannot express: a hardcoded
 allowlist for credentialed provider calls, the denylist + SSRF block
-for everything else, and the audit log for all of it. The only
-non-HTTPS entry is `wss://disks.webvm.io`, the disk-image stream's
-websocket fallback.
+for everything else, and the audit log for all of it. The generated manifest
+and store posture tests are the authority for the narrow non-HTTPS sources used
+by local providers and runtime assets.
 
 ## Privacy posture (for the data form)
 
-No backend, no analytics, no telemetry — the only "metering" in the
+No hosted agent backend, analytics, or telemetry. The only metering in the
 code computes local cost estimates from the user's own API responses.
-User data goes exactly one place: the AI provider the user configured
-with their own key. API keys are stored in an encrypted vault
+Messages and task context go to the configured AI provider. User-directed web
+requests go to their requested destinations. Runtime assets are downloaded from
+the sources listed above. API keys are stored in an encrypted vault
 (passphrase or WebAuthn PRF / platform biometrics).
