@@ -17,9 +17,8 @@
 // parent-relative ('../style.css'), or root-relative ('/style.css') — same
 // latitude the Worker resolver already gives `new Worker('worker.js')`.
 // Absolute URLs (scheme:), protocol-relative (//host), data: URIs, and
-// pure #fragment / ?query refs pass through unchanged. They'll resolve via
-// the iframe's normal fetch -- which may or may not succeed depending on
-// what the agent wrote.
+// pure #fragment / ?query refs pass through unchanged. The App sandbox refuses
+// remote loads; data:/blob: resources are the only non-bundle asset paths.
 //
 // Pure function, browser-free. Tested in Bun against a file map.
 
@@ -202,39 +201,9 @@ const injectAtHeadStart = (html, snippet) => {
 };
 
 /**
- * Make every link in a composed app open as a real top-level tab.
- *
- * why: apps run in a manifest-sandboxed iframe with an opaque origin.
- * A plain <a href> navigates the IFRAME ITSELF — and most real sites
- * (huggingface.co, github.com…) send frame-ancestors/X-Frame-Options
- * denials, so the click dead-ends on ERR_BLOCKED_BY_RESPONSE. The
- * sandbox is doing its job; the missing affordance is that outbound
- * links belong in a NEW TAB (Chrome's default sandbox CSP allows
- * popups and lets them escape the sandbox into a normal browsing
- * context). One <base target="_blank"> covers every link without
- * rewriting the app's markup; an app that ships its OWN <base> is
- * respected. Pure — string in, string out.
- *
- * @param {string} html  composed document
- * @returns {string}
- */
-export const withNewTabLinks = (html) => {
-  if (/<base\b/i.test(html)) return html;
-  const BASE = '<base target="_blank">';
-  // After <head…> when present; else before the first markup. Either
-  // way the tag precedes every <a> the document can contain.
-  const m = /<head[^>]*>/i.exec(html);
-  if (m) {
-    const at = m.index + m[0].length;
-    return html.slice(0, at) + BASE + html.slice(at);
-  }
-  return BASE + html;
-};
-
-/**
  * Strip <meta http-equiv="refresh"> — a DECLARATIVE self-navigation that
- * reloads the opaque-origin sandbox frame, the same hazard withNewTabLinks
- * fixes for <a> and the runner's submit guard fixes for forms. A reload
+ * reloads the opaque-origin sandbox frame, the same hazard the runner's
+ * trusted link broker and submit guard close for interactive controls. A reload
  * loses all app state AND tears down the dweb bridge, so in a dwapp a
  * meta-refresh is always a mistake (change screens by showing/hiding DOM).
  * why strip, not rewrite: there's nothing here worth preserving. Pure —

@@ -68,8 +68,14 @@ export const createAppSandbox = async (args, ctx) => {
       });
       // focus:false — open in the BACKGROUND + drop a "go there" card in the chat
       // instead of yanking the user to the new tab (DESIGN-12). They click to go.
+      let opened = true;
+      let openError;
       try { await appClient.open?.({ appId: record.id, sessionId: ctx.session?.sessionId, focus: false }); }
-      catch (e) { console.debug('[app_create] open failed', e); }
+      catch (e) {
+        opened = false;
+        openError = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+        console.debug('[app_create] open failed', e);
+      }
       const summary = JSON.stringify({
         id: record.id,
         name: record.name,
@@ -78,7 +84,8 @@ export const createAppSandbox = async (args, ctx) => {
         kind: 'app',
         entryFile: record.entryFile,
         fileCount: Object.keys(files).length,
-        opened: true,
+        opened,
+        ...(openError ? { openError } : {}),
       }, null, 2);
       // The App ACTOR writes the files, so the code-style guidance rides ITS
       // prompt (system-prompt.js actorBlock), not this orchestrator
@@ -90,7 +97,7 @@ export const createAppSandbox = async (args, ctx) => {
         : '(App runtime note shown earlier this session — same iframe rules apply.)';
       return {
         ok: true,
-        content: `${summary}\n\n${note}`,
+        content: `${summary}\n\n${opened ? note : `The App was saved, but the browser could not establish its isolation floor: ${openError}. It cannot run safely here.\n\n${note}`}`,
       };
     } catch (e) {
       return { ok: false, error: `app_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };

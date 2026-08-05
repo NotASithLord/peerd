@@ -152,6 +152,9 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(app.includes('<code-style>')).toBe(true);
     expect(app.includes('<app-runtime>')).toBe(true);
     expect(app.includes("new Worker('worker.js')")).toBe(true);
+    expect(app.includes('NO ambient network')).toBe(true);
+    expect(app.includes('full fetch')).toBe(false);
+    expect(app.includes('consent-gated parent dweb bridge')).toBe(true);
     const nb = actorBlock('notebook');
     expect(nb.includes('<code-style>')).toBe(true);
     expect(nb.includes('<js-correctness>')).toBe(true);

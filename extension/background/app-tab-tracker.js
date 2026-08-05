@@ -28,11 +28,14 @@ export const createAppTabTracker = ({ announce, onAdopt, onDrop } = {}) => {
     onAdopt,
     onDrop,
     kindLabel: 'an App',
+    announceOnReady: true,
   });
 
   return {
     bootstrap: tracker.bootstrap,
     onTabReady: tracker.onTabReady,
+    onTabPending: tracker.onTabPending,
+    onTabFailed: tracker.onTabFailed,
     onTabRemoved: tracker.onTabRemoved,
     parseIdFromUrl: tracker.parseIdFromUrl,
     getTabId: tracker.getTabId,

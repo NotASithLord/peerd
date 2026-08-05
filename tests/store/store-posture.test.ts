@@ -75,6 +75,23 @@ describe('store manifest posture', () => {
     expect(csp).not.toMatch(/\bwss:(?!\/\/)/);
   });
 
+  test('Chrome App sandboxes have no ambient network or navigation authority', () => {
+    for (const mf of [manifest, preview]) {
+      const csp = mf.content_security_policy?.sandbox ?? '';
+      for (const directive of [
+        "default-src 'none'", "connect-src 'none'", "frame-src 'none'",
+        "object-src 'none'", "form-action 'none'", "base-uri 'none'",
+        "webrtc 'block'",
+      ]) expect(csp).toContain(directive);
+      for (const capability of [
+        'allow-same-origin', 'allow-top-navigation', 'allow-forms',
+        'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-downloads',
+      ]) expect(csp).not.toContain(capability);
+      expect(csp).not.toContain("script-src 'self'");
+      expect(csp).not.toContain("worker-src 'self'");
+    }
+  });
+
   test('connect-src admits Ollama on the standard port, host-wildcard but PORT-SCOPED (issue #104)', () => {
     // The native Ollama adapter ships in the box and now supports a REMOTE
     // daemon (issue #104, e.g. a LAN box at http://192.168.1.4:11434). MV3 CSP

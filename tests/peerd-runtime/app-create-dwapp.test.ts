@@ -44,4 +44,14 @@ describe('sandbox_create app arm — dwapp:true attaches the bridge-unlocking dw
     await createAppSandbox({ name: 'pong', html: '<h1>x</h1>', dwapp: true, tags: ['game'] }, ctx as any);
     expect(calls[0].tags).toEqual(expect.arrayContaining(['game', 'dweb']));
   });
+
+  test('reports a durable App honestly when its isolated host cannot open', async () => {
+    const { ctx } = makeCtx(true);
+    ctx.appClient.open = async () => { throw new Error('Apps are not available in Firefox yet.'); };
+    const result = await createAppSandbox({ name: 'todo', html: '<h1>todo</h1>' }, ctx as any);
+    expect(result.ok).toBe(true);
+    const summary = JSON.parse(String(result.content).split('\n\n')[0]);
+    expect(summary.opened).toBe(false);
+    expect(summary.openError).toContain('not available in Firefox');
+  });
 });

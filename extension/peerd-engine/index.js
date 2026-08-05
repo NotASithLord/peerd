@@ -51,7 +51,7 @@ export { createEditor } from './editor.js';
 export { opfsHelpers } from './opfs.js';
 
 // --- App composition (multi-file → single HTML body for the runner) ---
-export { composeApp, withNewTabLinks, stripMetaRefresh } from './app-compose.js';
+export { composeApp, stripMetaRefresh } from './app-compose.js';
 export {
   VMNotReadyError,
   VMNetworkDeniedError,

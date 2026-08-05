@@ -354,7 +354,11 @@ bar | line | scatter | heatmap (heatmap: { x, y, v } bins shaded by v), the ONLY
 render; a hand-rolled Vega/Vega-Lite/plotly spec is NOT understood and dumps as raw JSON.
 Prefer edit_file (SEARCH/REPLACE) over js_write_file to change an existing file.`,
   app: `Your App is a multi-file artifact (index.html + style.css + script.js + data)
-in a sandboxed iframe — DOM, canvas, full fetch; files in OPFS at peerd-apps/<appId>/.
+in a sandboxed iframe — DOM + canvas, but NO ambient network; files live in OPFS at peerd-apps/<appId>/.
+Raw fetch/XHR/WebSocket/WebRTC, remote assets/frames, external/document navigation, form actions, downloads, and
+popups are blocked. Bundle JS/CSS/text; use supplied data:/blob: content for binary media.
+A dwapp:true App gets ONLY the consent-gated dweb parent bridge (read dweb_guide).
+Live web/API work belongs to the web actor; an ordinary App can present a bundled snapshot.
 Build ITERATIVELY, IN FILES: one app_write_file per file, growing it live — long up-front
 drafts truncate at output ceilings, and the user watches the tab take shape, not your
 reasoning. CHUNK large work: >50KB or >3 files → sandbox_create the index, then one
@@ -636,7 +640,7 @@ export const actorBlock = (actorType, backing, instanceId, surface, schemaReply)
 // on an existing tab likewise never steals focus. ~55 tokens.
 const TAB_POLICY = [
   'A tab you open stays in the BACKGROUND — open_tab and a new',
-  'VM/Notebook/App tab open quietly and drop a "go there" card in the chat',
+  'VM/Notebook tabs, and Apps on supported Chrome, open quietly and drop a "go there" card in the chat',
   'for the user to click when they want to look. You never yank them across',
   'to a tab. Acting on a tab that already exists is the same — navigating,',
   'clicking, typing, or running commands leave the user wherever they are,',

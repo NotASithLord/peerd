@@ -48,6 +48,8 @@ import browser from '/vendor/browser-polyfill.js';
  *   Injected by the SW (announceAgentTab); null when no announcer is wired.
  * @property {string} [kindLabel]
  *   Human noun for the announce card ('a Linux VM', 'a Notebook', 'an App').
+ * @property {boolean} [announceOnReady]
+ *   Delay the card until mandatory host initialization succeeds.
  * @property {((id: string, tabId: number) => void) | null} [onAdopt]
  *   Lifecycle liveness hook: fired on every id↔tab association (spawn,
  *   tab-ready, bootstrap re-adoption). Best-effort — see the §9 ledger.
@@ -71,6 +73,7 @@ export const createTabTracker = ({
   // human noun for the card ('a Linux VM', 'a Notebook', 'an App').
   announce = null,
   kindLabel = 'a tab',
+  announceOnReady = false,
   // Lifecycle liveness hooks (§9): fired on every id↔tab association and
   // clean drop, so the durable ledger knows which instances were HOSTED if
   // an eviction hits. Optional + best-effort — tracker bookkeeping never
@@ -80,7 +83,7 @@ export const createTabTracker = ({
 }) => {
   const tabUrlPrefix = browser.runtime.getURL(tabPath);
 
-  /** @type {Map<string, { tabId: number, ready: boolean, readyPromise: Promise<number>, resolveReady?: (tabId: number) => void, rejectReady?: (err: Error) => void }>} */
+  /** @type {Map<string, { tabId: number, ready: boolean, readyPromise: Promise<number>, resolveReady?: (tabId: number) => void, rejectReady?: (err: Error) => void, announceWhenReady?: boolean }>} */
   const byId = new Map();
   /** @type {Map<number, string>} */
   const tabIdToId = new Map();
@@ -186,6 +189,27 @@ export const createTabTracker = ({
   const onTabReady = (id, tabId) => {
     recordEntry(id, tabId, true);
     markReady(id);
+    if (announceOnReady && announce && byId.get(id)?.announceWhenReady) {
+      try { announce(tabId, kindLabel, id); } catch { /* best-effort card */ }
+    }
+  };
+
+  // Record a host tab before it is runnable. Apps use this while installing
+  // their mandatory tab-scoped network rule; only onTabReady resolves callers.
+  /** @param {string} id @param {number} tabId */
+  const onTabPending = (id, tabId) => { recordEntry(id, tabId, false); };
+
+  /** Reject readiness immediately when a host cannot establish its mandatory
+   * runtime floor. why: callers need the real failure, not a later timeout.
+   * @param {string} id @param {Error} error */
+  const onTabFailed = (id, error) => {
+    const entry = byId.get(id);
+    if (!entry) return null;
+    entry.rejectReady?.(error);
+    byId.delete(id);
+    tabIdToId.delete(entry.tabId);
+    try { onDrop?.(id); } catch { /* liveness is best-effort */ }
+    return entry.tabId;
   };
 
   /**
@@ -269,11 +293,12 @@ export const createTabTracker = ({
     });
     if (tab.id == null) throw new Error('tabs.create returned no id');
     const entry = recordEntry(id, tab.id, false);
+    entry.announceWhenReady = opts.active !== true;
 
     // Agent-opened (background) tab → announce a "go there" card. Fired on CREATE
     // (not after ready) so even a slow-booting background tab surfaces a card the
     // moment it exists. A user-focused open (active:true) doesn't announce.
-    if (opts.active !== true && announce) {
+    if (opts.active !== true && announce && !announceOnReady) {
       try { announce(tab.id, kindLabel, id); } catch { /* best-effort card */ }
     }
 
@@ -323,6 +348,8 @@ export const createTabTracker = ({
   return {
     bootstrap,
     onTabReady,
+    onTabPending,
+    onTabFailed,
     onTabRemoved,
     parseIdFromUrl,
     getTabId,

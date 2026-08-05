@@ -87,7 +87,7 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
     expect(meta?.[1]).toBe("connect-src 'none'");
   });
 
-  it('the manifest sandbox CSP denies the App iframe a same-origin identity and host navigation', async () => {
+  it('the manifest sandbox CSP denies the App iframe ambient authority and network egress', async () => {
     // eslint-disable-next-line no-restricted-globals
     const manifest = await (await fetch('/manifest.json')).json();
     const sandboxCsp = String(manifest?.content_security_policy?.sandbox ?? manifest?.sandbox?.csp ?? '');
@@ -98,6 +98,20 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
     // (The custom in-browser framework has no `.not`, so assert absence directly.)
     expect(sandboxCsp.includes('allow-same-origin')).toBe(false);
     expect(sandboxCsp.includes('allow-top-navigation')).toBe(false);
+    expect(sandboxCsp.includes('allow-forms')).toBe(false);
+    expect(sandboxCsp.includes('allow-popups')).toBe(false);
+    expect(sandboxCsp.includes('allow-downloads')).toBe(false);
+    for (const directive of [
+      "default-src 'none'", "connect-src 'none'", "frame-src 'none'",
+      "object-src 'none'", "form-action 'none'", "base-uri 'none'",
+      "webrtc 'block'",
+    ]) expect(sandboxCsp).toContain(directive);
+    // App assets are composed inline; only non-network data/blob resources and
+    // the blob Worker shim are restored above the deny-by-default floor.
+    expect(sandboxCsp).toContain("worker-src blob:");
+    expect(sandboxCsp).toContain("img-src data: blob:");
+    expect(sandboxCsp.includes("script-src 'self'")).toBe(false);
+    expect(sandboxCsp.includes("worker-src 'self'")).toBe(false);
   });
 
   it('the App runner cancels form submits so a hostile bundle cannot navigate out', async () => {
@@ -109,5 +123,8 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
     // covered at the compose layer by scenario 06's stripMetaRefresh probe.)
     expect(/addEventListener\(['"]submit['"]/.test(runner)).toBe(true);
     expect(/Form\.prototype\.submit/.test(runner)).toBe(true);
+    expect(runner).toContain('RTCPeerConnection');
+    expect(runner).toContain('securitypolicyviolation');
+    expect(runner).toContain("type: 'app-link'");
   });
 });

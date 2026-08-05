@@ -18,7 +18,8 @@
 // screenshot to look at and a structured pass/fail with the "why".
 
 import { createServer } from 'node:http';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openWidePage, sleep, PASSPHRASE } from './e2e-harness.mjs';
+import { createSocket } from 'node:dgram';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, sleep, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -81,6 +82,8 @@ let actorToolsState = { spawned: 0, childCalls: 0 };
 let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
+let actorAppProbeUrl = '';
+let actorAppStunPort = 0;
 
 // --- harvest: the FULL personal-data flow, incl. reading a real page ---------
 // An order page served over localhost. The order lines are ANCHOR text so the
@@ -1549,7 +1552,24 @@ export const STATES = [
       // APP ACTOR (owns the created app; holds app_write_file).
       if (body.includes('client-side App builder') || body.includes('Your App is a multi-file artifact')) {
         actorAppState.appCalls += 1;
-        if (actorAppState.appCalls === 1) return { sse: sseToolCall('app_write_file', { path: 'index.html', content: '<!DOCTYPE html><body>REAL LAVA LAMP</body>' }) };
+        if (actorAppState.appCalls === 1) {
+          const probe = JSON.stringify(actorAppProbeUrl);
+          const blobPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('blob'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {}<\/script>`;
+          const dataPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('data'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {} setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringify(blobPayload)}], {type:'text/html'})); }, 250);<\/script>`;
+          const content = `<!DOCTYPE html><body>REAL LAVA LAMP
+<img src="${actorAppProbeUrl}/image">
+<script>
+document.body.dataset.webrtc = String(typeof RTCPeerConnection);
+fetch(${probe} + '/fetch').catch(() => {});
+const worker = new Worker(URL.createObjectURL(new Blob([
+  'fetch(' + JSON.stringify(${probe} + '/worker') + ').catch(() => {})',
+], { type: 'application/javascript' })));
+setTimeout(() => { location.href = ${probe} + '/navigate'; }, 50);
+setTimeout(() => { location.href = 'data:text/html,' + encodeURIComponent(${JSON.stringify(dataPayload)}); }, 150);
+setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringify(blobPayload)}], {type:'text/html'})); }, 300);
+</script></body>`;
+          return { sse: sseToolCall('app_write_file', { path: 'index.html', content }) };
+        }
         return { sse: sseText('APP-ACTOR-WROTE') };
       }
       // ACTOR (ephemeral): create, capture the app id from the result, delegate.
@@ -1569,28 +1589,65 @@ export const STATES = [
     },
     async run(ctx, rec) {
       actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
-      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'spawn an actor to build a lava lamp app' });
-      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
-      let out = {};
-      await waitFor(async () => {
+      let probeHits = 0;
+      let stunHits = 0;
+      const server = createServer((_req, res) => {
+        probeHits += 1;
+        res.writeHead(204); res.end();
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = /** @type {{ port: number }} */ (server.address()).port;
+      actorAppProbeUrl = `http://127.0.0.1:${port}`;
+      const stunServer = createSocket('udp4');
+      stunServer.on('message', () => { stunHits += 1; });
+      await new Promise((resolve) => stunServer.bind(0, '127.0.0.1', resolve));
+      actorAppStunPort = /** @type {{ port: number }} */ (stunServer.address()).port;
+      let appPage = null;
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'spawn an actor to build a lava lamp app' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        let out = {};
+        await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
           const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
           const busy = !!document.querySelector('form.input-bar button.stop');
           return { bubbles, busy };
         })()`) || {};
         return (out.bubbles || []).includes('FINAL-APP-BUILT') && !out.busy;
-      }, { budgetMs: 45_000 });
+        }, { budgetMs: 45_000 });
 
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 1000 });
+        const audit = await rpc(ctx.page, { type: 'audit/list', limit: 1000 });
       const entries = (audit && audit.entries) || [];
       const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
       const appWriteRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'app_write_file');
       // the app id came back into the actor's heap → it could delegate to that exact app
-      rec.check("the actor's sandbox_create result (the new app id) re-entered its heap", typeof actorAppState.appId === 'string' && actorAppState.appId.startsWith('app-'), `appId=${actorAppState.appId}`);
-      rec.check('the actor reached the freshly-created app actor (delegation worked)', msgActorRan === true && actorAppState.appCalls >= 1, `msgActorRan=${msgActorRan} appActorCalls=${actorAppState.appCalls}`);
-      rec.check('the app actor wrote the real file (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
-      rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));
-      await rec.shot('final');
+        rec.check("the actor's sandbox_create result (the new app id) re-entered its heap", typeof actorAppState.appId === 'string' && actorAppState.appId.startsWith('app-'), `appId=${actorAppState.appId}`);
+        rec.check('the actor reached the freshly-created app actor (delegation worked)', msgActorRan === true && actorAppState.appCalls >= 1, `msgActorRan=${msgActorRan} appActorCalls=${actorAppState.appCalls}`);
+        rec.check('the app actor wrote the real file (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
+        rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));
+
+        appPage = await openExtPage(ctx, `engine-tabs/app-tab/index.html#${actorAppState.appId}`);
+        const rendered = await waitFor(() => evalIn(appPage, `
+          document.title === 'peerd · Lava'
+          && document.getElementById('boot')?.classList.contains('is-hidden')
+          && !document.getElementById('boot')?.classList.contains('is-failed')
+        `),
+          { budgetMs: 12_000, pollMs: 200 });
+        await sleep(1_200);
+        rec.check('the real manifest-sandboxed App rendered', !!rendered);
+        rec.check('fetch, passive resource, Worker fetch, and self-navigation made zero network hits', probeHits === 0, `hits=${probeHits}`);
+        rec.check('the App frame stayed on the peerd runner after blocked self-navigation',
+          await evalIn(appPage, `document.querySelector('#app-frame')?.src.includes('/runner.html')`) === true);
+        rec.check('the WebRTC fail-closed preflight allowed App delivery', !!rendered);
+        rec.check('data: and blob: replacement realms cannot emit WebRTC STUN traffic', stunHits === 0, `udpHits=${stunHits}`);
+        await rec.shot('final');
+      } finally {
+        try { appPage?.close(); } catch { /* */ }
+        await new Promise((resolve) => server.close(resolve));
+        stunServer.close();
+        actorAppProbeUrl = '';
+        actorAppStunPort = 0;
+      }
     },
   },
 ];
