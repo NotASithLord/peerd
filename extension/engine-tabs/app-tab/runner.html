@@ -6,7 +6,7 @@
     Sandboxed page (declared in manifest.json sandbox.pages). MV3
     strips ALL chrome.* APIs from sandboxed pages, but we get:
       - opaque origin
-      - the default sandbox CSP, which allows inline <script>
+      - peerd's narrowed sandbox CSP, which allows inline <script>
       - postMessage with the parent window
 
     This page lives inside an iframe in app-tab/index.html. Its only
@@ -19,7 +19,25 @@
 <body>
 <script>
   (() => {
+    // CSP does not consistently cover WebRTC's ICE/STUN path. Apps do not need
+    // raw peer connections — dwapps reach the mesh through the trusted parent
+    // bridge — so remove both constructor spellings before untrusted code runs.
+    let realmSealed = true;
+    for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection']) {
+      try {
+        Object.defineProperty(globalThis, name, {
+          value: undefined, writable: false, configurable: false,
+        });
+      } catch (_e) { /* verified below — failure never falls through to App code */ }
+      if (typeof globalThis[name] === 'function') realmSealed = false;
+    }
+
     let received = false;
+
+    if (!realmSealed) {
+      window.parent.postMessage({ type: 'runner-failed', reason: 'WebRTC could not be disabled.' }, '*');
+      return;
+    }
 
     window.addEventListener('message', (e) => {
       if (received) return;
@@ -36,25 +54,31 @@
       // current script-frame stays alive until it returns, which is
       // fine (we're about to return anyway).
       document.open();
+      // document.open() replaces the old document and its listeners. Install
+      // observability before parsing App markup so synchronous violations from
+      // initial resources are visible to the trusted parent.
+      window.addEventListener('securitypolicyviolation', (event) => {
+        window.parent.postMessage({
+          type: 'app-policy-blocked',
+          directive: String(event.effectiveDirective || 'resource'),
+        }, '*');
+      });
       document.write(html);
       document.close();
 
-      // Keep the app INSIDE its sandbox. A <form> submit (the classic dwapp
-      // "Join" button) navigates this opaque-origin frame — which reloads it,
-      // loses all app state, and tears down the dweb bridge. preventDefault at
-      // the CAPTURE phase so the navigation is cancelled but the app's own
-      // submit handlers still fire (they read the form + do the JS work).
+      // Keep the app INSIDE its sandbox. The manifest CSP is the security
+      // boundary: it refuses form actions before any untrusted script runs.
+      // This listener is the UX half — it keeps ordinary submit buttons from
+      // reloading the frame while still letting the app's own handler fire.
       // `document` here is the app's document (document.write replaced ours),
       // and the listener outlives this script.
       try {
         document.addEventListener('submit', (e) => { e.preventDefault(); }, true);
       } catch (_e) { /* no document — nothing to guard */ }
 
-      // form.submit() bypasses the submit EVENT entirely (by spec) and navigates
-      // unconditionally, so the capture guard above never sees it. Redirect it
-      // through a real, cancelable submit event: the guard cancels the navigation
-      // and the app's own submit handler still fires. (requestSubmit() already
-      // dispatches the event, so the guard covers it; only legacy submit() leaks.)
+      // form.submit() bypasses the submit EVENT. Redirect it through a real,
+      // cancelable event for the same UX; form-action 'none' independently
+      // refuses the network action even if hostile code races or bypasses this.
       try {
         const Form = (document.defaultView || window).HTMLFormElement;
         if (Form && Form.prototype) {
@@ -63,6 +87,25 @@
           };
         }
       } catch (_e) { /* prototype frozen / no form interface — leave default */ }
+
+      // Links are a user-mediated declassification, not ambient App authority.
+      // Keep fragments local; ask the trusted parent to validate + confirm every
+      // external HTTP(S) URL. Other schemes and relative cross-page links fail
+      // visibly through the same display-only notice.
+      try {
+        document.addEventListener('click', (event) => {
+          const target = event.target instanceof Element
+            ? event.target.closest('a[href]')
+            : null;
+          if (!target) return;
+          const raw = target.getAttribute('href') || '';
+          if (raw.startsWith('#')) return;
+          event.preventDefault();
+          window.parent.postMessage({
+            type: 'app-link', href: raw, label: (target.textContent || '').trim(),
+          }, '*');
+        }, true);
+      } catch (_e) { /* no DOM — links remain blocked by the sandbox */ }
     });
 
     // Announce readiness to the parent so it knows it can postMessage

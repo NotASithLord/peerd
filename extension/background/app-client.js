@@ -168,14 +168,10 @@ export const createAppClient = ({ registry, tracker }) => {
     // (focus:false) opens in the BACKGROUND — the tracker drops a "go there" card
     // in the chat instead of stealing focus (DESIGN-12). ensureTab early-returns
     // for a live tab, so re-opening an existing App tab doesn't yank the user back.
-    try {
-      await tracker.ensureTab(id, { active: focus, groupTitle: APP_TAB_GROUP_TITLE });
-    } catch (e) {
-      // A background tab can miss the readiness timeout (Chrome throttles
-      // not-yet-visible tabs) but it WAS created + already announced — only a
-      // FOCUSED (user) open treats the timeout as a real failure.
-      if (focus) throw e;
-    }
+    // Isolation failures and readiness timeouts both propagate. why: claiming
+    // a background App opened when its host is not runnable leaves the model
+    // and user with a dead card and hides a security-floor failure.
+    await tracker.ensureTab(id, { active: focus, groupTitle: APP_TAB_GROUP_TITLE });
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
     return id;
   };

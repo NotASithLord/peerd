@@ -20,14 +20,16 @@ app is an ordinary sandboxed app, window.parent never answers hello(), and you'l
 get "no dweb bridge — open this inside peerd" no matter how correct your client
 code is. (Grow it with app_write_file afterward; the dwapp marking persists.)
 
-DON'T SELF-NAVIGATE with location.* or history — it reloads the opaque sandbox
-frame, loses all app state, and drops the bridge ("app frame navigated
-unexpectedly"). Switch screens (lobby → game) by showing/hiding DOM. Forms,
-buttons, links, and meta-refresh are handled for you — they won't navigate the
-frame, so write them naturally (a <form> with a submit handler is fine).
+DON'T externally navigate the document with location.* — the offline sandbox blocks it.
+Fragment links and same-document history state remain local and are fine.
+Switch screens (lobby → game) by showing/hiding DOM. Buttons and JS-handled forms
+work; meta-refresh is stripped. External links are mediated by peerd's trusted
+host and require the user to approve opening them.
 
 An App you build talks to the network through the dwapp bridge: it posts a request
-to window.parent and listens for replies + events. Drop this minimal client INLINE
+to window.parent and listens for replies + events. Raw fetch/XHR/WebSocket/WebRTC
+and remote scripts, styles, images, fonts, media, and frames are blocked — the
+bridge is the dwapp's ONLY network path. Drop this minimal client INLINE
 into the app's HTML — in a <script> tag in the page, NOT a separate bridge.js the
 game imports. why: the sandbox has no file server, so cross-file ES module
 import/export between your files does not resolve (the app would silently never

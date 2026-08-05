@@ -37,6 +37,14 @@ export const APP_RUNTIME_NOTE = [
   "— it runs automatically (wired to a blob worker). Keep the worker self-contained:",
   "a blob worker can't import other app files. Or tile work across",
   'requestAnimationFrame frames; for pure no-UI compute, a Notebook/script are simpler.',
+  'Apps have NO ambient network: fetch/XHR/WebSocket/WebRTC, CDN/remote assets,',
+  'iframes, external/document navigation, form actions, downloads, and popups are blocked. Bundle JS,',
+  'CSS, and text files; embed binary media as data: or construct blob: URLs at runtime.',
+  'Mithril is built in as ./mithril.js. Live web/API work belongs to the web actor;',
+  'the web actor can prefetch data for a bundled snapshot, not relay a live runtime',
+  'connection into an ordinary App. Apps currently run only on Chrome. A dwapp:true App gets only the',
+  'consent-gated parent dweb bridge — call dweb_guide before building one. External',
+  'HTTP(S) links work only through peerd\'s per-click confirmation.',
   '</app-runtime>',
 ].join('\n');
 

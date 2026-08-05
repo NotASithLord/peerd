@@ -18,7 +18,7 @@ import { describe, test, expect } from 'bun:test';
 const { messageActorTool } = await import('../../../extension/peerd-runtime/tools/defs/message-actor.js');
 const { scriptTool } = await import('../../../extension/peerd-runtime/tools/defs/script.js');
 const { sandboxCreateTool } = await import('../../../extension/peerd-runtime/tools/defs/sandbox-create.js');
-const { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } = await import('../../../extension/peerd-runtime/tools/defs/code-style-note.js');
+const { APP_RUNTIME_NOTE, JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } = await import('../../../extension/peerd-runtime/tools/defs/code-style-note.js');
 
 const descriptorChars = (t: any) =>
   (t.name || '').length + (t.description || '').length + JSON.stringify(t.schema || {}).length;
@@ -68,6 +68,9 @@ describe('schema diet — descriptor sizes dropped, no capability lost', () => {
     for (const kind of ['webvm', 'notebook', 'app']) {
       expect(sandboxCreateTool.description).toContain(`"${kind}"`);
     }
+    expect(sandboxCreateTool.description).toContain('NO ambient network');
+    expect(APP_RUNTIME_NOTE).toContain('NO ambient network');
+    expect(APP_RUNTIME_NOTE).toContain('consent-gated parent dweb bridge');
   });
 
   test('net main-surface delta across the three tools is meaningfully negative', () => {

@@ -156,10 +156,17 @@ export const DiscoverSection = () => {
   /**
    * @param {Send} send
    * @param {string | null} appId
+   * @param {string} discoveryId
    */
-  const open = async (send, appId) => {
+  const open = async (send, appId, discoveryId) => {
     if (!appId) return;
-    try { await send({ type: 'apps/open', appId }); } catch { /* surfaced elsewhere */ }
+    try {
+      const result = await send({ type: 'apps/open', appId });
+      if (!result?.ok) busy[discoveryId] = result?.error || 'App could not be opened';
+    } catch (e) {
+      busy[discoveryId] = /** @type {{ message?: string }} */ (e)?.message || 'App could not be opened';
+    }
+    if (!dead) m.redraw();
   };
 
   // The manual ↻: spin while a one-shot re-sync runs. The background 4s poll
@@ -201,7 +208,7 @@ export const DiscoverSection = () => {
       onclick: () => update(send, app, /** @type {string} */ (localId)),
     }, state === 'updating' ? 'Updating…' : failed ? 'Retry update' : 'Update');
     else if (installed) action = localId
-      ? m('button.disc-open', { onclick: () => open(send, localId) }, 'Open ↗')
+      ? m('button.disc-open', { onclick: () => open(send, localId, id) }, 'Open ↗')
       : m('span.peerd-disc-done', 'installed ✓');
     else action = m('button.disc-open', {
       disabled: state === 'installing' || !app.uri,

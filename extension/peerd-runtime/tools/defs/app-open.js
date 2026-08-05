@@ -6,9 +6,10 @@ export const appOpenTool = {
   name: 'app_open',
   primitive: 'app',
   description: [
-    'Open an App in a tab. It opens in the BACKGROUND and a "go there" card',
+    'Open an App in a tab on supported Chrome. It opens in the BACKGROUND and a "go there" card',
     'appears in the chat (peerd never yanks the user to a new tab — they click',
-    'to go). Becomes the chat\'s current app for follow-up app_update calls.',
+    'to go). Apps cannot run on Firefox yet; tell the user to open peerd in Chrome.',
+    'Becomes the chat\'s current app for follow-up app_update calls.',
   ].join(' '),
   schema: {
     type: 'object',

@@ -99,8 +99,10 @@ export {
 export {
   denylistBlockDomains,
   buildDenylistBlockRule,
+  buildAppEgressBlockRule,
   denylistSessionRuleUpdate,
   DENYLIST_RULE_ID,
+  APP_EGRESS_RULE_ID,
   DENYLIST_RESOURCE_TYPES,
 } from './denylist/dnr-rules.js';
 

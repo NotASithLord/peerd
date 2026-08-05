@@ -12,7 +12,6 @@
 import browser from '/vendor/browser-polyfill.js';
 import {
   composeApp,
-  withNewTabLinks,
   stripMetaRefresh,
   createEditor,
   opfsHelpers,
@@ -45,6 +44,26 @@ const fail = (msg) => {
   boot.classList.remove('is-hidden');
   boot.classList.add('is-failed');
   bootMsg.textContent = `Failed: ${msg}`;
+};
+
+/** @param {string} text */
+const showNotice = (text) => {
+  let notice = document.getElementById('app-security-notice');
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.id = 'app-security-notice';
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'polite');
+    notice.style.cssText = [
+      'position:fixed', 'left:12px', 'right:12px', 'bottom:12px', 'z-index:60',
+      'padding:9px 12px', 'border:1px solid #444', 'border-radius:6px',
+      'background:#111', 'color:#eee', 'font:12px/1.4 -apple-system,system-ui,sans-serif',
+    ].join(';');
+    document.body.appendChild(notice);
+  }
+  notice.textContent = text;
+  clearTimeout(Number(notice.dataset.timer || 0));
+  notice.dataset.timer = String(setTimeout(() => notice?.remove(), 6000));
 };
 
 if (!appId) {
@@ -134,6 +153,7 @@ let runnerStarted = false;
 // app navigation (which would log a spurious warning AND tear down the dweb
 // bridge we just attached on runner-ready). One-shot per delivery.
 let expectingBodyLoad = false;
+let linkPromptOpen = false;
 
 const tryDeliver = () => {
   if (!runnerReady || !pendingBody) return;
@@ -177,7 +197,7 @@ const renderMode = async () => {
   await withBuiltinLibs(files);
 
   let composed;
-  try { composed = withNewTabLinks(stripMetaRefresh(composeApp(files, appMeta.entryFile))); }
+  try { composed = stripMetaRefresh(composeApp(files, appMeta.entryFile)); }
   catch (e) { fail(`compose failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return; }
 
   // Ensure the iframe is in the DOM (re-create on mode switch).
@@ -215,6 +235,42 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
     // dwapp). why: a dwapp that reloads itself shouldn't permanently lose the
     // network (the multiplayer game would just die mid-session).
     attachDwebBridge();
+    return;
+  }
+  if (e.data?.type === 'app-policy-blocked') {
+    const directive = typeof e.data.directive === 'string'
+      ? e.data.directive.replace(/[^a-z-]/gi, '').slice(0, 40)
+      : 'resource';
+    showNotice(`Blocked ${directive || 'resource'}: Apps are offline. Bundle dependencies and assets.`);
+    return;
+  }
+  if (e.data?.type === 'runner-failed') {
+    fail('The browser could not enforce the App sandbox.');
+    return;
+  }
+  if (e.data?.type === 'app-link') {
+    if (linkPromptOpen) { showNotice('Finish the open-link prompt first.'); return; }
+    let target;
+    try { target = new URL(String(e.data.href)); }
+    catch { showNotice('That link is unavailable inside this offline App.'); return; }
+    if (!['http:', 'https:'].includes(target.protocol)) {
+      showNotice('Only confirmed HTTP(S) links can leave an App.');
+      return;
+    }
+    const safeTarget = new URL(target.href);
+    safeTarget.username = '';
+    safeTarget.password = '';
+    const remainder = `${safeTarget.pathname}${safeTarget.search}${safeTarget.hash}`;
+    const shownRemainder = remainder.length > 120 ? `${remainder.slice(0, 117)}…` : remainder;
+    const shown = `${safeTarget.origin}${shownRemainder}`;
+    linkPromptOpen = true;
+    confirmAction({ appName: appMeta?.name ?? 'This App', detail: `open this external link: ${shown}`, approveLabel: 'Open link' })
+      .then((allowed) => {
+        if (allowed) return browser.tabs.create({ url: safeTarget.href });
+        return undefined;
+      })
+      .catch(() => showNotice('The external link could not be opened.'))
+      .finally(() => { linkPromptOpen = false; });
   }
 });
 
@@ -245,9 +301,14 @@ frame.addEventListener('load', () => {
 let dwebBridge = null;
 
 // A minimal monochrome consent bar (no new accent colors — CLAUDE.md).
-/** @param {{ appName: string, detail: string }} arg @returns {Promise<boolean>} */
-const confirmAction = ({ appName, detail }) => new Promise((resolve) => {
+let confirmationTail = Promise.resolve();
+
+/** @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} arg @returns {Promise<boolean>} */
+const showConfirmation = ({ appName, detail, kind, approveLabel }) => new Promise((resolve) => {
+  const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const bar = document.createElement('div');
+  bar.setAttribute('role', 'alertdialog');
+  bar.setAttribute('aria-modal', 'true');
   bar.style.cssText = [
     'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:50',
     'display:flex', 'gap:12px', 'align-items:center', 'justify-content:center',
@@ -256,18 +317,38 @@ const confirmAction = ({ appName, detail }) => new Promise((resolve) => {
     'border-bottom:1px solid #333',
   ].join(';');
   const text = document.createElement('span');
+  text.id = `app-confirm-${Date.now()}`;
+  bar.setAttribute('aria-labelledby', text.id);
   text.textContent = `“${appName}” wants to ${detail}.`;
   /** @param {string} label @param {boolean} val @param {boolean} solid */
   const mkBtn = (label, val, solid) => {
     const b = document.createElement('button');
     b.textContent = label;
-    b.style.cssText = `padding:4px 14px;border:1px solid #555;border-radius:4px;cursor:pointer;background:${solid ? '#eee' : 'transparent'};color:${solid ? '#111' : '#eee'};font:inherit`;
-    b.addEventListener('click', () => { bar.remove(); resolve(val); });
+    b.style.cssText = `min-height:44px;padding:8px 16px;border:1px solid #555;border-radius:4px;cursor:pointer;background:${solid ? '#eee' : 'transparent'};color:${solid ? '#111' : '#eee'};font:inherit`;
+    b.addEventListener('click', () => { bar.remove(); priorFocus?.focus(); resolve(val); });
     return b;
   };
-  bar.append(text, mkBtn('Allow', true, true), mkBtn('Deny', false, false));
+  const actionLabel = approveLabel ?? (kind === 'join' ? 'Join room' : kind === 'install' ? 'Install app' : 'Allow');
+  const allow = mkBtn(actionLabel, true, true);
+  const deny = mkBtn('Deny', false, false);
+  bar.append(text, allow, deny);
   document.body.appendChild(bar);
+  deny.focus();
+  bar.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); deny.click(); return; }
+    if (event.key !== 'Tab') return;
+    if (event.shiftKey && document.activeElement === allow) { event.preventDefault(); deny.focus(); }
+    else if (!event.shiftKey && document.activeElement === deny) { event.preventDefault(); allow.focus(); }
+  });
 });
+
+/** Serialize every trusted-parent consent surface so App prompts cannot overlap.
+ * @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} args */
+const confirmAction = (args) => {
+  const result = confirmationTail.then(() => showConfirmation(args));
+  confirmationTail = result.then(() => undefined, () => undefined);
+  return result;
+};
 
 const attachDwebBridge = async () => {
   if (dwebBridge || !appMeta?.dweb) return;
@@ -387,14 +468,21 @@ toggleBtn.addEventListener('click', async () => {
   }
 });
 
-// Announce ready + start in render mode. Live-reload after agent
+// Arm the network floor, announce ready, then start in render mode. Live-reload after agent
 // edits flows via chrome.tabs.reload (in app-client.reloadTab); this
 // page re-runs, refetches OPFS + recomposes. No extra message
 // channel needed.
-browser.runtime.sendMessage({ type: 'app/tab-ready', appId }).catch(() => {});
+const isolation = /** @type {{ ok?: boolean, error?: string }} */ (
+  await browser.runtime.sendMessage({ type: 'app/tab-ready', appId })
+    .catch(() => ({ ok: false, error: 'The App isolation check did not respond.' }))
+);
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
 // keep chatting from this App without a round-trip back to home.
 mountPullInPeerd();
 
-renderMode();
+if (!isolation?.ok) {
+  fail(isolation?.error ?? 'This browser cannot enforce App isolation.');
+} else {
+  renderMode();
+}
