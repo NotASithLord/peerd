@@ -738,12 +738,16 @@ evaluating peerd should know. Each cites where it lives in the code.
   hosts, asked at origin level), origins with a stored credential, and two signals
   LEARNED from ordinary use — a password field seen on a page, and a write the user
   approved. It fails open, so an unlisted credentialed site is treated as ordinary until
-  a signal fires. In practice the password-field signal fires on the first page walk of
-  any sign-in surface, so the exposure is narrower than "until you configure something";
-  but the FIRST landing on a site whose login the actor never sees is unprotected by
-  construction, and nothing un-learns, so an origin stays classified until the profile
-  is reset. Detecting credentials directly would need the `cookies` permission, which is
-  not requested for the same reason `webNavigation` is not.
+  a signal fires. The signal is observed at the DOM chokepoint every DOM tool passes
+  through, so which tool an actor reaches for no longer decides whether peerd learns
+  (#267 — it used to fire only on `snapshot`, and tool choice belongs to whoever is
+  driving the actor). The FIRST landing on a site whose login the actor never sees is
+  unprotected by construction. An origin can now be un-learned: Settings → Learned
+  sites lists what was inferred and removes it (#262), and the signal is credited to
+  the origin the probe REPORTS rather than to the caller's tab record, so a page that
+  navigates mid-call cannot spend it on someone else (#278). Detecting credentials
+  directly would need the `cookies` permission, which is not requested for the same
+  reason `webNavigation` is not.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,
@@ -760,6 +764,68 @@ evaluating peerd should know. Each cites where it lives in the code.
   been about that site. But the report is first-party text the orchestrator is meant to
   trust, so a hijacked page gets one attempt at persuading it to open a helper somewhere
   the user never asked about. (`peerd-runtime/actor/origin-lock-report.js`.)
+
+- R18. The identity-provider registry is invisible to the sensitivity classifier
+  (#265). peerd keeps exactly one curated list of origins whose whole purpose is
+  authentication, and it is consumed only to OPEN a bound actor's excursion
+  (`actor/origin-lock.js`, `actor/landing-rule.js`) — never as a sensitivity signal.
+  The classifier's seeds are the UGC registry, a stored credential, and what was
+  learned. So the big IdP hosts classify as ORDINARY until something happens to see a
+  password field on one, which is backwards: they are the set on which a session cookie
+  is worth the most. The fix is plausibly one seed, but whether an IdP should be
+  "sensitive" or a THIRD state — enterable on an excursion, never roamable — is a
+  design call, and adding the seed naively would make the excursion mechanism refuse
+  the landings it exists to permit.
+- R19. Learning is unauthenticated, page-controlled input (#268). A hostile page that
+  renders one password field classifies ITSELF as credentialed, and the landing rule
+  then hands off to a successor bound to the attacker's own origin. R17 already records
+  that the attacker names the successor; what this adds is the CAPABILITY difference —
+  the successor is bound, so it may open an auth excursion onto a real IdP host, which
+  the roaming actor it replaced could not. Two things bound it today: a signal is
+  credited to the origin the probe reports rather than to the caller's tab record
+  (#278), so a page can only mark the document it controls; and Settings → Learned
+  sites shows what was inferred and removes it (#262). Moving the probe to the DOM
+  chokepoint (#267) deliberately widened the trigger from one tool to all of them,
+  which widens this too — the trade is stated in that commit: unfixed #267 let a
+  hijacked actor KEEP authority on a real credentialed site, while this direction costs
+  availability and fills the learned cap faster.
+- R20. Type-the-scrape-into-a-form exfil is invisible to the tripwire (#269). The
+  scanner inspects tool ARGUMENTS for URL-shaped payloads. Typing a scraped blob into a
+  form field and clicking submit moves the same bytes with no URL in any argument: the
+  blob is seen in the `text` slot and discarded because it does not parse as a URL, and
+  the request that actually carries it — the form submission — is a `click`, whose args
+  are a ref or a selector. The module header already puts page-driven beacons out of
+  scope; this path is tool-driven, so it is inside the stated scope and is a gap rather
+  than an exclusion (`tools/egress-heuristics.js`).
+- R21. `fetch_url` headers and body are structurally invisible to the same scanner
+  (#270). The tripwire was widened to cover the web actor's own fetch, but it reads
+  only the URL-shaped fields; header values and any request body are never examined,
+  and the candidate collector only walks top-level strings, so an object argument could
+  not be read even if it were listed. `fetch_url` strips the credential-bearing headers
+  and passes the rest through verbatim. The scanner is already a pure function over
+  strings, so the cheapest close is to run it over those values too — it is listed here
+  because it is not done, not because it is hard.
+- R22. The auth excursion is scoped to TIME, not to the sign-in it was opened for
+  (#273). Inside a live excursion the only refusals are the deadline, a sensitive
+  landing that is not the opener, and budget exhaustion — and budget is spent on an
+  ORIGIN CHANGE, so one hop onto an attacker origin buys read/click/type across every
+  path of it for the rest of the window. The opener is recorded but only used to exempt
+  itself; the return-to is never enforced. Whether an excursion should be bounded by
+  the flow that opened it rather than by a clock is the open question
+  (`actor/landing-rule.js`).
+- R23. The password probe is top-frame and light-DOM only (#277). A site whose sign-in
+  lives in an iframe — an embedded IdP or payment widget, or a plain `<iframe
+  src=/login>` — or inside a shadow root is invisible to the learned signal
+  permanently, however often peerd walks it. This is the one residual that pulls
+  AGAINST another: widening the probe widens both directions at once, and #257 exists
+  because false positives on this signal have their own cost. It wants a deliberate
+  call, not a wider selector (`dom/walk-injected.js`).
+- R24. Chunked exfil defeats the minimum-blob threshold (#279). The tripwire is a pure
+  per-call function over one call's slots, and the dispatcher hands it no history, so a
+  payload split below the threshold passes as many times as an attacker cares to
+  repeat it and reassembles server-side. Cross-call aggregation is the only real
+  answer; the module header already lists fragmentation as accepted, and this records
+  it as a decision rather than an oversight (`tools/egress-heuristics.js`).
 
 Candidates for future red-team scenarios, from the partially-defended surfaces above:
 R2 memory poisoning and R3 skill-body smuggling. (R4 chain tampering, R5 grant

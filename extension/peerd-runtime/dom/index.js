@@ -17,7 +17,7 @@ export { summarizeMutations } from './action-result.js';
 // Firefox-parity fallback: captureSnapshot picks CDP when the pool is
 // wired, else the chrome.scripting DOM-walk pseudo-snapshot
 // (walk-injected.js) — same serializer, same ref contract.
-export { captureSnapshot, describeSource } from './capture.js';
+export { captureSnapshot, describeSource, signalIsAttributable } from './capture.js';
 export { domWalkInjected } from './walk-injected.js';
 
 // The in-page activity indicator injected into the tab the web actor drives.
