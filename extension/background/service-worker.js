@@ -438,6 +438,18 @@ const lifecycleBoot = makeLifecycleBoot({
   // postChatNote is declared far below — the standard late-dep deferral.
   notify: (/** @type {string} */ _sessionId, /** @type {string} */ text) =>
     postChatNote(`Recovered from a browser interruption: ${text}`),
+  // Actor sessions may never take another turn, so their recovery notices
+  // walk parentSessionId up to the root chat (bounded — a corrupt chain
+  // stops at the depth cap and falls back to the child).
+  resolveNoticeSession: async (/** @type {string} */ sid) => {
+    let cursor = sid;
+    for (let hops = 0; hops < 8; hops += 1) {
+      const record = await sessions.get(cursor).catch(() => null);
+      if (!record?.parentSessionId) break;
+      cursor = record.parentSessionId;
+    }
+    return cursor;
+  },
   nonce: () => crypto.randomUUID(),
 });
 /** @type {ReturnType<typeof makeDispatchTracker> | null} */

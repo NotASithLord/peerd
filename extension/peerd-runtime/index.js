@@ -439,7 +439,7 @@ export {
 export {
   createOperationLog,
   OperationNotFoundError, OperationExistsError, RetryRefusedError,
-  OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL,
+  OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL, OPERATION_LOG_MAX_UNKNOWN,
 } from './lifecycle/operation-log.js';
 export {
   RECOVERY_CATEGORIES, categorizeRecovery, describeRecovery,

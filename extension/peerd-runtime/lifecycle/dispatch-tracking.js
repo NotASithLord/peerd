@@ -7,12 +7,14 @@
 // service-worker eviction at ANY point leaves evidence the startup
 // reconciler can settle truthfully (interrupted vs outcome_unknown).
 //
-// This file also enforces contract guarantee 2 at the seam where it was
-// weakest: the auto-resume path re-drives a dead turn's pending tool calls
-// with their ORIGINAL tool_use ids. Without tracking, that silently
-// re-executes a non-idempotent action whose first dispatch may have landed.
-// beginTracking recognizes the operationId and REFUSES the re-execution
-// with the semantic outcome instead of running the effect twice.
+// This file also enforces contract guarantee 2 as a structural backstop:
+// any dispatch that re-presents an operationId whose earlier dispatch has
+// no proven outcome is REFUSED with the semantic state instead of executed
+// twice. (The auto-resume path itself repairs orphaned tool_use blocks as
+// synthesized error results rather than re-dispatching — see the format
+// layer's orphan repair — so the guard's live coverage is the other replay
+// shapes: an OpenAI-compat model re-emitting an id it used before, a
+// duplicated wake delivery, or any future resume path that does re-drive.)
 //
 // Failure semantics (§16.2 — no generic timeouts): a settled failure is
 // classified. A definitive error response is `failed`; an ambiguous
@@ -38,9 +40,19 @@ import { OperationExistsError } from './operation-log.js';
 // gate blocks) are definitive.
 const AMBIGUOUS_ERROR = /timed? ?out|timeout|failed to fetch|networkerror|network error|connection (reset|closed|lost|refused)|socket hang ?up|ERR_(NETWORK|CONNECTION|INTERNET|TIMED_OUT)|fetch failed|load failed|HTTP 5\d\d|\b50[0-4]\b.*(server|gateway)|internal server error|bad gateway|service unavailable|gateway time/i;
 
+// Execution-HOST deaths: the channel to the code doing the work died — a
+// closed message port, a closed engine tab, a terminated worker, an
+// invalidated extension context. These are NOT the tool attesting failure
+// (a returned "element not found" is); they are the transport dying with
+// the effect possibly in flight, so for a non-idempotent action they are
+// ambiguous, never positive failure evidence.
+const HOST_DEATH_ERROR = /message port closed|receiving end does not exist|could not establish connection|tab (was |is )?closed|no tab with id|VM(NotReady|BootFailed|TabClosed)|worker (was )?(terminated|died|killed)|context invalidated|extension context|target (closed|crashed)|frame (was )?detached/i;
+
 /** @param {string | undefined} error @param {string} kind */
 const isAmbiguousLoss = (error, kind) =>
-  kind === 'timeout' || (typeof error === 'string' && AMBIGUOUS_ERROR.test(error));
+  kind === 'timeout'
+  || (typeof error === 'string'
+    && (AMBIGUOUS_ERROR.test(error) || HOST_DEATH_ERROR.test(error)));
 
 /**
  * @typedef {Object} TrackingHandle
@@ -140,9 +152,16 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
     if (record.state === OPERATION_STATES.INTERRUPTED
         && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
       // A/B/C/D-undispatched interruption: the sanctioned retry — same
-      // operation, fresh attempt number.
-      const next = await operationLog.newAttempt(record.operationId);
+      // operation, fresh attempt number, re-stamped with the LIVE
+      // generation. markDispatched mirrors the fresh path: the retry's
+      // effect can leave peerd the instant it executes, and a record still
+      // claiming dispatched:false would reconcile a second interruption as
+      // "never attempted, safe to auto-retry" — the exact false claim the
+      // contract forbids.
+      const next = await operationLog.newAttempt(record.operationId,
+        { generationId: generationId() });
       await operationLog.transition(record.operationId, OPERATION_STATES.RUNNING);
+      await operationLog.markDispatched(record.operationId);
       return { handle: { operationId: next.operationId, retryClass, toolName: next.toolName } };
     }
 
@@ -177,8 +196,12 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       const fresh = await operationLog.get(record.operationId);
       if (fresh?.state === OPERATION_STATES.INTERRUPTED
           && retryClass !== RETRY_CLASSES.SIDE_EFFECT) {
-        const next = await operationLog.newAttempt(record.operationId);
+        // Same shape as the sanctioned-retry branch above: live generation
+        // stamp + dispatched marked before the effect can leave.
+        const next = await operationLog.newAttempt(record.operationId,
+          { generationId: generationId() });
         await operationLog.transition(record.operationId, OPERATION_STATES.RUNNING);
+        await operationLog.markDispatched(record.operationId);
         return { handle: { operationId: next.operationId, retryClass, toolName: next.toolName } };
       }
     }

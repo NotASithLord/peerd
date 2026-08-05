@@ -79,10 +79,17 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
 
   // Pin the owned tab onto the tool args (security invariant above). The DOM
   // tools all accept tabId; ones that don't ignore the extra key.
+  //
+  // why the id must be UNIQUE per dispatch: the lifecycle tracker keys
+  // operations on (sessionId, call id), and the SW route doesn't thread the
+  // worker's rid through — a constant id made every page.* write after the
+  // first read as a replay of it and refuse. These are fresh interactive
+  // calls the worker awaits one at a time; there is no resume path that
+  // re-drives them, so a collision-free random id is the correct identity.
   const call = {
     name: toolCall.name,
     args: { ...toolCall.args, tabId: req.tabId },
-    id: `page-${req.rid ?? ''}`,
+    id: `page-${req.rid ?? ''}-${crypto.randomUUID()}`,
   };
 
   /** @type {ToolResult} */

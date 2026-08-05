@@ -32,10 +32,16 @@ export const OPERATION_LOG_KEY = 'peerd.lifecycle.operations';
 // Settled records kept for correlation before the oldest are pruned. why a
 // cap: the log is a recovery + audit correlation surface, not history —
 // unbounded growth would make the startup reconcile scan pay for every
-// operation ever run. outcome_unknown records are deliberately EXEMPT from
-// pruning: deleting one silently discards the uncertainty the contract
-// exists to surface — they leave only via resolveUnknown.
+// operation ever run. outcome_unknown records are EXEMPT from this cap
+// (deleting one silently discards the uncertainty the contract exists to
+// surface — they leave via resolveUnknown) but carry their own, larger
+// bound below: a store that can grow without limit from attacker-
+// influenceable error text is its own failure mode, so past that bound the
+// OLDEST unknowns are dropped — a documented, bounded discard, not a
+// silent one (and 200 unresolved unknowns already signals something far
+// worse than log pressure).
 export const OPERATION_LOG_MAX_TERMINAL = 500;
+export const OPERATION_LOG_MAX_UNKNOWN = 200;
 
 const PRUNABLE_STATES = Object.freeze(
   /** @type {ReadonlySet<import('./operation-state.js').OperationState>} */ (new Set([
@@ -105,6 +111,13 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
     const excess = prunable.length - OPERATION_LOG_MAX_TERMINAL;
     if (excess > 0) {
       for (const record of prunable.slice(0, excess)) delete map[record.operationId];
+    }
+    const unknowns = Object.values(map)
+      .filter((record) => record.state === OPERATION_STATES.OUTCOME_UNKNOWN)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const unknownExcess = unknowns.length - OPERATION_LOG_MAX_UNKNOWN;
+    if (unknownExcess > 0) {
+      for (const record of unknowns.slice(0, unknownExcess)) delete map[record.operationId];
     }
     await storage.set(OPERATION_LOG_KEY, map);
   };
@@ -256,9 +269,14 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
    * action is a NEW operation with a fresh confirmation, never a re-drive
    * of the old record) and for any state but `interrupted` — settled
    * outcomes are never re-driven.
+   *
    * @param {string} operationId
+   * @param {{ generationId?: string }} [patch]  re-stamp the LIVE generation
+   *   driving the retry — leaving the dead generation's stamp would
+   *   misattribute the attempt in audit and make the reconciler skip it as
+   *   "current" never again.
    */
-  const newAttempt = (operationId) => enqueue(async () => {
+  const newAttempt = (operationId, patch = {}) => enqueue(async () => {
     const map = await load();
     const record = map[operationId];
     if (!record) throw new OperationNotFoundError(operationId);
@@ -275,6 +293,8 @@ export const createOperationLog = ({ storage, now = Date.now }) => {
       attempt: record.attempt + 1,
       state: OPERATION_STATES.QUEUED,
       dispatched: false,
+      ...(typeof patch.generationId === 'string' && patch.generationId
+        ? { generationId: patch.generationId } : {}),
     };
     map[operationId] = next;
     await persist(map);

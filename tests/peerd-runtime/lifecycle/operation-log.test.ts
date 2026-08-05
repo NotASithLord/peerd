@@ -5,6 +5,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   createOperationLog, OperationNotFoundError, OperationExistsError,
   RetryRefusedError, OPERATION_LOG_KEY, OPERATION_LOG_MAX_TERMINAL,
+  OPERATION_LOG_MAX_UNKNOWN,
 } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import {
   OPERATION_STATES, IllegalTransitionError, UnknownOutcomeUnresolvedError,
@@ -229,7 +230,24 @@ describe('bounded growth', () => {
     expect(stored['op-live']).toBeDefined();
   });
 
-  test('outcome_unknown records are never pruned — deleting one discards the uncertainty', async () => {
+  test('outcome_unknown has its own larger bound — oldest dropped past OPERATION_LOG_MAX_UNKNOWN', async () => {
+    const { adapter } = makeStorage();
+    let t = 0;
+    const log = createOperationLog({ storage: adapter, now: () => ++t });
+    for (let i = 0; i < OPERATION_LOG_MAX_UNKNOWN + 3; i += 1) {
+      const id = `unk-${i}`;
+      await log.begin({ ...beginInput, operationId: id });
+      await log.transition(id, S.RUNNING);
+      await log.transition(id, S.OUTCOME_UNKNOWN, { dispatched: true });
+    }
+    const stored = await adapter.get(OPERATION_LOG_KEY) as Record<string, { state: string }>;
+    const unknowns = Object.values(stored).filter((r) => r.state === S.OUTCOME_UNKNOWN);
+    expect(unknowns.length).toBe(OPERATION_LOG_MAX_UNKNOWN);
+    expect(stored['unk-0']).toBeUndefined();
+    expect(stored[`unk-${OPERATION_LOG_MAX_UNKNOWN + 2}`]).toBeDefined();
+  });
+
+  test('outcome_unknown records are not pruned by the terminal cap — the uncertainty outlives ordinary history', async () => {
     const { adapter } = makeStorage();
     let t = 0;
     const log = createOperationLog({ storage: adapter, now: () => ++t });

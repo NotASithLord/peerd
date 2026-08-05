@@ -32,10 +32,18 @@ const MAX_NOTICES_PER_SESSION = 8;
  *   set: (key: string, value: any) => Promise<void> }} deps.storage
  * @param {(entry: Record<string, unknown>) => Promise<unknown>} [deps.appendAudit]
  * @param {(sessionId: string, userText: string) => unknown} [deps.notify]
+ * @param {(sessionId: string) => Promise<string>} [deps.resolveNoticeSession]
+ *   maps an operation's session to the session whose NEXT TURN should hear
+ *   the notice. why: most side effects dispatch inside ACTOR sessions,
+ *   which may never take another turn (ephemeral children) — the shell
+ *   passes a parent-chain walk so the notice lands on the root chat, where
+ *   the turn driver actually drains it. Default: identity.
  * @param {() => string} deps.nonce   injected entropy (crypto.randomUUID)
  * @param {() => number} [deps.now]
  */
-export const makeLifecycleBoot = ({ storage, appendAudit, notify, nonce, now = Date.now }) => {
+export const makeLifecycleBoot = ({
+  storage, appendAudit, notify, resolveNoticeSession, nonce, now = Date.now,
+}) => {
   if (!storage || typeof nonce !== 'function') {
     throw new TypeError('makeLifecycleBoot: storage and nonce are required');
   }
@@ -80,7 +88,13 @@ export const makeLifecycleBoot = ({ storage, appendAudit, notify, nonce, now = D
     if (plan.notifications.length > 0) {
       const pending = (await storage.get(PENDING_NOTICES_KEY).catch(() => null)) ?? {};
       for (const notification of plan.notifications) {
-        const { sessionId, recoveryRecord } = notification;
+        const { recoveryRecord } = notification;
+        // Route to the session that will actually take a next turn. A
+        // failed resolution falls back to the operation's own session —
+        // a possibly-undrained notice beats a lost one.
+        const sessionId = await Promise.resolve(
+          resolveNoticeSession?.(notification.sessionId) ?? notification.sessionId,
+        ).catch(() => notification.sessionId) || notification.sessionId;
         const transition = plan.transitions.find(
           (t) => t.operationId === recoveryRecord.operationId);
         const verdict = transition?.verdict;

@@ -100,6 +100,21 @@ describe('settleTracking — §16.2 semantic failures', () => {
     expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
   });
 
+  test('execution-host deaths are ambiguous, not tool-attested failures', async () => {
+    for (const error of [
+      'script_failed: Error: The message port closed before a response was received.',
+      'Could not establish connection. Receiving end does not exist.',
+      'VMTabClosed: the VM tab was closed mid-command',
+      'worker terminated before the job settled',
+    ]) {
+      const { record } = await settle('E', error);
+      expect(record!.state).toBe(S.OUTCOME_UNKNOWN);
+    }
+    // …while a genuine pre-effect refusal from the tool itself stays failed.
+    const { record } = await settle('E', 'element not found: #missing');
+    expect(record!.state).toBe(S.FAILED);
+  });
+
   test('a timeout on a Class B read settles interrupted — retryable, budget-worded', async () => {
     const { rewrite, record } = await settle('B', 'fetch failed: connection reset');
     expect(record!.state).toBe(S.INTERRUPTED);
@@ -171,7 +186,37 @@ describe('the replay guard — guarantee 2', () => {
       callId: 'c1', tool: { name: 'fetch_url', retryClass: 'B' }, sessionId: 's',
     });
     expect(begun && 'handle' in begun).toBe(true);
-    expect((await log.get('s:c1'))!.attempt).toBe(2);
+    const record = (await log.get('s:c1'))!;
+    expect(record.attempt).toBe(2);
+    // The retry mirrors the fresh path: dispatched marked before execute
+    // and the LIVE generation stamped — a second eviction must reconcile
+    // this as a dispatched attempt of the current generation, never as
+    // "never attempted" under a dead one.
+    expect(record.state).toBe(S.AWAITING_REMOTE);
+    expect(record.dispatched).toBe(true);
+    expect(record.generationId).toBe('gen-1-nonce');
+  });
+
+  test('a retried Class D killed mid-flight reconciles as outcome_unknown, not safe-to-retry', async () => {
+    const { tracker, log } = makeTracker();
+    await log.begin({
+      operationId: 's:c1', sessionId: 's', toolName: 'dweb_share',
+      retryClass: 'D', generationId: 'gen-0-old',
+    });
+    await log.settle('s:c1', {
+      state: S.INTERRUPTED, autoRetry: true, retryRequires: [],
+      keepIdempotencyKey: true, verificationRequired: false,
+      recreateResource: false, reason: 'first eviction, pre-dispatch',
+    });
+    // The sanctioned re-drive… then the SW dies mid-execute.
+    const begun = await tracker.beginTracking({
+      callId: 'c1', tool: { name: 'dweb_share', retryClass: 'D' }, sessionId: 's',
+    });
+    expect(begun && 'handle' in begun).toBe(true);
+    const record = (await log.get('s:c1'))!;
+    // The durable evidence a reconciler needs: dispatched, current gen.
+    expect(record.dispatched).toBe(true);
+    expect(record.generationId).toBe('gen-1-nonce');
   });
 
   test('an interrupted-before-dispatch Class E call refuses the automatic replay even though it is safe', async () => {

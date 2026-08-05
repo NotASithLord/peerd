@@ -140,4 +140,45 @@ describe('notices — both audiences, delivered once', () => {
     // Other sessions see nothing.
     expect(await gen2.drainNoticesFor('sess-other')).toBe('');
   });
+
+  test('an actor session\'s notice routes to the parent chat via resolveNoticeSession', async () => {
+    const storage = makeStorage();
+    const gen1 = boot(storage);
+    const { generation } = await gen1.init();
+    await gen1.operationLog.begin({
+      operationId: 'op-actor', sessionId: 'actor-child-3', actorId: 'web:9',
+      toolName: 'click', retryClass: 'E', generationId: generation.id,
+    });
+    await gen1.operationLog.transition('op-actor', S.RUNNING);
+    await gen1.operationLog.markDispatched('op-actor');
+
+    const gen2 = boot(storage, {
+      resolveNoticeSession: async (sid: string) =>
+        (sid === 'actor-child-3' ? 'root-chat-1' : sid),
+    });
+    await gen2.init();
+    // The notice landed on the ROOT chat — the session that takes turns —
+    // not the ephemeral actor child.
+    expect(await gen2.drainNoticesFor('actor-child-3')).toBe('');
+    const block = await gen2.drainNoticesFor('root-chat-1');
+    expect(block).toContain('click');
+    expect(block).toContain('outcome_unknown');
+  });
+
+  test('a throwing resolver falls back to the operation\'s own session', async () => {
+    const storage = makeStorage();
+    const gen1 = boot(storage);
+    const { generation } = await gen1.init();
+    await gen1.operationLog.begin({
+      operationId: 'op-1', sessionId: 'sess-1', toolName: 't',
+      retryClass: 'E', generationId: generation.id,
+    });
+    await gen1.operationLog.transition('op-1', S.RUNNING);
+    await gen1.operationLog.markDispatched('op-1');
+    const gen2 = boot(storage, {
+      resolveNoticeSession: async () => { throw new Error('sessions store down'); },
+    });
+    await gen2.init();
+    expect(await gen2.drainNoticesFor('sess-1')).toContain('outcome_unknown');
+  });
 });
