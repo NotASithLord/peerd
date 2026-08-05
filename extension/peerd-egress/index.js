@@ -79,6 +79,12 @@ export {
   usableDpopPrivateKey, loadDpopJkt, ensureDpopJkt,
   dpopJkt, accessTokenHashFor, signDpopProof,
 } from './dpop/keys.js';
+// The §8 server-nonce half: the pure retry decisions + the per-origin cache the
+// boundary consults. The sequencing lives in fetch/web-fetch.js.
+export {
+  DPOP_NONCE_HEADER, MAX_NONCE_LENGTH, parseDpopNonce, readDpopNonce,
+  replayableRequest, shouldRetryWithNonce, makeNonceCache,
+} from './dpop/nonce.js';
 
 // --- denylist -----------------------------------------------------------
 export {

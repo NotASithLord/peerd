@@ -594,7 +594,9 @@ describe('withDpopCredentials — proof minted at the boundary, nowhere else', (
     const { wf, audits, key } = await mkBoundary();
     await wf(`${OWNED}/v1/x`, {});
     expect(audits).toHaveLength(1);
-    expect(audits[0]).toEqual({ type: 'dpop_auth_attached', details: { origin: OWNED, jkt: await dpopJkt(key.publicJwk) } });
+    // `nonced` is a BOOLEAN posture flag, not the nonce — the log says which
+    // shape the request went out under and still carries no server state.
+    expect(audits[0]).toEqual({ type: 'dpop_auth_attached', details: { origin: OWNED, jkt: await dpopJkt(key.publicJwk), nonced: false } });
     const serialized = JSON.stringify(audits[0]);
     expect(serialized).not.toContain(TOKEN);
     expect(serialized).not.toContain('dpop+jwt');           // no proof body

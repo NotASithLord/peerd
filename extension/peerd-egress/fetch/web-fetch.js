@@ -31,6 +31,7 @@ import { EgressDeniedError } from './errors.js';
 import { isPrivateOrLocalHost } from './private-network.js';
 import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './origin-credentials.js';
 import { accessTokenHashFor, dpopJkt, signDpopProof } from '../dpop/keys.js';
+import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce } from '../dpop/nonce.js';
 
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
@@ -182,72 +183,133 @@ const DPOP_AUTH_HEADER = 'Authorization';
  *   7.   fail closed and SILENT: a locked vault, a missing key, or a failed
  *        signature all send the request ANONYMOUS, with no throw. An unsigned
  *        token is never sent as a consolation prize.
+ *   8.   the server-nonce dance (§8) is handled HERE and nowhere else: a cached
+ *        nonce rides the first proof, and a nonce challenge earns exactly ONE
+ *        re-signed retry. See dpop/nonce.js for every condition on that retry;
+ *        this function only sequences them.
  *
  * @param {(resource:any, init?:any)=>Promise<Response>} webFetch
  * @param {()=>string|null|undefined} getOwnedOrigin  the actor's fixed owned origin
  * @param {{ getSecret:(name:string)=>Promise<string|null>,
  *           getDpopKey:(origin:string)=>Promise<{ privateKey: CryptoKey, publicJwk: any } | null>,
- *           audit?:(e:any)=>void, now?:()=>number, randomJti?:()=>string }} deps
+ *           audit?:(e:any)=>void, now?:()=>number, randomJti?:()=>string,
+ *           nonceCache?:ReturnType<typeof makeNonceCache> }} deps
  * @returns {(resource:any, init?:any)=>Promise<Response>}
  */
-export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti }) => async (resource, init = {}) => {
-  const url = resource instanceof Request ? resource.url : String(resource);
-  const owned = getOwnedOrigin();
-  const credentials = sessionScopedCredentials(url, owned);
-  let headers = init.headers;
-  const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
-  if (authOrigin) {
-    // Rule 5, UNCONDITIONALLY and BEFORE any decision: both slots the RFC fixes are
-    // cleared the moment we know this request is to the owned origin. why not inside
-    // the "we minted a proof" branch, where these used to live: every path that does
-    // NOT mint one — locked vault, no stored secret, a bearer secret, a failed
-    // signature — then left a CALLER-SUPPLIED `DPoP:` header standing on a request
-    // to the credentialed origin. The actor is untrusted; a header it chose must
-    // never reach the owned server in the slot the boundary owns, whether or not the
-    // boundary ends up filling it. Clearing first also makes "we sent nothing" mean
-    // exactly that.
-    headers = stripHeaderName(headers, DPOP_AUTH_HEADER);
-    headers = stripHeaderName(headers, DPOP_PROOF_HEADER);
-    // ONE try/catch around the whole credential attempt: rule 7 says every failure
-    // mode — locked vault, absent key, unsupported crypto, a throwing audit sink —
-    // degrades to the same anonymous request rather than surfacing to the caller.
-    try {
-      const secret = await getSecret(originSecretName(authOrigin));
-      const auth = secret ? parseOriginAuth(secret) : null;
-      if (auth && auth.scheme === 'dpop' && auth.token) {
-        const key = await getDpopKey(authOrigin);
-        if (key?.privateKey && key.publicJwk) {
-          // init.method wins over a Request's own method, mirroring fetch itself, so
-          // the `htm` we bind is the method that actually goes out.
-          const method = typeof init.method === 'string' ? init.method
-            : (resource instanceof Request ? resource.method : 'GET');
-          const proof = await signDpopProof({
-            privateKey: key.privateKey,
-            publicJwk: key.publicJwk,
-            method,
-            url,
-            jti: (randomJti ?? (() => crypto.randomUUID()))(),
-            iatSeconds: Math.floor((now ?? Date.now)() / 1000),
-            accessTokenHash: await accessTokenHashFor(auth.token),
-          });
-          if (proof) {
-            // Both slots are already empty (stripped above) — set ours, last-wins.
-            headers = { ...(headers || {}), [DPOP_AUTH_HEADER]: auth.value, [DPOP_PROOF_HEADER]: proof };
-            const jkt = await dpopJkt(key.publicJwk);
-            try { audit?.({ type: 'dpop_auth_attached', details: { origin: authOrigin, jkt } }); }
-            catch { /* best effort — never let auditing leak a value or throw */ }
+export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti, nonceCache }) => {
+  // ONE cache per wrapper, so it lives exactly as long as the actor's boundary
+  // does and is never shared across owned origins by accident (it is keyed by
+  // origin regardless — see nonce.js — this is belt and braces).
+  const nonces = nonceCache ?? makeNonceCache();
+
+  return async (resource, init = {}) => {
+    const url = resource instanceof Request ? resource.url : String(resource);
+    const owned = getOwnedOrigin();
+    const credentials = sessionScopedCredentials(url, owned);
+    const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
+    if (!authOrigin) return webFetch(resource, { ...init, headers: init.headers, credentials });
+
+    /**
+     * Build the outgoing headers for one attempt. Returns whether a PROOF was
+     * minted, because that — not "there is a credential" — is what licenses a
+     * retry: a bearer origin has no nonce dance to run.
+     * @param {string | null} nonce
+     */
+    const attach = async (nonce) => {
+      // Rule 5, UNCONDITIONALLY and BEFORE any decision: both slots the RFC fixes are
+      // cleared the moment we know this request is to the owned origin. why not inside
+      // the "we minted a proof" branch, where these used to live: every path that does
+      // NOT mint one — locked vault, no stored secret, a bearer secret, a failed
+      // signature — then left a CALLER-SUPPLIED `DPoP:` header standing on a request
+      // to the credentialed origin. The actor is untrusted; a header it chose must
+      // never reach the owned server in the slot the boundary owns, whether or not the
+      // boundary ends up filling it. Clearing first also makes "we sent nothing" mean
+      // exactly that. Re-run per attempt, so the retry re-derives from the CALLER's
+      // headers rather than layering on the first attempt's.
+      let headers = stripHeaderName(init.headers, DPOP_AUTH_HEADER);
+      headers = stripHeaderName(headers, DPOP_PROOF_HEADER);
+      // ONE try/catch around the whole credential attempt: rule 7 says every failure
+      // mode — locked vault, absent key, unsupported crypto, a throwing audit sink —
+      // degrades to the same anonymous request rather than surfacing to the caller.
+      try {
+        const secret = await getSecret(originSecretName(authOrigin));
+        const auth = secret ? parseOriginAuth(secret) : null;
+        if (auth && auth.scheme === 'dpop' && auth.token) {
+          const key = await getDpopKey(authOrigin);
+          if (key?.privateKey && key.publicJwk) {
+            // init.method wins over a Request's own method, mirroring fetch itself, so
+            // the `htm` we bind is the method that actually goes out.
+            const method = typeof init.method === 'string' ? init.method
+              : (resource instanceof Request ? resource.method : 'GET');
+            const proof = await signDpopProof({
+              privateKey: key.privateKey,
+              publicJwk: key.publicJwk,
+              method,
+              url,
+              // A retry re-signs from scratch — new jti, new iat, the new nonce.
+              // Re-sending the first proof with a nonce bolted on is not a thing
+              // that exists: the claims are inside the signature.
+              jti: (randomJti ?? (() => crypto.randomUUID()))(),
+              iatSeconds: Math.floor((now ?? Date.now)() / 1000),
+              accessTokenHash: await accessTokenHashFor(auth.token),
+              nonce: nonce ?? undefined,
+            });
+            if (proof) {
+              // Both slots are already empty (stripped above) — set ours, last-wins.
+              headers = { ...(headers || {}), [DPOP_AUTH_HEADER]: auth.value, [DPOP_PROOF_HEADER]: proof };
+              const jkt = await dpopJkt(key.publicJwk);
+              // The audit records origin + public thumbprint ONLY (rule 6). `nonced`
+              // is a boolean, never the nonce: the log says which posture the request
+              // went out under without carrying the server's freshness state.
+              try { audit?.({ type: 'dpop_auth_attached', details: { origin: authOrigin, jkt, nonced: Boolean(nonce) } }); }
+              catch { /* best effort — never let auditing leak a value or throw */ }
+              return { headers, minted: true };
+            }
           }
+        } else if (auth) {
+          // A plain bearer/raw secret on this origin: identical to withApiCredentials.
+          headers = stripHeaderName(headers, auth.header);
+          headers = { ...(headers || {}), [auth.header]: auth.value };
+          try { audit?.({ type: 'origin_auth_attached', details: { origin: authOrigin, header: auth.header } }); }
+          catch { /* best effort */ }
         }
-      } else if (auth) {
-        // A plain bearer/raw secret on this origin: identical to withApiCredentials.
-        headers = stripHeaderName(headers, auth.header);
-        headers = { ...(headers || {}), [auth.header]: auth.value };
-        try { audit?.({ type: 'origin_auth_attached', details: { origin: authOrigin, header: auth.header } }); }
-        catch { /* best effort */ }
-      }
-    } catch { /* rule 7: anonymous, never a throw, never an unsigned token */ }
-  }
-  return webFetch(resource, { ...init, headers, credentials });
+      } catch { /* rule 7: anonymous, never a throw, never an unsigned token */ }
+      return { headers, minted: false };
+    };
+
+    const sentNonce = nonces.get(authOrigin);
+    const first = await attach(sentNonce);
+    const response = await webFetch(resource, { ...init, headers: first.headers, credentials });
+
+    // Learn from EVERY response, not just the challenges: RFC 9449 lets a server
+    // rotate its nonce on a success too, and the next request should carry the
+    // new one rather than eat a 401 to discover it.
+    const freshNonce = readDpopNonce(response);
+    if (freshNonce) nonces.set(authOrigin, freshNonce);
+
+    if (!shouldRetryWithNonce(response, {
+      minted: first.minted,
+      sentNonce,
+      freshNonce,
+      replayable: replayableRequest(resource, init),
+    })) return response;
+
+    const retry = await attach(freshNonce);
+    // If the second signing failed (vault locked between attempts, key revoked),
+    // rule 7 still holds: hand back the server's own answer rather than sending
+    // an unsigned request. The first response is the honest result.
+    if (!retry.minted) return response;
+
+    try { audit?.({ type: 'dpop_nonce_retry', details: { origin: authOrigin, status: response?.status } }); }
+    catch { /* best effort */ }
+    // The first response is being discarded, so release its body. Best effort:
+    // a stub response has none, and a failed cancel must not sink the retry.
+    try { await /** @type {any} */ (response)?.body?.cancel?.(); } catch { /* ignore */ }
+    const retried = await webFetch(resource, { ...init, headers: retry.headers, credentials });
+    const rotated = readDpopNonce(retried);
+    if (rotated) nonces.set(authOrigin, rotated);
+    return retried;
+  };
 };
 
 /**
