@@ -8,6 +8,7 @@ import {
   validateAttachment,
   validateAttachments,
   prepareUserAttachments,
+  prepareUserAttachmentsWithDocs,
   stripAttachment,
   stripAttachments,
   attachmentBytes,
@@ -17,6 +18,7 @@ import {
   UnsupportedAttachmentError,
   AttachmentTooLargeError,
   TooManyAttachmentsError,
+  AttachmentConversionError,
 } from '../../../extension/peerd-runtime/loop/attachments.js';
 
 const b64 = (s: string) => btoa(s);
@@ -197,5 +199,134 @@ describe('helpers', () => {
     expect(formatBytes(512)).toBe('512 B');
     expect(formatBytes(2048)).toBe('2.0 KB');
     expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB');
+  });
+});
+
+// --- office / e-book attachments (the 'doc' kind) -------------------------
+//
+// These have no model-native transport, so they are converted to Markdown and
+// ride the text transport. The interesting cases are all about the SEAM: the
+// conversion is injected, so the pure core must sequence it correctly and fail
+// closed with the converter's own message.
+
+describe('classifyAttachment — documents', () => {
+  test('office media types classify as doc', () => {
+    for (const mediaType of [
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.oasis.opendocument.text',
+      'application/epub+zip',
+    ]) {
+      expect(classifyAttachment({ name: 'f', mediaType })).toBe('doc');
+    }
+  });
+
+  test('an EMPTY media type falls back to the extension — the common real case', () => {
+    // Chrome reports File.type '' for .docx on machines whose OS has no
+    // registry entry. Without the fallback the picker refuses a file peerd
+    // reads perfectly.
+    expect(classifyAttachment({ name: 'report.docx', mediaType: '' })).toBe('doc');
+    expect(classifyAttachment({ name: 'BUDGET.XLSX', mediaType: '' })).toBe('doc');
+    expect(classifyAttachment({ name: 'book.epub' })).toBe('doc');
+  });
+
+  test('legacy binaries classify as doc so the refusal can be specific', () => {
+    // Nothing converts these, but reaching the converter is what produces
+    // "this is a Word 97-2003 file, here is what to do" instead of a generic
+    // unsupported-type error.
+    expect(classifyAttachment({ name: 'old.doc', mediaType: '' })).toBe('doc');
+    expect(classifyAttachment({ name: 'old.xls', mediaType: 'application/vnd.ms-excel' })).toBe('doc');
+  });
+
+  test('the extension fallback does NOT rescue arbitrary unknown files', () => {
+    expect(classifyAttachment({ name: 'archive.zip', mediaType: '' })).toBe('unsupported');
+    expect(classifyAttachment({ name: 'app.exe', mediaType: '' })).toBe('unsupported');
+  });
+
+  test('text/* still wins over the extension fallback', () => {
+    // A .csv stays text and is inlined verbatim rather than re-rendered.
+    expect(classifyAttachment({ name: 'data.csv', mediaType: 'text/csv' })).toBe('text');
+  });
+});
+
+describe('prepareUserAttachmentsWithDocs', () => {
+  const docx = { name: 'q3.docx', mediaType: '', size: 2048, data: b64('PK-not-really') };
+
+  test('a converted document is inlined as text and its payload dropped', async () => {
+    const convert = async () => '# Q3\n\nRevenue rose.';
+    const out = await prepareUserAttachmentsWithDocs({ text: 'summarize this', attachments: [docx], convert });
+    expect(out.text).toContain('<peerd_file name="q3.docx">');
+    expect(out.text).toContain('Revenue rose.');
+    // The chip keeps its identity — the UI should not call a .docx a text file.
+    expect(out.attachments[0].kind).toBe('doc');
+    // Neither the source bytes nor the converted text ride the attachment
+    // record: the text lives in the message, which is what persists.
+    expect(out.attachments[0]).not.toHaveProperty('data');
+    expect(out.attachments[0]).not.toHaveProperty('text');
+  });
+
+  test('the converter sees the file and its declared type', async () => {
+    const seen: any[] = [];
+    await prepareUserAttachmentsWithDocs({
+      text: '', attachments: [docx], convert: async (a: any) => { seen.push(a); return 'x'; },
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].name).toBe('q3.docx');
+    expect(seen[0].data).toBe(docx.data);
+  });
+
+  test('validation runs BEFORE conversion — an over-cap file is never parsed', async () => {
+    let converted = false;
+    const huge = { name: 'big.docx', mediaType: '', size: ATTACHMENT_CAPS.doc + 1 };
+    await expect(prepareUserAttachmentsWithDocs({
+      text: '', attachments: [huge], convert: async () => { converted = true; return ''; },
+    })).rejects.toThrow(AttachmentTooLargeError);
+    expect(converted).toBe(false);
+  });
+
+  test('a conversion failure fails the send with the converter\'s own message', async () => {
+    // The whole point of routing legacy binaries here: the specific advice
+    // survives to the user instead of collapsing into "unsupported".
+    const convert = async () => { throw new Error('Word 97-2003 (.doc) is a binary format this reader cannot open.'); };
+    const err = await prepareUserAttachmentsWithDocs({
+      text: '', attachments: [{ name: 'old.doc', mediaType: '', size: 10, data: b64('x') }], convert,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AttachmentConversionError);
+    expect(err.message).toContain('old.doc');
+    expect(err.message).toContain('Word 97-2003');
+  });
+
+  test('no converter (Firefox — no offscreen document) refuses legibly', async () => {
+    const err = await prepareUserAttachmentsWithDocs({
+      text: '', attachments: [docx], convert: undefined,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AttachmentConversionError);
+    expect(err.message).toContain('not available in this browser build');
+  });
+
+  test('a batch with no documents never touches the converter', async () => {
+    let called = false;
+    const out = await prepareUserAttachmentsWithDocs({
+      text: 'hi',
+      attachments: [{ name: 'a.txt', mediaType: 'text/plain', size: 5, data: b64('hello') }],
+      convert: async () => { called = true; return ''; },
+    });
+    expect(called).toBe(false);
+    expect(out.text).toContain('hello');
+  });
+
+  test('images and documents mix in one message', async () => {
+    const out = await prepareUserAttachmentsWithDocs({
+      text: 'compare',
+      attachments: [
+        { name: 'chart.png', mediaType: 'image/png', size: 100, data: b64('img') },
+        docx,
+      ],
+      convert: async () => 'converted body',
+    });
+    // The image keeps its bytes for this turn; the document became text.
+    expect(out.attachments[0].kind).toBe('image');
+    expect(out.attachments[0].data).toBeTruthy();
+    expect(out.text).toContain('converted body');
   });
 });
