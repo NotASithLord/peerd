@@ -5,6 +5,8 @@ import {
   buildIdpAllowRule,
   denylistSessionRuleUpdate,
   DENYLIST_RULE_ID,
+  APP_EGRESS_RULE_ID,
+  buildAppEgressBlockRule,
   DENYLIST_ALLOW_RULE_ID,
   DENYLIST_RESOURCE_TYPES,
 } from '../../extension/peerd-egress/denylist/dnr-rules.js';
@@ -76,18 +78,18 @@ describe('buildDenylistBlockRule — never unscoped', () => {
 describe('denylistSessionRuleUpdate — idempotent reconcile', () => {
   test('always removes the rule id first, so applying it is self-healing', () => {
     const update = denylistSessionRuleUpdate({ patterns: ['chase.com'], tabIds: [1] });
-    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID]);
+    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID, APP_EGRESS_RULE_ID]);
     expect(update.addRules).toHaveLength(1);
   });
   test('with no driven tabs it is a pure removal', () => {
     const update = denylistSessionRuleUpdate({ patterns: ['chase.com'], tabIds: [] });
-    expect(update).toEqual({ removeRuleIds: [DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID], addRules: [] });
+    expect(update).toEqual({ removeRuleIds: [DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID, APP_EGRESS_RULE_ID], addRules: [] });
   });
   test('exempt IdP domains ride along as a higher-priority allow rule', () => {
     const update: any = denylistSessionRuleUpdate({
       patterns: ['*.okta.com', 'chase.com'], tabIds: [4], exemptDomains: ['okta.com'],
     });
-    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID]);
+    expect(update.removeRuleIds).toEqual([DENYLIST_RULE_ID, DENYLIST_ALLOW_RULE_ID, APP_EGRESS_RULE_ID]);
     const [block, allow] = update.addRules;
     expect(block.action.type).toBe('block');
     expect(allow.action.type).toBe('allow');
@@ -132,5 +134,29 @@ describe('denylistSessionRuleUpdate — idempotent reconcile', () => {
     // an earlier revision of THIS test pinned the bare containment with no
     // carve-out anywhere, i.e. encoded the broken sign-in corridor as expected.
     expect(domains).toContain('okta.com');
+  });
+});
+
+describe('buildAppEgressBlockRule — App tabs have no remote network edge', () => {
+  test('no App tabs means no rule', () => {
+    expect(buildAppEgressBlockRule({ tabIds: [] })).toBeNull();
+  });
+
+  test('the rule is tab-scoped and blocks every HTTP(S) resource type', () => {
+    const rule: any = buildAppEgressBlockRule({ tabIds: [11, 11, -1, 12] });
+    expect(rule.id).toBe(APP_EGRESS_RULE_ID);
+    expect(rule.action).toEqual({ type: 'block' });
+    expect(rule.condition.regexFilter).toBe('^https?://');
+    expect(rule.condition.tabIds).toEqual([11, 12]);
+    expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
+  });
+
+  test('the App rule survives even when the user denylist is empty', () => {
+    const update: any = denylistSessionRuleUpdate({
+      patterns: [], tabIds: [], appTabIds: [17],
+    });
+    expect(update.addRules).toHaveLength(1);
+    expect(update.addRules[0].id).toBe(APP_EGRESS_RULE_ID);
+    expect(update.addRules[0].condition.tabIds).toEqual([17]);
   });
 });

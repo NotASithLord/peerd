@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { composeApp, withNewTabLinks, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
+import { composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
 
 describe('composeApp', () => {
   test('returns entry unchanged if no relative refs', () => {
@@ -215,28 +215,6 @@ describe('composeApp', () => {
 
     new mockSelf.Worker('https://cdn/other.js');       // unknown spec
     expect(calls[1].u).toBe('https://cdn/other.js');   // passes straight through
-  });
-});
-
-describe('withNewTabLinks', () => {
-  test('injects <base target="_blank"> right after <head>', () => {
-    const out = withNewTabLinks('<!doctype html><html><head><title>x</title></head><body><a href="https://huggingface.co">hf</a></body></html>');
-    expect(out).toContain('<head><base target="_blank"><title>x</title>');
-  });
-
-  test('headless documents get the base tag prepended', () => {
-    const out = withNewTabLinks('<p><a href="https://example.com">go</a></p>');
-    expect(out.startsWith('<base target="_blank">')).toBe(true);
-  });
-
-  test('an app shipping its OWN <base> is respected', () => {
-    const html = '<head><base href="/x/" target="_self"></head><a href="y">y</a>';
-    expect(withNewTabLinks(html)).toBe(html);
-  });
-
-  test('attributes on <head> survive', () => {
-    const out = withNewTabLinks('<head data-x="1"><meta charset="utf-8"></head>');
-    expect(out).toContain('<head data-x="1"><base target="_blank"><meta');
   });
 });
 

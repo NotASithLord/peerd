@@ -68,7 +68,7 @@ export const makeDenylistNetGuard = ({ dnr, getPatterns, getTabIds, buildUpdate,
       await dnr.updateSessionRules(update);
       applied = fingerprint;
       lastError = null;
-      ruleDomains = rule ? rule.condition.requestDomains.length : 0;
+      ruleDomains = rule ? (rule.condition.requestDomains ?? []).length : 0;
       ruleTabs = rule ? [...rule.condition.tabIds] : [];
     } catch (e) {
       applied = null;
@@ -76,7 +76,7 @@ export const makeDenylistNetGuard = ({ dnr, getPatterns, getTabIds, buildUpdate,
       if (!loggedFailures.has(lastError)) {
         loggedFailures.add(lastError);
         log.warn('[denylist-net-guard] session rule update failed —',
-          'the network backstop is off; the denylist gates in the dispatcher and webFetch still apply:', lastError);
+          'the denylist network backstop is off; App hosts will fail closed until the rule installs:', lastError);
         try { audit?.({ type: 'denylist_net_guard_failed', details: { reason: lastError } }); }
         catch { /* audit is best-effort; never let it mask the original failure */ }
       }

@@ -1088,7 +1088,13 @@ const denylistNetGuard = makeDenylistNetGuard({
   // would break that, so the rule pair exempts exactly the IdP registry — which
   // stays the single authority on what counts as one. No authority is granted:
   // isDenylistedTab still refuses every DOM tool on such a tab.
-  buildUpdate: (/** @type {any} */ input) => denylistSessionRuleUpdate({ ...input, exemptDomains: idpExemptDomains }),
+  buildUpdate: (/** @type {any} */ input) => denylistSessionRuleUpdate({
+    ...input,
+    exemptDomains: idpExemptDomains,
+    appTabIds: appTabTracker.listLive()
+      .map((/** @type {string} */ id) => appTabTracker.getTabId(id))
+      .filter((/** @type {number | null} */ id) => typeof id === 'number'),
+  }),
   getPatterns: () => denylistStore.patterns(),
   getTabIds: drivenTabIds,
   audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
@@ -3193,9 +3199,35 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
   }
   if (msg?.type === 'app/tab-ready') {
     if (typeof msg.appId !== 'string' || sender?.tab?.id == null) return false;
-    appTabTracker.onTabReady(msg.appId, sender.tab.id);
-    denylistNetGuard.sync();
-    return false;
+    appTabTracker.onTabPending(msg.appId, sender.tab.id);
+    // Firefox currently has no proven manifest-sandbox host (its generated
+    // manifest intentionally omits Chrome's top-level `sandbox` key). Do not
+    // infer enforcement from its partial DNR API accepting a rule.
+    if (typeof browser.runtime.getBrowserInfo === 'function') {
+      appTabTracker.onTabFailed(msg.appId, new Error('Apps are not available in Firefox yet.'));
+      setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+      return Promise.resolve({
+        ok: false,
+        error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.',
+      });
+    }
+    // App code is not delivered until its tab-scoped all-remote DNR rule is
+    // LIVE. CSP closes resource/connect paths, while DNR closes self-navigation
+    // that CSP cannot reliably govern. Unsupported/failing DNR therefore means
+    // the App host fails closed (not a best-effort degradation like denylist).
+    return denylistNetGuard.sync().then(() => {
+      const net = denylistNetGuard.state();
+      if (!net.supported || net.lastError) {
+        appTabTracker.onTabFailed(msg.appId, new Error('App network isolation is unavailable.'));
+        setTimeout(() => browser.tabs.remove(sender.tab.id).catch(() => {}), 250);
+        return {
+          ok: false,
+          error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
+        };
+      }
+      appTabTracker.onTabReady(msg.appId, sender.tab.id);
+      return { ok: true };
+    });
   }
   return false;
 });

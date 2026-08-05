@@ -68,6 +68,14 @@ export const DENYLIST_RULE_ID = 1;
  */
 export const DENYLIST_ALLOW_RULE_ID = 2;
 
+// App code is an untrusted opaque-origin document. Its CSP is the primary
+// resource/connect fence, but CSP does not reliably govern self-navigation:
+// `location = https://…` can still issue a sub-frame request before the host
+// notices the runner was replaced. This session rule is the browser-network
+// floor for every live App tab. It deliberately matches only remote schemes,
+// so the chrome-extension:// host and runner continue to load.
+export const APP_EGRESS_RULE_ID = 3;
+
 /**
  * Resource types the block rule covers. Enumerated EXPLICITLY rather than left
  * to the default: implementations differ on whether an omitted `resourceTypes`
@@ -180,29 +188,56 @@ export const buildIdpAllowRule = ({ domains, tabIds, ruleId = DENYLIST_ALLOW_RUL
 };
 
 /**
+ * Block every HTTP(S) request made in a live App tab. App code has no ambient
+ * network capability; its only external edge is the trusted parent bridge.
+ * @param {Object} input
+ * @param {readonly number[]} input.tabIds
+ * @param {number} [input.ruleId]
+ * @returns {object | null}
+ */
+export const buildAppEgressBlockRule = ({ tabIds, ruleId = APP_EGRESS_RULE_ID }) => {
+  const tabs = [...new Set((tabIds ?? []).filter((t) => Number.isInteger(t) && t >= 0))];
+  if (!tabs.length) return null;
+  return {
+    id: ruleId,
+    priority: 3,
+    action: { type: 'block' },
+    condition: {
+      regexFilter: '^https?://',
+      tabIds: tabs,
+      resourceTypes: [...DENYLIST_RESOURCE_TYPES],
+    },
+  };
+};
+
+/**
  * The full `updateSessionRules` argument for the current state. Always removes
- * both rule ids first so the call is idempotent and self-healing: whatever the
+ * all owned rule ids first so the call is idempotent and self-healing: whatever the
  * previous state was (stale tab list, stale domains, nothing at all), applying
  * this leaves a correct pair of rules, or none.
  *
  * @param {Object} input
  * @param {readonly string[]} input.patterns  the live denylist
  * @param {readonly number[]} input.tabIds
+ * @param {readonly number[]} [input.appTabIds]
  * @param {readonly string[]} [input.exemptDomains]  IdP domains that stay
  *   reachable inside a driven tab — injected, see DENYLIST_ALLOW_RULE_ID.
  * @param {number} [input.ruleId]
  * @param {number} [input.allowRuleId]
+ * @param {number} [input.appRuleId]
  * @returns {{ removeRuleIds: number[], addRules: object[] }}
  */
 export const denylistSessionRuleUpdate = ({
-  patterns, tabIds, exemptDomains = [], ruleId = DENYLIST_RULE_ID, allowRuleId = DENYLIST_ALLOW_RULE_ID,
+  patterns, tabIds, appTabIds = [], exemptDomains = [], ruleId = DENYLIST_RULE_ID,
+  allowRuleId = DENYLIST_ALLOW_RULE_ID, appRuleId = APP_EGRESS_RULE_ID,
 }) => {
   const block = buildDenylistBlockRule({
     domains: denylistBlockDomains(patterns ?? []), tabIds, ruleId,
   });
   const allow = block ? buildIdpAllowRule({ domains: exemptDomains, tabIds, ruleId: allowRuleId }) : null;
+  const appBlock = buildAppEgressBlockRule({ tabIds: appTabIds, ruleId: appRuleId });
   return {
-    removeRuleIds: [ruleId, allowRuleId],
-    addRules: [block, allow].filter((rule) => rule !== null),
+    removeRuleIds: [ruleId, allowRuleId, appRuleId],
+    addRules: [block, allow, appBlock].filter((rule) => rule !== null),
   };
 };
