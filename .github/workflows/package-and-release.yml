@@ -19,6 +19,8 @@
 #                     same key forever, or every preview install breaks)
 #   AMO_JWT_ISSUER    addons.mozilla.org API credentials used by
 #   AMO_JWT_SECRET    `web-ext sign` for the Firefox preview package
+#   PEERD_SITE_DISPATCH_TOKEN  fine-grained token scoped only to the private
+#                     NotASithLord/peerd-site repo with Contents:write
 
 name: package-and-release
 
@@ -779,6 +781,19 @@ jobs:
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               "${ASSETS[@]}"
           fi
+
+      - name: Trigger peerd.ai feed deployment
+        env:
+          GH_TOKEN: ${{ secrets.PEERD_SITE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::PEERD_SITE_DISPATCH_TOKEN is not set"
+            exit 1
+          }
+          gh api --method POST repos/NotASithLord/peerd-site/dispatches \
+            -f event_type=peerd-release \
+            -F "client_payload[tag]=$GITHUB_REF_NAME"
 
       # The feeds are committed so the repo (and the peerd.ai site deploy,
       # which serves update-feeds/ at /updates/) always reflects the
