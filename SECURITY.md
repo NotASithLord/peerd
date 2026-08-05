@@ -13,7 +13,7 @@ We take security seriously and welcome good-faith research.
 **Do not open a public issue for security problems.**
 
 Report privately via **GitHub Private Vulnerability Reporting**:
-the repository's **Security** tab → **Report a vulnerability**
+open the repository's **Security** tab and choose **Report a vulnerability**
 (`https://github.com/NotASithLord/peerd/security/advisories/new`). This
 opens a private advisory only the maintainers can see.
 
@@ -45,53 +45,51 @@ security claims can be re-checked against the code rather than taken on faith.
 
 Understanding the boundaries helps you scope a report:
 
-- **BYOK, no backend, no telemetry.** Your API key is held locally in an
-  encrypted **vault** (`peerd-egress/vault/`, Argon2id / WebAuthn-PRF).
-  Nothing is sent anywhere except your chosen model endpoint.
-- **Egress chokepoint.** All network calls route through
-  `peerd-egress/fetch/`: `safeFetch` (a hardcoded provider allowlist for
-  model calls) and `webFetch` (SSRF guard + a denylist of sensitive
-  origins, no redirects). There is no other egress path. The denylist also
-  has a network-level backstop (`peerd-egress/denylist/dnr-rules.js` +
-  `background/denylist-net-guard.js`): a `declarativeNetRequest` rule that
-  blocks denylisted domains inside the tabs peerd is currently driving —
-  and only those, never your own browsing — so a page that navigates
-  ITSELF onto a sensitive site is refused below the page, where no
-  decision-time gate can see it.
+- **BYOK, no peerd backend, no telemetry.** Provider secrets are held locally
+  in an encrypted vault (`peerd-egress/vault/`). Model requests go directly to
+  the selected provider.
+- **Scoped network paths.** Provider calls use a provider allowlist. Open-web
+  reads use SSRF and denylist checks. WebVM and Notebook network operations use
+  host-mediated routes. Browser navigation is checked separately. App tabs
+  have no ambient network and use a tab-scoped network rule as a backstop.
+  Preview dweb builds also use signaling and peer-to-peer WebRTC. The current
+  implementations live in `peerd-egress/`, `peerd-engine/`,
+  `peerd-distributed/`, and the service-worker wiring.
 - **Untrusted-content boundary (the heap split).** The main agent never
   sees raw page content: page/DOM work is delegated to a per-tab **web
-  actor** — a separate agent loop that, on Chrome, runs in its OWN Worker
+  actor**, a separate agent loop that, on Chrome, runs in its own Worker
   heap, holds no key, no `chrome.*`, and no egress, and reaches the model,
   the network, or the page only by asking the service worker, which holds
   the key and re-checks every request. Untrusted content (page text,
   command output, file contents) stays inside that heap and returns to the
   orchestrator only as a `wrapUntrusted`-fenced summary. Actors run the
-  same way — keyless, in their own heap, with a narrowed toolset. This is
-  the core prompt-injection / "lethal trifecta" defense: a memory boundary,
-  not a prompt one. (Firefox lacks the offscreen API, so there the actor
-  runs keyless in the shared loop until it lands.)
+  same way: keyless, in their own heap, with a narrowed toolset. This is
+  the main prompt-injection defense. It is a memory boundary, not a prompt
+  convention. Firefox lacks the offscreen API and has no equivalent heap
+  separation. Spawned children remain keyless there, but bound actors run in
+  the service worker with live model credentials. This is a known residual risk.
 - **Policy-gated tool dispatch** with a local, append-only audit log. The
   current policy checks and hooks live in `peerd-runtime/tools/`.
 - **What the model reads is what you could have seen.** Bytes that are
-  invisible to a person but legible to a model — zero-width runs, bidi
-  overrides, Unicode tag characters, HTML comments — are stripped before
+  invisible to a person but legible to a model, including zero-width runs, bidi
+  overrides, Unicode tag characters, and HTML comments, are stripped before
   page text reaches the model, at both read boundaries and inside the
   untrusted-content fence itself. Text in every script survives, including
   the zero-width non-joiner Persian, Urdu and the Indic scripts need
   (`peerd-runtime/dom/cdr.js`).
-- **Acting as you, on a page strangers wrote, takes you.** On sites where
-  third parties author the content — issue trackers, shared docs, social
-  feeds — an authenticated write asks you first, **even if you turned
+- **Authenticated writes to user-generated content require confirmation.** On sites where
+  third parties author the content, such as issue trackers, shared docs, and social
+  feeds, an authenticated write asks you first, **even if you turned
   confirmations off**. Reading is exempt; so is navigating away
   (`peerd-runtime/actor/ugc-registry.js`).
-- **An exfil-shaped navigation is blocked.** A tab tool sending a long,
+- **Suspicious cross-origin navigation is blocked.** A tab tool sending a long,
   scraped-looking blob to another origin in the URL is refused. Best
   effort: it catches the obvious shape, not everything, and it deliberately
   does not scan query strings, because that is where legitimate login
   tokens live (`peerd-runtime/tools/egress-heuristics.js`).
 
-- **A helper that browses the web can't walk into your accounts.** Every web
-  helper is either *roaming* — it browses freely and holds no authority — or
+- **Web helpers do not enter known account sites without authority.** Every web
+  helper is either *roaming*, so it browses freely and holds no authority, or
   *bound* to exactly one site it may not leave. A roaming helper that reaches a
   site you have an account on stops instead of continuing, and peerd checks
   where the tab actually ENDED UP rather than where something asked it to go, so
@@ -100,20 +98,21 @@ Understanding the boundaries helps you scope a report:
   (`peerd-runtime/actor/landing-rule.js`).
 
 Two things this list does **not** claim. Knowing which sites you have an account
-on is a list, and lists are incomplete — the first visit to a site peerd has
+on is a list, and lists are incomplete. The first visit to a site peerd has
 never seen a login page for is unprotected (R15). And the strict structural
 reply format for web actors ships **off** by default (R14). The threat model
 states both plainly rather than counting them as defenses.
-- **Sandboxed execution.** WebVM (CheerpX, network only via the egress
-  wrappers), JS Sandbox (realm-sealed Web Worker), App (opaque-origin
-  sandboxed iframe).
+
+- **Sandboxed execution.** WebVM uses CheerpX. Notebook and headless script
+  execution use sealed workers. Apps use opaque-origin sandboxed iframes and
+  currently run only on Chrome.
 
 ## In scope
 
 - Exfiltration of the vault / API key / conversation off-device.
 - Prompt injection that bypasses the actor boundary (the keyless
   per-environment heap) and reaches the orchestrator's tools or memory.
-- Sandbox escape (WebVM / JS Sandbox / App iframe) reaching the host,
+- Sandbox escape (WebVM, Notebook, headless script, or App iframe) reaching the host,
   other origins, or the extension's privileged contexts.
 - Denylist / egress-chokepoint / SSRF-guard bypass.
 - Vault / crypto weaknesses; auth-bypass of the lock.
