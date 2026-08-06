@@ -9,7 +9,7 @@
 //   <link rel="stylesheet" href="style.css">     →  <style>…</style>
 //   <script src="script.js">…</script>           →  <script>…</script>
 //   new Worker('worker.js')                      →  blob: worker (shim, see below)
-//   <img src="./logo.png">                       →  (left as-is; v1 limit)
+//   <img src="./logo.png">                       →  runner resolves bundled binary asset
 //   <a href="./other.html">                      →  (left as-is — nav)
 //
 // "tag-relative" is liberal on purpose: a bundle file resolves whether the
@@ -157,7 +157,7 @@ const workerFilePath = (spec, entry, files) => {
  */
 const inlineWorkerFiles = (composed, files, entry) => {
   /** @type {Record<string, string>} */
-  const srcBySpec = {};
+  const srcBySpec = Object.create(null);
   WORKER_REF_RE.lastIndex = 0;
   let m;
   while ((m = WORKER_REF_RE.exec(composed))) {

@@ -40,10 +40,24 @@ export const toBase64 = (b) => {
 
 /** @param {string} s */
 export const fromBase64 = (s) => {
+  base64ByteLength(s);
   const bin = atob(s);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+};
+
+/**
+ * Validate canonical base64 and return its exact decoded byte length without
+ * allocating the decoded buffer.
+ * @param {string} s
+ */
+export const base64ByteLength = (s) => {
+  if (typeof s !== 'string') throw new Error('base64 must be a string');
+  const canonical = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  if (!canonical.test(s)) throw new Error('invalid base64');
+  const padding = s.endsWith('==') ? 2 : (s.endsWith('=') ? 1 : 0);
+  return (s.length / 4) * 3 - padding;
 };
 
 /** @param {...Uint8Array} arrs */

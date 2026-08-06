@@ -16,7 +16,8 @@
 
 import { packBundle, unpackBundle } from '/shared/bundle/bundle.js';
 import { buildManifest, manifestHash, verifyManifestChunks } from '/shared/bundle/manifest.js';
-import { utf8, toBase64, fromBase64, concat } from '/shared/bundle/bytes.js';
+import { utf8, toBase64, fromBase64, base64ByteLength, concat } from '/shared/bundle/bytes.js';
+import { CHUNK_SIZE } from '/shared/bundle/chunk.js';
 import {
   ArtifactTooLargeError,
   EnvelopeFormatError,
@@ -28,6 +29,11 @@ export const EXPORT_VERSION = 1;
 // 64 MB payload rail — everything is in-memory base64 (see DESIGN-10
 // "Size + safety rails"); the limit exists for the pathological case.
 export const EXPORT_LIMIT_BYTES = 64 * 1024 * 1024;
+// JSON/base64 expands the payload beyond the decoded limit. This file-level
+// ceiling is high enough for every valid export while still rejecting a hostile
+// selection before file.text() allocates it in the options page.
+export const EXPORT_FILE_LIMIT_BYTES = 96 * 1024 * 1024;
+const MAX_EXPORT_CHUNKS = Math.ceil(EXPORT_LIMIT_BYTES / CHUNK_SIZE);
 
 /** @typedef {'app' | 'notebook' | 'vm'} Kind */
 
@@ -55,7 +61,7 @@ const MIME_BY_KIND = {
  */
 const toByteFiles = (files = {}) => {
   /** @type {Record<string, Uint8Array>} */
-  const out = {};
+  const out = Object.create(null);
   for (const [path, content] of Object.entries(files)) {
     out[path] = typeof content === 'string' ? utf8(content) : content;
   }
@@ -97,11 +103,16 @@ const packEnvelope = async ({ payload, kind, entry, meta }) => {
  * App → envelope. `files` is the OPFS tree under peerd-apps/<id>/
  * (path → text|bytes); entry comes from the AppRecord.
  *
- * @param {{ record: { name: string, entryFile: string, tags?: string[] },
+ * @param {{ record: { name: string, entryFile: string, tags?: string[],
+ *                     fileKinds?: Record<string, 'text' | 'binary'> },
  *           files: Record<string, string | Uint8Array> }} args
  */
 export const buildAppExport = async ({ record, files }) => packEnvelope({
-  payload: packBundle({ entry: record.entryFile, files: toByteFiles(files) }),
+  payload: packBundle({
+    entry: record.entryFile,
+    files: toByteFiles(files),
+    fileKinds: record.fileKinds,
+  }),
   kind: 'app',
   entry: record.entryFile,
   meta: { kind: 'app', name: record.name, tags: record.tags ?? [] },
@@ -158,6 +169,7 @@ export const buildVmRecipeExport = async ({ record, pin, imageUrl }) => packEnve
  *   manifest: any, hash: string, kind: 'app' | 'notebook' | 'vm',
  *   name: string, meta: Record<string, any>,
  *   entry: string | undefined, files: Record<string, Uint8Array>,
+ *   fileKinds: Record<string, 'text' | 'binary'>,
  *   summary: { kind: string, name: string, size: number, fileCount: number },
  * }>}
  */
@@ -175,7 +187,10 @@ export const openEnvelope = async (envelope) => {
   if (!manifest || typeof manifest !== 'object' || !Array.isArray(envelope.chunks)) {
     throw new EnvelopeFormatError('missing manifest or chunks');
   }
-  if (!Number.isInteger(manifest.size) || manifest.size > EXPORT_LIMIT_BYTES) {
+  if (!Number.isInteger(manifest.size) || manifest.size < 0) {
+    throw new EnvelopeFormatError('manifest size is invalid');
+  }
+  if (manifest.size > EXPORT_LIMIT_BYTES) {
     throw new ArtifactTooLargeError(manifest.size ?? -1, EXPORT_LIMIT_BYTES);
   }
   const meta = manifest.meta;
@@ -189,6 +204,43 @@ export const openEnvelope = async (envelope) => {
   if (TYPE_BY_KIND[kind] !== manifest.type) {
     throw new EnvelopeFormatError(`manifest type '${manifest.type}' does not match kind '${kind}'`);
   }
+
+  if (!Array.isArray(manifest.chunks)) {
+    throw new EnvelopeFormatError('manifest chunks are missing');
+  }
+  if (manifest.chunks.length > MAX_EXPORT_CHUNKS || envelope.chunks.length > MAX_EXPORT_CHUNKS) {
+    throw new EnvelopeFormatError('too many chunks');
+  }
+  if (envelope.chunks.length !== manifest.chunks.length) {
+    throw new EnvelopeIntegrityError('chunk-count-mismatch');
+  }
+  let totalBytes = 0;
+  for (const [index, encoded] of envelope.chunks.entries()) {
+    const committed = manifest.chunks[index];
+    if (!committed || !Number.isInteger(committed.size)
+        || committed.size <= 0 || committed.size > CHUNK_SIZE
+        || typeof committed.hash !== 'string' || !/^[a-f0-9]{64}$/.test(committed.hash)) {
+      throw new EnvelopeFormatError(`manifest chunk is invalid: ${index}`);
+    }
+    if (typeof encoded !== 'string') {
+      throw new EnvelopeFormatError('chunk is not valid base64');
+    }
+    const expectedCharacters = 4 * Math.ceil(committed.size / 3);
+    if (encoded.length !== expectedCharacters) {
+      throw new EnvelopeIntegrityError(`chunk-size-mismatch:${index}`);
+    }
+    let decodedBytes;
+    try { decodedBytes = base64ByteLength(encoded); }
+    catch { throw new EnvelopeFormatError('chunk is not valid base64'); }
+    if (decodedBytes !== committed.size) {
+      throw new EnvelopeIntegrityError(`chunk-size-mismatch:${index}`);
+    }
+    totalBytes += decodedBytes;
+    if (totalBytes > EXPORT_LIMIT_BYTES) {
+      throw new ArtifactTooLargeError(totalBytes, EXPORT_LIMIT_BYTES);
+    }
+  }
+  if (totalBytes !== manifest.size) throw new EnvelopeIntegrityError('size-mismatch');
 
   let chunks;
   try {
@@ -216,6 +268,7 @@ export const openEnvelope = async (envelope) => {
     meta,
     entry: unpacked.entry,
     files: unpacked.files,
+    fileKinds: unpacked.fileKinds,
     summary: {
       kind,
       name,

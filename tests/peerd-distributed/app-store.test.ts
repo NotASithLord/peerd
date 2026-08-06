@@ -45,6 +45,51 @@ describe('the dweb app store (base-network content + discovery)', () => {
     a.close(); b.close();
   });
 
+  test('binary files remain byte-identical through publish, fetch, and install', async () => {
+    const { a, b } = await linkedPair();
+    const binary = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0xff, 0xc0]);
+    const { uri } = await a.publishApp({
+      name: 'binary', entry: 'index.html',
+      files: { 'index.html': '<h1>x</h1>', 'engine.wasm': binary },
+    });
+    const { manifest, payload } = await b.fetchApp(uri);
+    let installed: any = null;
+    await installAppBundle({
+      uri, manifest, payload,
+      install: async (app) => { installed = app; return { id: 'local' }; },
+    });
+    expect(Array.from(installed.files['engine.wasm'])).toEqual(Array.from(binary));
+    a.close(); b.close();
+  });
+
+  test('explicit prototype-looking binary path survives peer install', async () => {
+    const { a, b } = await linkedPair();
+    const binary = new TextEncoder().encode('ASCII protocol bytes');
+    const files: Record<string, string | Uint8Array> = Object.fromEntries([
+      ['index.html', '<h1>x</h1>'],
+      ['__proto__', binary],
+    ]);
+    const fileKinds: Record<string, 'text' | 'binary'> = Object.fromEntries([
+      ['index.html', 'text'],
+      ['__proto__', 'binary'],
+    ]);
+    const { uri } = await a.publishApp({
+      name: 'typed', entry: 'index.html',
+      files,
+      fileKinds,
+    });
+    const { manifest, payload } = await b.fetchApp(uri);
+    let installed: any = null;
+    await installAppBundle({
+      uri, manifest, payload,
+      install: async (app) => { installed = app; return { id: 'local' }; },
+    });
+    expect(Object.hasOwn(installed.files, '__proto__')).toBe(true);
+    expect(Array.from(installed.files['__proto__'])).toEqual(Array.from(binary));
+    expect(installed.fileKinds['__proto__']).toBe('binary');
+    a.close(); b.close();
+  });
+
   test('share → a subscribed peer gets the card, and the bundle fetches over the mesh', async () => {
     const { a, b } = await linkedPair();
     a.start(); b.start();          // start() runs discovery.subscribeAll() (reconcile linked peers)
@@ -122,6 +167,13 @@ describe('the dweb app store (base-network content + discovery)', () => {
     expect(rows[0].head.version_id).toBe(v2.hash);
     expect(rows[0].seq).toBe(2);
 
+    // The offscreen share transaction invokes this only after v2 metadata wins.
+    // A later delete now has one served version to revoke, not an invisible trail.
+    expect(a.node.content.getManifest(v1.hash)).not.toBeNull();
+    expect(a.unserveContent(v1.hash)).toBe(true);
+    expect(a.node.content.getManifest(v1.hash)).toBeNull();
+    expect(a.node.content.getManifest(v2.hash)).not.toBeNull();
+
     // A stale (lower-seq) re-announce of v1 can't roll it back (no-downgrade).
     await a.publishMeta({ slug: 'editor', name: 'editor', seq: 1, head: { version_id: v1.hash, content_addr: v1.uri, size: 2 } }).catch(() => {});
     await tick(40);
@@ -165,14 +217,29 @@ describe('the dweb app store (base-network content + discovery)', () => {
     // The BUG, demonstrated: A2's Library is empty, so C's snapshot carries nothing.
     expect(c.heardDwapps().some((r: any) => r.dwapp_id === m1.dwapp_id)).toBe(false);
 
-    // The FIX: A2 re-seeds — re-publish the bytes + re-announce at the STORED seq.
-    // (The manifest carries a `created` timestamp, so the re-published version_id
-    // differs; the STABLE dwapp_id and the preserved seq are what matter — a fresh
-    // peer fetches via the re-announced card's content_addr.)
-    const v1b = await a2.publishApp({ name: 'editor', entry: 'index.html', files: { 'index.html': 'v1' } });
+    // Give C the old card to model an already-warm peer whose no-downgrade
+    // cache has the original sequence and version.
+    await (c as any).discovery.ingest(m1.card);
+    const publish = (a2 as any).node.content.publish;
+    let publishCalls = 0;
+    (a2 as any).node.content.publish = (bundle: any) => { publishCalls += 1; return publish(bundle); };
+
+    // Reuse the stored manifest timestamp and expected hash. Identical bytes
+    // recreate the exact signed version, so the stored sequence stays honest.
+    const v1b = await a2.publishApp({
+      name: 'editor', entry: 'index.html', files: { 'index.html': 'v1' },
+      created: v1.created, expectedHash: v1.hash,
+    });
+    expect(v1b.hash).toBe(v1.hash);
     const m1b = await a2.publishMeta({ slug: 'editor', name: 'editor', seq: 7, head: { version_id: v1b.hash, content_addr: v1b.uri, size: 2 } });
     expect(m1b.dwapp_id).toBe(m1.dwapp_id);        // same stable app identity (no fork)
     await tick(60);
+
+    await expect(a2.publishApp({
+      name: 'editor', entry: 'index.html', files: { 'index.html': 'changed' },
+      created: v1.created, expectedHash: v1.hash,
+    })).rejects.toThrow('bytes changed');
+    expect(publishCalls).toBe(1);                  // mismatch failed before serving bytes
 
     // C now discovers it again AND can pull the bytes A2 serves again.
     const row: any = c.heardDwapps().find((r: any) => r.dwapp_id === m1.dwapp_id);
@@ -181,6 +248,20 @@ describe('the dweb app store (base-network content + discovery)', () => {
     expect((await c.fetchApp(row.head.content_addr)).manifest.type).toBe('app');
 
     a2.close(); c.close();
+  });
+
+  test('packed-size rejection happens before content publication', async () => {
+    const identity = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'base', identity });
+    const network = await createBaseNetwork({ identity, mesh, maxBundleBytes: 32 });
+    const publish = (network as any).node.content.publish;
+    let publishCalls = 0;
+    (network as any).node.content.publish = (bundle: any) => { publishCalls += 1; return publish(bundle); };
+    await expect(network.publishApp({
+      name: 'oversize', entry: 'index.html', files: { 'index.html': 'x' },
+    })).rejects.toThrow('bundle too large');
+    expect(publishCalls).toBe(0);
+    network.close();
   });
 
   test('un-share: deleting stops serving the bytes AND drops the card (re-infection-proof)', async () => {

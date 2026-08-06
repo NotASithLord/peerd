@@ -73,6 +73,9 @@ import './unit/engine-tabs/notebook-tab/notebook-seal.test.js';
 import './unit/engine-tabs/notebook-tab/notebook-extract.test.js';
 import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
+// --- chassis: app-tab ---
+import './unit/engine-tabs/app-tab/app-binary-assets.test.js';
+
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
 import './unit/red-team/sandbox-escape.test.js';
 
@@ -112,6 +115,7 @@ import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/options/activity-origin-events.test.js';
 import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
+import './unit/options/dweb-section.test.js';
 import './unit/options/transfer-identity.test.js';
 
 // --- home (chassis): the full-tab Library page ---

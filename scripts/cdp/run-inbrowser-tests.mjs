@@ -208,7 +208,8 @@ const main = async () => {
       expression: `[...document.querySelectorAll('li.test.fail')].map((li) => {
         const name = li.querySelectorAll(':scope > span')[1]?.textContent ?? '(unnamed)';
         const err = li.querySelector('details summary')?.textContent ?? '';
-        return name + (err ? ' — ' + err : '');
+        const details = li.querySelector('details pre')?.textContent ?? '';
+        return name + (err ? ': ' + err : '') + (details ? '\\n' + details : '');
       }).join('\\n')`,
       returnByValue: true,
     });

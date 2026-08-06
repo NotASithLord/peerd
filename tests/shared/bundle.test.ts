@@ -71,4 +71,31 @@ describe('bundle codec', () => {
 		expect(entry).toBe('index.html');
 		expect(files['index.html']).toBe('<h1>héllo wörld</h1>');
 	});
+
+	it('round-trips durable file kinds without changing legacy bundles', () => {
+		const legacy = packBundle({ files: { 'x.custom': utf8('ASCII bytes') } });
+		expect('fileKinds' in JSON.parse(fromUtf8(legacy))).toBe(false);
+		const payload = packBundle({
+			files: { 'x.custom': utf8('ASCII bytes') },
+			fileKinds: { 'x.custom': 'binary' },
+		});
+		expect(unpackBundle(payload).fileKinds['x.custom']).toBe('binary');
+	});
+
+	it('admits the whole shape before decoding file buffers', () => {
+		const tooMany = utf8(JSON.stringify({ v: 1, files: { a: '', b: '', c: '' } }));
+		expect(() => unpackBundle(tooMany, { maxFiles: 2 })).toThrow('more than 2 files');
+		const tooLarge = utf8(JSON.stringify({ v: 1, files: { a: 'AAAA', b: 'AAAA' } }));
+		expect(() => unpackBundle(tooLarge, { maxDecodedBytes: 5 })).toThrow('exceed 5 decoded bytes');
+		const orphanKind = utf8(JSON.stringify({ v: 1, files: { a: '' }, fileKinds: { b: 'binary' } }));
+		expect(() => unpackBundle(orphanKind)).toThrow('file kind has no file');
+	});
+
+	it('preserves prototype-looking paths as own keys', () => {
+		const files: Record<string, Uint8Array> = Object.create(null);
+		files.__proto__ = utf8('safe');
+		const unpacked = unpackBundle(packBundle({ files }));
+		expect(Object.hasOwn(unpacked.files, '__proto__')).toBe(true);
+		expect(fromUtf8(unpacked.files.__proto__)).toBe('safe');
+	});
 });

@@ -23,7 +23,7 @@
  * The gossip-heard discovery response from the offscreen base host (an RPC
  * boundary into the pruned-on-store dweb module — the shape is what the host
  * returns over browser.runtime.sendMessage).
- * @typedef {{ ok?: boolean, error?: string, apps?: Array<{ name?: string, dwapp_id?: string, uri?: string, publisher?: string, from?: string }> }} DiscoverResult
+ * @typedef {{ ok?: boolean, error?: string, apps?: Array<{ name?: string, dwapp_id?: string, slug?: string, seq?: number, uri?: string, publisher?: string, from?: string }> }} DiscoverResult
  */
 
 /** @type {DwebTool} */
@@ -52,6 +52,8 @@ export const dwebDiscoverTool = {
     const apps = (r.apps ?? []).map((a) => ({
       name: a.name,
       dwapp_id: a.dwapp_id,
+      slug: a.slug,
+      seq: a.seq,
       uri: a.uri,
       publisher: a.publisher ?? a.from ?? null,
     }));

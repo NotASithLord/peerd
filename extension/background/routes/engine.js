@@ -18,7 +18,8 @@ export const makeEngineRoutes = (deps) => {
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
+    settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
+    listOffscreenContexts,
   } = deps;
 
   return {
@@ -66,7 +67,38 @@ export const makeEngineRoutes = (deps) => {
         if (!meta) return { ok: false, error: 'app-not-found' };
         // dweb meta unlocks the app-tab bridge for dwapps (preview builds);
         // harmless null elsewhere.
-        return { ok: true, name: meta.name, entryFile: meta.entryFile, dweb: meta.dweb ?? null };
+        return {
+          ok: true,
+          name: meta.name,
+          entryFile: meta.entryFile,
+          fileKinds: meta.fileKinds ?? {},
+          dweb: meta.dweb ?? null,
+        };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
+    // The App editor reads OPFS directly but sends every mutation through the
+    // SW client so byte caps, kind metadata, and rollback stay one contract.
+    'app/editor-write': async ({ appId, path, content }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      if (typeof path !== 'string') return { ok: false, error: 'path-required' };
+      if (typeof content !== 'string') return { ok: false, error: 'content-required' };
+      try {
+        const result = await appClient.writeFile({ appId, path, content, reload: false });
+        return { ok: true, ...result };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
+    'app/editor-delete': async ({ appId, path }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      if (typeof path !== 'string') return { ok: false, error: 'path-required' };
+      try {
+        await appClient.deleteFile({ appId, path, reload: false });
+        return { ok: true };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -148,33 +180,48 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        // why read first: deleting drops the record, but UN-SHARING a dwapp needs its
-        // name (→ slug) + dweb slot (publisher/hash) to tell the base host to stop
-        // announcing + serving the bytes. An app the user shared (or installed → we
-        // auto-seed) keeps being served by the offscreen content store until we
-        // unannounce it — that's the "I deleted it but a peer could still pull it" bug.
-        const record = await appRegistry.get(appId);
-        // why distinguish: appClient.delete returns false for an unknown id;
-        // reporting that as success would let the UI drop a card that wasn't
-        // actually deleted (masking id drift).
-        const deleted = await appClient.delete(appId);
-        if (!deleted) return { ok: false, error: 'app-not-found' };
-        // Best-effort un-share (a dwapp, or any app the user shared). Never blocks or
-        // fails the delete: the local copy is already gone; this just stops the network
-        // copy. Dweb-off / store: the route is inert, so skip the offscreen round-trip.
-        if (DWEB_ENABLED && settingsStore.get().dwebEnabled && record && (record.dweb || record.shared)) {
-          try {
-            await ensureOffscreen();
-            await browser.runtime.sendMessage({
-              type: 'dweb/base-host/unshare-app',
-              name: record.name,
-              slug: record.dweb?.slug ?? null,
-              publisher: record.dweb?.publisher ?? null,
-              hash: record.dweb?.hash ?? null,
-            });
-          } catch (e) { console.debug('[apps/delete] unshare failed (local delete still applied)', e); }
-        }
-        return { ok: true };
+        const result = await withDwebPublication(() => withAppLifecycle(appId, async () => {
+          // Revoke the live network copy before removing the only durable record
+          // that names it. A transient host failure leaves the local App intact so
+          // the user can retry without losing the hashes needed for revocation.
+          const record = await appRegistry.get(appId);
+          if (!record) return { ok: false, error: 'app-not-found' };
+          if (DWEB_ENABLED && (record.dweb || record.shared)) {
+            try {
+              // Never create a host just to revoke. No offscreen context means
+              // no in-memory content store can still be serving these bytes.
+              const contexts = await listOffscreenContexts(browser);
+              if (contexts.length) {
+                const reply = await browser.runtime.sendMessage({
+                  type: 'dweb/base-host/unshare-app', appId, name: record.name,
+                  slug: record.dweb?.slug ?? null,
+                  publisher: record.dweb?.publisher ?? null,
+                  unpublish: record.dweb?.local === true,
+                  hash: record.dweb?.hash ?? null,
+                  hashes: [...new Set([
+                    record.dweb?.hash,
+                    record.dweb?.room_hash,
+                    ...(Array.isArray(record.dweb?.pending_unserve_hashes)
+                      ? record.dweb.pending_unserve_hashes
+                      : []),
+                    ...(Array.isArray(record.dweb?.pending_seed_unserve_hashes)
+                      ? record.dweb.pending_seed_unserve_hashes
+                      : []),
+                  ].filter((hash) => typeof hash === 'string' && hash))],
+                });
+                if (!reply?.ok) throw new Error(reply?.error ?? 'app-unshare-failed');
+              }
+            } catch {
+              return {
+                ok: false,
+                error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
+              };
+            }
+          }
+          const deleted = await appClient.delete(appId);
+          return deleted ? { ok: true } : { ok: false, error: 'app-not-found' };
+        }));
+        return result;
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -190,29 +237,29 @@ export const makeEngineRoutes = (deps) => {
     // a FRESH id, never overwriting an existing artifact.
     'export/artifact': async ({ kind, id }) => {
       if (typeof id !== 'string' || !id) return { ok: false, error: 'id-required' };
-      // The OPFS tree, path → text — the same read surface app-tab's
-      // composer uses (opfs.list() prefixes paths with '/').
-      /** @param {string[]} rootPath */
-      const readTree = async (rootPath) => {
+      /** @param {string[]} rootPath @param {'text' | 'bytes'} mode */
+      const readTree = async (rootPath, mode) => {
         const opfs = opfsHelpers(rootPath);
-        /** @type {Record<string, string>} */
+        /** @type {Record<string, string | Uint8Array>} */
         const files = {};
         for (const f of await opfs.list()) {
           const path = f.path.replace(/^\/+/, '');
-          files[path] = await opfs.read(path);
+          files[path] = mode === 'bytes' ? await opfs.readBytes(path) : await opfs.read(path);
         }
         return files;
       };
       try {
         let record, envelope;
         if (kind === 'app') {
-          record = await appRegistry.get(id);
-          if (!record) return { ok: false, error: 'app-not-found' };
-          envelope = await buildAppExport({ record, files: await readTree(['peerd-apps', id]) });
+          const snapshot = await appClient.snapshotFiles({ appId: id });
+          record = snapshot.record;
+          // why every App file is read as bytes: artifact transfer is lossless;
+          // the persisted kind map decides which bytes are editable text.
+          envelope = await buildAppExport({ record, files: snapshot.files });
         } else if (kind === 'notebook') {
           record = await jsRegistry.get(id);
           if (!record) return { ok: false, error: 'notebook-not-found' };
-          envelope = await buildNotebookExport({ record, files: await readTree([NOTEBOOK_OPFS_ROOT, id]) });
+          envelope = await buildNotebookExport({ record, files: await readTree([NOTEBOOK_OPFS_ROOT, id], 'text') });
         } else if (kind === 'vm') {
           record = await vmRegistry.get(id);
           if (!record) return { ok: false, error: 'vm-not-found' };
@@ -259,9 +306,9 @@ export const makeEngineRoutes = (deps) => {
         }
         throw e;
       }
-      const { kind, name, entry, files, meta } = opened;
-      // OPFS trees travel as bytes; the engine kinds store text (the
-      // same contract app-tab/notebook-tab read back out).
+      const { kind, name, entry, files, fileKinds, meta } = opened;
+      // Notebook source files use the existing text contract. Apps receive the
+      // raw file map so import preserves every byte, including unknown suffixes.
       const textFiles = () => {
         /** @type {Record<string, string>} */
         const out = {};
@@ -277,7 +324,8 @@ export const makeEngineRoutes = (deps) => {
         try {
           record = await appClient.create({
             name,
-            files: textFiles(),
+            files,
+            fileKinds,
             tags: Array.isArray(meta.tags) ? meta.tags : [],
             entryFile: entry,
           });

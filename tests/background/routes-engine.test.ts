@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeEngineRoutes } from '../../extension/background/routes/engine.js';
+import { listOffscreenContexts } from '../../extension/background/offscreen-contexts.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -9,7 +10,10 @@ const baseDeps = (over: any = {}) => ({
   vault: { isLocked: () => false },
   auditLog: { append: async () => {} },
   pushState: () => {},
-  browser: { storage: { local: { get: async () => ({}), set: async () => {} } } },
+  browser: {
+    runtime: { getContexts: async () => [], sendMessage: async () => ({ ok: true }) },
+    storage: { local: { get: async () => ({}), set: async () => {} } },
+  },
   // #53: engine's sw/web-fetch now delegates to the vm-net vmHttpFetch factory
   // (cache + host-bound git-auth + body cap + base64 — those are covered by
   // tests/peerd-engine/vm-net/vm-http-fetch.test.ts). engine.js only validates
@@ -22,9 +26,16 @@ const baseDeps = (over: any = {}) => ({
   },
   vmRegistry: { get: async (id: string) => (id === 'v1' ? { id, name: 'VM' } : null), create: async () => ({ id: 'vNew' }) },
   jsRegistry: { get: async () => null, create: async () => ({ id: 'nNew' }) },
-  appClient: { open: async () => {}, create: async () => ({ id: 'imported' }) },
+  appClient: {
+    open: async () => {},
+    create: async () => ({ id: 'imported' }),
+    snapshotFiles: async () => ({
+      record: { id: 'a1', name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text' } },
+      files: { 'index.html': new TextEncoder().encode('<h1>x</h1>') },
+    }),
+  },
   appTabTracker: { reloadTab: async () => {} },
-  opfsHelpers: () => ({ list: async () => [], read: async () => '', write: async () => {} }),
+  opfsHelpers: () => ({ list: async () => [], read: async () => '', readBytes: async () => new Uint8Array(), write: async () => {} }),
   NOTEBOOK_OPFS_ROOT: 'peerd-notebooks',
   IMAGE_PIN_STORAGE_KEY: 'vm.imagePins',
   buildAppExport: async () => ({ env: 'app' }),
@@ -34,9 +45,11 @@ const baseDeps = (over: any = {}) => ({
   inspectEnvelope: async () => ({ ok: true, summary: 'x' }),
   exportFilename: (name: string, kind: string) => `${name}.${kind}.peerd`,
   ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-  ensureOffscreen: async () => {},
   settingsStore: { get: () => ({ dwebEnabled: false }) },
   DWEB_ENABLED: false,
+  withDwebPublication: async (operation: (isCurrent: () => boolean) => Promise<any>) => operation(() => true),
+  withAppLifecycle: async (_appId: string, operation: () => Promise<any>) => operation(),
+  listOffscreenContexts,
   // The SW always injects the extract post-step (a passthrough when extract is
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
@@ -106,9 +119,15 @@ describe('app/vm meta + apps Library', () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['app/get-meta']({ appId: 'zzz' })).toEqual({ ok: false, error: 'app-not-found' });
   });
-  test('app/get-meta returns name/entry/dweb', async () => {
+  test('app/get-meta returns name, entry, file kinds, and dweb metadata', async () => {
     const r = makeEngineRoutes(baseDeps());
-    expect(await r['app/get-meta']({ appId: 'a1' })).toEqual({ ok: true, name: 'App', entryFile: 'index.html', dweb: null });
+    expect(await r['app/get-meta']({ appId: 'a1' })).toEqual({
+      ok: true,
+      name: 'App',
+      entryFile: 'index.html',
+      fileKinds: {},
+      dweb: null,
+    });
   });
   test('vm/get-meta requires a string id', async () => {
     const r = makeEngineRoutes(baseDeps());
@@ -149,12 +168,101 @@ describe('apps/delete', () => {
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
-      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h', slug: 'custom-a' } }) },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h', slug: 'custom-a', local: true } }) },
       appClient: { delete: async () => true },
-      browser: { runtime: { sendMessage: async (m: any) => { msg = m; } } },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: { getContexts: async () => [{}], sendMessage: async (m: any) => { msg = m; return { ok: true }; } } },
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
-    expect(msg).toEqual({ type: 'dweb/base-host/unshare-app', name: 'A', slug: 'custom-a', publisher: 'pub', hash: 'h' });
+    expect(msg).toEqual({
+      type: 'dweb/base-host/unshare-app', appId: 'a1', name: 'A', slug: 'custom-a',
+      publisher: 'pub', unpublish: true, hash: 'h', hashes: ['h'],
+    });
+  });
+  test('disabled dweb still revokes a networked App from a surviving host before delete', async () => {
+    const events: string[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      settingsStore: { get: () => ({ dwebEnabled: false }) },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { local: true, hash: 'h' } }) },
+      appClient: { delete: async () => { events.push('delete'); return true; } },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: {
+        getContexts: async () => [{}],
+        sendMessage: async () => { events.push('unshare'); return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(events).toEqual(['unshare', 'delete']);
+  });
+  test('disabled dweb deletes safely without creating an absent offscreen host', async () => {
+    let sent = false;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      settingsStore: { get: () => ({ dwebEnabled: false }) },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { hash: 'h' } }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [],
+      browser: { runtime: {
+        getContexts: async () => [],
+        sendMessage: async () => { sent = true; return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(sent).toBe(false);
+  });
+  test('Firefox deletes a networked App without probing the absent offscreen API', async () => {
+    let sent = false;
+    let probed = false;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { hash: 'h' } }) },
+      appClient: { delete: async () => true },
+      browser: { runtime: {
+        getContexts: async () => { probed = true; throw new Error('OFFSCREEN_DOCUMENT is unsupported'); },
+        sendMessage: async () => { sent = true; return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(probed).toBe(false);
+    expect(sent).toBe(false);
+  });
+  test('un-shares both discovery and room-published versions on delete', async () => {
+    let msg: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      settingsStore: { get: () => ({ dwebEnabled: true }) },
+      appRegistry: { get: async () => ({
+        id: 'a1', name: 'A', shared: true,
+        dweb: {
+          publisher: 'pub', hash: 'main', room_hash: 'room', slug: 'a',
+          pending_unserve_hashes: ['older-share'],
+          pending_seed_unserve_hashes: ['older-seed'],
+        },
+      }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: { getContexts: async () => [{}], sendMessage: async (message: any) => { msg = message; return { ok: true }; } } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(msg.hashes).toEqual(['main', 'room', 'older-share', 'older-seed']);
+  });
+  test('deleting an installed App does not tombstone the peer discovery card', async () => {
+    let msg: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      appRegistry: { get: async () => ({
+        id: 'a1', name: 'A', dweb: { publisher: 'peer', hash: 'main', slug: 'a' },
+      }) },
+      appClient: { delete: async () => true },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: {
+        getContexts: async () => [{}],
+        sendMessage: async (message: any) => { msg = message; return { ok: true }; },
+      } },
+    }));
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(msg).toMatchObject({ publisher: 'peer', hash: 'main', unpublish: false });
   });
   test('does NOT unshare a purely-local app even with dweb fully on', async () => {
     let sent = false;
@@ -168,15 +276,21 @@ describe('apps/delete', () => {
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
     expect(sent).toBe(false); // the (record.dweb || record.shared) gate must skip the offscreen round-trip
   });
-  test('unshare failure never fails the delete', async () => {
+  test('unshare failure preserves the local App and its revocation metadata', async () => {
+    let deleted = false;
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
       appRegistry: { get: async () => ({ id: 'a1', name: 'A', dweb: {} }) },
-      appClient: { delete: async () => true },
-      browser: { runtime: { sendMessage: async () => { throw new Error('mesh down'); } } },
+      appClient: { delete: async () => { deleted = true; return true; } },
+      listOffscreenContexts: async () => [{}],
+      browser: { runtime: { getContexts: async () => [{}], sendMessage: async () => { throw new Error('mesh down'); } } },
     }));
-    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({
+      ok: false,
+      error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
+    });
+    expect(deleted).toBe(false);
   });
 });
 
@@ -192,6 +306,21 @@ describe('export/artifact', () => {
   test('app export returns filename + envelope', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['export/artifact']({ kind: 'app', id: 'a1' })).toEqual({ ok: true, filename: 'App.app.peerd', envelope: { env: 'app' } });
+  });
+  test('app export preserves every file as bytes, including an unknown suffix', async () => {
+    const raw = new Uint8Array([0xff, 0x00, 0xc0]);
+    let exported: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      buildAppExport: async ({ files }: any) => { exported = files; return { env: 'app' }; },
+      appClient: {
+        snapshotFiles: async () => ({
+          record: { name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text', 'model.custom': 'binary' } },
+          files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
+        }),
+      },
+    }));
+    expect((await r['export/artifact']({ kind: 'app', id: 'a1' })).ok).toBe(true);
+    expect(Array.from(exported['model.custom'])).toEqual(Array.from(raw));
   });
   test('vm export without an image pin refuses', async () => {
     const r = makeEngineRoutes(baseDeps());
@@ -213,6 +342,20 @@ describe('import/apply', () => {
   test('app import mints a fresh id', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['import/apply']({ envelope: {} })).toEqual({ ok: true, kind: 'app', id: 'imported' });
+  });
+  test('app import passes raw bytes to storage without classifying the suffix', async () => {
+    const raw = new Uint8Array([0xff, 0x00, 0xc0]);
+    let received: any = null;
+    const r = makeEngineRoutes(baseDeps({
+      appClient: { create: async (opts: any) => { received = opts.files; return { id: 'imported' }; } },
+      openEnvelope: async () => ({
+        kind: 'app', name: 'X', entry: 'index.html', meta: { tags: [] },
+        files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
+      }),
+    }));
+    expect((await r['import/apply']({ envelope: {} })).ok).toBe(true);
+    expect(received['index.html']).toBeInstanceOf(Uint8Array);
+    expect(Array.from(received['model.custom'])).toEqual(Array.from(raw));
   });
   test('unexpected error rethrown (not swallowed)', async () => {
     const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new Error('weird'); } }));

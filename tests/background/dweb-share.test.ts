@@ -9,6 +9,8 @@ const makeLane = () => {
     return result;
   };
 };
+const withAppLifecycle = <T>(_appId: string, operation: () => Promise<T>) => operation();
+const withDwebPublication = <T>(operation: (isCurrent: () => boolean) => Promise<T>) => operation(() => true);
 
 describe('identity-bound dweb share', () => {
   test('publish and complete identity metadata persistence stay in the custody lane', async () => {
@@ -20,18 +22,18 @@ describe('identity-bound dweb share', () => {
     const published = new Promise<void>((resolve) => { publishStarted = resolve; });
     let persisted: any;
     const share = makeDwebShare({
-      enabled: true, active: () => true, withIdentityMutation: lane,
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: lane, withAppLifecycle,
       appRegistry: {
         get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
         update: async (_id, patch) => { events.push('persist'); persisted = patch; return { id: 'app-1' }; },
       },
-      opfsHelpers: () => ({ list: async () => [{ path: '/index.html' }], read: async () => '<h1>App</h1>' }),
       prepareRuntime: async () => ({ ok: true }),
-      sendMessage: async () => {
+      sendMessage: async (message) => {
+        if (message.type === 'dweb/base-host/commit-share') return { ok: true };
         events.push('publish');
         publishStarted();
         await publishGate;
-        return { ok: true, uri: 'peerd://bundle', publisher: 'did:key:zOld', hash: 'hash', slug: 'app', dwapp_id: 'dwapp', seq: 7 };
+        return { ok: true, uri: 'peerd://bundle', publisher: 'did:key:zOld', hash: 'hash', slug: 'app', dwapp_id: 'dwapp', seq: 7, transactionId: 'tx-1' };
       },
     });
 
@@ -51,44 +53,73 @@ describe('identity-bound dweb share', () => {
     });
   });
 
+  test('passes the previously served hash so a successful reshare can revoke it', async () => {
+    const messages: any[] = [];
+    const patches: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: { hash: 'old', slug: 'app', local: true } }),
+        update: async (_id, patch) => { patches.push(patch); return { id: 'app-1', ...patch }; },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        messages.push(message);
+        if (message.type === 'dweb/base-host/commit-share') return { ok: true };
+        if (message.type === 'dweb/base-host/unserve-content') return { ok: true, unserved: true };
+        return { ok: true, uri: 'peerd://new', hash: 'new', slug: 'app', dwapp_id: 'd', seq: 2, transactionId: 'tx-2' };
+      },
+    });
+    expect((await share('app-1', undefined)).ok).toBe(true);
+    expect(messages[0]).toMatchObject({
+      type: 'dweb/base-host/share-app', previousHash: 'old', slug: 'app',
+    });
+    expect(messages.find((message) => message.type === 'dweb/base-host/unserve-content')).toEqual({
+      type: 'dweb/base-host/unserve-content', appId: 'app-1', hash: 'old', slot: 'share',
+    });
+    expect(patches[0].dweb.pending_unserve_hashes).toEqual(['old']);
+    expect(patches[1].dwebExact.pending_unserve_hashes).toBeUndefined();
+  });
+
   test('metadata failure rolls back the published share and reports failure', async () => {
     const messages: any[] = [];
     const share = makeDwebShare({
-      enabled: true, active: () => true, withIdentityMutation: makeLane(),
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: makeLane(), withAppLifecycle,
       appRegistry: {
         get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
         update: async () => { throw new Error('disk'); },
       },
-      opfsHelpers: () => ({ list: async () => [], read: async () => '' }),
       prepareRuntime: async () => ({ ok: true }),
       sendMessage: async (message) => {
         messages.push(message);
-        return message.type.endsWith('unshare-app')
+        return message.type === 'dweb/base-host/rollback-share'
           ? { ok: true }
-          : { ok: true, publisher: 'did:key:zOld', hash: 'hash', slug: 'custom-slug' };
+          : { ok: true, publisher: 'did:key:zOld', hash: 'hash', slug: 'custom-slug', transactionId: 'tx-3' };
       },
     });
     expect(await share('app-1', undefined)).toMatchObject({ ok: false, error: 'share-metadata-store-failed' });
     expect(messages.map((message) => message.type)).toEqual([
-      'dweb/base-host/share-app', 'dweb/base-host/unshare-app',
+      'dweb/base-host/share-app', 'dweb/base-host/rollback-share',
     ]);
-    expect(messages[1].slug).toBe('custom-slug');
+    expect(messages[1]).toMatchObject({
+      transactionId: 'tx-3',
+    });
   });
 
   test('cold runtime preparation completes before the share takes the custody lane', async () => {
     const events: string[] = [];
     const lane = makeLane();
     const share = makeDwebShare({
-      enabled: true, active: () => true, withIdentityMutation: lane,
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: lane, withAppLifecycle,
       appRegistry: {
         get: async () => ({ name: 'App', entryFile: 'index.html', dweb: { local: false } }),
         update: async (_id, patch) => { events.push('persist'); return { id: 'app-1', ...patch }; },
       },
-      opfsHelpers: () => ({ list: async () => [], read: async () => '' }),
       prepareRuntime: () => lane(async () => { events.push('mint'); return { ok: true }; }),
-      sendMessage: async () => {
+      sendMessage: async (message) => {
+        if (message.type === 'dweb/base-host/commit-share') return { ok: true };
         events.push('publish');
-        return { ok: true, uri: 'peerd://bundle', publisher: 'did:key:zLocal', hash: 'hash', slug: 'app', dwapp_id: 'dwapp', seq: 1 };
+        return { ok: true, uri: 'peerd://bundle', publisher: 'did:key:zLocal', hash: 'hash', slug: 'app', dwapp_id: 'dwapp', seq: 1, transactionId: 'tx-4' };
       },
     });
     expect(await share('app-1', undefined)).toMatchObject({ ok: true });
@@ -98,25 +129,259 @@ describe('identity-bound dweb share', () => {
   test('a concurrent deletion is a persistence failure and rolls back', async () => {
     const messages: any[] = [];
     const share = makeDwebShare({
-      enabled: true, active: () => true, withIdentityMutation: makeLane(),
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: makeLane(), withAppLifecycle,
       appRegistry: {
         get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
         update: async () => null,
       },
-      opfsHelpers: () => ({ list: async () => [], read: async () => '' }),
       prepareRuntime: async () => ({ ok: true }),
       sendMessage: async (message) => {
         messages.push(message);
-        return message.type.endsWith('unshare-app')
+        return message.type === 'dweb/base-host/rollback-share'
           ? { ok: true }
-          : { ok: true, publisher: 'did:key:zOld', hash: 'hash', slug: 'app' };
+          : { ok: true, publisher: 'did:key:zOld', hash: 'hash', slug: 'app', transactionId: 'tx-5' };
       },
     });
     expect(await share('app-1', undefined)).toMatchObject({
       ok: false, error: 'share-metadata-store-failed',
     });
     expect(messages.at(-1)).toMatchObject({
-      type: 'dweb/base-host/unshare-app', slug: 'app',
+      type: 'dweb/base-host/rollback-share', transactionId: 'tx-5',
     });
+  });
+
+  test('a failed reshare restores the last durable share metadata', async () => {
+    const messages: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({
+          name: 'App', entryFile: 'index.html',
+          dweb: { hash: 'old', uri: 'peerd://old', size: 123, slug: 'app', local: true },
+        }),
+        update: async () => { throw new Error('disk'); },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        messages.push(message);
+        if (message.type === 'dweb/base-host/rollback-share') return { ok: true, restored: true };
+        return {
+          ok: true, publisher: 'did:key:zOld', uri: 'peerd://new', hash: 'new',
+          size: 456, slug: 'app', seq: 9, transactionId: 'tx-6',
+        };
+      },
+    });
+
+    expect(await share('app-1', undefined)).toMatchObject({
+      ok: false, error: 'share-metadata-store-failed',
+    });
+    expect(messages[1]).toMatchObject({
+      type: 'dweb/base-host/rollback-share', transactionId: 'tx-6', failedSeq: 9,
+    });
+  });
+
+  test('reports committed success when old-version cleanup needs a later retry', async () => {
+    const patches: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: { hash: 'old', local: true } }),
+        update: async (_id, patch) => { patches.push(patch); return { id: 'app-1', ...patch }; },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        if (message.type === 'dweb/base-host/unserve-content') return { ok: false, error: 'host busy' };
+        if (message.type === 'dweb/base-host/commit-share') return { ok: true };
+        return { ok: true, uri: 'peerd://new', hash: 'new', slug: 'app', seq: 2, transactionId: 'tx-7' };
+      },
+    });
+
+    expect(await share('app-1', undefined)).toMatchObject({
+      ok: true,
+      hash: 'new',
+      warning: 'previous-version-cleanup-pending',
+      cleanupPending: true,
+    });
+    expect(patches).toHaveLength(1);
+    expect(patches[0].dweb.pending_unserve_hashes).toEqual(['old']);
+  });
+
+  test('resharing an installed App cleans update retries through the seed slot', async () => {
+    const messages: any[] = [];
+    const patches: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({
+          name: 'Installed', entryFile: 'index.html',
+          dweb: {
+            hash: 'installed-current', slug: 'installed', local: false,
+            pending_seed_unserve_hashes: ['installed-old'],
+          },
+        }),
+        update: async (_id, patch) => { patches.push(patch); return { id: 'app-1', ...patch }; },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        messages.push(message);
+        if (message.type === 'dweb/base-host/commit-share') return { ok: true };
+        if (message.type === 'dweb/base-host/unserve-content') return { ok: true, unserved: true };
+        return {
+          ok: true, uri: 'peerd://local-new', hash: 'local-new', slug: 'installed',
+          seq: 1, transactionId: 'tx-installed-reshare',
+        };
+      },
+    });
+
+    expect(await share('app-1', undefined)).toMatchObject({ ok: true, hash: 'local-new' });
+    expect(messages[0]).toMatchObject({
+      type: 'dweb/base-host/share-app', previousHash: null,
+    });
+    expect(messages.filter((message) => message.type === 'dweb/base-host/unserve-content'))
+      .toEqual([
+        { type: 'dweb/base-host/unserve-content', appId: 'app-1', hash: 'installed-old', slot: 'seed' },
+        { type: 'dweb/base-host/unserve-content', appId: 'app-1', hash: 'installed-current', slot: 'seed' },
+      ]);
+    expect(patches[0].dweb.pending_seed_unserve_hashes)
+      .toEqual(['installed-old', 'installed-current']);
+    expect(patches[1].dwebExact.pending_seed_unserve_hashes).toBeUndefined();
+  });
+
+  test('requires host restoration when a legacy prior share lacks stored size', async () => {
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication, withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: { hash: 'old', uri: 'peerd://old', local: true } }),
+        update: async () => { throw new Error('disk'); },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => message.type === 'dweb/base-host/rollback-share'
+        ? { ok: true, restored: false }
+        : { ok: true, uri: 'peerd://new', hash: 'new', slug: 'app', seq: 4, transactionId: 'tx-8' },
+    });
+
+    expect(await share('app-1', undefined)).toMatchObject({
+      ok: false, error: 'share-rollback-failed',
+    });
+  });
+
+  test('retries one failed host rollback with the same transaction id', async () => {
+    const rollbacks: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
+        update: async () => { throw new Error('disk'); },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        if (message.type !== 'dweb/base-host/rollback-share') {
+          return { ok: true, hash: 'new', slug: 'app', transactionId: 'tx-retry' };
+        }
+        rollbacks.push(message);
+        return rollbacks.length === 1 ? { ok: false, error: 'restore failed' } : { ok: true };
+      },
+    });
+    expect(await share('app-1', undefined)).toMatchObject({
+      ok: false, error: 'share-metadata-store-failed',
+    });
+    expect(rollbacks.map((message) => message.transactionId)).toEqual(['tx-retry', 'tx-retry']);
+  });
+
+  test('records the uncertain new hash when rollback cannot finish', async () => {
+    const patches: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: { hash: 'old', local: true } }),
+        update: async (_id, patch) => {
+          patches.push(patch);
+          if (patches.length === 1) throw new Error('disk');
+          return { id: 'app-1', ...patch };
+        },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => message.type === 'dweb/base-host/rollback-share'
+        ? { ok: false, error: 'host busy' }
+        : { ok: true, hash: 'new', slug: 'app', transactionId: 'tx-uncertain' },
+    });
+    expect(await share('app-1', undefined)).toMatchObject({ ok: false, error: 'share-rollback-failed' });
+    expect(patches[1]).toMatchObject({
+      shared: true,
+      dweb: { hash: 'old', local: true, pending_unserve_hashes: ['new'] },
+    });
+  });
+
+  test('a master-off generation change after publication rolls the share back before metadata commit', async () => {
+    let current = true;
+    let updated = false;
+    const messages: any[] = [];
+    const share = makeDwebShare({
+      enabled: true,
+      active: () => current,
+      withDwebPublication: (operation) => operation(() => current),
+      withIdentityMutation: makeLane(),
+      withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
+        update: async () => { updated = true; return { id: 'app-1' }; },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        messages.push(message);
+        if (message.type === 'dweb/base-host/share-app') {
+          current = false;
+          return { ok: true, hash: 'new', slug: 'app', transactionId: 'tx-disabled' };
+        }
+        return { ok: true };
+      },
+    });
+    expect(await share('app-1', undefined)).toEqual({ ok: false, error: 'dweb-disabled' });
+    expect(updated).toBe(false);
+    expect(messages.at(-1)).toMatchObject({
+      type: 'dweb/base-host/rollback-share', transactionId: 'tx-disabled',
+    });
+  });
+
+  test('master-off retains the new hash when both rollback attempts fail', async () => {
+    let current = true;
+    const patches: any[] = [];
+    const rollbacks: any[] = [];
+    const share = makeDwebShare({
+      enabled: true,
+      active: () => current,
+      withDwebPublication: (operation) => operation(() => current),
+      withIdentityMutation: makeLane(),
+      withAppLifecycle,
+      appRegistry: {
+        get: async () => ({
+          name: 'App', entryFile: 'index.html',
+          dweb: { hash: 'old', local: true, pending_unserve_hashes: ['older'] },
+        }),
+        update: async (_id, patch) => { patches.push(patch); return { id: 'app-1', ...patch }; },
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => {
+        if (message.type === 'dweb/base-host/share-app') {
+          current = false;
+          return { ok: true, hash: 'new', slug: 'app', transactionId: 'tx-off-failed' };
+        }
+        rollbacks.push(message);
+        return { ok: false, error: 'host busy' };
+      },
+    });
+
+    expect(await share('app-1', undefined)).toMatchObject({
+      ok: false, error: 'share-rollback-failed',
+    });
+    expect(rollbacks).toHaveLength(2);
+    expect(rollbacks.every((message) => message.transactionId === 'tx-off-failed')).toBe(true);
+    expect(patches).toEqual([{
+      shared: true,
+      dweb: { hash: 'old', local: true, pending_unserve_hashes: ['older', 'new'] },
+    }]);
   });
 });

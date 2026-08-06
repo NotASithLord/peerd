@@ -13,10 +13,12 @@
 //   { t:'CHUNK_REQ', hash }         -> { t:'CHUNK', hash, bytes(base64) }
 //                                   or { t:'NOCHUNK', hash }
 
-import { manifestHash, verifyManifest, assertBundleWithinLimits } from './manifest.js';
+import {
+  manifestHash, verifyManifest, assertBundleWithinLimits, decodeCommittedChunk,
+} from './manifest.js';
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
-import { toBase64, fromBase64, concat } from '/shared/bundle/bytes.js';
+import { toBase64, concat } from '/shared/bundle/bytes.js';
 
 const ALPHA = 3; // lookup/transfer parallelism (PROTOCOL §5.1)
 
@@ -132,6 +134,7 @@ export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 
   // 3. Fetch unique chunk hashes in parallel (dedup so identical chunks
   //    are fetched once and key collisions are impossible).
   const uniqueHashes = [...new Set(manifest.chunks.map((c) => c.hash))];
+  const expectedSizes = new Map(manifest.chunks.map((c) => [c.hash, c.size]));
   /** @type {Map<string, Uint8Array>} */
   const byHash = new Map();
   let idx = 0;
@@ -143,7 +146,7 @@ export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 
       if (resp.t === 'NOCHUNK') throw new Error(`chunk unavailable: ${h}`);
       // why cast: a CHUNK reply carries bytes (a NOCHUNK was rejected above);
       // the field is wire-decoded and re-verified by the hash check below.
-      const bytes = fromBase64(/** @type {string} */ (resp.bytes));
+      const bytes = decodeCommittedChunk(resp.bytes, /** @type {number} */ (expectedSizes.get(h)));
       const got = await sha256hex(bytes);
       if (got !== h) throw new Error(`chunk hash mismatch (tamper?): ${h}`);
       byHash.set(h, bytes);

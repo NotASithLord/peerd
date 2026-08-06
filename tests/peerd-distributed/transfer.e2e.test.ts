@@ -106,6 +106,35 @@ describe('end-to-end app transfer over a channel pair', () => {
     ).rejects.toThrow(/chunk hash mismatch/);
   });
 
+  test('rejects an oversized wire chunk before hash verification or retention', async () => {
+    const [chPub, chCon] = memoryPair();
+    const pub = await generateIdentity();
+    const con = await generateIdentity();
+    await Promise.all([
+      createSession({ channel: chPub, identity: pub }),
+      createSession({ channel: chCon, identity: con }),
+    ]);
+
+    const payload = buildSample();
+    const { manifest, hash, chunks } = await buildManifest({ payload, entry: 'index.html', identity: pub, now: () => 1 });
+    const store = createContentStore();
+    store.publish({ manifest, hash, chunks });
+    const respond = createContentResponder({ store });
+    chPub.setHandler((msg: any) => respond(msg, (out: any) => {
+      if (out.t === 'CHUNK') {
+        const bytes = fromBase64(out.bytes);
+        const oversized = new Uint8Array(bytes.length + 1);
+        oversized.set(bytes);
+        out = { ...out, bytes: toBase64(oversized) };
+      }
+      chPub.send(out);
+    }));
+
+    await expect(fetchBundle({
+      uri: formatPeerdUri({ did: pub.did, hash }), channel: chCon,
+    })).rejects.toThrow(/(?:encoded|decoded) length mismatch/);
+  });
+
   test('rejects content the publisher never announced', async () => {
     const [chPub, chCon] = memoryPair();
     const pub = await generateIdentity();

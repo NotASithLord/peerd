@@ -21,9 +21,12 @@ const mockTransport = () => {
 // The bridge now talks to the offscreen base host over swCall('dweb/base/room')
 // and receives pushed room events via onHostEvent — no in-page room host, no
 // identity minting, no signaler. The fakes below stand in for that host.
-const makeBridge = ({ confirm = true }: { confirm?: boolean } = {}) => {
+const makeBridge = ({ confirm = true }: {
+  confirm?: boolean | ((request: any) => boolean),
+} = {}) => {
   const mt = mockTransport();
   const calls: any[] = [];
+  const confirmations: any[] = [];
   let pushEvent: ((m: any) => void) | null = null;
   const swCall = async (type: string, payload: any = {}) => {
     if (type !== 'dweb/base/room') return { ok: true };
@@ -35,6 +38,7 @@ const makeBridge = ({ confirm = true }: { confirm?: boolean } = {}) => {
       case 'presence': return { ok: true, present: [{ did: 'did:key:zBOB', meta: { name: 'bob' } }] };
       case 'history': return { ok: true, items: [] };
       case 'leave': return { ok: true, left: true };
+      case 'publish-app': return { ok: true, uri: 'peerd://bundle', hash: 'hash' };
       default: return { ok: true };
     }
   };
@@ -43,12 +47,14 @@ const makeBridge = ({ confirm = true }: { confirm?: boolean } = {}) => {
     transport: mt.transport,
     swCall,
     storage: { get: async () => ({}), set: async () => {} },
-    confirmAction: async () => confirm,
-    readAppFiles: async () => ({}),
+    confirmAction: async (request: any) => {
+      confirmations.push(request);
+      return typeof confirm === 'function' ? confirm(request) : confirm;
+    },
     onHostEvent: (h: any) => { pushEvent = h; return () => { pushEvent = null; }; },
     launch: {},
   });
-  return { mt, bridge, calls, push: (m: any) => pushEvent?.(m) };
+  return { mt, bridge, calls, confirmations, push: (m: any) => pushEvent?.(m) };
 };
 
 describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
@@ -71,6 +77,34 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
     await tick();
     expect(calls.find((c) => c.op === 'publish')).toMatchObject({ roomId: 'peerd-global', topic: 'feed', data: { text: 'hi' } });
     expect(mt.results().find((r) => r.id === 2)).toMatchObject({ ok: true, value: { id: 'e1' } });
+  });
+
+  test('publishing the current App sends its trusted id, not page-supplied files', async () => {
+    const { mt, calls, confirmations } = makeBridge();
+    mt.drive({ peerd: 'dweb', id: 1, op: 'join', args: { roomId: 'r', name: 'ada' } });
+    await tick();
+    mt.drive({ peerd: 'dweb', id: 2, op: 'publish-app', args: { files: { 'evil.bin': 'ignored' } } });
+    await tick();
+    expect(calls.find((call) => call.op === 'publish-app')).toMatchObject({
+      appId: 'commons', entry: 'index.html', name: 'commons',
+    });
+    expect(calls.find((call) => call.op === 'publish-app').files).toBeUndefined();
+    expect(confirmations.filter((request) => request.kind === 'share')).toHaveLength(1);
+    expect(confirmations.find((request) => request.kind === 'share').detail).toContain('source and binary assets');
+    expect(confirmations.find((request) => request.kind === 'share').approveLabel).toBe('Share app');
+  });
+
+  test('a remembered room join never replaces fresh consent for publishing App files', async () => {
+    const { mt, calls, confirmations } = makeBridge({
+      confirm: (request) => request.kind !== 'share',
+    });
+    mt.drive({ peerd: 'dweb', id: 1, op: 'join', args: { roomId: 'r', name: 'ada' } });
+    await tick();
+    mt.drive({ peerd: 'dweb', id: 2, op: 'publish-app', args: {} });
+    await tick();
+    expect(mt.results().find((result) => result.id === 2)).toMatchObject({ ok: false });
+    expect(calls.some((call) => call.op === 'publish-app')).toBe(false);
+    expect(confirmations.map((request) => request.kind)).toEqual(['join', 'share']);
   });
 
   test('pushed host events are emitted to the app — filtered to our room + subscribed topics', async () => {

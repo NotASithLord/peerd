@@ -15,6 +15,8 @@ export const appReadFileTool = {
   primitive: 'app',
   description: [
     'Read a single file from an App\'s OPFS subtree. Returns UTF-8 text.',
+    'Binary assets are listed but cannot be read as text; replace them with',
+    '`app_write_file({contentBase64})` when needed.',
     'Use to inspect current content before patching. A large file returns a',
     'bounded slice plus a paging note — re-call with offset to read on (no',
     're-truncation). Without `appId`, targets the chat\'s current app.',
@@ -75,7 +77,12 @@ export const appReadFileTool = {
         },
       });
     } catch (e) {
-      return { ok: false, error: `app_read_file_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      const detail = /** @type {{ message?: string, code?: string }} */ (e);
+      return {
+        ok: false,
+        ...(detail?.code ? { code: detail.code } : {}),
+        error: `app_read_file_failed: ${detail?.message ?? String(e)}`,
+      };
     }
   },
 };

@@ -343,6 +343,7 @@ import {
   createVmRegistry,
   createNotebookRegistry,
   createAppRegistry,
+  appFileCheckpointContent,
   // artifact export/import (.peerd envelopes — DESIGN-10)
   opfsHelpers,
   // design 06: the resolver transform, injected into the toolbox write-time
@@ -384,6 +385,10 @@ import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
 import { makeDwebTransfer, IdentityTransferError } from './dweb-transfer.js';
 import { makeDwebShare } from './dweb-share.js';
+import { makeReseedSharedApps } from './dweb-reseed.js';
+import { createDwebPublicationFence } from './dweb-publication-fence.js';
+import { createDwebSettingsGate } from './dweb-settings-gate.js';
+import { listOffscreenContexts } from './offscreen-contexts.js';
 import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody-client.js';
 import {
   identityChangeBlockedByApps, makeDwebIdentityCustody,
@@ -1790,10 +1795,25 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     dweb: (DWEB_ENABLED && settingsStore.get().dwebEnabled) ? {
       share: (/** @type {string} */ appId) => shareLocalApp(appId, undefined),
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
-      install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
+      install: async (/** @type {any} */ { uri, name } = {}) => withDwebPublication(async (isCurrent) => {
+        if (!isCurrent() || !settingsStore.get().dwebEnabled) {
+          return { ok: false, error: 'dweb-disabled', outcomeKind: 'pre-effect-failure' };
+        }
+        await ensureOffscreen();
+        return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name });
+      }),
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
-      block: async (/** @type {any} */ { did, block = true, reason } = {}) => { await ensureOffscreen(); if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); } return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason }); },
-      setDiscovery: async (/** @type {any} */ { enabled } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled }); },
+      block: async (/** @type {any} */ { did, block = true, reason } = {}) => withDwebPublication(async (isCurrent) => {
+        if (!isCurrent() || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        if (block && typeof did === 'string') { a2aRevoke(did); conversationRegistry.closeDid(did); }
+        return browser.runtime.sendMessage({ type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason });
+      }),
+      setDiscovery: async (/** @type {any} */ { enabled } = {}) => withDwebPublication(async (isCurrent) => {
+        if (!isCurrent() || !settingsStore.get().dwebEnabled) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled });
+      }),
     } : null,
     // why: debuggerPool exposes the CDP channel for snapshot / page_exec /
     // page_keys / read_state and the ref path of click / type. Lazy-attaches
@@ -2429,21 +2449,26 @@ const commandSources = mergeSources([
 // scope, so adding a `notebook:<id>` adapter later is purely additive.
 const SNAPSHOT_SCOPE_APP = (/** @type {string} */ appId) => `app:${appId}`;
 const appWorkspaceAdapter = (/** @type {string} */ appId) => {
-  const opfs = appClient.opfsForApp(appId);
   return {
     readAll: async () => {
-      const files = await opfs.list();
+      const snapshot = await appClient.snapshotFiles({ appId });
       /** @type {Record<string,string>} */
-      const out = {};
-      for (const f of files) {
-        const path = f.path.replace(/^\/+/, '');
-        try { out[path] = await opfs.read(path); }
-        catch { /* skip unreadable (binary/locked) entries */ }
+      const out = Object.create(null);
+      for (const [path, bytes] of Object.entries(snapshot.files)) {
+        out[path] = await appFileCheckpointContent(
+          path,
+          bytes,
+          snapshot.record.fileKinds?.[path],
+        );
       }
       return out;
     },
-    writeFile: (/** @type {string} */ path, /** @type {any} */ content) => opfs.write(path, content),
-    deleteFile: (/** @type {string} */ path) => opfs.delete(path).catch(() => {}),
+    writeFile: async (/** @type {string} */ path, /** @type {any} */ content) => {
+      await appClient.writeFile({ appId, path, content, reload: false });
+    },
+    deleteFile: async (/** @type {string} */ path) => {
+      await appClient.deleteFile({ appId, path, reload: false });
+    },
   };
 };
 const workspaceForScope = (/** @type {string} */ scope) => {
@@ -2555,9 +2580,7 @@ const ensureOffscreen = async () => {
     return;
   }
   try {
-    const contexts = await browser.runtime.getContexts({
-      contextTypes: /** @type {any} */ (['OFFSCREEN_DOCUMENT']),
-    });
+    const contexts = await listOffscreenContexts(browser);
     if (contexts.length > 0) {
       console.log('[sw] offscreen already exists');
       return;
@@ -2638,6 +2661,37 @@ const withDwebIdentityMutation = (operation) => {
   dwebIdentityMutationTail = result.then(() => undefined, () => undefined);
   return result;
 };
+
+// App network publication, version replacement, and deletion share one keyed
+// lane. The App client's own queue protects OPFS mutations; this wider lane
+// keeps a publish from committing a served hash while deletion revokes a stale
+// record snapshot.
+/** @type {Map<string, Promise<unknown>>} */
+const appLifecycleTails = new Map();
+/** @template T @param {string} appId @param {() => Promise<T>} operation @returns {Promise<T>} */
+const withAppLifecycle = async (appId, operation) => {
+  const prior = appLifecycleTails.get(appId) ?? Promise.resolve();
+  const current = prior.catch(() => {}).then(operation);
+  appLifecycleTails.set(appId, current);
+  try { return await current; }
+  finally {
+    if (appLifecycleTails.get(appId) === current) appLifecycleTails.delete(appId);
+  }
+};
+
+const dwebPublicationFence = createDwebPublicationFence();
+const withDwebPublication = dwebPublicationFence.run;
+const invalidateDwebPublications = dwebPublicationFence.invalidate;
+
+const reseedSharedApps = makeReseedSharedApps({
+  enabled: DWEB_ENABLED,
+  active: () => settingsStore.get().dwebEnabled,
+  locked: () => vault.isLocked(),
+  appRegistry,
+  withDwebPublication,
+  withAppLifecycle,
+  sendMessage: (message) => browser.runtime.sendMessage(message),
+});
 
 const canChangeDwebIdentity = async () => {
   const apps = await appRegistry.list();
@@ -4400,8 +4454,11 @@ const dwebAgentOn = () => DWEB_ENABLED
 let dwebAgentRoomJoined = false;
 const joinDwebAgentInbox = async () => {
   if (!dwebAgentOn() || dwebAgentRoomJoined) return;
-  const r = /** @type {any} */ (await browser.runtime.sendMessage({
-    type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+  const r = /** @type {any} */ (await withDwebPublication(async (isCurrent) => {
+    if (!isCurrent() || !dwebAgentOn() || dwebAgentRoomJoined) return null;
+    return browser.runtime.sendMessage({
+      type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+    });
   }).catch(() => null));
   if (r?.ok) { dwebAgentRoomJoined = true; console.log('[sw] dweb agent inbox joined'); }
 };
@@ -4411,11 +4468,40 @@ const leaveDwebAgentInbox = async () => {
   await browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'leave' }).catch(() => {});
   console.log('[sw] dweb agent inbox left');
 };
+// The base host tore down (master OFF) → every room closed, incl. the inbox, so
+// clear the SW-side membership flag for a clean re-join on the next start.
+const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
+
+const stopBaseNetwork = () => withDwebPublication(async () => {
+  // Never create an offscreen document to stop it. A surviving document can
+  // outlive this worker, so durable OFF always reconciles it explicitly.
+  const contexts = await listOffscreenContexts(browser);
+  if (contexts.length) {
+    const stopped = /** @type {any} */ (await browser.runtime.sendMessage({
+      type: 'dweb/base-host/stop',
+    }));
+    if (!stopped?.ok) throw new Error(stopped?.error ?? 'dweb-stop-failed');
+  }
+  onBaseNetworkStopped();
+  return { ok: true, running: false };
+});
+
+const disableDweb = async () => {
+  invalidateDwebPublications();
+  await settingsStore.update({ dwebEnabled: false });
+  return stopBaseNetwork();
+};
+
+const onSettingsChanging = (/** @type {any} */ patch) => {
+  if (patch?.dwebEnabled === false) invalidateDwebPublications();
+};
 // React to the toggle: joining/leaving the inbox when the user flips the agent
 // on/off, so a disable withdraws presence instead of lingering until SW restart.
 // Named onSettingsChanged so it wires to the settings route by shorthand (the
 // deps-wiring meta-test forbids key:value mis-wires).
-const onSettingsChanged = (/** @type {any} */ patch) => {
+const onSettingsChanged = async (/** @type {any} */ patch) => {
+  if (patch?.dwebEnabled === false) await stopBaseNetwork();
+  else if (patch?.dwebEnabled === true) maybeStartBaseNetwork('settings-enabled');
   if (dwebAgentOn()) joinDwebAgentInbox().catch(() => {});
   else leaveDwebAgentInbox().catch(() => {});
   // Watch mode: react to the TRANSITION, not the state. why: this fires on EVERY
@@ -4429,9 +4515,7 @@ const onSettingsChanged = (/** @type {any} */ patch) => {
   // normalizeSettingsPatch only emits keys the caller actually sent).
   if (patch?.frontDoorView) syncFrontDoorBehavior();
 };
-// The base host tore down (master OFF) → every room closed, incl. the inbox, so
-// clear the SW-side membership flag for a clean re-join on the next start.
-const onBaseNetworkStopped = () => { dwebAgentRoomJoined = false; };
+
 const mintDwebActor = async () => {
   // A GLOBAL actor has no owner chat to inherit a provider from, and the sync
   // resolveActiveProvider mintWebSession falls back to returns 'anthropic'
@@ -4520,8 +4604,10 @@ const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string
   auditLog.append({ type: 'a2a_consent', details: { target, op, approved: ok, standing: persist } }).catch(() => {});
   return ok;
 };
-const meshHostRoom = (/** @type {object} */ payload) =>
-  browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+const meshHostRoom = (/** @type {object} */ payload) => withDwebPublication(async (isCurrent) => {
+  if (!isCurrent() || !dwebAgentOn()) return { ok: false, error: 'dweb-disabled' };
+  return browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, ...payload });
+});
 // Standing peer conversations (conversation-registry.js): the SW-side thread
 // store, sibling to meshDispatch's pending-ask map. converse/say open + extend
 // threads; an inbound turn carrying a known convId continues one (waking the
@@ -5500,9 +5586,10 @@ const ensureSession = ensureCurrentSession;
 const shareLocalApp = makeDwebShare({
   enabled: DWEB_ENABLED,
   active: () => settingsStore.get().dwebEnabled,
+  withDwebPublication,
   withIdentityMutation: withDwebIdentityMutation,
+  withAppLifecycle,
   appRegistry,
-  opfsHelpers,
   prepareRuntime: async () => {
     await ensureDwebSuspensionRecovery();
     await ensureOffscreen();
@@ -5566,7 +5653,7 @@ const makeSystemRouteSet = () => makeSystemRoutes({
   vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
   uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
   CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
-  privateTransferAuthorization,
+  onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
 });
 const makeSettingsRouteSet = () => makeSettingsRoutes({
   vault, auditLog, pushState, kv, memory, settingsStore,
@@ -5574,7 +5661,7 @@ const makeSettingsRouteSet = () => makeSettingsRoutes({
   REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
   buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
   EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
-  onSettingsChanged, privateTransferAuthorization,
+  onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
 });
 const systemMessageRoutes = makeSystemRouteSet();
 const settingsMessageRoutes = makeSettingsRouteSet();
@@ -5676,7 +5763,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
+    settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
+    listOffscreenContexts,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
@@ -5740,7 +5828,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
-    onBaseNetworkStopped,
+    disableDweb, withDwebPublication, withAppLifecycle,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -5782,7 +5870,19 @@ loadUserEndpoints();
 // channel defaults until load() lands), and Chrome persists the behavior
 // browser-side, so by the time a click wakes a future cold SW the native
 // open already reflects the user's real choice.
-loadSettings().then(() => syncFrontDoorBehavior()).catch(() => {});
+const settingsReady = loadSettings();
+const dwebSettingsGate = createDwebSettingsGate({
+  ready: settingsReady,
+  available: DWEB_ENABLED,
+  active: () => !!settingsStore.get().dwebEnabled,
+});
+settingsReady.then(() => syncFrontDoorBehavior()).catch(() => {});
+// A prior worker may have died after persisting OFF but before stopping the
+// offscreen host. Reconcile only after hydration so preview defaults cannot
+// hide the durable choice or briefly restart the mesh on session resume.
+void dwebSettingsGate.stopWhenDisabled(stopBaseNetwork).catch((error) => {
+  console.warn('[sw] dweb OFF reconciliation failed; next boot will retry', error);
+});
 
 // SW boot logging — we want a clear timeline of when the SW comes up
 // (cold start, extension reload, idle respawn). The console clears
@@ -5811,29 +5911,34 @@ setInterval(() => {
 // preview + setting; on the store build maybeStart is a no-op (DWEB_ENABLED
 // false) — and this file names no dweb module, so the store verifier stays clean.
 function maybeStartBaseNetwork(/** @type {string} */ reason) {
-  if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled) return;
-  if (dwebIdentityMutationActive) {
-    dwebStartDeferredByIdentityMutation = true;
-    console.log('[sw] dweb base network — start deferred during identity custody mutation');
-    return;
-  }
-  console.log('[sw] dweb base network — auto-start on', reason);
-  (async () => {
-    await ensureDwebSuspensionRecovery();
-    await ensureOffscreen();
-    // The host owns its suspension lease. A normal start may race a rotation,
-    // but it cannot release that lease and will fail harmlessly until the owner
-    // resumes with the matching token.
-    const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/start' }));
-    if (r?.ok) {
-      console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
-      reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
-      // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
-      // inbound peer messages flow as dweb/base-room/event 'direct' events the
-      // listener consumes. Opt-in — no join, no inbox, no wakes.
-      joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
-    } else console.warn('[sw] dweb base network start returned', r);
-  })().catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+  void dwebSettingsGate.startWhenEnabled(() => {
+    if (dwebIdentityMutationActive) {
+      dwebStartDeferredByIdentityMutation = true;
+      console.log('[sw] dweb base network — start deferred during identity custody mutation');
+      return;
+    }
+    console.log('[sw] dweb base network — auto-start on', reason);
+    return withDwebPublication(async (isCurrent) => {
+      if (!isCurrent() || !settingsStore.get().dwebEnabled) {
+        return { ok: false, error: 'dweb-disabled' };
+      }
+      await ensureDwebSuspensionRecovery();
+      await ensureOffscreen();
+      // The host owns its suspension lease. A normal start may race a rotation,
+      // but it cannot release that lease and will fail harmlessly until the owner
+      // resumes with the matching token.
+      return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+    }).then((/** @type {any} */ r) => {
+      if (r?.ok && settingsStore.get().dwebEnabled) {
+        console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
+        reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+        // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
+        // inbound peer messages flow as dweb/base-room/event 'direct' events the
+        // listener consumes. Opt-in — no join, no inbox, no wakes.
+        joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+      } else if (r?.error !== 'dweb-disabled') console.warn('[sw] dweb base network start returned', r);
+    });
+  }).catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
 }
 
 // why: the offscreen base network's discovery Library AND content store are
@@ -5845,35 +5950,6 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
 // apps only (dweb.local) — we can't re-sign a peer's card. Best-effort and async;
 // it never blocks start, and the no-downgrade rule makes a re-announce a peer
 // already has a harmless no-op.
-async function reseedSharedApps() {
-  if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled || vault.isLocked()) return;
-  let mine;
-  try {
-    const apps = await appRegistry.list();
-    mine = apps.filter((a) => a.shared && a.dweb?.local && a.dweb?.slug);
-  } catch (e) {
-    console.warn('[sw] re-seed: listing apps failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e);
-    return;
-  }
-  if (!mine.length) return;
-  let seeded = 0;
-  for (const app of mine) {
-    try {
-      const opfs = opfsHelpers(['peerd-apps', app.id]);
-      /** @type {Record<string, any>} */ const files = {};
-      for (const f of await opfs.list()) { const path = f.path.replace(/^\/+/, ''); files[path] = await opfs.read(path); }
-      if (!Object.keys(files).length) continue;       // nothing on disk — skip
-      const res = /** @type {any} */ (await browser.runtime.sendMessage({
-        type: 'dweb/base-host/share-app',
-        name: app.name, entry: app.entryFile, files,
-        slug: (/** @type {any} */ (app.dweb)).slug, seq: (/** @type {any} */ (app.dweb)).seq, description: (/** @type {any} */ (app.dweb)).description ?? '',
-      }));
-      if (res?.ok) seeded += 1;
-    } catch (e) { console.debug('[sw] re-seed failed for', app.id, (/** @type {{ message?: string }} */ (e))?.message ?? e); }
-  }
-  if (seeded) console.log('[sw] re-seeded', seeded, 'shared app(s) after base network start');
-}
-
 // Spawn the offscreen doc immediately on SW boot. Previously this was
 // only called from vault/unlock and vault/initialize; in practice the
 // SW often boots cold (extension reload, browser restart) into a state

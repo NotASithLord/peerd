@@ -19,6 +19,7 @@ import {
   EditParseError, SearchNotFoundError, SearchAmbiguousError,
 } from '../../edit/errors.js';
 import { resolveCanWrite } from '../../edit/permissions-adapter.js';
+import { MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/index.js';
 
 const MAX_CONTENT_CHARS = 500_000;
 
@@ -172,7 +173,12 @@ export const editFileTool = {
       // OPFS raises NotFoundError for a missing entry — that's an absent file,
       // not a read fault. Anything else is a genuine read failure.
       if (/** @type {{ name?: string }} */ (e)?.name !== 'NotFoundError') {
-        return { ok: false, code: 'read_failed', error: `read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+        const detail = /** @type {{ message?: string, code?: string }} */ (e);
+        return {
+          ok: false,
+          code: detail?.code ?? 'read_failed',
+          error: `read_failed: ${detail?.message ?? String(e)}`,
+        };
       }
     }
 
@@ -203,8 +209,11 @@ export const editFileTool = {
       return { ok: false, error: `edit_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
 
-    if (result.content.length > MAX_CONTENT_CHARS) {
-      return { ok: false, error: `content_too_large: ${result.content.length} > ${MAX_CONTENT_CHARS}` };
+    const contentBytes = new TextEncoder().encode(result.content).byteLength;
+    const contentLimit = kind === 'app' ? MAX_MODEL_APP_FILE_BYTES : MAX_CONTENT_CHARS;
+    const contentSize = kind === 'app' ? contentBytes : result.content.length;
+    if (contentSize > contentLimit) {
+      return { ok: false, error: `content_too_large: ${contentSize} > ${contentLimit}` };
     }
 
     try {
@@ -221,7 +230,7 @@ export const editFileTool = {
         path: args.path,
         kind,
         blocks: result.blocks,
-        bytes: result.content.length,
+        bytes: contentBytes,
         // 3b: an already-in-place edit succeeds and says so — with the 0-based
         // block indices, so a multi-block result isn't ambiguous about which
         // landed vs. was skipped — so the agent stops retrying instead of

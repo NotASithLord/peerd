@@ -336,7 +336,8 @@ export const STATES = [
     async run(ctx, rec) {
       const seedPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
       const localExport = await privateTransferRpc(seedPage, { type: 'transfer/export', passphrase: PASSPHRASE });
-      let localReady = !!localExport?.payload?.dweb?.identityRecord;
+      let localDid = localExport?.payload?.dweb?.identityRecord?.did ?? null;
+      let localReady = !!localDid;
       if (!localReady) {
         const record = await evalIn(ctx.page, `(async () => {
           const dweb = await import('/peerd-distributed/index.js');
@@ -357,7 +358,8 @@ export const STATES = [
         const postBootstrap = await privateTransferRpc(seedPage, {
           type: 'transfer/export', passphrase: PASSPHRASE,
         });
-        localReady = !!postBootstrap?.payload?.dweb?.identityRecord;
+        localDid = postBootstrap?.payload?.dweb?.identityRecord?.did ?? null;
+        localReady = !!localDid;
       }
       try { seedPage.close(); } catch { /* */ }
       const incoming = await evalIn(ctx.page, `(async () => {
@@ -428,7 +430,30 @@ export const STATES = [
             && /Existing peers will see a new identity/.test(state?.confirmation ?? ''),
           JSON.stringify({ local: localReady, incoming: !!incoming?.record, state }));
         await evalIn(page, `document.querySelector('#identity-replace-confirmation')?.scrollIntoView({ block: 'center' })`);
-        await rec.visualPage('options-transfer-conflict', page);
+        const pinIdentityText = () => evalIn(page, `(() => {
+          const fixedExisting = 'did:key:z6MkqSmkPkM5RvkHP9izceLBE3trfq8XZFaLvUA7dgEcon8t';
+          const fixedIncoming = 'did:key:z6MkeWmmVApVUxSNWsrKKvN21QdEpVcHLXG96hfLdrJyKfiC';
+          const replacements = [
+            [${JSON.stringify(localDid)}, fixedExisting],
+            [${JSON.stringify(incoming?.record?.did ?? null)}, fixedIncoming],
+          ].filter(([from]) => typeof from === 'string' && from.length > 0);
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            let text = node.textContent ?? '';
+            for (const [from, to] of replacements) text = text.split(from).join(to);
+            if (text !== node.textContent) node.textContent = text;
+          }
+          const rendered = document.body.textContent ?? '';
+          return rendered.includes(fixedExisting) && rendered.includes(fixedIncoming);
+        })()`);
+        // why: the encrypted identities above must be real to exercise the
+        // conflict path, but fresh keys make the rendered DIDs change on every
+        // run. Pin only their displayed, same-length text after the security
+        // flow completes so the visual gate still guards wrapping and emphasis.
+        const identityTextReady = await waitFor(pinIdentityText, { budgetMs: 5000, pollMs: 50 });
+        if (!identityTextReady) throw new Error('identity conflict text did not settle');
+        await rec.visualPage('options-transfer-conflict', page, { beforeShot: pinIdentityText });
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -1146,6 +1171,66 @@ export const STATES = [
     },
   },
 
+  // Functional rendered coverage for committed success warnings. This takes a
+  // screenshot without creating a local visual authority baseline. CI remains
+  // the only source of Linux pixel baselines.
+  {
+    name: 'home-committed-warnings', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/home-warning.html');
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 320,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        const ready = await waitFor(() => evalIn(page, `
+          !![...document.querySelectorAll('.library-card button')].find((button) => button.textContent === 'Update')
+          && !![...document.querySelectorAll('.disc-card button')].find((button) => button.textContent === 'Update')
+        `), { budgetMs: 8_000, pollMs: 80 });
+        rec.check('the narrow warning fixture renders both update actions', !!ready);
+
+        await evalIn(page, `
+          [...document.querySelectorAll('.disc-card button')]
+            .find((button) => button.textContent === 'Update')?.click()
+        `);
+        const discoverWarning = await waitFor(() => evalIn(page, `
+          document.querySelector('.disc-card [role="status"]')?.textContent ?? ''
+        `), { budgetMs: 4_000, pollMs: 50 });
+
+        await evalIn(page, `
+          [...document.querySelectorAll('.library-card button')]
+            .find((button) => button.textContent === 'Update')?.click()
+        `);
+        const warningLayout = await waitFor(() => evalIn(page, `(() => {
+          const statuses = [...document.querySelectorAll('.warning-fixture [role="status"]')];
+          if (statuses.length !== 2) return null;
+          return {
+            texts: statuses.map((status) => status.textContent ?? ''),
+            viewportWidth: innerWidth,
+            documentWidth: document.documentElement.scrollWidth,
+            withinViewport: statuses.every((status) => {
+              const rect = status.getBoundingClientRect();
+              return rect.left >= 0 && rect.right <= innerWidth;
+            }),
+          };
+        })()`), { budgetMs: 4_000, pollMs: 50 });
+        const warningText = warningLayout?.texts?.join(' ') ?? '';
+        rec.check('Library and Discover render both committed warning details',
+          warningText.includes('security audit entry could not be written')
+            && (warningText.match(/Older shared bytes will be cleaned up/g) ?? []).length === 2,
+          JSON.stringify({ discoverWarning, warningLayout }));
+        rec.check('combined warning statuses fit the narrow viewport',
+          warningLayout?.documentWidth <= warningLayout?.viewportWidth
+            && warningLayout?.withinViewport === true,
+          JSON.stringify(warningLayout));
+        await rec.shotPage('combined-warning-narrow', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // --- visual (WIDE): the full-tab options / settings page --------------------
   {
     name: 'options-fulltab', kind: 'visual', phase: 'post-unlock',
@@ -1200,6 +1285,28 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  {
+    name: 'options-dweb-stop-failed', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      // The failure needs a live stop error that normal E2E cannot safely force.
+      // This fixture mounts the real section and returns the real route shape.
+      const page = await openWidePage(ctx, 'tests/fixtures/options-dweb-stop-failed.html', {
+        ready: '[role="alert"]',
+      });
+      try {
+        const status = await evalIn(page, `({
+          warning: document.querySelector('[role="alert"]')?.textContent ?? '',
+          retry: [...document.querySelectorAll('button')]
+            .some((button) => button.textContent === 'Retry stopping dweb'),
+        })`);
+        rec.check('failed live stop stays visible',
+          status?.warning.includes('live network could not be stopped'), status?.warning);
+        rec.check('failed live stop remains retryable', status?.retry === true);
+        await rec.visualPage('options-dweb-stop-failed', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
   // --- visual: the STANDALONE TAB PAGES ---------------------------------------
   //
   // Coverage audit finding: every visual baseline photographed the side panel,
@@ -1219,7 +1326,7 @@ export const STATES = [
     name: 'vm-tab-failed', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed, #boot-stage' });
+      const page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed' });
       try {
         // The boot log stamps each line with the WALL CLOCK, so this baseline
         // would differ on every single run and the state would flap forever.
@@ -1227,12 +1334,21 @@ export const STATES = [
         // presence and position are part of what the baseline should guard, its
         // value is not. (The harness's UTC timezone override does not help: the
         // problem is the time advancing, not the zone.)
-        const pinClock = () => evalIn(page, `(() => {
+        const pinVisualState = () => evalIn(page, `(() => {
           for (const el of document.querySelectorAll('#boot-log, #boot-log *')) {
             for (const n of el.childNodes) {
               if (n.nodeType === 3) n.textContent = n.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00');
             }
           }
+          const pullIn = document.querySelector('.peerd-pull');
+          if (!pullIn) return false;
+          // why: Chrome can omit a fixed backdrop-filter layer while the root
+          // compositor pump is active. The failed VM screen is uniform behind
+          // this chip, so removing only its blur preserves the intended render
+          // and keeps the control in both theme captures.
+          pullIn.style.backdropFilter = 'none';
+          pullIn.style.webkitBackdropFilter = 'none';
+          pullIn.getBoundingClientRect();
           return true;
         })()`);
 
@@ -1261,8 +1377,9 @@ export const STATES = [
           return a === await logLength();
         }, { budgetMs: 5000 });
 
-        await pinClock();
-        await rec.visualPage('vm-tab-failed', page, { beforeShot: pinClock });
+        const visualReady = await waitFor(pinVisualState, { budgetMs: 5000 });
+        if (!visualReady) throw new Error('VM failure controls did not settle');
+        await rec.visualPage('vm-tab-failed', page, { beforeShot: pinVisualState });
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -1272,7 +1389,7 @@ export const STATES = [
     async run(ctx, rec) {
       // notebook-tab replaces <body> wholesale with its red no-id paragraph, so
       // the probe cannot look for a page id — `body > p` is what actually lands.
-      const page = await openWidePage(ctx, 'engine-tabs/notebook-tab/index.html', { ready: 'body > p, #notebook-boot' });
+      const page = await openWidePage(ctx, 'engine-tabs/notebook-tab/index.html', { ready: 'body > p' });
       try { await rec.visualPage('notebook-tab-failed', page); }
       finally { try { page.close(); } catch { /* */ } }
     },
@@ -1281,7 +1398,9 @@ export const STATES = [
     name: 'app-tab-failed', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed, #boot-msg' });
+      // The message node exists in the initial loading frame. Wait for the
+      // failure class so the light capture cannot race the module startup.
+      const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed' });
       try { await rec.visualPage('app-tab-failed', page); }
       finally { try { page.close(); } catch { /* */ } }
     },
@@ -1337,7 +1456,7 @@ export const STATES = [
       // than a redraw + 100ms DOM poll on a slow CI runner (flaked in CI on
       // 2026-07-05). Holding the actor's model call open guarantees the feed
       // a real lifetime — the run is slower, never racy.
-      if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 1500 };
+      if (isActor) return { sse: sseText('WIDGET_PRICE_777'), delayMs: 5000 };
       // ORCHESTRATOR sees the script result (value derived from the reply) →
       // final answer.
       if (body.includes('GOT:')
@@ -1356,26 +1475,54 @@ export const STATES = [
     },
     async run(ctx, rec) {
       scriptFanState = { scripts: 0, seen: [] };
+      // Capture transient live-feed DOM before the turn starts. A loaded full
+      // run can finish between CDP polls even when the actor response is held;
+      // the page-side observer makes "was rendered" durable for this state.
+      await evalIn(ctx.page, `(() => {
+        globalThis.__peerdScriptFanObserver?.disconnect();
+        const state = globalThis.__peerdScriptFanE2e = {
+          opsSeen: false, finalSeen: false, cardOk: false,
+        };
+        const sample = () => {
+          state.opsSeen ||= !!document.querySelector('.tool-call .script-ops .script-op');
+          state.finalSeen ||= [...document.querySelectorAll('.message-assistant .bubble')]
+            .some((bubble) => bubble.textContent.trim() === 'SCRIPT-FAN-DONE');
+          state.cardOk ||= [...document.querySelectorAll('.tool-call.tool-ok')]
+            .some((card) => card.querySelector('.tool-name')?.textContent === 'script');
+        };
+        globalThis.__peerdScriptFanObserver = new MutationObserver(sample);
+        globalThis.__peerdScriptFanObserver.observe(document.body, { childList: true, subtree: true });
+        sample();
+      })()`);
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'script-check the widget price' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       // The live delegation feed appears on the pending script card.
-      const opsSeen = await waitFor(
-        () => evalIn(ctx.page, `!!document.querySelector('.tool-call .script-ops .script-op')`),
-        { budgetMs: 20_000, pollMs: 100 });
+      const liveState = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const state = globalThis.__peerdScriptFanE2e;
+          return state?.opsSeen || state?.finalSeen ? state : null;
+        })()`),
+        { budgetMs: 90_000, pollMs: 100 });
+      const opsSeen = liveState?.opsSeen === true;
       rec.check('the live delegation feed renders on the pending script card', !!opsSeen);
       if (opsSeen) await rec.shot('script-ops-live');
       let out = {};
       await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
+          const tracked = globalThis.__peerdScriptFanE2e ?? {};
           const bubbles = [...document.querySelectorAll('.message-assistant .bubble')].map((b) => b.textContent.trim());
           const busy = !!document.querySelector('form.input-bar button.stop');
           const results = [...document.querySelectorAll('.tool-call .tool-result')].map((r) => r.textContent || '');
           const cardOk = !!document.querySelector('.tool-call.tool-ok .tool-name') &&
             [...document.querySelectorAll('.tool-call .tool-name')].some((n) => n.textContent === 'script');
-          return { bubbles, busy, results, cardOk };
+          return {
+            bubbles, busy, results,
+            finalSeen: tracked.finalSeen === true || bubbles.includes('SCRIPT-FAN-DONE'),
+            cardOk: tracked.cardOk === true || cardOk,
+          };
         })()`) || {};
-        return (out.bubbles || []).includes('SCRIPT-FAN-DONE') && !out.busy;
-      }, { budgetMs: 45_000 });
+        return out.finalSeen && !out.busy;
+      }, { budgetMs: 90_000 });
 
       const seen = scriptFanState.seen;
       const actorTurns = seen.filter((s) => s.isActor && s.isWebActor);
@@ -1383,8 +1530,9 @@ export const STATES = [
       rec.check('the model called script exactly once', scriptFanState.scripts === 1, `scripts=${scriptFanState.scripts}`);
       rec.check("the script's actors.ask spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
       rec.check("the orchestrator read a result whose value was built FROM the actor's reply", resultTurn.length >= 1, `resultTurns=${resultTurn.length}`);
-      rec.check('the final orchestrator answer landed', (out.bubbles || []).includes('SCRIPT-FAN-DONE'));
+      rec.check('the final orchestrator answer landed', out.finalSeen === true);
       rec.check('the script card settled ok', out.cardOk === true);
+      await evalIn(ctx.page, `globalThis.__peerdScriptFanObserver?.disconnect()`);
       await rec.shot('script-fanout-done');
     },
   },
@@ -1871,20 +2019,68 @@ export const STATES = [
       if (body.includes('client-side App builder') || body.includes('Your App is a multi-file artifact')) {
         actorAppState.appCalls += 1;
         if (actorAppState.appCalls === 1) {
+          return { sse: sseToolCall('app_write_file', { path: 'asset.bin', contentBase64: 'AP/AgH8=' }) };
+        }
+        if (actorAppState.appCalls === 2) {
+          return { sse: sseToolCall('app_write_file', { path: 'empty.wasm', contentBase64: 'AGFzbQEAAAA=' }) };
+        }
+        if (actorAppState.appCalls === 3) {
+          return { sse: sseToolCall('app_write_file', { path: 'model.custom', contentBase64: 'QUJD' }) };
+        }
+        if (actorAppState.appCalls === 4) {
           const probe = JSON.stringify(actorAppProbeUrl);
+          const secureProbe = JSON.stringify(actorAppProbeUrl.replace(/^http:/, 'https:'));
           const blobPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('blob'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {}<\/script>`;
-          const dataPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('data'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {} setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringify(blobPayload)}], {type:'text/html'})); }, 250);<\/script>`;
+          const blobPayloadLiteral = JSON.stringify(blobPayload).replace(/</g, '\\u003c');
+          const dataPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('data'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {} setTimeout(() => { location.href = URL.createObjectURL(new Blob([${blobPayloadLiteral}], {type:'text/html'})); }, 250);<\/script>`;
+          const dataPayloadLiteral = JSON.stringify(dataPayload).replace(/</g, '\\u003c');
           const content = `<!DOCTYPE html><body>REAL LAVA LAMP
 <img src="${actorAppProbeUrl}/image">
 <script>
-document.body.dataset.webrtc = String(typeof RTCPeerConnection);
-fetch(${probe} + '/fetch').catch(() => {});
-const worker = new Worker(URL.createObjectURL(new Blob([
-  'fetch(' + JSON.stringify(${probe} + '/worker') + ').catch(() => {})',
-], { type: 'application/javascript' })));
-setTimeout(() => { location.href = ${probe} + '/navigate'; }, 50);
-setTimeout(() => { location.href = 'data:text/html,' + encodeURIComponent(${JSON.stringify(dataPayload)}); }, 150);
-setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringify(blobPayload)}], {type:'text/html'})); }, 300);
+Promise.resolve().then(async () => {
+  parent.postMessage({ type: 'runner-ready' }, '*');
+  const bytes = window.peerd.assets.bytes('asset.bin');
+  const custom = window.peerd.assets.bytes('model.custom');
+  await WebAssembly.instantiate(window.peerd.assets.bytes('empty.wasm'));
+  const second = window.name === 'peerd-binary-reloaded' || window.name === 'peerd-binary-probed';
+  const sendProof = () => parent.postMessage({
+    type: 'e2e-binary-proof', second, bytes: Array.from(bytes), custom: Array.from(custom), wasm: true,
+  }, '*');
+  sendProof();
+  const proofTimer = setInterval(sendProof, 100);
+  setTimeout(() => clearInterval(proofTimer), 2_000);
+  document.body.dataset.webrtc = String(typeof RTCPeerConnection);
+  if (!second) {
+    window.name = 'peerd-binary-reloaded';
+    setTimeout(() => location.reload(), 250);
+    return;
+  }
+  if (window.name === 'peerd-binary-probed') return;
+  window.name = 'peerd-binary-probed';
+  fetch(${probe} + '/fetch').catch(() => {});
+  try {
+    new Worker(URL.createObjectURL(new Blob([
+      'fetch(' + JSON.stringify(${probe} + '/worker') + ').catch(() => {})',
+    ], { type: 'application/javascript' })));
+  } catch (_) {}
+  setTimeout(() => { location.href = ${probe} + '/navigate'; }, 50);
+  setTimeout(() => { location.assign(${secureProbe} + '/assign'); }, 80);
+  setTimeout(() => { location.replace(${probe} + '/replace'); }, 110);
+  setTimeout(() => {
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'refresh';
+    meta.content = '0;url=' + ${probe} + '/meta-refresh';
+    document.head.appendChild(meta);
+  }, 140);
+  setTimeout(() => {
+    const form = document.createElement('form');
+    form.action = ${probe} + '/form';
+    document.body.appendChild(form);
+    form.submit();
+  }, 170);
+  setTimeout(() => { location.href = 'data:text/html,' + encodeURIComponent(${dataPayloadLiteral}); }, 200);
+  setTimeout(() => { location.href = URL.createObjectURL(new Blob([${blobPayloadLiteral}], {type:'text/html'})); }, 250);
+}).catch((error) => parent.postMessage({ type: 'e2e-binary-error', error: String(error) }, '*'));
 </script></body>`;
           return { sse: sseToolCall('app_write_file', { path: 'index.html', content }) };
         }
@@ -1907,12 +2103,16 @@ setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringif
     },
     async run(ctx, rec) {
       actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
-      let probeHits = 0;
+      /** @type {string[]} */
+      const probeHits = [];
+      let probeConnections = 0;
       let stunHits = 0;
-      const server = createServer((_req, res) => {
-        probeHits += 1;
+      const server = createServer((req, res) => {
+        probeHits.push(req.url ?? '');
         res.writeHead(204); res.end();
       });
+      server.on('connection', () => { probeConnections += 1; });
+      server.on('clientError', (_error, socket) => socket.destroy());
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = /** @type {{ port: number }} */ (server.address()).port;
       actorAppProbeUrl = `http://127.0.0.1:${port}`;
@@ -1940,24 +2140,147 @@ setTimeout(() => { location.href = URL.createObjectURL(new Blob([${JSON.stringif
       const appWriteRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'app_write_file');
       // the app id came back into the actor's heap → it could delegate to that exact app
         rec.check("the actor's sandbox_create result (the new app id) re-entered its heap", typeof actorAppState.appId === 'string' && actorAppState.appId.startsWith('app-'), `appId=${actorAppState.appId}`);
-        rec.check('the actor reached the freshly-created app actor (delegation worked)', msgActorRan === true && actorAppState.appCalls >= 1, `msgActorRan=${msgActorRan} appActorCalls=${actorAppState.appCalls}`);
-        rec.check('the app actor wrote the real file (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
+        rec.check('the actor reached the freshly-created app actor (delegation worked)', msgActorRan === true && actorAppState.appCalls >= 4, `msgActorRan=${msgActorRan} appActorCalls=${actorAppState.appCalls}`);
+        rec.check('the app actor wrote text and binary files (app_write_file executed)', appWriteRan === true, `appWriteRan=${appWriteRan}`);
         rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('FINAL-APP-BUILT'));
 
         appPage = await openExtPage(ctx, `engine-tabs/app-tab/index.html#${actorAppState.appId}`);
+        await appPage.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+          if (window === top) {
+            globalThis.__e2eBinaryProofs = [];
+            globalThis.__e2eBinaryErrors = [];
+            globalThis.__e2eAppPolicies = [];
+            globalThis.__e2eParentPolicies = [];
+            addEventListener('message', (event) => {
+              const frame = document.getElementById('app-frame');
+              if (event.source !== frame?.contentWindow) return;
+              if (event.data?.type === 'e2e-binary-proof') {
+                globalThis.__e2eBinaryProofs.push({ ...event.data, receivedAt: performance.now() });
+              }
+              if (event.data?.type === 'e2e-binary-error') globalThis.__e2eBinaryErrors.push(event.data.error);
+              if (event.data?.type === 'app-policy-blocked') globalThis.__e2eAppPolicies.push(event.data.directive);
+            });
+            addEventListener('securitypolicyviolation', (event) => {
+              globalThis.__e2eParentPolicies.push({
+                directive: event.effectiveDirective,
+                receivedAt: performance.now(),
+              });
+            });
+          }
+        ` });
+        await appPage.send('Page.reload', { ignoreCache: true });
         const rendered = await waitFor(() => evalIn(appPage, `
           document.title === 'peerd · Lava'
           && document.getElementById('boot')?.classList.contains('is-hidden')
           && !document.getElementById('boot')?.classList.contains('is-failed')
         `),
           { budgetMs: 12_000, pollMs: 200 });
+        const binaryProof = await waitFor(() => evalIn(appPage, `
+          globalThis.__e2eBinaryProofs?.find((proof) => proof.second === true
+            && proof.wasm === true
+            && JSON.stringify(proof.bytes) === '[0,255,192,128,127]'
+            && JSON.stringify(proof.custom) === '[65,66,67]') ?? null
+        `), { budgetMs: 12_000, pollMs: 100 });
         await sleep(1_200);
         rec.check('the real manifest-sandboxed App rendered', !!rendered);
-        rec.check('fetch, passive resource, Worker fetch, and self-navigation made zero network hits', probeHits === 0, `hits=${probeHits}`);
-        rec.check('the App frame stayed on the peerd runner after blocked self-navigation',
-          await evalIn(appPage, `document.querySelector('#app-frame')?.src.includes('/runner.html')`) === true);
+        rec.check('the App received exact binary bytes and instantiated WASM after a self-reload', !!binaryProof,
+          JSON.stringify(binaryProof ?? await evalIn(appPage, `globalThis.__e2eBinaryProofs ?? []`)));
+        rec.check('the App binary API reported no runtime errors',
+          (await evalIn(appPage, `(globalThis.__e2eBinaryErrors ?? []).length`)) === 0,
+          JSON.stringify(await evalIn(appPage, `globalThis.__e2eBinaryErrors ?? []`)));
+        rec.check('fetch, resources, Worker, forms, meta refresh, and HTTP(S) navigation made zero network connections',
+          probeHits.length === 0 && probeConnections === 0,
+          JSON.stringify({ hits: probeHits, connections: probeConnections, policies: await evalIn(appPage, `globalThis.__e2eAppPolicies ?? []`) }));
+        rec.check('the trusted parent CSP blocked cross-origin frame navigation before fetch',
+          (await evalIn(appPage, `globalThis.__e2eParentPolicies ?? []`))
+            .some((policy) => policy.directive === 'frame-src'),
+          JSON.stringify(await evalIn(appPage, `globalThis.__e2eParentPolicies ?? []`)));
+        rec.check('the App kept running after blocked self-navigation', await evalIn(appPage, `(() => {
+          const blockedAt = globalThis.__e2eParentPolicies
+            ?.find((policy) => policy.directive === 'frame-src')?.receivedAt;
+          return typeof blockedAt === 'number'
+            && globalThis.__e2eBinaryProofs?.some((proof) => proof.receivedAt > blockedAt);
+        })()`) === true);
         rec.check('the WebRTC fail-closed preflight allowed App delivery', !!rendered);
         rec.check('data: and blob: replacement realms cannot emit WebRTC STUN traffic', stunHits === 0, `udpHits=${stunHits}`);
+        await evalIn(appPage, `document.getElementById('mode-toggle')?.click()`);
+        const editorState = await waitFor(() => evalIn(appPage, `(() => {
+          const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
+          if (rows.length < 3) return null;
+          rows[0].click();
+          return {
+            labels: rows.map((row) => row.getAttribute('aria-label')),
+            notice: document.getElementById('app-security-notice')?.textContent ?? '',
+            panelVisible: document.getElementById('editor-panel')?.hidden === false,
+          };
+        })()`), { budgetMs: 8_000, pollMs: 100 });
+        rec.check('the App editor exposes binary files as labeled read-only rows',
+          editorState?.panelVisible === true
+            && editorState.labels?.some((label) => label === 'asset.bin, binary asset, read-only')
+            && editorState.labels?.some((label) => label === 'empty.wasm, binary asset, read-only')
+            && editorState.labels?.some((label) => label === 'model.custom, binary asset, read-only'),
+          JSON.stringify(editorState));
+        rec.check('selecting a binary file explains the safe replacement paths',
+          editorState?.notice?.includes('Ask peerd to replace it') && editorState.notice.includes('import'),
+          editorState?.notice ?? '');
+        const replacementNoticeFocus = await evalIn(appPage, `(() => {
+          const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
+          const dismiss = document.querySelector('#app-security-notice button');
+          dismiss?.focus();
+          rows[1]?.click();
+          return {
+            active: document.activeElement?.textContent ?? '',
+            notice: document.getElementById('app-security-notice')?.textContent ?? '',
+          };
+        })()`);
+        rec.check('replacing a binary notice preserves keyboard focus on Dismiss',
+          replacementNoticeFocus?.active === 'Dismiss'
+            && replacementNoticeFocus?.notice?.includes('empty.wasm'),
+          JSON.stringify(replacementNoticeFocus));
+        const appViewport = await evalIn(appPage, `({ width: innerWidth, height: innerHeight })`);
+        await appPage.send('Emulation.setDeviceMetricsOverride', {
+          width: 320,
+          height: 500,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        const stackedNotices = await evalIn(appPage, `(() => {
+          const save = document.getElementById('app-save-status');
+          const message = document.getElementById('app-save-message');
+          const security = document.getElementById('app-security-notice');
+          if (!save || !message || !security) return null;
+          message.textContent = 'Could not save assets/' + 'unbrokenfilename'.repeat(16)
+            + 'large-binary-file.wasm. Your edits are still open. Reduce the file or free browser storage, then retry.';
+          save.hidden = false;
+          const saveRect = save.getBoundingClientRect();
+          const securityRect = security.getBoundingClientRect();
+          const dismissRect = security.querySelector('button')?.getBoundingClientRect();
+          const result = {
+            gap: saveRect.top - securityRect.bottom,
+            securityTop: securityRect.top,
+            saveBottom: saveRect.bottom,
+            dismissVisible: !!dismissRect
+              && dismissRect.left >= 0
+              && dismissRect.right <= innerWidth
+              && dismissRect.top >= 0
+              && dismissRect.bottom <= innerHeight,
+          };
+          save.hidden = true;
+          return result;
+        })()`);
+        rec.check('long save errors and security notices remain separate and usable in a narrow App tab',
+          stackedNotices?.gap >= 8
+            && stackedNotices.securityTop >= 0
+            && stackedNotices.saveBottom <= 500
+            && stackedNotices.dismissVisible === true,
+          JSON.stringify(stackedNotices));
+        await appPage.send('Emulation.setDeviceMetricsOverride', {
+          width: appViewport.width,
+          height: appViewport.height,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        await rec.shotPage('app-editor-binary', appPage);
         await rec.shot('final');
       } finally {
         try { appPage?.close(); } catch { /* */ }

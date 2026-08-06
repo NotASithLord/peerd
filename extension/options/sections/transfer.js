@@ -8,6 +8,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { CHANNEL } from '/shared/channel-config.js';
 import { bundleToOtlp, EXPORT_PASSPHRASE_MIN_LENGTH } from '/peerd-runtime/index.js';
+import { EXPORT_FILE_LIMIT_BYTES } from '/peerd-engine/index.js';
 
 const MAX_BACKUP_FILE_BYTES = 32 * 1024 * 1024;
 /** @param {string | null | undefined} did */
@@ -253,6 +254,15 @@ export const TransferSection = {
       ui.artifactEnvelope = null;
       const file = e.target.files?.[0];
       if (!file) return;
+      if (file.size > EXPORT_FILE_LIMIT_BYTES) {
+        ui.artifactMsg = {
+          ok: false,
+          text: `That artifact is too large to import safely (${Math.round(EXPORT_FILE_LIMIT_BYTES / 1024 / 1024)} MB maximum).`,
+        };
+        e.target.value = '';
+        m.redraw();
+        return;
+      }
       let envelope;
       try {
         envelope = JSON.parse(await file.text());

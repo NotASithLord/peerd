@@ -19,7 +19,7 @@ export const makeSettingsRoutes = (deps) => {
     REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
     buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
     EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
-    onSettingsChanged, privateTransferAuthorization,
+    onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
   } = deps;
 
   return {
@@ -44,10 +44,19 @@ export const makeSettingsRoutes = (deps) => {
       if (Object.keys(next).length === 0) {
         return { ok: false, error: 'no-known-keys-in-patch' };
       }
+      onSettingsChanging?.(next);
       await settingsStore.update(next);
-      // Optional post-persist reaction (e.g. join/leave the dweb agent inbox
-      // when its toggle flips). Fire-and-forget — never block the settings write.
-      try { onSettingsChanged?.(next); } catch { /* reaction is best-effort */ }
+      // Master OFF is a lifecycle transition, not just a preference write. Wait
+      // for its host stop so the acknowledgement is an actual network fence.
+      try { await onSettingsChanged?.(next); }
+      catch (error) {
+        pushState();
+        return {
+          ok: false,
+          error: /** @type {{ message?: string }} */ (error)?.message ?? 'settings-side-effect-failed',
+          settings: { ...settingsStore.get() },
+        };
+      }
       pushState();
       return { ok: true, settings: { ...settingsStore.get() } };
     },
@@ -61,7 +70,18 @@ export const makeSettingsRoutes = (deps) => {
       }
       const known = keys.filter((k) => Object.hasOwn(DEFAULT_SETTINGS, k));
       if (known.length === 0) return { ok: false, error: 'no-known-keys' };
+      const resetsDweb = known.includes('dwebEnabled');
+      const resetDwebEnabled = Boolean(DEFAULT_SETTINGS.dwebEnabled);
+      // Reset is only an OFF fence when this channel's default is actually OFF.
+      // Preview resets to ON, so invalidating an admitted publication there
+      // would report a failure even though neither the setting nor host stopped.
+      if (resetsDweb && !resetDwebEnabled) {
+        onSettingsChanging?.({ dwebEnabled: false });
+      }
       await settingsStore.reset(known);
+      if (resetsDweb) {
+        await onSettingsChanged?.({ dwebEnabled: settingsStore.get().dwebEnabled });
+      }
       pushState();
       return { ok: true, settings: { ...settingsStore.get() } };
     },

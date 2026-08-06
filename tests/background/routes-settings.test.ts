@@ -11,7 +11,7 @@ const authorized = (message: Record<string, unknown> = {}) => ({
 // reset filters to known keys, and export gates on a passphrase when secrets exist.
 
 const baseDeps = (over: any = {}) => {
-  const calls: any = { autoLock: [], updated: [], reset: [], getSecret: [], identityExport: [] };
+  const calls: any = { autoLock: [], updated: [], reset: [], getSecret: [], identityExport: [], changing: [], changed: [] };
   const deps = {
     vault: {
       setAutoLockMs: (v: number) => { calls.autoLock.push(v); },
@@ -47,6 +47,8 @@ const baseDeps = (over: any = {}) => {
     CHANNEL: 'preview',
     exportHooks: () => [],
     skillRegistry: { list: async () => [] },
+    onSettingsChanging: (patch: any) => { calls.changing.push(patch); },
+    onSettingsChanged: async (patch: any) => { calls.changed.push(patch); },
     privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
     ...over,
   };
@@ -73,6 +75,23 @@ describe('settings/update', () => {
     expect(await makeSettingsRoutes(deps)['settings/update']({ patch: {} })).toEqual({ ok: true, settings: { a: 1 } });
     expect(calls.updated).toEqual([{ providerModel: 'x' }]);
   });
+  test('waits for dweb disable side effects before acknowledging the setting', async () => {
+    let finishStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => { finishStop = resolve; });
+    let settled = false;
+    const { deps, calls } = baseDeps({
+      normalizeSettingsPatch: () => ({ dwebEnabled: false }),
+      onSettingsChanged: async () => { await stopGate; calls.changed.push('stopped'); },
+    });
+    const updating = makeSettingsRoutes(deps)['settings/update']({ patch: { dwebEnabled: false } })
+      .then((result: any) => { settled = true; return result; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(calls.changing).toEqual([{ dwebEnabled: false }]);
+    finishStop();
+    expect(await updating).toEqual({ ok: true, settings: { a: 1 } });
+    expect(calls.changed).toEqual(['stopped']);
+  });
 });
 
 describe('settings/reset', () => {
@@ -88,6 +107,37 @@ describe('settings/reset', () => {
     const { deps, calls } = baseDeps();
     expect(await makeSettingsRoutes(deps)['settings/reset']({ keys: ['providerModel', 'nope'] })).toEqual({ ok: true, settings: { a: 1 } });
     expect(calls.reset).toEqual([['providerModel']]);
+  });
+  test('resetting a preview dweb default does not invalidate admitted work', async () => {
+    const { deps, calls } = baseDeps({
+      DEFAULT_SETTINGS: { dwebEnabled: true },
+      settingsStore: {
+        get: () => ({ dwebEnabled: true }),
+        stored: () => ({}),
+        update: async () => {},
+        reset: async (keys: string[]) => { calls.reset.push(keys); },
+      },
+    });
+    expect(await makeSettingsRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] }))
+      .toEqual({ ok: true, settings: { dwebEnabled: true } });
+    expect(calls.changing).toEqual([]);
+    expect(calls.changed).toEqual([{ dwebEnabled: true }]);
+  });
+  test('resetting a store dweb default invalidates before persistence', async () => {
+    const events: string[] = [];
+    const { deps } = baseDeps({
+      DEFAULT_SETTINGS: { dwebEnabled: false },
+      settingsStore: {
+        get: () => ({ dwebEnabled: false }),
+        stored: () => ({}),
+        update: async () => {},
+        reset: async () => { events.push('reset'); },
+      },
+      onSettingsChanging: () => { events.push('invalidate'); },
+      onSettingsChanged: async () => { events.push('changed'); },
+    });
+    await makeSettingsRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] });
+    expect(events).toEqual(['invalidate', 'reset', 'changed']);
   });
 });
 

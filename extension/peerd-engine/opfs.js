@@ -51,6 +51,19 @@ export const opfsHelpers = (rootPath) => {
     },
 
     /**
+     * Read a file without UTF-8 decoding.
+     *
+     * why: App assets and artifact exports must preserve arbitrary bytes.
+     * @param {string} path
+     * @returns {Promise<Uint8Array<ArrayBuffer>>}
+     */
+    readBytes: async (path) => {
+      const { dir, leaf } = await walkParent(path);
+      const fh = await dir.getFileHandle(leaf);
+      return new Uint8Array(await (await fh.getFile()).arrayBuffer());
+    },
+
+    /**
      * Write a text or binary file.
      * @param {string} path
      * @param {FileSystemWriteChunkType} content
@@ -59,8 +72,15 @@ export const opfsHelpers = (rootPath) => {
       const { dir, leaf } = await walkParent(path, { create: true });
       const fh = await dir.getFileHandle(leaf, { create: true });
       const w = await fh.createWritable();
-      await w.write(content);
-      await w.close();
+      try {
+        await w.write(content);
+        await w.close();
+      } catch (error) {
+        // why: an aborted writable retains the previous file atomically, while
+        // leaving a failed stream open can strand a partial replacement.
+        try { await w.abort(); } catch { /* preserve the original write error */ }
+        throw error;
+      }
     },
 
     /**
@@ -96,7 +116,8 @@ export const opfsHelpers = (rootPath) => {
       return out;
     },
 
-    /** Drop the entire subtree (used when an instance is deleted). */
+    /** Drop the entire subtree (used when an instance is deleted).
+     * Missing trees are already gone; every other storage failure must surface. */
     nuke: async () => {
       try {
         const parent = await navigator.storage.getDirectory();
@@ -105,8 +126,8 @@ export const opfsHelpers = (rootPath) => {
           dir = await dir.getDirectoryHandle(rootPath[i]);
         }
         await dir.removeEntry(rootPath[rootPath.length - 1], { recursive: true });
-      } catch {
-        // No subtree to nuke; ignore.
+      } catch (error) {
+        if (/** @type {{ name?: string }} */ (error)?.name !== 'NotFoundError') throw error;
       }
     },
   };

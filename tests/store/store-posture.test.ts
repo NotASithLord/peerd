@@ -90,6 +90,10 @@ describe('store manifest posture', () => {
       expect(csp).not.toContain("script-src 'self'");
       expect(csp).not.toContain("worker-src 'self'");
     }
+
+    const appTabHtml = readFileSync(join(EXTENSION_DIR, 'engine-tabs/app-tab/index.html'), 'utf8');
+    expect(appTabHtml).toContain('http-equiv="Content-Security-Policy"');
+    expect(appTabHtml).toContain("frame-src 'self'");
   });
 
   test('connect-src admits Ollama on the standard port, host-wildcard but PORT-SCOPED (issue #104)', () => {

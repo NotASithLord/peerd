@@ -95,11 +95,31 @@ const downloadEnvelope = (filename, envelope) => {
   URL.revokeObjectURL(url);
 };
 
+/** @param {string} appId */
+const appCardSelector = (appId) => `.library-card[data-app-id="${CSS.escape(appId)}"]`;
+
+/**
+ * Move focus after Mithril has committed a mutation result. The fallback keeps
+ * keyboard users inside the Library when the original card no longer exists.
+ * @param {string | null} appId
+ * @param {string} action
+ */
+const focusLibraryAction = (appId, action) => {
+  requestAnimationFrame(() => {
+    const card = appId ? document.querySelector(appCardSelector(appId)) : null;
+    const target = card?.querySelector(`[data-library-action="${action}"]`)
+      ?? document.querySelector('.library-search')
+      ?? document.querySelector('.library-refresh');
+    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+  });
+};
+
 export const LibrarySection = {
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
   oninit(vnode) {
     vnode.state.apps = null;        // null = loading
     vnode.state.error = null;
+    vnode.state.warning = null;
     vnode.state.query = '';
     vnode.state.favOnly = false;
     vnode.state.renamingId = null;
@@ -164,6 +184,7 @@ export const LibrarySection = {
     // why: clearing the error here is what lets the Refresh button (which
     // is the only control rendered on the error screen) recover the view.
     vnode.state.error = null;
+    vnode.state.warning = null;
     vnode.state.refreshing = true;          // drives the ↻ spin until it lands
     vnode.attrs.send({ type: 'apps/list' }).then((/** @type {any} */ r) => {
       if (r?.ok) vnode.state.apps = r.apps ?? [];
@@ -258,6 +279,11 @@ export const LibrarySection = {
    * @param {App} app
    */
   async confirmDelete(vnode, app) {
+    const currentCard = document.querySelector(appCardSelector(app.id));
+    const adjacentCard = currentCard?.nextElementSibling ?? currentCard?.previousElementSibling;
+    const adjacentAppId = adjacentCard instanceof HTMLElement
+      ? adjacentCard.dataset.appId ?? null
+      : null;
     vnode.state.error = null;
     vnode.state.armedDeleteId = null;
     vnode.state.busyId = app.id;
@@ -266,6 +292,7 @@ export const LibrarySection = {
     if (r?.ok) vnode.state.apps = (vnode.state.apps ?? []).filter((/** @type {App} */ a) => a.id !== app.id);
     else vnode.state.error = r?.error ?? 'delete failed';
     m.redraw();
+    focusLibraryAction(r?.ok ? adjacentAppId : app.id, r?.ok ? 'open' : 'more');
   },
 
   /**
@@ -320,12 +347,16 @@ export const LibrarySection = {
       // and the next Share opens LOCKED to this slug (no refetch round-trip).
       app.shared = true;
       app.dweb = { ...(app.dweb || {}), slug: r.slug, dwapp_id: r.dwapp_id, version_id: r.hash, seq: r.seq, publisher: r.publisher, uri: r.uri };
+      if (r.warning === 'previous-version-cleanup-pending') {
+        vnode.state.warning = 'The update was shared. Older shared bytes will be cleaned up on the next share or delete.';
+      }
     } else {
       vnode.state.error = r?.error === 'dweb-disabled'
         ? 'turn the base network on (unlock + dweb enabled) to share'
         : (r?.error ?? 'share failed');
     }
     m.redraw();
+    focusLibraryAction(app.id, 'share');
   },
 
   // Pull a newer announced version of an installed app, overwriting it in place.
@@ -337,16 +368,30 @@ export const LibrarySection = {
     const up = vnode.state.updates[app.id];
     if (!up) return;
     vnode.state.error = null;
+    vnode.state.warning = null;
     vnode.state.busyId = app.id;
     const r = await vnode.attrs.send({ type: 'dweb/base/update-app', appId: app.id, uri: up.uri, name: up.name, dwappId: up.dwapp_id, slug: up.slug, seq: up.seq });
     vnode.state.busyId = null;
     if (r?.ok) {
       delete vnode.state.updates[app.id];      // cleared — we're now on the new version
       if (r.app?.dweb) app.dweb = r.app.dweb;
+      const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);
+      if (r.warning) warnings.add(r.warning);
+      const notices = [];
+      if (warnings.has('audit-write-failed')) {
+        notices.push('The update was installed, but its security audit entry could not be written.');
+      } else if (warnings.has('previous-version-cleanup-pending')) {
+        notices.push('The update was installed.');
+      }
+      if (warnings.has('previous-version-cleanup-pending')) {
+        notices.push('Older shared bytes will be cleaned up on the next update or delete.');
+      }
+      vnode.state.warning = notices.join(' ') || null;
     } else {
       vnode.state.error = r?.error ?? 'update failed';
     }
     m.redraw();
+    focusLibraryAction(app.id, r?.ok ? 'open' : 'update');
   },
 
   /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
@@ -378,11 +423,18 @@ export const LibrarySection = {
     // as an inline banner over the still-valid grid instead of blanking
     // it. Either way the next successful action clears ui.error.
     if (ui.apps === null) {
-      return m('div', [header, ui.error ? m('p.error', ui.error) : m('p.muted', 'Loading…')]);
+      return m('div', [
+        header,
+        ui.error ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, ui.error) : m('p.muted', 'Loading…'),
+        ui.warning ? m('p.muted', { role: 'status', 'aria-live': 'polite' }, ui.warning) : null,
+      ]);
     }
-    const banner = ui.error ? m('p.error', ui.error) : null;
+    const banners = [
+      ui.error ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, ui.error) : null,
+      ui.warning ? m('p.muted', { role: 'status', 'aria-live': 'polite' }, ui.warning) : null,
+    ];
     if (ui.apps.length === 0) {
-      return m('div', [header, banner, m('p.muted',
+      return m('div', [header, ...banners, m('p.muted',
         'No apps yet. Ask the agent to build one — it will appear here automatically.')]);
     }
 
@@ -401,7 +453,7 @@ export const LibrarySection = {
 
     return m('div', [
       header,
-      banner,
+      ...banners,
       m('input.library-search', {
         type: 'search',
         placeholder: 'Filter apps… (name, tag)',
@@ -427,7 +479,7 @@ export const LibrarySection = {
 
     const menuOpen = ui.menuOpenId === app.id;
 
-    return m('.library-card', { key: app.id }, [
+    return m('.library-card', { key: app.id, 'data-app-id': app.id }, [
       m('.library-head', [
         m('.library-avatar', { style: `background:${colorOf(colorKeyOf(app))}`, 'aria-hidden': 'true' }, (app.name || '?').trim().charAt(0) || '?'),
         m('div', { style: 'flex:1; min-width:0;' }, [
@@ -478,11 +530,16 @@ export const LibrarySection = {
       // Delete stop competing with Open for attention. The kebab is ALWAYS shown
       // (not hover-revealed) so touch + keyboard reach it.
       m('.library-actions', [
-        m('button.library-open', { disabled: busy, onclick: () => LibrarySection.openApp(vnode, app) }, busy ? '…' : 'Open'),
+        m('button.library-open', {
+          disabled: busy,
+          'data-library-action': 'open',
+          onclick: () => LibrarySection.openApp(vnode, app),
+        }, busy ? '…' : 'Open'),
         m('.spacer'),
         ui.updates[app.id]
           ? m('button.library-btn', {
               disabled: busy,
+              'data-library-action': 'update',
               title: 'Download the newer version a peer published (overwrites your copy in place)',
               onclick: () => LibrarySection.updateApp(vnode, app),
             }, busy ? '…' : 'Update')
@@ -490,6 +547,7 @@ export const LibrarySection = {
         vnode.attrs.dweb
           ? m('button.library-btn', {
               disabled: busy,
+              'data-library-action': 'share',
               title: isSeeded(app)
                 ? 'Reshare: publish an updated version — peers who installed it see "update available"'
                 : 'Share on the dweb, peers can discover and install it peer-to-peer',
@@ -498,6 +556,7 @@ export const LibrarySection = {
           : null,
         m('button.icon.library-kebab', {
           'aria-haspopup': 'menu', 'aria-expanded': String(menuOpen), title: 'More actions',
+          'data-library-action': 'more',
           onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.menuOpenId = menuOpen ? null : app.id; ui.armedDeleteId = null; },
         }, '⋯'),
         menuOpen

@@ -35,7 +35,7 @@ export const COMMONS_SEED = Object.freeze({
  */
 export const loadSeedApp = async ({ fetchText }) => {
   /** @type {Record<string, string>} */
-  const files = {};
+  const files = Object.create(null);
   for (const p of COMMONS_SEED.paths) {
     files[p] = await fetchText(COMMONS_SEED.base + p);
   }

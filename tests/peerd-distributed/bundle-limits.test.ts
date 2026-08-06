@@ -1,5 +1,9 @@
 import { describe, test, expect } from 'bun:test';
-import { assertBundleWithinLimits, MAX_BUNDLE_BYTES } from '../../extension/peerd-distributed/content/manifest.js';
+import {
+  assertBundleWithinLimits, decodeCommittedChunk, MAX_BUNDLE_BYTES, MAX_BUNDLE_CHUNKS,
+} from '../../extension/peerd-distributed/content/manifest.js';
+import { CHUNK_SIZE } from '../../extension/shared/bundle/chunk.js';
+import { toBase64 } from '../../extension/shared/bundle/bytes.js';
 
 // A hostile publisher signs their OWN manifest, so the hash + signature checks
 // never bound its declared size or chunk list. assertBundleWithinLimits is the
@@ -16,13 +20,13 @@ describe('assertBundleWithinLimits — bundle OOM guard', () => {
 
   test('rejects a multi-GB bundle (many distinct chunks) before any fetch', () => {
     const big = Array.from({ length: 20000 }, (_, i) => chunk(262144, String(i).padEnd(64, '0')));
-    expect(() => assertBundleWithinLimits({ size: 20000 * 262144, chunks: big } as any)).toThrow(/too large/);
+    expect(() => assertBundleWithinLimits({ size: 20000 * 262144, chunks: big } as any)).toThrow(/too many|too large/);
   });
 
   test('rejects the reassembly amplification: thousands of refs to ONE chunk', () => {
     // fetched once (deduped), but reassembly maps over every entry → ~10GB
     const amp = Array.from({ length: 40000 }, () => chunk(262144, 'a'.repeat(64)));
-    expect(() => assertBundleWithinLimits({ size: 40000 * 262144, chunks: amp } as any)).toThrow(/too large/);
+    expect(() => assertBundleWithinLimits({ size: 40000 * 262144, chunks: amp } as any)).toThrow(/too many|too large/);
   });
 
   test('rejects a manifest that under-reports size to dodge a naive size check', () => {
@@ -33,6 +37,28 @@ describe('assertBundleWithinLimits — bundle OOM guard', () => {
   test('rejects non-integer / negative chunk sizes', () => {
     expect(() => assertBundleWithinLimits({ size: 0, chunks: [chunk(-1)] } as any)).toThrow(/chunk size invalid/);
     expect(() => assertBundleWithinLimits({ size: 0, chunks: [chunk(1.5)] } as any)).toThrow(/chunk size invalid/);
+  });
+
+  test('rejects zero-size, over-size, malformed, and inconsistent duplicate chunks', () => {
+    expect(() => assertBundleWithinLimits({ size: 0, chunks: [chunk(0)] } as any)).toThrow(/chunk size invalid/);
+    expect(() => assertBundleWithinLimits({ size: CHUNK_SIZE + 1, chunks: [chunk(CHUNK_SIZE + 1)] } as any)).toThrow(/chunk size invalid/);
+    expect(() => assertBundleWithinLimits({ size: 1, chunks: [chunk(1, 'not-a-hash')] } as any)).toThrow(/chunk hash invalid/);
+    expect(() => assertBundleWithinLimits({
+      size: 3,
+      chunks: [chunk(1), chunk(2)],
+    } as any)).toThrow(/inconsistent sizes/);
+  });
+
+  test('bounds chunk count independently of declared bytes', () => {
+    const chunks = Array.from({ length: MAX_BUNDLE_CHUNKS + 1 }, (_, i) =>
+      chunk(1, i.toString(16).padStart(64, '0')));
+    expect(() => assertBundleWithinLimits({ size: chunks.length, chunks } as any)).toThrow(/too many chunks/);
+  });
+
+  test('checks encoded length before decoding a committed chunk', () => {
+    const exact = toBase64(new Uint8Array([1, 2, 3]));
+    expect([...decodeCommittedChunk(exact, 3)]).toEqual([1, 2, 3]);
+    expect(() => decodeCommittedChunk(exact.repeat(100_000), 3)).toThrow(/encoded length mismatch/);
   });
 
   test('rejects a missing chunk list', () => {

@@ -14,6 +14,8 @@ import {
   composeApp,
   stripMetaRefresh,
   createEditor,
+  isBinaryAppFile,
+  isBinaryAssetPath,
   opfsHelpers,
 } from '/peerd-engine/index.js';
 import { loadDweb } from '/shared/dweb-loader.js';
@@ -38,6 +40,10 @@ const editorPanel = byId('editor-panel');
 const editorMount = byId('editor-mount');
 const toggleBtn = byId('mode-toggle');
 const exportBtn = /** @type {HTMLButtonElement} */ (byId('export-btn'));
+const noticeStack = byId('app-notice-stack');
+const saveStatus = byId('app-save-status');
+const saveMessage = byId('app-save-message');
+const saveRetry = /** @type {HTMLButtonElement} */ (byId('app-save-retry'));
 
 /** @param {string} msg */
 const fail = (msg) => {
@@ -46,24 +52,58 @@ const fail = (msg) => {
   bootMsg.textContent = `Failed: ${msg}`;
 };
 
-/** @param {string} text */
-const showNotice = (text) => {
+/** @type {HTMLElement | null} */
+let noticeReturnFocus = null;
+
+/** @param {string} text @param {{ persistent?: boolean }} [options] */
+const showNotice = (text, { persistent = false } = {}) => {
   let notice = document.getElementById('app-security-notice');
+  const noticeHadFocus = Boolean(notice?.contains(document.activeElement));
+  if (!noticeHadFocus && document.activeElement instanceof HTMLElement) {
+    noticeReturnFocus = document.activeElement;
+  }
   if (!notice) {
     notice = document.createElement('div');
     notice.id = 'app-security-notice';
     notice.setAttribute('role', 'status');
     notice.setAttribute('aria-live', 'polite');
     notice.style.cssText = [
-      'position:fixed', 'left:12px', 'right:12px', 'bottom:12px', 'z-index:60',
+      'display:flex', 'align-items:center', 'gap:12px',
       'padding:9px 12px', 'border:1px solid #444', 'border-radius:6px',
       'background:#111', 'color:#eee', 'font:12px/1.4 -apple-system,system-ui,sans-serif',
     ].join(';');
-    document.body.appendChild(notice);
+    noticeStack.prepend(notice);
   }
-  notice.textContent = text;
+  notice.replaceChildren();
+  const message = document.createElement('span');
+  message.style.cssText = 'flex:1;min-width:0;overflow-wrap:anywhere';
+  message.textContent = text;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = 'Dismiss';
+  close.style.cssText = 'border:1px solid #555;background:#111;color:#eee;border-radius:4px;padding:3px 7px;cursor:pointer';
+  /** @param {boolean} restoreFocus */
+  const dismiss = (restoreFocus) => {
+    notice?.remove();
+    if (restoreFocus && noticeReturnFocus?.isConnected) noticeReturnFocus.focus({ preventScroll: true });
+  };
+  close.addEventListener('click', () => dismiss(true));
+  notice.append(message, close);
+  if (noticeHadFocus) close.focus({ preventScroll: true });
+  notice.onkeydown = (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    dismiss(true);
+  };
   clearTimeout(Number(notice.dataset.timer || 0));
-  notice.dataset.timer = String(setTimeout(() => notice?.remove(), 6000));
+  const scheduleDismiss = () => {
+    notice.dataset.timer = String(setTimeout(() => {
+      if (notice?.contains(document.activeElement)) { scheduleDismiss(); return; }
+      dismiss(false);
+    }, 6000));
+  };
+  notice.dataset.timer = '';
+  if (!persistent) scheduleDismiss();
 };
 
 if (!appId) {
@@ -72,25 +112,74 @@ if (!appId) {
 }
 
 const opfs = opfsHelpers(['peerd-apps', appId]);
-/** @type {{ name: string, entryFile: string, dweb: any } | null} */
+/** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any } | null} */
 let appMeta = null;        // { name, entryFile }
 /** @type {Awaited<ReturnType<typeof createEditor>> | null} */
 let editorApi = null;
 let mode = 'render';
+const binaryFilePaths = new Set();
+/** @type {HTMLElement | null} */
+let saveReturnFocus = null;
+/** @param {string} path */
+const showSaveFailure = (path) => {
+  if (saveStatus.hidden && document.activeElement instanceof HTMLElement) {
+    saveReturnFocus = document.activeElement;
+  }
+  saveMessage.textContent = `Could not save ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
+  saveStatus.hidden = false;
+  saveRetry.disabled = false;
+};
+const clearSaveFailure = () => {
+  const restoreFocus = saveStatus.contains(document.activeElement);
+  saveStatus.hidden = true;
+  saveRetry.disabled = false;
+  if (restoreFocus) {
+    if (saveReturnFocus?.isConnected) saveReturnFocus.focus({ preventScroll: true });
+    else editorApi?.focus?.();
+  }
+  saveReturnFocus = null;
+};
+saveRetry.addEventListener('click', async () => {
+  if (!editorApi) return;
+  saveRetry.disabled = true;
+  try {
+    await editorApi.flushSave();
+    if (!editorApi.hasUnsavedChanges()) clearSaveFailure();
+  } catch { saveRetry.disabled = false; }
+});
+window.addEventListener('beforeunload', (event) => {
+  if (!editorApi?.hasUnsavedChanges()) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
+/** @param {unknown} value */
+const copyFileKinds = (value) => Object.assign(
+  Object.create(null),
+  value && typeof value === 'object' ? value : {},
+);
 
 // ---------------------------------------------------------------------------
 // Render mode — compose multi-file from OPFS, post to the runner iframe
 // ---------------------------------------------------------------------------
 
-const readAllFiles = async () => {
+const readForRender = async () => {
   const entries = await opfs.list();
   /** @type {Record<string, string>} */
-  const files = {};
+  const textFiles = Object.create(null);
+  /** @type {Record<string, ArrayBuffer>} */
+  const binaryAssets = Object.create(null);
+  binaryFilePaths.clear();
   for (const e of entries) {
     const path = e.path.replace(/^\/+/, '');
-    files[path] = await opfs.read(path);
+    const bytes = await opfs.readBytes(path);
+    if (isBinaryAppFile(path, bytes, appMeta?.fileKinds?.[path])) {
+      binaryFilePaths.add(path);
+      binaryAssets[path] = bytes.buffer;
+    } else {
+      textFiles[path] = new TextDecoder().decode(bytes);
+    }
   }
-  return files;
+  return { textFiles, binaryAssets };
 };
 
 // Built-in libraries available to every app without a download. Apps run
@@ -130,13 +219,18 @@ const withBuiltinLibs = async (files) => {
   return files;
 };
 
-let runnerReady = false;
+/** @type {'idle' | 'awaiting-ready' | 'ready' | 'delivered'} */
+let runnerPhase = 'idle';
 // Watchdog timer for the runner-ready handshake — so a runner iframe that
 // throws / never loads doesn't strand the app on the boot screen forever.
 /** @type {ReturnType<typeof setTimeout> | null} */
 let runnerWatchdog = null;
 /** @type {string | null} */
 let pendingBody = null;
+/** @type {Record<string, ArrayBuffer>} */
+let pendingAssets = {};
+/** @type {MessagePort | null} */
+let runnerPort = null;
 // Set true right before WE point the frame at the runner, so the frame's load
 // event can tell our own (re)load apart from a navigation the app initiated.
 let expectingRunnerLoad = false;
@@ -154,16 +248,64 @@ let runnerStarted = false;
 // bridge we just attached on runner-ready). One-shot per delivery.
 let expectingBodyLoad = false;
 let linkPromptOpen = false;
+let runnerGeneration = 0;
 
 const tryDeliver = () => {
-  if (!runnerReady || !pendingBody) return;
+  if (runnerPhase !== 'ready' || pendingBody == null) return;
   expectingBodyLoad = true;
-  frame.contentWindow?.postMessage(
-    { type: 'app-body', html: pendingBody },
-    '*',
+  // why: sandbox flags are fixed for the active document. Removing script
+  // permission here leaves the already-loaded trusted runner able to execute
+  // the App, while every later data:, blob:, or URL navigation enters a realm
+  // where scripts cannot run. startRunner restores the token only for a fresh
+  // trusted runner load.
+  frame.sandbox.remove('allow-scripts');
+  runnerPort?.postMessage(
+    { type: 'app-body', html: pendingBody, assets: pendingAssets, entry: appMeta?.entryFile },
+    Object.values(pendingAssets),
   );
+  // Transfer detaches these parent-side buffers. Clear the queue immediately;
+  // every later delivery re-reads OPFS and gets fresh ownership.
+  pendingBody = null;
+  pendingAssets = {};
+  runnerPhase = 'delivered';
   if (appMeta?.name) document.title = `peerd · ${appMeta.name}`;
   boot.classList.add('is-hidden');
+};
+
+const startRunner = () => {
+  runnerPort?.close();
+  runnerPort = null;
+  runnerPhase = 'awaiting-ready';
+  expectingRunnerLoad = true;
+  runnerStarted = true;
+  runnerGeneration += 1;
+  frame.sandbox.add('allow-scripts');
+  frame.src = `/engine-tabs/app-tab/runner.html#${runnerGeneration}`;
+  if (runnerWatchdog) clearTimeout(runnerWatchdog);
+  runnerWatchdog = setTimeout(() => {
+    if (runnerPhase === 'awaiting-ready') {
+      fail('the app runner did not start. Try reopening the app or reload this tab.');
+    }
+  }, 8000);
+};
+
+const initializeRunnerChannel = () => {
+  const channel = new MessageChannel();
+  runnerPort = channel.port1;
+  runnerPort.addEventListener('message', (event) => {
+    if (runnerPhase !== 'awaiting-ready') return;
+    if (event.data?.type === 'runner-failed') {
+      fail('The browser could not enforce the App sandbox.');
+      return;
+    }
+    if (event.data?.type !== 'runner-ready') return;
+    runnerPhase = 'ready';
+    if (runnerWatchdog) { clearTimeout(runnerWatchdog); runnerWatchdog = null; }
+    tryDeliver();
+    attachDwebBridge();
+  });
+  runnerPort.start();
+  frame.contentWindow?.postMessage({ type: 'runner-init' }, '*', [channel.port2]);
 };
 
 const renderMode = async () => {
@@ -180,75 +322,60 @@ const renderMode = async () => {
   if (!appMeta) {
     const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
     if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
-    appMeta = { name: meta.name, entryFile: meta.entryFile, dweb: meta.dweb ?? null };
+    appMeta = {
+      name: meta.name,
+      entryFile: meta.entryFile,
+      fileKinds: copyFileKinds(meta.fileKinds),
+      dweb: meta.dweb ?? null,
+    };
     attachDwebBridge(); // no-op unless this app is a dwapp on a dweb build
   }
 
-  let files;
-  try { files = await readAllFiles(); }
+  let textFiles, binaryAssets;
+  try { ({ textFiles, binaryAssets } = await readForRender()); }
   catch (e) { fail(`couldn't read app files: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return; }
 
-  if (!(appMeta.entryFile in files)) {
+  if (!(appMeta.entryFile in textFiles)) {
     fail(`entry file ${appMeta.entryFile} not found in OPFS`);
     return;
   }
 
   // Make built-in libs (Mithril) available before composing.
-  await withBuiltinLibs(files);
+  await withBuiltinLibs(textFiles);
 
   let composed;
-  try { composed = stripMetaRefresh(composeApp(files, appMeta.entryFile)); }
+  try { composed = stripMetaRefresh(composeApp(textFiles, appMeta.entryFile)); }
   catch (e) { fail(`compose failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return; }
 
   // Ensure the iframe is in the DOM (re-create on mode switch).
   if (!frame.isConnected) document.querySelector('.frame-host')?.appendChild(frame);
   frame.hidden = false;
   pendingBody = composed;
+  pendingAssets = binaryAssets;
 
-  if (runnerReady) {
+  if (runnerPhase === 'ready') {
     tryDeliver();
-  } else {
-    // Reload the runner so the runner-ready handshake fires fresh.
-    runnerReady = false;
-    expectingRunnerLoad = true;
-    runnerStarted = true;
-    frame.src = '/engine-tabs/app-tab/runner.html';
-    // Watchdog: if the runner never announces ready (threw / failed to load),
-    // surface an error instead of sitting on the boot screen forever.
-    if (runnerWatchdog) clearTimeout(runnerWatchdog);
-    runnerWatchdog = setTimeout(() => {
-      if (!runnerReady) fail('the app runner did not start — try reopening the app, or reload this tab.');
-    }, 8000);
-  }
+  } else if (runnerPhase !== 'awaiting-ready') startRunner();
 };
+
+// The trusted embedding page owns frame-src, so it sees blocked attempts to
+// replace the runner. Keep the notice URL-free: App input must not reach a
+// trusted UI surface without normalization.
+window.addEventListener('securitypolicyviolation', (event) => {
+  if (!String(event.effectiveDirective).startsWith('frame-src')) return;
+  showNotice('Blocked navigation: Apps stay inside their offline sandbox.');
+});
 
 window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   if (e.source !== frame.contentWindow) return;
-  if (e.data && e.data.type === 'runner-ready') {
-    runnerReady = true;
-    if (runnerWatchdog) { clearTimeout(runnerWatchdog); runnerWatchdog = null; }
-    tryDeliver();
-    // Re-attach the dweb bridge if it was torn down by an app-initiated frame
-    // reload (e.g. a <form> submit). Safe: only OUR trusted runner posts
-    // runner-ready, so a navigation to a foreign page never reaches here — the
-    // bridge stays dead there. Idempotent (no-op when already attached / not a
-    // dwapp). why: a dwapp that reloads itself shouldn't permanently lose the
-    // network (the multiplayer game would just die mid-session).
-    attachDwebBridge();
-    return;
-  }
-  if (e.data?.type === 'app-policy-blocked') {
+  if (e.data?.type === 'app-policy-blocked' && runnerPhase === 'delivered') {
     const directive = typeof e.data.directive === 'string'
       ? e.data.directive.replace(/[^a-z-]/gi, '').slice(0, 40)
       : 'resource';
     showNotice(`Blocked ${directive || 'resource'}: Apps are offline. Bundle dependencies and assets.`);
     return;
   }
-  if (e.data?.type === 'runner-failed') {
-    fail('The browser could not enforce the App sandbox.');
-    return;
-  }
-  if (e.data?.type === 'app-link') {
+  if (e.data?.type === 'app-link' && runnerPhase === 'delivered') {
     if (linkPromptOpen) { showNotice('Finish the open-link prompt first.'); return; }
     let target;
     try { target = new URL(String(e.data.href)); }
@@ -281,11 +408,17 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
 // events can't reach whatever now occupies the frame.
 frame.addEventListener('load', () => {
   if (!runnerStarted) return;                 // the empty iframe's initial about:blank load — not an app navigation
-  if (expectingRunnerLoad) { expectingRunnerLoad = false; return; }
+  if (expectingRunnerLoad) {
+    expectingRunnerLoad = false;
+    initializeRunnerChannel();
+    return;
+  }
   if (expectingBodyLoad) { expectingBodyLoad = false; return; }  // the runner's document.write delivery — not a navigation
-  runnerReady = false;
+  runnerPhase = 'idle';
   if (dwebBridge) { dwebBridge.dispose(); dwebBridge = null; }
-  console.warn('[app-tab] app frame navigated unexpectedly — dweb bridge stopped');
+  console.warn('[app-tab] app frame navigated unexpectedly; restarting the trusted runner');
+  startRunner();
+  renderMode().catch((e) => fail(/** @type {{ message?: string }} */ (e)?.message ?? String(e)));
 });
 
 // ---------------------------------------------------------------------------
@@ -300,7 +433,7 @@ frame.addEventListener('load', () => {
 /** @type {any} */
 let dwebBridge = null;
 
-// A minimal monochrome consent bar (no new accent colors — CLAUDE.md).
+// A minimal monochrome consent bar follows the project color rule.
 let confirmationTail = Promise.resolve();
 
 /** @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} arg @returns {Promise<boolean>} */
@@ -365,7 +498,6 @@ const attachDwebBridge = async () => {
       swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => browser.runtime.sendMessage({ type, ...payload }),
       storage: browser.storage.local,
       confirmAction,
-      readAppFiles: readAllFiles,
       // The offscreen base host pushes room events (feed/dm/presence) as
       // `dweb/base-room/event` runtime messages — every extension context gets
       // them, so the bridge listens here and filters to the room it joined.
@@ -395,16 +527,50 @@ const editMode = async () => {
   if (!appMeta) {
     const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
     if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
-    appMeta = { name: meta.name, entryFile: meta.entryFile, dweb: meta.dweb ?? null };
+    appMeta = {
+      name: meta.name,
+      entryFile: meta.entryFile,
+      fileKinds: copyFileKinds(meta.fileKinds),
+      dweb: meta.dweb ?? null,
+    };
     attachDwebBridge();
   }
 
   if (!editorApi) {
+    // Refresh classification from bytes before the editor renders its tree.
+    // Unknown suffixes are safe because the read boundary, not the name,
+    // decides whether CodeMirror may open them.
+    await readForRender();
     editorApi = await createEditor({
       mountEl: editorMount,
       opfsBase: ['peerd-apps', appId],
       pinnedFile: appMeta.entryFile,
-      onSaved: () => { /* swap back to render manually via toggle */ },
+      isReadOnlyFile: (path) => binaryFilePaths.has(path) || isBinaryAssetPath(path),
+      onReadOnlyFile: (path) => showNotice(
+        `${path} is a binary file and cannot be edited here. Ask peerd to replace it, or import another App package.`,
+        { persistent: true },
+      ),
+      writeFile: async (path, content) => {
+        const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+          type: 'app/editor-write', appId, path, content,
+        }));
+        if (!reply?.ok) throw new Error(reply?.error ?? 'write failed');
+        binaryFilePaths.delete(path);
+        if (appMeta) appMeta.fileKinds[path] = 'text';
+      },
+      deleteFile: async (path) => {
+        const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+          type: 'app/editor-delete', appId, path,
+        }));
+        if (!reply?.ok) throw new Error(reply?.error ?? 'delete failed');
+        binaryFilePaths.delete(path);
+        if (appMeta) delete appMeta.fileKinds[path];
+      },
+      onSaveError: showSaveFailure,
+      onDirtyChange: (dirty) => { if (!dirty) clearSaveFailure(); },
+      onSaved: () => {
+        if (!editorApi?.hasUnsavedChanges()) clearSaveFailure();
+      },
     });
   }
   editorPanel.hidden = false;
@@ -451,20 +617,36 @@ exportBtn.addEventListener('click', exportApp);
 // presence as a ghost in a room whose tab is gone. pagehide fires on tab close
 // and navigation; dispose() runs the bridge's leave op (a fire-and-forget swCall
 // that still flushes to the SW before teardown).
-window.addEventListener('pagehide', () => { dwebBridge?.dispose(); });
+const flushEditorBeforeSuspension = () => {
+  editorApi?.flushSave?.().catch((error) => {
+    console.warn('[app-tab] final editor save failed:', error);
+  });
+};
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushEditorBeforeSuspension();
+});
+window.addEventListener('pagehide', () => {
+  flushEditorBeforeSuspension();
+  runnerPort?.close();
+  dwebBridge?.dispose();
+});
 
 // ---------------------------------------------------------------------------
 // Boot + toggle
 // ---------------------------------------------------------------------------
 
 toggleBtn.addEventListener('click', async () => {
-  if (mode === 'render') {
-    await editMode();
-  } else {
-    // When leaving edit mode, flush save + force a fresh render.
-    if (editorApi) await editorApi.flushSave?.();
-    runnerReady = false;          // force the runner to re-emit ready
-    await renderMode();
+  try {
+    if (mode === 'render') {
+      await editMode();
+    } else {
+      // When leaving edit mode, flush save + force a fresh render.
+      if (editorApi) await editorApi.flushSave?.();
+      runnerPhase = 'idle';          // force the runner to re-emit ready
+      await renderMode();
+    }
+  } catch (error) {
+    console.warn('[app-tab] mode switch failed:', error);
   }
 });
 
