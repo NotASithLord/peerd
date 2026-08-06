@@ -20,6 +20,7 @@
 import browser from '/vendor/browser-polyfill.js';
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
+import { makeStartStopBarrier } from '/offscreen/start-stop-barrier.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -33,8 +34,6 @@ const warn = (...a) => console.warn('[offscreen/dweb]', ...a);
 // rather than widening the shared stub (the dweb boundary stays intact).
 /** @type {any} */
 let handle = null;    // { base, room, close } once the lobby is joined
-/** @type {Promise<any> | null} */
-let starting = null;  // in-flight start, so concurrent callers share it
 /** @type {ReturnType<typeof setInterval> | null} */
 let resubTimer = null; // periodic re-subscribe — self-heals a missed onPeer SUB
 
@@ -65,6 +64,65 @@ const rooms = new Map();        // roomId -> { room, refs, name, topicSubs:Map, 
 
 /** @param {string} type @param {object} [payload] @returns {Promise<any>} */
 const swCall = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
+
+// The permanent identity seed and backup passphrase never ride swCall. This
+// dedicated channel is accepted only after the service worker verifies the
+// browser-owned offscreen sender metadata.
+const CUSTODY_PORT_NAME = 'dweb-custody';
+const CUSTODY_RECONNECT_MS = 500;
+const CUSTODY_TIMEOUT_MS = 60_000;
+/** @type {import('webextension-polyfill').Runtime.Port | null} */
+let custodyPort = null;
+/** @type {Set<{ resolve: (port: import('webextension-polyfill').Runtime.Port) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
+const custodyWaiters = new Set();
+/** @type {Map<string, { resolve: (value: any) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
+const custodySecretPending = new Map();
+
+const rejectCustodySecretPending = () => {
+  for (const entry of custodySecretPending.values()) {
+    clearTimeout(entry.timer);
+    entry.reject(new Error('identity custody port disconnected'));
+  }
+  custodySecretPending.clear();
+};
+
+const waitForCustodyPort = async () => {
+  if (custodyPort) return custodyPort;
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        custodyWaiters.delete(waiter);
+        reject(new Error('identity custody port timed out'));
+      }, CUSTODY_TIMEOUT_MS),
+    };
+    custodyWaiters.add(waiter);
+  });
+};
+
+/** @param {'get'|'set'} operation @param {any} [args] */
+const callIdentitySecret = async (operation, args = {}) => {
+  const port = await waitForCustodyPort();
+  if (custodyPort !== port) throw new Error('identity custody port disconnected');
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      custodySecretPending.delete(requestId);
+      reject(new Error(`identity custody ${operation} timed out`));
+    }, CUSTODY_TIMEOUT_MS);
+    custodySecretPending.set(requestId, { resolve, reject, timer });
+    try {
+      port.postMessage({
+        type: 'custody/secret-request', requestId, operation, args,
+      });
+    } catch (cause) {
+      custodySecretPending.delete(requestId);
+      clearTimeout(timer);
+      reject(cause);
+    }
+  });
+};
 
 // peerd notifications: emit a runtime 'dweb/notify' for genuinely-NEW peers and
 // apps so the UI surfaces them (the bell + an in-chat banner), each linking to
@@ -99,57 +157,148 @@ const startNotifications = (h) => {
 
 // Join the lobby once. Identity comes from the vault via the SW (the offscreen
 // doc has no vault access) — so this only succeeds once the vault is unlocked.
-const start = async () => {
-  if (handle) return handle;
-  if (!starting) {
-    starting = (async () => {
-      log('starting base network…');
-      // why any: the live dweb module's surface exceeds the stub interface (see top).
-      const client = /** @type {any} */ (await loadDweb());
-      if (!client.available || !client.joinBaseNetwork) { warn('dweb module unavailable here — inert'); return null; }
-      let identity;
-      try {
-        const material = await client.identityMaterial({
-          getSecret: async () => {
-            const r = await swCall('dweb/identity-get');
-            if (!r?.ok) throw new Error(r?.error === 'vault-locked' ? 'vault is locked — unlock peerd first' : (r?.error ?? 'identity unavailable'));
-            return r.value;
-          },
-          setSecret: async (/** @type {string} */ _n, /** @type {string} */ value) => {
-            const r = await swCall('dweb/identity-set', { value });
-            if (!r?.ok) throw new Error(r?.error ?? 'identity store failed');
-          },
-        });
-        identity = await client.identityFromMaterial(material);
-      } catch (e) {
-        warn('identity step failed:', /** @type {{ message?: string }} */ (e)?.message ?? e);
-        starting = null; // let a later call retry (e.g. after unlock)
-        throw e;
-      }
-      log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
-      handle = await client.joinBaseNetwork({ identity });
-      handle.base.start();
-      startNotifications(handle);
-      // Late joiners now discover via the sovereign subscription plane (they ASK
-      // on connect), so there is no periodic re-announce timer to run — the card
-      // streams to subscribers and a snapshot answers each new SUBSCRIBE.
-      handle.base.onDwappAnnounce((/** @type {any} */ a) => log('discovery card:', a?.dwapp_id?.slice(0, 12), `from …${String(a?.publisher).slice(-8)}`));
-      // Self-heal the discovery subscription. The SUB is sent on mesh.onPeer when a
-      // link forms, but that fire-once handshake is racy over real WebRTC (a SUB can
-      // land before the channel is fully ready, or onPeer can be missed) — and a
-      // missed SUB means a peer's shares never reach our Library. Re-subscribing to
-      // every linked peer on a timer makes it eventually-consistent: each SUB is
-      // idempotent and triggers a fresh SNAPSHOT back, so a peer's already-shared
-      // apps arrive within one interval even if the initial subscribe was lost.
-      if (!resubTimer) {
-        resubTimer = setInterval(() => { try { handle?.base?.discovery?.subscribeAll(); } catch { /* best-effort */ } }, 12_000);
-      }
-      log('✅ base network ONLINE — lobby joined, presence beaconing');
-      return handle;
-    })();
+// The barrier makes stop a real lifecycle fence even while this async setup is
+// between reading the old identity and publishing its eventual handle.
+const baseLifecycle = makeStartStopBarrier({
+  getActive: () => handle,
+  create: async () => {
+    log('starting base network…');
+    // why any: the live dweb module's surface exceeds the stub interface (see top).
+    const client = /** @type {any} */ (await loadDweb());
+    if (!client.available || !client.joinBaseNetwork) { warn('dweb module unavailable here — inert'); return null; }
+    let identity;
+    try {
+      const material = await client.identityMaterial({
+        getSecret: async () => {
+          const r = await callIdentitySecret('get');
+          if (!r?.ok) throw new Error(r?.error === 'vault-locked' ? 'vault is locked — unlock peerd first' : (r?.error ?? 'identity unavailable'));
+          return r.value;
+        },
+        setSecret: async (/** @type {string} */ _n, /** @type {string} */ value) => {
+          const r = await callIdentitySecret('set', { value });
+          if (!r?.ok) throw new Error(r?.error ?? 'identity store failed');
+        },
+      });
+      identity = await client.identityFromMaterial(material);
+    } catch (e) {
+      warn('identity step failed:', /** @type {{ message?: string }} */ (e)?.message ?? e);
+      throw e;
+    }
+    log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
+    return client.joinBaseNetwork({ identity });
+  },
+  activate: (candidate) => {
+    candidate.base.start();
+    handle = candidate;
+    startNotifications(candidate);
+    // Late joiners discover through the sovereign subscription plane.
+    candidate.base.onDwappAnnounce((/** @type {any} */ a) => log('discovery card:', a?.dwapp_id?.slice(0, 12), `from …${String(a?.publisher).slice(-8)}`));
+    // Self-heal discovery if the initial subscription races WebRTC readiness.
+    if (!resubTimer) {
+      resubTimer = setInterval(() => { try { handle?.base?.discovery?.subscribeAll(); } catch { /* best-effort */ } }, 12_000);
+    }
+    log('✅ base network ONLINE — lobby joined, presence beaconing');
+  },
+  close: (candidate) => {
+    candidate.close();
+    if (handle !== candidate) return;
+    // Once close succeeds the identity is no longer live. Listener cleanup is
+    // best-effort so a stale unsubscribe cannot turn a successful stop into a
+    // false failure that blocks identity recovery.
+    for (const entry of rooms.values()) {
+      for (const off of entry.offs) { try { off(); } catch { /* already closed */ } }
+      for (const off of entry.topicSubs.values()) { try { off(); } catch { /* already closed */ } }
+    }
+    rooms.clear();
+    if (resubTimer) { clearInterval(resubTimer); resubTimer = null; }
+    handle = null;
+    log('base network stopped');
+  },
+});
+
+const start = () => baseLifecycle.start();
+
+/** @param {'export'|'adopt'|'suspend'|'resume'|'reset'} operation @param {any} args */
+const runCustodyOperation = async (operation, args) => {
+  if (operation === 'suspend') {
+    if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
+      throw new Error('lease-required');
+    }
+    await baseLifecycle.stop({ suspensionOwner: args.leaseId });
+    return { suspended: true };
   }
-  return starting;
+  if (operation === 'resume') {
+    if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
+      throw new Error('lease-required');
+    }
+    return { resumed: baseLifecycle.resume(args.leaseId) };
+  }
+  if (operation === 'reset') {
+    baseLifecycle.resetSuspension();
+    return { reset: true };
+  }
+  const client = await loadDweb();
+  if (operation === 'export') {
+    if (!client.identityRecordExport) throw new Error('portable identity export is unsupported');
+    return client.identityRecordExport(args);
+  }
+  if (operation === 'adopt') {
+    if (!client.identityRecordAdopt) throw new Error('portable identity restore is unsupported');
+    return client.identityRecordAdopt(args);
+  }
+  throw new Error('unknown identity custody operation');
 };
+
+const connectCustodyPort = () => {
+  if (!DWEB_ENABLED) return;
+  try {
+    const port = browser.runtime.connect({ name: CUSTODY_PORT_NAME });
+    custodyPort = port;
+    for (const waiter of custodyWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(port);
+    }
+    custodyWaiters.clear();
+    /** @param {any} response */
+    const respond = (response) => {
+      try { port.postMessage(response); } catch { /* disconnect rejects the SW-side request */ }
+    };
+    port.onMessage.addListener((/** @type {any} */ message) => {
+      if (message?.type === 'custody/secret-response'
+          && typeof message.requestId === 'string') {
+        const entry = custodySecretPending.get(message.requestId);
+        if (!entry) return;
+        custodySecretPending.delete(message.requestId);
+        clearTimeout(entry.timer);
+        if (message.ok) entry.resolve(message.result);
+        else entry.reject(new Error(message.error ?? 'identity secret operation failed'));
+        return;
+      }
+      if (message?.type !== 'custody/request'
+          || typeof message.requestId !== 'string'
+          || !['export', 'adopt', 'suspend', 'resume', 'reset'].includes(message.operation)) return;
+      Promise.resolve(runCustodyOperation(message.operation, message.args ?? {}))
+        .then((result) => respond({
+          type: 'custody/response', requestId: message.requestId, ok: true, result,
+        }))
+        .catch((cause) => respond({
+          type: 'custody/response', requestId: message.requestId, ok: false,
+          error: /** @type {{ code?: string, message?: string }} */ (cause)?.code
+            ?? /** @type {{ message?: string }} */ (cause)?.message ?? 'host-failed',
+        }));
+    });
+    port.onDisconnect.addListener(() => {
+      if (custodyPort === port) {
+        custodyPort = null;
+        rejectCustodySecretPending();
+      }
+      setTimeout(connectCustodyPort, CUSTODY_RECONNECT_MS);
+    });
+  } catch {
+    setTimeout(connectCustodyPort, CUSTODY_RECONNECT_MS);
+  }
+};
+connectCustodyPort();
 
 const status = () => (handle
   ? { running: true, did: handle.base.did, peers: handle.base.peers().length, present: handle.base.presence.list().length }
@@ -360,7 +509,7 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // to unshare — answer ok so delete still succeeds.
         case 'dweb/base-host/unshare-app': {
           if (!handle) { sendResponse({ ok: true, unserved: false, removed: false }); return; }
-          const r = await handle.base.unshareApp({ slug: slugify(msg.name), publisher: msg.publisher || handle.base.did, hash: msg.hash || null });
+          const r = await handle.base.unshareApp({ slug: slugify(msg.slug || msg.name), publisher: msg.publisher || handle.base.did, hash: msg.hash || null });
           log(`unshared app "${msg.name}" — unserved:${r.unserved} removed:${r.removed}`);
           sendResponse({ ok: true, ...r });
           return;
@@ -416,13 +565,7 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
           return;
         }
         case 'dweb/base-host/stop': {
-          if (handle) {
-            for (const e of rooms.values()) { for (const off of e.offs) off(); for (const off of e.topicSubs.values()) off(); }
-            rooms.clear();
-            if (resubTimer) { clearInterval(resubTimer); resubTimer = null; }
-            handle.close(); handle = null; starting = null;
-            log('base network stopped');
-          }
+          await baseLifecycle.stop();
           sendResponse({ ok: true });
           return;
         }

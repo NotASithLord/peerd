@@ -168,6 +168,7 @@ export const makeEngineRoutes = (deps) => {
             await browser.runtime.sendMessage({
               type: 'dweb/base-host/unshare-app',
               name: record.name,
+              slug: record.dweb?.slug ?? null,
               publisher: record.dweb?.publisher ?? null,
               hash: record.dweb?.hash ?? null,
             });

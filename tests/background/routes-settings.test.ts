@@ -1,18 +1,23 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSettingsRoutes } from '../../extension/background/routes/settings.js';
 
+const PRIVATE_TRANSFER_AUTHORIZATION = Symbol('test-transfer');
+const authorized = (message: Record<string, unknown> = {}) => ({
+  ...message, privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
+});
+
 // settings/update + settings/reset + transfer/export, now over settingsStore.
 // Pin: patch normalization is delegated, the vault auto-lock side effect fires,
 // reset filters to known keys, and export gates on a passphrase when secrets exist.
 
 const baseDeps = (over: any = {}) => {
-  const calls: any = { autoLock: [], updated: [], reset: [] };
+  const calls: any = { autoLock: [], updated: [], reset: [], getSecret: [], identityExport: [] };
   const deps = {
     vault: {
       setAutoLockMs: (v: number) => { calls.autoLock.push(v); },
       isLocked: () => false,
       listSecretNames: async () => ['anthropic.key'],
-      getSecret: async () => 'sk-secret',
+      getSecret: async (name: string) => { calls.getSecret.push(name); return 'sk-secret'; },
     },
     auditLog: { append: async () => {} },
     pushState: () => {},
@@ -33,9 +38,16 @@ const baseDeps = (over: any = {}) => {
     DWEB_ENABLED: false,
     DEFAULT_SETTINGS: { providerModel: '', spendLimitUsd: 0 },
     buildExport: async (a: any) => ({ payload: 'X', channel: a.channel, stored: a.storedSettings }),
+    dwebTransfer: {
+      exportRecord: async (passphrase: string) => { calls.identityExport.push(passphrase); return null; },
+    },
+    EXPORT_PASSPHRASE_MIN_LENGTH: 16,
+    isCustodySecretName: (name: string) => name.startsWith('distributed/identity/')
+      || name.startsWith('distributed/device-key/'),
     CHANNEL: 'preview',
     exportHooks: () => [],
     skillRegistry: { list: async () => [] },
+    privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
     ...over,
   };
   return { deps, calls };
@@ -80,23 +92,61 @@ describe('settings/reset', () => {
 });
 
 describe('transfer/export', () => {
+  test('requires the private transfer capability', async () => {
+    const { deps } = baseDeps();
+    expect(await makeSettingsRoutes(deps)['transfer/export']({ passphrase: 'long-enough-for-backup' }))
+      .toEqual({ ok: false, error: 'private-transfer-required' });
+  });
   test('refused when vault locked', async () => {
     const { deps } = baseDeps({ vault: { isLocked: () => true } });
-    expect(await makeSettingsRoutes(deps)['transfer/export']({})).toEqual({ ok: false, error: 'vault-locked' });
+    expect(await makeSettingsRoutes(deps)['transfer/export'](authorized())).toEqual({ ok: false, error: 'vault-locked' });
   });
   test('requires a passphrase when secrets exist', async () => {
     const { deps } = baseDeps();
-    expect(await makeSettingsRoutes(deps)['transfer/export']({ passphrase: 'short' })).toEqual({ ok: false, error: 'passphrase-required' });
+    expect(await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'short' }))).toEqual({ ok: false, error: 'passphrase-required' });
   });
   test('builds an export from settingsStore.stored() when authorized', async () => {
     const { deps } = baseDeps();
-    const res = await makeSettingsRoutes(deps)['transfer/export']({ passphrase: 'longenough' });
+    const res = await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' }));
     expect(res.ok).toBe(true);
     expect(res.payload.stored).toEqual({ providerModel: 'm' });
   });
   test('no secrets → no passphrase required', async () => {
     const { deps } = baseDeps({ vault: { isLocked: () => false, listSecretNames: async () => [], getSecret: async () => null } });
-    const res = await makeSettingsRoutes(deps)['transfer/export']({});
+    const res = await makeSettingsRoutes(deps)['transfer/export'](authorized());
     expect(res.ok).toBe(true);
+  });
+
+  test('custody secrets are never decrypted and the portable identity is reported', async () => {
+    const identityRecord = { did: 'did:key:zPortable' };
+    const decrypted: string[] = [];
+    const identityExports: string[] = [];
+    const { deps } = baseDeps({
+      vault: {
+        isLocked: () => false,
+        listSecretNames: async () => ['anthropic.key', 'distributed/identity/v1'],
+        getSecret: async (name: string) => { decrypted.push(name); return 'secret'; },
+      },
+      dwebTransfer: {
+        exportRecord: async (passphrase: string) => {
+          identityExports.push(passphrase);
+          return { identityRecord };
+        },
+      },
+    });
+    const res = await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' }));
+    expect(res.ok).toBe(true);
+    expect(decrypted).toEqual(['anthropic.key']);
+    expect(identityExports).toEqual(['long-enough-for-backup']);
+    expect(res.identityIncluded).toBe(true);
+    expect(res.identityDid).toBe(identityRecord.did);
+  });
+
+  test('fails loudly when a local identity cannot be included', async () => {
+    const { deps } = baseDeps({
+      dwebTransfer: { exportRecord: async () => { throw new Error('offscreen failed'); } },
+    });
+    expect(await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' })))
+      .toEqual({ ok: false, error: 'identity-export-failed' });
   });
 });

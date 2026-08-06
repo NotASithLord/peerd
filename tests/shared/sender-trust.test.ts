@@ -5,7 +5,9 @@
 // future-content-script cases the guard exists to reject.
 
 import { describe, it, expect } from 'bun:test';
-import { isFirstPartySender } from '../../extension/shared/sender-trust.js';
+import {
+  isFirstPartySender, isOffscreenSender, isOptionsSender,
+} from '../../extension/shared/sender-trust.js';
 
 const ID = 'abcdefghijklmnopabcdefghijklmnop';
 const ORIGIN = `chrome-extension://${ID}/`;
@@ -84,5 +86,60 @@ describe('isFirstPartySender', () => {
     const fxOrigin = `moz-extension://11111111-2222-3333-4444-555555555555/`;
     const fx = { runtimeId: ID, extensionOrigin: fxOrigin };
     expect(isFirstPartySender({ id: ID, url: `${fxOrigin}sidepanel/sidepanel.html` }, fx)).toBe(true);
+  });
+});
+
+describe('isOffscreenSender', () => {
+  const offscreenUrl = `${ORIGIN}offscreen/offscreen.html`;
+  const offscreenTrust = { ...trust, offscreenUrl };
+
+  it('accepts only the exact browser-owned offscreen document', () => {
+    expect(isOffscreenSender({ id: ID, url: offscreenUrl }, offscreenTrust)).toBe(true);
+  });
+
+  it('rejects query and hash variants', () => {
+    expect(isOffscreenSender({ id: ID, url: `${offscreenUrl}?copy=1` }, offscreenTrust)).toBe(false);
+    expect(isOffscreenSender({ id: ID, url: `${offscreenUrl}#frame` }, offscreenTrust)).toBe(false);
+  });
+
+  it('rejects a tab-hosted copy of the offscreen page', () => {
+    expect(isOffscreenSender(
+      { id: ID, url: offscreenUrl, tab: { id: 9 } }, offscreenTrust,
+    )).toBe(false);
+  });
+
+  it('rejects prefix variants and missing trust data', () => {
+    expect(isOffscreenSender(
+      { id: ID, url: `${offscreenUrl}.evil.html` }, offscreenTrust,
+    )).toBe(false);
+    expect(isOffscreenSender({ id: ID, url: offscreenUrl }, trust as any)).toBe(false);
+  });
+});
+
+describe('isOptionsSender', () => {
+  const optionsUrl = `${ORIGIN}options/options.html`;
+  const optionsTrust = { ...trust, optionsUrl };
+
+  it('accepts the exact full-tab options page and its hash routes', () => {
+    expect(isOptionsSender(
+      { id: ID, url: optionsUrl, tab: { id: 11 } }, optionsTrust,
+    )).toBe(true);
+    expect(isOptionsSender(
+      { id: ID, url: `${optionsUrl}#!/transfer`, tab: { id: 11 } }, optionsTrust,
+    )).toBe(true);
+  });
+
+  it('rejects no-tab, query, sibling-path, and wrong-origin senders', () => {
+    expect(isOptionsSender({ id: ID, url: optionsUrl }, optionsTrust)).toBe(false);
+    expect(isOptionsSender(
+      { id: ID, url: `${optionsUrl}?mode=transfer`, tab: { id: 11 } }, optionsTrust,
+    )).toBe(false);
+    expect(isOptionsSender(
+      { id: ID, url: `${optionsUrl}.evil`, tab: { id: 11 } }, optionsTrust,
+    )).toBe(false);
+    expect(isOptionsSender(
+      { id: ID, url: 'https://evil.example/options/options.html', tab: { id: 11 } },
+      optionsTrust,
+    )).toBe(false);
   });
 });

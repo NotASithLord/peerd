@@ -40,7 +40,7 @@
  * sibling id that merely shares a prefix. Using getURL('') rather than a
  * hardcoded scheme keeps this correct on Firefox (`moz-extension://…`).
  *
- * @param {{ id?: string, url?: string } | null | undefined} sender
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
  *   the second argument browser.runtime.onMessage hands to a listener
  * @param {{ runtimeId?: string, extensionOrigin?: string }} [trust]
  *   runtimeId = browser.runtime.id; extensionOrigin = browser.runtime.getURL('').
@@ -73,10 +73,11 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
  *
  * Exact-match on the document URL, not a prefix: a prefix would also admit
  * `offscreen/offscreen.html.evil.html` or any deeper path under it. Query and
- * hash are tolerated (Chrome does not add them today, but a future
- * createDocument call might) by comparing only the part before `?` or `#`.
+ * hash are rejected because the browser-owned document is created at one exact
+ * URL. A sender with `tab` provenance is also rejected because a real offscreen
+ * document is not hosted by a user-visible tab.
  *
- * @param {{ id?: string, url?: string } | null | undefined} sender
+ * @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
  * @param {{ runtimeId?: string, extensionOrigin?: string, offscreenUrl?: string }} [trust]
  *   offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html'). Missing or
  *   blank fails closed, so an unwired caller is "untrusted" rather than a crash.
@@ -85,6 +86,23 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
 export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscreenUrl } = {}) => {
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
   if (typeof offscreenUrl !== 'string' || offscreenUrl.length === 0) return false;
-  const url = /** @type {string} */ (sender?.url).split('?')[0].split('#')[0];
-  return url === offscreenUrl;
+  if (sender && typeof sender === 'object' && 'tab' in sender) return false;
+  return sender?.url === offscreenUrl;
+};
+
+/**
+ * Is this sender the full-tab options page that owns backup and restore?
+ * Hash routes are part of the trusted page URL. Queries and sibling paths are
+ * not, and open_in_tab means legitimate callers carry tab provenance.
+ * @param {{ id?: string, url?: string, tab?: { id?: number } } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, optionsUrl?: string }} [trust]
+ */
+export const isOptionsSender = (sender, { runtimeId, extensionOrigin, optionsUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof optionsUrl !== 'string' || optionsUrl.length === 0) return false;
+  if (typeof sender?.tab?.id !== 'number') return false;
+  const url = /** @type {string} */ (sender.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?') && documentUrl === optionsUrl;
 };

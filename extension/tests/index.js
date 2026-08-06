@@ -112,6 +112,7 @@ import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/options/activity-origin-events.test.js';
 import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
+import './unit/options/transfer-identity.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

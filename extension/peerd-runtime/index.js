@@ -325,10 +325,10 @@ export {
 // Explicit migration between installs and across channels. Pure shaping
 // + passphrase crypto; the SW injects all IO (vault, memory, hooks, kv).
 export {
-  EXPORT_VERSION, EXPORT_FORMAT,
+  EXPORT_VERSION, EXPORT_FORMAT, EXPORT_PASSPHRASE_MIN_LENGTH,
   buildExport, inspectImport, applyImport,
   encryptWithPassphrase, decryptWithPassphrase,
-  ExportPassphraseError,
+  ExportPassphraseError, isCustodySecretName,
 } from './transfer/transfer.js';
 
 // --- permissions (Plan/Act mode + confirm-actions toggle; Feature 03) ---

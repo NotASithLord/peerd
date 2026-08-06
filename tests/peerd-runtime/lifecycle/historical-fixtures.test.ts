@@ -67,7 +67,7 @@ import {
 import { normalizeToolManifest } from '/peerd-runtime/tools/manifests.js';
 import { compileUserHook } from '/peerd-runtime/tools/hooks/compile.js';
 import { orderAlwaysLoaded, assembleAlwaysLoaded } from '/peerd-runtime/memory/memory.js';
-import { inspectImport, EXPORT_FORMAT, EXPORT_VERSION } from '/peerd-runtime/transfer/transfer.js';
+import { inspectImport, EXPORT_FORMAT } from '/peerd-runtime/transfer/transfer.js';
 import { runMigration, guardStore } from '/peerd-runtime/lifecycle/store-version.js';
 import { checkStores, storeEntry, STORE_REGISTRY } from '/peerd-runtime/lifecycle/store-registry.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
@@ -350,9 +350,9 @@ const KNOWN_SETTING_KEYS = Object.keys(CHANNEL_DEFAULTS);
 describe.each(FIXTURES)('$name — the export envelope this release wrote', ({ data }) => {
   const envelope = () => data.exportEnvelope;
 
-  test('the format/version this build still speaks', () => {
+  test('the historical format/version remains intact', () => {
     expect(envelope().format).toBe(EXPORT_FORMAT);
-    expect(envelope().version).toBe(EXPORT_VERSION);
+    expect(envelope().version).toBe(1);
   });
 
   test('inspectImport accepts it and the summary is sane', () => {
@@ -885,9 +885,9 @@ describe('the new fixtures — permission normalization over non-default values'
 describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', ({ data }) => {
   const envelope = () => data.exportEnvelope;
 
-  test('the format/version this build still speaks', () => {
+  test('the historical format/version remains intact', () => {
     expect(envelope().format).toBe(EXPORT_FORMAT);
-    expect(envelope().version).toBe(EXPORT_VERSION);
+    expect(envelope().version).toBe(1);
   });
 
   test('inspectImport accepts it and the summary is sane', () => {

@@ -149,12 +149,12 @@ describe('apps/delete', () => {
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
-      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h' } }) },
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h', slug: 'custom-a' } }) },
       appClient: { delete: async () => true },
       browser: { runtime: { sendMessage: async (m: any) => { msg = m; } } },
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
-    expect(msg).toEqual({ type: 'dweb/base-host/unshare-app', name: 'A', publisher: 'pub', hash: 'h' });
+    expect(msg).toEqual({ type: 'dweb/base-host/unshare-app', name: 'A', slug: 'custom-a', publisher: 'pub', hash: 'h' });
   });
   test('does NOT unshare a purely-local app even with dweb fully on', async () => {
     let sent = false;

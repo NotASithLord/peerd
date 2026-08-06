@@ -39,6 +39,18 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 })()`);
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
+const TRANSFER_EXPORT_VERSION = 2;
+
+// Transfer routes require the exact options-page Port. Keep the live E2E on
+// that production boundary instead of calling the generic dispatcher.
+const privateTransferRpc = (page, message) => evalIn(page, `(async () => {
+  const browser = (await import('/vendor/browser-polyfill.js')).default;
+  const { makePrivateTransferClient } = await import('/options/private-transfer-client.js');
+  globalThis.__peerdE2eTransferClient ??= makePrivateTransferClient({
+    connect: () => browser.runtime.connect({ name: 'private-transfer' }),
+  });
+  return globalThis.__peerdE2eTransferClient.call(${JSON.stringify(message)});
+})()`, true);
 
 // The local-first personal-data agent, end to end through the REAL stack: the
 // faked model calls script, the sealed worker builds an on-device index in OPFS
@@ -184,6 +196,240 @@ export const STATES = [
       rec.check('assistant turn renders the streamed text', out.assistantText === SMOKE_TEXT, JSON.stringify(out.assistantText));
       rec.check('turn reaches a terminal/idle state', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // --- functional: portable identity through the live SW + offscreen host ---
+  {
+    name: 'portable-identity', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const transferPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
+      let exported = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      if (!exported?.payload?.dweb?.identityRecord) {
+        // The harness initializes a new vault but does not perform the later
+        // unlock wake that normally starts the base network and mints its root.
+        // Seed through the shipped encrypted restore surface. No raw root uses
+        // the generic runtime-message dispatcher.
+        const bootstrap = await evalIn(ctx.page, `(async () => {
+          const dweb = await import('/peerd-distributed/index.js');
+          let value = null;
+          await dweb.createPersistentIdentity({
+            getSecret: async () => null,
+            setSecret: async (_name, next) => { value = next; },
+          });
+          const material = JSON.parse(value);
+          return dweb.createDwebClient().identityRecordExport({
+            material, passphrase: ${JSON.stringify(PASSPHRASE)},
+          });
+        })()`, true);
+        const seeded = await privateTransferRpc(transferPage, {
+          type: 'transfer/import', passphrase: PASSPHRASE,
+          payload: {
+            format: 'peerd-export', version: TRANSFER_EXPORT_VERSION, exportedAt: new Date(0).toISOString(), channel: 'preview',
+            settings: {}, providerEndpoints: null, secrets: null, memory: null,
+            hooks: [], skills: [], dweb: { identityRecord: bootstrap },
+          },
+        });
+        rec.check('test fixture restores only through the encrypted transfer surface',
+          seeded?.ok === true && seeded?.imported?.dwebIdentity === 1, JSON.stringify(seeded));
+        exported = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      }
+      const record = exported?.payload?.dweb?.identityRecord;
+      const beforeDid = record?.did ?? null;
+      rec.check('preview identity exists in the unlocked vault',
+        typeof beforeDid === 'string' && beforeDid.startsWith('did:key:'), JSON.stringify(beforeDid));
+      rec.check('live export includes an encrypted identity record',
+        exported?.ok === true && typeof record?.capsule === 'string' && record?.did?.startsWith('did:key:'),
+        JSON.stringify({ ok: exported?.ok, error: exported?.error, did: record?.did }));
+
+      const inspected = await privateTransferRpc(transferPage, { type: 'transfer/inspectImport', payload: exported?.payload });
+      rec.check('pre-flight names the identity and requires its passphrase',
+        inspected?.ok === true && inspected.summary?.hasIdentityRecord === true
+          && inspected.summary?.requiresPassphrase === true && inspected.summary?.identityDid === record?.did,
+        JSON.stringify(inspected?.summary));
+
+      const wrong = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: exported?.payload, passphrase: `${PASSPHRASE}-wrong`,
+      });
+      rec.check('wrong identity passphrase fails closed',
+        wrong?.ok === false && wrong?.error === 'wrong-passphrase', JSON.stringify(wrong));
+
+      const restored = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: exported?.payload, passphrase: PASSPHRASE,
+      });
+      const after = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      const afterDid = after?.payload?.dweb?.identityRecord?.did ?? null;
+      rec.check('same-did restore authenticates without replacing the local root',
+        restored?.ok === true && restored.imported?.dwebIdentity === 0
+          && afterDid === beforeDid,
+        JSON.stringify({ restored, beforeDid, afterDid }));
+
+      const incoming = await evalIn(ctx.page, `(async () => {
+        const dweb = await import('/peerd-distributed/index.js');
+        let value = null;
+        await dweb.createPersistentIdentity({
+          getSecret: async () => null,
+          setSecret: async (_name, next) => { value = next; },
+        });
+        const material = JSON.parse(value);
+        const record = await dweb.createDwebClient().identityRecordExport({
+          material, passphrase: ${JSON.stringify(PASSPHRASE)},
+        });
+        return { record, did: record.did };
+      })()`, true);
+      const replacementPayload = {
+        ...exported.payload,
+        settings: {}, providerEndpoints: null, secrets: null,
+        memory: null, hooks: [], skills: [],
+        dweb: { identityRecord: incoming.record },
+      };
+      const conflict = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: replacementPayload, passphrase: PASSPHRASE,
+      });
+      rec.check('a different live identity stops for explicit approval',
+        conflict?.ok === false && conflict?.error === 'dweb-identity-conflict'
+          && conflict.conflict?.existingDid === record.did
+          && conflict.conflict?.incomingDid === incoming.did,
+        JSON.stringify(conflict));
+
+      const replaced = await privateTransferRpc(transferPage, {
+        type: 'transfer/import', payload: replacementPayload, passphrase: PASSPHRASE,
+        replaceDwebIdentity: true,
+        approvedExistingDwebDid: conflict?.conflict?.existingDid,
+        approvedIncomingDwebDid: conflict?.conflict?.incomingDid,
+      });
+      const exportedAfterReplace = await privateTransferRpc(transferPage, {
+        type: 'transfer/export', passphrase: PASSPHRASE,
+      });
+      const storedDid = exportedAfterReplace?.payload?.dweb?.identityRecord?.did ?? null;
+      rec.check('approved replacement commits the incoming permanent identity',
+        replaced?.ok === true && replaced.identityOutcome === 'replaced'
+          && replaced.imported?.dwebIdentity === 1 && storedDid === incoming.did,
+        JSON.stringify({ replaced, storedDid, incomingDid: incoming.did }));
+
+      const restarted = await rpc(ctx.page, { type: 'dweb/base-host/start' });
+      rec.check('the peer host starts under the restored identity after lease release',
+        restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
+        JSON.stringify(restarted));
+      await rec.shot('final');
+      try { transferPage.close(); } catch { /* */ }
+    },
+  },
+
+  // --- visual: portable identity backup + destructive restore conflict ------
+  {
+    name: 'options-transfer', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/transfer');
+      try {
+        await waitFor(() => evalIn(page, `!!document.querySelector('#exppass')`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await rec.visualPage('options-transfer', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-transfer-conflict', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const seedPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
+      const localExport = await privateTransferRpc(seedPage, { type: 'transfer/export', passphrase: PASSPHRASE });
+      let localReady = !!localExport?.payload?.dweb?.identityRecord;
+      if (!localReady) {
+        const record = await evalIn(ctx.page, `(async () => {
+          const dweb = await import('/peerd-distributed/index.js');
+          let value = null;
+          await dweb.createPersistentIdentity({ getSecret: async () => null, setSecret: async (_name, next) => { value = next; } });
+          return dweb.createDwebClient().identityRecordExport({
+            material: JSON.parse(value), passphrase: ${JSON.stringify(PASSPHRASE)},
+          });
+        })()`, true);
+        await privateTransferRpc(seedPage, {
+          type: 'transfer/import', passphrase: PASSPHRASE,
+          payload: {
+            format: 'peerd-export', version: TRANSFER_EXPORT_VERSION, exportedAt: new Date(0).toISOString(), channel: 'preview',
+            settings: {}, providerEndpoints: null, secrets: null, memory: null,
+            hooks: [], skills: [], dweb: { identityRecord: record },
+          },
+        });
+        const postBootstrap = await privateTransferRpc(seedPage, {
+          type: 'transfer/export', passphrase: PASSPHRASE,
+        });
+        localReady = !!postBootstrap?.payload?.dweb?.identityRecord;
+      }
+      try { seedPage.close(); } catch { /* */ }
+      const incoming = await evalIn(ctx.page, `(async () => {
+        const dweb = await import('/peerd-distributed/index.js');
+        let value = null;
+        await dweb.createPersistentIdentity({ getSecret: async () => null, setSecret: async (_name, next) => { value = next; } });
+        const material = JSON.parse(value);
+        const record = await dweb.createDwebClient().identityRecordExport({
+          material, passphrase: ${JSON.stringify(PASSPHRASE)},
+        });
+        return { material, record };
+      })()`, true);
+      const payload = {
+        format: 'peerd-export', version: TRANSFER_EXPORT_VERSION, exportedAt: new Date(0).toISOString(), channel: 'preview',
+        // why: keep the complete-value disclosure in the same visual contract
+        // as the destructive conflict. A long recognized array catches both
+        // accidental truncation and wrapping regressions before the user acts.
+        settings: {
+          openrouterModels: [
+            'review/complete-setting-value-that-must-remain-visible-without-ellipsis-or-clipping-0123456789',
+            'review/second-model-preserves-the-array-shape-and-confirms-every-value-is-inspectable',
+          ],
+        },
+        providerEndpoints: null, secrets: null, memory: null, hooks: [], skills: [],
+        dweb: { identityRecord: incoming?.record },
+      };
+      const page = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#peerd-backup-file' });
+      try {
+        await evalIn(page, `(() => {
+          const file = new File([${JSON.stringify(JSON.stringify(payload))}], 'identity-backup.json', { type: 'application/json' });
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          const input = document.querySelector('#peerd-backup-file');
+          input.files = transfer.files;
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#imppass')`),
+          { budgetMs: 15_000, pollMs: 80 });
+        await evalIn(page, `(() => {
+          const input = document.querySelector('#imppass');
+          input.value = ${JSON.stringify(PASSPHRASE)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        await waitFor(() => evalIn(page, `[...document.querySelectorAll('button')].some((button) => button.textContent === 'Apply import' && !button.disabled)`),
+          { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Apply import')?.click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#identity-conflict')`),
+          { budgetMs: 20_000, pollMs: 80 });
+        await evalIn(page, `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Review identity replacement')?.click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#identity-replace-confirmation')`),
+          { budgetMs: 5_000, pollMs: 80 });
+        await evalIn(page, `document.querySelector('.import-setting-values > summary')?.click()`);
+        await waitFor(() => evalIn(page, `(() => {
+          const disclosure = document.querySelector('.import-setting-values');
+          const value = disclosure?.querySelector('code')?.textContent ?? '';
+          return disclosure?.open === true
+            && value.includes('complete-setting-value-that-must-remain-visible')
+            && value.includes('second-model-preserves-the-array-shape');
+        })()`), { budgetMs: 5_000, pollMs: 80 });
+        const state = await evalIn(page, `(() => ({
+          conflict: document.querySelector('#identity-conflict')?.textContent,
+          confirmation: document.querySelector('#identity-replace-confirmation')?.textContent,
+          danger: !!document.querySelector('button.danger'),
+          settingsDisclosureOpen: document.querySelector('.import-setting-values')?.open === true,
+        }))()`);
+        rec.check('destructive identity replacement requires a second confirmation',
+          state?.danger === true && state?.settingsDisclosureOpen === true
+            && /Existing peers will see a new identity/.test(state?.confirmation ?? ''),
+          JSON.stringify({ local: localReady, incoming: !!incoming?.record, state }));
+        await evalIn(page, `document.querySelector('#identity-replace-confirmation')?.scrollIntoView({ block: 'center' })`);
+        await rec.visualPage('options-transfer-conflict', page);
+      } finally { try { page.close(); } catch { /* */ } }
     },
   },
 
@@ -954,7 +1200,6 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
-
   // --- visual: the STANDALONE TAB PAGES ---------------------------------------
   //
   // Coverage audit finding: every visual baseline photographed the side panel,
