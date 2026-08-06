@@ -179,11 +179,11 @@ jobs:
           [[ "$geckodriver" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "invalid geckodriver pin: $geckodriver" >&2; exit 1; }
           echo "firefox=$firefox" >> "$GITHUB_OUTPUT"
           echo "geckodriver=$geckodriver" >> "$GITHUB_OUTPUT"
-      - uses: browser-actions/setup-firefox@49cdbfc200e72729ff368b519201904af267e90c # v1.7.2
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1.7.2
         id: firefox
         with:
           firefox-version: ${{ steps.browser-pins.outputs.firefox }}
-      - uses: browser-actions/setup-geckodriver@bf8266f624ca122cedb6d0381a031f18f6c431cd # master, Node 24; no release tag
+      - uses: browser-actions/setup-geckodriver@fac5b0424c584257f32cf12c5eb4ba86014c34f8 # latest built branch, Node 24; no release tag
         with:
           geckodriver-version: ${{ steps.browser-pins.outputs.geckodriver }}
           token: ${{ secrets.GITHUB_TOKEN }}
