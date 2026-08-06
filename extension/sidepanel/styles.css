@@ -1180,6 +1180,9 @@ button.icon.is-active {
 .tool-call.tool-failed {
   border-color: var(--danger);
 }
+.tool-call.tool-failed .actor-body .error-line {
+  color: var(--fg);
+}
 .tool-call.tool-pending { opacity: 0.85; }
 
 .tool-call-header {

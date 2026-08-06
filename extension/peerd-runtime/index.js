@@ -107,7 +107,7 @@ export { makeTurnCostTracker } from './cost/turn-tracker.js';
 
 // --- spawned (orchestration over sessions; see docs/ACTORS.md) ------
 export {
-  makeSpawnActor, narrowTools, finalAssistantText,
+  makeSpawnActor, narrowTools, finalAssistantText, finalActorTurnReply,
   restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
 } from './actor/spawn.js';
@@ -494,6 +494,8 @@ export {
 
 // --- errors -------------------------------------------------------------
 export {
+  ActorCredentialBoundaryError,
+  ACTOR_CREDENTIAL_BOUNDARY_FAILURE, ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE,
   SessionNotFoundError,
   RuntimeContextIncompleteError,
 } from './errors.js';

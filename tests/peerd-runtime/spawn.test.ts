@@ -2,11 +2,12 @@ import { describe, test, expect } from 'bun:test';
 import {
   makeSpawnActor,
   narrowTools,
-  finalAssistantText,
+  finalActorTurnReply, finalAssistantText,
   restrictCtxCapabilities,
   CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH,
 } from '../../extension/peerd-runtime/actor/spawn.js';
+import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '../../extension/peerd-runtime/errors.js';
 
 // ---- pure helpers ---------------------------------------------------------
 
@@ -53,6 +54,27 @@ describe('finalAssistantText', () => {
   test('empty string when there is no assistant text', () => {
     expect(finalAssistantText({ messages: [{ role: 'user', content: 'hi' }] } as any)).toBe('');
     expect(finalAssistantText(undefined)).toBe('');
+  });
+});
+
+describe('finalActorTurnReply', () => {
+  test('preserves a persisted provider refusal as a failed actor reply', () => {
+    expect(finalActorTurnReply({ messages: [
+      { role: 'assistant', content: 'partial text', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE },
+    ] } as any)).toEqual({
+      result: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
+      stopped: true,
+    });
+  });
+
+  test('returns clean text and keeps the empty-turn Stop fallback', () => {
+    expect(finalActorTurnReply({ messages: [
+      { role: 'assistant', content: 'done' },
+    ] } as any)).toEqual({ result: 'done' });
+    expect(finalActorTurnReply({ messages: [] } as any)).toEqual({
+      result: 'the actor turn was stopped before it produced a reply.',
+      stopped: true,
+    });
   });
 });
 
@@ -265,8 +287,12 @@ describe('makeSpawnActor — the in-SW fallback loop is keyless', () => {
     // Not the injected live credentials — and not merely absent: calling them
     // throws, so a loop (or anything reachable from its frame) that reaches for
     // the key fails loudly instead of silently succeeding.
-    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
-    await expect(loopCtx.safeFetch('https://example.com')).rejects.toThrow(/no egress/);
+    await expect(loopCtx.getSecret('anthropic')).rejects.toMatchObject({
+      name: 'ActorCredentialBoundaryError', capability: 'secret',
+    });
+    await expect(loopCtx.safeFetch('https://example.com')).rejects.toMatchObject({
+      name: 'ActorCredentialBoundaryError', capability: 'provider-network',
+    });
   });
 
   test('the model call still receives the REAL credentials from the wrapper', async () => {
@@ -300,7 +326,9 @@ describe('makeSpawnActor — the in-SW fallback loop is keyless', () => {
     expect(await modelCalls[0].getSecret('anthropic')).toBe('sk-test');
     expect(typeof modelCalls[0].safeFetch).toBe('function');
     // And the loop's own view is still the stub, even though it forwarded it.
-    await expect(loopCtx.getSecret('anthropic')).rejects.toThrow(/no secret access/);
+    await expect(loopCtx.getSecret('anthropic')).rejects.toMatchObject({
+      name: 'ActorCredentialBoundaryError', capability: 'secret',
+    });
   });
 });
 

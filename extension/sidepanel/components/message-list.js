@@ -25,7 +25,9 @@
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
-import { formatBytes, classifyFailure } from '/peerd-runtime/index.js';
+import {
+  ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE, classifyFailure, formatBytes,
+} from '/peerd-runtime/index.js';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
 /** @typedef {import('../chat-reducer.js').SpawnedSession} SpawnedSession */
@@ -294,13 +296,20 @@ const ActorReplyMessage = {
     // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
     // the role label above the bubble already says who this is.
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
+    const notRun = reply.failed === true
+      && /actor-provider-boundary-blocked|model request was not run/i.test(body);
+    const displayBody = notRun ? ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE : body;
     // A `via:'script'` reply came from a fire-and-forget delegation inside an
     // earlier script run — it can land minutes later, so name its origin or the
     // bubble is unexplainable to a user who never saw the fan-out happen.
     const via = /** @type {{ via?: string }} */ (reply).via;
     return m(`.message.message-actor-reply${reply.failed ? '.failed' : ''}`, [
-      m('.role', [label, via === 'script' ? ' · delegated by an earlier script' : '', reply.failed ? ' · failed' : '']),
-      m('.bubble', renderText(stripUntrustedFences(body))),
+      m('.role', [
+        label,
+        via === 'script' ? ' · delegated by an earlier script' : '',
+        reply.failed ? ` · ${notRun ? 'Not run' : 'failed'}` : '',
+      ]),
+      m('.bubble', renderText(stripUntrustedFences(displayBody))),
     ]);
   },
 };
@@ -641,6 +650,10 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
   const childSession = childId ? spawned?.sessions?.[childId] : null;
   const task = childSession?.task ?? toolUse.input?.task ?? '';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
+  const terminalLabel = status === 'pending' ? 'running…'
+    : status === 'cancelled' ? 'cancelled'
+    : status === 'failed' ? 'failed'
+    : 'done';
 
   const onToggle = () => {
     ui.expanded = !ui.expanded;
@@ -650,16 +663,17 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
   };
 
   return m(`.tool-call.tool-actor.tool-${status}`, [
-    m('.tool-call-header', { onclick: onToggle }, [
+    m('button.tool-call-header', {
+      type: 'button', onclick: onToggle, 'aria-expanded': String(ui.expanded),
+    }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
         { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'actor_create'),
       m('span.tool-args', `"${truncate(String(task), 48)}"`),
       m('.spacer'),
-      status === 'pending' ? m('span.tool-pending', 'running…')
-        : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
-        : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
+      m(`span.tool-${status === 'pending' ? 'pending' : 'duration'}`, terminalLabel),
+      meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
     ]),
     ui.expanded ? m('.actor-body', [
       status === 'failed' && toolResult
@@ -706,33 +720,58 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     : card?.streaming ? 'pending'
     : card ? 'ok'
     : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
+  const resultText = toolResult ? formatResultContent(toolResult) : '';
+  const notRun = status === 'failed'
+    && /not run|actor-provider-boundary-blocked|actor isolation|isolated worker.*(did not|unavailable)/i
+      .test(`${card?.error ?? ''} ${resultText}`);
+  const handedOff = !card && toolUse.input?.await === true
+    && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
+  const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true
+    && toolUse.input?.await !== true;
+  const completedAwait = !card && !!toolResult && toolResult.is_error !== true
+    && toolUse.input?.await === true && !handedOff;
+  const terminalLabel = status === 'pending' ? 'working…'
+    : status === 'cancelled' ? 'cancelled'
+    : status === 'failed' ? (notRun ? 'Not run' : 'failed')
+    : handedOff ? 'handed off'
+    : acceptedAsync ? 'accepted'
+    : 'done';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
   const onToggle = () => { ui.expanded = !ui.expanded; };
   return m(`.tool-call.tool-actor.tool-${status}`, [
-    m('.tool-call-header', { onclick: onToggle }, [
+    m('button.tool-call-header', {
+      type: 'button', onclick: onToggle, 'aria-expanded': String(ui.expanded),
+    }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
         { title: status === 'failed' ? 'failed' : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'message_actor'),
       m('span.tool-args', `${cardLabel}: "${truncate(task, 40)}"`),
       m('.spacer'),
-      status === 'pending' ? m('span.tool-pending', 'working…')
-        // Show the spend chip whenever a tally is present — incl. $0.00 for a
-        // keyless/Ollama turn — so a completed card always carries a terminal chip.
-        : card?.cost ? m('span.tool-duration', { title: 'this actor turn’s spend' }, `$${Number(card.cost.cost ?? 0).toFixed((card.cost.cost ?? 0) < 0.01 ? 4 : 2)}`)
-        : null,
+      m(`span.tool-${status === 'pending' ? 'pending' : 'duration'}`, terminalLabel),
+      // Spend stays separate so the terminal state is visible even at $0.00.
+      card?.cost ? m('span.tool-duration', { title: 'this actor turn’s spend' }, `$${Number(card.cost.cost ?? 0).toFixed((card.cost.cost ?? 0) < 0.01 ? 4 : 2)}`) : null,
     ]),
     ui.expanded ? m('.actor-body', [
-      card?.error ? m('p.error-line', String(card.error)) : null,
-      tooDeep
+      card?.error
+        ? m('p.error-line', notRun ? ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE : String(card.error))
+        : null,
+      !card?.error && toolResult?.is_error
+        ? m('p.error-line', notRun ? ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE : resultText)
+        : null,
+      card?.error || toolResult?.is_error
+        ? null
+        : tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
         : (card && Array.isArray(card.messages) && card.messages.length > 0)
           ? m('.actor-transcript',
               renderTranscript({ messages: card.messages, actors, spawned, loadActor, peerName, depth: depth + 1 }))
+          : completedAwait
+            ? m('pre.tool-result-content', resultText)
+            : handedOff
+              ? m('p.muted', 'the actor is still working; check later messages for the reply')
           : m('p.muted', card?.streaming ? 'actor working…'
-              // No card after a non-error "delivered" ack = the reply already landed
-              // on a later turn (the live stream was lost to a reload / SW restart).
-              : (!card && toolResult && !toolResult.is_error) ? 'reply delivered on a later turn'
+              : (!card && toolResult && !toolResult.is_error) ? 'request accepted; check later messages for the reply'
               : 'no actor activity yet — its reply will arrive on a later turn'),
     ]) : null,
   ]);

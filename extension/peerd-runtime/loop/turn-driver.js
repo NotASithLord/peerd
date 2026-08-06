@@ -22,7 +22,9 @@
 import {
   ProviderHttpError, ProviderKeyMissingError, ProviderUsageLimitError, UnknownProviderError,
 } from '/peerd-provider/index.js';
-import { SessionNotFoundError } from '../errors.js';
+import {
+  ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
+} from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
 import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
@@ -162,6 +164,18 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // the egress boundary scopes to the FIXED origin for an API actor.
   /** @type {'tab'|'api'|undefined} */
   const actorBacking = isActor ? turnSession.backing : undefined;
+  // Firefox has no offscreen actor host, so a bound actor can reach this
+  // in-service-worker loop. Keep the live provider credentials out of that
+  // loop frame just as the spawned-actor fallback does. The model wrapper
+  // below restores them only at the provider-call boundary. This narrows
+  // custody but does not create heap isolation; that contract is tracked
+  // separately in #305.
+  const loopCredentials = isActor
+    ? {
+      getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
+      safeFetch: async () => { throw new ActorCredentialBoundaryError('provider-network'); },
+    }
+    : { getSecret, safeFetch };
 
   // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
   // message_actor (display set; absent on a boot redrain), re-emit its stream as
@@ -530,14 +544,27 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // unconfigured (resolveFailoverChain returns just the primary).
   /** @type {{ provider: string, model: string } | null} */ let failoverLastGood = null;
   const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
-    const start = failoverLastGood ?? { provider: modelArgs.provider, model: modelArgs.model };
+    // Pin the first candidate to the persisted turn record. The loop normally
+    // forwards those same values, but the in-SW actor is not a trust boundary:
+    // it must not select another keyed adapter by colliding with broker fields.
+    // Later calls stay on a successful failover candidate for this turn.
+    const start = failoverLastGood ?? {
+      provider: costSession?.provider ?? modelArgs.provider,
+      model: costSession?.model ?? modelArgs.model,
+    };
     const chain = resolveFailoverChain(start);
-    // The context inspector sees every ORCHESTRATOR model call here — the
-    // one seam every step of every main turn passes through. (Actors and
-    // spawned are captured at the SW's actor/model-call relay instead.)
+    // The context inspector sees main turns and the bound-actor in-SW
+    // fallback here. Offscreen actors use the actor/model-call relay; spawned
+    // in-SW children use their capped wrapper.
     // record() is contractually non-throwing; label with the provider the
     // call will actually start on.
-    recordModelCall({ ...modelArgs, provider: start.provider, model: start.model, sessionId, label: 'main' });
+    recordModelCall({
+      ...modelArgs,
+      provider: start.provider,
+      model: start.model,
+      sessionId,
+      label: isActor ? `actor ${actorType ?? 'bound'} (in-SW)` : 'main',
+    });
     // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
     // #104). Thread it from settings for every candidate; non-ollama adapters
     // ignore the extra arg. (The configured host is also on the egress allowlist.)
@@ -547,7 +574,19 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       const cand = chain[i];
       let streamedContent = false;
       try {
-        for await (const ev of callModel({ ...modelArgs, ollamaHost, provider: cand.provider, model: cand.model })) {
+        // The loop forwards its credential fields with every model call. For
+        // an in-SW actor those fields are throwing stubs, so all broker-owned
+        // fields must come AFTER modelArgs. Reversing this order lets the loop
+        // change credential custody, provider choice, or cancellation.
+        for await (const ev of callModel({
+          ...modelArgs,
+          ollamaHost,
+          provider: cand.provider,
+          model: cand.model,
+          signal: abortController.signal,
+          getSecret,
+          safeFetch,
+        })) {
           // rate-limit-pause is the adapter's pre-stream backoff signal, not
           // model output — failover stays safe while only those have flowed.
           if (ev.type !== 'rate-limit-pause') streamedContent = true;
@@ -558,11 +597,15 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       } catch (e) {
         lastErr = e;
         const isLast = i === chain.length - 1;
+        const aborted = abortController.signal.aborted
+          || (/** @type {{ name?: string }} */ (e))?.name === 'AbortError';
         // Can't fail over once real output streamed (would duplicate it);
         // the PRIMARY only triggers a switch on a failover-worthy error,
         // while a fallback already in the chain is advanced on any pre-stream
         // failure (a backup that's also down/keyless shouldn't dead-end).
-        if (streamedContent || isLast) throw e;
+        // A Stop is never provider unavailability. Refuse to read another
+        // provider key or emit a misleading failover note after cancellation.
+        if (aborted || streamedContent || isLast) throw e;
         if (i === 0 && !shouldFailover(e)) throw e;
         const to = chain[i + 1];
         auditLog.append({
@@ -603,8 +646,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // persistently-overloaded or out-of-credit provider switches to a
       // configured fallback mid-turn instead of failing the whole turn.
       callModel: callModelWithFailover,
-      getSecret,
-      safeFetch,
+      // Bound actors on the in-SW fallback get throwing stubs. Main turns keep
+      // the live functions. callModelWithFailover brokers the real credentials
+      // at the provider boundary for both paths.
+      ...loopCredentials,
       sessions,
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
@@ -662,6 +707,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // guard (the switch's 'stop' case is panel-only). 'aborted' here = Stop /
       // steer / a spend-limit halt — an outer goal loop must not re-drive it.
       if (ev.type === 'stop') lastStopReason = ev.stopReason;
+      // The production loop turns provider failures into stream events. Fold
+      // their outcome before the UI guard so background and Goal turns fail
+      // even when no panel is connected.
+      if (ev.type === 'error') turnOk = false;
       if (!uiConnected()) continue;
       switch (ev.type) {
         case 'state':
@@ -749,6 +798,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       : e instanceof ProviderHttpError ? `provider-http-${e.status}`
       : e instanceof UnknownProviderError ? 'unknown-provider'
       : e instanceof SessionNotFoundError ? 'session-not-found'
+      : e instanceof ActorCredentialBoundaryError ? ACTOR_CREDENTIAL_BOUNDARY_FAILURE
       : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error';
     turnOk = false;
     if (uiConnected()) {

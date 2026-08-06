@@ -37,6 +37,7 @@ import './unit/peerd-provider/ollama-recommend.test.js';
 import './unit/peerd-runtime/sessions-store.test.js';
 import './unit/peerd-runtime/agent-loop.test.js';
 import './unit/peerd-runtime/actor-spawn.test.js';
+import './unit/peerd-runtime/turn-driver-credentials.test.js';
 import './unit/peerd-runtime/dispatcher.test.js';
 import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';

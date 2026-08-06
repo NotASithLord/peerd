@@ -34,6 +34,7 @@
 // no chrome.*/DOM) and lives in the same module dir → intra-module import, worker-
 // portable, Bun-testable.
 import { fenceWebActorSummary, fenceApiActorSummary } from './web-actor.js';
+import { ActorCredentialBoundaryError } from '../errors.js';
 
 /**
  * The final assistant text of a session — a loop's return value. Inlined (not
@@ -228,8 +229,8 @@ export const runActorLoop = async (deps, req) => {
     // A bound actor is keyless/egress-less in its own heap: getSecret/safeFetch
     // are never consumed by its tools (they relay to the SW). Throwing stubs make
     // any accidental use fail LOUD in the worker (which has neither).
-    getSecret: async () => { throw new Error('actor worker has no secret access'); },
-    safeFetch: async () => { throw new Error('actor worker has no egress'); },
+    getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
+    safeFetch: async () => { throw new ActorCredentialBoundaryError('provider-network'); },
     sessions,
     getSystemPrompt,
     appendAudit,

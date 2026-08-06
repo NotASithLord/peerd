@@ -39,7 +39,9 @@ const parseResponse = async (response, method, path) => {
   return payload?.value;
 };
 
-export const startGeckodriver = async ({ binary, firefoxBinary, prefs = {} }) => {
+export const startGeckodriver = async ({
+  binary, firefoxBinary, prefs = {}, acceptInsecureCerts = false, proxy = null,
+}) => {
   const port = await reservePort();
   const logs = [];
   const child = spawn(binary, ['--host', '127.0.0.1', '--port', String(port), '--log', 'info'], {
@@ -99,7 +101,8 @@ export const startGeckodriver = async ({ binary, firefoxBinary, prefs = {} }) =>
         capabilities: {
           alwaysMatch: {
             browserName: 'firefox',
-            acceptInsecureCerts: false,
+            acceptInsecureCerts,
+            ...(proxy ? { proxy } : {}),
             'moz:firefoxOptions': {
               binary: firefoxBinary,
               args: ['-headless', '-no-remote'],

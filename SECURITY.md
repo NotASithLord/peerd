@@ -58,19 +58,16 @@ Understanding the boundaries helps you scope a report:
   Preview dweb builds also use signaling and peer-to-peer WebRTC. The current
   implementations live in `peerd-egress/`, `peerd-engine/`,
   `peerd-distributed/`, and the service-worker wiring.
-- **Untrusted-content boundary (the heap split).** The main agent never
-  sees raw page content: page/DOM work is delegated to a per-tab **web
-  actor**, a separate agent loop that, on Chrome, runs in its own Worker
-  heap, holds no key, no `chrome.*`, and no egress, and reaches the model,
-  the network, or the page only by asking the service worker, which holds
-  the key and re-checks every request. Untrusted content (page text,
-  command output, file contents) stays inside that heap and returns to the
-  orchestrator only as a `wrapUntrusted`-fenced summary. Actors run the
-  same way: keyless, in their own heap, with a narrowed toolset. This is
-  the main prompt-injection defense. It is a memory boundary, not a prompt
-  convention. Firefox lacks the offscreen API and has no equivalent heap
-  separation. Spawned children remain keyless there, but bound actors run in
-  the service worker with live model credentials. This is a known residual risk.
+- **Untrusted-content boundary.** The main agent never sees raw page content.
+  Page and DOM work is delegated to a per-tab **web actor**. On Chrome, that
+  actor runs in its own Worker heap with no key or `chrome.*` access. Firefox
+  lacks the offscreen API, so its fallback actor loop shares the service-worker
+  realm. The fallback loop receives throwing credential stubs, and the service
+  worker adds live provider functions only at the model-call boundary. Every
+  tool call is still re-checked. Untrusted results return only as
+  `wrapUntrusted`-fenced data. Firefox therefore has credential custody, tool
+  gates, and the data fence, but not Chrome's memory boundary. This remaining
+  difference is a known risk.
 - **Policy-gated tool dispatch** with a local, append-only audit log. The
   current policy checks and hooks live in `peerd-runtime/tools/`.
 - **What the model reads is what you could have seen.** Bytes that are
@@ -117,8 +114,9 @@ states both plainly rather than counting them as defenses.
 ## In scope
 
 - Exfiltration of the vault / API key / conversation off-device.
-- Prompt injection that bypasses the actor boundary (the keyless
-  per-environment heap) and reaches the orchestrator's tools or memory.
+- Prompt injection that bypasses actor credential custody, tool gates, the
+  untrusted-content fence, or the isolated heap where one is available and
+  reaches the orchestrator's tools, memory, or key.
 - Sandbox escape (WebVM, Notebook, headless script, or App iframe) reaching the host,
   other origins, or the extension's privileged contexts.
 - Denylist / egress-chokepoint / SSRF-guard bypass.
