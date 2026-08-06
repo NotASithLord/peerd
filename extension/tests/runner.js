@@ -9,19 +9,38 @@
 // harness (scripts/cdp/run-inbrowser-tests.mjs) scrapes over CDP. The
 // harness exits non-zero on any failure.
 
-import './index.js';   // pulls in every *.test.js file by side effect
-import { run, summarize } from './framework.js';
-
 // why: runner.html always defines these elements; assert non-null so the
 // render/CI-marker writes below typecheck without scattering null guards.
 const summaryEl = /** @type {HTMLElement} */ (document.getElementById('summary'));
 const resultsEl = /** @type {HTMLElement} */ (document.getElementById('results'));
 const ciMarker = /** @type {HTMLElement} */ (document.getElementById('ci-marker'));
-const isCI = new URLSearchParams(location.search).has('ci');
+const search = new URLSearchParams(location.search);
+const isCI = search.has('ci');
+const only = search.get('only') ?? '';
+const shardMatch = /^(\d+)\/(\d+)$/.exec(search.get('shard') ?? '1/1');
+const shardNumber = Number(shardMatch?.[1] ?? 1);
+const shardCount = Number(shardMatch?.[2] ?? 1);
+const validShard = shardMatch !== null
+  && Number.isInteger(shardNumber) && Number.isInteger(shardCount)
+  && shardNumber >= 1 && shardNumber <= shardCount;
 
 (async () => {
+  if (!validShard) throw new Error('shard must use the form N/TOTAL with 1 <= N <= TOTAL');
+  // Dynamic imports keep module-graph failures inside this catch. With static
+  // imports, a Firefox-only parse or load error happens before the runner body
+  // exists and CI waits on a page that says only "Loading...".
+  await import('./index.js');   // pulls in every *.test.js file by side effect
+  const { run, summarize, countTests } = await import('./framework.js');
+  const total = countTests();
   const t0 = performance.now();
-  const results = await run();
+  /** @type {string[]} */
+  const started = [];
+  const results = await run((name) => {
+    started.push(name);
+    if (started.length > 30) started.shift();
+    summaryEl.dataset.testHistory = JSON.stringify(started);
+    summaryEl.textContent = `Running: ${name}`;
+  }, { only, shardIndex: shardNumber - 1, shardCount });
   const elapsed = performance.now() - t0;
   const { passed, failed } = summarize(results);
 
@@ -31,11 +50,19 @@ const isCI = new URLSearchParams(location.search).has('ci');
   resultsEl.replaceChildren(...results.map(renderSuite));
 
   if (isCI) {
-    ciMarker.textContent = `__TEST_RESULT__ ${JSON.stringify({ passed, failed, ms: Math.round(elapsed) })}`;
+    ciMarker.textContent = `__TEST_RESULT__ ${JSON.stringify({
+      passed, failed, total, shardNumber, shardCount, ms: Math.round(elapsed),
+    })}`;
   }
 })().catch((e) => {
-  summaryEl.textContent = `Runner crashed: ${e?.message ?? e}`;
+  const message = e?.message ?? String(e);
+  summaryEl.textContent = `Runner crashed: ${message}`;
   summaryEl.classList.add('fail');
+  if (isCI) {
+    ciMarker.textContent = `__TEST_RESULT__ ${JSON.stringify({
+      passed: 0, failed: 1, ms: 0, crash: message,
+    })}`;
+  }
   console.error(e);
 });
 

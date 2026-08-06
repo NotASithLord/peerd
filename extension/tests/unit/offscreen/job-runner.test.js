@@ -793,7 +793,7 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(r.usedEgress).toBe(true);   // the runtime lane fences the run too
     // Composed-and-ran, or the known CSP-blocked last hop — never anything else.
     const ok = r.value === 42
-      || String(r.error).includes('Failed to fetch dynamically imported module');
+      || String(r.error).includes('dynamically imported module');
     expect(ok).toBe(true);
   });
 

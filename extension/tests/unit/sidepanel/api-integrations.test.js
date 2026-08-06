@@ -125,7 +125,7 @@ describe('options.api-integrations', () => {
       key.value = 'at_abcdefghijklmnop'; key.dispatchEvent(new Event('input'));
       scheme.value = 'dpop'; scheme.dispatchEvent(new Event('change'));
       await flush();
-      apiForm.dispatchEvent(new Event('submit'));
+      apiForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await flush();
       const set = send.calls.find((c) => c.type === 'origin-cred/set');
       expect(set.scheme).toBe('dpop');
@@ -145,7 +145,7 @@ describe('options.api-integrations', () => {
       origin.value = 'api.github.com'; origin.dispatchEvent(new Event('input'));
       key.value = 'ghp_abcdefgh1234'; key.dispatchEvent(new Event('input'));
       await flush();
-      apiForm.dispatchEvent(new Event('submit'));
+      apiForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await flush();
       const set = send.calls.find((c) => c.type === 'origin-cred/set');
       expect(set).toBeTruthy();
