@@ -9,7 +9,7 @@
 // itself drives a full turn and belongs to the e2e harness.
 
 import { test, expect } from 'bun:test';
-import { makeTurnDriver } from '/peerd-runtime/loop/turn-driver.js';
+import { inboundActorCallAllowed, makeTurnDriver } from '/peerd-runtime/loop/turn-driver.js';
 
 /** Minimal deps maybeAutoResume touches; the rest stay undefined (never invoked). */
 const deps = (/** @type {any} */ over: any = {}) => ({
@@ -27,6 +27,22 @@ test('makeTurnDriver returns the two entry points', () => {
   const d = makeTurnDriver(deps());
   expect(typeof d.runAgentTurn).toBe('function');
   expect(typeof d.maybeAutoResume).toBe('function');
+});
+
+test('the in-SW inbound dweb fallback rejects forged hidden/signing tool calls', () => {
+  expect(inboundActorCallAllowed({
+    isActor: true, inbound: true, actorType: 'dweb', name: 'dweb_peers',
+  })).toBe(true);
+  for (const name of ['a2a_run', 'dweb_share', 'dweb_install', 'message_actor']) {
+    expect(inboundActorCallAllowed({
+      isActor: true, inbound: true, actorType: 'dweb', name,
+    })).toBe(false);
+  }
+  // The rule is specific to untrusted daemon wakes; ordinary actor turns keep
+  // their existing kind/grant gates.
+  expect(inboundActorCallAllowed({
+    isActor: true, inbound: false, actorType: 'dweb', name: 'a2a_run',
+  })).toBe(true);
 });
 
 test('maybeAutoResume no-ops when the setting is off (never reads the session)', async () => {

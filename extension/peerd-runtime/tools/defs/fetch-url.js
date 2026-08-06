@@ -118,7 +118,7 @@ export const fetchUrlTool = {
         tool: 'web:write', kind: 'web_write', origins: [parsed.origin],
         summary: `Allow a ${method} request to ${parsed.host}? This can send data out of the browser.`,
         sessionId: ctx.session?.sessionId ?? null,
-      }));
+      }), ctx.abortSignal);
       if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined', content: 'User declined the outbound write.' };
     }
 

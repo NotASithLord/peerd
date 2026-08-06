@@ -13,9 +13,10 @@ import {
 } from '../../extension/peerd-runtime/actor/actors-api.js';
 
 describe('the method table', () => {
-  test('exposes exactly list / ask — delegation only, no raw tools or fake cast', () => {
-    expect([...ACTORS_API_METHODS].sort()).toEqual(['ask', 'list']);
-    expect(actorsMethodDelegates('ask')).toBe(true);
+  test('exposes exactly list / call — GenServer request-reply, no fake cast', () => {
+    expect([...ACTORS_API_METHODS].sort()).toEqual(['call', 'list']);
+    expect(actorsMethodDelegates('call')).toBe(true);
+    expect(actorsMethodDelegates('ask')).toBe(true); // accepted compatibility alias, not advertised
     expect(actorsMethodDelegates('list')).toBe(false);
   });
 
@@ -26,20 +27,20 @@ describe('the method table', () => {
 });
 
 describe('actorsCallToOp — validation', () => {
-  test('ask requires to + goal, clamps timeoutMs, passes oneShot through', () => {
-    const r = actorsCallToOp({ method: 'ask', args: { to: 'vm-9', goal: 'run pytest', timeoutMs: 999_999, oneShot: true } });
-    expect(r).toEqual({ op: 'ask', args: { to: 'vm-9', goal: 'run pytest', timeoutMs: ACTORS_ASK_MAX_TIMEOUT_MS, oneShot: true }, delegates: true });
-    expect(() => actorsCallToOp({ method: 'ask', args: { goal: 'x' } })).toThrow(/to/);
-    expect(() => actorsCallToOp({ method: 'ask', args: { to: 'vm-9', goal: '  ' } })).toThrow(/goal/);
+  test('call requires address + message, clamps timeoutMs, passes oneShot through', () => {
+    const r = actorsCallToOp({ method: 'call', args: { address: 'vm-9', message: 'run pytest', timeoutMs: 999_999, oneShot: true } });
+    expect(r).toEqual({ op: 'call', args: { to: 'vm-9', goal: 'run pytest', timeoutMs: ACTORS_ASK_MAX_TIMEOUT_MS, oneShot: true }, delegates: true });
+    expect(() => actorsCallToOp({ method: 'call', args: { message: 'x' } })).toThrow(/address/);
+    expect(() => actorsCallToOp({ method: 'call', args: { address: 'vm-9', message: '  ' } })).toThrow(/message/);
   });
 
-  test('ask omits absent options (no undefined keys leak to the wire)', () => {
-    const r = actorsCallToOp({ method: 'ask', args: { to: 'web', goal: 'find the price' } });
+  test('call omits absent options (no undefined keys leak to the wire)', () => {
+    const r = actorsCallToOp({ method: 'call', args: { address: 'web', message: 'find the price' } });
     expect(r.args).toEqual({ to: 'web', goal: 'find the price' });
   });
 
   test('numeric tab handles from actors.list normalize to message_actor addresses', () => {
-    expect(actorsCallToOp({ method: 'ask', args: { to: 42, goal: 'inspect it' } }).args.to)
+    expect(actorsCallToOp({ method: 'call', args: { address: 42, message: 'inspect it' } }).args.to)
       .toBe('42');
   });
 
@@ -63,8 +64,9 @@ describe('shapeActorsResult — system failures reject, actor failures return', 
       .toEqual({ reply: 'the vm actor failed: …', failed: true });
   });
 
-  test('list shapes the roster string', () => {
-    expect(shapeActorsResult('list', { ok: true, roster: '{"tabs_columns":…}' })).toBe('{"tabs_columns":…}');
+  test('list returns structured, string-normalized refs', () => {
+    const refs = [{ ref: '42', type: 'tab', name: 'Docs', live: true, current: false, detail: 'https://example.com' }];
+    expect(shapeActorsResult('list', { ok: true, refs })).toEqual({ refs });
   });
 });
 
@@ -133,7 +135,7 @@ describe('the timeout tower derives from one ceiling', () => {
 describe('askOutcome — the timeout / system-refusal / actor-failure fork', () => {
   test('timeout rejects with the target + budget, regardless of what settled', () => {
     const r = askOutcome({ ok: true, content: 'late reply' }, { timedOut: true, timeoutMs: 5000, to: 'vm-9' });
-    expect(r).toEqual({ ok: false, error: "actors.ask: timed out after 5000ms awaiting 'vm-9'" });
+    expect(r).toEqual({ ok: false, error: "actors.call: timed out after 5000ms awaiting 'vm-9'" });
   });
   test('a clean reply returns { reply, failed:false }', () => {
     expect(askOutcome({ ok: true, content: 'done: 42' }, { timedOut: false, timeoutMs: 5000, to: 'vm-9' }))
@@ -151,6 +153,6 @@ describe('askOutcome — the timeout / system-refusal / actor-failure fork', () 
   test('a Stop-abort REJECTS — it must not masquerade as an actor failure a retry loop would grind on', () => {
     const r = askOutcome({ ok: false, error: 'the request was aborted (timeout or cancel) before the actor replied.' },
       { timedOut: false, aborted: true, timeoutMs: 5000, to: 'vm-9' });
-    expect(r).toEqual({ ok: false, error: "actors.ask: aborted (Stop) while awaiting 'vm-9'" });
+    expect(r).toEqual({ ok: false, error: "actors.call: aborted (Stop) while awaiting 'vm-9'" });
   });
 });

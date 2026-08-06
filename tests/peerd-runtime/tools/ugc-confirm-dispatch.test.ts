@@ -215,4 +215,25 @@ describe('UGC-zone forced confirmation — what the user and the record see', ()
     expect(ran).toBe(false);
     expect(r.ok).toBe(false);
   });
+
+  test('an aborted run dismisses its confirmation and never executes', async () => {
+    let ran = false;
+    let promptStarted = () => {};
+    const waiting = new Promise<void>((resolve) => { promptStarted = resolve; });
+    const controller = new AbortController();
+    registerTool(tool({ execute: async () => { ran = true; return { ok: true, content: 'x' }; } }) as any);
+    const { ctx } = makeCtx({ pinUrl: REPO_ROOT, confirmActions: true });
+    ctx.abortSignal = controller.signal;
+    ctx.confirm = async (_prompt: Prompt, signal?: AbortSignal) => {
+      promptStarted();
+      return new Promise((resolve) => signal?.addEventListener('abort', () => resolve('no'), { once: true }));
+    };
+    const pending = run(ctx);
+    await waiting;
+    controller.abort();
+    const result = await pending;
+    expect(ran).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
 });

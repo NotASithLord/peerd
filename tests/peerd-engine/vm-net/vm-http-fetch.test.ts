@@ -96,6 +96,27 @@ describe('makeVmHttpFetch — anti-exfil write gate', () => {
     await fetch({ url: 'not a url', method: 'POST' });
     expect(calls.confirm[0].origins).toEqual(['not a url']);
   });
+
+  test('a run abort cancels a pending write confirmation before egress', async () => {
+    const controller = new AbortController();
+    let confirmationStarted = () => {};
+    const waiting = new Promise<void>((resolve) => { confirmationStarted = resolve; });
+    const { fetch, calls } = build({
+      confirm: async (_prompt: any, signal?: AbortSignal) => {
+        expect(signal).toBe(controller.signal);
+        confirmationStarted();
+        return new Promise((resolve) => signal?.addEventListener('abort', () => resolve('no'), { once: true }));
+      },
+    });
+    const pending = fetch({
+      url: 'https://api.example.com/p', method: 'POST', body: b64('x'), signal: controller.signal,
+    });
+    await waiting;
+    controller.abort();
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(calls.fetch).toHaveLength(0);
+  });
 });
 
 describe('makeVmHttpFetch — host-bound git auth', () => {

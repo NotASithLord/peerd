@@ -11,23 +11,63 @@ let active = 0;
 let seq = 0;
 /** @type {Map<string, Worker>} */
 const liveWorkers = new Map();
+// actor/abort can beat actor/run while the offscreen command messages cross.
+// Keep a short, bounded tombstone so that ordering race cannot launch a Worker
+// after Stop. Run ids are SW-minted and never reused intentionally.
+/** @type {Map<string, number>} runId → expiry */
+const abortedEarly = new Map();
+const EARLY_ABORT_MAX = 64;
+const EARLY_ABORT_TTL_MS = 60_000;
+
+const pruneEarlyAborts = (now = Date.now()) => {
+  for (const [runId, expiresAt] of abortedEarly) {
+    if (expiresAt > now) break;
+    abortedEarly.delete(runId);
+  }
+  while (abortedEarly.size > EARLY_ABORT_MAX) {
+    const oldest = abortedEarly.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    abortedEarly.delete(oldest);
+  }
+};
+
+/** @param {string} runId */
+const rememberEarlyAbort = (runId) => {
+  const now = Date.now();
+  pruneEarlyAborts(now);
+  abortedEarly.delete(runId);
+  abortedEarly.set(runId, now + EARLY_ABORT_TTL_MS);
+  pruneEarlyAborts(now);
+};
+
+/** @param {string} runId */
+const consumeEarlyAbort = (runId) => {
+  pruneEarlyAborts();
+  if (!abortedEarly.has(runId)) return false;
+  abortedEarly.delete(runId);
+  return true;
+};
 
 /** @param {string} runId */
 export const abortActor = (runId) => {
   const w = liveWorkers.get(runId);
   if (w) { try { w.postMessage({ type: 'abort' }); } catch { /* gone */ } }
+  else rememberEarlyAbort(runId);
 };
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string }} job
+ * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string, inbound?: boolean }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any> }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean }>}
  */
 export const runActor = async (job, { workerUrl, sendToSW }) => {
+  const runId = job.runId ?? `aw-${++seq}`;
+  if (consumeEarlyAbort(runId)) {
+    return { ok: false, started: true, aborted: true, error: 'actor aborted before worker start' };
+  }
   if (active >= MAX_CONCURRENT) return { ok: false, started: false, error: `actor worker rejected: ${MAX_CONCURRENT} already running` };
   active++;
-  const runId = job.runId ?? `aw-${++seq}`;
   // The SW-minted relay grant for this run. It stays in THIS scope — never posted to
   // the Worker — so the untrusted heap can't lift it, and every relay below carries it
   // as proof of which run is speaking. The SW derives the run + session from it and
@@ -97,6 +137,9 @@ export const runActor = async (job, { workerUrl, sendToSW }) => {
         // web/API actor's self-fence provenance (actorType/backing/tabUrl/origin →
         // the worker rebuilds ctx.fenceActorSummary). Undefined for engine actors.
         oneShot: job.oneShot, actorType: job.actorType, backing: job.backing, tabUrl: job.tabUrl, origin: job.origin,
+        // Provenance is host-stamped and monotonic. The Worker consumes it for
+        // loop semantics; actual tool authority remains enforced by the SW grant.
+        inbound: job.inbound === true,
       });
     });
   } catch (e) {

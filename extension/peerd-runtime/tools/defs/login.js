@@ -154,7 +154,7 @@ export const loginTool = {
     //    site_client_write) so it prompts EVEN when confirmations are globally off.
     //    The origin is system-derived (step 2) and the method/provider come from the
     //    verified classifier (step 5), so the summary cannot be spoofed by the model.
-    const confirmAny = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
     if (!confirmAny) return { ok: false, error: 'login_declined', content: 'No confirmation channel available for a sign-in.' };
     const summary = v.method === 'passkey'
@@ -174,7 +174,7 @@ export const loginTool = {
       verified: v.verified === true,
       summary,
       sessionId: ctx.session?.sessionId ?? null,
-    });
+    }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'login_declined', content: 'User declined the sign-in.' };
     }

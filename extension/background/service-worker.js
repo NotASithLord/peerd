@@ -291,7 +291,7 @@ import {
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
-  ACTORS_RUN_MAX_OPS,
+  ACTORS_RUN_MAX_OPS, canonicalCodeTraceLabel, CODE_CLIENT_MANIFESTS, DWEB_INBOUND_TOOL_NAMES,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
   validateProviderCallArgs, providerQuotaError, foldProviderEvents,
@@ -412,6 +412,7 @@ import { makeLocalModelRoutes } from './routes/local-model.js';
 import { makeDwebRoutes } from './routes/dweb.js';
 import { makeToolboxRoutes } from './routes/toolbox.js';
 import { makeActorsRoutes } from './routes/actors.js';
+import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
 
 // ---- §11.5 universal write guard -------------------------------------------
 // EVERY store this file constructs gets its storage through these wrapped
@@ -831,7 +832,7 @@ const vmHttpFetch = makeVmHttpFetch({
   cachePut: (record) => idb.put(VM_HTTP_CACHE_STORE, record),
   // Deferred: confirmAction is declared further down; the wrapper closes over
   // it so resolution happens at fetch time (not module-eval), avoiding the TDZ.
-  confirm: (prompt) => confirmAction(prompt),
+  confirm: (prompt, signal) => confirmAction(prompt, signal),
   getCurrentSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
   bytesToBase64,
   audit: (e) => { auditLog.append(e).catch(() => {}); },
@@ -1579,8 +1580,13 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // otherwise it's the live setting. Used BOTH to stamp ctx.actorSurface (gate +
   // descriptors) AND the capability strip below — the turn driver doesn't pass
   // actorSurface, so the strip can't read the raw param; it must use THIS.
+  const requestedActorSurface = actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools');
+  const codeSurfaceAllowed = toolAllow === null || (
+    toolAllow.has('page_code')
+    && Object.values(CODE_CLIENT_MANIFESTS.page.methods).every((method) => !method.tool || toolAllow.has(method.tool))
+  );
   const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
-    ? (actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'))
+    ? (requestedActorSurface === 'code' && codeSurfaceAllowed ? 'code' : 'tools')
     : undefined;
   const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
@@ -2156,8 +2162,9 @@ const spawnActorCore = makeSpawnActor({
   // design 01: embed temporal grounding — the offscreen child prompt renders
   // fresh per spawn (no cache), and the main path's <context> message never
   // reaches a child, so without this an ephemeral child has zero time bytes.
-  renderSystemPromptForChild: (/** @type {string} */ task) => renderSystemPrompt({
+  renderSystemPromptForChild: (/** @type {string} */ task, /** @type {string[]} */ effectiveTools) => renderSystemPrompt({
     taskOverride: task,
+    effectiveTools,
     temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
   }),
 });
@@ -2815,6 +2822,7 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // keeps another first-party page from dispatching as an actor; the token
   // carries run identity and liveness on top of it.
   isOffscreenSender,
+  inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
   // Spend-limit preflight for the actor lane. Two tallies, because they fail in
   // different directions and each alone leaves a hole:
   //
@@ -3058,9 +3066,11 @@ const sessionConfirmGrants = new Map();
  * round-trip. Records new session grants.
  *
  * @param {{ tool: string, sessionId?: string|null, origins?: string[] }} prompt
+ * @param {AbortSignal} [signal]
  * @returns {Promise<'yes_once'|'yes_session'|'no'>}
  */
-const confirmAction = async (prompt) => {
+const confirmAction = async (prompt, signal) => {
+  if (signal?.aborted) return 'no';
   const sid = prompt.sessionId ?? null;
   // issue 251 — the second LEARNED signal: the user AFFIRMED acting as themselves
   // on this origin, so remember that the origin is one they have an identity on.
@@ -3092,7 +3102,7 @@ const confirmAction = async (prompt) => {
   // explicit, risk-acknowledged choice. The session-grant cache still applies
   // when it's on.
   if (prompt.tool === WEB_WRITE_CONFIRM_KEY && settingsStore.get().confirmWebWrites === false) {
-    return 'yes_once';
+    return signal?.aborted ? 'no' : 'yes_once';
   }
   // R5 (origin-bound grants): "approve for this session" means this tool ON
   // this origin — the dispatcher computes prompt.origins (the pinned tab's
@@ -3109,6 +3119,7 @@ const confirmAction = async (prompt) => {
   if (sid) {
     try { ephemeral = (await sessions.get(sid))?.kind === 'actor'; } catch { ephemeral = false; }
   }
+  if (signal?.aborted) return 'no';
   if (!ephemeral && sid && sessionConfirmGrants.get(sid)?.has(grantKey)) {
     return 'yes_session';
   }
@@ -3121,7 +3132,7 @@ const confirmAction = async (prompt) => {
   // correct and stays; what was wrong was offering the choice.
   const answer = await confirmCoordinator.confirm(/** @type {any} */ (
     downgradesActorConfirm(prompt.tool, ephemeral, 'yes_session') ? { ...prompt, ephemeral: true } : prompt
-  ));
+  ), signal);
   if (answer === 'yes_session' && sid && !ephemeral) {
     if (!sessionConfirmGrants.has(sid)) sessionConfirmGrants.set(sid, new Set());
     (/** @type {Set<string>} */ (sessionConfirmGrants.get(sid))).add(grantKey);
@@ -3850,7 +3861,7 @@ const pageCallHandler = makePageCallHandler({
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   buildActorContext: ({ sessionId, tabId }) => buildToolContext({
     sessionId, activeTabId: tabId,
-    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
+    exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: typeof tabId === 'number' ? String(tabId) : 'web', actorBacking: 'tab',
     // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
     // surface is 'code' (that's how it got here), but navigate/click/type must be
     // ALLOWED for the page.* translation — else the setting would refuse them.
@@ -3858,13 +3869,21 @@ const pageCallHandler = makePageCallHandler({
   }),
 });
 const pageCallRoute = {
-  /** @param {{ method?: string, args?: object, ownerSessionId?: string }} msg */
-  'page/call': async ({ method, ownerSessionId, args } = {}) => {
+  /** @param {{ method?: string, args?: object, ownerSessionId?: string, runId?: string }} msg @param {any} sender */
+  'page/call': async ({ method, ownerSessionId, args, runId } = {}, sender = undefined) => {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'page_call_unauthorized_relay' };
     if (vault.isLocked()) return { ok: false, error: 'locked' };
     if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'page_call_no_owner' };
+    if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+      || scriptRuns.allows(runId, 'page') !== true || scriptRuns.admitOp(runId, 'page') !== true) {
+      return { ok: false, error: 'page_call_unknown_finished_foreign_or_over_limit_run' };
+    }
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
     // The owner MUST be a live tab-backed web actor — the page surface is not a
     // general worker capability. (findActorSession/get by id; reject otherwise.)
     const owner = await sessions.get(ownerSessionId).catch(() => null);
+    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
       return { ok: false, error: 'page_call_not_web_actor' };
     }
@@ -3876,15 +3895,19 @@ const pageCallRoute = {
     // actionable "open a page first" message. See resolvePageTab.
     const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
     if (decision.action === 'refuse') return { ok: false, error: decision.error };
+    /** @type {number | undefined} */
     let tabId;
     if (decision.action === 'adopt') {
-      const adopted = await adoptWebTab(ownerSessionId).catch(() => null);
+      if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+      const adopted = await adoptWebTab(ownerSessionId, runSignal ?? undefined).catch(() => null);
+      if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
       if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
       tabId = adopted.tabId;
     } else {
       tabId = decision.tabId;
     }
-    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId });
+    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId, signal: runSignal ?? undefined });
     // Announce the settled op on the UI ports — pure observability, ZERO added
     // authority (the gated dispatch already ran; consumers see method/ok only).
     // why: a page_code call is ONE tool_use whose real page actions happen in
@@ -3894,8 +3917,7 @@ const pageCallRoute = {
     // [navigate, answer] and a judge can't see the work.
     uiPorts.broadcast({
       type: 'page/op', sessionId: ownerSessionId, tabId,
-      method: /** @type {string} */ (method), args: args ?? {}, ok: outcome?.ok === true,
-      ...(outcome?.ok === false ? { error: String(outcome.error ?? '').slice(0, 200) } : {}),
+      method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
     });
     return outcome;
   },
@@ -3914,10 +3936,17 @@ const pageCallRoute = {
 //     same-origin, keyless — identical authority to fetch_url), so this relay adds
 //     nothing the live actor doesn't already have for its own origin.
 const siteFetchCallRoute = {
-  /** @param {{ ownerSessionId?: string, siteOrigin?: string, pathOrUrl?: string, method?: string, headers?: Record<string,string>, body?: unknown }} msg */
-  'site-fetch/call': async ({ ownerSessionId, siteOrigin, pathOrUrl, method, headers, body } = {}) => {
+  /** @param {{ ownerSessionId?: string, siteOrigin?: string, pathOrUrl?: string, method?: string, headers?: Record<string,string>, body?: unknown, runId?: string }} msg @param {any} sender */
+  'site-fetch/call': async ({ ownerSessionId, siteOrigin, pathOrUrl, method, headers, body, runId } = {}, sender = undefined) => {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
     if (vault.isLocked()) return { ok: false, error: 'locked' };
     if (typeof ownerSessionId !== 'string' || !ownerSessionId) return { ok: false, error: 'site_fetch_no_owner' };
+    if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+      || scriptRuns.allows(runId, 'site') !== true || scriptRuns.admitOp(runId, 'site') !== true) {
+      return { ok: false, error: 'site_fetch_unknown_finished_foreign_or_over_limit_run' };
+    }
+    const runSignal = scriptRuns.signalFor(runId);
+    if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     const owner = await sessions.get(ownerSessionId).catch(() => null);
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
       return { ok: false, error: 'site_fetch_not_web_actor' };
@@ -3942,8 +3971,9 @@ const siteFetchCallRoute = {
         tool: 'web:write', kind: 'web_write', origins: [pin],
         summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
         sessionId: ownerSessionId,
-      }));
+      }), runSignal ?? undefined);
       if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined: user declined the site-client write.' };
+      if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     }
     // The actor's SESSION-SCOPED / origin-pinned webFetch — same wrappers
     // buildToolContext hands the web/API actor. Cookies ride only same-origin to
@@ -4013,7 +4043,7 @@ const siteFetchCallRoute = {
       if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) safeHeaders['Content-Type'] = 'application/json';
     }
     try {
-      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody) });
+      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
       const ct = res.headers.get('content-type') ?? '';
       const text = (await res.text()).slice(0, 200_000);   // hard cap on relayed bytes
       let json = null;
@@ -4027,6 +4057,13 @@ const siteFetchCallRoute = {
     }
   },
 };
+
+// A headless Worker may settle while one of its fire-and-forget bridge calls is
+// still awaiting consent. The offscreen host invokes this control route before
+// releasing its bounded relay lease, so the run signal dismisses confirmations
+// and cancels admitted work first. Exact offscreen sender + owner binding make a
+// run id insufficient to cancel another session's work.
+const scriptRunControlRoute = makeScriptRunControlRoutes({ scriptRuns, isOffscreenSender });
 
 // DESIGN-19 — the options-surface routes for stored site clients: list (metas
 // only — no module bodies) + delete. The dossier/module are NOT secrets (they hold
@@ -4592,9 +4629,9 @@ const a2aRevoke = (/** @type {string} */ did) => {
 // user is shown the exact target and deliberately clears it, like adding a
 // contact; it lives in chrome.storage.session (cleared on browser restart) and is
 // revocable via dweb_block. Already-cleared → silent; else pop the confirm.
-const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message') => {
+const a2aResolveConsent = async (/** @type {string} */ target, /** @type {string} */ sessionId, /** @type {string} */ op = 'message', /** @type {AbortSignal | undefined} */ signal = undefined) => {
   if (a2aApprovedDids.has(target)) return true;
-  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] });
+  const answer = await confirmAction({ tool: 'a2a_contact', sessionId, origins: [target] }, signal);
   // "Allow for session" adds the peer to the revocable allowlist (silent after —
   // the intended contact-add); "Allow once" authorizes THIS call only and is NOT
   // persisted, so a one-time click can't become a standing signing grant. The
@@ -4810,10 +4847,18 @@ const scriptModelCallRoute = async (
 // The a2a/call route — invoked by the offscreen relay for each mesh call the
 // a2a_run worker makes. ownerSessionId is TRUSTED (job param); we verify it is
 // THE dweb actor before touching the mesh, translate + gate + dispatch.
-const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string }} */ msg) => {
+const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessionId?: string, runId?: string }} */ msg, /** @type {any} */ sender = undefined) => {
   try {
+    if (!isOffscreenSender(sender)) return { ok: false, error: 'a2a: unauthorized relay' };
     if (!dwebAgentOn()) return { ok: false, error: 'a2a: the dweb agent is off' };
+    if (typeof msg.runId !== 'string' || scriptRuns.ownerFor(msg.runId) !== msg.ownerSessionId
+      || scriptRuns.allows(msg.runId, 'a2a') !== true || scriptRuns.admitOp(msg.runId, 'a2a') !== true) {
+      return { ok: false, error: 'a2a: unknown, finished, foreign, or over-limit run' };
+    }
+    const runSignal = scriptRuns.signalFor(msg.runId);
+    if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
     const owner = msg.ownerSessionId ? await sessions.get(msg.ownerSessionId) : null;
+    if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
     if (!owner || owner.kind !== 'actor' || owner.actorType !== 'dweb') {
       return { ok: false, error: 'a2a: not the dweb actor' };
     }
@@ -4836,11 +4881,13 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
           : /** @type {{ did?: string }} */ (args).did;
       if (!consentTarget) return { ok: false, error: `a2a: ${op} has no consent target` };
       if (!a2aApprovedDids.has(consentTarget)) {
-        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op);
+        const approved = await a2aResolveConsent(consentTarget, msg.ownerSessionId ?? '', op, runSignal ?? undefined);
+        if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
         if (!approved) return { ok: false, error: `a2a: the user declined ${op} to ${consentTarget}` };
       }
     }
-    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did) });
+    if (runSignal?.aborted) return { ok: false, error: 'a2a: run aborted' };
+    const opResult = await meshDispatch.dispatch(op, args, { signs, allowed: (did) => a2aApprovedDids.has(did), signal: runSignal ?? undefined });
     return { ok: true, value: shapeMeshResult(msg.method ?? '', opResult) };
   } catch (e) {
     return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -4910,6 +4957,9 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
         const off = await runActorTurnOffscreen({
           actorSessionId: actor.actorSessionId, message: wake,
           instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
+          // SW-stamped once at the remote-message ingress. Every offscreen relay
+          // preserves this monotonic bit and rebuilds synthetic/untrusted ctx from it.
+          inbound: true,
         });
         if (!off) {
           // INBOUND: synthetic + NOT trusted — the sender gate refuses any delegation
@@ -5002,16 +5052,27 @@ const resolveApiActor = async (/** @type {string} */ origin, /** @type {string |
 // webActorTabBindings (so the next turn pins it, and `to:'<tabId>'` reaches the SAME
 // actor), and tracks it as an agent-tab card. Returns the new tab so navigate can
 // re-pin ctx.activeTab for the rest of THIS turn.
-const adoptWebTab = async (/** @type {string} */ actorSessionId) => {
+const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => {
+  if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
   const created = await browser.tabs.create({ active: false });
   const tabId = created?.id;
   if (typeof tabId !== 'number') throw new Error('adopt_web_tab: no tab id');
+  if (signal?.aborted) {
+    await browser.tabs.remove(tabId).catch(() => {});
+    throw new Error('adopt_web_tab: aborted');
+  }
   webActorTabBindings.bind(tabId, actorSessionId);
   persistWebBindings();
   // AWAIT the network backstop before handing the tab back: the caller's very
   // next act is to navigate it. persistWebBindings already kicked the sync off;
   // this only waits for its turn in the queue, and it never rejects.
   await denylistNetGuard.sync();
+  if (signal?.aborted) {
+    webActorTabBindings.drop(tabId);
+    persistWebBindings();
+    await browser.tabs.remove(tabId).catch(() => {});
+    throw new Error('adopt_web_tab: aborted');
+  }
   noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
   return { tabId, windowId: created?.windowId };
 };
@@ -5037,7 +5098,7 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
 // Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
 // (offscreen unavailable / never started). The worker holds no key, no engine
 // clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
-const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display }) => {
+const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display, inbound }) => {
   if (!actorClient) return null;
   const loaded = await sessions.get(actorSessionId);
   if (!loaded) return null;
@@ -5062,8 +5123,13 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // value buildToolContext falls back to. Without it a code-surface actor is
     // advertised the TOOLS descriptors (no page_code) and taught the tools
     // lore, so the whole code arm silently degrades on the offscreen heap.
+    const actorToolAllow = resolveManifestAllow(rec.toolManifest);
+    const codeSurfaceAllowed = actorToolAllow === null || (
+      actorToolAllow.has('page_code')
+      && Object.values(CODE_CLIENT_MANIFESTS.page.methods).every((method) => !method.tool || actorToolAllow.has(method.tool))
+    );
     const actorSurface = (kind === 'web' && rec.backing !== 'api')
-      ? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools')
+      ? (settingsStore.get().webActorActionSurface === 'code' && codeSurfaceAllowed ? 'code' : 'tools')
       : undefined;
     // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
     // runs through this path, so a schemaReply stamped only in buildToolContext
@@ -5071,12 +5137,21 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // web reply dropped. Read from the SAME setting, at the same moment, as the
     // getter injected into actorMessaging below.
     const schemaReply = settingsStore.get().schemaValidatedReplies === true;
+    const advertisedTools = filterDescriptorsByManifest(
+      actorDescriptors(listTools(), kind, rec.backing, actorSurface),
+      actorToolAllow,
+    );
+    const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
+    const tools = (inbound === true && kind === 'dweb'
+      ? advertisedTools.filter((tool) => inboundAllowed.has(tool.name))
+      : advertisedTools)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     const systemPrompt = await renderSystemPrompt({
       actorType: kind, backing: rec.backing, instanceId, actorSurface, schemaReply,
       temporalBlock, customSystemPrompt: rec.customSystemPrompt,
+      effectiveTools: tools.map((tool) => tool.name),
+      inbound: inbound === true,
     });
-    const tools = actorDescriptors(listTools(), kind, rec.backing, actorSurface)
-      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
     // Reasoning + dynamic context-window PARITY (extended thinking + trim scaling).
     const reasoning = {
       enabled: settingsStore.get().reasoningEnabled,
@@ -5124,6 +5199,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
       // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
       oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
+      inbound: inbound === true,
     }, { signal: controller.signal, onEvent });
     if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
     // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
@@ -5704,7 +5780,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   }),
   // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
   // consent-gated, dispatched on the peerd-agent room).
-  'a2a/call': (/** @type {any} */ msg) => a2aCallRoute(msg),
+  'a2a/call': (/** @type {any} */ msg, /** @type {any} */ sender) => a2aCallRoute(msg, sender),
   // provider (design 5): the script tool's sub-model surface — each
   // peerd.provider.call a provider-enabled headless run makes relays here
   // (owner/run-verified, quota-capped, the key added SW-side).
@@ -5764,7 +5840,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts,
+    listOffscreenContexts, scriptRuns, isOffscreenSender,
   }),
   ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
@@ -5852,6 +5928,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // to the client's origin (owner + origin resolved trusted-side; cross-origin
   // refused; non-GET confirmed via the shared web:write key).
   ...(/** @type {any} */ (siteFetchCallRoute)),
+
+  // Headless settlement cancels SW-side relays before its bounded lease frees.
+  ...(/** @type {any} */ (scriptRunControlRoute)),
 
   // --- DESIGN-19: the options surface for stored site clients (list + delete) ---
   ...(/** @type {any} */ (siteClientRoutes)),

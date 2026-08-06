@@ -91,6 +91,25 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
 };
 
 /**
+ * Is this sender specifically the extension SERVICE WORKER?
+ *
+ * why: runtime.sendMessage is broadcast to extension contexts. An engine tab
+ * is first-party but hosts agent-authored/untrusted state, so it must not mint
+ * a headless job or actor run by replaying an observed command. Command
+ * receivers in the offscreen document use this exact source-script pin; relay
+ * replies travel in the opposite direction and use isOffscreenSender.
+ *
+ * @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | null | undefined} sender
+ * @param {{ runtimeId?: string, extensionOrigin?: string, serviceWorkerUrl?: string }} [trust]
+ */
+export const isServiceWorkerSender = (sender, { runtimeId, extensionOrigin, serviceWorkerUrl } = {}) => {
+  if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
+  if (typeof serviceWorkerUrl !== 'string' || serviceWorkerUrl.length === 0) return false;
+  if (sender && typeof sender === 'object' && ('tab' in sender || 'documentId' in sender)) return false;
+  return sender?.url === serviceWorkerUrl;
+};
+
+/**
  * Is this sender the full-tab options page that owns backup and restore?
  * Hash routes are part of the trusted page URL. Queries and sibling paths are
  * not, and open_in_tab means legitimate callers carry tab provenance.

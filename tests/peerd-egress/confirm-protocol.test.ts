@@ -57,9 +57,8 @@ describe('confirm coordinator — hang protection', () => {
   test('reset clears pending + timers', async () => {
     const c = makeConfirmCoordinator({ notifySidePanel: () => {}, timeoutMs: 10 });
     const p = c.confirm({ tool: 'do', description: 'x', origins: [], sideEffect: 'write' } as any);
-    // not awaited; reset should not leave it pending forever (the Promise stays
-    // unsettled, but the timer is cleared so no leak). Just assert no throw.
     expect(() => c.reset()).not.toThrow();
+    expect(await p).toBe('no');
     await sleep(20); // past the (now-cleared) timeout — nothing should fire/throw
   });
 
@@ -103,6 +102,36 @@ describe('confirm coordinator — hang protection', () => {
 });
 
 describe('confirm coordinator — declineSession (turn aborted: Stop / steer)', () => {
+  test('a run AbortSignal immediately declines and dismisses its own pending prompt', async () => {
+    const settled: string[] = [];
+    const controller = new AbortController();
+    let pushed: any = null;
+    const c = makeConfirmCoordinator({
+      notifySidePanel: (prompt) => { pushed = prompt; },
+      onSettled: (id) => settled.push(id),
+    });
+    const pending = c.confirm({
+      tool: 'click', description: 'x', origins: [], sideEffect: 'write', sessionId: 's1',
+    } as any, controller.signal);
+    expect(c.getPending()?.id).toBe(pushed.id);
+    controller.abort();
+    expect(await pending).toBe('no');
+    expect(c.getPending()).toBe(null);
+    expect(settled).toEqual([pushed.id]);
+  });
+
+  test('an already-aborted operation never raises a confirmation card', async () => {
+    let notified = 0;
+    const controller = new AbortController();
+    controller.abort();
+    const c = makeConfirmCoordinator({ notifySidePanel: () => { notified++; } });
+    expect(await c.confirm({
+      tool: 'click', description: 'x', origins: [], sideEffect: 'write', sessionId: 's1',
+    } as any, controller.signal)).toBe('no');
+    expect(notified).toBe(0);
+    expect(c.getPending()).toBe(null);
+  });
+
   test('declines pending prompts for that session → the await resolves to "no"', async () => {
     const c = makeConfirmCoordinator({ notifySidePanel: () => {} });
     const p = c.confirm({ tool: 'click', description: 'x', origins: [], sideEffect: 'write', sessionId: 's1' } as any);

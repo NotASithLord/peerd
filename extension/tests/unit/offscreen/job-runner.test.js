@@ -43,6 +43,172 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.error).toBe(null);
   });
 
+  it('returns a capped privacy-minimal code bridge trace', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'for (let i = 0; i < 55; i += 1) await peerd.self.listFiles();',
+          'try { await peerd.egress.fetch("https://trace.example/x"); } catch {}',
+          'return "done";',
+        ].join('\n'),
+      },
+      { sendToSW: async () => ({ ok: false, status: 0, error: 'blocked' }) },
+    );
+    expect(r.value).toBe('done');
+    const trace = /** @type {any[]} */ (r.codeTrace);
+    expect(trace.length).toBe(50);
+    expect(trace[0].seq > 1).toBe(true);   // oldest entries were evicted
+    expect(trace.at(-1).bridge).toBe('fetch');
+    expect(trace.at(-1).method).toBe('GET');
+    expect(trace.at(-1).outcome).toBe('error');
+    expect(trace.at(-1).settled).toBe(true);
+    expect(typeof trace.at(-1).ms).toBe('number');
+    // Host observability never copies code-client arguments or results.
+    expect(Object.hasOwn(trace.at(-1), 'args')).toBe(false);
+    expect(Object.hasOwn(trace.at(-1), 'result')).toBe(false);
+  });
+
+  it('uses one absolute deadline across import resolution and worker execution', async () => {
+    const startedAt = performance.now();
+    const r = await runJob(
+      {
+        code: [
+          "import { value } from 'https://slow.example/value.js';",
+          'await new Promise((resolve) => setTimeout(resolve, 350));',
+          'return value;',
+        ].join('\n'),
+        timeoutMs: 550,
+      },
+      {
+        sendToSW: async (type) => {
+          if (type !== 'sw/web-fetch') return { ok: false };
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          return { ok: true, status: 200, bodyB64: btoa('export const value = 42;') };
+        },
+      },
+    );
+    const elapsedMs = performance.now() - startedAt;
+    expect(String(r.error)).toContain('job timed out after 550ms');
+    expect(r.value).toBe(undefined);
+    // The pre-fix runner gave each phase 550ms and returned 42 after ~700ms.
+    expect(elapsedMs < 900).toBe(true);
+  });
+
+  it('reserves compute capacity when page, a2a, and site-client jobs relay outward', async () => {
+    /** @type {(() => void) | undefined} */
+    let release;
+    const barrier = new Promise((resolve) => { release = () => resolve(undefined); });
+    let relays = 0;
+    /** @type {(() => void) | undefined} */
+    let bothStarted;
+    const started = new Promise((resolve) => { bothStarted = () => resolve(undefined); });
+    const sendToSW = async (/** @type {string} */ type) => {
+      if (type === 'page/call' || type === 'site-fetch/call') {
+        relays += 1;
+        if (relays === 2) bothStarted?.();
+        await barrier;
+        return type === 'page/call'
+          ? { ok: true, value: 'snapshot' }
+          : { ok: true, value: { status: 200, body: 'ok', json: null } };
+      }
+      return { ok: true };
+    };
+    const pageRun = runJob(
+      { code: 'return await page.snapshot();', caps: { page: true }, ownerSessionId: 'web-1', runId: 'page-relay-1', timeoutMs: 5000 },
+      { sendToSW },
+    );
+    const siteRun = runJob(
+      { code: 'return await site.fetch("/x");', siteFetch: 'https://site.example', ownerSessionId: 'api-1', runId: 'site-relay-1', timeoutMs: 5000 },
+      { sendToSW },
+    );
+    await started;
+
+    // page + site consume the relay sub-cap; a2a is classified in the same
+    // lane and is refused without spawning a third outward-waiting worker.
+    const refused = await runJob(
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-1', runId: 'a2a-relay-1' },
+      { sendToSW },
+    );
+    expect(String(refused.error)).toContain('capability-relaying runs already in flight');
+
+    // A normal script does not reserve the sub-cap merely because egress is
+    // available; it acquires on the first actual outward relay and is refused
+    // there while the two dedicated relay runs are holding the lane.
+    const refusedEgress = await runJob(
+      { code: 'return await peerd.egress.fetch("https://example.com");' },
+      { sendToSW },
+    );
+    expect(String(refusedEgress.error)).toContain('capability-relaying runs already in flight');
+
+    // Two global slots remain available to quick compute.
+    const compute = await runJob(
+      { code: 'return 6 * 7;' },
+      { sendToSW },
+    );
+    expect(compute.value).toBe(42);
+    release?.();
+    const settled = await Promise.all([pageRun, siteRun]);
+    expect(settled.every((result) => result.error === null)).toBe(true);
+  });
+
+  it('aborts SW relays before releasing a settled job\'s relay lease', async () => {
+    /** @type {(() => void) | undefined} */
+    let releaseAbort;
+    const abortBarrier = new Promise((resolve) => { releaseAbort = () => resolve(undefined); });
+    let aborts = 0;
+    /** @type {(() => void) | undefined} */
+    let bothAborting;
+    const aborting = new Promise((resolve) => { bothAborting = () => resolve(undefined); });
+    const deps = {
+      sendToSW: async (/** @type {string} */ type) => type === 'page/call'
+        ? { ok: true, value: 'snapshot' }
+        : { ok: true, value: { status: 200, body: 'ok', json: null } },
+      abortRun: async () => {
+        aborts += 1;
+        if (aborts === 2) bothAborting?.();
+        await abortBarrier;
+      },
+    };
+    const pageRun = runJob(
+      { code: 'return await page.snapshot();', caps: { page: true }, ownerSessionId: 'web-finalize', runId: 'page-finalize' },
+      deps,
+    );
+    const siteRun = runJob(
+      { code: 'return await site.fetch("/x");', siteFetch: 'https://site.example', ownerSessionId: 'api-finalize', runId: 'site-finalize' },
+      deps,
+    );
+    await aborting;
+
+    // Both workers have returned, but their SW abort handshakes are pending, so
+    // neither relay lease may be reused yet.
+    const refused = await runJob(
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-finalize', runId: 'a2a-finalize' },
+      deps,
+    );
+    expect(String(refused.error)).toContain('capability-relaying runs already in flight');
+
+    releaseAbort?.();
+    const settled = await Promise.all([pageRun, siteRun]);
+    expect(settled.every((result) => result.error === null)).toBe(true);
+  });
+
+  it('bounds early Stop tombstones and keeps owner-bound tombstones scoped', async () => {
+    abortJob('early-owned', 'other-session');
+    const owned = await runJob(
+      { code: 'return 7;', runId: 'early-owned', ownerSessionId: 'right-session' },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(owned.value).toBe(7);
+
+    abortJob('early-evicted');
+    for (let i = 0; i < 64; i += 1) abortJob(`early-fifo-${i}`);
+    const evicted = await runJob(
+      { code: 'return 8;', runId: 'early-evicted' },
+      { sendToSW: async () => ({ ok: true }) },
+    );
+    expect(evicted.value).toBe(8);
+  });
+
   // Design 02, 2a — extract:'markdown' on the bridged fetch. The extraction
   // pipeline is INJECTED (deps.extractMarkdown — in production offscreen.js
   // passes web-extract-core's extractMarkdownLocal); stubbed here so the test
@@ -209,7 +375,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     /** @type {any} */
     let seen = null;
     const r = await runJob(
-      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-sess-1' },
+      { code: 'return await mesh.peers();', a2a: true, ownerSessionId: 'dweb-sess-1', runId: 'a2a-run-1' },
       { sendToSW: async (type, payload) => {
         if (type === 'a2a/call') { seen = payload; return { ok: true, value: [{ did: 'did:key:z6MkBob' }] }; }
         return { ok: false };
@@ -217,6 +383,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     );
     expect(seen?.method).toBe('peers');
     expect(seen?.ownerSessionId).toBe('dweb-sess-1');  // owner from trusted job params, not the worker
+    expect(seen?.runId).toBe('a2a-run-1');
     expect(r.error).toBe(null);
     expect(/** @type {any} */ (r.value)?.[0]?.did).toBe('did:key:z6MkBob');
   });
@@ -304,7 +471,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     const c = /** @type {any} */ (calls[0]);
     expect(c.type).toBe('actors/call');
     expect(c.payload.method).toBe('ask');
-    expect(c.payload.args).toEqual({ to: 'vm-9', goal: 'run pytest', timeoutMs: undefined, oneShot: true });
+    expect(c.payload.args).toEqual({ address: 'vm-9', message: 'run pytest', timeoutMs: undefined, oneShot: true });
     // owner identity rides from job params — the worker cannot spoof it
     expect(c.payload.ownerSessionId).toBe('chat-1');
     expect(c.payload.ownerToolUseId).toBe('tu-7');
@@ -323,7 +490,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
       },
       {
         sendToSW: async (_type, payload) => (
-          /** @type {any} */ (payload).args?.to === 'web'
+          /** @type {any} */ (payload).args?.address === 'web'
             ? { ok: false, error: 'message_actor: refused by the sender gate' }
             : { ok: true, value: { reply: 'ok', failed: false } }),
       },

@@ -34,6 +34,7 @@
     "e2e:chrome": "bun scripts/cdp/ensure-chrome-for-testing.mjs",
     "eval:bench": "bun scripts/cdp/run-eval-bench.mjs",
     "eval:bench:smoke": "bun scripts/cdp/run-eval-bench.mjs --smoke",
+    "eval:actors": "bun scripts/cdp/run-actor-orchestration-eval.mjs",
     "eval:context": "bun scripts/cdp/run-eval-context.mjs",
     "typecheck": "tsc",
     "lint": "eslint extension web",
@@ -81,5 +82,8 @@
     "globals": "^17.6.0",
     "typescript": "^6.0.3",
     "web-ext": "10.3.0"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
   }
 }

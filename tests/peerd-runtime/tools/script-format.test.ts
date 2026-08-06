@@ -9,6 +9,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { formatRunResult, runIsFenced, runOriginLabel, scriptTool } from '../../../extension/peerd-runtime/tools/defs/script.js';
+import { makeEngineRoutes } from '../../../extension/background/routes/engine.js';
 
 const run = (over: Record<string, unknown> = {}) => ({
   durationMs: 5, value: 'out', ...over,
@@ -63,6 +64,15 @@ describe('formatRunResult — fence decision matrix', () => {
 
   test('no spill → no footer (page_code and existing callers unchanged)', () => {
     expect(formatRunResult('x', run() as any)).not.toContain('read_run_cache');
+  });
+
+  test('the generic code-op trace is host-shaped and outside any output fence', () => {
+    const out = formatRunResult('x', run({
+      usedEgress: true,
+      codeTrace: [{ seq: 1, bridge: 'page', method: 'snapshot', outcome: 'ok', ms: 4 }],
+    }) as any);
+    expect(out).toContain('[CODE OPS]\n#1 page.snapshot → ok (4ms)');
+    expect(out.indexOf('[CODE OPS]')).toBeLessThan(out.indexOf(FENCE));
   });
 });
 
@@ -143,8 +153,54 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     await scriptTool.execute({ code: 'return 1' }, ctx as any);
     expect(seen.opts.runId).toBe('x');
     expect(seen.opts.caps).toEqual({ subagent: false });
-    expect(registered[0]?.[3]).toEqual({ actors: false, provider: false });
+    expect(registered[0]?.[3]).toEqual({ actors: false, egress: true, provider: false });
     expect(released).toEqual(['x']);
+  });
+
+  test('an ordinary script egress run forwards its owner through the job into the SW route', async () => {
+    const live = new Map<string, { owner: string, signal?: AbortSignal, caps: Record<string, boolean> }>();
+    let fetched = false;
+    let jobOpts: any;
+    let relayResult: any;
+    const scriptRuns = {
+      mintRunId: () => 'egress-run',
+      register: (runId: string, signal: AbortSignal | undefined, owner: string, caps: Record<string, boolean>) => {
+        live.set(runId, { owner, signal, caps });
+      },
+      ownerFor: (runId: string) => live.get(runId)?.owner,
+      allows: (runId: string, cap: string) => live.get(runId)?.caps[cap] === true,
+      admitOp: () => true,
+      signalFor: (runId: string) => live.get(runId)?.signal,
+      abort: () => {},
+      release: (runId: string) => { live.delete(runId); },
+      opsFor: () => [],
+    };
+    const routes = makeEngineRoutes({
+      vmHttpFetch: async () => { fetched = true; return { ok: true, status: 200 }; },
+      applyWebExtract: async (response: any) => response,
+      scriptRuns,
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+    });
+    const ctx = {
+      session: { sessionId: 'chat-1' },
+      scriptRuns,
+      toolUseId: 'tu-egress',
+      jsOffscreenClient: {
+        execHeadless: async (_code: string, opts: any) => {
+          jobOpts = opts;
+          relayResult = await (routes['sw/web-fetch'] as any)({
+            url: 'https://example.com', runId: opts.runId,
+            ownerSessionId: opts.ownerSessionId,
+          }, { url: 'offscreen' });
+          return { durationMs: 1, value: relayResult };
+        },
+      },
+    };
+    await scriptTool.execute({ code: 'return await peerd.egress.fetch("https://example.com")' }, ctx as any);
+    expect(jobOpts.ownerSessionId).toBe('chat-1');
+    expect(relayResult).toMatchObject({ ok: true, status: 200 });
+    expect(fetched).toBe(true);
+    expect(live.size).toBe(0);
   });
 
   test('Stop aborts a pure-compute worker, not just actor/provider runs', async () => {

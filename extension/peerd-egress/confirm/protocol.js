@@ -87,37 +87,47 @@ export const makeConfirmCoordinator = ({
    * (auto-denies on a broken channel or timeout — never hangs the turn).
    *
    * @param {Omit<ConfirmPrompt, 'id'>} promptInput
+   * @param {AbortSignal} [signal] the lifetime of the operation requesting consent
    * @returns {Promise<ConfirmAnswer>}
    */
-  const confirm = (promptInput) => new Promise((res) => {
+  const confirm = (promptInput, signal) => new Promise((res) => {
+    // A dead operation cannot leave a stale card behind or receive authority
+    // from a late click. Refuse before allocating an id or notifying the UI.
+    if (signal?.aborted) { res('no'); return; }
     // Broken channel → fail-closed immediately. The agent can't reach the user,
     // so it must not perform the side-effect AND must not hang.
     if (!isChannelOpen()) { res('no'); return; }
 
     const id = uuidv7();
     const prompt = { ...promptInput, id };
+    /** @type {(() => void) | undefined} */
+    let onAbort;
     /** @param {ConfirmAnswer} answer */
     const settle = (answer) => {
       const t = timers.get(id); if (t) clearTimeout(t); timers.delete(id);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
       // onSettled inside the delete-guard → fires EXACTLY once, on the first
       // settle (answer or timeout), so every surface dismisses the modal.
       if (pending.delete(id)) { res(answer); notifyCount(); try { onSettled(id); } catch { /* best-effort */ } }
     };
     pending.set(id, { settle, prompt });
     timers.set(id, setTimeout(() => settle('no'), timeoutMs));
+    // Install the listener before exposing the prompt. The second aborted check
+    // closes the race between the preflight above and addEventListener().
+    if (signal) {
+      onAbort = () => settle('no');
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) { settle('no'); return; }
+    }
     notifyCount();
     notifySidePanel(prompt);
   });
 
-  /** Drop all pending prompts (e.g. on session end). Clears timers too, and
-   * fires onSettled for each so any open modal is dismissed everywhere. */
+  /** Decline all pending prompts (e.g. on session end). `settle` clears each
+   * timer, resolves the blocked caller, and dismisses every open modal. */
   const reset = () => {
-    for (const t of timers.values()) clearTimeout(t);
-    timers.clear();
-    const ids = [...pending.keys()];
-    pending.clear();
-    notifyCount();
-    for (const id of ids) { try { onSettled(id); } catch { /* best-effort */ } }
+    // snapshot: settle() mutates both maps while resolving each promise.
+    for (const { settle } of [...pending.values()]) settle('no');
   };
 
   /**

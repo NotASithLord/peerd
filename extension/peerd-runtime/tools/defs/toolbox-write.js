@@ -87,7 +87,7 @@ export const toolboxWriteTool = {
     // as runnable JS so it never reads like a prose edit. why no "review the
     // code" instruction: the confirm card renders only this summary — it must
     // not tell the user to inspect source the UI doesn't show.
-    const confirmAny = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
     if (!confirmAny) return { ok: false, error: 'declined', content: 'No confirmation channel available for a toolbox write.' };
     const ans = await confirmAny({
@@ -101,7 +101,7 @@ export const toolboxWriteTool = {
         + `${proposal.description ? ` Agent's description: ${proposal.description}` : ''}`,
       origins: [],
       sessionId: ctx.session?.sessionId ?? null,
-    });
+    }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'toolbox_write_rejected', content: 'User declined the toolbox write.' };
     }

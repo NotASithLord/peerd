@@ -11,20 +11,23 @@
 // machinery (sender gate, rate caps, dedupe, audit — nothing new is trusted).
 //
 // What script code gets ON PURPOSE and what it doesn't:
-//   • list / ask — DELEGATION only. The script can ask an actor to do
+//   • list / call — DELEGATION only. The script can call an actor to do
 //     work and await the reply; it can never name a raw tool, spawn an actor,
 //     or reach another capability through this bridge (the job host denies
 //     everything undeclared, same posture as a2a).
-//   • ask addresses SANDBOX + WEB actors alike — authority is unchanged
+//   • call addresses SANDBOX + WEB actors alike — authority is unchanged
 //     because every op runs the full messageActor gate chain per call; oneShot
 //     rides through and stays sandbox-only (enforced there, not re-implemented
 //     here).
 //
-// Pure — values in, values out, no IO, no imports. The imperative shell (the
+// Pure — values in, values out, no IO. The declarative manifest is its only
+// import. The imperative shell (the
 // worker bridge, the job-runner relay, the SW actors/call route) lives in
 // worker-source.js / job-runner.js / service-worker.js.
 
-/** A failed actors op REJECTS like a thrown call — so `await actors.ask(...)` throws. */
+import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
+
+/** A failed actors op REJECTS like a thrown call — so `await actors.call(...)` throws. */
 export class ActorsApiError extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'ActorsApiError'; }
@@ -65,26 +68,26 @@ export const ACTORS_JOB_MAX_TIMEOUT_MS = ACTORS_BRIDGE_GUARD_MS + 50_000;
  */
 
 // The method table. `delegates:true` marks an op that hands a GOAL to an actor
-// (ask) — the SW route runs it through messageActor's full gate chain
+// (call) — the SW route runs it through messageActor's full gate chain
 // (sender gate, runaway caps, duplicate-intent, audit). `list` is the read-only
 // roster (the actor_list catalog, dispatched through the normal tool gates).
 /** @type {Record<string, ActorsMethodSpec>} */
 const ACTORS_METHODS = {
   // Everything addressable right now — instances, open tabs, integrations —
-  // with the handle to pass as ask's `to`. Read.
+  // with the address to pass to call. Read.
   list: {
     op: 'list',
     toArgs: () => ({}),
-    shape: (c) => c?.roster ?? '',
+    shape: (c) => ({ refs: Array.isArray(c?.refs) ? c.refs : [] }),
   },
   // ASK — delegate a goal and await the actor's ONE reply within this run.
   // Returns { reply, failed } (failed:true = the actor's turn errored/aborted;
   // the reply text then describes the failure). A timeout REJECTS (throws).
-  ask: {
-    op: 'ask',
+  call: {
+    op: 'call',
     toArgs: (a) => {
-      const to = actorAddress(a?.to, 'actors.ask(to, goal): to');
-      const goal = nonEmptyString(a?.goal, 'actors.ask(to, goal): goal');
+      const to = actorAddress(a?.address ?? a?.to, 'actors.call(address, message): address');
+      const goal = nonEmptyString(a?.message ?? a?.goal, 'actors.call(address, message): message');
       const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0
         ? Math.min(a.timeoutMs, ACTORS_ASK_MAX_TIMEOUT_MS) : undefined;
       const oneShot = a?.oneShot === true ? true : undefined;
@@ -93,12 +96,21 @@ const ACTORS_METHODS = {
     shape: (c) => ({ reply: c?.reply ?? null, failed: c?.failed === true }),
     delegates: true,
   },
+  // why the alias stays out of ACTORS_API_METHODS + prompt lore: scripts written
+  // during the #327 rollout keep working for one 0.x migration window, while
+  // new model output sees the GenServer-shaped `call` contract only.
+  ask: {
+    op: 'call',
+    toArgs: (a) => ACTORS_METHODS.call.toArgs(a),
+    shape: (c) => ACTORS_METHODS.call.shape(c),
+    delegates: true,
+  },
 };
 
-/** The canonical method list. The worker stub (worker-source.js) and the
- * prompt lore are hand-written mirrors — the actors-api tests are what keep
- * them honest, not this constant (nothing generates from it). */
-export const ACTORS_API_METHODS = Object.freeze(Object.keys(ACTORS_METHODS));
+/** The canonical model-facing method list comes from the shared manifest. */
+export const ACTORS_API_METHODS = Object.freeze(codeClientMethods('actors'));
+/** Canonical + compatibility methods accepted at the relay. */
+export const ACTORS_API_ACCEPTED_METHODS = Object.freeze(codeClientMethods('actors', true));
 
 /** Does this method hand a goal to an actor (vs a read)? Pure. @param {string} method */
 export const actorsMethodDelegates = (method) => ACTORS_METHODS[method]?.delegates === true;
@@ -112,7 +124,10 @@ export const actorsMethodDelegates = (method) => ACTORS_METHODS[method]?.delegat
 export const actorsCallToOp = (call) => {
   const method = call?.method;
   const spec = typeof method === 'string' ? ACTORS_METHODS[method] : undefined;
-  if (!spec) throw new ActorsApiError(`unknown actors method: ${String(method)}`);
+  const declared = codeClientMethod('actors', String(method));
+  if (!spec || !declared || declared.op !== spec.op) {
+    throw new ActorsApiError(`unknown actors method: ${String(method)}`);
+  }
   return { op: spec.op, args: spec.toArgs(call?.args ?? {}), delegates: spec.delegates === true };
 };
 
@@ -150,8 +165,8 @@ export const shapeActorsResult = (method, opResult) => {
  * @returns {{ ok: true, reply: string | null, failed: boolean } | { ok: false, error: string }}
  */
 export const askOutcome = (r, { timedOut, aborted, timeoutMs, to }) => {
-  if (timedOut) return { ok: false, error: `actors.ask: timed out after ${timeoutMs}ms awaiting '${to}'` };
-  if (aborted) return { ok: false, error: `actors.ask: aborted (Stop) while awaiting '${to}'` };
+  if (timedOut) return { ok: false, error: `actors.call: timed out after ${timeoutMs}ms awaiting '${to}'` };
+  if (aborted) return { ok: false, error: `actors.call: aborted (Stop) while awaiting '${to}'` };
   if (r.ok) return { ok: true, reply: r.content ?? null, failed: false };
   const err = String(r.error ?? 'ask failed');
   if (err.startsWith('message_actor:')) return { ok: false, error: err };

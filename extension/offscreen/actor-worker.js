@@ -64,7 +64,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           tools: m.tools ?? [],
           ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
-        { sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps, oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning, contextWindow: m.contextWindow },
+        {
+          sessionId: m.sessionId, userText: m.message, maxSteps: m.maxSteps,
+          oneShot: m.oneShot, signal: abort.signal, reasoning: m.reasoning,
+          contextWindow: m.contextWindow, inbound: m.inbound === true,
+        },
       );
       // why the worker does NOT stamp `aborted`: a Stop unwinds the loop cleanly (the
       // relay rejects, the loop stops with an empty reply), but whether that counts as

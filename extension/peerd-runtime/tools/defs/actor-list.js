@@ -179,8 +179,21 @@ export const actorListTool = {
       return (b.current ? 1 : 0) - (a.current ? 1 : 0);
     });
 
+    const structured = {
+      refs: actors.map((actor) => ({
+        ref: String(actor.handle), type: actor.type, name: actor.name,
+        live: actor.live, current: actor.current, detail: actor.detail,
+      })),
+      ...(denylistedTabsHidden > 0 ? { deniedCount: denylistedTabsHidden } : {}),
+      ...(unavailable.length > 0 ? { unavailable: [...unavailable] } : {}),
+    };
     return {
       ok: true,
+      // why a second shape: actor_list's columnar content is optimized for a
+      // language-model turn; code needs values it can filter/map without
+      // scraping presentation text. The dispatcher preserves this host-only
+      // field while the model loop continues to ingest only `content`.
+      structured,
       content: serializeListResult({
         count: actors.length,
         // Tell the agent SOMETHING was withheld so it doesn't loop hunting for a

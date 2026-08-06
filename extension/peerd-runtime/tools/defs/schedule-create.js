@@ -84,8 +84,12 @@ export const scheduleCreateTool = {
     // confirmed this write, so we don't double-prompt.
     const permission = /** @type {{ confirmActions?: boolean } | undefined} */ (
       /** @type {{ permission?: unknown }} */ (ctx).permission);
-    const confirm = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirm = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
+    const aborted = () => ctx.abortSignal?.aborted === true;
+    if (aborted()) {
+      return { ok: false, error: 'schedule_aborted', content: 'The routine was not armed because the run was stopped.' };
+    }
     if (permission?.confirmActions === false && confirm) {
       const cadence = args.every ? `every ${String(args.every).trim()}` : `daily at ${String(args.dailyAt).trim()}`;
       const runMode = args.mode === 'turn' ? 'a single turn' : 'an autonomous run';
@@ -96,10 +100,19 @@ export const scheduleCreateTool = {
         origins: [],
         summary: `Schedule a background routine (${cadence}, ${runMode})? It will run unattended, even with the panel closed:\n"${args.prompt.trim()}"`,
         sessionId: ctx.session?.sessionId ?? null,
-      });
+      }, ctx.abortSignal);
+      // The coordinator normally resolves an aborted confirmation as `no`, but
+      // recheck the authoritative signal here too: injected/test coordinators
+      // and future adapters must not turn a late affirmative into persistence.
+      if (aborted()) {
+        return { ok: false, error: 'schedule_aborted', content: 'The routine was not armed because the run was stopped.' };
+      }
       if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
         return { ok: false, error: 'declined', content: 'User declined to arm the routine.' };
       }
+    }
+    if (aborted()) {
+      return { ok: false, error: 'schedule_aborted', content: 'The routine was not armed because the run was stopped.' };
     }
     const res = await scheduleAdd({
       prompt: args.prompt,

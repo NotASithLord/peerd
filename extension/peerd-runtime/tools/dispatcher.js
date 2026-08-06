@@ -184,6 +184,18 @@ export const dispatchToolCall = async (call, ctx) => {
   // ---- Gate chain --------------------------------------------------------
   /** @type {GateResult[]} */
   const gateResults = [];
+  /** @param {string} stage @returns {ToolResult} */
+  const abortedResult = (stage) => {
+    ctx.audit({ type: 'tool_blocked', details: { tool: call.name, gate: 'abort', reason: stage } }).catch(() => {});
+    return {
+      ok: false,
+      error: `tool_aborted:${call.name}:${stage}`,
+      meta: /** @type {DispatchMeta} */ ({
+        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        gates: gateResults, hooks: hookOutcomes, durationMs: 0,
+      }),
+    };
+  };
   for (const { name, fn } of GATES) {
     let result;
     try {
@@ -234,6 +246,7 @@ export const dispatchToolCall = async (call, ctx) => {
   const permMode = normalizeMode(ctx.permission?.mode);
   const permConfirm = ctx.permission?.confirmActions ?? DEFAULT_CONFIRM_ACTIONS;
   const verdict = decideAction({ mode: permMode, confirmActions: permConfirm, tool });
+  if (ctx.abortSignal?.aborted) return abortedResult('before_confirmation');
 
   // ---- The UGC-zone forced confirmation (#242) ---------------------------
   // A non-read browser-session action on a page that hosts THIRD-PARTY content
@@ -257,6 +270,7 @@ export const dispatchToolCall = async (call, ctx) => {
       url: await liveTabUrl(ctx),
     })
     : null;
+  if (ctx.abortSignal?.aborted) return abortedResult('before_confirmation');
 
   // Whether the USER approved this exact dispatch via a confirm round-trip
   // — the lifecycle tracker turns it into a durable single-use proof.
@@ -270,7 +284,7 @@ export const dispatchToolCall = async (call, ctx) => {
       // ConfirmPrompt typedef (it adds `tool`/`summary`/`sessionId` for the
       // side-panel card). Cast the call so the dispatcher keeps building the
       // shape the coordinator actually consumes without widening the contract.
-      const confirm = /** @type {((p: Record<string, unknown>) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (ctx.confirm);
+      const confirm = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (ctx.confirm);
       answer = await confirm?.({
         tool: call.name,
         sideEffect: tool.sideEffect,
@@ -284,10 +298,11 @@ export const dispatchToolCall = async (call, ctx) => {
         // so the card is unchanged for the common case.
         note: ugcRuleId ? UGC_CONFIRM_NOTE : undefined,
         sessionId: ctx.session?.sessionId ?? null,
-      });
+      }, ctx.abortSignal);
     } catch {
       answer = 'no';  // fail closed — a broken confirm channel blocks the action
     }
+    if (ctx.abortSignal?.aborted) return abortedResult('after_confirmation');
     const approved = answer === 'yes_once' || answer === 'yes_session';
     userApprovedThisDispatch = approved;
     if (confirmEntry) {
@@ -323,6 +338,7 @@ export const dispatchToolCall = async (call, ctx) => {
       details: { tool: call.name, answer, ugcZone: ugcRuleId ?? undefined },
     }).catch(() => {});
   }
+  if (ctx.abortSignal?.aborted) return abortedResult('after_confirmation');
 
   // ---- Pre-tool-use hooks ------------------------------------------------
   // why: this is the LAST programmable veto before a side effect runs —
@@ -365,6 +381,7 @@ export const dispatchToolCall = async (call, ctx) => {
   }
   // Adopt any args the pre-hooks rewrote. execute() + the audit see these.
   args = pre.args;
+  if (ctx.abortSignal?.aborted) return abortedResult('after_pre_tool_hook');
 
   // ---- Lifecycle tracking (the recovery contract) ------------------------
   // why HERE: every gate/confirm/hook has passed, so what follows is a real
@@ -448,6 +465,14 @@ export const dispatchToolCall = async (call, ctx) => {
       };
     }
     tracking = begun && 'handle' in begun ? begun.handle : null;
+  }
+  if (ctx.abortSignal?.aborted) {
+    if (tracking && ctx.lifecycle?.settleTracking) {
+      await ctx.lifecycle.settleTracking(tracking, {
+        ok: false, error: 'aborted before execution', aborted: true,
+      }).catch(() => null);
+    }
+    return abortedResult('before_execution');
   }
 
   // ---- Execute -----------------------------------------------------------

@@ -177,12 +177,13 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list'],
   messageActor:    ['message_actor'],
-  // The script tool's run registry (Stop plumbing for its actors surface). A
-  // narrowed child without the script grant loses it; one granted script but
-  // not message_actor keeps the registry yet loses the messageActor closure —
-  // and script's actors mint requires BOTH, so its delegation surface composes
-  // off exactly the same grant that message_actor itself needs.
-  scriptRuns:      ['script'],
+  // The sealed-code run registry (Stop + relay custody). Script's actor client
+  // additionally requires messageActor, so code delegation still composes off
+  // exactly the same grant as direct message_actor.
+  // Every sealed code lane now mints the same owner-bound live-run lease. Keep
+  // the registry exactly when one of those tools survived the grant; omitting a
+  // lane fails loudly as `*_registry_unavailable`, never as an ungated relay.
+  scriptRuns:      ['script', 'a2a_run', 'page_code', 'site_client_run'],
   // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
   // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
   // web actor (which has navigate), stripped from any kind whose toolset lacks it.
@@ -267,7 +268,7 @@ export const finalAssistantText = (session) => {
  *   key never enters it). Tool-less children only relay the model call; tool-bearing
  *   children (job.tools set) also relay each tool call to the SW-gated dispatch.
  *   null = use the in-SW loop.
- * @param {((task: string) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
+ * @param {((task: string, effectiveTools: string[]) => Promise<string> | string) | null} [deps.renderSystemPromptForChild]
  *   Render the child's system prompt SW-side for the offscreen path (the worker
  *   never assembles it). Required alongside runChildOffscreen.
  */
@@ -625,7 +626,8 @@ export const makeSpawnActor = (deps) => {
     // would distort the child's one-shot task and silently widen the
     // blast radius of a session-scoped instruction. Inheritance is
     // "absent", by design.
-    const getSystemPrompt = () => renderSystemPrompt({ taskOverride: task });
+    const effectiveTools = subsetDescriptors.map(({ name }) => name);
+    const getSystemPrompt = () => renderSystemPrompt({ taskOverride: task, effectiveTools });
 
     // Guardrail 5 (output cap): inject maxTokens into every model call.
     // Also the context inspector's THIRD seam: this wrapper only feeds the
@@ -697,7 +699,7 @@ export const makeSpawnActor = (deps) => {
       const canRunOffscreen = typeof runChildOffscreen === 'function'
         && typeof renderSystemPromptForChild === 'function';
       if (canRunOffscreen) {
-        const systemPrompt = await renderSystemPromptForChild(task);
+        const systemPrompt = await renderSystemPromptForChild(task, effectiveTools);
         const r = await runChildOffscreen({
           sessionId: child.sessionId, task, systemPrompt,
           provider, model: model ?? parent?.model, depth,

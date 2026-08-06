@@ -9,7 +9,7 @@
 // the subtree (what session teardown does) actually empties the workspace.
 
 import { describe, it, expect } from '../../framework.js';
-import { runJob } from '/offscreen/job-runner.js';
+import { runJob, abortJob } from '/offscreen/job-runner.js';
 import { opfsHelpers } from '/peerd-engine/index.js';
 
 const noSW = { sendToSW: async () => ({ ok: true }) };
@@ -17,6 +17,13 @@ const noSW = { sendToSW: async () => ({ ok: true }) };
 // leak state into these assertions.
 const wsid = `ws-test-${Date.now().toString(36)}`;
 const nukeWorkspace = () => opfsHelpers(['peerd-workspace', wsid]).nuke();
+
+const deferred = () => {
+  /** @type {(value?: unknown) => void} */
+  let resolve = () => {};
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+};
 
 describe('offscreen job-runner — durable workspace (workspaceSessionId)', () => {
   it('a second workspace run sees the first run\'s file (mount + skip-nuke)', async () => {
@@ -151,5 +158,105 @@ describe('offscreen job-runner — durable workspace (workspaceSessionId)', () =
     expect(r.value).toBe('gone');
     // leave no residue behind the test run
     await nukeWorkspace();
+  });
+
+  it('Stop aborts and drains a pending WORKSPACE write before the run returns', async () => {
+    const started = deferred();
+    const maySettle = deferred();
+    let signalSeen = false;
+    let writeSettled = false;
+    const fake = {
+      list: async () => [],
+      write: async (/** @type {string} */ _path, /** @type {unknown} */ _content, /** @type {{ signal: AbortSignal }} */ { signal }) => {
+        signalSeen = signal instanceof AbortSignal;
+        started.resolve();
+        await maySettle.promise;
+        writeSettled = true;
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+      },
+      read: async () => '', delete: async () => {}, nuke: async () => {},
+    };
+    const runId = `workspace-stop-${Date.now().toString(36)}`;
+    const pending = runJob(
+      {
+        code: 'await peerd.self.writeFile("late.txt", "must-not-commit"); return "bad";',
+        workspaceSessionId: wsid, runId, ownerSessionId: wsid, timeoutMs: 5000,
+      },
+      { ...noSW, opfsForRoot: /** @type {any} */ (() => fake) },
+    );
+    await started.promise;
+    abortJob(runId, wsid);
+    await Promise.resolve();
+    expect(signalSeen).toBe(true);
+    expect(writeSettled).toBe(false);
+    maySettle.resolve();
+    const result = await pending;
+    expect(writeSettled).toBe(true);
+    expect(String(result.error)).toContain('job aborted');
+  });
+
+  it('ephemeral cleanup waits for an aborted host write before nuking scratch', async () => {
+    const started = deferred();
+    const maySettle = deferred();
+    /** @type {string[]} */
+    const order = [];
+    const fake = {
+      write: async (/** @type {string} */ _path, /** @type {unknown} */ _content, /** @type {{ signal: AbortSignal }} */ { signal }) => {
+        started.resolve();
+        await maySettle.promise;
+        order.push('write-settled');
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+      },
+      read: async () => '', list: async () => [], delete: async () => {},
+      nuke: async () => { order.push('nuke'); },
+    };
+    const runId = `ephemeral-stop-${Date.now().toString(36)}`;
+    const pending = runJob(
+      {
+        code: 'await peerd.self.writeFile("late.txt", "must-not-survive"); return "bad";',
+        runId, ownerSessionId: 'chat-ephemeral', timeoutMs: 5000,
+      },
+      { ...noSW, opfsForRoot: /** @type {any} */ (() => fake) },
+    );
+    await started.promise;
+    abortJob(runId, 'chat-ephemeral');
+    await Promise.resolve();
+    expect(order.length).toBe(0);
+    maySettle.resolve();
+    await pending;
+    expect(order).toEqual(['write-settled', 'nuke']);
+  });
+
+  it('Stop during delete path resolution reaches the host commit check', async () => {
+    const started = deferred();
+    const mayCommit = deferred();
+    let removed = false;
+    let sawAbortedCommit = false;
+    const fake = {
+      list: async () => [], write: async () => {}, read: async () => '', nuke: async () => {},
+      delete: async (/** @type {string} */ _path, /** @type {{ signal: AbortSignal }} */ { signal }) => {
+        started.resolve();
+        await mayCommit.promise;
+        if (signal.aborted) {
+          sawAbortedCommit = true;
+          throw new DOMException('aborted', 'AbortError');
+        }
+        removed = true;
+      },
+    };
+    const runId = `delete-stop-${Date.now().toString(36)}`;
+    const pending = runJob(
+      {
+        code: 'await peerd.self.deleteFile("keep.txt"); return "bad";',
+        workspaceSessionId: wsid, runId, ownerSessionId: wsid, timeoutMs: 5000,
+      },
+      { ...noSW, opfsForRoot: /** @type {any} */ (() => fake) },
+    );
+    await started.promise;
+    abortJob(runId, wsid);
+    mayCommit.resolve();
+    await pending;
+    expect(sawAbortedCommit).toBe(true);
+    expect(removed).toBe(false);
   });
 });

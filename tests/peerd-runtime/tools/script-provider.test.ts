@@ -61,7 +61,7 @@ describe('script — the caps.provider mint (design 5)', () => {
     expect(opts?.runId).toBe('run-s1');
     expect(opts?.timeoutMs).toBe(30_000);
     const reg = scriptRuns.calls.find((c) => c.fn === 'register');
-    expect(reg?.args[3]).toEqual({ actors: false, provider: false });
+    expect(reg?.args[3]).toEqual({ actors: false, egress: true, provider: false });
     expect(scriptRuns.calls.some((c) => c.fn === 'release')).toBe(true);
   });
 
@@ -97,7 +97,7 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
     expect(opts?.runId).toBe('run-spawn-1');
     expect(opts?.caps).toEqual({ subagent: false });
     const reg = scriptRuns.calls.find((c) => c.fn === 'register');
-    expect(reg?.args[3]).toEqual({ actors: true, provider: false });
+    expect(reg?.args[3]).toEqual({ actors: true, egress: true, provider: false });
   });
 
   test('every script disables hidden peerd.runtime.runAgent, even without actors code', async () => {
@@ -116,7 +116,7 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
     });
     expect(opts?.actors).toBeUndefined();
     const reg = scriptRuns.calls.find((c) => c.fn === 'register');
-    expect(reg?.args[3]).toEqual({ actors: false, provider: false });
+    expect(reg?.args[3]).toEqual({ actors: false, egress: true, provider: false });
   });
 
   test('a chat manifest that removes message_actor cannot recover it through script', async () => {
@@ -144,7 +144,7 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
     expect(opts?.actors).toBeUndefined();
     // It still gets a Stop-bound run, with no delegation authority.
     const reg = scriptRuns.calls.find((c) => c.fn === 'register');
-    expect(reg?.args[3]).toEqual({ actors: false, provider: false });
+    expect(reg?.args[3]).toEqual({ actors: false, egress: true, provider: false });
   });
 });
 

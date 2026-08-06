@@ -25,4 +25,22 @@ describe('offscreen JS client', () => {
     await expect(pending).rejects.toThrow('headless job aborted before dispatch');
     expect(sent).toEqual([]);
   });
+
+  test('one wall-clock deadline is minted before startup and forwarded unchanged', async () => {
+    let sent: any = null;
+    const before = Date.now();
+    const client = makeOffscreenJsClient({
+      ensureOffscreen: async () => {},
+      sendMessage: async (message: object) => {
+        sent = message;
+        return { ok: true, result: {} };
+      },
+    });
+    await client.execHeadless('return 1', { timeoutMs: 1_234 });
+    const after = Date.now();
+    expect(sent.startedAt).toBeGreaterThanOrEqual(before);
+    expect(sent.startedAt).toBeLessThanOrEqual(after);
+    expect(sent.deadlineAt - sent.startedAt).toBe(1_234);
+    expect(sent.timeoutMs).toBe(1_234);
+  });
 });
