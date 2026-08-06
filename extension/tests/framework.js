@@ -169,24 +169,53 @@ export const expect = (actual) => ({
 });
 
 /**
- * Run all collected suites. Returns a tree of results — the runner
- * page formats it for display.
+ * Run collected suites. `only` and sharding are runner controls, not test
+ * semantics; each selected test still gets the same fresh page-global state.
+ * @param {(name: string) => void} [onTestStart]
+ * @param {{ only?: string, shardIndex?: number, shardCount?: number }} [options]
  */
-export const run = async () => {
+export const run = async (onTestStart = () => {}, options = {}) => {
+  const only = options.only ?? '';
+  const shardIndex = options.shardIndex ?? 0;
+  const shardCount = options.shardCount ?? 1;
+  const selectors = only.split(',').map((value) => value.trim()).filter(Boolean);
+  /** @param {string} fullName */
+  const selected = (fullName) => selectors.length === 0
+    || selectors.some((selector) => fullName.includes(selector));
   /** @type {SuiteResult[]} */
   const results = [];
-  for (const s of suites) results.push(await runSuite(s));
+  for (const [index, suite] of suites.entries()) {
+    // why: suites can deliberately share setup across their tests. Sharding a
+    // suite's individual tests would change those semantics, so the root suite
+    // is the smallest parallel unit.
+    if (index % shardCount !== shardIndex) continue;
+    results.push(await runSuite(suite, onTestStart, [], selected));
+  }
   return results;
+};
+
+/** @returns {number} */
+export const countTests = () => {
+  /** @param {Suite} suite @returns {number} */
+  const countSuite = (suite) => suite.tests.length
+    + suite.children.reduce((total, child) => total + countSuite(child), 0);
+  return suites.reduce((total, suite) => total + countSuite(suite), 0);
 };
 
 /**
  * @param {Suite} suite
+ * @param {(name: string) => void} onTestStart
+ * @param {string[]} parents
+ * @param {(fullName: string) => boolean} selected
  * @returns {Promise<SuiteResult>}
  */
-const runSuite = async (suite) => {
+const runSuite = async (suite, onTestStart, parents, selected) => {
   /** @type {SuiteResult} */
   const out = { name: suite.name, tests: [], children: [] };
   for (const t of suite.tests) {
+    const fullName = [...parents, suite.name, t.name].join(' > ');
+    if (!selected(fullName)) continue;
+    onTestStart(fullName);
     const start = performance.now();
     try {
       await t.fn();
@@ -206,7 +235,8 @@ const runSuite = async (suite) => {
       });
     }
   }
-  for (const c of suite.children) out.children.push(await runSuite(c));
+  const nextParents = [...parents, suite.name];
+  for (const c of suite.children) out.children.push(await runSuite(c, onTestStart, nextParents, selected));
   return out;
 };
 

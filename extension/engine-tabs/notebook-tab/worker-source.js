@@ -455,10 +455,19 @@ __PEERD_BODY__})()
     });
   })
   .catch((err) => {
+    const errorName = err?.name || 'Error';
+    const errorMessage = err?.message || String(err);
+    const headline = errorName + ': ' + errorMessage;
+    const stack = typeof err?.stack === 'string' ? err.stack : '';
+    // why: Firefox worker stacks can contain only frames. Keep the message in
+    // the result so a user or model can understand and repair the failed run.
+    const detail = stack.includes(errorMessage)
+      ? stack
+      : stack ? headline + '\\n' + stack : headline;
     postMessage({
       type: 'done', value: undefined, consoleOutput,
       durationMs: Math.round(performance.now() - __start),
-      error: err?.stack || (err?.name || 'Error') + ': ' + (err?.message || String(err)),
+      error: detail,
     });
   });
 `;

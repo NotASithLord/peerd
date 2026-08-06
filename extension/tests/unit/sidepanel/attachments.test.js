@@ -80,9 +80,12 @@ const mountInputBar = async (state, send) => {
 const pasteImage = (textarea, bytes = 'imgbytes', name = 'shot.png') => {
   const dt = new DataTransfer();
   dt.items.add(new File([bytes], name, { type: 'image/png' }));
-  textarea.dispatchEvent(new ClipboardEvent('paste', {
-    clipboardData: dt, bubbles: true, cancelable: true,
-  }));
+  // why: Firefox ignores clipboardData passed to the ClipboardEvent
+  // constructor. Define the same read-only event field explicitly so this
+  // exercises InputBar's paste path in both browser engines.
+  const event = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', { value: dt });
+  textarea.dispatchEvent(event);
 };
 
 describe('sidepanel.attachments', () => {

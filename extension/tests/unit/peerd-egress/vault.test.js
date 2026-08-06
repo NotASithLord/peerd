@@ -22,6 +22,15 @@ const SMALL_PARAMS = Object.freeze({
 import { makeMockKV } from '../../mocks/kv.js';
 import { fakeTimers } from '../../mocks/clock.js';
 
+/** @param {() => boolean} predicate */
+const until = async (predicate) => {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for vault mirror state');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
 /** @param {ReturnType<typeof makeMockKV>} [kvOverride] */
 const newVault = (kvOverride) => {
   const kv = kvOverride ?? makeMockKV();
@@ -198,8 +207,8 @@ describe('vault', () => {
       await v1.initialize('passphrase-for-resume-test');
       await v1.setSecret('k', 'plaintext-value');
 
-      // Microtask: persist runs without await; let it complete.
-      await new Promise((r) => setTimeout(r, 0));
+      // Persistence is intentionally fire-and-forget and includes WebCrypto.
+      await until(() => session.has('vault.unlocked.v1'));
       expect(session.has('vault.unlocked.v1')).toBe(true);
 
       // Simulate SW death + fresh boot: build a new vault against the
@@ -237,12 +246,12 @@ describe('vault', () => {
         autoLockMs: 0,
       });
       await v.initialize('passphrase-for-lock-clear');
-      await new Promise((r) => setTimeout(r, 0));
+      await until(() => session.has('vault.unlocked.v1'));
       expect(session.has('vault.unlocked.v1')).toBe(true);
 
       v.lock();
-      // sessionDelete is fire-and-forget; let microtask flush.
-      await new Promise((r) => setTimeout(r, 0));
+      // sessionDelete is fire-and-forget and queued behind any pending set.
+      await until(() => !session.has('vault.unlocked.v1'));
       expect(session.has('vault.unlocked.v1')).toBe(false);
 
       // Fresh vault can't resume.

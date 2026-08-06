@@ -221,7 +221,7 @@ describe('sidepanel.hooks-view', () => {
         editor.dispatchEvent(new Event('input'));
         await flush();
         const form = need(root, 'form.hook-add');
-        form.dispatchEvent(new Event('submit'));
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         await flush();
         const save = send.calls.find((c) => c.type === 'hooks/save');
         expect(save?.markdown).toContain('id: x');
@@ -240,7 +240,9 @@ describe('sidepanel.hooks-view', () => {
         editor.value = '---\nid: x\nevent: nope\n---\n';
         editor.dispatchEvent(new Event('input'));
         await flush();
-        need(root, 'form.hook-add').dispatchEvent(new Event('submit'));
+        need(root, 'form.hook-add').dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
         await flush();
         expect(root.querySelector('.key-msg.err')?.textContent).toContain('invalid event');
       } finally { unmount(); }
