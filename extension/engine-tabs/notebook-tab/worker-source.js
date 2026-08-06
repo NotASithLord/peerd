@@ -309,8 +309,8 @@ const __mesh = {
 globalThis.mesh = __mesh;
 ` : ''}
 
-// --- actors.* (the orchestrator's OWN actors) proxy — capability-gated ---
-// The script tool's delegation client: ask/send hand a GOAL to a local actor
+// --- actors.* (the trusted caller's actors) proxy — capability-gated ---
+// The script tool's delegation client: ask hands a GOAL to a local actor
 // (vm/notebook/app instance, "web", an API origin) through the SW actors/call
 // route — the full message_actor gate chain runs per call. The guard value is
 // INTERPOLATED from the timeout tower (actors-api.js): it sits above the
@@ -321,7 +321,6 @@ const actorsCall = (method, args) => actorsRelay({ method, args });
 const __actors = {
   list: () => actorsCall('list', {}),
   ask:  (to, goal, opts) => actorsCall('ask', { to, goal, timeoutMs: opts && opts.timeoutMs, oneShot: opts && opts.oneShot }),
-  send: (to, goal, opts) => actorsCall('send', { to, goal, oneShot: opts && opts.oneShot }),
 };
 globalThis.actors = __actors;
 ` : ''}

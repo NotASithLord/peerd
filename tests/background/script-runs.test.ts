@@ -60,6 +60,21 @@ describe('createScriptRunRegistry', () => {
     r.release('run-4');
     expect(outer._count()).toBe(0);
   });
+
+  test('actors capability and the run-wide operation ceiling are admitted atomically', () => {
+    const r = createScriptRunRegistry({ actorOpLimit: 3 });
+    r.register('run-a', undefined, 'chat-1', { actors: true });
+    r.register('run-p', undefined, 'chat-1', { provider: true });
+    expect(r.allows('run-a', 'actors')).toBe(true);
+    expect(r.allows('run-a', 'provider')).toBe(false);
+    expect(r.allows('run-p', 'actors')).toBe(false);
+    expect(r.admitActorOp('run-p')).toBe(false);
+    for (let i = 0; i < 3; i++) expect(r.admitActorOp('run-a')).toBe(true);
+    expect(r.admitActorOp('run-a')).toBe(false);
+    r.abort('run-p');
+    expect(r.allows('run-p', 'provider')).toBe(false);
+    expect(r.admitActorOp('run-p')).toBe(false);
+  });
 });
 
 // Design 5 — the sub-model lane's SW-side state: the owner binding the

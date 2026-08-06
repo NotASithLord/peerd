@@ -1,6 +1,6 @@
 // @ts-check
-// actors-api.js — the PURE translation core for the ORCHESTRATOR's code
-// surface over its own actors: `peerd.actors.*` inside the `script` tool.
+// actors-api.js — the PURE translation core for a trusted delegator's code
+// surface over its actors: `actors.*` inside the `script` tool.
 //
 // The inverse of a2a-api.js (its direct twin): a2a said "a peer's agent is an
 // actor whose heap is remote"; this says "an actor is a peer whose heap is
@@ -11,11 +11,11 @@
 // machinery (sender gate, rate caps, dedupe, audit — nothing new is trusted).
 //
 // What script code gets ON PURPOSE and what it doesn't:
-//   • list / ask / send — DELEGATION only. The script can ask an actor to do
+//   • list / ask — DELEGATION only. The script can ask an actor to do
 //     work and await the reply; it can never name a raw tool, spawn an actor,
 //     or reach another capability through this bridge (the job host denies
 //     everything undeclared, same posture as a2a).
-//   • ask/send address SANDBOX + WEB actors alike — authority is unchanged
+//   • ask addresses SANDBOX + WEB actors alike — authority is unchanged
 //     because every op runs the full messageActor gate chain per call; oneShot
 //     rides through and stays sandbox-only (enforced there, not re-implemented
 //     here).
@@ -36,6 +36,13 @@ const nonEmptyString = (v, what) => {
   return v;
 };
 
+/** Actor lists render numeric tab ids; normalize those handles at the code edge.
+ * @param {unknown} v @param {string} what */
+const actorAddress = (v, what) => {
+  if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return String(v);
+  return nonEmptyString(v, what);
+};
+
 // The timeout TOWER, defined once so it cannot drift apart (the nesting
 // job wall-clock > worker bridge guard > per-ask cap is what makes a stuck
 // actor turn fail as an ask timeout the script can handle, not a mid-run
@@ -43,6 +50,9 @@ const nonEmptyString = (v, what) => {
 // DERIVES from the ask ceiling: bump it and the tower moves together.
 export const ACTORS_ASK_MAX_TIMEOUT_MS = 240_000;
 export const ACTORS_ASK_DEFAULT_TIMEOUT_MS = 120_000;
+// One run may compose many calls, but it is not an unbounded actor-message
+// pump. Shared by the SW admission meter and the offscreen trace ring.
+export const ACTORS_RUN_MAX_OPS = 50;
 // The worker-side bridge guard — sits ABOVE the ask cap so the SW's timeout
 // (a handleable rejection) always fires before the bridge gives up.
 export const ACTORS_BRIDGE_GUARD_MS = ACTORS_ASK_MAX_TIMEOUT_MS + 10_000;
@@ -55,13 +65,13 @@ export const ACTORS_JOB_MAX_TIMEOUT_MS = ACTORS_BRIDGE_GUARD_MS + 50_000;
  */
 
 // The method table. `delegates:true` marks an op that hands a GOAL to an actor
-// (ask/send) — the SW route runs those through messageActor's full gate chain
+// (ask) — the SW route runs it through messageActor's full gate chain
 // (sender gate, runaway caps, duplicate-intent, audit). `list` is the read-only
 // roster (the actor_list catalog, dispatched through the normal tool gates).
 /** @type {Record<string, ActorsMethodSpec>} */
 const ACTORS_METHODS = {
   // Everything addressable right now — instances, open tabs, integrations —
-  // with the handle to pass as ask/send's `to`. Read.
+  // with the handle to pass as ask's `to`. Read.
   list: {
     op: 'list',
     toArgs: () => ({}),
@@ -73,7 +83,7 @@ const ACTORS_METHODS = {
   ask: {
     op: 'ask',
     toArgs: (a) => {
-      const to = nonEmptyString(a?.to, 'actors.ask(to, goal): to');
+      const to = actorAddress(a?.to, 'actors.ask(to, goal): to');
       const goal = nonEmptyString(a?.goal, 'actors.ask(to, goal): goal');
       const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0
         ? Math.min(a.timeoutMs, ACTORS_ASK_MAX_TIMEOUT_MS) : undefined;
@@ -81,19 +91,6 @@ const ACTORS_METHODS = {
       return { to, goal, ...(timeoutMs ? { timeoutMs } : {}), ...(oneShot ? { oneShot } : {}) };
     },
     shape: (c) => ({ reply: c?.reply ?? null, failed: c?.failed === true }),
-    delegates: true,
-  },
-  // TELL — fire-and-forget: hand the goal off and keep running. The actor's
-  // reply routes to the CHAT as a normal fenced actor note on a later turn
-  // (attributed to this script's tool call), not into this run.
-  send: {
-    op: 'send',
-    toArgs: (a) => ({
-      to: nonEmptyString(a?.to, 'actors.send(to, goal): to'),
-      goal: nonEmptyString(a?.goal, 'actors.send(to, goal): goal'),
-      ...(a?.oneShot === true ? { oneShot: true } : {}),
-    }),
-    shape: (c) => ({ sent: c?.ok === true }),
     delegates: true,
   },
 };

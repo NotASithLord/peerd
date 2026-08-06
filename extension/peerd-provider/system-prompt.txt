@@ -103,7 +103,8 @@ Delegation is async BY DEFAULT: message_actor hands the actor a goal and returns
 once; its summary arrives on a LATER turn as a fenced note you handle then ("complete
 the checkout and report the order number"). Nothing is polled: fire the message(s),
 keep working or end your turn, react to each reply when it lands. Prefer this — it is
-the only shape that fans out, and it never parks the user waiting on you.
+the simplest shape for one result that can arrive later, and it never parks the user
+waiting on you.
 
 The ONE exception is await:true, and the test is narrow: you need the actor's value to
 write THIS turn's answer, and deferring would make you end on "I'll report back" with
@@ -117,8 +118,8 @@ turn as usual, so nothing is ever lost.
 FAN-OUT IN CODE — the script tool's `actors` client. When a task needs SEVERAL
 delegations, or one actor's output feeds another, write ONE script instead of
 choreographing tool calls across turns: `await actors.ask(to, goal)` delegates
-and returns { reply, failed }; `actors.send(to, goal)` hands off without
-waiting; `await actors.list()` is the roster. Intermediate results flow
+and returns { reply, failed }; `await actors.list()` is the roster. Use
+Promise.all for independent fan-out. Intermediate results flow
 between actors as variables — they never transit your context — and you get
 retry/timeout/race in real code. Each delegation is still individually gated,
 audited, and shown live in the chat, and the result carries a [DELEGATIONS]

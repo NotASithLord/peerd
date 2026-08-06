@@ -1,6 +1,6 @@
 // The pure translation core for the orchestrator's `peerd.actors.*` code
 // surface (script tool) — the local twin of a2a-api.test.ts. Proves the
-// method table (validation, the ask/send split, oneShot passthrough), the
+// method table (validation + oneShot passthrough), the
 // result shaping (system failures REJECT), and the ops-trace helpers that
 // carry the observability contract (fence-safe lines vs fenced error details).
 
@@ -13,10 +13,9 @@ import {
 } from '../../extension/peerd-runtime/actor/actors-api.js';
 
 describe('the method table', () => {
-  test('exposes exactly list / ask / send — delegation only, no raw tools', () => {
-    expect([...ACTORS_API_METHODS].sort()).toEqual(['ask', 'list', 'send']);
+  test('exposes exactly list / ask — delegation only, no raw tools or fake cast', () => {
+    expect([...ACTORS_API_METHODS].sort()).toEqual(['ask', 'list']);
     expect(actorsMethodDelegates('ask')).toBe(true);
-    expect(actorsMethodDelegates('send')).toBe(true);
     expect(actorsMethodDelegates('list')).toBe(false);
   });
 
@@ -39,10 +38,9 @@ describe('actorsCallToOp — validation', () => {
     expect(r.args).toEqual({ to: 'web', goal: 'find the price' });
   });
 
-  test('send requires to + goal; oneShot rides through', () => {
-    expect(actorsCallToOp({ method: 'send', args: { to: 'nb-1', goal: 'chart it', oneShot: true } }).args)
-      .toEqual({ to: 'nb-1', goal: 'chart it', oneShot: true });
-    expect(() => actorsCallToOp({ method: 'send', args: { to: 'nb-1' } })).toThrow(ActorsApiError);
+  test('numeric tab handles from actors.list normalize to message_actor addresses', () => {
+    expect(actorsCallToOp({ method: 'ask', args: { to: 42, goal: 'inspect it' } }).args.to)
+      .toBe('42');
   });
 
   test('list takes no args', () => {
@@ -54,7 +52,6 @@ describe('shapeActorsResult — system failures reject, actor failures return', 
   test('a failed op (gate refusal / rate cap / timeout) THROWS with the system reason', () => {
     expect(() => shapeActorsResult('ask', { ok: false, error: 'message_actor: 4 actor messages already in flight…' }))
       .toThrow(/in flight/);
-    expect(() => shapeActorsResult('send', { ok: false })).toThrow(/actors.send failed/);
   });
 
   test('ask shapes { reply, failed } — an actor-level failure RETURNS (script decides)', () => {
@@ -66,8 +63,7 @@ describe('shapeActorsResult — system failures reject, actor failures return', 
       .toEqual({ reply: 'the vm actor failed: …', failed: true });
   });
 
-  test('send shapes { sent }; list shapes the roster string', () => {
-    expect(shapeActorsResult('send', { ok: true })).toEqual({ sent: true });
+  test('list shapes the roster string', () => {
     expect(shapeActorsResult('list', { ok: true, roster: '{"tabs_columns":…}' })).toBe('{"tabs_columns":…}');
   });
 });

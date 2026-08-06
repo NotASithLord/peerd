@@ -266,8 +266,9 @@ spawned by an inbound or injected turn is tainted for its whole subtree. Forged,
 severed, foreign-rooted, and cyclic lineages fail closed. A poisoned mesh op (bad
 method or args) is rejected, and signing as the user requires per-target consent. The
 wall covers EVERY door to delegation, not only the direct `message_actor` tool: the
-`script` tool's `actors.send`/`actors.ask` surface reaches the same `messageActor`, so
-it is refused mint on an inbound turn (`tools/defs/script.js` gates `actorsOn` on
+`script` tool's awaited `actors.ask` surface reaches the same `messageActor`
+(while `actors.list` only reads the roster), so delegation is refused mint on
+an inbound turn (`tools/defs/script.js` gates `actorsOn` on
 `ctx.inbound !== true` — the trusted turn signal folded SW-side; the untrusted worker
 never echoes it).
 Code: `peerd-runtime/actor/delegation-lineage.js` (`mayMessageActor`,

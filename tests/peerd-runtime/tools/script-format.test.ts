@@ -128,10 +128,47 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     expect(released).toEqual(['scriptrun-chat-1-1']);  // the finally path unwinds it
   });
 
-  test('an ephemeral run without actors mints NO runId (unchanged fast path)', async () => {
-    const { ctx, seen } = ctxWith({ scriptRuns: { mintRunId: () => 'x', register: () => {}, abort: () => {}, release: () => {}, opsFor: () => [] } });
+  test('a pure-compute run gets a runId so Stop can terminate its worker', async () => {
+    const registered: unknown[][] = [];
+    const released: string[] = [];
+    const { ctx, seen } = ctxWith({
+      scriptRuns: {
+        mintRunId: () => 'x',
+        register: (...args: unknown[]) => { registered.push(args); },
+        abort: () => {},
+        release: (runId: string) => { released.push(runId); },
+        opsFor: () => [],
+      },
+    });
     await scriptTool.execute({ code: 'return 1' }, ctx as any);
-    expect(seen.opts.runId).toBeUndefined();
+    expect(seen.opts.runId).toBe('x');
+    expect(seen.opts.caps).toEqual({ subagent: false });
+    expect(registered[0]?.[3]).toEqual({ actors: false, provider: false });
+    expect(released).toEqual(['x']);
+  });
+
+  test('Stop aborts a pure-compute worker, not just actor/provider runs', async () => {
+    const controller = new AbortController();
+    const aborted: string[] = [];
+    let finish: (value: any) => void = () => {};
+    const scriptRuns = {
+      mintRunId: () => 'pure-run', register: () => {}, abort: () => {},
+      release: () => {}, opsFor: () => [],
+    };
+    const { ctx } = ctxWith({
+      abortSignal: controller.signal,
+      scriptRuns,
+      jsOffscreenClient: {
+        execHeadless: () => new Promise((resolve) => { finish = resolve; }),
+        abortHeadless: async (runId: string) => { aborted.push(runId); },
+      },
+    });
+    const pending = scriptTool.execute({ code: 'for (;;) {}' }, ctx as any);
+    await Promise.resolve();
+    controller.abort();
+    expect(aborted).toEqual(['pure-run']);
+    finish({ durationMs: 1, value: undefined, error: 'job aborted (Stop)' });
+    await pending;
   });
 
   test('an overflowing value spills to runCache stamped with session + fence state, and the result carries the footer', async () => {

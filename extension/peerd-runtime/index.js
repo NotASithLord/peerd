@@ -123,6 +123,7 @@ export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
+  ACTORS_RUN_MAX_OPS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Design 5 — peerd.provider.call: the pure core (text-only arg validation,

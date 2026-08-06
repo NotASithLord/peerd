@@ -1,25 +1,25 @@
 // @ts-check
-// background/script-runs.js — the live registry of delegating script runs:
-// actors-enabled AND provider-enabled (design 5 — a provider run registers
-// here with no actors at all, for the owner binding the script/model-call
-// relay checks and the per-run sub-model quota counters below).
+// background/script-runs.js — the live registry of session-owned script runs.
+// Every run registers so Stop can terminate its worker. Actors/provider flags
+// are explicit capabilities: a run id alone buys no relay authority.
 //
-// why it exists: a `script` run that delegates holds real work in flight —
-// pending actors.ask calls are LIVE ACTOR TURNS. When the user hits Stop (or
-// the turn aborts for any reason), those turns must die with the run, and the
-// worker itself should be terminated instead of running to its wall-clock.
+// why it exists: a `script` run holds real work in flight — compute, egress,
+// workspace writes, and possibly LIVE ACTOR/MODEL TURNS. When the user hits
+// Stop (or the turn aborts for any reason), that work must die with the run
+// instead of continuing to its wall-clock.
 // The tool execute registers each run here with the dispatch abort signal;
 // the SW actors/call route derives every pending ask's awaitSignal from the
 // run's controller, so one abort() unwinds the whole delegation fan.
 //
-// Pure factory (values + injected clock only) — bun-tested without a browser.
+// Pure factory (values + injected limits only) — bun-tested without a browser.
 
 /**
  * @typedef {{ aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void }} AbortSignalLike
  */
 
-export const createScriptRunRegistry = () => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, providerCalls: number, providerOutputTokens: number }>} */
+/** @param {{ actorOpLimit?: number }} [options] */
+export const createScriptRunRegistry = ({ actorOpLimit = 50 } = {}) => {
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: { actors: boolean, provider: boolean }, actorOps: number, providerCalls: number, providerOutputTokens: number }>} */
   const runs = new Map();
   let seq = 0;
 
@@ -41,11 +41,23 @@ export const createScriptRunRegistry = () => {
      * refuses a runId whose registered owner doesn't match the trusted job
      * param (design 5 — a dead or foreign run buys nothing).
      * @param {string} runId @param {AbortSignalLike} [outerSignal] @param {string} [owner]
+     * @param {{ actors?: boolean, provider?: boolean }} [capabilities]
      */
-    register: (runId, outerSignal, owner) => {
+    register: (runId, outerSignal, owner, capabilities = {}) => {
       const controller = new AbortController();
-      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, providerCalls: number, providerOutputTokens: number }} */
-      const entry = { controller, ops: [], ...(owner ? { owner } : {}), providerCalls: 0, providerOutputTokens: 0 };
+      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: { actors: boolean, provider: boolean }, actorOps: number, providerCalls: number, providerOutputTokens: number }} */
+      const entry = {
+        controller,
+        ops: [],
+        ...(owner ? { owner } : {}),
+        capabilities: {
+          actors: capabilities.actors === true,
+          provider: capabilities.provider === true,
+        },
+        actorOps: 0,
+        providerCalls: 0,
+        providerOutputTokens: 0,
+      };
       if (outerSignal) {
         const onOuterAbort = () => controller.abort();
         if (outerSignal.aborted) controller.abort();
@@ -66,7 +78,7 @@ export const createScriptRunRegistry = () => {
     recordOp: (runId, op) => {
       const entry = runs.get(runId);
       if (!entry) return;
-      if (entry.ops.length >= 50) entry.ops.shift();
+      if (entry.ops.length >= actorOpLimit) entry.ops.shift();
       entry.ops.push(op);
     },
 
@@ -78,6 +90,25 @@ export const createScriptRunRegistry = () => {
 
     /** The session a live run was registered FOR, or null. @param {string} runId */
     ownerFor: (runId) => runs.get(runId)?.owner ?? null,
+
+    /** A live run may redeem only the capability minted for its job lane.
+     * @param {string} runId @param {'actors'|'provider'} capability */
+    allows: (runId, capability) => {
+      const entry = runs.get(runId);
+      return entry?.controller.signal.aborted !== true
+        && entry?.capabilities[capability] === true;
+    },
+
+    /** Atomically admit one actors op against the run-wide ceiling. Counting
+     * happens before any await, so Promise.all fan-out cannot oversubscribe it.
+     * @param {string} runId */
+    admitActorOp: (runId) => {
+      const entry = runs.get(runId);
+      if (!entry || entry.controller.signal.aborted
+        || !entry.capabilities.actors || entry.actorOps >= actorOpLimit) return false;
+      entry.actorOps += 1;
+      return true;
+    },
 
     // ── design 5: the per-run sub-model quota counters ────────────────────
     // SW-side ON PURPOSE (never worker state): the realm being metered must
