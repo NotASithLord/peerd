@@ -1,16 +1,18 @@
 // @ts-check
 // web-pace/reducer.js — the PURE policy core of adaptive per-origin action
-// pacing. Design spec: docs/store/ADAPTIVE-PACING.md (PR #213), which resolves
-// ANTI-BOT-POSTURE.md Option 0 as "code, not prompt; learned, not a hardcoded
-// list; targeted, not blanket".
+// pacing. Issue #234 is the decision record.
 //
-// THE SHAPE. peerd paces NOTHING by default (minIntervalMs 0 everywhere). When
-// a site pushes back in its own response bytes (a 429 + Retry-After, a velocity
-// wall, a challenge interstitial), the observing hook feeds that signal through
-// nextRuleOnBlock and persists the result: a NUMBER for that origin, sized from
-// the cadence that actually got blocked. Quiet time decays it back toward zero;
-// a probe tests whether the site still cares. The whole loop is
-// observe -> learn -> enforce -> decay/probe.
+// This module is not wired into storage, hooks, dispatch, or UI. It changes no
+// extension behavior on its own. A future integration must keep rules in the
+// trusted service-worker control plane, feed only fixed trusted classifiers
+// into these transitions, and keep rule history out of model context. Arbitrary
+// page text is never a pacing instruction.
+//
+// THE SHAPE. The default interval is zero. A trusted observer may pass a block
+// signal through nextRuleOnBlock, producing an interval for that exact origin.
+// Quiet time decays it toward zero. A probe may test one action at a lower
+// interval, then adopt that interval only after a clean outcome and settle
+// period. The intended loop is observe -> learn -> enforce -> decay/probe.
 //
 // why a pure core: every transition here is a function of (rule, signal, now).
 // No storage, no clock, no Math.random — the caller injects them. That makes the
@@ -18,24 +20,18 @@
 // enforcement/observation hooks as thin imperative shells, per the module's
 // functional-core rule.
 //
-// THE FENCE (why this file holds no strings). The rule is data the RUNTIME
-// interprets, never prose the model reads. It is computed and stored SW-side,
-// behind the actor-heap fence: the offscreen worker never holds it and the
-// model never receives it as prompt. An untrusted reasoning heap therefore
-// cannot argue peerd out of pacing — there is no sentence to argue with.
+// THE FENCE (why this file holds no page strings). The integration must treat a
+// rule as control-plane data, not prose for the model. This reducer does not
+// establish that boundary by itself.
 //
-// THE DESCENT RULE (the load-bearing safety property). Pacing may be raised by
-// anyone, but it may only ever come DOWN two ways: automatic time-based decay,
-// or a bounded probe that snaps back on a block. There is deliberately NO
-// clearRule() and applyAgentSet() is RAISE-ONLY. why: raising is self-limiting
-// (worst case peerd is slow on one origin), but LOWERING is the direction an
-// injected page benefits from — talk the web actor into retiring the rule, peerd
-// hammers the site, and it is the user's own logged-in account that eats the
-// ban. An SW-side re-check of a "clear" call can validate its args but never its
-// INTENT — it cannot tell "the actor judged this stale" from "a page talked the
-// actor into it". So the descent is not a decision the actor is allowed to make;
-// probe() is the safe expression of the same wish, because a block during the
-// trial window restores the old value and re-escalates.
+// THE DESCENT RULE (the load-bearing safety property). A rule rises only from
+// trusted block signals, and it may come down only through automatic time-based
+// decay or a bounded probe that snaps back on a block. There is deliberately no
+// clearRule() or model-controlled set operation. LOWERING is the direction an
+// injected page benefits from: retire the rule, peerd hammers the site, and the
+// user's logged-in account absorbs the risk. An argument check cannot validate
+// intent. Descent is therefore limited to time-based decay and the one-action
+// probe state machine below.
 
 import { clamp } from '/shared/util.js';
 
@@ -45,6 +41,7 @@ import { clamp } from '/shared/util.js';
  * every origin peerd has never been blocked by.
  *
  * @typedef {Object} PaceRule
+ * @property {1} version                       persisted shape version
  * @property {string} origin                 the key this rule binds to
  * @property {number} minIntervalMs          enforced gap between action tools; 0 == no rule
  * @property {number} jitterFrac             ± fraction applied to the gap (a UNIFORM gap is itself a tell)
@@ -53,16 +50,20 @@ import { clamp } from '/shared/util.js';
  * @property {number} lastDecayAt            epoch ms of the last decay/adopt
  * @property {number} createdAt              epoch ms
  * @property {number} updatedAt              epoch ms
- * @property {'learned'|'retry-after'|'agent'} source  provenance of the current value
- * @property {null | { trialMs: number, until: number, prevMinIntervalMs: number }} probe
- *   a live staleness test: pace at trialMs until `until`, restoring
- *   prevMinIntervalMs if the site blocks us during the window.
+ * @property {'learned'|'retry-after'} lastEscalationSource source of the last increase
+ * @property {null | {
+ *   trialMs: number,
+ *   startedAt: number,
+ *   until: number,
+ *   prevMinIntervalMs: number,
+ *   actionStartedAt: number | null,
+ *   cleanObservedAt: number | null,
+ * }} probe a one-action staleness test
  */
 
 /**
- * The tunables bundle (`K`). Seeds, not doctrine — start conservative and tune
- * from the eval harness + field reports (spec open question F). Injected into
- * every reducer so a test can pin exact arithmetic.
+ * The tunables bundle (`K`). These are starting values to tune through the eval
+ * harness and field reports. Injection lets tests pin exact arithmetic.
  *
  * @typedef {Object} PaceTunables
  * @property {number} growth         multiplier on a REPEAT block (compounding escalation)
@@ -70,9 +71,12 @@ import { clamp } from '/shared/util.js';
  * @property {number} seedMs         floor for a FIRST block when no cadence sample exists
  * @property {number} decay          multiplier applied per elapsed quiet period (< 1)
  * @property {number} quietMs        block-free time that earns one decay step
- * @property {number} maxPaceMs      ceiling; at/over it the limiter HANDS OFF rather than napping
+ * @property {number} maxPaceMs      ceiling; at/over it the future caller must hand off rather than wait
  * @property {number} jitterFrac     default ± fraction for a new rule
  * @property {number} retireFloorMs  decayed below this, the rule is retired (deleted)
+ * @property {number} minProbeWindowMs shortest useful observation window
+ * @property {number} maxProbeWindowMs longest a probe may suppress normal decay
+ * @property {number} probeSettleMs     quiet time after a clean observed result
  */
 
 /** @type {PaceTunables} */
@@ -87,13 +91,83 @@ export const PACE_TUNABLES = Object.freeze({
   decay: 0.5,
   quietMs: 30 * 60_000,
   // why a ceiling at all: pacing is for shaving seconds. A site that wants us
-  // minutes slower is not a pacing problem — needsHandOff() sends it up the
-  // posture ladder (challenge hand-back / assist-only) instead of silently
-  // sleeping a turn.
+  // minutes slower is not a pacing problem. needsHandOff() tells the future
+  // controller to use a challenge hand-back or assist-only posture instead of
+  // silently sleeping a turn.
   maxPaceMs: 30_000,
   jitterFrac: 0.3,
   retireFloorMs: 250,
+  minProbeWindowMs: 5_000,
+  maxProbeWindowMs: 5 * 60_000,
+  probeSettleMs: 2_000,
 });
+
+export const PACE_RULE_VERSION = 1;
+
+/** @param {unknown} value @returns {value is number} */
+const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+
+/**
+ * Validate data at the persistence boundary before any action uses it. An
+ * unreadable rule must make a future write path fail closed, not turn pacing
+ * off. The optional origin check prevents a valid record being replayed under
+ * another key.
+ *
+ * @param {unknown} value
+ * @param {string | undefined} [expectedOrigin]
+ * @param {PaceTunables} [K]
+ * @returns {value is PaceRule}
+ */
+export const isValidRule = (value, expectedOrigin, K = PACE_TUNABLES) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const rule = /** @type {Partial<PaceRule>} */ (value);
+  if (rule.version !== PACE_RULE_VERSION) return false;
+  if (typeof rule.origin !== 'string' || rule.origin.length === 0) return false;
+  if (expectedOrigin !== undefined && rule.origin !== expectedOrigin) return false;
+  if (!isFiniteNumber(rule.minIntervalMs)
+    || rule.minIntervalMs < 0
+    || rule.minIntervalMs > K.maxPaceMs) return false;
+  if (!isFiniteNumber(rule.jitterFrac)
+    || rule.jitterFrac < 0
+    || rule.jitterFrac > K.jitterFrac) return false;
+  const observations = rule.observations;
+  if (!isFiniteNumber(observations) || !Number.isInteger(observations) || observations < 0) return false;
+  const { lastBlockAt, lastDecayAt, createdAt, updatedAt } = rule;
+  if (!isFiniteNumber(lastBlockAt) || lastBlockAt < 0
+    || !isFiniteNumber(lastDecayAt) || lastDecayAt < 0
+    || !isFiniteNumber(createdAt) || createdAt < 0
+    || !isFiniteNumber(updatedAt) || updatedAt < 0) return false;
+  if (updatedAt < createdAt || lastDecayAt < createdAt || lastDecayAt > updatedAt) return false;
+  if (observations === 0) {
+    if (lastBlockAt !== 0 || rule.minIntervalMs !== 0) return false;
+  } else if (lastBlockAt < createdAt || lastBlockAt > updatedAt) return false;
+  if (rule.lastEscalationSource !== 'learned' && rule.lastEscalationSource !== 'retry-after') return false;
+  if (observations === 0 && rule.lastEscalationSource !== 'learned') return false;
+  if (rule.probe === null) return true;
+  if (!rule.probe || typeof rule.probe !== 'object') return false;
+  const probe = rule.probe;
+  if (!isFiniteNumber(probe.trialMs)
+    || probe.trialMs < 0
+    || probe.trialMs > rule.minIntervalMs) return false;
+  if (!isFiniteNumber(probe.prevMinIntervalMs)
+    || probe.prevMinIntervalMs !== rule.minIntervalMs) return false;
+  const { startedAt, until, actionStartedAt, cleanObservedAt } = probe;
+  if (!isFiniteNumber(startedAt) || !isFiniteNumber(until)) return false;
+  const windowMs = until - startedAt;
+  if (windowMs < K.minProbeWindowMs || windowMs > K.maxProbeWindowMs) return false;
+  if (startedAt < createdAt || startedAt > updatedAt) return false;
+  if (actionStartedAt !== null
+    && (!isFiniteNumber(actionStartedAt)
+      || actionStartedAt < startedAt
+      || actionStartedAt >= until
+      || actionStartedAt > updatedAt)) return false;
+  if (cleanObservedAt !== null
+    && (actionStartedAt === null
+      || !isFiniteNumber(cleanObservedAt)
+      || cleanObservedAt < actionStartedAt
+      || cleanObservedAt !== updatedAt)) return false;
+  return true;
+};
 
 /**
  * The default state of an origin: known, but costing nothing. Callers mint this
@@ -104,6 +178,7 @@ export const PACE_TUNABLES = Object.freeze({
  * @returns {PaceRule}
  */
 export const newRule = (origin, now, K = PACE_TUNABLES) => ({
+  version: PACE_RULE_VERSION,
   origin,
   minIntervalMs: 0,
   jitterFrac: K.jitterFrac,
@@ -112,7 +187,7 @@ export const newRule = (origin, now, K = PACE_TUNABLES) => ({
   lastDecayAt: now,
   createdAt: now,
   updatedAt: now,
-  source: 'learned',
+  lastEscalationSource: 'learned',
   probe: null,
 });
 
@@ -131,12 +206,17 @@ export const newRule = (origin, now, K = PACE_TUNABLES) => ({
  * @returns {PaceRule}
  */
 export const nextRuleOnBlock = (rule, { recentIntervalMs, retryAfterMs, now }, K = PACE_TUNABLES) => {
-  const fromCadence = Number.isFinite(recentIntervalMs)
+  if (!isValidRule(rule, undefined, K) || !Number.isFinite(now)) return rule;
+  const effectiveNow = Math.max(now, rule.createdAt, rule.updatedAt, rule.lastBlockAt, rule.lastDecayAt);
+  const fromCadence = Number.isFinite(recentIntervalMs) && /** @type {number} */ (recentIntervalMs) >= 0
     ? /** @type {number} */ (recentIntervalMs) * K.slowdownMult
     : 0;
-  const fromServer = Number.isFinite(retryAfterMs) ? /** @type {number} */ (retryAfterMs) : 0;
+  const fromServer = Number.isFinite(retryAfterMs) && /** @type {number} */ (retryAfterMs) >= 0
+    ? /** @type {number} */ (retryAfterMs)
+    : 0;
+  const fromExisting = rule.minIntervalMs * K.growth;
   const desired = Math.max(
-    rule.minIntervalMs * K.growth,   // compounding: repeats mean we are still too fast
+    fromExisting,                    // compounding: repeats mean we are still too fast
     fromCadence,
     fromServer,
     K.seedMs,                        // a block always yields SOME rule
@@ -145,12 +225,16 @@ export const nextRuleOnBlock = (rule, { recentIntervalMs, retryAfterMs, now }, K
     ...rule,
     minIntervalMs: clamp(desired, 0, K.maxPaceMs),
     observations: rule.observations + 1,
-    lastBlockAt: now,
-    updatedAt: now,
+    lastBlockAt: effectiveNow,
+    updatedAt: effectiveNow,
     // A block during a probe is the probe's answer; resolveProbe() owns that
     // transition, so a bare block here just drops the trial.
     probe: null,
-    source: fromServer > 0 ? 'retry-after' : 'learned',
+    // Attribute the VALUE that won, not merely the presence of a header. A
+    // smaller Retry-After did not set this rule and must not get credit for it.
+    lastEscalationSource: fromServer > 0 && fromServer >= Math.max(fromExisting, fromCadence, K.seedMs)
+      ? 'retry-after'
+      : 'learned',
   };
 };
 
@@ -165,6 +249,7 @@ export const nextRuleOnBlock = (rule, { recentIntervalMs, retryAfterMs, now }, K
  * @returns {PaceRule}
  */
 export const decay = (rule, now, K = PACE_TUNABLES) => {
+  if (!isValidRule(rule, undefined, K)) return rule;
   if (rule.probe) return rule;
   if (rule.minIntervalMs <= 0) return rule;
   const since = now - Math.max(rule.lastBlockAt, rule.lastDecayAt);
@@ -186,7 +271,10 @@ export const decay = (rule, now, K = PACE_TUNABLES) => {
  * @param {PaceRule} rule @param {PaceTunables} [K]
  */
 export const isRetired = (rule, K = PACE_TUNABLES) =>
-  !rule.probe && rule.minIntervalMs < K.retireFloorMs;
+  isValidRule(rule, undefined, K)
+  && !rule.probe
+  && rule.minIntervalMs < K.retireFloorMs
+  && rule.observations > 0;
 
 /**
  * The site wants us slower than pacing is willing to go. Not a nap — the caller
@@ -195,7 +283,8 @@ export const isRetired = (rule, K = PACE_TUNABLES) =>
  *
  * @param {PaceRule} rule @param {PaceTunables} [K]
  */
-export const needsHandOff = (rule, K = PACE_TUNABLES) => rule.minIntervalMs >= K.maxPaceMs;
+export const needsHandOff = (rule, K = PACE_TUNABLES) =>
+  !isValidRule(rule, undefined, K) || rule.minIntervalMs >= K.maxPaceMs;
 
 /**
  * The per-action delay: a CATCH-UP, not a fixed tax. The first action on an
@@ -208,17 +297,28 @@ export const needsHandOff = (rule, K = PACE_TUNABLES) => rule.minIntervalMs >= K
  * @param {number | undefined} lastActionAt   epoch ms of the previous paced action on this origin
  * @param {number} now
  * @param {() => number} [rng]                [0,1) source; injected for tests
- * @returns {number} ms to sleep (>= 0)
+ * @param {PaceTunables} [K]
+ * @returns {number | null} ms to sleep, or null when the rule cannot authorize an action
  */
-export const waitForAction = (rule, lastActionAt, now, rng = Math.random) => {
+export const waitForAction = (rule, lastActionAt, now, rng = Math.random, K = PACE_TUNABLES) => {
   if (!rule) return 0;
+  if (!isValidRule(rule, undefined, K)) return null;
+  if (needsHandOff(rule, K)) return null;
+  if (rule.probe && !probeAllowsAction(rule, now, K)) return null;
+  if (lastActionAt === undefined) return rule.probe ? null : 0;
+  if (!Number.isFinite(lastActionAt) || lastActionAt < 0) return null;
   const base = rule.probe ? rule.probe.trialMs : rule.minIntervalMs;
-  if (!(base > 0)) return 0;                                  // no rule (or a zero trial) — full speed
-  if (!Number.isFinite(lastActionAt)) return 0;               // first action on this origin is free
+  if (!(base > 0)) return 0;
   const elapsed = now - /** @type {number} */ (lastActionAt);
-  if (!Number.isFinite(elapsed) || elapsed < 0) return 0;     // clock skew — never stall
-  const jitter = base * rule.jitterFrac * (rng() * 2 - 1);    // ± jitterFrac
-  return Math.max(0, (base + jitter) - elapsed);
+  // A backwards or broken wall clock is not evidence that the interval elapsed.
+  // Require the full base rather than turning clock skew into a pacing bypass.
+  if (!Number.isFinite(elapsed) || elapsed < 0) return Math.min(base, K.maxPaceMs);
+  const rawRandom = rng();
+  const random = Number.isFinite(rawRandom) ? clamp(rawRandom, 0, 1) : 0.5;
+  const jitterFrac = rule.jitterFrac;
+  const jitter = base * jitterFrac * (random * 2 - 1);         // ± jitterFrac
+  // The ceiling governs the ACTUAL wait, not only the pre-jitter interval.
+  return clamp((base + jitter) - elapsed, 0, K.maxPaceMs);
 };
 
 /**
@@ -234,22 +334,87 @@ export const waitForAction = (rule, lastActionAt, now, rng = Math.random) => {
  * @param {PaceRule} rule @param {number} trialMs @param {number} windowMs @param {number} now
  * @returns {PaceRule}
  */
-export const startProbe = (rule, trialMs, windowMs, now) => {
+export const startProbe = (rule, trialMs, windowMs, now, K = PACE_TUNABLES) => {
+  if (!isValidRule(rule, undefined, K)) return rule;
   if (rule.probe) return rule;              // already probing — don't restart the window
   if (rule.minIntervalMs <= 0) return rule; // nothing to probe
+  if (!Number.isFinite(trialMs) || trialMs < 0) return rule;
+  if (!Number.isFinite(windowMs) || windowMs <= 0) return rule;
+  if (!Number.isFinite(now) || now < rule.updatedAt) return rule;
+  const boundedWindow = clamp(windowMs, K.minProbeWindowMs, K.maxProbeWindowMs);
   return {
     ...rule,
     probe: {
       trialMs: clamp(trialMs, 0, rule.minIntervalMs),
-      until: now + windowMs,
+      startedAt: now,
+      until: now + boundedWindow,
       prevMinIntervalMs: rule.minIntervalMs,
+      actionStartedAt: null,
+      cleanObservedAt: null,
     },
     updatedAt: now,
   };
 };
 
 /** The probe window has run out; the caller resolves it. @param {PaceRule} rule @param {number} now */
-export const probeExpired = (rule, now) => !!rule.probe && now >= rule.probe.until;
+export const probeExpired = (rule, now, K = PACE_TUNABLES) =>
+  isValidRule(rule, undefined, K) && Number.isFinite(now) && !!rule.probe && now >= rule.probe.until;
+
+/**
+ * A probe authorizes exactly one action. The future controller must reserve it
+ * immediately before dispatch so a second call cannot run at the trial pace.
+ *
+ * @param {PaceRule} rule @param {number} now
+ * @param {PaceTunables} [K]
+ * @returns {boolean}
+ */
+export const probeAllowsAction = (rule, now, K = PACE_TUNABLES) =>
+  isValidRule(rule, undefined, K)
+  && !!rule.probe
+  && Number.isFinite(now)
+  && now >= rule.probe.startedAt
+  && now < rule.probe.until
+  && rule.probe.actionStartedAt === null;
+
+/**
+ * @param {PaceRule} rule @param {number | undefined} lastActionAt
+ * @param {number} now @param {PaceTunables} [K]
+ * @returns {PaceRule}
+ */
+export const beginProbeAction = (rule, lastActionAt, now, K = PACE_TUNABLES) => {
+  if (!Number.isFinite(lastActionAt)
+    || /** @type {number} */ (lastActionAt) < 0
+    || !probeAllowsAction(rule, now, K)
+    || !rule.probe) return rule;
+  return {
+    ...rule,
+    probe: { ...rule.probe, actionStartedAt: now },
+    updatedAt: now,
+  };
+};
+
+/**
+ * Record a completed non-blocking outcome from the trusted post-action
+ * classifier. The action may finish after the probe window, but it must be the
+ * single action reserved inside that window.
+ *
+ * @param {PaceRule} rule @param {number} actionStartedAt @param {number} observedAt
+ * @param {PaceTunables} [K]
+ * @returns {PaceRule}
+ */
+export const noteCleanProbeAction = (rule, actionStartedAt, observedAt, K = PACE_TUNABLES) => {
+  if (!isValidRule(rule, undefined, K) || !rule.probe) return rule;
+  if (!Number.isFinite(actionStartedAt)
+    || !Number.isFinite(observedAt)
+    || rule.probe.cleanObservedAt !== null
+    || rule.probe.actionStartedAt !== actionStartedAt
+    || observedAt < actionStartedAt) return rule;
+  return {
+    ...rule,
+    probe: { ...rule.probe, cleanObservedAt: observedAt },
+    updatedAt: observedAt,
+  };
+};
 
 /**
  * End a probe. Blocked during the trial -> the site still cares: restore the
@@ -258,36 +423,27 @@ export const probeExpired = (rule, now) => !!rule.probe && now >= rule.probe.unt
  * Clean -> adopt the lower trial value; if that is under the retire floor the
  * rule is now retirable and the caller drops it entirely.
  *
- * @param {PaceRule} rule @param {boolean} blockedDuringProbe @param {number} now @param {PaceTunables} [K]
+ * @param {PaceRule} rule @param {'clean'|'blocked'|'inconclusive'} outcome
+ * @param {number} now @param {PaceTunables} [K]
  * @returns {PaceRule}
  */
-export const resolveProbe = (rule, blockedDuringProbe, now, K = PACE_TUNABLES) => {
-  if (!rule.probe) return rule;
-  const { trialMs, prevMinIntervalMs } = rule.probe;
-  if (blockedDuringProbe) {
+export const resolveProbe = (rule, outcome, now, K = PACE_TUNABLES) => {
+  if (!isValidRule(rule, undefined, K) || !rule.probe || !Number.isFinite(now)) return rule;
+  const { trialMs, prevMinIntervalMs, startedAt, actionStartedAt, cleanObservedAt } = rule.probe;
+  if (now < startedAt) return rule;
+  if (outcome === 'blocked') {
+    if (actionStartedAt === null || now < actionStartedAt) return rule;
     const restored = { ...rule, minIntervalMs: prevMinIntervalMs, probe: null };
     return nextRuleOnBlock(restored, { recentIntervalMs: trialMs, now }, K);
   }
+  if (outcome === 'inconclusive') {
+    if (now < rule.updatedAt || (actionStartedAt !== null && now < actionStartedAt)) return rule;
+    return { ...rule, minIntervalMs: prevMinIntervalMs, probe: null, updatedAt: now };
+  }
+  if (outcome !== 'clean' || actionStartedAt === null || cleanObservedAt === null) return rule;
+  // A quiet timer is not a test. Adopt only after the one authorized action
+  // completed cleanly and a bounded post-result settle period also stayed clean.
+  const readyAt = Math.max(rule.probe.until, cleanObservedAt + K.probeSettleMs);
+  if (now < readyAt) return rule;
   return { ...rule, minIntervalMs: trialMs, probe: null, lastDecayAt: now, updatedAt: now };
-};
-
-/**
- * The agent's only write into the rule: RAISE-ONLY, and clamped.
- *
- * why not a symmetric set(): see THE DESCENT RULE in the module header. A
- * request to go SLOWER is always safe to honor — the agent has a real signal
- * (a Retry-After it read, or the user saying "take it easy on this one") and
- * the worst case is a slow origin. A request to go FASTER is refused outright,
- * because that is the outcome an injected page wants and no downstream check
- * can distinguish a genuine judgement from a laundered instruction. An agent
- * that believes a rule is stale asks for a probe instead.
- *
- * @param {PaceRule} rule @param {number} requestedMs @param {number} now @param {PaceTunables} [K]
- * @returns {PaceRule} the rule unchanged when the request would lower it
- */
-export const applyAgentSet = (rule, requestedMs, now, K = PACE_TUNABLES) => {
-  if (!Number.isFinite(requestedMs)) return rule;
-  const requested = clamp(requestedMs, 0, K.maxPaceMs);
-  if (requested <= rule.minIntervalMs) return rule;   // refuse to lower — probe is the way down
-  return { ...rule, minIntervalMs: requested, source: 'agent', updatedAt: now };
 };
