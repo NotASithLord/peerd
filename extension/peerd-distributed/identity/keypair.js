@@ -12,10 +12,8 @@
 //                                attribution holds. IO is INJECTED (get/
 //                                setSecret) per the functional-core rule —
 //                                this file never touches the vault itself.
-// The PRF-derived seed (HKDF over the passkey PRF output) remains Phase 3
-// (NORTH-STAR D-6); the vault-random seed below is its documented fallback
-// and stores under the same secret name, so the upgrade is a derivation
-// change, not a migration.
+// Portable backup never changes derivation: it encrypts this same random seed
+// into a recovery capsule. Future passkey custody remains a design proposal.
 
 import { encodeDidKey, decodeDidKey } from './did.js';
 import { toBase64, fromBase64, concat } from '/shared/bundle/bytes.js';
@@ -66,13 +64,15 @@ const SECRET_NAME = 'distributed/identity/v1';
  */
 export const importIdentity = async ({ seed, publicKey }) => {
   if (seed.length !== 32) throw new Error('importIdentity: seed must be 32 bytes');
-  const priv = await crypto.subtle.importKey(
-    'pkcs8',
-    concat(PKCS8_ED25519_PREFIX, seed),
-    { name: 'Ed25519' },
-    false,
-    ['sign'],
-  );
+  if (publicKey.length !== 32) throw new Error('importIdentity: public key must be 32 bytes');
+  const pkcs8 = concat(PKCS8_ED25519_PREFIX, seed);
+  /** @type {CryptoKey} */
+  let priv;
+  try {
+    priv = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
+  } finally {
+    pkcs8.fill(0);
+  }
   const did = encodeDidKey(publicKey);
   /** @param {Uint8Array} bytes */
   const sign = async (bytes) =>
@@ -104,25 +104,81 @@ export const loadIdentityMaterial = async ({ getSecret, setSecret }) => {
   const stored = await getSecret(SECRET_NAME);
   if (stored) {
     const { seed, pub } = JSON.parse(stored);
-    return { seed, pub, did: encodeDidKey(fromBase64(pub)) };
+    const did = await assertIdentityMaterial({ seed, pub });
+    return { seed, pub, did };
   }
-  // First run: generate EXTRACTABLE once to capture the seed, persist,
-  // and never export again.
+  // First run: mint once and persist. Any later backup exports it only inside
+  // the authenticated, passphrase-encrypted recovery capsule.
+  const material = await mintKeypairMaterial();
+  await setSecret(SECRET_NAME, JSON.stringify({ v: 1, seed: material.seed, pub: material.pub }));
+  return material;
+};
+
+/**
+ * Mint fresh Ed25519 material: generate EXTRACTABLE exactly once to
+ * capture the seed, then hand back base64 material for the caller to
+ * persist as the identity secret — the generated
+ * handle is dropped, and later use re-imports non-extractable.
+ *
+ * @returns {Promise<{ seed: string, pub: string, did: string }>}
+ */
+export const mintKeypairMaterial = async () => {
   const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey));
-  if (pkcs8.length !== 48) throw new Error(`unexpected Ed25519 PKCS#8 length: ${pkcs8.length}`);
-  const seed = pkcs8.slice(-32);
-  const publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
-  await setSecret(SECRET_NAME, JSON.stringify({ v: 1, seed: toBase64(seed), pub: toBase64(publicKey) }));
-  return { seed: toBase64(seed), pub: toBase64(publicKey), did: encodeDidKey(publicKey) };
+  /** @type {Uint8Array | null} */
+  let seed = null;
+  /** @type {Uint8Array | null} */
+  let publicKey = null;
+  try {
+    if (pkcs8.length !== 48) throw new Error(`unexpected Ed25519 PKCS#8 length: ${pkcs8.length}`);
+    seed = pkcs8.slice(-32);
+    publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+    return { seed: toBase64(seed), pub: toBase64(publicKey), did: encodeDidKey(publicKey) };
+  } finally {
+    // Best-effort lifetime reduction on every exit, including export or
+    // encoding failures. The returned base64 owns the only required copies.
+    seed?.fill(0);
+    publicKey?.fill(0);
+    pkcs8.fill(0);
+  }
 };
 
 /**
  * Rehydrate a signing identity from stored/transferred material.
  * @param {{ seed: string, pub: string }} material
  */
-export const identityFromMaterial = ({ seed, pub }) =>
-  importIdentity({ seed: fromBase64(seed), publicKey: fromBase64(pub) });
+export const identityFromMaterial = async ({ seed, pub }) => {
+  const seedBytes = fromBase64(seed);
+  try {
+    return await importIdentity({ seed: seedBytes, publicKey: fromBase64(pub) });
+  } finally {
+    // WebCrypto copied the seed into a non-extractable handle; do not leave the
+    // decoded transfer buffer live for the rest of this turn.
+    seedBytes.fill(0);
+  }
+};
+
+const MATERIAL_PROOF = new TextEncoder().encode('peerd/identity-material-proof/v1');
+
+/**
+ * Prove that independently serialized seed/public-key fields are one Ed25519
+ * pair before the material becomes an identity. Merely deriving the advertised
+ * did from `pub` would accept a capsule whose signer can never verify under it.
+ *
+ * @param {{ seed: string, pub: string }} material
+ * @returns {Promise<string>} the verified did
+ */
+export const assertIdentityMaterial = async (material) => {
+  if (typeof material?.seed !== 'string' || typeof material?.pub !== 'string') {
+    throw new Error('identity material must contain base64 seed and pub');
+  }
+  const identity = await identityFromMaterial(material);
+  const signature = await identity.sign(MATERIAL_PROOF);
+  if (!(await verifySignature(identity.did, signature, MATERIAL_PROOF))) {
+    throw new Error('identity seed does not match public key');
+  }
+  return identity.did;
+};
 
 /**
  * Load the persistent identity, creating it on first use (the one-context

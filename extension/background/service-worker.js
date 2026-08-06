@@ -29,7 +29,10 @@
 
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
-import { isOffscreenSender as senderIsOffscreen } from '/shared/sender-trust.js';
+import {
+  isOffscreenSender as senderIsOffscreen, isOptionsSender,
+} from '/shared/sender-trust.js';
+import { loadDweb } from '/shared/dweb-loader.js';
 import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
@@ -247,6 +250,8 @@ import {
   inspectImport,
   applyImport,
   ExportPassphraseError,
+  EXPORT_PASSPHRASE_MIN_LENGTH,
+  isCustodySecretName,
   // design js-superpower/06 — the toolbox: durable agent-authored modules
   // (peerd:toolbox/<name>; store + the write-time import-resolution check).
   createToolboxStore,
@@ -377,6 +382,13 @@ import { makeModelCatalog } from './model-catalog.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
+import { makeDwebTransfer, IdentityTransferError } from './dweb-transfer.js';
+import { makeDwebShare } from './dweb-share.js';
+import { makeDwebCustodyClient, makeRetryableCustodyReset } from './dweb-custody-client.js';
+import {
+  identityChangeBlockedByApps, makeDwebIdentityCustody,
+} from './dweb-identity-custody.js';
+import { makePrivateTransferPort } from './private-transfer-port.js';
 import { downgradesActorConfirm, a2aConsentOutcome } from './a2a-consent.js';
 import { makeVaultRoutes } from './routes/vault.js';
 import { makeProviderRoutes } from './routes/providers.js';
@@ -1776,19 +1788,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // (and dweb-off) ctx.dweb is null and the tools (already hidden by exposure)
     // also no-op. share reads the app's OPFS bundle like export does.
     dweb: (DWEB_ENABLED && settingsStore.get().dwebEnabled) ? {
-      share: async (/** @type {string} */ appId) => {
-        const record = await appRegistry.get(appId);
-        if (!record) return { ok: false, error: 'app-not-found' };
-        const opfs = opfsHelpers(['peerd-apps', appId]);
-        /** @type {Record<string, any>} */ const files = {};
-        for (const f of await opfs.list()) { const path = f.path.replace(/^\/+/, ''); files[path] = await opfs.read(path); }
-        await ensureOffscreen();
-        const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/share-app', name: record.name, entry: record.entryFile, files }));
-        // Mark shared so deleting this app later un-shares it (stops serving the
-        // bytes) — same bookkeeping as the Library's Share button.
-        if (r?.ok) { try { await appRegistry.update(appId, { shared: true }); } catch (e) { console.debug('[dweb.share] mark shared failed', e); } }
-        return r;
-      },
+      share: (/** @type {string} */ appId) => shareLocalApp(appId, undefined),
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
       peers: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/peers' }); },
@@ -2602,6 +2602,76 @@ const ensureOffscreen = async () => {
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
 const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+// Relays that redeem an offscreen worker's authority need the exact browser-
+// owned host, not the broader "one of our extension pages" sender check.
+const isOffscreenSender = (/** @type {any} */ sender) => senderIsOffscreen(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
+});
+const isActualOptionsSender = (/** @type {any} */ sender) => isOptionsSender(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  optionsUrl: browser.runtime?.getURL?.('options/options.html') ?? '',
+});
+
+// Root creation and recovery share one serialized custody lane. Without it,
+// base-network auto-start and two concurrent imports can all observe "missing"
+// and last-write-wins different permanent identities.
+let dwebIdentityMutationTail = Promise.resolve();
+let dwebIdentityMutationActive = false;
+let dwebStartDeferredByIdentityMutation = false;
+/** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
+const withDwebIdentityMutation = (operation) => {
+  const run = async () => {
+    dwebIdentityMutationActive = true;
+    try { return await operation(); }
+    finally {
+      dwebIdentityMutationActive = false;
+      if (dwebStartDeferredByIdentityMutation) {
+        dwebStartDeferredByIdentityMutation = false;
+        setTimeout(() => maybeStartBaseNetwork('identity-mutation-finished'), 0);
+      }
+    }
+  };
+  const result = dwebIdentityMutationTail.then(run, run);
+  dwebIdentityMutationTail = result.then(() => undefined, () => undefined);
+  return result;
+};
+
+const canChangeDwebIdentity = async () => {
+  const apps = await appRegistry.list();
+  // Treat legacy rows that predate shared:true conservatively when they still
+  // carry a local publisher binding. Remote installs and unshared local stubs
+  // do not prevent identity recovery.
+  return !identityChangeBlockedByApps(apps);
+};
+const dwebIdentityCustody = makeDwebIdentityCustody({
+  enabled: DWEB_ENABLED,
+  active: () => settingsStore.get().dwebEnabled,
+  vault,
+  auditLog,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+  withIdentityMutation: withDwebIdentityMutation,
+  canChangeIdentity: canChangeDwebIdentity,
+});
+const dwebCustodyClient = makeDwebCustodyClient({
+  ensureOffscreen,
+  handleSecretRequest: dwebIdentityCustody.handle,
+});
+/** @type {ReturnType<typeof makePrivateTransferPort> | null} */
+let privateTransferPort = null;
+const dwebCustodyReset = makeRetryableCustodyReset({
+  enabled: DWEB_ENABLED,
+  hostAvailable: offscreenAvailable,
+  reset: async () => { await dwebCustodyClient.call('reset'); },
+});
+const ensureDwebSuspensionRecovery = dwebCustodyReset.ensure;
+void ensureDwebSuspensionRecovery().catch((error) => {
+  // A later start/share/rotation retries. Do not poison the worker lifetime if
+  // the offscreen port was still reconnecting during cold boot.
+  console.error('[sw] stale identity suspension recovery failed', error);
+});
 
 // The headless-JS client (the script tool). execHeadless ensures the offscreen
 // doc, then dispatches a 'job/run' message to job-runner.js hosted there.
@@ -2615,14 +2685,6 @@ const jsOffscreenClient = offscreenAvailable ? makeOffscreenJsClient({
 // pending asks + terminate the worker. Declared here (before buildToolContext
 // consumers run) and read by the actors/call route below.
 const scriptRuns = createScriptRunRegistry({ actorOpLimit: ACTORS_RUN_MAX_OPS });
-
-// Relays that redeem an offscreen worker's authority need an exact host
-// predicate, not the dispatcher's broader "one of our extension pages" check.
-const isOffscreenSender = (/** @type {any} */ sender) => senderIsOffscreen(sender, {
-  runtimeId: browser.runtime?.id,
-  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
-  offscreenUrl: browser.runtime?.getURL?.(OFFSCREEN_URL) ?? '',
-});
 
 // The context inspector's capture ring — "what did the model see" per
 // session, SW-memory only. Fed from the two seams that together cover
@@ -3277,6 +3339,14 @@ browser.runtime.onConnect.addListener((port) => {
   // so an untrusted connector must never get it. Same boundary as the
   // message dispatcher.
   if (!isTrustedSender(port.sender)) { try { port.disconnect(); } catch { /* already gone */ } return; }
+  if (port.name === 'private-transfer') {
+    if (!privateTransferPort || !isActualOptionsSender(port.sender)) {
+      try { port.disconnect(); } catch { /* already gone */ }
+      return;
+    }
+    privateTransferPort.attach(/** @type {any} */ (port));
+    return;
+  }
   if (port.name === 'sidepanel' || port.name === 'home' || port.name === 'eval') {
     // The side panel and the full-page home are equal live surfaces (DESIGN-12);
     // the 'eval' surface (the Lab section + the standalone eval page) also needs
@@ -3343,6 +3413,13 @@ browser.runtime.onConnect.addListener((port) => {
       keepalivePorts.delete(/** @type {any} */ (port));
     });
     return;
+  }
+  if (port.name === 'dweb-custody') {
+    if (!isOffscreenSender(port.sender)) {
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      return;
+    }
+    dwebCustodyClient.attach(/** @type {any} */ (port));
   }
 });
 
@@ -5420,6 +5497,96 @@ const resumeSchedules = () => Promise.resolve(/** @type {any} */ (goalRunner)?.r
   .catch((e) => console.error('[sw] schedule catch-up failed', e));
 const ensureSession = ensureCurrentSession;
 
+const shareLocalApp = makeDwebShare({
+  enabled: DWEB_ENABLED,
+  active: () => settingsStore.get().dwebEnabled,
+  withIdentityMutation: withDwebIdentityMutation,
+  appRegistry,
+  opfsHelpers,
+  prepareRuntime: async () => {
+    await ensureDwebSuspensionRecovery();
+    await ensureOffscreen();
+    return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+  },
+  sendMessage: (message) => browser.runtime.sendMessage(message),
+});
+
+const dwebTransfer = makeDwebTransfer({
+  enabled: DWEB_ENABLED,
+  offscreenAvailable,
+  vault,
+  identitySecretName: DWEB_IDENTITY_SECRET,
+  runCustodyOperation: (operation, args) => dwebCustodyClient.call(operation, args),
+  loadDweb,
+  withIdentityMutation: withDwebIdentityMutation,
+  canReplaceIdentity: canChangeDwebIdentity,
+  stopIdentityRuntime: async (leaseId) => {
+    if (!offscreenAvailable) return;
+    await ensureDwebSuspensionRecovery();
+    try {
+      await dwebCustodyClient.call('suspend', { leaseId });
+    } catch {
+      throw new IdentityTransferError('existing identity runtime could not be stopped', 'stop-failed');
+    }
+    onBaseNetworkStopped();
+  },
+  startIdentityRuntime: async (leaseId) => {
+    if (!offscreenAvailable) return;
+    const releaseLease = async () => {
+      const reply = /** @type {any} */ (await dwebCustodyClient.call('resume', { leaseId }));
+      if (!reply?.resumed) {
+        throw new IdentityTransferError('identity runtime could not resume', 'resume-failed');
+      }
+    };
+    const retryRelease = () => {
+      releaseLease()
+        .then(() => maybeStartBaseNetwork('identity-resume-retry'))
+        .catch(() => setTimeout(retryRelease, 1000));
+    };
+    try {
+      await releaseLease();
+    } catch (cause) {
+      // Retry only with the same owner token. A normal start can observe the
+      // lease but can never release it, and a lost success acknowledgement is
+      // harmless because release is idempotent once no owner remains.
+      setTimeout(retryRelease, 1000);
+      throw cause;
+    }
+    setTimeout(() => maybeStartBaseNetwork('identity-import'), 0);
+  },
+  audit: (event) => auditLog.append(event),
+});
+
+// Backup requests carry passwords and recovery records. They are present in
+// the normal route modules for shared business logic, but every transfer route
+// requires this non-serializable capability and the options page reaches them
+// only through its exact-sender verified Port.
+const privateTransferAuthorization = Symbol('private-transfer');
+const makeSystemRouteSet = () => makeSystemRoutes({
+  vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
+  uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
+  CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
+  privateTransferAuthorization,
+});
+const makeSettingsRouteSet = () => makeSettingsRoutes({
+  vault, auditLog, pushState, kv, memory, settingsStore,
+  normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
+  REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
+  buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
+  EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
+  onSettingsChanged, privateTransferAuthorization,
+});
+const systemMessageRoutes = makeSystemRouteSet();
+const settingsMessageRoutes = makeSettingsRouteSet();
+privateTransferPort = makePrivateTransferPort({
+  authorization: privateTransferAuthorization,
+  handlers: {
+    'transfer/export': settingsMessageRoutes['transfer/export'],
+    'transfer/inspectImport': systemMessageRoutes['transfer/inspectImport'],
+    'transfer/import': systemMessageRoutes['transfer/import'],
+  },
+});
+
 // Message routes live in background/routes/*.js as import-free, deps-injected
 // factories. Each is wired with an EXPLICIT per-module deps object naming
 // exactly the stable collaborators that module needs — so the coupling is
@@ -5511,11 +5678,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
   }),
-  ...makeSystemRoutes({
-    vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
-    uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
-    CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError,
-  }),
+  ...systemMessageRoutes,
   // denylistNetGuard: an edit changes what the network backstop blocks, so the
   // rule is rebuilt on every edit — including the removal path, where a stale
   // rule would keep blocking a site the user just unblocked.
@@ -5558,15 +5721,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
       })(),
     };
   },
-  ...makeSettingsRoutes({
-    vault, auditLog, pushState, kv, memory, settingsStore,
-    normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
-    REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
-    buildExport, CHANNEL, exportHooks, skillRegistry,
-    // React to the dweb-agent toggle: join/leave the inbox room so a disable
-    // withdraws mesh presence immediately (idempotent; no-op for other keys).
-    onSettingsChanged,
-  }),
+  ...settingsMessageRoutes,
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
@@ -5583,8 +5738,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
-    appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
-    DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
+    appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
+    DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     onBaseNetworkStopped,
   }),
 
@@ -5657,9 +5812,18 @@ setInterval(() => {
 // false) — and this file names no dweb module, so the store verifier stays clean.
 function maybeStartBaseNetwork(/** @type {string} */ reason) {
   if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled) return;
+  if (dwebIdentityMutationActive) {
+    dwebStartDeferredByIdentityMutation = true;
+    console.log('[sw] dweb base network — start deferred during identity custody mutation');
+    return;
+  }
   console.log('[sw] dweb base network — auto-start on', reason);
   (async () => {
+    await ensureDwebSuspensionRecovery();
     await ensureOffscreen();
+    // The host owns its suspension lease. A normal start may race a rotation,
+    // but it cannot release that lease and will fail harmlessly until the owner
+    // resumes with the matching token.
     const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/start' }));
     if (r?.ok) {
       console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
@@ -5718,7 +5882,10 @@ async function reseedSharedApps() {
 // window. The offscreen doc holds the keepalive port and voice host;
 // the WebVMs live in their own tabs (vm-tab/index.html).
 console.log('[sw] boot — ensuring offscreen for keepalive + voice');
-ensureOffscreen().catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
+ensureOffscreen().then(async () => {
+  if (!DWEB_ENABLED) return;
+  await ensureDwebSuspensionRecovery();
+}).catch((e) => console.error('[sw] boot ensureOffscreen failed', e));
 
 // Instance registry + tracker init for all three kinds: pull persisted
 // catalogs and re-discover live tabs (a SW restart while tabs are open

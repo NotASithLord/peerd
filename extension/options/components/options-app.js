@@ -53,7 +53,7 @@ const NAV = [
     items: [
       ['memory', 'Memory'],
       ['costs', 'Costs'],
-      ['transfer', 'Export & import'],
+      ['transfer', 'Backup & restore'],
     ],
   },
   {

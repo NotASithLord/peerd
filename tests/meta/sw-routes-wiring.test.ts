@@ -47,7 +47,7 @@ const factoryNames = (src: string): string[] =>
 
 /** Inner text of the object literal passed at the `...makeFooRoutes({ ... })` call site. */
 const callSiteSpan = (factory: string): string | null => {
-  const open = SW.indexOf(`...${factory}({`);
+  const open = SW.indexOf(`${factory}({`);
   if (open === -1) return null;
   // Walk from the first `{` matching braces to find the object-literal span.
   const braceStart = SW.indexOf('{', open);

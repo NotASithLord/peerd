@@ -128,7 +128,19 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // outcomes), write-guard.js (§11.5 enforcement), engine-liveness.js (§9
 // ledger); all carry // @ts-check.
 // 618 → 619: the actors-in-code SW route extracted for issue #324.
-const COVERED_FLOOR = 619;
+// 619 → 624: the initial portable-identity capsule/record implementation.
+// 624 → 628: custody hardening added the shared crypto/host boundaries,
+// rendered restore-flow test, and tested offscreen lifecycle barrier while
+// centralizing identity-bound sharing and removing unused device-key files.
+// 628 → 629: targeted dweb-custody port client (raw roots and passphrases
+// never ride extension-wide broadcast messaging).
+// 629 → 630: permanent identity reads and first-mint writes moved from generic
+// runtime routes into the verified custody port.
+// 630 → 631: one shared memory-hard KDF policy now protects every new backup
+// password oracle.
+// 631 → 633: the exact-options transfer Port and its client keep backup
+// passwords off extension-wide runtime messages.
+const COVERED_FLOOR = 633;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

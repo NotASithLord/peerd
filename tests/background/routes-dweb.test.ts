@@ -13,11 +13,12 @@ const baseDeps = (over: any = {}) => {
     appRegistry: { get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html' }), list: async () => [], update: async (_i: any, p: any) => ({ id: 'a1', ...p }) },
     appClient: { create: async (r: any) => ({ id: 'new', ...r }), opfsForApp: () => ({ list: async () => [], read: async () => '', write: async () => {}, delete: async () => {} }) },
     appTabTracker: { ensureTab: async () => {}, reloadTab: async () => {} },
-    opfsHelpers: () => ({ list: async () => [], read: async () => '' }),
+    shareLocalApp: async (appId: string, slug?: string) => ({ ok: true, appId, slug }),
     settingsStore: { get: () => ({ dwebEnabled: true }) },
     DWEB_ENABLED: true,
     DWEB_IDENTITY_SECRET: 'distributed/identity/v1',
     APP_TAB_GROUP_TITLE: 'peerd apps',
+    withDwebIdentityMutation: async (operation: () => Promise<any>) => operation(),
     ...over,
   };
   return { deps, sent, audits };
@@ -27,7 +28,6 @@ describe('dweb gate (build flag + setting)', () => {
   test('disabled when the build flag is off', async () => {
     const { deps } = baseDeps({ DWEB_ENABLED: false });
     expect(await makeDwebRoutes(deps)['dweb/base/start']()).toEqual({ ok: false, error: 'dweb-disabled' });
-    expect(await makeDwebRoutes(deps)['dweb/identity-get']()).toEqual({ ok: false, error: 'dweb-disabled' });
   });
   test('disabled when the user setting is off', async () => {
     const { deps } = baseDeps({ settingsStore: { get: () => ({ dwebEnabled: false }) } });
@@ -35,26 +35,15 @@ describe('dweb gate (build flag + setting)', () => {
   });
   test('enabled when both on', async () => {
     const { deps, sent } = baseDeps();
-    expect(await makeDwebRoutes(deps)['dweb/base/start']()).toEqual({ ok: true });
+    const routes = makeDwebRoutes(deps);
+    expect(await routes['dweb/base/start']()).toEqual({ ok: true });
     expect(sent[0]).toEqual({ type: 'dweb/base-host/start' });
+    expect(routes['dweb/identity-get']).toBeUndefined();
+    expect(routes['dweb/identity-set']).toBeUndefined();
   });
 });
 
-describe('dweb identity + audit', () => {
-  test('identity-get returns the vaulted secret', async () => {
-    const { deps } = baseDeps();
-    expect(await makeDwebRoutes(deps)['dweb/identity-get']()).toEqual({ ok: true, value: 'id-secret' });
-  });
-  test('identity-get refused when vault locked', async () => {
-    const { deps } = baseDeps({ vault: { isLocked: () => true } });
-    expect(await makeDwebRoutes(deps)['dweb/identity-get']()).toEqual({ ok: false, error: 'vault-locked' });
-  });
-  test('identity-set requires a string + audits issuance', async () => {
-    const { deps, audits } = baseDeps();
-    expect(await makeDwebRoutes(deps)['dweb/identity-set']({ value: 5 })).toEqual({ ok: false, error: 'value-required' });
-    expect(await makeDwebRoutes(deps)['dweb/identity-set']({ value: 'k' })).toEqual({ ok: true });
-    expect(audits.at(-1)).toEqual({ type: 'dweb_identity_issued', details: {} });
-  });
+describe('dweb audit', () => {
   test('dweb/audit gates only on the build flag (not the setting) + dweb_ prefix', async () => {
     // setting off but build on → still accepted (matches the original inline gate)
     const { deps, audits } = baseDeps({ settingsStore: { get: () => ({ dwebEnabled: false }) } });
@@ -72,13 +61,12 @@ describe('dweb app store', () => {
     expect(audits.at(-1)).toMatchObject({ type: 'dweb_app_installed', details: { uri: 'u', publisher: 'p' } });
   });
   test('share-app persists the version slot on success', async () => {
-    let updated: any = null;
+    const shared: any[] = [];
     const { deps } = baseDeps({
-      _reply: { ok: true, uri: 'u2', publisher: 'pub', hash: 'h', slug: 's', dwapp_id: 'd', seq: 2 },
-      appRegistry: { get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html', dweb: {} }), update: async (_i: any, p: any) => { updated = p; return p; } },
+      shareLocalApp: async (appId: string, slug?: string) => { shared.push({ appId, slug }); return { ok: true }; },
     });
     await makeDwebRoutes(deps)['dweb/base/share-app']({ appId: 'a1', slug: 's' });
-    expect(updated).toMatchObject({ shared: true, dweb: { uri: 'u2', version_id: 'h', slug: 's', dwapp_id: 'd', seq: 2 } });
+    expect(shared).toEqual([{ appId: 'a1', slug: 's' }]);
   });
   test('updates flags an installed app when a higher-seq different version is heard', async () => {
     const { deps } = baseDeps({

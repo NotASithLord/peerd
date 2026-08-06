@@ -72,7 +72,8 @@ export const DwebSection = {
       ui.dwebStatus ? m('p.hint', [
         `Protocol phase ${ui.dwebStatus.phase ?? '—'}. `,
         ui.dwebStatus.did
-          ? ['Identity: ', m('code', ui.dwebStatus.did), ' (ephemeral this view; the persistent one is vault-stored).']
+          ? ['Peer identity: ', m('code', ui.dwebStatus.did), '. ',
+            m('a', { href: '#!/transfer' }, 'Back up or restore this identity.')]
           : 'Identity is vault-stored and created on first room join.',
       ]) : null,
 

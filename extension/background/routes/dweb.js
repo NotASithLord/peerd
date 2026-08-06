@@ -22,8 +22,8 @@
 export const makeDwebRoutes = (deps) => {
   const {
     vault, auditLog, kv, ensureOffscreen, browser,
-    appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
-    DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
+    appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
+    DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     onBaseNetworkStopped,
   } = deps;
 
@@ -31,34 +31,6 @@ export const makeDwebRoutes = (deps) => {
   const dwebOn = () => DWEB_ENABLED && settingsStore.get().dwebEnabled;
 
   return {
-    // Persistent-identity storage for the room-hosting page. The MODULE CODE that
-    // mints the Ed25519 material runs in the PAGE (app-tab, via loadDweb); the SW
-    // only owns the vault and exposes these two routes scoped to the single
-    // identity secret. The hardcoded name is store-safe (not the dweb module path).
-    'dweb/identity-get': async () => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
-      try {
-        return { ok: true, value: await vault.getSecret(DWEB_IDENTITY_SECRET) };
-      } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
-      }
-    },
-    'dweb/identity-set': async ({ value }) => {
-      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
-      if (typeof value !== 'string') return { ok: false, error: 'value-required' };
-      try {
-        await vault.setSecret(DWEB_IDENTITY_SECRET, value);
-        // Fires once, on first-run creation (the page only sets when get
-        // returned null). did is not parsed SW-side — it shows on room-join.
-        await auditLog.append({ type: 'dweb_identity_issued', details: {} });
-        return { ok: true };
-      } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
-      }
-    },
-
     // Dweb pages append their security events to the ONE audit log
     // (ARCHITECTURE §7: no new logging subsystem; new event types only).
     'dweb/audit': async ({ type, details }) => {
@@ -244,30 +216,7 @@ export const makeDwebRoutes = (deps) => {
     // dwapp_id stays stable. On success we persist the version identity.
     'dweb/base/share-app': async ({ appId, slug } = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      const record = await appRegistry.get(appId);
-      if (!record) return { ok: false, error: 'app-not-found' };
-      const opfs = opfsHelpers(['peerd-apps', appId]);
-      /** @type {Record<string, any>} */
-      const files = {};
-      for (const f of await opfs.list()) { const path = f.path.replace(/^\/+/, ''); files[path] = await opfs.read(path); }
-      // Reshare locks to the stored slug; first share takes the dialog's edited slug.
-      const useSlug = record.dweb?.slug || slug || undefined;
-      await ensureOffscreen();
-      const r = await browser.runtime.sendMessage({ type: 'dweb/base-host/share-app', name: record.name, entry: record.entryFile, files, slug: useSlug });
-      if (r?.ok) {
-        // `shared` drives the "you're seeding this" delete confirm + the un-share path;
-        // the dweb slot records the version identity (merged, so it survives reshares).
-        try {
-          await appRegistry.update(appId, {
-            shared: true,
-            dweb: {
-              uri: r.uri, publisher: r.publisher ?? null, hash: r.hash, version_id: r.hash,
-              slug: r.slug, dwapp_id: r.dwapp_id, seq: r.seq, local: record.dweb?.local ?? true,
-            },
-          });
-        } catch (e) { console.debug('[share-app] persist version slot failed', e); }
-      }
-      return r;
+      return shareLocalApp(appId, slug);
     },
     // Discover: what peers have announced (gossip cache + DHT hits).
     'dweb/base/heard': async () => {
