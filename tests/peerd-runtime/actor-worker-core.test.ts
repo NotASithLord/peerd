@@ -130,6 +130,25 @@ describe('runActorLoop', () => {
     expect(secretThrew).toBe(true);   // getSecret in the worker is a throwing stub
     expect(fetchThrew).toBe(true);    // safeFetch too — no egress in the heap
   });
+
+  test('preserves inbound as a synthetic, explicitly untrusted loop turn', async () => {
+    const sessions = makeInMemorySessions({ sessionId: 'dweb' });
+    let seen: any = null;
+    const probeLoop = async function* (ctx: any) {
+      seen = ctx;
+      await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a', role: 'assistant', content: 'observed' });
+      yield { type: 'stop', stopReason: 'end_turn' };
+    };
+    await runActorLoop(
+      { runUserTurn: probeLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => ({}), getSystemPrompt: () => 'S', tools: [] },
+      { sessionId: 'dweb', userText: 'peer bytes', inbound: true },
+    );
+    expect(seen).toEqual(expect.objectContaining({
+      synthetic: true,
+      trusted: false,
+      inbound: true,
+    }));
+  });
 });
 
 describe('makeActorSummaryFence', () => {

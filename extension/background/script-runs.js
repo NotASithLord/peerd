@@ -17,9 +17,9 @@
  * @typedef {{ aborted: boolean, addEventListener: (t: string, fn: () => void, opts?: object) => void, removeEventListener?: (t: string, fn: () => void) => void }} AbortSignalLike
  */
 
-/** @param {{ actorOpLimit?: number }} [options] */
-export const createScriptRunRegistry = ({ actorOpLimit = 50 } = {}) => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: { actors: boolean, provider: boolean }, actorOps: number, providerCalls: number, providerOutputTokens: number }>} */
+/** @param {{ actorOpLimit?: number, codeOpLimit?: number }} [options] */
+export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actorOpLimit } = {}) => {
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }>} */
   const runs = new Map();
   let seq = 0;
 
@@ -41,20 +41,17 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50 } = {}) => {
      * refuses a runId whose registered owner doesn't match the trusted job
      * param (design 5 — a dead or foreign run buys nothing).
      * @param {string} runId @param {AbortSignalLike} [outerSignal] @param {string} [owner]
-     * @param {{ actors?: boolean, provider?: boolean }} [capabilities]
+     * @param {Record<string, boolean>} [capabilities]
      */
     register: (runId, outerSignal, owner, capabilities = {}) => {
       const controller = new AbortController();
-      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: { actors: boolean, provider: boolean }, actorOps: number, providerCalls: number, providerOutputTokens: number }} */
+      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }} */
       const entry = {
         controller,
         ops: [],
         ...(owner ? { owner } : {}),
-        capabilities: {
-          actors: capabilities.actors === true,
-          provider: capabilities.provider === true,
-        },
-        actorOps: 0,
+        capabilities: Object.fromEntries(Object.entries(capabilities).map(([name, on]) => [name, on === true])),
+        opCounts: {},
         providerCalls: 0,
         providerOutputTokens: 0,
       };
@@ -92,21 +89,32 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50 } = {}) => {
     ownerFor: (runId) => runs.get(runId)?.owner ?? null,
 
     /** A live run may redeem only the capability minted for its job lane.
-     * @param {string} runId @param {'actors'|'provider'} capability */
+     * @param {string} runId @param {string} capability */
     allows: (runId, capability) => {
       const entry = runs.get(runId);
       return entry?.controller.signal.aborted !== true
         && entry?.capabilities[capability] === true;
     },
 
-    /** Atomically admit one actors op against the run-wide ceiling. Counting
-     * happens before any await, so Promise.all fan-out cannot oversubscribe it.
-     * @param {string} runId */
+    /** Atomically admit one code-client op against a per-capability run ceiling.
+     * Counting happens before any await, so Promise.all cannot oversubscribe it.
+     * @param {string} runId @param {string} capability @param {number} [limit] */
+    admitOp: (runId, capability, limit = codeOpLimit) => {
+      const entry = runs.get(runId);
+      if (!entry || entry.controller.signal.aborted
+        || entry.capabilities[capability] !== true
+        || (entry.opCounts[capability] ?? 0) >= limit) return false;
+      entry.opCounts[capability] = (entry.opCounts[capability] ?? 0) + 1;
+      return true;
+    },
+
+    /** Compatibility name for the actors route. @param {string} runId */
     admitActorOp: (runId) => {
       const entry = runs.get(runId);
       if (!entry || entry.controller.signal.aborted
-        || !entry.capabilities.actors || entry.actorOps >= actorOpLimit) return false;
-      entry.actorOps += 1;
+        || entry.capabilities.actors !== true
+        || (entry.opCounts.actors ?? 0) >= actorOpLimit) return false;
+      entry.opCounts.actors = (entry.opCounts.actors ?? 0) + 1;
       return true;
     },
 

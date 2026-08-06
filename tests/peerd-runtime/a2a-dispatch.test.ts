@@ -46,6 +46,18 @@ describe('the first-contact signing gate', () => {
     const r = await d.dispatch('send', { did: DID, message: 'x' }, { signs: true });
     expect(r.ok).toBe(false);
   });
+
+  test('a pre-aborted cast or card publish emits nothing', async () => {
+    let published = false;
+    const d = harness({ publishCard: async () => { published = true; return { ok: true }; } });
+    const controller = new AbortController();
+    controller.abort();
+    const ctx = { signs: true, allowed: () => true, signal: controller.signal };
+    expect(await d.dispatch('send', { did: DID, message: 'hi' }, ctx)).toEqual({ ok: false, error: 'a2a: run aborted' });
+    expect(await d.dispatch('publishCard', { card: { name: 'me' } }, ctx)).toEqual({ ok: false, error: 'a2a: run aborted' });
+    expect(d.sent).toEqual([]);
+    expect(published).toBe(false);
+  });
 });
 
 describe('ask / reply correlation', () => {
@@ -89,6 +101,21 @@ describe('ask / reply correlation', () => {
     const d = harness({ sendDm: async () => ({ ok: false, error: 'no direct link to did' }) });
     const r = await d.dispatch('ask', { did: DID, message: 'x' }, { signs: true, allowed: () => true });
     expect(r.ok).toBe(false);
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('Stop aborts a pending ask and retires its correlation immediately', async () => {
+    const d = harness();
+    const controller = new AbortController();
+    const pending = d.dispatch(
+      'ask',
+      { did: DID, message: 'long request', timeoutMs: 5000 },
+      { signs: true, allowed: () => true, signal: controller.signal },
+    );
+    await tick();
+    expect(d._pendingCount()).toBe(1);
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'a2a: aborted while awaiting reply' });
     expect(d._pendingCount()).toBe(0);
   });
 });

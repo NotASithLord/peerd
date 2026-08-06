@@ -121,9 +121,16 @@ export { makeActorMessaging } from './actor/actor-messaging.js';
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export {
+  CODE_CLIENT_MANIFESTS, CODE_RUN_MAX_TRACE_OPS, ACTOR_CAPABILITY_MANIFESTS,
+  DWEB_INBOUND_TOOL_NAMES,
+  codeClientMethods, codeClientAllows, codeClientMethod, codeClientReference, buildCodeClientSource,
+  renderCodeOpTrace, canonicalCodeTraceLabel,
+  actorCapabilityManifest,
+} from './actor/capability-manifest.js';
+export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
-  ACTORS_RUN_MAX_OPS,
+  ACTORS_RUN_MAX_OPS, ACTORS_API_METHODS, ACTORS_API_ACCEPTED_METHODS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Design 5 — peerd.provider.call: the pure core (text-only arg validation,

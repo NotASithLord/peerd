@@ -404,9 +404,10 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
   const webCode = (over: object = {}) =>
     ({ exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code', ...over });
 
-  test('the code surface is page_code ALONE — perceive + act both go through page.*', () => {
-    expect([...actorAllowedToolsFor('web', 'tab', 'code')]).toEqual(['page_code']);
+  test('the code surface is page_code plus the one operation not mapped by page.*', () => {
+    expect([...actorAllowedToolsFor('web', 'tab', 'code')]).toEqual(['page_code', 'site_client_run']);
     expect(isAllowedForActor('page_code', 'web', 'tab', 'code')).toBe(true);
+    expect(isAllowedForActor('site_client_run', 'web', 'tab', 'code')).toBe(true);
     // Everything else — action AND direct perception — is OFF the code surface:
     // perception is page.snapshot()/page.content() INSIDE page_code, not a direct
     // tool (a direct snapshot resolves the tab from the actor's turn ctx, which a
@@ -450,8 +451,9 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(isAllowedForActor('page_code', 'web', 'tab', 'tools')).toBe(false);
   });
 
-  test('the gate: a code-surface web actor may call page_code ONLY (even perception)', () => {
+  test('the gate: a code-surface web actor may call page_code and discrete site_client_run', () => {
     expect(rt({ name: 'page_code' }, { code: 'return 1' }, webCode())).toBeNull();      // allowed
+    expect(rt({ name: 'site_client_run' }, { origin: 'https://example.com', code: 'return 1' }, webCode())).toBeNull();
     // Everything else refuses — the model acts AND perceives via page.* in code.
     for (const n of ['click', 'type', 'navigate', 'query_dom', 'fetch_url', 'snapshot', 'read_page']) {
       expect(rt({ name: n }, {}, webCode())?.allowed).toBe(false);
@@ -469,10 +471,12 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(rt({ name: 'navigate' }, {}, noSurface)).toBeNull();
   });
 
-  test('actorDescriptors is surface-aware — a code actor is advertised page_code only', () => {
-    const all = [{ name: 'click' }, { name: 'navigate' }, { name: 'snapshot' }, { name: 'read_page' }, { name: 'page_code' }, { name: 'fetch_url' }];
-    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name)).toEqual(['page_code']);
-    // The tools surface keeps the discrete DOM tools + fetch_url, and never shows page_code.
-    expect(actorDescriptors(all, 'web', 'tab', 'tools').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'read_page', 'snapshot']);
+  test('actorDescriptors is surface-aware — a code actor sees code plus unmapped operations', () => {
+    const all = [{ name: 'click' }, { name: 'navigate' }, { name: 'snapshot' }, { name: 'read_page' }, { name: 'page_code' }, { name: 'fetch_url' }, { name: 'site_client_run' }];
+    expect(actorDescriptors(all, 'web', 'tab', 'code').map((t) => t.name)).toEqual(['page_code', 'site_client_run']);
+    // The tools surface keeps every supplied direct web operation and never
+    // shows page_code.
+    expect(actorDescriptors(all, 'web', 'tab', 'tools').map((t) => t.name).sort())
+      .toEqual(['click', 'fetch_url', 'navigate', 'read_page', 'site_client_run', 'snapshot']);
   });
 });

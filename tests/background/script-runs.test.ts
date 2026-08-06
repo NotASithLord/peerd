@@ -75,6 +75,17 @@ describe('createScriptRunRegistry', () => {
     expect(r.allows('run-p', 'provider')).toBe(false);
     expect(r.admitActorOp('run-p')).toBe(false);
   });
+
+  test('every code relay gets the same atomic capability/operation wall', () => {
+    const r = createScriptRunRegistry({ codeOpLimit: 2 });
+    r.register('page-run', undefined, 'web-1', { page: true });
+    expect(r.admitOp('page-run', 'site')).toBe(false);
+    expect(r.admitOp('page-run', 'page')).toBe(true);
+    expect(r.admitOp('page-run', 'page')).toBe(true);
+    expect(r.admitOp('page-run', 'page')).toBe(false);
+    r.abort('page-run');
+    expect(r.admitOp('page-run', 'page')).toBe(false);
+  });
 });
 
 // Design 5 — the sub-model lane's SW-side state: the owner binding the

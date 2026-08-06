@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
-  isFirstPartySender, isOffscreenSender, isOptionsSender,
+  isFirstPartySender, isOffscreenSender, isOptionsSender, isServiceWorkerSender,
 } from '../../extension/shared/sender-trust.js';
 
 const ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -113,6 +113,30 @@ describe('isOffscreenSender', () => {
       { id: ID, url: `${offscreenUrl}.evil.html` }, offscreenTrust,
     )).toBe(false);
     expect(isOffscreenSender({ id: ID, url: offscreenUrl }, trust as any)).toBe(false);
+  });
+});
+
+describe('isServiceWorkerSender', () => {
+  const serviceWorkerUrl = `${ORIGIN}background/service-worker.js`;
+  const swTrust = { ...trust, serviceWorkerUrl };
+
+  it('accepts only the exact worker script with no document/tab provenance', () => {
+    expect(isServiceWorkerSender({ id: ID, url: serviceWorkerUrl }, swTrust)).toBe(true);
+  });
+
+  it('rejects a first-party engine page replay and document-hosted copies', () => {
+    expect(isServiceWorkerSender(
+      { id: ID, url: `${ORIGIN}engine-tabs/notebook-tab/index.html`, tab: { id: 7 } },
+      swTrust,
+    )).toBe(false);
+    expect(isServiceWorkerSender(
+      { id: ID, url: serviceWorkerUrl, documentId: 'forged-copy' }, swTrust,
+    )).toBe(false);
+  });
+
+  it('rejects suffix/query variants and missing trust data', () => {
+    expect(isServiceWorkerSender({ id: ID, url: `${serviceWorkerUrl}?x=1` }, swTrust)).toBe(false);
+    expect(isServiceWorkerSender({ id: ID, url: serviceWorkerUrl }, trust as any)).toBe(false);
   });
 });
 

@@ -1428,9 +1428,9 @@ export const STATES = [
     },
   },
 
-  // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.ask) ----
+  // --- functional: the ORCHESTRATOR delegates from CODE (script + actors.call) ---
   // The actors-in-script surface end to end: the model writes ONE script whose
-  // code awaits actors.ask('web', …); the ask relays offscreen-worker → SW
+  // code awaits actors.call('web', …); the call relays offscreen-worker → SW
   // actors/call → messageActor(awaitReply) → a REAL web-actor turn, and the
   // reply resolves back INTO the running script, which returns a value derived
   // from it. Proves: the bridge chain, the [DELEGATIONS] trace + fencing in the
@@ -1468,7 +1468,7 @@ export const STATES = [
       if (scriptFanState.scripts === 0) {
         scriptFanState.scripts += 1;
         return { sse: sseToolCall('script', {
-          code: "const r = await actors.ask('web', 'price of widget X?'); return 'GOT:' + r.reply + ':' + r.failed;",
+          code: "const r = await actors.call('web', 'price of widget X?'); return 'GOT:' + r.reply + ':' + r.failed;",
         }) };
       }
       return { sse: sseText('unexpected extra orchestrator step') };
@@ -1528,7 +1528,7 @@ export const STATES = [
       const actorTurns = seen.filter((s) => s.isActor && s.isWebActor);
       const resultTurn = seen.filter((s) => !s.isActor && s.hasScriptResult);
       rec.check('the model called script exactly once', scriptFanState.scripts === 1, `scripts=${scriptFanState.scripts}`);
-      rec.check("the script's actors.ask spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
+      rec.check("the script's actors.call spawned a REAL web-actor turn", actorTurns.length >= 1, `actorTurns=${actorTurns.length}`);
       rec.check("the orchestrator read a result whose value was built FROM the actor's reply", resultTurn.length >= 1, `resultTurns=${resultTurn.length}`);
       rec.check('the final orchestrator answer landed', out.finalSeen === true);
       rec.check('the script card settled ok', out.cardOk === true);
@@ -1716,7 +1716,12 @@ export const STATES = [
       const entries = (audit && audit.entries) || [];
       const a2aRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'a2a_run');
       rec.check('the dweb actor wrote + ran a mesh script (2 actor turns)', a2aState.actorCalls >= 2, `actorCalls=${a2aState.actorCalls}`);
-      rec.check('a2a_run EXECUTED — the code surface ran through the mesh bridge + SW route (tool_executed audit)', a2aRan === true, `a2aRan=${a2aRan}`);
+      rec.check(
+        'a2a_run EXECUTED — the code surface ran through the mesh bridge + SW route (tool_executed audit)',
+        a2aRan === true,
+        a2aRan ? 'a2aRan=true' : JSON.stringify(entries.filter((entry) =>
+          String(entry.type).startsWith('tool_') || JSON.stringify(entry.details || {}).includes('a2a')).slice(-12)),
+      );
       rec.check('the orchestrator settled with a final answer', (out.bubbles || []).includes('A2A-FINAL'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
@@ -1778,10 +1783,8 @@ export const STATES = [
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       // The CHILD's model call — its system prompt is the ephemeral-actor block.
-      // why the IDENTITY line, not just "EPHEMERAL ACTOR": the ORCHESTRATOR prompt
-      // also contains "EPHEMERAL ACTOR" (describing actor_create), so the broad
-      // match mis-classified the orchestrator's own first call as the child.
-      if (body.includes('You are an EPHEMERAL ACTOR')) { reasoningState.childCalls += 1; return { sse: sseText('REASONED-FOURTY-TWO') }; }
+      // Match the compact actor kernel's structural identity, not mutable prose.
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) { reasoningState.childCalls += 1; return { sse: sseText('REASONED-FOURTY-TWO') }; }
       // ORCHESTRATOR — spawn ONE sync pure-reasoning child, then (post tool-result) answer.
       if (reasoningState.spawned === 0) {
         reasoningState.spawned += 1;
@@ -1834,7 +1837,7 @@ export const STATES = [
       const body = (request && request.postData) || '';
       // The CHILD's model calls (ephemeral-actor prompt). First call emits script;
       // second call (after the tool result re-enters its heap) answers.
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorToolsState.childCalls += 1;
         if (actorToolsState.childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
         return { sse: sseText('CHILD-RAN-JS') };
@@ -1877,17 +1880,17 @@ export const STATES = [
 
   // --- functional: a trusted spawned actor delegates FROM CODE (#324) -------
   // Direct message_actor already admitted this trusted lineage. This state proves
-  // the code hand has exact parity: actor heap -> script worker -> actors.ask relay
+  // the code hand has exact parity: actor heap -> script worker -> actors.call relay
   // -> web-actor heap -> reply back into code -> child -> orchestrator.
   {
     name: 'actor-code-delegates-offscreen', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
-      if (body.includes("You are peerd's web actor")) {
+      if (body.includes('kind: bound; type: web')) {
         actorCodeDelegatesState.webCalls += 1;
         return { sse: sseText('WEB-CODE-PRICE-101') };
       }
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorCodeDelegatesState.childCalls += 1;
         if (body.includes('CODE:')
           && body.includes('WEB-CODE-PRICE-101')
@@ -1896,7 +1899,7 @@ export const STATES = [
         }
         if (actorCodeDelegatesState.childCalls === 1) {
           return { sse: sseToolCall('script', {
-            code: "const r = await actors.ask('web', 'get the code-path price'); return 'CODE:' + r.reply;",
+            code: "const r = await actors.call('web', 'get the code-path price'); return 'CODE:' + r.reply;",
           }) };
         }
         return { sse: sseText('CHILD-CODE-GOT-WEB') };
@@ -1933,7 +1936,7 @@ export const STATES = [
       const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
       rec.check('the actor script ran through the SW-gated relay', jsRan === true, `jsRan=${jsRan}`);
       rec.check('the actor looped after code received the web reply', actorCodeDelegatesState.childCalls >= 2 && actorCodeDelegatesState.sawComposedResult, `childCalls=${actorCodeDelegatesState.childCalls} composed=${actorCodeDelegatesState.sawComposedResult}`);
-      rec.check('actors.ask reached a real web-actor heap', actorCodeDelegatesState.webCalls >= 1, `webCalls=${actorCodeDelegatesState.webCalls}`);
+      rec.check('actors.call reached a real web-actor heap', actorCodeDelegatesState.webCalls >= 1, `webCalls=${actorCodeDelegatesState.webCalls}`);
       rec.check('the actor stayed in its isolated offscreen heap', ranOffscreen === true && fellBack === false, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
       rec.check('the composed result reached the orchestrator', (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE'));
       rec.check('the turn settles idle', out.busy === false);
@@ -1956,13 +1959,13 @@ export const STATES = [
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
       // The WEB ACTOR's model call (its own offscreen heap).
-      if (body.includes("You are peerd's web actor")) {
+      if (body.includes('kind: bound; type: web')) {
         actorDelegatesState.webCalls += 1;
         return { sse: sseText('WEB-PRICE-99') };
       }
       // The ACTOR's model calls (ephemeral-actor prompt). First emits message_actor;
       // second (after the awaited web reply re-enters its heap) answers.
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorDelegatesState.childCalls += 1;
         if (actorDelegatesState.childCalls === 1) return { sse: sseToolCall('message_actor', { to: 'web', message: 'get the price of widget X' }) };
         return { sse: sseText('CHILD-GOT-WEB') };
@@ -2087,7 +2090,7 @@ Promise.resolve().then(async () => {
         return { sse: sseText('APP-ACTOR-WROTE') };
       }
       // ACTOR (ephemeral): create, capture the app id from the result, delegate.
-      if (body.includes('You are an EPHEMERAL ACTOR')) {
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorAppState.childCalls += 1;
         if (actorAppState.childCalls === 1) return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Lava', files: { 'index.html': '<!-- placeholder -->' } }) };
         if (!actorAppState.appId) { const m = body.match(/app-[a-z0-9]+-[a-z0-9]+/); if (m) actorAppState.appId = m[0]; }

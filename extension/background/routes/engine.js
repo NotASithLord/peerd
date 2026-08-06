@@ -8,7 +8,7 @@
 
 /**
  * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any) => Promise<any>>}
+ * @returns {Record<string, (msg?: any, sender?: any) => Promise<any>>}
  */
 export const makeEngineRoutes = (deps) => {
   const {
@@ -19,7 +19,7 @@ export const makeEngineRoutes = (deps) => {
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
-    listOffscreenContexts,
+    listOffscreenContexts, scriptRuns, isOffscreenSender,
   } = deps;
 
   return {
@@ -33,9 +33,37 @@ export const makeEngineRoutes = (deps) => {
     // an IO-injected factory (vm-net/vm-http-fetch.js) so it's bun-testable — it
     // layers the revalidating IDB GET cache + host-bound git-auth + body cap +
     // chunked base64 on top of webFetch's denylist/SSRF/audit chokepoint.
-    'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract }) => {
+    'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract, runId, ownerSessionId, deadlineAt }, sender = undefined) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
+      }
+      /** @type {AbortController | null} */
+      let runController = null;
+      /** @type {AbortSignal | null} */
+      let sourceSignal = null;
+      /** @type {(() => void) | null} */
+      let onAbort = null;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let deadlineTimer = null;
+      const carriesRun = runId !== undefined || ownerSessionId !== undefined;
+      if (carriesRun) {
+        if (typeof runId !== 'string' || typeof ownerSessionId !== 'string'
+          || !isOffscreenSender?.(sender)
+          || scriptRuns?.ownerFor(runId) !== ownerSessionId
+          || scriptRuns?.allows(runId, 'egress') !== true
+          || scriptRuns?.admitOp(runId, 'egress') !== true) {
+          return { ok: false, error: 'web_fetch_unknown_finished_foreign_or_over_limit_run' };
+        }
+        sourceSignal = scriptRuns.signalFor(runId);
+        if (sourceSignal?.aborted) return { ok: false, error: 'aborted' };
+        runController = new AbortController();
+        onAbort = () => runController?.abort();
+        sourceSignal?.addEventListener('abort', onAbort, { once: true });
+        if (typeof deadlineAt === 'number' && Number.isFinite(deadlineAt)) {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 0) runController.abort();
+          else deadlineTimer = setTimeout(() => runController?.abort(), remaining);
+        }
       }
       // GET callers (the VM HTTP marker fast path) pass only { url } and behave
       // exactly as before; the rich VM path + the Notebook code-mode bridge pass
@@ -44,7 +72,10 @@ export const makeEngineRoutes = (deps) => {
       // vmHttpFetch layers the IDB GET cache + optional git-auth on top; noCache
       // (module-source fetches) bypasses that cache so every run is re-audited.
       try {
-        const resp = await vmHttpFetch({ url, method, headers, body, gitAuth, noCache: noCache === true });
+        const resp = await vmHttpFetch({
+          url, method, headers, body, gitAuth, noCache: noCache === true,
+          ...(runController ? { signal: runController.signal } : {}),
+        });
         // Design 2a extract post-step (Notebook tab relay) — why + security
         // posture: shared/fetch-extract.js. Absent `extract` (every VM caller)
         // it is a passthrough, byte-for-byte as before.
@@ -53,6 +84,9 @@ export const makeEngineRoutes = (deps) => {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
         return { ok: false, error: ev?.name === 'EgressDeniedError'
           ? `denylisted: ${ev.message}` : (ev?.message ?? String(e)) };
+      } finally {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        if (sourceSignal && onAbort) sourceSignal.removeEventListener('abort', onAbort);
       }
     },
 

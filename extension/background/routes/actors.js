@@ -1,7 +1,7 @@
 // @ts-check
 // background/routes/actors.js — the `script` tool's actors-in-code relay.
 //
-// A sealed headless worker can choreograph local actors with actors.list/ask.
+// A sealed headless worker can choreograph local actors with actors.list/call.
 // This route translates each call back into the EXISTING actor machinery; it does
 // not create a second authority path. The live run, owner, narrowed tool grant,
 // sender lineage, rate caps, dedupe, audit, and Stop signal are all re-checked
@@ -85,7 +85,9 @@ export const makeActorsRoutes = (deps) => {
             id: `${msg.runId}-list-${msg.seq ?? 0}`, name: 'actor_list', args: {},
           }, listCtx);
           return result?.ok
-            ? { ok: true, value: shapeActorsResult('list', { ok: true, roster: result.content }) }
+            ? { ok: true, value: shapeActorsResult('list', {
+              ok: true, refs: Array.isArray(result.structured?.refs) ? result.structured.refs : [],
+            }) }
             : { ok: false, error: result?.error ?? 'actor_list failed' };
         }
 
@@ -100,7 +102,7 @@ export const makeActorsRoutes = (deps) => {
           });
         };
 
-        // ask — awaitReply, raced against the per-ask timeout AND the run's Stop
+        // call — awaitReply, raced against the per-call timeout AND the run's Stop
         // signal. The same signal cancels the underlying actor turn.
         const askTimeoutMs = target.timeoutMs ?? ACTORS_ASK_DEFAULT_TIMEOUT_MS;
         const runSignal = scriptRuns.signalFor(msg.runId);
@@ -137,7 +139,7 @@ export const makeActorsRoutes = (deps) => {
           mirror({ ok: true, ms, ...(outcome.failed ? { actorFailed: true } : {}) });
           return {
             ok: true,
-            value: shapeActorsResult('ask', {
+            value: shapeActorsResult(msg.method === 'ask' ? 'ask' : 'call', {
               ok: true, reply: outcome.reply, failed: outcome.failed,
             }),
           };

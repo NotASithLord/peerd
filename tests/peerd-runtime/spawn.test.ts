@@ -73,6 +73,8 @@ describe('restrictCtxCapabilities', () => {
     actorCancel: () => {},
     requestReview: () => {},
     dweb: { share: () => {} },
+    jsOffscreenClient: { execHeadless: () => {} },
+    scriptRuns: { register: () => {} },
     // non-capability fields — always retained
     denylist: ['evil.com'],
     allowlist: ['https://api.anthropic.com'],
@@ -118,6 +120,11 @@ describe('restrictCtxCapabilities', () => {
     // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);
+    for (const tool of ['script', 'a2a_run', 'page_code', 'site_client_run']) {
+      const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
+      expect('jsOffscreenClient' in narrowed).toBe(true);
+      expect('scriptRuns' in narrowed).toBe(true);
+    }
   });
 
   test('getSecret / safeFetch have NO tool consumer — always stripped', () => {

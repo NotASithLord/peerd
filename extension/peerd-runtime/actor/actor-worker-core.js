@@ -202,7 +202,7 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {Array<{ name: string, description: string, schema: object }>} deps.tools
  * @param {((text: string) => string)} [deps.fenceActorSummary]  a web/API actor's
  *   rolling-summary self-fence (heap-split phase 3); absent for engine actors.
- * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number }} req
+ * @param {{ sessionId: string, userText: string, maxSteps?: number, oneShot?: boolean, signal?: AbortSignal, reasoning?: object, contextWindow?: number, inbound?: boolean }} req
  * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
@@ -210,7 +210,7 @@ export const runActorLoop = async (deps, req) => {
   // Defensive (phase-1 lesson): the loop fire-and-forgets audits as
   // appendAudit(...).catch(...) — a sync stub returning undefined would crash it.
   const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
-  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow } = req;
+  const { sessionId, userText, maxSteps, oneShot, signal, reasoning, contextWindow, inbound } = req;
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let toolCalls = 0;
   let stopReason;
@@ -236,6 +236,10 @@ export const runActorLoop = async (deps, req) => {
     tools,
     toolDispatch,
     persistDeltas: false,
+    // Preserve the SW's inbound provenance in the loop request as well as the
+    // relay grant. These are strict literals derived from one monotonic bit; the
+    // worker cannot turn an inbound peer wake into a trusted continuation.
+    ...(inbound === true ? { synthetic: true, trusted: false, inbound: true } : {}),
     ...(signal ? { signal } : {}),
     // maxSteps: omit when undefined so runUserTurn uses its OWN default (parity
     // with the in-SW actor path, which passes none). Only cap when the caller asks.

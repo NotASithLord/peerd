@@ -94,6 +94,9 @@
  *   is the legitimate result — but the one-shot latch reads this to give the
  *   actor its promised recovery turn instead of short-circuiting a crash back
  *   as the raw reply (the oneShot contract: "an errored round falls through").
+ * @property {any} [structured]        optional host-only structured twin of a
+ *   presentation-oriented `content` string. The model loop ignores it; trusted
+ *   relays may consume it without parsing human-formatted text.
  */
 
 /**
@@ -166,12 +169,14 @@
  *                                     ctx.skills.loadBody on invocation)
  * @property {(name: string) => Promise<string | null>} getSecret
  * @property {(entry: { type: string, details?: Record<string, any> }) => Promise<unknown>} audit
- * @property {(prompt: ConfirmPrompt) => Promise<ConfirmAnswer>} confirm
+ * @property {(prompt: ConfirmPrompt, signal?: AbortSignal) => Promise<ConfirmAnswer>} confirm
  * @property {Object} kv               peerd-egress kv namespace
  * @property {Object} idb              peerd-egress idb namespace
  * @property {readonly string[]} denylist   loaded denylist patterns (egress + denylist gate input)
  * @property {ProviderLite} provider
  * @property {VaultLite} vault
+ * @property {AbortSignal} [abortSignal] Stop/cancel signal for this dispatch;
+ *                                     relayed code operations must preserve it
  */
 
 /**

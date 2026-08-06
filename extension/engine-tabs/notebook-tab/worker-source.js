@@ -66,6 +66,10 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
  * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
  * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
+ * @param {{ actors?: string, page?: string, mesh?: string, provider?: string, site?: string }} [opts.clientSources]
+ *   Trusted client installers generated from the runtime capability manifest.
+ *   Fallback installers below preserve direct engine tests/Notebook embedding;
+ *   production headless runs always pass the generated sources.
  * @param {{ page?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
  *   capability profile (defaults = DEFAULT_WORKER_CAPS — the historical surface;
  *   caps.page is the web actor's page bridge, PR #119; caps.provider is the
@@ -75,7 +79,7 @@ export const DEFAULT_WORKER_CAPS = Object.freeze({
  *   bodyLine: the 1-based source line the user code's first line lands on
  *   (user line L = source line bodyLine + L - 1) — feed it to mapWorkerError.
  */
-export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '' }) => {
+export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false, actorsGuardMs = 250000, caps, siteFetch = '', clientSources = {} }) => {
   const profile = { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
@@ -289,11 +293,11 @@ const distributedInfo = () => distributedRelay({});
 // --- peerd.mesh.* (agent-to-agent) proxy — capability-gated (a2a) ---
 // The code the dweb actor writes drives peers through this client; each call
 // leaves the sealed realm as an a2a-request the host relays to the SW a2a/call
-// route (consent + gated mesh op). Signing calls (ask/send/publishCard) the SW
+// route (consent + gated mesh op). Signing calls (call/cast/publishCard) the SW
 // gates; a reply/timeout comes back as a2a-response. why a 130s timeout: an ask
 // awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
 // ABOVE that, else the worker rejects a still-valid ask.
-${a2a ? `
+${a2a ? (clientSources.mesh || `
 const meshRelay = makeBridge('a2a', { timeoutMs: 130000, timeoutMessage: (p) => 'mesh.' + p.method + ' timed out' });
 const meshCall = (method, args) => meshRelay({ method, args });
 const __mesh = {
@@ -307,7 +311,7 @@ const __mesh = {
   say:         (convId, message, opts) => meshCall('say', { convId, message, timeoutMs: opts && opts.timeoutMs }),
 };
 globalThis.mesh = __mesh;
-` : ''}
+`) : ''}
 
 // --- actors.* (the trusted caller's actors) proxy — capability-gated ---
 // The script tool's delegation client: ask hands a GOAL to a local actor
@@ -315,15 +319,16 @@ globalThis.mesh = __mesh;
 // route — the full message_actor gate chain runs per call. The guard value is
 // INTERPOLATED from the timeout tower (actors-api.js): it sits above the
 // per-ask cap by construction, and the job wall-clock sits above it.
-${actors ? `
+${actors ? (clientSources.actors || `
 const actorsRelay = makeBridge('actors', { timeoutMs: ${JSON.stringify(actorsGuardMs)}, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
 const actorsCall = (method, args) => actorsRelay({ method, args });
 const __actors = {
   list: () => actorsCall('list', {}),
-  ask:  (to, goal, opts) => actorsCall('ask', { to, goal, timeoutMs: opts && opts.timeoutMs, oneShot: opts && opts.oneShot }),
+  call: (address, message, options) => actorsCall('call', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot }),
+  ask:  (address, message, options) => actorsCall('ask', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot }),
 };
 globalThis.actors = __actors;
-` : ''}
+`) : ''}
 
 // --- peerd.provider.call (sub-model text call) — capability-gated (caps.provider) ---
 // Design 5: a pure text transform mid-script ({ system?, prompt | messages,
@@ -335,7 +340,7 @@ globalThis.actors = __actors;
 // the RUN's wall-clock — the host terminates the worker and the SW aborts the
 // in-flight provider fetch on Stop/release, so a local timer here could only
 // orphan a paid call.
-${profile.provider ? `
+${profile.provider ? (clientSources.provider || `
 const providerRelay = makeBridge('provider');
 // Re-type quota refusals in-realm: the bridge re-raises plain Errors, so the
 // SW's structured refusal arrives as a message string — restore the name so
@@ -344,7 +349,7 @@ globalThis.peerd.provider.call = (args) => providerRelay({ args: args ?? {} }).c
   if (e && typeof e.message === 'string' && e.message.indexOf('provider quota exceeded') === 0) e.name = 'ProviderQuotaError';
   throw e;
 });
-` : `
+`) : `
 globalThis.peerd.provider.call = () => {
   throw new Error('peerd.provider.call is not available in this worker (no-provider capability profile).');
 };
@@ -355,7 +360,7 @@ globalThis.peerd.provider.call = () => {
 // the tool-call web actor uses (denylist / confirm / audit unchanged) against
 // the ONE tab this actor owns. The host attaches the owner identity itself —
 // nothing this realm sends can choose the session or the tab.
-${profile.page ? `
+${profile.page ? (clientSources.page || `
 const pageRelay = makeBridge('page', { timeoutMs: 30000, timeoutMessage: (p) => 'page.' + p.method + ' timed out' });
 const pageCall = (method, args) => pageRelay({ method, args });
 // The Playwright-shaped API is a BARE \`page\` global (the tool description +
@@ -371,7 +376,7 @@ const __page = {
 };
 globalThis.page = __page;
 globalThis.peerd.page = __page;
-` : ''}${siteFetch ? `
+`) : ''}${siteFetch ? (clientSources.site || `
 // --- site.* (DESIGN-19 site client) proxy — ONE origin-pinned fetch ---
 // A site-client run's ONLY outward edge: site.fetch(path, { method, headers, body })
 // leaves the sealed realm as a site-fetch-request the host relays to the SW
@@ -390,7 +395,7 @@ const __site = {
 };
 globalThis.site = __site;
 globalThis.peerd.site = __site;
-` : ''}${profile.egress ? '' : `
+`) : ''}${profile.egress ? '' : `
 // Capability profile: NO egress. peerd.egress.fetch throws in-realm; the host
 // relay refuses any 'fetch-request' this realm still emits (global fetch is the
 // seal's bridge and cannot be removed here) — two walls, same refusal.

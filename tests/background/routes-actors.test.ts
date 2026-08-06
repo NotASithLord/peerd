@@ -44,7 +44,7 @@ const makeHarness = ({
     buildToolContext: async (args: any) => ({ builtFor: args }),
     dispatchToolCall: async (call: any, ctx: any) => {
       calls.push({ kind: 'dispatch', call, ctx });
-      return { ok: true, content: 'ROSTER' };
+      return { ok: true, content: 'ROSTER', structured: { refs: [{ ref: 'vm-1', type: 'webvm' }] } };
     },
     actorMessaging: {
       messageActor: async (req: any) => {
@@ -178,7 +178,7 @@ describe('actors/call — per-operation authority', () => {
         grantedTools: ['script', 'message_actor', 'actor_list'],
       },
     });
-    expect(await allowed.call('list')).toEqual({ ok: true, value: 'ROSTER' });
+    expect(await allowed.call('list')).toEqual({ ok: true, value: { refs: [{ ref: 'vm-1', type: 'webvm' }] } });
     expect(allowed.calls[0].call.name).toBe('actor_list');
   });
 
@@ -195,7 +195,7 @@ describe('actors/call — per-operation authority', () => {
       .toEqual({ ok: false, error: refusal });
   });
 
-  test('Stop aborts an awaited actors.ask through the live run signal', async () => {
+  test('Stop aborts an awaited actors.call through the live run signal', async () => {
     const h = makeHarness({
       owner: {
         sessionId: 'spawn-1', kind: 'spawned',
@@ -211,7 +211,7 @@ describe('actors/call — per-operation authority', () => {
     h.runController.abort();
     expect(await pending).toEqual({
       ok: false,
-      error: "actors.ask: aborted (Stop) while awaiting 'vm-1'",
+      error: "actors.call: aborted (Stop) while awaiting 'vm-1'",
     });
   });
 });

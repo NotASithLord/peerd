@@ -13,7 +13,7 @@
 //   - replies follow `{ ok: true, ... }` or `{ ok: false, error: string }`
 
 import browser from '../vendor/browser-polyfill.js';
-import { isFirstPartySender } from './sender-trust.js';
+import { isFirstPartySender, isServiceWorkerSender as isServiceWorkerSenderCore } from './sender-trust.js';
 
 /**
  * Send a fire-and-forget message to whatever context owns the receiver
@@ -55,6 +55,14 @@ export const send = (msg) => browser.runtime.sendMessage(msg);
 export const isTrustedSender = (sender) => isFirstPartySender(sender, {
   runtimeId: browser.runtime?.id,
   extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+});
+
+/** Exact SW command-source pin for privileged offscreen receivers. */
+/** @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | undefined} sender */
+export const isServiceWorkerSender = (sender) => isServiceWorkerSenderCore(sender, {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+  serviceWorkerUrl: browser.runtime?.getURL?.('background/service-worker.js') ?? '',
 });
 
 /**

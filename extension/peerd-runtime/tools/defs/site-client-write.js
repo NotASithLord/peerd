@@ -100,7 +100,7 @@ export const siteClientWriteTool = {
     if (proposal.op === 'noop') return { ok: true, content: 'no change (identical to the stored client).' };
 
     // Confirm round-trip — the DOSSIER + summarized deltas are the consent surface.
-    const confirmAny = /** @type {((p: Record<string, unknown>) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
+    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
     if (!confirmAny) return { ok: false, error: 'declined', content: 'No confirmation channel available for a site-client write.' };
     const ans = await confirmAny({
@@ -119,7 +119,7 @@ export const siteClientWriteTool = {
       // audited against one, and this write persists runnable JS for that site.
       origins: [origin],
       sessionId: ctx.session?.sessionId ?? null,
-    });
+    }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
       return { ok: false, error: 'site_client_write_rejected', content: 'User declined the site-client write.' };
     }

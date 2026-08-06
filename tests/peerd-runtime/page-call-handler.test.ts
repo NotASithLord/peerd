@@ -68,6 +68,61 @@ describe('page-call handler — gated dispatch on the owned tab', () => {
 });
 
 describe('page-call handler — failures surface as the worker sees them', () => {
+  test('a pre-aborted run never builds context or dispatches', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { handle, buildActorContext, dispatchToolCall } = harness();
+    const out = await handle({
+      method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 1,
+      signal: controller.signal,
+    });
+    expect(out).toEqual({ ok: false, error: 'page_call_aborted' });
+    expect(buildActorContext).not.toHaveBeenCalled();
+    expect(dispatchToolCall).not.toHaveBeenCalled();
+  });
+
+  test('Stop while context is resolving prevents the gated dispatch', async () => {
+    let finishContext = (_value: any) => {};
+    const context = new Promise((resolve) => { finishContext = resolve; });
+    const dispatchToolCall = mock(async () => ({ ok: true, content: '{}' }));
+    const handle = makePageCallHandler({
+      dispatchToolCall,
+      buildActorContext: async () => context,
+    });
+    const controller = new AbortController();
+    const pending = handle({
+      method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 1,
+      signal: controller.signal,
+    });
+    controller.abort();
+    finishContext(ACTOR_CTX);
+    expect(await pending).toEqual({ ok: false, error: 'page_call_aborted' });
+    expect(dispatchToolCall).not.toHaveBeenCalled();
+  });
+
+  test('Stop during dispatch is threaded into the gated context and suppresses its result', async () => {
+    let finishDispatch = (_value: any) => {};
+    const dispatched = new Promise((resolve) => { finishDispatch = resolve; });
+    let seenContext: any = null;
+    const handle = makePageCallHandler({
+      buildActorContext: async () => ACTOR_CTX,
+      dispatchToolCall: async (_call, ctx) => {
+        seenContext = ctx;
+        return await dispatched as any;
+      },
+    });
+    const controller = new AbortController();
+    const pending = handle({
+      method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 1,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+    finishDispatch({ ok: true, content: '{"clicked":true}' });
+    expect(await pending).toEqual({ ok: false, error: 'page_call_aborted' });
+    expect(seenContext.abortSignal).toBe(controller.signal);
+  });
+
   test('an unknown method never dispatches', async () => {
     const { handle, dispatchToolCall } = harness();
     const out = await handle({ method: 'evaluate', args: {}, sessionId: 's1', tabId: 42 });
@@ -98,6 +153,23 @@ describe('page-call handler — failures surface as the worker sees them', () =>
     expect(out.ok).toBe(false);
     expect((out as any).error).toMatch(/page_context_unavailable: no such actor/);
     expect(dispatchToolCall).not.toHaveBeenCalled();
+  });
+
+  test('vision bytes stay separate from the shaped page value and are bounded to one image', async () => {
+    const { handle } = harness({
+      ok: true,
+      content: JSON.stringify({ viewed: true }),
+      images: [
+        { data: 'old', mediaType: 'image/png' },
+        { data: 'latest', mediaType: 'image/png' },
+      ],
+    });
+    const out = await handle({ method: 'view', args: {}, sessionId: 's1', tabId: 1 });
+    expect(out).toEqual({
+      ok: true,
+      value: { viewed: true },
+      images: [{ data: 'latest', mediaType: 'image/png' }],
+    });
   });
 });
 

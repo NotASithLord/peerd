@@ -25,7 +25,7 @@
  * dweb-enabled build. dweb.share is an RPC into the pruned-on-store module.
  * @typedef {{
  *   permission?: { confirmActions?: boolean },
- *   confirm?: (p: { tool: string, kind: string, origins: string[], summary: string, sessionId: string | null }) => Promise<ConfirmAnswer>,
+ *   confirm?: (p: { tool: string, kind: string, origins: string[], summary: string, sessionId: string | null }, signal?: AbortSignal) => Promise<ConfirmAnswer>,
  *   dweb?: { share: (appId: string) => Promise<{ ok?: boolean, error?: string, uri?: string, hash?: string, dwapp_id?: string, warning?: string, cleanupPending?: boolean }> } | null,
  * }} DwebShareCtx
  */
@@ -67,7 +67,7 @@ export const dwebShareTool = {
         tool: 'dweb_share', kind: 'dweb_publish', origins: [],
         summary: `Publish app "${appId}" to the dweb app store? Peers will be able to discover and install it.`,
         sessionId: ctx.session?.sessionId ?? null,
-      });
+      }, ctx.abortSignal);
       if (ans !== 'yes_once' && ans !== 'yes_session') {
         return {
           ok: false, error: 'declined', content: 'User declined to publish to the dweb.',

@@ -43,7 +43,7 @@ import './doc-extract.js';
 import './web-extract.js';
 import { extractMarkdownLocal } from './web-extract-core.js';
 import { initLocalModel, generateLocal, localModelStatus, probeWebgpu, teardownLocalModel } from './local-model.js';
-import { isTrustedSender } from '/shared/messaging.js';
+import { isServiceWorkerSender, isTrustedSender } from '/shared/messaging.js';
 // The always-on base network (S1b). Self-registers a dweb/base-host/* handler;
 // inert on store builds (DWEB_ENABLED false + loadDweb stub). The lobby
 // connection lives here so the network outlives any tab.
@@ -342,10 +342,10 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // Fail closed for any non-first-party sender — this runs arbitrary code, so it
   // must match the SW dispatcher's posture (sender-trust.js). externally_connectable
   // is unset today, so this is defense-in-depth, not an active hole.
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
   runJob(
     {
-      code: msg.code, timeoutMs: msg.timeoutMs,
+      code: msg.code, timeoutMs: msg.timeoutMs, startedAt: msg.startedAt, deadlineAt: msg.deadlineAt,
       a2a: msg.a2a === true, actors: msg.actors === true,
       // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
       siteFetch: typeof msg.siteFetch === 'string' ? msg.siteFetch : '',
@@ -364,6 +364,12 @@ const onJobMessage = (msg, sender, sendResponse) => {
     },
     {
       sendToSW: (type, payload) => browser.runtime.sendMessage({ type, ...payload }),
+      // Run settlement is a control signal, separate from the capability relay
+      // lane: the SW aborts pending confirmations/tool work before job-runner
+      // releases that lane for reuse.
+      abortRun: (runId, ownerSessionId) => browser.runtime.sendMessage({
+        type: 'script-run/abort', runId, ownerSessionId,
+      }),
       // The bridged fetch's extract:'markdown' post-step — the local pipeline
       // adapter (see shared/fetch-extract.js for the why + posture).
       extractMarkdown: extractMarkdownLocal,
@@ -385,7 +391,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
  */
 const onJobAbort = (msg, sender, sendResponse) => {
   if (msg?.type !== 'job/abort') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
   if (typeof msg.runId === 'string' && msg.runId) abortJob(msg.runId, typeof msg.ownerSessionId === 'string' ? msg.ownerSessionId : undefined);
   sendResponse({ ok: true });
   return true;
@@ -404,7 +410,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
  */
 const onActorMessage = (msg, sender, sendResponse) => {
   if (msg?.type !== 'actor/run' && msg?.type !== 'actor/abort') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
+  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
   if (msg.type === 'actor/abort') { abortActor(msg.runId); sendResponse({ ok: true }); return true; }
   runActor(
     msg.job ?? {},

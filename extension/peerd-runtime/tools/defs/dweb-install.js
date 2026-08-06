@@ -24,7 +24,7 @@
  * base ToolContext.confirm); dweb.install is an RPC into the pruned-on-store module.
  * @typedef {{
  *   permission?: { confirmActions?: boolean },
- *   confirm?: (p: { tool: string, kind: string, origins: string[], summary: string, sessionId: string | null }) => Promise<ConfirmAnswer>,
+ *   confirm?: (p: { tool: string, kind: string, origins: string[], summary: string, sessionId: string | null }, signal?: AbortSignal) => Promise<ConfirmAnswer>,
  *   dweb?: { install: (o: { uri: string, name?: string }) => Promise<{ ok?: boolean, error?: string, warning?: string, warnings?: string[], outcomeKind?: string, app?: { id?: string, name?: string }, appId?: string, name?: string }> } | null,
  * }} DwebInstallCtx
  */
@@ -70,7 +70,7 @@ export const dwebInstallTool = {
         tool: 'dweb_install', kind: 'dweb_install', origins: [],
         summary: `Install the app at ${uri.slice(0, 72)}… from a peer? It runs sandboxed, with no extension access.`,
         sessionId: ctx.session?.sessionId ?? null,
-      });
+      }, ctx.abortSignal);
       if (ans !== 'yes_once' && ans !== 'yes_session') {
         return {
           ok: false, error: 'declined', content: 'User declined the install.',

@@ -112,6 +112,56 @@ describe('sw/web-fetch', () => {
     expect(raw.extracted).toBeUndefined();
     expect(seenExtract).toBeUndefined();
   });
+
+  test('a run-scoped fetch needs exact offscreen provenance and a live owner capability', async () => {
+    let fetched = false;
+    let admissions = 0;
+    const controller = new AbortController();
+    const routes = makeEngineRoutes(baseDeps({
+      vmHttpFetch: async () => { fetched = true; return { ok: true }; },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1',
+        allows: () => true,
+        admitOp: () => { admissions += 1; return true; },
+        signalFor: () => controller.signal,
+      },
+    }));
+    const forged = await (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+    }, { url: 'engine-tab' });
+    expect(forged).toEqual({ ok: false, error: 'web_fetch_unknown_finished_foreign_or_over_limit_run' });
+    expect(fetched).toBe(false);
+    expect(admissions).toBe(0);
+  });
+
+  test('Stop aborts an admitted run-scoped fetch through the injected HTTP signal', async () => {
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+    const routes = makeEngineRoutes(baseDeps({
+      vmHttpFetch: async ({ signal }: any) => {
+        seenSignal = signal;
+        return await new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      },
+      isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
+      scriptRuns: {
+        ownerFor: () => 'owner-1',
+        allows: (_runId: string, cap: string) => cap === 'egress',
+        admitOp: () => true,
+        signalFor: () => controller.signal,
+      },
+    }));
+    const pending = (routes['sw/web-fetch'] as any)({
+      url: 'https://example.com', runId: 'run-1', ownerSessionId: 'owner-1',
+      deadlineAt: Date.now() + 10_000,
+    }, { url: 'offscreen' });
+    await Promise.resolve();
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'aborted' });
+    expect(seenSignal?.aborted).toBe(true);
+  });
 });
 
 describe('app/vm meta + apps Library', () => {

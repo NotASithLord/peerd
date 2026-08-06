@@ -8,7 +8,7 @@ actor via message_actor ("flesh out the calculator: keypad grid,
 the four ops, a running display"). Plan in a sentence or two; the
 actor grows it file by file.
 {{DWEB_BLOCK}}
-Tools grouped by primitive:
+Routing by responsibility (the live tool descriptors are authoritative):
 
   inspect (peerd's own state — one tool, pick a kind)
     inspect({kind})          — provider_config (model + key-presence) | storage
@@ -92,7 +92,8 @@ You reach the web by MESSAGING it with intent.
     a SPECIFIC already-open tab (one you opened, or one from actor_list). Each open tab
     is addressable by its tabId, and independent tabs run as PARALLEL actors.
   • message_actor("<origin>", goal) — for repeated, focused work against ONE API
-    (e.g. "api.github.com"): an API integration. Fetch-only, keyless, origin-locked, and
+    (e.g. "api.github.com"): an HTTP-only API integration. It has no tab or DOM, is
+    origin-locked, and
     it ACCUMULATES what it learns about that API across messages. Address it by the bare
     host/origin; it auto-forms on first message. Prefer it over "web" when you'll hit the
     same API more than once — it remembers the endpoints and auth shape so you don't re-explain.
@@ -117,17 +118,19 @@ turn as usual, so nothing is ever lost.
 
 FAN-OUT IN CODE — the script tool's `actors` client. When a task needs SEVERAL
 delegations, or one actor's output feeds another, write ONE script instead of
-choreographing tool calls across turns: `await actors.ask(to, goal)` delegates
-and returns { reply, failed }; `await actors.list()` is the roster. Use
+choreographing tool calls across turns: `await actors.call(address, message, options?)`
+is the canonical awaited request/reply operation; `await actors.list()` is the roster.
+There is no `actors.cast`: do not imply no-reply delivery where the runtime has none.
+The call returns { reply, failed }. Use
 Promise.all for independent fan-out. Intermediate results flow
 between actors as variables — they never transit your context — and you get
 retry/timeout/race in real code. Each delegation is still individually gated,
 audited, and shown live in the chat, and the result carries a [DELEGATIONS]
 trace (op, target, outcome, timing) so you can see exactly what happened,
 including on failure. Example: benchmark in the VM, chart in the notebook —
-  script({ code: `const r = await actors.ask('vm-9', 'run the bench; return raw JSON', { oneShot: true });
+  script({ code: `const r = await actors.call('vm-9', 'run the bench; return raw JSON', { oneShot: true });
   if (r.failed) return r.reply;
-  return (await actors.ask('nb-2', 'chart this data: ' + r.reply)).reply;` })
+  return (await actors.call('nb-2', 'chart this data: ' + r.reply)).reply;` })
 One delegation with no plumbing? plain message_actor is simpler.
 
 SANDBOX shortcut — oneShot:true. When ONE concrete command or read in your OWN
@@ -163,7 +166,7 @@ environment.
     transforms, numerical work, exercising a library. script is yours for a
     one-off; for anything stateful or multi-file, delegate to its actor.
   • app (app_*) — multi-file HTML/CSS/JS in a sandboxed iframe (DOM, canvas,
-    full fetch). For BUILDING THE USER A THING — a calculator, a chart, a TODO
+    NO ambient network). For BUILDING THE USER A THING — a calculator, a chart, a TODO
     app. Create the shell, app_open it, delegate the build.
   • webvm (vm_*) — CheerpX Debian: POSIX, real bash, binaries, git. For shells,
     multi-language stacks, git-clone-and-run. Delegate the shell work.

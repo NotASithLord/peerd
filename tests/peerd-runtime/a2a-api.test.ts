@@ -1,7 +1,7 @@
 // The pure mesh translation core — the page-api.js twin for agent-to-agent.
 // Maps a `mesh.<method>(args)` call to a gated mesh op + shapes the reply,
 // browserless. Pins: the method table, arg validation (fail-closed), the
-// ask/send signing split, and result shaping (a failed op rejects like a throw).
+// call/cast signing split, and result shaping (a failed op rejects like a throw).
 
 import { describe, test, expect } from 'bun:test';
 import {
@@ -13,7 +13,7 @@ const DID = 'did:key:z6MkexampleAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 describe('meshCallToOp — mapping + validation', () => {
   test('the method surface is exactly the client vocabulary', () => {
-    expect([...MESH_API_METHODS].sort()).toEqual(['ask', 'card', 'converse', 'inbox', 'peers', 'publishCard', 'say', 'send'].sort());
+    expect([...MESH_API_METHODS].sort()).toEqual(['call', 'card', 'cast', 'converse', 'inbox', 'peers', 'publishCard', 'say'].sort());
   });
 
   test('peers/inbox take no args', () => {
@@ -26,24 +26,24 @@ describe('meshCallToOp — mapping + validation', () => {
     expect(() => meshCallToOp({ method: 'card', args: { did: 'nope' } })).toThrow(MeshApiError);
   });
 
-  test('ask validates did + message, clamps timeout, and is a SIGNING op', () => {
-    const out = meshCallToOp({ method: 'ask', args: { did: DID, message: 'free Tuesday?', timeoutMs: 999_999 } });
+  test('call validates did + message, clamps timeout, and is a SIGNING op', () => {
+    const out = meshCallToOp({ method: 'call', args: { did: DID, message: 'free Tuesday?', timeoutMs: 999_999 } });
     expect(out.op).toBe('ask');
     expect(out.signs).toBe(true);
     expect(out.args).toEqual({ did: DID, message: 'free Tuesday?', timeoutMs: 120_000 });   // clamped
-    expect(() => meshCallToOp({ method: 'ask', args: { did: DID, message: '' } })).toThrow(MeshApiError);
-    expect(() => meshCallToOp({ method: 'ask', args: { did: 'x', message: 'hi' } })).toThrow(MeshApiError);
+    expect(() => meshCallToOp({ method: 'call', args: { did: DID, message: '' } })).toThrow(MeshApiError);
+    expect(() => meshCallToOp({ method: 'call', args: { did: 'x', message: 'hi' } })).toThrow(MeshApiError);
   });
 
-  test('send is signing; publishCard requires a named card object', () => {
-    expect(meshMethodSigns('send')).toBe(true);
+  test('cast is signing; publishCard requires a named card object', () => {
+    expect(meshMethodSigns('cast')).toBe(true);
     expect(meshMethodSigns('peers')).toBe(false);
     expect(() => meshCallToOp({ method: 'publishCard', args: { card: {} } })).toThrow(MeshApiError);
     expect(meshCallToOp({ method: 'publishCard', args: { card: { name: 'Ada' } } }).signs).toBe(true);
   });
 
-  test('the signing set is exactly send/ask/publishCard', () => {
-    expect([...MESH_SIGNING_METHODS].sort()).toEqual(['ask', 'converse', 'publishCard', 'say', 'send'].sort());
+  test('the canonical signing set uses call/cast vocabulary', () => {
+    expect([...MESH_SIGNING_METHODS].sort()).toEqual(['call', 'cast', 'converse', 'publishCard', 'say'].sort());
   });
 
   test('an unknown method throws', () => {
@@ -52,14 +52,15 @@ describe('meshCallToOp — mapping + validation', () => {
 });
 
 describe('shapeMeshResult — reply shaping', () => {
-  test('ask shapes { from, reply } and surfaces a timeout', () => {
-    expect(shapeMeshResult('ask', { ok: true, from: DID, reply: 'yes' })).toEqual({ from: DID, reply: 'yes' });
+  test('call shapes { from, reply } and rejects timeout; ask alias preserves 0.x shape', () => {
+    expect(shapeMeshResult('call', { ok: true, from: DID, reply: 'yes' })).toEqual({ from: DID, reply: 'yes' });
+    expect(() => shapeMeshResult('call', { ok: true, from: null, reply: null, timedOut: true })).toThrow(/timed out/);
     expect(shapeMeshResult('ask', { ok: true, from: null, reply: null, timedOut: true })).toEqual({ from: null, reply: null, timedOut: true });
   });
 
-  test('a failed op REJECTS like a throw (so await mesh.ask() throws)', () => {
-    expect(() => shapeMeshResult('ask', { ok: false, error: 'no direct link to did' })).toThrow(MeshApiError);
-    expect(() => shapeMeshResult('send', { ok: false })).toThrow(MeshApiError);
+  test('a failed op REJECTS like a throw (so await mesh.call() throws)', () => {
+    expect(() => shapeMeshResult('call', { ok: false, error: 'no direct link to did' })).toThrow(MeshApiError);
+    expect(() => shapeMeshResult('cast', { ok: false })).toThrow(MeshApiError);
   });
 
   test('peers reads the named roster; card reads the named card (null when absent)', () => {

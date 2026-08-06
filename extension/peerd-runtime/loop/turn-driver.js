@@ -34,6 +34,16 @@ import { PREWALK_NUDGE } from './prewalk.js';
 // per-turn ephemeral <context> message (temporal + active tab) that keeps the
 // main system string byte-stable and prompt-cacheable (design 01).
 import { buildTemporalContext } from './system-prompt.js';
+import { DWEB_INBOUND_TOOL_NAMES } from '../actor/capability-manifest.js';
+
+/**
+ * The in-SW fallback's positive inbound authority check. Kept pure/exported so
+ * the hidden-tool forgery case is pinned without constructing a whole turn.
+ * @param {{ isActor: boolean, inbound: boolean, actorType?: string, name?: string }} input
+ */
+export const inboundActorCallAllowed = ({ isActor, inbound, actorType, name }) =>
+  !(isActor && inbound && actorType === 'dweb')
+  || (typeof name === 'string' && DWEB_INBOUND_TOOL_NAMES.includes(name));
 
 // pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
 // relay, a security seam — one implementation, no drift).
@@ -286,7 +296,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // #241: schemaReply rides the SAME stamp — buildToolContext sets it from the
       // setting that arms the reply validator, so an actor is never told to emit
       // the envelope by a build that wouldn't validate it (or vice versa).
-      ...(isActor ? { actorType, backing: actorBacking, instanceId: actorInstanceId, actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply } : {}),
+      ...(isActor ? {
+        actorType, backing: actorBacking, instanceId: actorInstanceId,
+        actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply,
+        effectiveTools: toolDescriptors.map((/** @type {any} */ tool) => tool.name),
+        inbound: toolContext.inbound === true,
+      } : {}),
     // why await: renderSystemPrompt is async — concatenating the un-awaited
     // promise would bake "[object Promise]" into the prompt.
     })) + prewalkBlock;
@@ -372,12 +387,28 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // inherited tool MANIFEST (sessionToolAllow, above) so the list is honest: a
   // browse-only chat's web actor is shown only the read DOM tools, matching the
   // gate (which refuses click/type for it). null manifest passes through unchanged.
-  const refreshActorTools = async () =>
-    filterDescriptorsByManifest(actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface), sessionToolAllow)
+  const refreshActorTools = async () => {
+    const descriptors = filterDescriptorsByManifest(
+      actorDescriptors(listTools(), actorType, actorBacking, toolContext.actorSurface),
+      sessionToolAllow,
+    );
+    const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
+    return (toolContext.inbound === true && actorType === 'dweb'
+      ? descriptors.filter((/** @type {any} */ tool) => inboundAllowed.has(tool.name))
+      : descriptors)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+  };
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
+    // The descriptor filter is model guidance; this is the in-SW fallback's
+    // authority wall. A remote-peer wake may use only the positive inbound
+    // dweb subset even if it forges a hidden tool name.
+    if (!inboundActorCallAllowed({
+      isActor, inbound: toolContext.inbound === true, actorType, name: call?.name,
+    })) {
+      return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
+    }
     // DESIGN-17 per-instance pin: force an actor's instance-target arg to its
     // BOUND instance before dispatch, so it can only ever touch its own (the gate
     // is the backstop). Runs first — before the gate chain sees the args.

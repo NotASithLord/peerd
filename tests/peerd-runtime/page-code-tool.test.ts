@@ -12,7 +12,10 @@ const RESULT = { value: 'ok', consoleOutput: [], durationMs: 5, error: null };
 
 const ctxWith = (over: object = {}) => {
   const execHeadless = mock(async (_code: string, _opts: object) => RESULT);
-  const ctx = { session: { sessionId: 's-web-1' }, jsOffscreenClient: { execHeadless }, ...over };
+  const scriptRuns = {
+    mintRunId: mock(() => 'run-page-1'), register: mock(() => {}), release: mock(() => {}),
+  };
+  const ctx = { session: { sessionId: 's-web-1' }, jsOffscreenClient: { execHeadless }, scriptRuns, ...over };
   return { ctx, execHeadless };
 };
 
@@ -32,6 +35,7 @@ describe('page_code — the code-REPL action tool', () => {
     expect((opts as any).caps).toEqual(PAGE_CODE_CAPS);
     // owner is the ctx session id — the SW route resolves the owned tab from it.
     expect((opts as any).ownerSessionId).toBe('s-web-1');
+    expect((opts as any).runId).toBe('run-page-1');
   });
 
   test('fails closed with no actor session — the page surface is never anonymous', async () => {
