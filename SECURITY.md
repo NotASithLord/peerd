@@ -40,6 +40,9 @@ invariants are wired to a runnable [red-team suite](tests/red-team/) (`bun test
 ./tests/red-team`) whose results are published in
 [`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md), so the
 security claims can be re-checked against the code rather than taken on faith.
+The [`lifecycle and recovery contract`](docs/security/LIFECYCLE-CONTRACT.md)
+states what happens to operations, tabs, sandboxes, and stored data when a
+worker or browser session stops unexpectedly.
 
 ## Trust model (what peerd already defends)
 
@@ -105,7 +108,11 @@ states both plainly rather than counting them as defenses.
 
 - **Sandboxed execution.** WebVM uses CheerpX. Notebook and headless script
   execution use sealed workers. Apps use opaque-origin sandboxed iframes and
-  currently run only on Chrome.
+  currently run only on Chrome. Script and Notebook jobs may import HTTPS
+  JavaScript. Pins are optional, imported code inherits the run's capabilities,
+  and visible Notebook output is not yet fenced before its actor reads it. The
+  sealed worker protects the extension process; it does not make remote code a
+  trusted dependency.
 
 ## In scope
 

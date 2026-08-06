@@ -199,15 +199,21 @@ permission in the store Chrome build, a strict CSP) reduces peerd's own attack
 surface but does not defend against a separate malicious extension.
 
 ### 5.6 Compromised dependency (supply chain)
-Can: a subverted vendored library or a remote asset peerd loads could inject code.
+Can: a subverted vendored library, a remote asset, or an agent-selected HTTPS
+JavaScript module could inject code.
 Defenses (partial): there is no npm runtime inside the extension. Third-party code is
 vendored in `vendor/` with a `SOURCE.txt`. The Moonshine voice model is SHA-384
 SRI-verified and refuses to load on a null SRI
-(`peerd-runtime/voice/model-store.js`). The store build strips the `debugger`
-permission and the dweb module, and CI verifies zero dweb traces.
-Accepted residual (R8): the CheerpX WebVM streams its root filesystem image from a
-third-party host over WSS, which cannot be SRI-pinned. This is a live trust
-dependency for the VM's filesystem. It is named, not defended.
+(`peerd-runtime/voice/model-store.js`). Remote modules cross the audited web-fetch
+path, have source and graph caps, and may carry an optional SHA-256 pin. They run
+inside a sealed worker. The store build strips the `debugger` permission and the
+dweb module, and CI verifies zero dweb traces.
+Accepted residuals: the CheerpX WebVM streams its root filesystem image from a
+third-party host over WSS, which cannot be SRI-pinned. An unpinned HTTPS module
+can change at its publisher's discretion and inherits the execution lane's
+capabilities. Visible Notebook results also lack remote-import provenance, so
+remote-controlled output is not fenced before the Notebook actor reads it. The
+store-package decision for remote JavaScript remains open.
 Proven by (partial): scenario 06 for sandbox confinement of whatever the VM runs.
 
 ---

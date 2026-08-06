@@ -23,12 +23,15 @@ peerd is an experimental 0.x beta. Breaking changes are likely. Storage formats
 and product behavior may change. It can drive browser pages and use API keys, so
 review the security model before using it with sensitive data.
 
+Chromium is the primary product target. Firefox support is experimental and
+lacks several execution and actor-isolation features available on Chrome.
+
 The code is the source of truth for current behavior. Start with
 [`CLAUDE.md`](CLAUDE.md), then read the relevant module under `extension/`.
 
 ## What it does
 
-- Runs an agent loop in a Chrome or Firefox extension.
+- Runs an agent loop in Chrome and an experimental Firefox package.
 - Reads and drives browser tabs through per-environment actors.
 - Runs Linux WebVMs, JavaScript Notebooks, browser Apps, and headless scripts.
 - Supports cloud and local model providers. The live list is in
@@ -91,8 +94,9 @@ code is the authority for each browser and channel.
 1. Open peerd from the browser toolbar.
 2. Create and unlock the local vault. Passphrase unlock is always available.
    Passkey unlock depends on WebAuthn PRF support in the browser and device.
-3. Open Settings, then add a provider key or choose a supported local provider.
-4. Select a model and start a chat.
+3. Complete the short profile onboarding.
+4. Open Settings, then add a provider key or choose a supported local provider.
+5. Select a model and start a chat.
 
 Only vault secrets and protected security records are covered by the vault
 encryption boundary. Other local extension state follows the storage rules in
@@ -150,6 +154,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing code.
 - [`CLAUDE.md`](CLAUDE.md): project structure, conventions, and current posture
 - [`SECURITY.md`](SECURITY.md): security policy and reporting
 - [`docs/security/THREAT-MODEL.md`](docs/security/THREAT-MODEL.md): trust boundaries and residual risks
+- [`docs/security/LIFECYCLE-CONTRACT.md`](docs/security/LIFECYCLE-CONTRACT.md): interruption behavior and recovery limits
 - [`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md): red-team coverage
 - [`docs/store/`](docs/store/): store packaging, permissions, privacy, and reviewer notes
 - [`scripts/cdp/GALLERY.md`](scripts/cdp/GALLERY.md): E2E and visual states

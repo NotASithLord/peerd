@@ -1,6 +1,6 @@
 # peerd Privacy Policy
 
-**Effective date:** July 12, 2026
+**Effective date:** August 6, 2026
 
 **Applies to:** all peerd browser extension distribution channels
 
@@ -30,8 +30,10 @@ peerd stores local extension data such as:
 Vault encryption does not apply to every item in extension storage. The
 security documentation defines the current storage boundaries.
 
-Voice input is transcribed locally by default. peerd does not retain recorded
-audio.
+Voice is off by default. When enabled, the automatic engine prefers the
+browser's Web Speech service, which may send audio to the browser vendor. The
+user can select Moonshine for local transcription. peerd does not retain
+recorded audio.
 
 ## Data sent from the device
 
@@ -39,13 +41,18 @@ audio.
 
 Messages and task context are sent to the model provider selected by the user.
 Requests use the user's provider key when required. The provider's privacy
-policy applies to that data.
+policy applies to that data. Depending on the task, this content may include
+personal communications, identifying information, or other sensitive material
+present in the user's prompt or page. The default denylist reduces access to
+some sensitive sites but is not a guarantee about the content of every page.
 
 ### Websites and user-directed network requests
 
-peerd can request websites and APIs needed for a task. Network policy blocks
-private network targets and configured sensitive sites on supported paths. The
-local audit log records allowed and denied requests.
+peerd can request websites and APIs needed for a task. Direct fetch and
+document-reading paths block private-network targets. Configured sensitive-site
+rules apply on supported browser and fetch paths. The local Activity log records
+tool outcomes, direct open-web fetches, and policy denials. It is not a complete
+record of every network request or visited URL.
 
 ### Runtime assets
 
@@ -53,16 +60,32 @@ Some features download public runtime assets, such as a speech model or a
 WebVM disk image. Integrity and source controls are defined in the code and
 vendored dependency records.
 
+Script and Notebook jobs can also import JavaScript from an HTTPS URL. peerd
+fetches that source through its audited web path and executes it in a sealed
+worker. Store packages must disable this path or disclose an accepted policy
+exemption before submission.
+
 ### Browser speech services
 
-If local transcription is unavailable and the user chooses the browser speech
-fallback, the browser may send audio to its own speech service. The browser
-vendor controls that service.
+When voice is enabled, the default automatic engine prefers the browser's Web
+Speech service. The browser may send audio to its own speech service, which is
+controlled by the browser vendor. Users can select Moonshine for local
+transcription instead.
 
 ### Preview dweb
 
-Preview builds can use signaling servers for peer discovery and WebRTC for
-peer-to-peer traffic when the dweb is enabled. Store builds omit the dweb.
+Preview builds can use signaling servers for peer discovery and WebRTC when the
+dweb is enabled. Direct and agent-to-agent messages, published agent profiles,
+and shared peer-to-peer app bundles can be sent to peers. Recipients may retain
+data they receive even after the sender removes a local copy. Signaling servers
+may keep their own operational logs, but they do not control data already held
+by peers.
+
+The optional preview dweb agent currently uses one model conversation across
+messages from different peers. Until peer-scoped histories and exact reply
+grants are implemented, one peer may be able to prompt it to reveal information
+from another peer conversation. Keep the dweb agent disabled unless you accept
+this risk. Store builds omit the dweb.
 
 ## What peerd does not do
 

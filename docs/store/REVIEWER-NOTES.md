@@ -1,5 +1,10 @@
 # Chrome Web Store reviewer notes
 
+**Blocked draft. Do not submit this text with the current package.** Script and
+Notebook jobs can fetch and execute HTTPS JavaScript modules. Resolve the remote
+code decision in `OPEN-DECISIONS.md`, verify the uploaded artifact, and then
+replace the blocked section below with accurate final text.
+
 One placeholder must be filled before submitting: the demo video URL below.
 No test API key is provided. The demo video covers
 the full flow instead.
@@ -13,38 +18,43 @@ speaks a task; the assistant performs it by reading and interacting
 with web pages, and by running computations in sandboxes (a WebAssembly
 Linux VM and a JavaScript sandbox that can also run WebAssembly (WASI)
 programs) that exist entirely inside the browser. It is local-first, uses
-bring-your-own-key providers, and has no account, hosted agent backend,
-analytics, or telemetry. The developer does not receive or store extension
-data through the extension.
+user-configured cloud or local providers, and has no account, hosted agent
+backend, analytics, or telemetry. The developer does not receive or store
+extension data through the extension.
 
 ## How to test
 
 1. Install, open the side panel (toolbar icon).
-2. Onboarding asks for an AI provider API key. peerd is
-   bring-your-own-key with no accounts, so there is no test credential
-   to share; the demo video below shows every flow end-to-end instead.
+2. Create and unlock the local vault, then complete the short profile
+   onboarding. Open Settings, then Providers & models. Add a provider key or
+   choose a supported keyless local provider. No hosted peerd account or shared
+   test credential exists; the demo video shows the configured flow.
 3. Ask something that exercises page automation, e.g. open any article
    and ask "summarize this page", or "open hacker news and tell me the
    top three stories".
 4. VM demo: ask "boot a linux vm and run uname -a". First boot streams
    the public Debian image from disks.webvm.io (see below).
-5. The audit log (in the side panel) shows every outbound request the
-   agent made, including denied ones.
+5. The Activity page shows tool outcomes, direct open-web fetches, and policy
+   denials.
 
 **Demo video** (full agent flow, VM boot, automation, audit log):
 «VIDEO URL»
 
 ## Remotely hosted code
 
-There is no remotely hosted code. These are the five places a scan
-will flag:
+The current package can fetch HTTPS JavaScript through the audited web relay
+and execute it as a blob module inside sealed Script and Notebook workers. Do
+not claim that the package contains no remotely hosted code. Store submission
+is blocked until this path is disabled and verified in the store artifact, or
+the behavior receives a documented policy decision and accurate disclosure.
+
+Other network-loaded assets that a scan may flag are listed below:
 
 1. **CheerpX (x86-in-WASM runtime) is fully vendored** in
    `vendor/cheerpx/`, version-pinned, with provenance and the SHA-256
    of the entry file documented in `vendor/cheerpx/SOURCE.txt`. Every
    vendored dependency in `vendor/` carries the same SOURCE.txt
-   treatment. No CDN script loading anywhere; the package is vanilla,
-   unobfuscated ES modules.
+   treatment. Packaged extension code is vanilla, unobfuscated ES modules.
 2. **`disks.webvm.io` (vm-tab)** streams a stock Debian *filesystem
    image*. These bytes are interpreted as an ext2 disk by the sandboxed WASM VM.
    It is data, not extension code, equivalent to a game loading an
@@ -99,12 +109,12 @@ and three things keep that honest regardless of channel:
 
 - A denylist, ON by default, refuses to operate on banks, brokerages,
   crypto exchanges and wallets, health portals, government services,
-  password managers, and identity providers (the categories where
+  and password managers (the categories where
   automation could do harm). See
   `peerd-egress/denylist/default.json`; the service worker blocks all
   tool dispatch until the denylist is loaded (no cold-start race).
 - Page actions run only during an active, user-initiated task.
-- Every action goes to the local audit log, including denied attempts.
+- Tool outcomes and policy denials go to the local Activity log.
 
 Maintainer note (not for the dashboard): an optional Chrome DevTools
 Protocol path for sites that ship Trusted Types or strict CSP (Gmail,
@@ -118,9 +128,12 @@ forbids `debugger` under `optional_permissions`).
 
 ## Why `<all_urls>`
 
-Which site the user will ask the assistant to work on is the user's
-choice at task time. Access is exercised only during an active user
-task and is constrained by the same denylist + SSRF block + audit log.
+Which site the user will ask the assistant to work on is the user's choice at
+task time. Page injection and page automation occur only during an active user
+task. The denylist applies to page access. Direct fetch and document-reading
+paths also apply private-network checks. Provider setup and user-enabled runtime
+downloads are separate user-initiated network uses. Tool outcomes and policy
+denials are recorded locally.
 
 ## Egress posture (honest scope)
 
@@ -133,10 +146,11 @@ We separate two things on purpose:
   allowlist because the target is user-selected. It enforces a scheme
   check, an SSRF/private-network block (IPv4 + structural IPv6, incl.
   the cloud-metadata IP and IPv4-mapped forms), a sensitive-site
-  denylist, fail-closed redirect handling, and a full audit log, but
+  denylist, fail-closed redirect handling, and local records for direct fetches
+  and policy denials, but
   **not** a per-host allowlist. Traffic to an arbitrary *public* domain
   over this path is not categorically prevented. The web actor is keyless, its tool access is
-  narrowed, and the audit log records every request. We do not claim otherwise.
+  narrowed. We do not claim otherwise.
 
 The Notebook specifically: the `js_notebook` Web Worker runs
 agent-authored code, so its raw network primitives (XHR / WebSocket /
@@ -153,10 +167,11 @@ which is governed by the open-web `webFetch` gates above.
 pages the user asks it to read from the extension's service worker.
 The target set is user-chosen and cannot be enumerated in a manifest.
 The egress layer enforces what the manifest cannot express: a hardcoded
-allowlist for credentialed provider calls, the denylist + SSRF block
-for everything else, and the audit log for all of it. The generated manifest
-and store posture tests are the authority for the narrow non-HTTPS sources used
-by local providers and runtime assets.
+allowlist for credentialed provider calls and the denylist plus private-network
+checks on direct open-web fetch paths. Local records cover tool outcomes,
+direct fetches, and policy denials. The generated manifest and store posture
+tests are the authority for the narrow non-HTTPS sources used by local
+providers and runtime assets.
 
 ## Privacy posture (for the data form)
 
