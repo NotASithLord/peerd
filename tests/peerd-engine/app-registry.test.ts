@@ -26,6 +26,25 @@ describe('createAppRegistry', () => {
     expect(rec.entryFile).toBe('index.html');
   });
 
+  test('a trusted install can reserve its final App id without overwriting another record', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const id = 'app-12345678-abcd';
+    expect((await reg.create({ id, name: 'installed' })).id).toBe(id);
+    await expect(reg.create({ id, name: 'duplicate' })).rejects.toThrow('app already exists');
+    await expect(reg.create({ id: 'app-../../escape', name: 'bad' })).rejects.toThrow('invalid app id');
+  });
+
+  test('file kinds are bounded, normalized metadata', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const rec = await reg.create({
+      name: 'a',
+      fileKinds: { 'index.html': 'text', 'data.custom': 'binary', bad: 'other' },
+    });
+    expect(rec.fileKinds).toEqual({ 'index.html': 'text', 'data.custom': 'binary' });
+    const updated = await reg.update(rec.id, { fileKinds: { 'main.html': 'text' } });
+    expect(updated?.fileKinds).toEqual({ 'main.html': 'text' });
+  });
+
   test('update() bumps updatedAt', async () => {
     const reg = createAppRegistry({ storage: createStorageStub() });
     const rec = await reg.create({ name: 'a' });

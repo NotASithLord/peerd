@@ -32,6 +32,8 @@ const baseDeps = (over: any = {}) => ({
   CHANNEL: 'preview',
   DEFAULT_SETTINGS: { a: 1, b: 2 },
   ExportPassphraseError,
+  onSettingsChanging: () => {},
+  onSettingsChanged: async () => {},
   privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
   ...over,
 });
@@ -115,6 +117,20 @@ describe('transfer import', () => {
     expect(await r['transfer/import'](authorized({ payload: {} }))).toEqual({ ok: true, imported: { secrets: 1 } });
     expect(pushed).toBe(true);
     expect(audited).toBe(true);
+  });
+  test('settings import runs dweb lifecycle hooks around the durable write', async () => {
+    const events: string[] = [];
+    const r = makeSystemRoutes(baseDeps({
+      applyImport: async ({ io }: any) => {
+        await io.applySettings({ dwebEnabled: false });
+        return { ok: true, imported: { settings: 1 } };
+      },
+      settingsStore: { update: async () => { events.push('persist'); } },
+      onSettingsChanging: () => { events.push('close'); },
+      onSettingsChanged: async () => { events.push('stop'); },
+    }));
+    expect((await r['transfer/import'](authorized({ payload: {} }))).ok).toBe(true);
+    expect(events).toEqual(['close', 'persist', 'stop']);
   });
   test('partial import audits committed counts and refreshes visible state', async () => {
     let pushed = false; let event: any;

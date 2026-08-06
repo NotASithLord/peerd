@@ -50,6 +50,16 @@ export { createEditor } from './editor.js';
 // --- OPFS helpers (rooted; usable in any extension context) ---
 export { opfsHelpers } from './opfs.js';
 
+// --- App asset classification (text composition vs byte delivery) -------
+export {
+  isBinaryAssetPath,
+  isBinaryAppFile,
+  inferAppFileKind,
+  isLosslessUtf8Text,
+  MAX_MODEL_APP_FILE_BYTES,
+  appFileCheckpointContent,
+} from './app-assets.js';
+
 // --- App composition (multi-file → single HTML body for the runner) ---
 export { composeApp, stripMetaRefresh } from './app-compose.js';
 export {
@@ -77,6 +87,7 @@ export {
   inspectEnvelope,
   exportFilename,
   EXPORT_LIMIT_BYTES,
+  EXPORT_FILE_LIMIT_BYTES,
 } from './export.js';
 
 // --- Per-VM command serialization (pure keyed FIFO; IO injected) ---------

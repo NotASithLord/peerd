@@ -6,14 +6,14 @@ import { createContentStore } from '../../extension/peerd-distributed/content/st
 import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
 import { packBundle } from '../../extension/peerd-distributed/content/bundle.js';
 import { formatPeerdUri } from '../../extension/peerd-distributed/content/uri.js';
-import { utf8 } from '../../extension/shared/bundle/bytes.js';
+import { utf8, fromBase64, toBase64 } from '../../extension/shared/bundle/bytes.js';
 
 // A channel whose handler is set by the consumer; we bridge it to the responder
 // (stands in for a mesh content channel to one provider).
-const providerChannel = (store: any) => {
+const providerChannel = (store: any, transform = (message: any) => message) => {
   const respond = createContentResponder({ store });
   let handler: any = null;
-  return { send: (req: any) => respond(req, (m: any) => handler?.(m)), setHandler: (h: any) => { handler = h; } };
+  return { send: (req: any) => respond(req, (m: any) => handler?.(transform(m))), setHandler: (h: any) => { handler = h; } };
 };
 
 const big = (n: number) => 'x'.repeat(n);
@@ -73,5 +73,21 @@ describe('content/swarm — multi-provider fetch', () => {
     const s = createContentStore();
     const { uri } = await publishInto(s, pub, { 'index.html': 'hi' });
     await expect(swarmFetch({ uri, providers: ['nobody'], channelFor: () => null })).rejects.toThrow();
+  });
+
+  test('treats an oversized wire chunk as a provider miss before retention', async () => {
+    const pub = await generateIdentity();
+    const store = createContentStore();
+    const { uri } = await publishInto(store, pub, { 'index.html': 'hello' });
+    const channel = providerChannel(store, (message) => {
+      if (message.t !== 'CHUNK') return message;
+      const bytes = fromBase64(message.bytes);
+      const oversized = new Uint8Array(bytes.length + 1);
+      oversized.set(bytes);
+      return { ...message, bytes: toBase64(oversized) };
+    });
+    await expect(swarmFetch({
+      uri, providers: ['hostile'], channelFor: () => channel, timeoutMs: 2000,
+    })).rejects.toThrow(/chunk unavailable on all providers/);
   });
 });

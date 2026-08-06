@@ -53,7 +53,17 @@ const fetchState = async () => {
  * @param {any} reply
  */
 const foldReply = (msg, reply) => {
-  if (!reply?.ok || !currentState) return;
+  if (!currentState) return;
+  // A settings write can commit before its live side effect fails. The reply
+  // carries the durable value even when ok:false, so keep the page honest about
+  // what will apply on the next boot while the owning section reports the live
+  // failure and offers a retry.
+  if (!reply?.ok) {
+    if ((msg.type === 'settings/update' || msg.type === 'settings/reset') && reply?.settings) {
+      currentState = { ...currentState, settings: reply.settings };
+    }
+    return;
+  }
   switch (msg.type) {
     case 'settings/update':
     case 'settings/reset': {

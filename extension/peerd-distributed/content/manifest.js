@@ -16,12 +16,16 @@
 // `ASCII(tag) || 0x00 || payload` so a signature for one purpose can't be
 // replayed as another (PROTOCOL "conventions").
 
-import { utf8, concat, toBase64, fromBase64 } from '/shared/bundle/bytes.js';
+import {
+  utf8, concat, toBase64, fromBase64, base64ByteLength,
+} from '/shared/bundle/bytes.js';
+import { CHUNK_SIZE } from '/shared/bundle/chunk.js';
 import {
   buildManifest as buildUnsignedManifest,
   canonicalManifestBytes,
   manifestHash,
 } from '/shared/bundle/manifest.js';
+import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
 import { verifySignature } from '../identity/keypair.js';
 
 /** @typedef {import('/shared/bundle/manifest.js').Manifest} Manifest */
@@ -35,13 +39,24 @@ const signingBytes = (manifest) =>
 export { manifestHash };
 
 // why a cap before buffering: a bundle is fetched and reassembled fully in
-// memory before the loader's own MAX_TOTAL_CHARS cap can fire. The publisher
+// memory before the loader's decoded storage checks can fire. The publisher
 // signs their OWN manifest, so the hash + signature checks do NOT bound its
 // size — a hostile manifest can declare a multi-GB payload, or a short chunk
 // list whose entries all reference ONE chunk so reassembly amplifies it
 // thousand-fold. Bound it on the FETCH path, before any chunk is pulled.
-// Aligns with apps/loader.js MAX_TOTAL_CHARS.
-export const MAX_BUNDLE_BYTES = 50_000_000;
+// The shared bundle codec owns this packed network limit. The App loader owns
+// the separate decoded storage limits applied after bounded unpacking.
+export const MAX_BUNDLE_BYTES = MAX_NETWORK_BUNDLE_BYTES;
+export const MAX_BUNDLE_CHUNKS = Math.ceil(MAX_BUNDLE_BYTES / CHUNK_SIZE);
+
+/** @param {Uint8Array} payload @param {number} [maxBytes] */
+export const assertBundlePayloadWithinLimits = (payload, maxBytes = MAX_BUNDLE_BYTES) => {
+  if (!(payload instanceof Uint8Array)) throw new Error('bundle payload must be bytes');
+  if (payload.byteLength > maxBytes) {
+    throw new Error(`bundle too large: payload is ${payload.byteLength} > ${maxBytes} bytes`);
+  }
+  return payload.byteLength;
+};
 
 /**
  * Reject an over-large or amplified manifest BEFORE any chunk is fetched or the
@@ -57,10 +72,26 @@ export const MAX_BUNDLE_BYTES = 50_000_000;
 export const assertBundleWithinLimits = (manifest) => {
   const chunks = manifest?.chunks;
   if (!Array.isArray(chunks)) throw new Error('manifest has no chunk list');
+  if (chunks.length > MAX_BUNDLE_CHUNKS) {
+    throw new Error(`bundle has too many chunks: ${chunks.length} > ${MAX_BUNDLE_CHUNKS}`);
+  }
   let declared = 0;
+  /** @type {Map<string, number>} */
+  const sizesByHash = new Map();
   for (const c of chunks) {
     const size = c?.size;
-    if (!Number.isInteger(size) || size < 0) throw new Error('manifest chunk size invalid');
+    if (!Number.isInteger(size) || size <= 0 || size > CHUNK_SIZE) {
+      throw new Error('manifest chunk size invalid');
+    }
+    const hash = c?.hash;
+    if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) {
+      throw new Error('manifest chunk hash invalid');
+    }
+    const priorSize = sizesByHash.get(hash);
+    if (priorSize !== undefined && priorSize !== size) {
+      throw new Error('duplicate manifest chunk has inconsistent sizes');
+    }
+    sizesByHash.set(hash, size);
     declared += size;
     if (declared > MAX_BUNDLE_BYTES) {
       throw new Error(`bundle too large: chunks declare more than ${MAX_BUNDLE_BYTES} bytes`);
@@ -69,6 +100,27 @@ export const assertBundleWithinLimits = (manifest) => {
   if (!Number.isInteger(manifest.size) || manifest.size !== declared) {
     throw new Error(`manifest size ${manifest?.size} does not match its chunk list (${declared})`);
   }
+};
+
+/**
+ * Decode one wire chunk only after its cheap string-length commitment passes.
+ * This keeps a hostile base64 string from reaching the validator or allocator
+ * when its manifest claims a much smaller chunk.
+ *
+ * @param {unknown} encoded
+ * @param {number} expectedSize
+ */
+export const decodeCommittedChunk = (encoded, expectedSize) => {
+  if (!Number.isInteger(expectedSize) || expectedSize <= 0 || expectedSize > CHUNK_SIZE) {
+    throw new Error('committed chunk size invalid');
+  }
+  if (typeof encoded !== 'string') throw new Error('chunk bytes must be base64');
+  const expectedCharacters = 4 * Math.ceil(expectedSize / 3);
+  if (encoded.length !== expectedCharacters) throw new Error('chunk encoded length mismatch');
+  if (base64ByteLength(encoded) !== expectedSize) throw new Error('chunk decoded length mismatch');
+  const bytes = fromBase64(encoded);
+  if (bytes.byteLength !== expectedSize) throw new Error('chunk decoded length mismatch');
+  return bytes;
 };
 
 /**

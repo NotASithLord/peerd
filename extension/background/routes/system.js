@@ -20,7 +20,7 @@ export const makeSystemRoutes = (deps) => {
     buildStateSnapshot, closeSidePanel, uiPorts, loadUserEndpoints,
     inspectImport, applyImport, settingsStore, saveUserHook,
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
-    privateTransferAuthorization,
+    onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
   } = deps;
 
   return {
@@ -132,7 +132,11 @@ export const makeSystemRoutes = (deps) => {
           channel: CHANNEL,
           knownSettingKeys: Object.keys(DEFAULT_SETTINGS),
           io: {
-            applySettings: (/** @type {any} */ patch) => settingsStore.update(patch),
+            applySettings: async (/** @type {any} */ patch) => {
+              onSettingsChanging?.(patch);
+              await settingsStore.update(patch);
+              await onSettingsChanged?.(patch);
+            },
             setProviderEndpoints: async (/** @type {any} */ v) => {
               await kv.set('provider_endpoints.v1', v);
               await loadUserEndpoints();

@@ -72,8 +72,20 @@ export const sandboxCreateTool = {
       name: { type: 'string', description: 'Human-friendly label (tab strip + actor_list).' },
       files: {
         type: 'object',
-        description: 'app only: path → content map. Must include the entry (default index.html).',
-        additionalProperties: { type: 'string' },
+        description: 'app only: path → content map. Must include the entry (default index.html). '
+          + 'Text files use strings. Binary assets such as .wasm, images, audio, and fonts use '
+          + '{ "base64": "..." } and are available through window.peerd.assets.',
+        additionalProperties: {
+          anyOf: [
+            { type: 'string' },
+            {
+              type: 'object',
+              properties: { base64: { type: 'string' } },
+              required: ['base64'],
+              additionalProperties: false,
+            },
+          ],
+        },
       },
       html: { type: 'string', description: 'app only: shorthand for files:{index.html: html}.' },
       entryFile: { type: 'string', description: 'app only: entry filename (default index.html).' },

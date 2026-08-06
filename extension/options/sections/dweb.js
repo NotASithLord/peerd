@@ -18,13 +18,16 @@ import { resetRow } from './reset-row.js';
 /** @typedef {import('./reset-row.js').Send} Send */
 
 export const DwebSection = {
-  /** @param {{ state: any }} vnode */
+  /** @param {{ attrs?: { loadStatus?: () => Promise<any> }, state: any }} vnode */
   oninit(vnode) {
     vnode.state.dwebStatus = null;             // { available, phase, did }
     vnode.state.dwebBusy = false;
+    vnode.state.dwebError = null;
+    vnode.state.dwebStopIncomplete = false;
     if (DWEB_ENABLED) {
-      loadDweb()
-        .then((client) => client.getStatus())
+      const loadStatus = vnode.attrs?.loadStatus
+        ?? (() => loadDweb().then((client) => client.getStatus()));
+      loadStatus()
         .then((s) => { vnode.state.dwebStatus = s; m.redraw(); })
         .catch(() => {});
     }
@@ -62,13 +65,33 @@ export const DwebSection = {
           disabled: ui.dwebBusy,
           onclick: async () => {
             if (ui.dwebBusy) return;
+            const targetEnabled = ui.dwebStopIncomplete ? false : !dwebEnabled;
             ui.dwebBusy = true;
-            await send({ type: 'settings/update', patch: { dwebEnabled: !dwebEnabled } });
-            ui.dwebBusy = false;
-            m.redraw();
+            ui.dwebError = null;
+            try {
+              const reply = await send({ type: 'settings/update', patch: { dwebEnabled: targetEnabled } });
+              if (reply?.ok) {
+                ui.dwebStopIncomplete = false;
+              } else if (!targetEnabled && reply?.settings?.dwebEnabled === false) {
+                ui.dwebStopIncomplete = true;
+                ui.dwebError = 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.';
+              } else {
+                ui.dwebError = `Could not update dweb: ${reply?.error ?? 'unknown error'}. Try again.`;
+              }
+            } catch {
+              ui.dwebError = ui.dwebStopIncomplete
+                ? 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.'
+                : 'Could not confirm the dweb change. Try again.';
+            } finally {
+              ui.dwebBusy = false;
+              m.redraw();
+            }
           },
-        }, ui.dwebBusy ? '…' : dwebEnabled ? 'Disable dweb' : 'Enable dweb'),
+        }, ui.dwebBusy ? '…' : ui.dwebStopIncomplete
+          ? 'Retry stopping dweb'
+          : dwebEnabled ? 'Disable dweb' : 'Enable dweb'),
       ]),
+      ui.dwebError ? m('p.error', { role: 'alert' }, ui.dwebError) : null,
       ui.dwebStatus ? m('p.hint', [
         `Protocol phase ${ui.dwebStatus.phase ?? '—'}. `,
         ui.dwebStatus.did

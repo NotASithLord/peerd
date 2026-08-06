@@ -24,13 +24,31 @@ export const makeDwebRoutes = (deps) => {
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
-    onBaseNetworkStopped,
+    disableDweb, withDwebPublication, withAppLifecycle,
   } = deps;
 
   // The two-input gate every route shares (build flag + user setting).
   const dwebOn = () => DWEB_ENABLED && settingsStore.get().dwebEnabled;
+  /** @param {any} entry */
+  const auditCommittedChange = async (entry) => {
+    try { await auditLog.append(entry); return null; }
+    catch (error) {
+      console.warn('[sw/dweb] committed App change could not be audited', error);
+      return 'audit-write-failed';
+    }
+  };
 
   return {
+    'dweb/app-snapshot': async ({ appId }) => {
+      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        return { ok: true, ...(await appClient.snapshotFilesBase64({ appId })) };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
     // Dweb pages append their security events to the ONE audit log
     // (ARCHITECTURE §7: no new logging subsystem; new event types only).
     'dweb/audit': async ({ type, details }) => {
@@ -44,17 +62,20 @@ export const makeDwebRoutes = (deps) => {
 
     // Install a VERIFIED bundle as an engine App. The verification happened
     // in the calling page (fetchBundle + installAppBundle); this route is
-    // the storage arm. files is a path → text map, same shape sandbox_create
-    // uses, same size ceiling enforced in appClient.
-    'dweb/app-install': async ({ name, files, entryFile, dweb }) => {
+    // the storage arm. Files cross runtime messaging as JSON-safe base64
+    // envelopes, then appClient applies the same byte limits as local imports.
+    'dweb/app-install': async ({ appId, name, files, entryFile, fileKinds, dweb }) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (typeof appId !== 'string' || !appId.startsWith('app-')) {
+        return { ok: false, error: 'appId-required' };
+      }
       try {
-        const record = await appClient.create({ name, files, entryFile, dweb, source: 'dweb' });
-        await auditLog.append({
+        const record = await appClient.create({ appId, name, files, entryFile, fileKinds, dweb, source: 'dweb' });
+        const auditWarning = await auditCommittedChange({
           type: 'dweb_app_installed',
           details: { appId: record.id, uri: dweb?.uri ?? null, publisher: dweb?.publisher ?? null },
         });
-        return { ok: true, app: record };
+        return { ok: true, app: record, ...(auditWarning ? { warning: auditWarning } : {}) };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -66,29 +87,48 @@ export const makeDwebRoutes = (deps) => {
     // OPFS dir first, then write the new set — otherwise stale files linger and can
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
-    'dweb/app-update': async ({ appId, files, entryFile, dweb }) => {
+    'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb }) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const rec = await appRegistry.get(appId);
         if (!rec) return { ok: false, error: 'app-not-found' };
-        const opfs = appClient.opfsForApp(appId);
-        // Clear the old file set, then write the new one.
-        for (const f of await opfs.list()) {
-          const path = f.path.replace(/^\/+/, '');
-          try { await opfs.delete(path); } catch { /* best-effort */ }
-        }
-        for (const [path, content] of Object.entries(files || {})) await opfs.write(path, content);
-        const updated = await appRegistry.update(appId, {
-          ...(typeof entryFile === 'string' ? { entryFile } : {}),
-          ...(dweb && typeof dweb === 'object' ? { dweb } : {}),
+        if (typeof entryFile !== 'string') return { ok: false, error: 'entryFile-required' };
+        const updated = await appClient.replaceFiles({
+          appId,
+          files: files || {},
+          entryFile,
+          fileKinds,
+          metadata: dweb && typeof dweb === 'object' ? { dweb } : {},
         });
-        appTabTracker.reloadTab(appId).catch(() => {});
-        await auditLog.append({
+        const auditWarning = await auditCommittedChange({
           type: 'dweb_app_updated',
           details: { appId, uri: dweb?.uri ?? null, version_id: dweb?.version_id ?? null },
         });
-        return { ok: true, app: updated };
+        return { ok: true, app: updated, ...(auditWarning ? { warning: auditWarning } : {}) };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
+
+    // A dwapp can publish its current App into a room after explicit consent.
+    // Persist the latest room-published hash so replacement and deletion can
+    // revoke every version this node still serves.
+    'dweb/app-record-served': async ({ appId, uri, hash }) => {
+      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (typeof appId !== 'string' || typeof hash !== 'string' || typeof uri !== 'string') {
+        return { ok: false, error: 'appId-uri-hash-required' };
+      }
+      try {
+        const record = await appRegistry.get(appId);
+        if (!record) return { ok: false, error: 'app-not-found' };
+        const previousHash = record.dweb?.room_hash ?? null;
+        const updated = await appRegistry.update(appId, {
+          shared: true,
+          dweb: { ...(record.dweb ?? {}), room_hash: hash, room_uri: uri },
+        });
+        if (!updated) return { ok: false, error: 'app-not-found' };
+        return { ok: true, previousHash };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -171,8 +211,11 @@ export const makeDwebRoutes = (deps) => {
     // re-catch the forward.
     'dweb/base/start': async () => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
-      return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+      return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
+        if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        return browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
+      });
     },
     // The master OFF — the user-facing kill switch, symmetric to start
     // (docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2). Persist the preference
@@ -182,16 +225,7 @@ export const makeDwebRoutes = (deps) => {
     // DWEB_ENABLED — the store package prunes this module entirely.
     'dweb/base/stop': async () => {
       if (!DWEB_ENABLED) return { ok: false, error: 'dweb-disabled' };
-      await settingsStore.update({ dwebEnabled: false });
-      // Never SPAWN the offscreen just to stop it: if it isn't up, there is no
-      // live network to tear down. The offscreen stop handler closes every room,
-      // drops the mesh + lobby, and clears the re-sub timer (dweb-base.js).
-      const contexts = await browser.runtime.getContexts({ contextTypes: /** @type {any} */ (['OFFSCREEN_DOCUMENT']) });
-      if (contexts.length) await browser.runtime.sendMessage({ type: 'dweb/base-host/stop' });
-      // The offscreen stop closed every room, incl. the agent inbox — clear any
-      // SW-side membership flag so a later restart re-joins cleanly.
-      try { onBaseNetworkStopped?.(); } catch { /* best-effort */ }
-      return { ok: true, running: false };
+      return disableDweb();
     },
     'dweb/base/status': async () => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
@@ -229,8 +263,11 @@ export const makeDwebRoutes = (deps) => {
     // along so the installed record can be matched against future announces.
     'dweb/base/install': async ({ uri, name, dwappId, slug, seq } = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
-      return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name, dwappId, slug, seq });
+      return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
+        if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name, dwappId, slug, seq });
+      });
     },
     // Which installed dweb apps have a NEWER version announced? Cross-reference the
     // local catalog against the offscreen discovery Library (the heard cards).
@@ -261,12 +298,60 @@ export const makeDwebRoutes = (deps) => {
     // Update an installed app in place to a newer announced version: the offscreen
     // refetches + verifies the new bundle and the SW overwrites the existing app's
     // files. The user keeps ONE copy that just updates.
-    'dweb/base/update-app': async ({ appId, uri, name, dwappId, slug, seq } = {}) => {
+    'dweb/base/update-app': async ({ appId, uri, name } = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof uri !== 'string') return { ok: false, error: 'appId-and-uri-required' };
-      await ensureOffscreen();
-      return browser.runtime.sendMessage({ type: 'dweb/base-host/update-app', appId, uri, name, dwappId, slug, seq });
+      return withDwebPublication((/** @type {() => boolean} */ isCurrent) => withAppLifecycle(appId, async () => {
+        if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
+        const record = await appRegistry.get(appId);
+        if (!record) return { ok: false, error: 'app-not-found' };
+        const expectedDwappId = record.dweb?.dwapp_id;
+        const expectedPublisher = record.dweb?.publisher;
+        if (typeof expectedDwappId !== 'string' || !expectedDwappId
+            || typeof expectedPublisher !== 'string' || !expectedPublisher) {
+          return { ok: false, error: 'app-update-identity-missing' };
+        }
+        await ensureOffscreen();
+        const reply = await browser.runtime.sendMessage({
+          type: 'dweb/base-host/update-app', appId, uri, name,
+          expectedDwappId,
+          expectedPublisher,
+          previousHash: record.dweb?.hash ?? null,
+          pendingHashes: Array.isArray(record.dweb?.pending_seed_unserve_hashes)
+            ? record.dweb.pending_seed_unserve_hashes
+            : [],
+        });
+        if (!reply?.ok || !Array.isArray(reply.pendingUnserveHashes)) return reply;
+
+        const warnings = new Set(Array.isArray(reply.warnings) ? reply.warnings : []);
+        if (reply.warning) warnings.add(reply.warning);
+        const current = await appRegistry.get(appId);
+        if (!current) return { ...reply, ok: false, error: 'app-not-found' };
+        const nextDweb = { ...(current.dweb ?? {}) };
+        if (reply.pendingUnserveHashes.length) {
+          nextDweb.pending_seed_unserve_hashes = [...new Set(reply.pendingUnserveHashes)];
+        } else {
+          delete nextDweb.pending_seed_unserve_hashes;
+        }
+        try {
+          const updated = await appRegistry.update(appId, { dwebExact: nextDweb });
+          if (!updated) throw new Error('app-not-found');
+          reply.app = updated;
+        } catch {
+          // The atomic version commit already retained the full cleanup list.
+          // A stale handle is safe and lets the next update or delete retry.
+          warnings.add('previous-version-cleanup-pending');
+          reply.cleanupPending = true;
+        }
+        reply.warnings = [...warnings];
+        if (reply.warnings.length) reply.warning = reply.warnings[0];
+        else {
+          delete reply.warning;
+          delete reply.warnings;
+        }
+        return reply;
+      }));
     },
     // A dwapp room op (join/leave/publish/subscribe/dm/presence/history/…) — one
     // thin relay to the offscreen base host. Events flow back to the app-tab
@@ -274,9 +359,16 @@ export const makeDwebRoutes = (deps) => {
     // carries the request/response.
     'dweb/base/room': async (msg = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      await ensureOffscreen();
       const { type: _t, ...args } = msg;
-      return browser.runtime.sendMessage({ type: 'dweb/base-host/room', ...args });
+      return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
+        if (!isCurrent() || !dwebOn()) return { ok: false, error: 'dweb-disabled' };
+        await ensureOffscreen();
+        const relay = () => browser.runtime.sendMessage({ type: 'dweb/base-host/room', ...args });
+        if (args.op === 'publish-app' && typeof args.appId === 'string') {
+          return withAppLifecycle(args.appId, relay);
+        }
+        return relay();
+      });
     },
     // The READ surface behind peerd.distributed.{whoami,status,peers,presence} in
     // a Notebook. Side-effect-free: it reports the base host's CURRENT state with

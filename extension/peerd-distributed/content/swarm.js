@@ -16,10 +16,12 @@
 // against the signed manifest's hash, so a malicious provider can't corrupt a
 // byte — it can only fail to serve, which failover covers.
 
-import { manifestHash, verifyManifest, assertBundleWithinLimits } from './manifest.js';
+import {
+  manifestHash, verifyManifest, assertBundleWithinLimits, decodeCommittedChunk,
+} from './manifest.js';
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
-import { fromBase64, concat } from '/shared/bundle/bytes.js';
+import { concat } from '/shared/bundle/bytes.js';
 
 const ALPHA = 3;
 
@@ -112,6 +114,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.
     const uniqueHashes = [...new Set(manifest.chunks.map((c) => c.hash))];
+    const expectedSizes = new Map(manifest.chunks.map((c) => [c.hash, c.size]));
     /** @type {Map<string, Uint8Array>} */
     const byHash = new Map();
     const queue = [...uniqueHashes];
@@ -131,7 +134,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
             if (resp.t === 'CHUNK') {
               // why cast: a CHUNK reply carries bytes; re-verified by the
               // hash check on the next line.
-              const bytes = fromBase64(/** @type {string} */ (resp.bytes));
+              const bytes = decodeCommittedChunk(resp.bytes, /** @type {number} */ (expectedSizes.get(h)));
               if (await sha256hex(bytes) === h) got = bytes; // tamper → treat as a miss, try next provider
             }
           } catch { /* miss → next provider */ }

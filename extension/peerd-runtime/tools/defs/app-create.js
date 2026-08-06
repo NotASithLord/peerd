@@ -9,11 +9,13 @@
 
 import { APP_RUNTIME_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
+import { isBinaryAssetPath, MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/index.js';
+import { base64ByteLength } from '/shared/bundle/bytes.js';
 
-// Mirrors the write-layer backstop in background/app-client.js — kept aligned
-// with the dweb loader's 50M ceiling so a WASM-heavy dwapp (a game engine, a
-// physics runtime) can be authored/imported, not just a small hand-written app.
-const MAX_TOTAL_CHARS = 50_000_000;
+// Mirrors the local write-layer backstop in background/app-client.js. Dweb
+// publishing separately measures the packed bundle, including base64 overhead.
+const MAX_TOTAL_BYTES = 50_000_000;
+const MAX_FILES = 256;
 
 /**
  * Create + open an App from files/html; returns { id, name, kind, entryFile,
@@ -32,12 +34,32 @@ export const createAppSandbox = async (args, ctx) => {
     if (!files || !Object.keys(files).length) {
       return { ok: false, error: "sandbox_create kind:'app' requires `files` (path → content map) or `html` — start with a minimal index.html shell" };
     }
-    const totalChars = Object.values(files).reduce(
-      /** @param {number} n @param {unknown} c */
-      (n, c) => n + (typeof c === 'string' ? c.length : 0), 0,
-    );
-    if (totalChars > MAX_TOTAL_CHARS) {
-      return { ok: false, error: `app_too_large: ${totalChars} > ${MAX_TOTAL_CHARS}` };
+    if (Object.keys(files).length > MAX_FILES) {
+      return { ok: false, error: `app_has_too_many_files: ${Object.keys(files).length} > ${MAX_FILES}` };
+    }
+    let totalBytes = 0;
+    for (const [path, value] of Object.entries(files)) {
+      let fileBytes;
+      if (typeof value === 'string') {
+        if (isBinaryAssetPath(path)) return { ok: false, error: `binary_asset_requires_base64: ${path}` };
+        fileBytes = new TextEncoder().encode(value).byteLength;
+      } else {
+        const base64 = value && typeof value === 'object'
+          ? /** @type {{ base64?: unknown }} */ (value).base64
+          : null;
+        if (typeof base64 !== 'string') {
+          return { ok: false, error: `invalid_app_file_content: ${path}` };
+        }
+        try { fileBytes = base64ByteLength(base64); }
+        catch { return { ok: false, error: `invalid_base64: ${path}` }; }
+      }
+      if (fileBytes > MAX_MODEL_APP_FILE_BYTES) {
+        return { ok: false, error: `app_file_too_large: ${path} is ${fileBytes} > ${MAX_MODEL_APP_FILE_BYTES} bytes` };
+      }
+      totalBytes += fileBytes;
+      if (totalBytes > MAX_TOTAL_BYTES) {
+        return { ok: false, error: `app_too_large: ${totalBytes} > ${MAX_TOTAL_BYTES} bytes` };
+      }
     }
     // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
     // to the two methods this tool calls.

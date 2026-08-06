@@ -21,6 +21,15 @@ import browser from '/vendor/browser-polyfill.js';
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { makeStartStopBarrier } from '/offscreen/start-stop-barrier.js';
+import { createContentOwnership } from '/offscreen/content-ownership.js';
+import { rollbackSharePublication } from '/offscreen/share-publication.js';
+import { createShareRollbackStore } from '/offscreen/share-rollback-store.js';
+import {
+  discoveredIdentityError,
+  identityForDiscoveredUri,
+} from '/offscreen/install-card-identity.js';
+import { fromBase64, toBase64 } from '/shared/bundle/bytes.js';
+import { runPublishTransaction } from '/shared/publish-transaction.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -34,6 +43,8 @@ const warn = (...a) => console.warn('[offscreen/dweb]', ...a);
 // rather than widening the shared stub (the dweb boundary stays intact).
 /** @type {any} */
 let handle = null;    // { base, room, close } once the lobby is joined
+const contentOwnership = createContentOwnership();
+const shareRollbacks = createShareRollbackStore();
 /** @type {ReturnType<typeof setInterval> | null} */
 let resubTimer = null; // periodic re-subscribe — self-heals a missed onPeer SUB
 
@@ -41,6 +52,63 @@ let resubTimer = null; // periodic re-subscribe — self-heals a missed onPeer S
 // H(publisher‖slug), so the slug only needs to be stable + ≤64 chars).
 /** @param {unknown} name */
 const slugify = (name) => (String(name || 'app').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'app');
+/** Runtime messaging uses JSON serialization, so raw typed arrays need an envelope. */
+const jsonSafeFiles = (/** @type {Record<string, Uint8Array>} */ files) => {
+  /** @type {Record<string, { base64: string, kind: 'auto' }>} */
+  const encoded = Object.create(null);
+  for (const [path, bytes] of Object.entries(files)) {
+    encoded[path] = { base64: toBase64(bytes), kind: 'auto' };
+  }
+  return encoded;
+};
+
+/** @param {string} ownerId @param {string} hash */
+const trackServedHash = (ownerId, hash) => contentOwnership.acquire(ownerId, hash);
+
+/** @param {any} h @param {string} ownerId @param {string} hash */
+const unserveTrackedHash = (h, ownerId, hash) => {
+  const released = contentOwnership.release(ownerId, hash);
+  if (!released.lastOwner) return false;
+  try { return h.base.unserveContent(hash); }
+  catch (error) {
+    // Keep the final claim when the underlying revoke fails so rollback/delete
+    // can retry instead of losing the only handle to still-served bytes.
+    contentOwnership.acquire(ownerId, hash);
+    throw error;
+  }
+};
+
+const mintAppId = () => `app-${crypto.randomUUID()}`;
+const APP_CONTENT_SLOTS = ['share', 'room', 'seed'];
+/** @param {string} appId @param {string} slot */
+const appContentOwner = (appId, slot) => `app:${appId}:${slot}`;
+/** @param {string} appId */
+const servedHashesForApp = (appId) => [...new Set(
+  APP_CONTENT_SLOTS.flatMap((slot) => contentOwnership.hashesFor(appContentOwner(appId, slot))),
+)];
+
+/** @param {any} h @param {{ appId: string, name: string, entry: string,
+ *   created?: number, expectedHash?: string }} msg @param {string} ownerSlot */
+const publishLocalApp = async (h, msg, ownerSlot) => {
+  const snapshot = await swCall('dweb/app-snapshot', { appId: msg.appId });
+  if (!snapshot?.ok) throw new Error(snapshot?.error ?? 'App snapshot failed');
+  /** @type {Record<string, Uint8Array<ArrayBuffer>>} */
+  const files = Object.create(null);
+  for (const [path, envelope] of Object.entries(snapshot.files ?? {})) {
+    files[path] = fromBase64(/** @type {{ base64: string }} */ (envelope).base64);
+  }
+  const record = snapshot.record;
+  const published = await h.base.publishApp({
+    name: record.name,
+    entry: record.entryFile,
+    files,
+    fileKinds: record.fileKinds ?? {},
+    created: msg.created,
+    expectedHash: msg.expectedHash,
+  });
+  const ownershipAdded = trackServedHash(appContentOwner(msg.appId, ownerSlot), published.hash);
+  return { ...published, size: published.packedBytes, storedBytes: snapshot.totalBytes, ownershipAdded };
+};
 // A Library row (or a resolved card) → the Discover list shape the tools expect.
 // Carries the VERSION identity (version_id + seq + slug) so the UI can tell a
 // freshly-announced update from the copy already installed (same dwapp_id, newer
@@ -210,6 +278,8 @@ const baseLifecycle = makeStartStopBarrier({
       for (const off of entry.topicSubs.values()) { try { off(); } catch { /* already closed */ } }
     }
     rooms.clear();
+    contentOwnership.clear();
+    shareRollbacks.clear();
     if (resubTimer) { clearInterval(resubTimer); resubTimer = null; }
     handle = null;
     log('base network stopped');
@@ -381,12 +451,34 @@ const handleRoomOp = async (msg) => {
     const h = await start();
     const { manifest, payload } = await h.base.fetchApp(msg.uri);
     const client = /** @type {any} */ (await loadDweb());
-    const app = await client.installAppBundle({
-      uri: msg.uri, manifest, payload, name: msg.name,
-      install: async (/** @type {any} */ a) => { const r = await swCall('dweb/app-install', a); if (!r?.ok) throw new Error(r?.error ?? 'install failed'); return r.app; },
+    // why: seed before the App becomes visible. After create resolves, delete
+    // can discover the record; its durable version hash can then revoke these
+    // bytes even before the in-memory ownership index is updated.
+    const appId = mintAppId();
+    const ownerId = appContentOwner(appId, 'seed');
+    const { announced: installed } = await runPublishTransaction({
+      publish: async () => {
+        const hash = await h.base.seedApp({ manifest, payload });
+        return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+      },
+      announce: () => client.installAppBundle({
+        uri: msg.uri, manifest, payload, name: msg.name,
+        install: async (/** @type {any} */ a) => {
+          const r = await swCall('dweb/app-install', { appId, ...a, files: jsonSafeFiles(a.files) });
+          if (!r?.ok) throw new Error(r?.error ?? 'install failed');
+          return { app: r.app, warning: r.warning };
+        },
+      }),
+      rollback: ({ hash, ownershipAdded }) => {
+        if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+      },
     });
-    h.base.seedApp({ manifest, payload }).catch(() => {}); // install → we seed it (background; don't block the install)
-    return { ok: true, appId: app?.id, name: app?.name };
+    return {
+      ok: true,
+      appId: installed.app?.id,
+      name: installed.app?.name,
+      ...(installed.warning ? { warning: installed.warning } : {}),
+    };
   }
   const entry = rooms.get(roomId);
   if (!entry) return { ok: false, error: 'not-in-room' };
@@ -441,7 +533,19 @@ const handleRoomOp = async (msg) => {
       return { ok: true, card: latest ? client.parsePeerCard(latest.body.data) : null };
     }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
-    case 'publish-app': { const h = await start(); const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files }); return { ok: true, uri, hash }; }
+    case 'publish-app': {
+      const h = await start();
+      const { uri, hash, ownershipAdded } = await publishLocalApp(h, msg, 'room');
+      const recorded = await swCall('dweb/app-record-served', { appId: msg.appId, uri, hash });
+      if (!recorded?.ok) {
+        if (ownershipAdded) unserveTrackedHash(h, appContentOwner(msg.appId, 'room'), hash);
+        throw new Error(recorded?.error ?? 'shared App version could not be recorded');
+      }
+      if (recorded.previousHash && recorded.previousHash !== hash) {
+        unserveTrackedHash(h, appContentOwner(msg.appId, 'room'), recorded.previousHash);
+      }
+      return { ok: true, uri, hash };
+    }
     default: return { ok: false, error: `unknown room op: ${op}` };
   }
 };
@@ -482,24 +586,55 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // then announce it (gossip + DHT). dwapp_id = content hash.
         case 'dweb/base-host/share-app': {
           const h = await start();
-          const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files });
-          const size = Object.values(msg.files || {}).reduce((n, t) => n + (typeof t === 'string' ? t.length : 0), 0);
           // The UI passes an edited namespace on FIRST share (and the stored slug on
           // reshare); fall back to the name. A RESHARE reuses the same slug → same
           // dwapp_id → publishMeta amends the existing card (higher seq) instead of
           // forking a new app — that's the whole versioning story.
           const slug = slugify(msg.slug || msg.name);
-          const { dwapp_id, card } = await h.base.publishMeta({
-            slug, name: msg.name, description: msg.description ?? '',
-            head: { version_id: hash, content_addr: uri, size },
-            // A normal share omits seq (publishMeta defaults to Date.now() — a
-            // natural monotonic bump). A RE-SEED on restart passes the STORED seq
-            // so it re-announces the SAME version (same bytes → same version_id),
-            // repopulating our wiped in-memory Library without a spurious bump.
-            ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
+          const previousHash = typeof msg.previousHash === 'string' ? msg.previousHash : null;
+          const previousCard = h.base.heardDwapps().find((/** @type {any} */ row) => (
+            row.publisher === h.base.did && row.slug === slug
+          )) ?? null;
+          const { published, announced } = await runPublishTransaction({
+            publish: () => publishLocalApp(h, msg, 'share'),
+            announce: ({ uri, hash, size }) => h.base.publishMeta({
+              slug, name: msg.name, description: msg.description ?? '',
+              head: { version_id: hash, content_addr: uri, size },
+              // A normal share omits seq. A re-seed reuses both the stored manifest
+              // timestamp and sequence, and publishApp refuses changed bytes before
+              // this card can be announced.
+              ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
+            }),
+            rollback: ({ hash, ownershipAdded }) => {
+              if (ownershipAdded && hash !== previousHash) {
+                unserveTrackedHash(h, appContentOwner(msg.appId, 'share'), hash);
+              }
+            },
           });
+          const { uri, hash, created, size } = published;
+          const { dwapp_id, card } = announced;
+          const transactionId = msg.reseed ? null : crypto.randomUUID();
+          if (transactionId) {
+            shareRollbacks.register(transactionId, {
+              appId: msg.appId,
+              ownerId: appContentOwner(msg.appId, 'share'),
+              slug,
+              name: msg.name,
+              newHash: hash,
+              ownershipAdded: published.ownershipAdded,
+              previous: previousCard ? {
+                name: previousCard.name,
+                description: previousCard.description ?? '',
+                head: previousCard.head,
+                seq: previousCard.seq,
+              } : null,
+            });
+          }
           log(`shared app "${msg.name}" (${slug}) → ${dwapp_id.slice(0, 12)}… seq ${card.seq}`);
-          sendResponse({ ok: true, uri, hash, dwapp_id, slug, seq: card.seq, publisher: h.base.did });
+          sendResponse({
+            ok: true, uri, hash, size, created, dwapp_id, slug,
+            seq: card.seq, publisher: h.base.did, transactionId,
+          });
           return;
         }
         // Un-share: the user deleted an app — stop announcing + serving it. The host
@@ -509,9 +644,70 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // to unshare — answer ok so delete still succeeds.
         case 'dweb/base-host/unshare-app': {
           if (!handle) { sendResponse({ ok: true, unserved: false, removed: false }); return; }
-          const r = await handle.base.unshareApp({ slug: slugify(msg.slug || msg.name), publisher: msg.publisher || handle.base.did, hash: msg.hash || null });
-          log(`unshared app "${msg.name}" — unserved:${r.unserved} removed:${r.removed}`);
-          sendResponse({ ok: true, ...r });
+          /** @type {string[]} */
+          const hashes = Array.isArray(msg.hashes)
+            ? [...new Set(msg.hashes.filter((/** @type {unknown} */ hash) => typeof hash === 'string' && hash))]
+            : [];
+          if (typeof msg.appId === 'string') {
+            for (const hash of servedHashesForApp(msg.appId)) {
+              if (!hashes.includes(hash)) hashes.push(hash);
+            }
+          }
+          const primaryHash = msg.hash || hashes[0] || null;
+          let unserved = false;
+          if (typeof msg.appId === 'string') {
+            for (const slot of APP_CONTENT_SLOTS) {
+              const ownerId = appContentOwner(msg.appId, slot);
+              for (const hash of hashes) {
+                unserved = unserveTrackedHash(handle, ownerId, hash) || unserved;
+              }
+            }
+          }
+          const r = msg.unpublish === false
+            ? { removed: false }
+            : await handle.base.unpublishMeta({
+                slug: slugify(msg.slug || msg.name),
+                publisher: msg.publisher || handle.base.did,
+              });
+          log(`unshared app "${msg.name}"; unserved:${unserved} removed:${r.removed}`);
+          sendResponse({ ok: true, ...r, hash: primaryHash, unserved });
+          return;
+        }
+        case 'dweb/base-host/unserve-content': {
+          if (!handle) { sendResponse({ ok: true, unserved: false }); return; }
+          if (typeof msg.appId !== 'string' || typeof msg.hash !== 'string') {
+            sendResponse({ ok: false, error: 'appId-and-hash-required' });
+            return;
+          }
+          const slot = typeof msg.slot === 'string' ? msg.slot : 'share';
+          sendResponse({
+            ok: true,
+            unserved: unserveTrackedHash(handle, appContentOwner(msg.appId, slot), msg.hash),
+          });
+          return;
+        }
+        case 'dweb/base-host/commit-share': {
+          if (typeof msg.transactionId !== 'string') {
+            sendResponse({ ok: false, error: 'transactionId-required' });
+            return;
+          }
+          sendResponse(shareRollbacks.commit(msg.transactionId));
+          return;
+        }
+        case 'dweb/base-host/rollback-share': {
+          const h = await start();
+          if (typeof msg.transactionId !== 'string') {
+            sendResponse({ ok: false, error: 'transactionId-required', restored: false });
+            return;
+          }
+          const result = await shareRollbacks.rollback(msg.transactionId, async (state) => {
+            const { restored } = await rollbackSharePublication({
+              base: h.base, state, failedSeq: msg.failedSeq,
+              release: (ownerId, hash) => unserveTrackedHash(h, ownerId, hash),
+            });
+            return { restored };
+          });
+          sendResponse(result);
           return;
         }
         // Discover: the bounded discovery Library (filled by the subscription plane).
@@ -523,22 +719,55 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // persist as an engine App (via the SW). Returns the new app record.
         case 'dweb/base-host/install-app': {
           const h = await start();
+          // The model and UI identify a discovery row by URI. Rebind all update
+          // identity fields to the exact card held by this host so copied or
+          // mixed arguments cannot attach an App to another update stream.
+          const identity = identityForDiscoveredUri(h.base.heardDwapps(), msg.uri);
+          if (!identity) {
+            sendResponse({
+              ok: false, error: 'discovery-card-not-found', outcomeKind: 'pre-effect-failure',
+            });
+            return;
+          }
           const { manifest, payload } = await h.base.fetchApp(msg.uri);
+          const publisherError = discoveredIdentityError(identity, {
+            manifestPublisher: manifest.publisher,
+          });
+          if (publisherError) {
+            sendResponse({
+              ok: false, error: publisherError, outcomeKind: 'pre-effect-failure',
+            });
+            return;
+          }
           const client = /** @type {any} */ (await loadDweb());
-          const app = await client.installAppBundle({
-            uri: msg.uri, manifest, payload, name: msg.name,
-            // The version identity from the card the user installed from — lets the
-            // Library later detect a newer announce for this same dwapp_id.
-            dwappId: msg.dwappId ?? null, slug: msg.slug ?? null, seq: Number.isInteger(msg.seq) ? msg.seq : null,
-            install: async (/** @type {any} */ a) => {
-              const r = await swCall('dweb/app-install', a);
-              if (!r?.ok) throw new Error(r?.error ?? 'install failed');
-              return r.app;
+          const appId = mintAppId();
+          const ownerId = appContentOwner(appId, 'seed');
+          const { announced: installed } = await runPublishTransaction({
+            publish: async () => {
+              const hash = await h.base.seedApp({ manifest, payload });
+              return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+            },
+            announce: () => client.installAppBundle({
+              uri: msg.uri, manifest, payload, name: msg.name,
+              // The version identity from the card the user installed from lets the
+              // Library later detect a newer announce for this same dwapp_id.
+              dwappId: identity.dwappId, slug: identity.slug, seq: identity.seq,
+              install: async (/** @type {any} */ a) => {
+                const r = await swCall('dweb/app-install', { appId, ...a, files: jsonSafeFiles(a.files) });
+                if (!r?.ok) throw new Error(r?.error ?? 'install failed');
+                return { app: r.app, warning: r.warning };
+              },
+            }),
+            rollback: ({ hash, ownershipAdded }) => {
+              if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
             },
           });
-          h.base.seedApp({ manifest, payload }).catch(() => {}); // install → we seed it (background; don't block the install)
-          log(`installed app "${app?.name ?? msg.name}" from the dweb`);
-          sendResponse({ ok: true, app });
+          log(`installed app "${installed.app?.name ?? msg.name}" from the dweb`);
+          sendResponse({
+            ok: true,
+            app: installed.app,
+            ...(installed.warning ? { warning: installed.warning } : {}),
+          });
           return;
         }
         // Update an INSTALLED app in place to a newer announced version. Same fetch+
@@ -548,20 +777,80 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // still seeds them, the substrate for a future revert/changelog).
         case 'dweb/base-host/update-app': {
           const h = await start();
+          const identity = identityForDiscoveredUri(h.base.heardDwapps(), msg.uri);
+          const streamError = discoveredIdentityError(identity, {
+            expectedDwappId: msg.expectedDwappId,
+            expectedPublisher: msg.expectedPublisher,
+          });
+          if (streamError) {
+            sendResponse({ ok: false, error: streamError, outcomeKind: 'pre-effect-failure' });
+            return;
+          }
           const { manifest, payload } = await h.base.fetchApp(msg.uri);
+          const publisherError = discoveredIdentityError(identity, {
+            manifestPublisher: manifest.publisher,
+          });
+          if (publisherError) {
+            sendResponse({ ok: false, error: publisherError, outcomeKind: 'pre-effect-failure' });
+            return;
+          }
           const client = /** @type {any} */ (await loadDweb());
-          const app = await client.installAppBundle({
-            uri: msg.uri, manifest, payload, name: msg.name,
-            dwappId: msg.dwappId ?? null, slug: msg.slug ?? null, seq: Number.isInteger(msg.seq) ? msg.seq : null,
-            install: async (/** @type {any} */ a) => {
-              const r = await swCall('dweb/app-update', { appId: msg.appId, ...a });
-              if (!r?.ok) throw new Error(r?.error ?? 'update failed');
-              return r.app;
+          const previousHash = typeof msg.previousHash === 'string' ? msg.previousHash : null;
+          const ownerId = appContentOwner(msg.appId, 'seed');
+          /** @type {string[]} */
+          let cleanupHashes = [];
+          /** @type {string[]} */
+          const remainingCleanupHashes = [];
+          const { announced: updated } = await runPublishTransaction({
+            publish: async () => {
+              const hash = await h.base.seedApp({ manifest, payload });
+              return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+            },
+            announce: () => client.installAppBundle({
+              uri: msg.uri, manifest, payload, name: msg.name,
+              dwappId: identity?.dwappId ?? null,
+              slug: identity?.slug ?? null,
+              seq: identity?.seq ?? null,
+              install: async (/** @type {any} */ a) => {
+                cleanupHashes = [...new Set([
+                  ...(Array.isArray(msg.pendingHashes) ? msg.pendingHashes : []),
+                  ...(previousHash ? [previousHash] : []),
+                ].filter((hash) => typeof hash === 'string' && hash !== a.dweb?.hash))];
+                const r = await swCall('dweb/app-update', {
+                  appId: msg.appId,
+                  ...a,
+                  dweb: {
+                    ...a.dweb,
+                    ...(cleanupHashes.length ? { pending_seed_unserve_hashes: cleanupHashes } : {}),
+                  },
+                  files: jsonSafeFiles(a.files),
+                });
+                if (!r?.ok) throw new Error(r?.error ?? 'update failed');
+                return { app: r.app, warning: r.warning };
+              },
+            }),
+            rollback: ({ hash, ownershipAdded }) => {
+              if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+            },
+            supersede: () => {
+              for (const hash of cleanupHashes) {
+                try { unserveTrackedHash(h, ownerId, hash); }
+                catch { remainingCleanupHashes.push(hash); }
+              }
             },
           });
-          h.base.seedApp({ manifest, payload }).catch(() => {}); // seed the NEW version too
-          log(`updated app "${app?.name ?? msg.name}" to a newer dweb version`);
-          sendResponse({ ok: true, app });
+          const warnings = [...new Set([
+            ...(updated.warning ? [updated.warning] : []),
+            ...(remainingCleanupHashes.length ? ['previous-version-cleanup-pending'] : []),
+          ])];
+          log(`updated app "${updated.app?.name ?? msg.name}" to a newer dweb version`);
+          sendResponse({
+            ok: true,
+            app: updated.app,
+            pendingUnserveHashes: remainingCleanupHashes,
+            ...(remainingCleanupHashes.length ? { cleanupPending: true } : {}),
+            ...(warnings.length ? { warning: warnings[0], warnings } : {}),
+          });
           return;
         }
         case 'dweb/base-host/stop': {

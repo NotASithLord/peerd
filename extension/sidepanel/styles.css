@@ -2443,10 +2443,10 @@ button.icon.is-active {
 /* Dweb preview banner (§12) — persistent, not a popup: always
    visible in the Settings → Decentralized web section, never interrupts. */
 .dweb-banner {
-  border: 1px solid var(--magenta);
+  border: 1px solid var(--border);
   border-left-width: 4px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--magenta) 10%, transparent);
+  background: var(--bg-elev);
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.5;

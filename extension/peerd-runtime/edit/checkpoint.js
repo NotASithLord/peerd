@@ -104,17 +104,17 @@ export const createCheckpointManager = ({ store, workspaceFor, now = Date.now })
     if (!cp) return { files: [] };
     const ws = workspaceFor(cp.scope);
     if (!ws) return { files: [] };
-    const before = (await store.materialize(cp.id)) ?? {};
+    const before = (await store.materialize(cp.id)) ?? Object.create(null);
     const after = await ws.readAll();
     const files = [];
     for (const [path, content] of Object.entries(after)) {
-      if (!(path in before)) files.push({ path, status: 'added', after: content });
+      if (!Object.hasOwn(before, path)) files.push({ path, status: 'added', after: content });
       else if (before[path] !== content) {
         files.push({ path, status: 'modified', before: before[path], after: content });
       }
     }
     for (const [path, content] of Object.entries(before)) {
-      if (!(path in after)) files.push({ path, status: 'deleted', before: content });
+      if (!Object.hasOwn(after, path)) files.push({ path, status: 'deleted', before: content });
     }
     return { files, ref: cp.id };
   };

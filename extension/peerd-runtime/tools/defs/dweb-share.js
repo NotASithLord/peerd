@@ -26,7 +26,7 @@
  * @typedef {{
  *   permission?: { confirmActions?: boolean },
  *   confirm?: (p: { tool: string, kind: string, origins: string[], summary: string, sessionId: string | null }) => Promise<ConfirmAnswer>,
- *   dweb?: { share: (appId: string) => Promise<{ ok?: boolean, error?: string, uri?: string, hash?: string, dwapp_id?: string }> } | null,
+ *   dweb?: { share: (appId: string) => Promise<{ ok?: boolean, error?: string, uri?: string, hash?: string, dwapp_id?: string, warning?: string, cleanupPending?: boolean }> } | null,
  * }} DwebShareCtx
  */
 
@@ -54,9 +54,12 @@ export const dwebShareTool = {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
     // SW injects for dweb builds — absent/loosely-typed on the base ToolContext.
     const dctx = /** @type {DwebShareCtx} */ (/** @type {unknown} */ (ctx));
-    if (!dctx.dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    if (!dctx.dweb) return {
+      ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
+      outcomeKind: 'pre-effect-failure',
+    };
     const appId = String(args?.appId ?? '').trim();
-    if (!appId) return { ok: false, error: 'appId_required' };
+    if (!appId) return { ok: false, error: 'appId_required', outcomeKind: 'pre-effect-failure' };
     // Publishing is public, so confirm even if the global confirm toggle is OFF
     // (the dispatcher's gate already confirms it when the toggle is on).
     if (dctx.permission?.confirmActions === false && dctx.confirm) {
@@ -66,14 +69,31 @@ export const dwebShareTool = {
         sessionId: ctx.session?.sessionId ?? null,
       });
       if (ans !== 'yes_once' && ans !== 'yes_session') {
-        return { ok: false, error: 'declined', content: 'User declined to publish to the dweb.' };
+        return {
+          ok: false, error: 'declined', content: 'User declined to publish to the dweb.',
+          outcomeKind: 'pre-effect-failure',
+        };
       }
     }
     const r = await dctx.dweb.share(appId);
-    if (!r?.ok) return { ok: false, error: r?.error ?? 'share_failed' };
+    if (!r?.ok) {
+      const error = r?.error ?? 'share_failed';
+      const preEffect = ['dweb-disabled', 'dweb-start-failed', 'app-not-found'].includes(error);
+      return { ok: false, error, ...(preEffect ? { outcomeKind: 'pre-effect-failure' } : {}) };
+    }
     return {
       ok: true,
-      content: JSON.stringify({ shared: true, uri: r.uri, hash: r.hash, dwapp_id: r.dwapp_id ?? r.hash }, null, 2),
+      content: JSON.stringify({
+        shared: true,
+        uri: r.uri,
+        hash: r.hash,
+        dwapp_id: r.dwapp_id ?? r.hash,
+        ...(r.cleanupPending ? {
+          cleanupPending: true,
+          warning: r.warning ?? 'previous-version-cleanup-pending',
+          recovery: 'The new version is public. Cleanup of an older served version is pending and will be retried on the next share or delete.',
+        } : {}),
+      }, null, 2),
     };
   },
 };

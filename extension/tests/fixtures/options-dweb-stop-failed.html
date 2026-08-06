@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dweb stop warning fixture</title>
+  <link rel="stylesheet" href="/sidepanel/styles.css">
+  <link rel="stylesheet" href="/options/options.css">
+  <style>
+    body { min-width: 0; background: var(--bg); color: var(--fg); }
+    .fixture-shell { min-height: 100vh; padding: 24px 28px 56px; }
+  </style>
+</head>
+<body>
+  <main class="fixture-shell">
+    <section class="options-page" aria-labelledby="fixture-heading">
+      <h2 id="fixture-heading">Decentralized web</h2>
+      <div id="app"></div>
+    </section>
+  </main>
+  <script type="module" src="/tests/fixtures/options-dweb-stop-failed.js"></script>
+</body>
+</html>

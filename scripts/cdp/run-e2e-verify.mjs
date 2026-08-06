@@ -62,6 +62,13 @@ const makeRecorder = (ctx, state) => {
       screenshots.push({ label, path: relative(ROOT, file) });
       return png;
     },
+    async shotPage(label, page) {
+      const png = await capturePage(page);
+      const file = join(ARTIFACTS, `${state.name}-${label}.png`);
+      writeFileSync(file, png);
+      screenshots.push({ label, path: relative(ROOT, file) });
+      return png;
+    },
     // Compare + record ONE captured variant (a state × theme). Shared by the
     // panel-sized `visual` and the wide-page `visualPage`.
     _record(variant, base, theme, png, opts) {
@@ -127,6 +134,11 @@ async function runState(ctx, state, results) {
   const rec = makeRecorder(ctx, state);
   if (state.responder) ctx.setModelResponder(state.responder);
   try {
+    // Wide visual pages become Chrome's foreground target for capture. Put the
+    // side panel back in front before the next state so headless Chrome does not
+    // throttle its redraws until the eventual screenshot brings it forward.
+    await ctx.page.send('Page.bringToFront').catch(() => {});
+    await sleep(50);
     await state.run(ctx, rec);
   } catch (e) {
     rec.check('state ran without throwing', false, e?.message || String(e));

@@ -47,8 +47,7 @@ const GUARDED_CHROME_ONLY: readonly { api: string; file: string; why: string }[]
   // The heap split needs the offscreen API; Firefox has none, so actorClient is
   // null and the actor turn falls back to the in-SW loop (THREAT-MODEL R1).
   { api: 'offscreen.createDocument', file: 'background/service-worker.js', why: 'guarded by offscreenAvailable' },
-  { api: 'runtime.getContexts', file: 'background/service-worker.js', why: 'offscreen liveness probe, same guard' },
-  { api: 'runtime.getContexts', file: 'background/routes/dweb.js', why: 'offscreen liveness probe, same guard' },
+  { api: 'runtime.getContexts', file: 'background/offscreen-contexts.js', why: 'one capability-checked offscreen liveness probe' },
   // CDP. The `debugger` permission is STRIPPED from every Firefox manifest
   // (gen-manifest.ts), and the pool is wired in only when advancedAutomationOn().
   { api: 'debugger.attach', file: 'background/debugger-pool.js', why: 'permission stripped on Firefox; guarded by advancedAutomationOn()' },

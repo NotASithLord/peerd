@@ -83,8 +83,7 @@ export const iframeTransport = (frame) => ({
  *   transport: { send: (msg: any) => void, onMessage: (handler: (msg: any) => void) => () => void },
  *   swCall: (type: string, payload?: any) => Promise<any>,
  *   storage: { get: (k: any) => Promise<any>, set: (o: any) => Promise<void> },
- *   confirmAction: (info: { kind: 'join' | 'install', appName: string, detail: string }) => Promise<boolean>,
- *   readAppFiles: () => Promise<Record<string, string>>,
+ *   confirmAction: (info: { kind: 'join' | 'install' | 'share', appName: string, detail: string, approveLabel?: string }) => Promise<boolean>,
  *   onHostEvent?: (handler: (m: any) => void) => () => void,
  *   launch?: { room?: string, url?: string },
  * }} opts
@@ -98,7 +97,6 @@ export const createDwebBridge = ({
   swCall,
   storage,
   confirmAction,
-  readAppFiles,
   onHostEvent,
   launch = {},
 }) => {
@@ -272,8 +270,18 @@ export const createDwebBridge = ({
     // so a compromised app can't publish arbitrary other apps either.
     'publish-app': async () => {
       if (!roomId) throw new Error('not in a room');
-      const files = await readAppFiles();
-      const r = await room('publish-app', { name: appName, entry: entryFile, files });
+      const approved = await confirmAction({
+        kind: 'share',
+        appName,
+        detail: `share this App's current source and binary assets with peers in room “${roomId}”? `
+          + 'Anyone with the address can fetch this version.',
+        approveLabel: 'Share app',
+      });
+      if (!approved) {
+        audit('app_share_denied', { appId, appKey, roomId });
+        throw new Error('denied');
+      }
+      const r = await room('publish-app', { appId, name: appName, entry: entryFile });
       audit('app_shared', { uri: r.uri });
       return { uri: r.uri, hash: r.hash, room: roomId };
     },
