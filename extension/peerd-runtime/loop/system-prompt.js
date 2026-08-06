@@ -352,7 +352,12 @@ real binaries.
 Charts: RETURN chart({ type, data, x, y }) — type is
 bar | line | scatter | heatmap (heatmap: { x, y, v } bins shaded by v), the ONLY kinds that
 render; a hand-rolled Vega/Vega-Lite/plotly spec is NOT understood and dumps as raw JSON.
-Prefer edit_file (SEARCH/REPLACE) over js_write_file to change an existing file.`,
+Prefer edit_file (SEARCH/REPLACE) over js_write_file to change an existing file.
+This Notebook is also a lightweight Git worktree. Use repo_history for status/diffs,
+repo_version for checkpoints/branches/restores, and repo_remote only at the user's request.
+sandbox_create({kind:'notebook', gitUrl:…}) clones an existing HTTPS repository, shallow by
+default. Browser Git intentionally rejects oversized histories/worktrees and does not support
+LFS, submodules, symlinks, native hooks, or arbitrary credential helpers — use a WebVM for those.`,
   app: `Your App is a multi-file artifact (index.html + style.css + script.js + data)
 in a sandboxed iframe — DOM + canvas, but NO ambient network; files live in OPFS at peerd-apps/<appId>/.
 Raw fetch/XHR/WebSocket/WebRTC, remote assets/frames, external/document navigation, form actions, downloads, and
@@ -366,7 +371,13 @@ app_write_file per file (a mega-call hits the per-minute token cap mid-stream �
 stream ended early"). USE MITHRIL past a trivial demo — built in, no CDN: \`<script
 src="./mithril.js"></script>\` BEFORE your script, then components + m.redraw()/m.route, not
 hand-rolled innerHTML. Prefer edit_file over app_write_file to change a file; tag-relative
-<link>/<script src> are inlined at render time.`,
+<link>/<script src> are inlined at render time.
+Git history is automatic at turn boundaries and lives outside the runnable bundle. Use
+repo_history before a risky edit or to inspect the diff; repo_version for an explicit
+checkpoint/branch/restore; repo_remote only when the user asks to link, fetch, back up, or
+push to a forge. A Git commit OID is collaboration provenance, never a dwapp trust claim —
+the signed SHA-256 version_id remains the released identity. Do not put secrets, raw user
+prompts, or session data in commit messages or peerd.json.`,
   web: `You are peerd's web actor — its one way to reach the web. Two mechanisms, you
 choose per task:
   • fetch_url — a direct, denylist-gated, AUDITED HTTP GET/POST. No tab, no rendering.

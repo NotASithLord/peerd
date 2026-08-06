@@ -21,7 +21,7 @@ import { utf8, fromUtf8, toBase64, fromBase64 } from './bytes.js';
 /** @param {{ entry?: string, files: Record<string, Uint8Array> }} bundle */
 export const packBundle = ({ entry, files }) => {
   /** @type {Record<string, string>} */
-  const encoded = {};
+  const encoded = Object.create(null);
   for (const [path, bytes] of Object.entries(files)) {
     encoded[path] = toBase64(bytes);
   }
@@ -36,7 +36,7 @@ export const packBundle = ({ entry, files }) => {
 export const unpackBundle = (payload) => {
   const obj = JSON.parse(fromUtf8(payload));
   /** @type {Record<string, Uint8Array>} */
-  const files = {};
+  const files = Object.create(null);
   for (const [path, b64] of Object.entries(obj.files)) {
     files[path] = fromBase64(/** @type {string} */ (b64));
   }
@@ -52,7 +52,7 @@ export const unpackBundle = (payload) => {
 export const unpackBundleText = (payload) => {
   const { entry, files } = unpackBundle(payload);
   /** @type {Record<string, string>} */
-  const text = {};
+  const text = Object.create(null);
   for (const [path, bytes] of Object.entries(files)) text[path] = fromUtf8(bytes);
   return { entry, files: text };
 };

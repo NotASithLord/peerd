@@ -728,6 +728,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId, sessionId, error });
     }
   } finally {
+    // Capture while this turn still owns its slot. Releasing first lets a fast
+    // steered/next turn switch Apps or write bytes that get misattributed to
+    // the previous turn's checkpoint.
+    try {
+      const scope = await currentAppScope(sessionId);
+      if (scope) await checkpointMgr.capture({ scope, label: null, meta: { turn: true } });
+    } catch (e) { console.warn('[sw] post-turn snapshot failed', e); }
     // Self-scoped: a superseded (steered) turn unwinding late can only
     // clear its own slot, never the newer turn that replaced it.
     releaseTurnSlot();
@@ -744,19 +751,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // a 'cancelled' card (not a misleading green 'ok'). ok=false marks a failure.
       if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: actorDisplay.parentToolUseId, sessionId, ok: turnOk, aborted: lastStopReason === 'aborted' });
     }
-    // --- Feature 02: per-turn workspace snapshot ----------------------
-    // why: snapshot AFTER every turn that could have touched files so
-    // review's diffSince has a "before" to diff against. The capture is
-    // a no-op (dedup'd) when nothing changed, so running it
-    // unconditionally is cheap: one App workspace, one checkpoint per
-    // modifying turn. Fire-and-forget — a snapshot failure must never
-    // break the chat. (User-facing rollback over these snapshots was
-    // removed 2026-06-12 — owner call, DESIGN-09.)
-    (async () => {
-      const scope = await currentAppScope(sessionId);
-      if (!scope) return;
-      await checkpointMgr.capture({ scope, label: null, meta: { turn: true } });
-    })().catch((e) => console.warn('[sw] post-turn snapshot failed', e));
   }
   // Refresh the SW's session cache from the turn's final state — but only
   // when the user is still ON this chat. A turn finishing in a background

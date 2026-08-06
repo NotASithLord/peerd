@@ -404,6 +404,26 @@ const editMode = async () => {
       mountEl: editorMount,
       opfsBase: ['peerd-apps', appId],
       pinnedFile: appMeta.entryFile,
+      fileSystem: {
+        read: async (path) => {
+          const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/editor/read', appId, path }));
+          if (!reply?.ok) throw new Error(reply?.error ?? 'read failed');
+          return reply.content;
+        },
+        write: async (path, content) => {
+          const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/editor/write', appId, path, content }));
+          if (!reply?.ok) throw new Error(reply?.error ?? 'write failed');
+        },
+        delete: async (path) => {
+          const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/editor/delete', appId, path }));
+          if (!reply?.ok) throw new Error(reply?.error ?? 'delete failed');
+        },
+        list: async () => {
+          const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/editor/list', appId }));
+          if (!reply?.ok) throw new Error(reply?.error ?? 'list failed');
+          return reply.files;
+        },
+      },
       onSaved: () => { /* swap back to render manually via toggle */ },
     });
   }
@@ -463,6 +483,9 @@ toggleBtn.addEventListener('click', async () => {
   } else {
     // When leaving edit mode, flush save + force a fresh render.
     if (editorApi) await editorApi.flushSave?.();
+    // One human edit session becomes one coherent commit, instead of the
+    // editor's 400ms persistence debounce producing a noisy commit per stroke.
+    await browser.runtime.sendMessage({ type: 'apps/repository/commit', appId, message: 'edit app' }).catch(() => {});
     runnerReady = false;          // force the runner to re-emit ready
     await renderMode();
   }

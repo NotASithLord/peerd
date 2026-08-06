@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeEngineRoutes } from '../../extension/background/routes/engine.js';
+import { parseAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -22,7 +23,11 @@ const baseDeps = (over: any = {}) => ({
   },
   vmRegistry: { get: async (id: string) => (id === 'v1' ? { id, name: 'VM' } : null), create: async () => ({ id: 'vNew' }) },
   jsRegistry: { get: async () => null, create: async () => ({ id: 'nNew' }) },
-  appClient: { open: async () => {}, create: async () => ({ id: 'imported' }) },
+  appClient: {
+    open: async () => {}, create: async () => ({ id: 'imported' }),
+    readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: [] }),
+    listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+  },
   appTabTracker: { reloadTab: async () => {} },
   opfsHelpers: () => ({ list: async () => [], read: async () => '', write: async () => {} }),
   NOTEBOOK_OPFS_ROOT: 'peerd-notebooks',
@@ -40,6 +45,8 @@ const baseDeps = (over: any = {}) => ({
   // The SW always injects the extract post-step (a passthrough when extract is
   // absent — that contract is pinned in tests/shared/fetch-extract.test.ts).
   applyWebExtract: async (resp: any) => resp,
+  parseAppManifest,
+  kv: { get: async () => ({}), set: async () => {} },
   ...over,
 });
 
@@ -110,6 +117,25 @@ describe('app/vm meta + apps Library', () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['app/get-meta']({ appId: 'a1' })).toEqual({ ok: true, name: 'App', entryFile: 'index.html', dweb: null });
   });
+  test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'App', entryFile: 'index.html', dweb: { publisher: 'did:key:zOld' } }),
+        update: async (_id: string, patch: any) => ({ id: 'a1', name: 'App', dweb: { publisher: 'did:key:zOld' }, ...patch }),
+      },
+    }));
+    expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toBeNull();
+  });
+  test('app/get-meta grants the bridge from peerd.json without mutating provenance', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      DWEB_ENABLED: true,
+      appClient: {
+        readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: ['dweb'] }),
+        listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+      },
+    }));
+    expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toMatchObject({ local: true });
+  });
   test('vm/get-meta requires a string id', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['vm/get-meta']({ vmId: 5 })).toEqual({ ok: false, error: 'vmId-required' });
@@ -146,15 +172,16 @@ describe('apps/delete', () => {
   });
   test('un-shares a shared app when dweb is on', async () => {
     let msg: any = null;
+    const record = { id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h' } };
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
-      appRegistry: { get: async () => ({ id: 'a1', name: 'A', shared: true, dweb: { publisher: 'pub', hash: 'h' } }) },
-      appClient: { delete: async () => true },
-      browser: { runtime: { sendMessage: async (m: any) => { msg = m; } } },
+      appRegistry: { get: async () => record },
+      appClient: { delete: async (_id: string, opts: any) => { await opts.beforeDelete(record); return true; } },
+      browser: { runtime: { sendMessage: async (m: any) => { msg = m; return { ok: true }; } } },
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
-    expect(msg).toEqual({ type: 'dweb/base-host/unshare-app', name: 'A', publisher: 'pub', hash: 'h' });
+    expect(msg).toEqual({ type: 'dweb/base-host/unshare-app', name: 'A', slug: null, publisher: 'pub', hash: 'h', hashes: [] });
   });
   test('does NOT unshare a purely-local app even with dweb fully on', async () => {
     let sent = false;
@@ -168,15 +195,18 @@ describe('apps/delete', () => {
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
     expect(sent).toBe(false); // the (record.dweb || record.shared) gate must skip the offscreen round-trip
   });
-  test('unshare failure never fails the delete', async () => {
+  test('unshare failure preserves the local record so revocation can be retried', async () => {
+    let deleted = false;
+    const record = { id: 'a1', name: 'A', dweb: {} };
     const r = makeEngineRoutes(baseDeps({
       DWEB_ENABLED: true,
       settingsStore: { get: () => ({ dwebEnabled: true }) },
-      appRegistry: { get: async () => ({ id: 'a1', name: 'A', dweb: {} }) },
-      appClient: { delete: async () => true },
+      appRegistry: { get: async () => record },
+      appClient: { delete: async (_id: string, opts: any) => { await opts.beforeDelete(record); deleted = true; return true; } },
       browser: { runtime: { sendMessage: async () => { throw new Error('mesh down'); } } },
     }));
-    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
+    expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: false, error: 'network-unshare-failed: mesh down' });
+    expect(deleted).toBe(false);
   });
 });
 

@@ -55,6 +55,9 @@ const toDiscoverApp = (row) => ({
   version_id: row.head?.version_id ?? null,
   seq: row.seq ?? 0,
   publisher: row.publisher ?? null,
+  previous_version_id: row.head?.previous_version_id ?? null,
+  git_commit_oid: row.head?.git_commit_oid ?? null,
+  changelog: row.head?.changelog ?? '',
 });
 
 // dwapp ROOMS hosted here — each is base.openRoom(id) ONCE, ref-counted across
@@ -62,6 +65,15 @@ const toDiscoverApp = (row) => ({
 // rendezvous): a dwapp is a sub-protocol, not tied to a signaler.
 /** @type {Map<string, { room: any, refs: number, name: string, topicSubs: Map<string, () => void>, offs: (() => void)[] }>} */
 const rooms = new Map();        // roomId -> { room, refs, name, topicSubs:Map, offs:[] }
+/** @type {Map<string,Promise<any>>} */
+const pendingSeeds = new Map();
+
+/** @param {string} hash @param {Promise<any>} operation */
+const trackSeed = async (hash, operation) => {
+  pendingSeeds.set(hash, operation);
+  try { return await operation; }
+  finally { if (pendingSeeds.get(hash) === operation) pendingSeeds.delete(hash); }
+};
 
 /** @param {string} type @param {object} [payload] @returns {Promise<any>} */
 const swCall = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
@@ -219,15 +231,8 @@ const handleRoomOp = async (msg) => {
     const entry = await ensureRoom(roomId, msg.name);
     return { ok: true, did: entry.room.did, joined: roomId, ...entry.room.status() };
   }
-  // Content ops don't need a joined room (an app shares/installs another app).
-  // fetch-app returns just the publisher for the consent dialog; install re-fetches
-  // (the fetch is idempotent + install is rare/user-gated — no cache to leak on a
-  // declined install).
-  if (op === 'fetch-app') {
-    const h = await start();
-    const { manifest } = await h.base.fetchApp(msg.uri);
-    return { ok: true, publisher: manifest?.publisher ?? null };
-  }
+  // Content install doesn't need a joined room; the bridge prompts from the
+  // URI's bounded publisher identity before this full fetch can begin.
   if (op === 'install-app') {
     const h = await start();
     const { manifest, payload } = await h.base.fetchApp(msg.uri);
@@ -236,7 +241,8 @@ const handleRoomOp = async (msg) => {
       uri: msg.uri, manifest, payload, name: msg.name,
       install: async (/** @type {any} */ a) => { const r = await swCall('dweb/app-install', a); if (!r?.ok) throw new Error(r?.error ?? 'install failed'); return r.app; },
     });
-    h.base.seedApp({ manifest, payload }).catch(() => {}); // install → we seed it (background; don't block the install)
+    const hash = msg.uri.split('/').at(-1) || '';
+    await trackSeed(hash, h.base.seedApp({ manifest, payload }));
     return { ok: true, appId: app?.id, name: app?.name };
   }
   const entry = rooms.get(roomId);
@@ -292,7 +298,8 @@ const handleRoomOp = async (msg) => {
       return { ok: true, card: latest ? client.parsePeerCard(latest.body.data) : null };
     }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
-    case 'publish-app': { const h = await start(); const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files }); return { ok: true, uri, hash }; }
+    // The sandboxed dwapp bridge cannot author platform release provenance.
+    // Only the trusted Library/dweb_share route derives Git OIDs + changelogs.
     default: return { ok: false, error: `unknown room op: ${op}` };
   }
 };
@@ -333,16 +340,26 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // then announce it (gossip + DHT). dwapp_id = content hash.
         case 'dweb/base-host/share-app': {
           const h = await start();
-          const { uri, hash } = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files });
+          const slug = slugify(msg.slug || msg.name);
+          let publication = null;
+          try {
+          publication = await h.base.publishApp({ name: msg.name, entry: msg.entry, files: msg.files, release: msg.release, created: msg.created, expectedHash: msg.expectedHash });
+          const { uri, hash } = publication;
+          const journal = await swCall('dweb/publication-pending', { appId: msg.appId, hash, slug, publisher: h.base.did, name: msg.name });
+          if (!journal?.ok) throw new Error(journal?.error ?? 'publication journal unavailable');
           const size = Object.values(msg.files || {}).reduce((n, t) => n + (typeof t === 'string' ? t.length : 0), 0);
           // The UI passes an edited namespace on FIRST share (and the stored slug on
           // reshare); fall back to the name. A RESHARE reuses the same slug → same
           // dwapp_id → publishMeta amends the existing card (higher seq) instead of
           // forking a new app — that's the whole versioning story.
-          const slug = slugify(msg.slug || msg.name);
           const { dwapp_id, card } = await h.base.publishMeta({
             slug, name: msg.name, description: msg.description ?? '',
-            head: { version_id: hash, content_addr: uri, size },
+            head: {
+              version_id: hash, content_addr: uri, size,
+              ...(msg.release?.previousVersionId ? { previous_version_id: msg.release.previousVersionId } : {}),
+              ...(msg.release?.gitCommitOid ? { git_commit_oid: msg.release.gitCommitOid } : {}),
+              ...(msg.release?.changelog ? { changelog: msg.release.changelog } : {}),
+            },
             // A normal share omits seq (publishMeta defaults to Date.now() — a
             // natural monotonic bump). A RE-SEED on restart passes the STORED seq
             // so it re-announces the SAME version (same bytes → same version_id),
@@ -351,6 +368,11 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
           });
           log(`shared app "${msg.name}" (${slug}) → ${dwapp_id.slice(0, 12)}… seq ${card.seq}`);
           sendResponse({ ok: true, uri, hash, dwapp_id, slug, seq: card.seq, publisher: h.base.did });
+          } catch (error) {
+            if (publication) await h.base.unshareApp({ slug, publisher: h.base.did, hash: publication.hash, hashes: [publication.hash] }).catch(() => {});
+            if (publication) await swCall('dweb/publication-clear', { appId: msg.appId, hash: publication.hash }).catch(() => {});
+            throw error;
+          }
           return;
         }
         // Un-share: the user deleted an app — stop announcing + serving it. The host
@@ -360,7 +382,14 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
         // to unshare — answer ok so delete still succeeds.
         case 'dweb/base-host/unshare-app': {
           if (!handle) { sendResponse({ ok: true, unserved: false, removed: false }); return; }
-          const r = await handle.base.unshareApp({ slug: slugify(msg.name), publisher: msg.publisher || handle.base.did, hash: msg.hash || null });
+          const hashes = [...new Set([msg.hash, ...(Array.isArray(msg.hashes) ? msg.hashes : [])].filter((value) => typeof value === 'string'))];
+          await Promise.allSettled(hashes.map((hash) => pendingSeeds.get(hash)).filter(Boolean));
+          const r = await handle.base.unshareApp({
+            slug: msg.slug ? slugify(msg.slug) : slugify(msg.name),
+            publisher: msg.publisher || handle.base.did,
+            hash: msg.hash || null,
+            hashes,
+          });
           log(`unshared app "${msg.name}" — unserved:${r.unserved} removed:${r.removed}`);
           sendResponse({ ok: true, ...r });
           return;
@@ -381,13 +410,14 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
             // The version identity from the card the user installed from — lets the
             // Library later detect a newer announce for this same dwapp_id.
             dwappId: msg.dwappId ?? null, slug: msg.slug ?? null, seq: Number.isInteger(msg.seq) ? msg.seq : null,
+            expectedPublisher: msg.publisher ?? null,
             install: async (/** @type {any} */ a) => {
               const r = await swCall('dweb/app-install', a);
               if (!r?.ok) throw new Error(r?.error ?? 'install failed');
               return r.app;
             },
           });
-          h.base.seedApp({ manifest, payload }).catch(() => {}); // install → we seed it (background; don't block the install)
+          await trackSeed(msg.uri.split('/').at(-1) || '', h.base.seedApp({ manifest, payload }));
           log(`installed app "${app?.name ?? msg.name}" from the dweb`);
           sendResponse({ ok: true, app });
           return;
@@ -401,18 +431,21 @@ const onBaseHostMessage = (msg, _sender, sendResponse) => {
           const h = await start();
           const { manifest, payload } = await h.base.fetchApp(msg.uri);
           const client = /** @type {any} */ (await loadDweb());
+          /** @type {any} */ let updateResult = null;
           const app = await client.installAppBundle({
             uri: msg.uri, manifest, payload, name: msg.name,
             dwappId: msg.dwappId ?? null, slug: msg.slug ?? null, seq: Number.isInteger(msg.seq) ? msg.seq : null,
+            expectedPublisher: msg.publisher ?? null,
             install: async (/** @type {any} */ a) => {
-              const r = await swCall('dweb/app-update', { appId: msg.appId, ...a });
+              const r = await swCall('dweb/app-update', { appId: msg.appId, strategy: msg.strategy, ...a });
               if (!r?.ok) throw new Error(r?.error ?? 'update failed');
+              updateResult = r;
               return r.app;
             },
           });
-          h.base.seedApp({ manifest, payload }).catch(() => {}); // seed the NEW version too
+          await trackSeed(msg.uri.split('/').at(-1) || '', h.base.seedApp({ manifest, payload }));
           log(`updated app "${app?.name ?? msg.name}" to a newer dweb version`);
-          sendResponse({ ok: true, app });
+          sendResponse({ ok: true, app, ...(updateResult?.fork ? { fork: updateResult.fork } : {}) });
           return;
         }
         case 'dweb/base-host/stop': {

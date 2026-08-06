@@ -9,6 +9,7 @@
 
 import { APP_RUNTIME_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
+import { normalizeGitRemote } from '/peerd-engine/index.js';
 
 // Mirrors the write-layer backstop in background/app-client.js — kept aligned
 // with the dweb loader's 50M ceiling so a WASM-heavy dwapp (a game engine, a
@@ -22,17 +23,18 @@ const MAX_TOTAL_CHARS = 50_000_000;
  * @returns {Promise<import('/shared/tool-types.js').ToolResult>}
  */
 export const createAppSandbox = async (args, ctx) => {
-    if (typeof args?.name !== 'string' || !args.name.trim()) {
+    const gitUrl = typeof args?.gitUrl === 'string' ? args.gitUrl.trim() : '';
+    if (!gitUrl && (typeof args?.name !== 'string' || !args.name.trim())) {
       return { ok: false, error: "sandbox_create kind:'app' requires `name` (the app's display name)" };
     }
     /** @type {Record<string, unknown> | null} */
     const files = (args.files && typeof args.files === 'object')
       ? args.files
       : (typeof args.html === 'string' ? { 'index.html': args.html } : null);
-    if (!files || !Object.keys(files).length) {
+    if (!gitUrl && (!files || !Object.keys(files).length)) {
       return { ok: false, error: "sandbox_create kind:'app' requires `files` (path → content map) or `html` — start with a minimal index.html shell" };
     }
-    const totalChars = Object.values(files).reduce(
+    const totalChars = Object.values(files ?? {}).reduce(
       /** @param {number} n @param {unknown} c */
       (n, c) => n + (typeof c === 'string' ? c.length : 0), 0,
     );
@@ -41,9 +43,9 @@ export const createAppSandbox = async (args, ctx) => {
     }
     // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
     // to the two methods this tool calls.
-    const appClient = /** @type {{ create?: (opts: Record<string, any>) => Promise<{ id: string, name: string, entryFile: string }>, open?: (opts: { appId: string, sessionId?: string, focus?: boolean }) => Promise<unknown> } | undefined} */ (
+    const appClient = /** @type {{ create?: (opts: Record<string, any>) => Promise<{ id: string, name: string, entryFile: string }>, createFromGit?: (opts: Record<string, any>) => Promise<{record:{id:string,name:string,entryFile:string},repository:any,contract:any}>, open?: (opts: { appId: string, sessionId?: string, focus?: boolean }) => Promise<unknown> } | undefined} */ (
       /** @type {any} */ (ctx).appClient);
-    if (!appClient?.create) return { ok: false, error: 'app_not_available' };
+    if (!appClient?.create || (gitUrl && !appClient.createFromGit)) return { ok: false, error: 'app_not_available' };
     // A MULTIPLAYER dwapp needs the dweb metadata SLOT, which is what the app-tab
     // checks before attaching the bridge (app-registry: "its presence is what
     // unlocks the app-tab dweb bridge"; app-tab.js attachDwebBridge gates on
@@ -58,14 +60,41 @@ export const createAppSandbox = async (args, ctx) => {
       ? [...new Set([...(Array.isArray(args.tags) ? args.tags : []), 'dweb'])]
       : args.tags;
     try {
-      const record = await appClient.create({
-        name: args.name,
-        files,
-        tags,
-        entryFile: args.entryFile,
-        sessionId: ctx.session?.sessionId,
-        ...(makeDwapp ? { dweb: { uri: null, publisher: null, hash: null, local: true } } : {}),
-      });
+      let repository = null;
+      let contract = null;
+      let record;
+      if (gitUrl) {
+        let remote;
+        try { remote = normalizeGitRemote(gitUrl); }
+        catch (error) { return { ok: false, error: `git_clone_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
+        const confirm = /** @type {any} */ (ctx).confirm;
+        if (!confirm) return { ok: false, error: 'git_confirmation_unavailable' };
+        const answer = await confirm({
+          tool: 'sandbox_create', kind: 'git_clone', sideEffect: 'write', origins: [new URL(remote.url).origin],
+          summary: `Clone ${remote.url} and instantiate its peerd.json as a browser App?`,
+        });
+        if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'git_clone_declined' };
+        const result = await appClient.createFromGit?.({
+          name: typeof args.name === 'string' ? args.name : new URL(remote.url).pathname.split('/').at(-1)?.replace(/\.git$/, ''),
+          url: remote.url,
+          ref: typeof args.gitRef === 'string' ? args.gitRef : undefined,
+          depth: Math.min(500, Math.max(1, Number(args.gitDepth) || 50)),
+          sessionId: ctx.session?.sessionId,
+          signal: /** @type {any} */ (ctx).abortSignal,
+          allowDweb: !!(/** @type {any} */ (ctx).dweb),
+        });
+        if (!result) return { ok: false, error: 'git_app_import_unavailable' };
+        record = result.record; repository = result.repository; contract = result.contract;
+      } else {
+        record = await appClient.create({
+          name: args.name,
+          files,
+          tags,
+          entryFile: args.entryFile,
+          sessionId: ctx.session?.sessionId,
+          ...(makeDwapp ? { dweb: { uri: null, publisher: null, hash: null, local: true } } : {}),
+        });
+      }
       // focus:false — open in the BACKGROUND + drop a "go there" card in the chat
       // instead of yanking the user to the new tab (DESIGN-12). They click to go.
       let opened = true;
@@ -83,7 +112,8 @@ export const createAppSandbox = async (args, ctx) => {
         // carrier — instance-handle.js reads it to label the harvested id.
         kind: 'app',
         entryFile: record.entryFile,
-        fileCount: Object.keys(files).length,
+        fileCount: files ? Object.keys(files).length : undefined,
+        ...(repository ? { repository, contract } : {}),
         opened,
         ...(openError ? { openError } : {}),
       }, null, 2);

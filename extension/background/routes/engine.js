@@ -18,8 +18,19 @@ export const makeEngineRoutes = (deps) => {
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
+    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract, repositories, parseAppManifest, kv,
   } = deps;
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const coordinateApp = (appId, operation) => repositories.coordinate({ kind: 'app', id: appId }, operation);
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const quiesceApp = async (appId, operation) => {
+    const reopen = appTabTracker.getTabId(appId) != null;
+    if (reopen) { await appTabTracker.closeTab(appId); await new Promise((resolve) => setTimeout(resolve, 100)); }
+    try { return await coordinateApp(appId, operation); }
+    finally {
+      if (reopen) appTabTracker.ensureTab(appId, { active: false, groupTitle: 'peerd' }).catch(() => {});
+    }
+  };
 
   return {
     // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
@@ -62,11 +73,25 @@ export const makeEngineRoutes = (deps) => {
     'app/get-meta': async ({ appId }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const meta = await appRegistry.get(appId);
+        let meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
+        let runtimeDweb = meta.dweb ?? null;
+        try {
+          const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
+          const paths = new Set((await appClient.listFiles({ appId })).map((/** @type {{path:string}} */ file) => file.path.replace(/^\/+/, '')));
+          if (!paths.has(contract.entry)) return { ok: false, error: `peerd.json entry is missing: ${contract.entry}` };
+          runtimeDweb = contract.capabilities.includes('dweb') && DWEB_ENABLED
+            ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
+            : null;
+          if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
+        } catch (error) {
+          if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
+            return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
+          }
+        }
         // dweb meta unlocks the app-tab bridge for dwapps (preview builds);
         // harmless null elsewhere.
-        return { ok: true, name: meta.name, entryFile: meta.entryFile, dweb: meta.dweb ?? null };
+    return { ok: true, name: meta.name, entryFile: meta.entryFile, dweb: runtimeDweb };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -144,6 +169,106 @@ export const makeEngineRoutes = (deps) => {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
+    // App-tab editor IO goes through the same mutation coordinator as Git.
+    // This keeps a multi-surface browser App from writing around restore/share.
+    'app/editor/read': async ({ appId, path }) => {
+      if (typeof appId !== 'string' || typeof path !== 'string') return { ok: false, error: 'appId-and-path-required' };
+      try { return { ok: true, content: await appClient.readFile({ appId, path }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'app/editor/list': async ({ appId }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try { return { ok: true, files: await appClient.listFiles({ appId }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'app/editor/write': async ({ appId, path, content }) => {
+      if (typeof appId !== 'string' || typeof path !== 'string' || typeof content !== 'string') return { ok: false, error: 'appId-path-content-required' };
+      try { await appClient.writeFile({ appId, path, content }); return { ok: true }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'app/editor/delete': async ({ appId, path }) => {
+      if (typeof appId !== 'string' || typeof path !== 'string') return { ok: false, error: 'appId-and-path-required' };
+      try { await appClient.deleteFile({ appId, path }); return { ok: true }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/status': async ({ appId }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const [status, remote, branches] = await Promise.all([
+          repositories.statusApp(appId), repositories.getAppRemote(appId),
+          repositories.branches({ kind: 'app', id: appId }),
+        ]);
+        return { ok: true, status, remote, branches };
+      }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/history': async ({ appId, depth }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try { return { ok: true, commits: await repositories.historyApp(appId, { depth, includeSafety: true }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/diff': async ({ appId, from, to }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try { return { ok: true, diff: await repositories.diffApp(appId, { from: from || 'HEAD', to: to || null }) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/commit': async ({ appId, message }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const result = await coordinateApp(appId, () => repositories.commitApp(appId, { message: typeof message === 'string' ? message : 'manual edit' }));
+        await auditLog.append({ type: 'git_commit_created', details: { kind: 'app', appId, oid: result.oid, changed: result.changed.length } });
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/restore': async ({ appId, to }) => {
+      if (typeof appId !== 'string' || typeof to !== 'string') return { ok: false, error: 'appId-and-to-required' };
+      try {
+        const result = await quiesceApp(appId, () => repositories.restoreApp(appId, { to }));
+        appTabTracker.reloadTab(appId).catch(() => {});
+        await auditLog.append({ type: 'git_version_restored', details: { kind: 'app', appId, to, oid: result.oid } });
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/branch': async ({ appId, name, checkout = true }) => {
+      if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
+      try { return { ok: true, result: await (checkout === false ? coordinateApp : quiesceApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
+      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/checkout': async ({ appId, name }) => {
+      if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
+      try {
+        const result = await quiesceApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
+        appTabTracker.reloadTab(appId).catch(() => {});
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/link': async ({ appId, url }) => {
+      if (typeof appId !== 'string' || typeof url !== 'string') return { ok: false, error: 'appId-and-url-required' };
+      try {
+        const remote = await coordinateApp(appId, () => repositories.setRemote({ kind: 'app', id: appId }, { url }));
+        await auditLog.append({ type: 'git_remote_linked', details: { kind: 'app', appId, host: remote.host, url: remote.url } });
+        return { ok: true, remote };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/fetch': async ({ appId }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const result = await coordinateApp(appId, () => repositories.fetch({ kind: 'app', id: appId }));
+        await auditLog.append({ type: 'git_remote_fetched', details: { kind: 'app', appId, host: result.remote.host } });
+        return { ok: true, result };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
+    'apps/repository/push': async ({ appId, branch }) => {
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        const result = await coordinateApp(appId, async () => {
+          await repositories.commitApp(appId, { message: 'checkpoint before push' });
+          return repositories.push({ kind: 'app', id: appId }, { ref: typeof branch === 'string' ? branch : undefined });
+        });
+        await auditLog.append({ type: 'git_remote_pushed', details: { kind: 'app', appId, host: result.remote.host, branch: result.branch } });
+        return { ok: result.ok, result, ...(result.ok ? {} : { error: result.error || 'push rejected (the remote may contain unrelated or newer commits)' }) };
+      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+    },
     'apps/delete': async ({ appId }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
@@ -153,26 +278,27 @@ export const makeEngineRoutes = (deps) => {
         // announcing + serving the bytes. An app the user shared (or installed → we
         // auto-seed) keeps being served by the offscreen content store until we
         // unannounce it — that's the "I deleted it but a peer could still pull it" bug.
-        const record = await appRegistry.get(appId);
-        // why distinguish: appClient.delete returns false for an unknown id;
-        // reporting that as success would let the UI drop a card that wasn't
-        // actually deleted (masking id drift).
-        const deleted = await appClient.delete(appId);
-        if (!deleted) return { ok: false, error: 'app-not-found' };
-        // Best-effort un-share (a dwapp, or any app the user shared). Never blocks or
-        // fails the delete: the local copy is already gone; this just stops the network
-        // copy. Dweb-off / store: the route is inert, so skip the offscreen round-trip.
-        if (DWEB_ENABLED && settingsStore.get().dwebEnabled && record && (record.dweb || record.shared)) {
+        const deleted = await appClient.delete(appId, { beforeDelete: async (/** @type {any} */ record) => {
+          // Revoke every served release while the same lifecycle lock excludes
+          // share/update/write. Failure preserves the App for a clean retry.
+          const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+          if (!DWEB_ENABLED || !settingsStore.get().dwebEnabled || (!record.dweb && !record.shared && !pending[appId])) return;
           try {
-            await ensureOffscreen();
-            await browser.runtime.sendMessage({
-              type: 'dweb/base-host/unshare-app',
-              name: record.name,
-              publisher: record.dweb?.publisher ?? null,
-              hash: record.dweb?.hash ?? null,
-            });
-          } catch (e) { console.debug('[apps/delete] unshare failed (local delete still applied)', e); }
-        }
+          await ensureOffscreen();
+          const pendingHash = pending[appId]?.hash;
+          const unshare = await browser.runtime.sendMessage({
+            type: 'dweb/base-host/unshare-app', name: record.name,
+            slug: record.dweb?.slug ?? null, publisher: record.dweb?.publisher ?? null,
+            hash: record.dweb?.hash ?? pendingHash ?? null,
+            hashes: [...new Set([...(record.dweb?.published_hashes ?? []), ...(pendingHash ? [pendingHash] : [])])],
+          });
+          if (!unshare?.ok) throw new Error(unshare?.error ?? 'unshare rejected');
+          if (pending[appId]) { const next = { ...pending }; delete next[appId]; await kv.set('dweb.pendingPublications.v1', next); }
+          } catch (error) {
+            throw new Error(`network-unshare-failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}`);
+          }
+        } });
+        if (!deleted) return { ok: false, error: 'app-not-found' };
         return { ok: true };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };

@@ -201,7 +201,7 @@ export const ApiIntegrationsSection = {
 
       // Git credentials fold in here — a git PAT is the same class of secret (a
       // host-bound bearer token, stored git:<host> in the same vault), just for private
-      // `git clone` inside the WebVM. Rendered as a subsection rather than its own nav
+      // Git operations across every engine repository. Rendered as a subsection rather than its own nav
       // entry (owner's call). GitCredentialsSection owns its own load/save/list lifecycle.
       m('.settings-divider'),
       m('h3', 'Git credentials'),

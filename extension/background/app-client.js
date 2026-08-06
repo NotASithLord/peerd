@@ -12,7 +12,7 @@
 // (immutable, addressable "save this version" records). New apps
 // don't touch it.
 
-import { opfsHelpers } from '/peerd-engine/index.js';
+import { buildAppManifest, opfsHelpers, parseAppManifest } from '/peerd-engine/index.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
@@ -32,8 +32,11 @@ const opfsForApp = (appId) => opfsHelpers(['peerd-apps', appId]);
  * @param {Object} deps
  * @param {ReturnType<typeof import('/peerd-engine/index.js').createAppRegistry>} deps.registry
  * @param {ReturnType<typeof import('./app-tab-tracker.js').createAppTabTracker>} deps.tracker
+ * @param {ReturnType<typeof import('/peerd-engine/index.js').createRepositoryService>} deps.repositories
  */
-export const createAppClient = ({ registry, tracker }) => {
+export const createAppClient = ({ registry, tracker, repositories }) => {
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const withWriteLock = (appId, operation) => repositories.coordinate({ kind: 'app', id: appId }, operation);
   /** @param {{ sessionId?: string, appId?: string }} [opts] @returns {Promise<string>} */
   const resolveId = async ({ sessionId, appId } = {}) => {
     if (appId) {
@@ -58,14 +61,25 @@ export const createAppClient = ({ registry, tracker }) => {
   const create = async ({ name, files, html, tags, entryFile, sessionId, dweb, source } = {}) => {
     if (typeof name !== 'string' || !name.trim()) throw new Error('name required');
 
-    const fileMap = files && typeof files === 'object'
+    const suppliedFiles = files && typeof files === 'object'
       ? files
       : (typeof html === 'string' ? { 'index.html': html } : null);
-    if (!fileMap || !Object.keys(fileMap).length) {
+    if (!suppliedFiles || !Object.keys(suppliedFiles).length) {
       throw new Error('files (or html) required');
     }
-    const entry = entryFile || 'index.html';
-    if (!(entry in fileMap)) throw new Error(`entryFile not in files: ${entry}`);
+    const requestedEntry = entryFile || 'index.html';
+    // why a checked-in manifest: the bound App actor is part of the artifact's
+    // runtime contract, not invisible peerd metadata. Developers see the same
+    // entry/capability declaration on GitHub and in a dweb release. A supplied
+    // manifest wins so imported projects preserve their own declaration.
+    /** @type {Record<string,string>} */
+    const fileMap = Object.assign(Object.create(null), suppliedFiles);
+    if (!Object.hasOwn(fileMap, 'peerd.json')) {
+      fileMap['peerd.json'] = `${JSON.stringify(buildAppManifest({ entry: requestedEntry, dwapp: !!dweb }), null, 2)}\n`;
+    }
+    const contract = parseAppManifest(fileMap['peerd.json']);
+    const entry = contract.entry;
+    if (!Object.hasOwn(fileMap, entry)) throw new Error(`peerd.json entry is missing: ${entry}`);
 
     // Backstop size cap at the WRITE layer (was only in the app-create
     // tool — so the dweb install routes, which call create() directly with
@@ -88,13 +102,63 @@ export const createAppClient = ({ registry, tracker }) => {
     });
 
     const opfs = opfsForApp(record.id);
-    for (const [path, content] of Object.entries(fileMap)) {
-      await opfs.write(path, content);
+    try {
+      for (const [path, content] of Object.entries(fileMap)) {
+        await opfs.write(path, content);
+      }
+      // why part of create: every App is a repository from byte one. If Git
+      // initialization fails, roll the half-created catalog + tree back instead
+      // of returning an App that silently lacks the feature's safety net.
+      await repositories.initApp(record.id, { message: `create ${record.name}` });
+    } catch (error) {
+      try { await opfs.nuke(); } catch { /* best effort rollback */ }
+      try { await repositories.destroyApp(record.id); } catch { /* best effort rollback */ }
+      try { await registry.delete(record.id); } catch { /* best effort rollback */ }
+      throw error;
     }
     if (sessionId) {
       await registry.setDefaultForSession(sessionId, record.id);
     }
     return record;
+  };
+
+  /** Clone a repository and instantiate the validated peerd.json contract.
+   * @param {{name?:string,url:string,ref?:string,depth?:number,sessionId?:string,signal?:AbortSignal,allowDweb?:boolean}} opts */
+  const createFromGit = async ({ name, url, ref, depth = 50, sessionId, signal, allowDweb = false }) => {
+    if (typeof url !== 'string') throw new Error('git URL required');
+    const record = await registry.create({
+      name: (typeof name === 'string' && name.trim() ? name.trim() : 'Git App').slice(0, 80),
+      source: 'imported', entryFile: 'index.html', ownerSessionId: sessionId ?? null,
+    });
+    try {
+      const repository = await repositories.clone({ kind: 'app', id: record.id }, {
+        url,
+        ...(typeof ref === 'string' && ref ? { ref } : {}),
+        depth: Math.min(500, Math.max(1, Number(depth) || 50)),
+        signal,
+      });
+      const opfs = opfsForApp(record.id);
+      const paths = new Set((await opfs.list()).map((file) => file.path.replace(/^\/+/, '')));
+      let contract;
+      if (paths.has('peerd.json')) contract = parseAppManifest(await opfs.read('peerd.json'));
+      else if (paths.has('index.html')) contract = parseAppManifest(JSON.stringify(buildAppManifest({ entry: 'index.html' })));
+      else throw new Error('repository is not an App: add peerd.json or index.html');
+      if (!paths.has(contract.entry)) throw new Error(`peerd.json entry is missing: ${contract.entry}`);
+      if (contract.capabilities.includes('dweb') && !allowDweb) throw new Error('this dwapp requires a preview build with the dweb enabled');
+      const dwapp = contract.capabilities.includes('dweb')
+        ? { uri: null, publisher: null, hash: null, local: true }
+        : null;
+      const updated = await registry.update(record.id, {
+        entryFile: contract.entry,
+        ...(dwapp ? { dweb: dwapp } : {}),
+      });
+      if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
+      return { record: updated, repository, contract };
+    } catch (error) {
+      await repositories.destroy({ kind: 'app', id: record.id }, { worktree: true }).catch(() => {});
+      await registry.delete(record.id).catch(() => {});
+      throw error;
+    }
   };
 
   /**
@@ -106,36 +170,41 @@ export const createAppClient = ({ registry, tracker }) => {
    */
   const update = async ({ appId, name, html, path, content, tags, entryFile, sessionId } = {}) => {
     const id = await resolveId({ sessionId, appId });
-    const rec = await registry.get(id);
-    if (!rec) return null;
-    const opfs = opfsForApp(id);
+    return withWriteLock(id, async () => {
+      const rec = await registry.get(id);
+      if (!rec) return null;
+      const opfs = opfsForApp(id);
 
-    if (typeof html === 'string') {
-      await opfs.write(rec.entryFile, html);
-    }
-    if (typeof path === 'string' && typeof content === 'string') {
-      await opfs.write(path, content);
-    }
+      if (typeof html === 'string') {
+        await opfs.write(rec.entryFile, html);
+      }
+      if (typeof path === 'string' && typeof content === 'string') {
+        await opfs.write(path, content);
+      }
 
-    /** @type {Partial<import('/peerd-engine/app-registry.js').AppRecord>} */
-    const patch = {};
-    if (typeof name === 'string') patch.name = name.trim().slice(0, 80);
-    if (Array.isArray(tags)) patch.tags = tags;
-    if (typeof entryFile === 'string') patch.entryFile = entryFile;
-    const updated = await registry.update(id, patch);
+      /** @type {Partial<import('/peerd-engine/app-registry.js').AppRecord>} */
+      const patch = {};
+      if (typeof name === 'string') patch.name = name.trim().slice(0, 80);
+      if (Array.isArray(tags)) patch.tags = tags;
+      if (typeof entryFile === 'string') patch.entryFile = entryFile;
+      const updated = await registry.update(id, patch);
 
-    if (sessionId) await registry.setDefaultForSession(sessionId, id);
-    tracker.reloadTab(id).catch(() => {});
-    return updated;
+      if (sessionId) await registry.setDefaultForSession(sessionId, id);
+      tracker.reloadTab(id).catch(() => {});
+      return updated;
+    });
   };
 
   /** Write a single file in the app's OPFS subdir.
    * @param {{ appId?: string, path: string, content: string, sessionId?: string }} args */
   const writeFile = async ({ appId, path, content, sessionId }) => {
     const id = await resolveId({ sessionId, appId });
-    await opfsForApp(id).write(path, content);
-    await registry.update(id, {});                    // bump updatedAt
-    tracker.reloadTab(id).catch(() => {});
+    await withWriteLock(id, async () => {
+      if (!await registry.get(id)) throw new Error(`app not found: ${id}`);
+      await opfsForApp(id).write(path, content);
+      await registry.update(id, {});                  // bump updatedAt
+      tracker.reloadTab(id).catch(() => {});
+    });
   };
 
   /** @param {{ appId?: string, path: string, sessionId?: string }} args */
@@ -153,11 +222,14 @@ export const createAppClient = ({ registry, tracker }) => {
   /** @param {{ appId?: string, path: string, sessionId?: string }} args */
   const deleteFile = async ({ appId, path, sessionId }) => {
     const id = await resolveId({ sessionId, appId });
-    const rec = await registry.get(id);
-    if (path === rec?.entryFile) throw new Error(`refusing to delete entry file: ${path}`);
-    await opfsForApp(id).delete(path);
-    await registry.update(id, {});
-    tracker.reloadTab(id).catch(() => {});
+    await withWriteLock(id, async () => {
+      const rec = await registry.get(id);
+      if (!rec) throw new Error(`app not found: ${id}`);
+      if (path === rec?.entryFile) throw new Error(`refusing to delete entry file: ${path}`);
+      await opfsForApp(id).delete(path);
+      await registry.update(id, {});
+      tracker.reloadTab(id).catch(() => {});
+    });
   };
 
   /** @param {{ appId?: string, sessionId?: string, focus?: boolean }} [opts] */
@@ -176,16 +248,33 @@ export const createAppClient = ({ registry, tracker }) => {
     return id;
   };
 
-  /** @param {string} appId */
-  const deleteApp = async (appId) => {
-    const rec = await registry.get(appId);
-    if (!rec) return false;
-    await tracker.closeTab(appId);
-    await new Promise((r) => setTimeout(r, 100));
-    try { await opfsForApp(appId).nuke(); }
-    catch (e) { console.warn('[app-client] OPFS nuke failed', e); }
-    await registry.delete(appId);
-    return true;
+  /** @param {string} appId @param {{beforeDelete?:(record:any)=>Promise<void>}} [opts] */
+  const deleteApp = async (appId, { beforeDelete } = {}) => withWriteLock(appId, async () => {
+      const rec = await registry.get(appId);
+      if (!rec) return false;
+      if (beforeDelete) await beforeDelete(rec);
+      await tracker.closeTab(appId);
+      await new Promise((r) => setTimeout(r, 100));
+      await opfsForApp(appId).nuke();
+      await repositories.destroyApp(appId);
+      await registry.delete(appId);
+      return true;
+    });
+
+  /** @param {{ appId?: string, sessionId?: string, to: string }} args */
+  const restoreVersion = async ({ appId, sessionId, to }) => {
+    const id = await resolveId({ appId, sessionId });
+    const result = await withWriteLock(id, () => repositories.restoreApp(id, { to }));
+    tracker.reloadTab(id).catch(() => {});
+    return result;
+  };
+
+  /** @param {{ appId?: string, sessionId?: string, name: string }} args */
+  const checkoutBranch = async ({ appId, sessionId, name }) => {
+    const id = await resolveId({ appId, sessionId });
+    const result = await withWriteLock(id, () => repositories.checkout({ kind: 'app', id }, { name }));
+    tracker.reloadTab(id).catch(() => {});
+    return result;
   };
 
   /**
@@ -232,11 +321,15 @@ export const createAppClient = ({ registry, tracker }) => {
 
   return {
     resolveId,
-    create, update,
+    create, createFromGit, update,
     writeFile, readFile, listFiles, deleteFile,
     open,
     delete: deleteApp,
+    restoreVersion,
+    checkoutBranch,
     search,
     opfsForApp,
+    withWriteLock,
+    repositories,
   };
 };

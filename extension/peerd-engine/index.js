@@ -50,6 +50,14 @@ export { createEditor } from './editor.js';
 // --- OPFS helpers (rooted; usable in any extension context) ---
 export { opfsHelpers } from './opfs.js';
 
+// --- Browser-native Git repositories (trusted engine resource, not a sandbox) ---
+export { createRepositoryService } from './repository/repository-service.js';
+export { createOpfsGitFs, normalizeRepositoryPath } from './repository/opfs-fs.js';
+export { normalizeGitRemote, gitRemoteOwnsRequest, smartHttpAuthHeader } from './repository/remote.js';
+export { repositoryPaths, appRepositoryRef, notebookRepositoryRef } from './repository/paths.js';
+export { diffRepositorySnapshots } from './repository/diff.js';
+export { buildAppManifest, parseAppManifest } from './app-manifest.js';
+
 // --- App composition (multi-file → single HTML body for the runner) ---
 export { composeApp, stripMetaRefresh } from './app-compose.js';
 export {

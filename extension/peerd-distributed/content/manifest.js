@@ -42,6 +42,9 @@ export { manifestHash };
 // thousand-fold. Bound it on the FETCH path, before any chunk is pulled.
 // Aligns with apps/loader.js MAX_TOTAL_CHARS.
 export const MAX_BUNDLE_BYTES = 50_000_000;
+export const MAX_MANIFEST_BYTES = 256_000;
+export const MAX_MANIFEST_CHUNKS = 256;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 /**
  * Reject an over-large or amplified manifest BEFORE any chunk is fetched or the
@@ -55,18 +58,38 @@ export const MAX_BUNDLE_BYTES = 50_000_000;
  * @param {Manifest} manifest
  */
 export const assertBundleWithinLimits = (manifest) => {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('manifest malformed');
+  let encoded;
+  try { encoded = JSON.stringify(manifest); }
+  catch { throw new Error('manifest is not JSON-serializable'); }
+  if (new TextEncoder().encode(encoded).byteLength > MAX_MANIFEST_BYTES) {
+    throw new Error('manifest exceeds the wire ceiling');
+  }
   const chunks = manifest?.chunks;
   if (!Array.isArray(chunks)) throw new Error('manifest has no chunk list');
+  if (chunks.length > MAX_MANIFEST_CHUNKS) throw new Error('manifest has too many chunks');
+  /** @type {Array<[string, number]>} */
+  const stringFields = [['type', 32], ['mime', 128], ['entry', 512], ['publisher', 256], ['sig', 512]];
+  for (const [field, cap] of stringFields) {
+    const value = manifest[field];
+    if (value != null && (typeof value !== 'string' || value.length > cap)) throw new Error(`manifest ${field} invalid`);
+  }
   let declared = 0;
+  const sizesByHash = new Map();
   for (const c of chunks) {
+    if (!c || typeof c !== 'object' || !SHA256_HEX.test(c.hash)) throw new Error('manifest chunk hash invalid');
     const size = c?.size;
-    if (!Number.isInteger(size) || size < 0) throw new Error('manifest chunk size invalid');
+    if (!Number.isSafeInteger(size) || size < 0 || size > 262_144) throw new Error('manifest chunk size invalid');
+    if (sizesByHash.has(c.hash) && sizesByHash.get(c.hash) !== size) {
+      throw new Error('manifest reuses a chunk hash with conflicting sizes');
+    }
+    sizesByHash.set(c.hash, size);
     declared += size;
     if (declared > MAX_BUNDLE_BYTES) {
       throw new Error(`bundle too large: chunks declare more than ${MAX_BUNDLE_BYTES} bytes`);
     }
   }
-  if (!Number.isInteger(manifest.size) || manifest.size !== declared) {
+  if (!Number.isSafeInteger(manifest.size) || manifest.size !== declared) {
     throw new Error(`manifest size ${manifest?.size} does not match its chunk list (${declared})`);
   }
 };

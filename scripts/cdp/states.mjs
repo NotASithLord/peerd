@@ -896,6 +896,47 @@ export const STATES = [
     },
   },
 
+  // --- visual (WIDE): browser-native Git history on an App -------------------
+  // Creates through the real import→App→Git path, then opens the Library's
+  // developer panel. Import avoids opening a second tab during the visual state,
+  // while still exercising the production App client and OPFS repository init.
+  // This covers what assertions cannot see: dense log rows, remote controls,
+  // and the restore affordance in both themes.
+  {
+    name: 'home-library-git', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const imported = await evalIn(ctx.page, `(async () => {
+        const { buildAppExport } = await import('/peerd-engine/index.js');
+        const envelope = await buildAppExport({
+          record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
+          files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
+        });
+        return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+      })()`, true);
+      rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
+      const branched = imported?.id ? await evalIn(ctx.page,
+        `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(imported.id)}, name: 'feature/visual', checkout: true })`, true) : null;
+      rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
+      const page = await openWidePage(ctx, 'home/home.html');
+      try {
+        await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.library-name')].some((n) => n.textContent.includes('Versioned App'))`),
+        { budgetMs: 20_000, pollMs: 80 });
+        await evalIn(page, `(() => {
+          const name = [...document.querySelectorAll('.library-name')].find((n) => n.textContent.includes('Versioned App'));
+          name?.closest('.library-card')?.querySelector('.library-kebab')?.click();
+        })()`);
+        await waitFor(() => evalIn(page, `!![...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `[...document.querySelectorAll('.library-menu-item')].find((b) => b.textContent === 'History & Git')?.click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('.library-repository .library-commit')`),
+          { budgetMs: 20_000, pollMs: 80 });
+        await rec.visualPage('home-library-git', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // --- visual (WIDE): the full-tab options / settings page --------------------
   {
     name: 'options-fulltab', kind: 'visual', phase: 'post-unlock',

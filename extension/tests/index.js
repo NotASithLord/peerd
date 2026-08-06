@@ -78,6 +78,7 @@ import './unit/red-team/sandbox-escape.test.js';
 
 // --- chassis: vm-tab ---
 import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
+import './unit/peerd-engine/repository.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';

@@ -235,8 +235,6 @@ import {
   normalizeConfirmActions,
   confirmActionsFromRecord,
   // edit (SEARCH/REPLACE diff editing + review-diff snapshots, feature 02)
-  createBrowserSnapshotStore,
-  createCheckpointManager,
   // cost telemetry (feature 06): normalize for the state push + the
   // per-turn tracker (fold/persist/push/halt with all IO injected).
   // addUsage/limitExceeded also serve the script/model-call route's cost
@@ -363,7 +361,14 @@ import {
   needsWebWriteConfirm,
   // §11.5: the dormant App-bodies store's write gate (self-hosted DB).
   setAppBodyWriteGate,
+  createRepositoryService,
+  parseAppManifest,
 } from '/peerd-engine/index.js';
+// MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
+// statically reachable only from this host and inject it into the otherwise
+// operation-lazy repository service; unrelated peerd-engine consumers do not
+// inherit these bytes through the public barrel.
+import browserGit from '/vendor/isomorphic-git/index.js';
 import { createDebuggerPool } from './debugger-pool.js';
 import { normalizeSettingsPatch } from './settings-patch.js';
 import { makeSettingsStore } from './settings-store.js';
@@ -1766,6 +1771,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // why: App kind — DOM-bearing artifact the agent built for the
     // user. appClient combines registry (metadata) + body store (IDB).
     appClient,
+    // why separate from appClient: both App and Notebook actors use the narrow
+    // repository surface without inheriting either engine client's wider API.
+    repositories,
     appRegistry,
     appTabTracker,
     // why: the dweb network surface for the dweb_share/discover/install tools —
@@ -1775,17 +1783,11 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // also no-op. share reads the app's OPFS bundle like export does.
     dweb: (DWEB_ENABLED && settingsStore.get().dwebEnabled) ? {
       share: async (/** @type {string} */ appId) => {
-        const record = await appRegistry.get(appId);
-        if (!record) return { ok: false, error: 'app-not-found' };
-        const opfs = opfsHelpers(['peerd-apps', appId]);
-        /** @type {Record<string, any>} */ const files = {};
-        for (const f of await opfs.list()) { const path = f.path.replace(/^\/+/, ''); files[path] = await opfs.read(path); }
-        await ensureOffscreen();
-        const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/share-app', name: record.name, entry: record.entryFile, files }));
-        // Mark shared so deleting this app later un-shares it (stops serving the
-        // bytes) — same bookkeeping as the Library's Share button.
-        if (r?.ok) { try { await appRegistry.update(appId, { shared: true }); } catch (e) { console.debug('[dweb.share] mark shared failed', e); } }
-        return r;
+        // why one route: user Share and agent dweb_share must publish the same
+        // signed release envelope, Git provenance, changelog, monotonic seq,
+        // and registry baseline. A direct offscreen relay silently forked those
+        // semantics and made agent-published releases weaker.
+        return dwebToolRoutes['dweb/base/share-app']({ appId });
       },
       discover: async () => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/heard' }); },
       install: async (/** @type {any} */ { uri, name } = {}) => { await ensureOffscreen(); return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name }); },
@@ -2395,7 +2397,13 @@ const appTabTracker = createAppTabTracker({
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
 });
-const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker });
+const repositories = createRepositoryService({
+  loadGit: async () => browserGit,
+  webFetch,
+  getSecret,
+  audit: (event) => { auditLog.append(event).catch(() => {}); },
+});
+const appClient = createAppClient({ registry: appRegistry, tracker: appTabTracker, repositories });
 
 // Sessions that have ENGAGED the dweb — a dweb tool was called this turn-or-
 // earlier. Monotonic per session, SW-lifetime (a cold start resets it; the next
@@ -2426,34 +2434,36 @@ const commandSources = mergeSources([
 // a documented V1.x gap (DEV-NOTES.md). The manager already accepts any
 // scope, so adding a `notebook:<id>` adapter later is purely additive.
 const SNAPSHOT_SCOPE_APP = (/** @type {string} */ appId) => `app:${appId}`;
-const appWorkspaceAdapter = (/** @type {string} */ appId) => {
-  const opfs = appClient.opfsForApp(appId);
-  return {
-    readAll: async () => {
-      const files = await opfs.list();
-      /** @type {Record<string,string>} */
-      const out = {};
-      for (const f of files) {
-        const path = f.path.replace(/^\/+/, '');
-        try { out[path] = await opfs.read(path); }
-        catch { /* skip unreadable (binary/locked) entries */ }
-      }
-      return out;
-    },
-    writeFile: (/** @type {string} */ path, /** @type {any} */ content) => opfs.write(path, content),
-    deleteFile: (/** @type {string} */ path) => opfs.delete(path).catch(() => {}),
-  };
+// Apps now use their standard Git repository as the checkpoint substrate. The
+// turn-driver/reviewer seam stays unchanged: capture commits the turn once;
+// diffSince compares the prior commit (or an explicit OID) to the live tree.
+// `workspaceForScope` remains above as the binary-safe migration seam for a
+// future Notebook checkpoint backend, but App snapshots no longer duplicate
+// their bytes into the legacy miniature store.
+const checkpointMgr = {
+  capture: async (/** @type {{ scope: string, label?: string|null }} */ { scope, label }) => {
+    if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
+    const appId = scope.slice('app:'.length);
+    const result = await repositories.coordinate({ kind: 'app', id: appId }, async () => {
+      const status = await repositories.statusApp(appId);
+      const paths = status.changed.slice(0, 3).map((/** @type {{path:string}} */ change) => change.path);
+      const automatic = paths.length
+        ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
+        : 'agent turn';
+      return repositories.commitApp(appId, { message: label || automatic });
+    });
+    return result?.oid ? { id: result.oid, scope } : null;
+  },
+  diffSince: async (/** @type {{ scope?: string|null, ref?: string|null }} */ { scope, ref }) => {
+    if (typeof scope !== 'string' || !scope.startsWith('app:')) return { files: [] };
+    const appId = scope.slice('app:'.length);
+    const status = await repositories.statusApp(appId);
+    const from = ref || status.oid;
+    if (!from) return { files: [] };
+    const result = await repositories.diffApp(appId, { from });
+    return { files: result.files, ref: from };
+  },
 };
-const workspaceForScope = (/** @type {string} */ scope) => {
-  if (typeof scope === 'string' && scope.startsWith('app:')) {
-    return appWorkspaceAdapter(scope.slice('app:'.length));
-  }
-  return null; // unknown scope kind (notebook snapshots: V1.x)
-};
-const checkpointMgr = createCheckpointManager({
-  store: createBrowserSnapshotStore(),
-  workspaceFor: workspaceForScope,
-});
 
 /**
  * Resolve the App scope to snapshot for a session, or null if the session
@@ -5519,6 +5529,16 @@ const resumeSchedules = () => Promise.resolve(/** @type {any} */ (goalRunner)?.r
   .catch((e) => console.error('[sw] schedule catch-up failed', e));
 const ensureSession = ensureCurrentSession;
 
+// The tool needs the exact same handler semantics as the extension route. The
+// factory is stateless; the dispatcher constructs its own instance inline below
+// so the route-wiring invariant can audit its dependency object mechanically.
+const dwebToolRoutes = makeDwebRoutes({
+  vault, auditLog, kv, ensureOffscreen, browser,
+  appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
+  DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
+  onBaseNetworkStopped, repositories,
+});
+
 // Message routes live in background/routes/*.js as import-free, deps-injected
 // factories. Each is wired with an EXPLICIT per-module deps object naming
 // exactly the stable collaborators that module needs — so the coupling is
@@ -5604,7 +5624,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     buildAppExport, buildNotebookExport, buildVmRecipeExport,
     openEnvelope, inspectEnvelope, exportFilename,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
-    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract,
+    ensureOffscreen, settingsStore, DWEB_ENABLED, applyWebExtract, repositories, parseAppManifest, kv,
   }),
   ...makeSystemRoutes({
     vault, auditLog, sessions, pushState, kv, memory, buildStateSnapshot, closeSidePanel,
@@ -5680,7 +5700,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
     DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
-    onBaseNetworkStopped,
+    onBaseNetworkStopped, repositories,
   }),
 
   // --- git credentials (host-bound bearer tokens; same vault as API keys) ---
@@ -5758,6 +5778,7 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
     const r = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'dweb/base-host/start' }));
     if (r?.ok) {
       console.log('[sw] dweb base network ONLINE', { did: r.did, peers: r.peers, present: r.present });
+      await reconcilePendingPublications();
       reseedSharedApps().catch((e) => console.warn('[sw] re-seed after start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
       // The dweb AGENT's inbox: join the reserved agent room (idempotent) so
       // inbound peer messages flow as dweb/base-room/event 'direct' events the
@@ -5765,6 +5786,30 @@ function maybeStartBaseNetwork(/** @type {string} */ reason) {
       joinDwebAgentInbox().catch((e) => console.warn('[sw] dweb agent inbox join failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
     } else console.warn('[sw] dweb base network start returned', r);
   })().catch((e) => console.warn('[sw] dweb base network auto-start failed (non-fatal):', (/** @type {{ message?: string }} */ (e))?.message ?? e));
+}
+
+// Complete the tiny publish→catalog two-phase commit after an MV3 restart.
+// A hash already present in the App registry committed successfully; anything
+// else is an interrupted release and is revoked before normal reseeding.
+async function reconcilePendingPublications() {
+  const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+  if (!Object.keys(pending).length) return;
+  const records = new Map((await appRegistry.list()).map((record) => [record.id, record]));
+  const remaining = { ...pending };
+  for (const [appId, publication] of Object.entries(pending)) {
+    const entry = /** @type {any} */ (publication);
+    const record = /** @type {any} */ (records.get(appId));
+    const committed = record?.dweb?.hash === entry.hash || record?.dweb?.published_hashes?.includes?.(entry.hash);
+    if (committed) { delete remaining[appId]; continue; }
+    try {
+      const result = /** @type {any} */ (await browser.runtime.sendMessage({
+        type: 'dweb/base-host/unshare-app', name: entry.name,
+        slug: entry.slug, publisher: entry.publisher, hash: entry.hash, hashes: [entry.hash],
+      }));
+      if (result?.ok) delete remaining[appId];
+    } catch { /* keep the journal for the next online start */ }
+  }
+  await kv.set('dweb.pendingPublications.v1', remaining);
 }
 
 // why: the offscreen base network's discovery Library AND content store are
@@ -5790,14 +5835,25 @@ async function reseedSharedApps() {
   let seeded = 0;
   for (const app of mine) {
     try {
-      const opfs = opfsHelpers(['peerd-apps', app.id]);
       /** @type {Record<string, any>} */ const files = {};
-      for (const f of await opfs.list()) { const path = f.path.replace(/^\/+/, ''); files[path] = await opfs.read(path); }
+      const releaseOid = app.dweb?.git_oid;
+      const versionId = app.dweb?.version_id;
+      if (!releaseOid || !versionId) continue;
+      const committedFiles = await repositories.snapshot({ kind: 'app', id: app.id }, { at: releaseOid });
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      for (const [path, bytes] of Object.entries(committedFiles)) files[path] = decoder.decode(bytes);
       if (!Object.keys(files).length) continue;       // nothing on disk — skip
       const res = /** @type {any} */ (await browser.runtime.sendMessage({
         type: 'dweb/base-host/share-app',
         name: app.name, entry: app.entryFile, files,
         slug: (/** @type {any} */ (app.dweb)).slug, seq: (/** @type {any} */ (app.dweb)).seq, description: (/** @type {any} */ (app.dweb)).description ?? '',
+        created: (/** @type {any} */ (app.dweb)).release_created,
+        expectedHash: versionId,
+        release: {
+          previousVersionId: (/** @type {any} */ (app.dweb)).previous_version_id ?? null,
+          gitCommitOid: (/** @type {any} */ (app.dweb)).source_git_oid ?? (/** @type {any} */ (app.dweb)).git_oid ?? null,
+          changelog: (/** @type {any} */ (app.dweb)).changelog ?? '',
+        },
       }));
       if (res?.ok) seeded += 1;
     } catch (e) { console.debug('[sw] re-seed failed for', app.id, (/** @type {{ message?: string }} */ (e))?.message ?? e); }

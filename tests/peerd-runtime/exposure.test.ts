@@ -133,7 +133,8 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     for (const n of ['vm_boot', 'vm_write_file', 'vm_import', 'vm_delete',
       'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
       'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
-      'app_delete_file', 'app_delete', 'edit_file']) {
+      'app_delete_file', 'app_delete', 'edit_file',
+      'repo_history', 'repo_version', 'repo_remote']) {
       expect(isActorOnlyTool(n)).toBe(true);
     }
     // The bootstrap/catalog surface + script stay on the orchestrator.
@@ -150,6 +151,9 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     expect(isAllowedForActorType('app_read_file', 'app')).toBe(true); // reads allowed for its own
     expect(isAllowedForActorType('edit_file', 'app')).toBe(true);
     expect(isAllowedForActorType('edit_file', 'notebook')).toBe(true);
+    expect(isAllowedForActorType('repo_history', 'app')).toBe(true);
+    expect(isAllowedForActorType('repo_history', 'notebook')).toBe(true);
+    expect(isAllowedForActorType('repo_history', 'webvm')).toBe(false);
     expect(isAllowedForActorType('edit_file', 'webvm')).toBe(false);   // no vm files via edit_file
     expect(isAllowedForActorType('vm_boot', 'app')).toBe(false);       // foreign kind
     expect(isAllowedForActorType('call_api', 'app')).toBe(false);      // non-env tool
@@ -163,6 +167,9 @@ describe('DESIGN-17 actor tier — the tool sets', () => {
     expect(actorTargetIdField('js_delete')).toBe('notebookId');
     expect(actorTargetIdField('js_notebook')).toBe('notebook');
     expect(actorTargetIdField('edit_file')).toBe('targetId');
+    // Repository tools name no id at all: they derive kind + id from the
+    // server-stamped actor context, so there is no model-controlled target.
+    expect(actorTargetIdField('repo_history')).toBe(null);
     expect(actorTargetIdField('vm_write_file')).toBe(null);  // session-default only
     expect(actorTargetId('app_delete', { appId: 'app-9' })).toBe('app-9');
     expect(actorTargetId('app_delete', {})).toBeUndefined();

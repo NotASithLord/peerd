@@ -4,7 +4,8 @@ import { memoryPair } from '../../extension/peerd-distributed/transport/channel.
 import { createSession } from '../../extension/peerd-distributed/transport/session.js';
 import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh.js';
 import { createBaseNetwork } from '../../extension/peerd-distributed/base-network.js';
-import { unpackBundle } from '../../extension/peerd-distributed/content/bundle.js';
+import { packBundle, unpackBundle } from '../../extension/peerd-distributed/content/bundle.js';
+import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
 import { installAppBundle } from '../../extension/peerd-distributed/apps/loader.js';
 
 const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
@@ -42,6 +43,20 @@ describe('the dweb app store (base-network content + discovery)', () => {
     const { entry, files } = unpackBundle(payload);
     expect(entry).toBe('index.html');
     expect(new TextDecoder().decode(files['index.html'])).toBe('<h1>hi from the dweb</h1>');
+    a.close(); b.close();
+  });
+
+  test('reseed with the persisted release timestamp reproduces the exact version identity', async () => {
+    const { a, b } = await linkedPair();
+    const args = {
+      name: 'stable', entry: 'index.html', files: { 'index.html': 'same bytes' },
+      release: { previousVersionId: null, gitCommitOid: 'a'.repeat(40), changelog: 'initial release' },
+      created: 1_700_000_000_000,
+    };
+    const first = await a.publishApp(args);
+    const reseeded = await a.publishApp(args);
+    expect(reseeded.hash).toBe(first.hash);
+    expect(reseeded.uri).toBe(first.uri);
     a.close(); b.close();
   });
 
@@ -200,7 +215,7 @@ describe('the dweb app store (base-network content + discovery)', () => {
 
     // A deletes/un-shares it.
     const res = await a.unshareApp({ slug: 'ping' });
-    expect(res.unserved).toBe(true);          // bytes un-announced from the content store
+    expect(res.unserved).toBe(1);             // one release un-announced from the content store
     expect(res.dwapp_id).toBe(dwapp_id);
     expect(a.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(false); // gone from our own Discover
 
@@ -234,6 +249,26 @@ describe('the dweb app store (base-network content + discovery)', () => {
       uri, publisher: ia.did, hash, version_id: hash, dwapp_id: 'dwapp-abc', slug: 'tracked', seq: 7,
     });
     a.close(); b.close();
+  });
+
+  test('install binds executable bytes to the publisher named by the card and URI', async () => {
+    const { a, b, ib } = await linkedPair();
+    const { uri } = await a.publishApp({ name: 'bound', entry: 'index.html', files: { 'index.html': 'x' } });
+    const { manifest, payload } = await b.fetchApp(uri);
+    await expect(installAppBundle({
+      uri, manifest, payload, expectedPublisher: ib.did,
+      install: async () => ({ id: 'must-not-install' }),
+    })).rejects.toThrow('manifest publisher does not match the discovery card');
+    a.close(); b.close();
+  });
+
+  test('never installs unsigned executable content, even when its hash is valid', async () => {
+    const payload = packBundle({ entry: 'index.html', files: { 'index.html': new TextEncoder().encode('x') } });
+    const { manifest, hash } = await buildManifest({ payload, type: 'app', entry: 'index.html' });
+    await expect(installAppBundle({
+      uri: `peerd://${hash}`, manifest, payload,
+      install: async () => ({ id: 'must-not-install' }),
+    })).rejects.toThrow('require an authored URI and signed publisher');
   });
 
   test('install makes you a seeder: a third peer fetches from the installer after the author leaves', async () => {

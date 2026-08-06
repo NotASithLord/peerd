@@ -11,16 +11,35 @@ const baseDeps = (over: any = {}) => {
     ensureOffscreen: async () => {},
     browser: { runtime: { sendMessage: async (m: any) => { sent.push(m); return over._reply ?? { ok: true }; } } },
     appRegistry: { get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html' }), list: async () => [], update: async (_i: any, p: any) => ({ id: 'a1', ...p }) },
-    appClient: { create: async (r: any) => ({ id: 'new', ...r }), opfsForApp: () => ({ list: async () => [], read: async () => '', write: async () => {}, delete: async () => {} }) },
-    appTabTracker: { ensureTab: async () => {}, reloadTab: async () => {} },
+    appClient: { create: async (r: any) => ({ id: 'new', ...r }), delete: async () => true, withWriteLock: async (_id: string, op: () => Promise<any>) => op(), opfsForApp: () => ({ list: async () => [], read: async () => '', write: async () => {}, delete: async () => {} }) },
+    repositories: {
+      coordinate: async (_ref: any, op: () => Promise<any>) => op(),
+      statusApp: async () => ({ oid: 'local-oid', branch: 'main', dirty: false }),
+      commitApp: async () => ({ oid: 'local-oid', changed: [], created: false }),
+      historyApp: async () => [{ oid: 'local-oid', message: 'publish dweb release' }],
+      snapshot: async () => ({ 'i.html': new TextEncoder().encode('body') }),
+      matches: async () => true,
+      fork: async () => ({ oid: 'local-oid' }),
+      replaceWorkingTree: async () => ({ oid: 'local-oid', changed: [], created: true }),
+    },
+    appTabTracker: { getTabId: () => null, closeTab: async () => {}, ensureTab: async () => {}, reloadTab: async () => {} },
     opfsHelpers: () => ({ list: async () => [], read: async () => '' }),
     settingsStore: { get: () => ({ dwebEnabled: true }) },
     DWEB_ENABLED: true,
     DWEB_IDENTITY_SECRET: 'distributed/identity/v1',
     APP_TAB_GROUP_TITLE: 'peerd apps',
-    ...over,
   };
-  return { deps, sent, audits };
+  return {
+    deps: {
+      ...deps,
+      ...over,
+      appClient: { ...deps.appClient, ...(over.appClient ?? {}) },
+      repositories: { ...deps.repositories, ...(over.repositories ?? {}) },
+      appTabTracker: { ...deps.appTabTracker, ...(over.appTabTracker ?? {}) },
+    },
+    sent,
+    audits,
+  };
 };
 
 describe('dweb gate (build flag + setting)', () => {
@@ -79,6 +98,64 @@ describe('dweb app store', () => {
     });
     await makeDwebRoutes(deps)['dweb/base/share-app']({ appId: 'a1', slug: 's' });
     expect(updated).toMatchObject({ shared: true, dweb: { uri: 'u2', version_id: 'h', slug: 's', dwapp_id: 'd', seq: 2 } });
+  });
+  test('share-app revokes publication when its local version slot cannot persist', async () => {
+    const hash = 'a'.repeat(64);
+    const { deps, sent } = baseDeps({
+      _reply: { ok: true, uri: `peerd://did:key:z/${hash}`, publisher: 'did:key:z', hash, slug: 's', dwapp_id: 'd', seq: 2 },
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html', dweb: {} }),
+        update: async () => { throw new Error('idb unavailable'); },
+      },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/base/share-app']({ appId: 'a1', slug: 's' });
+    expect(result).toMatchObject({ ok: false, compensated: true });
+    expect(sent.at(-1)).toMatchObject({ type: 'dweb/base-host/unshare-app', hash, hashes: [hash] });
+  });
+
+  test('publication journal rejects malformed hashes and persists valid releases', async () => {
+    let stored: any = {};
+    const { deps } = baseDeps({ kv: { get: async () => stored, set: async (_key: string, value: any) => { stored = value; } } });
+    const routes = makeDwebRoutes(deps);
+    expect((await routes['dweb/publication-pending']({ appId: 'a1', hash: 'bad' })).ok).toBe(false);
+    const hash = 'b'.repeat(64);
+    expect((await routes['dweb/publication-pending']({ appId: 'a1', hash, slug: 's' })).ok).toBe(true);
+    expect(stored.a1.hash).toBe(hash);
+  });
+  test('a peer update refuses to overwrite a diverged local repository', async () => {
+    let replaced = false;
+    const { deps } = baseDeps({
+      appRegistry: { get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html', dweb: { git_oid: 'base' } }) },
+      repositories: {
+        statusApp: async () => ({ oid: 'local', branch: 'main', dirty: true }),
+        replaceWorkingTree: async () => { replaced = true; return { oid: 'new' }; },
+      },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/app-update']({ appId: 'a1', files: { 'i.html': 'new' }, entryFile: 'i.html', dweb: { version_id: 'v2' } });
+    expect(result).toMatchObject({ ok: false, error: 'local-changes', requiresAction: true });
+    expect(replaced).toBe(false);
+  });
+  test('fork strategy preserves local files before applying the verified update', async () => {
+    let forked: any = null;
+    let replacement: any = null;
+    const { deps } = baseDeps({
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html', tags: [], dweb: { git_oid: 'base' } }),
+        update: async (_id: string, patch: any) => ({ id: 'a1', ...patch }),
+      },
+      appClient: {
+        opfsForApp: () => ({ list: async () => [{ path: '/i.html' }], read: async () => 'local' }),
+        create: async (input: any) => { forked = input; return { id: 'fork-1', name: input.name }; },
+      },
+      repositories: {
+        statusApp: async () => ({ oid: 'local', branch: 'main', dirty: true }),
+        replaceWorkingTree: async (_ref: any, input: any) => { replacement = input; return { oid: 'new-base' }; },
+      },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/app-update']({ appId: 'a1', strategy: 'fork', files: { 'i.html': 'upstream' }, entryFile: 'i.html', dweb: { version_id: 'v2' } });
+    expect(result).toMatchObject({ ok: true, fork: { id: 'fork-1' } });
+    expect(forked.files).toEqual({ 'i.html': 'local' });
+    expect(replacement.files).toEqual({ 'i.html': 'upstream' });
   });
   test('updates flags an installed app when a higher-seq different version is heard', async () => {
     const { deps } = baseDeps({

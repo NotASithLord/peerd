@@ -73,6 +73,8 @@ describe('restrictCtxCapabilities', () => {
     actorCancel: () => {},
     requestReview: () => {},
     dweb: { share: () => {} },
+    repositories: { status: () => {} },
+    appClient: { create: () => {} },
     // non-capability fields — always retained
     denylist: ['evil.com'],
     allowlist: ['https://api.anthropic.com'],
@@ -115,6 +117,8 @@ describe('restrictCtxCapabilities', () => {
     expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
+    expect('repositories' in restrictCtxCapabilities(fullCtx(), new Set(['repo_history']))).toBe(true);
+    expect('appClient' in restrictCtxCapabilities(fullCtx(), new Set(['repo_history']))).toBe(false);
     // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
     expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);

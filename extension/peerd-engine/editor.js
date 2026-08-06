@@ -162,6 +162,7 @@ const injectStyle = () => {
  * @param {() => void} [config.onRun]           -- Cmd-Enter / Ctrl-Enter handler
  * @param {(path: string, content: string) => void} [config.onSaved]
  * @param {string} [config.initialFile]         -- file to open first (default: pinnedFile)
+ * @param {{read:(path:string)=>Promise<string>,write:(path:string,content:string)=>Promise<void>,delete:(path:string)=>Promise<void>,list:()=>Promise<Array<{path:string,size:number}>>}} [config.fileSystem]
  *
  * Language is auto-picked per file by extension (.html → html,
  * .css → css, anything else → javascript).
@@ -175,6 +176,7 @@ export const createEditor = async (config) => {
     onRun,
     onSaved,
     initialFile,
+    fileSystem,
   } = config;
 
   injectStyle();
@@ -200,7 +202,7 @@ export const createEditor = async (config) => {
   const host = /** @type {HTMLElement} */ (mountEl.querySelector('.pe-host'));
 
   // --- OPFS helpers ---
-  const opfs = opfsHelpers(opfsBase);
+  const opfs = fileSystem ?? opfsHelpers(opfsBase);
   const { read: opfsRead, write: opfsWrite, delete: opfsDelete, list: opfsList } = opfs;
 
   // --- CodeMirror ---

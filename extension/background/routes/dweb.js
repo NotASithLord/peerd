@@ -24,13 +24,33 @@ export const makeDwebRoutes = (deps) => {
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, opfsHelpers, settingsStore,
     DWEB_ENABLED, DWEB_IDENTITY_SECRET, APP_TAB_GROUP_TITLE,
-    onBaseNetworkStopped,
+    onBaseNetworkStopped, repositories,
   } = deps;
 
   // The two-input gate every route shares (build flag + user setting).
   const dwebOn = () => DWEB_ENABLED && settingsStore.get().dwebEnabled;
 
   return {
+    // Offscreen records the served hash before announcing its mutable card.
+    // A worker restart can therefore revoke an interrupted publication.
+    'dweb/publication-pending': async ({ appId, hash, slug, publisher, name } = {}) => {
+      if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      if (typeof appId !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) return { ok: false, error: 'invalid-publication-journal-entry' };
+      const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+      await kv.set('dweb.pendingPublications.v1', {
+        ...pending,
+        [appId]: { appId, hash, slug: slug ?? null, publisher: publisher ?? null, name: String(name || '').slice(0, 80) },
+      });
+      return { ok: true };
+    },
+    'dweb/publication-clear': async ({ appId, hash } = {}) => {
+      const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+      if (!pending[appId] || (hash && pending[appId].hash !== hash)) return { ok: true };
+      const next = { ...pending };
+      delete next[appId];
+      await kv.set('dweb.pendingPublications.v1', next);
+      return { ok: true };
+    },
     // Persistent-identity storage for the room-hosting page. The MODULE CODE that
     // mints the Ed25519 material runs in the PAGE (app-tab, via loadDweb); the SW
     // only owns the vault and exposes these two routes scoped to the single
@@ -76,14 +96,21 @@ export const makeDwebRoutes = (deps) => {
     // uses, same size ceiling enforced in appClient.
     'dweb/app-install': async ({ name, files, entryFile, dweb }) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
+      let record = null;
       try {
-        const record = await appClient.create({ name, files, entryFile, dweb, source: 'dweb' });
+        record = await appClient.create({ name, files, entryFile, dweb, source: 'dweb' });
+        const repository = await repositories.statusApp(record.id);
+        // Local Git history and publisher Git provenance are distinct. git_oid
+        // is OUR baseline commit for safe future update checks; source_git_oid
+        // came from the signed release and is never trusted as local authority.
+        record = await appRegistry.update(record.id, { dweb: { git_oid: repository.oid } });
         await auditLog.append({
           type: 'dweb_app_installed',
           details: { appId: record.id, uri: dweb?.uri ?? null, publisher: dweb?.publisher ?? null },
         });
         return { ok: true, app: record };
       } catch (e) {
+        if (record?.id) await appClient.delete(record.id).catch(() => {});
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
@@ -94,31 +121,127 @@ export const makeDwebRoutes = (deps) => {
     // OPFS dir first, then write the new set — otherwise stale files linger and can
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
-    'dweb/app-update': async ({ appId, files, entryFile, dweb }) => {
+    'dweb/app-update': async ({ appId, files, entryFile, dweb, strategy }) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      let reopen = false;
       try {
+        // The App editor writes OPFS directly from its tab. Quiesce that host,
+        // then serialize every SW-side writer through the same per-App lock so
+        // the divergence check, optional fork, and replacement are one mutation.
+        reopen = appTabTracker.getTabId(appId) != null;
+        if (reopen) {
+          await appTabTracker.closeTab(appId);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return await appClient.withWriteLock(appId, async () => {
         const rec = await appRegistry.get(appId);
         if (!rec) return { ok: false, error: 'app-not-found' };
+        if (rec.dweb?.publisher && dweb?.publisher !== rec.dweb.publisher) {
+          return { ok: false, error: 'publisher-changed' };
+        }
+        if (rec.dweb?.dwapp_id && dweb?.dwapp_id !== rec.dweb.dwapp_id) {
+          return { ok: false, error: 'dwapp-id-changed' };
+        }
         const opfs = appClient.opfsForApp(appId);
-        // Clear the old file set, then write the new one.
+        /** @type {Record<string,string>} */ const previousFiles = Object.create(null);
         for (const f of await opfs.list()) {
           const path = f.path.replace(/^\/+/, '');
-          try { await opfs.delete(path); } catch { /* best-effort */ }
+          previousFiles[path] = await opfs.read(path);
         }
-        for (const [path, content] of Object.entries(files || {})) await opfs.write(path, content);
-        const updated = await appRegistry.update(appId, {
+        const repository = await repositories.statusApp(appId);
+        const diverged = !rec.dweb?.git_oid
+          || repository.oid !== rec.dweb.git_oid
+          || !await repositories.matches({ kind: 'app', id: appId }, { at: rec.dweb.git_oid });
+        if (diverged && strategy !== 'replace' && strategy !== 'fork') {
+          return {
+            ok: false,
+            error: 'local-changes',
+            requiresAction: true,
+            currentOid: repository.oid,
+            baseOid: rec.dweb?.git_oid ?? null,
+          };
+        }
+        let fork = null;
+        if (diverged && strategy === 'fork') {
+          /** @type {Record<string,string>} */ const localFiles = Object.create(null);
+          for (const f of await opfs.list()) {
+            const path = f.path.replace(/^\/+/, '');
+            localFiles[path] = await opfs.read(path);
+          }
+          try {
+            fork = await appClient.create({
+              name: `${rec.name} — local fork`,
+              files: localFiles,
+              entryFile: rec.entryFile,
+              tags: [...new Set([...(rec.tags || []), 'fork'])],
+              // Keep the dweb runtime capability, but deliberately drop the
+              // publisher/update identity: this is a new local lineage, not an
+              // impersonation of the upstream release stream.
+              dweb: {
+                uri: null, publisher: null, hash: null, local: true,
+                forked_from: {
+                  publisher: rec.dweb?.publisher ?? null,
+                  dwapp_id: rec.dweb?.dwapp_id ?? null,
+                  version_id: rec.dweb?.version_id ?? null,
+                },
+              },
+              source: 'local',
+            });
+            await repositories.fork(
+              { kind: 'app', id: appId },
+              { kind: 'app', id: fork.id },
+            );
+          } catch (error) {
+            if (fork?.id) await appClient.delete(fork.id).catch(() => {});
+            throw error;
+          }
+        }
+        // One repository transaction replaces the full tree and records the new
+        // verified release. This removes stale nested directories too; a loop of
+        // leaf deletes cannot handle file↔directory path changes safely.
+        const committed = await repositories.replaceWorkingTree(
+          { kind: 'app', id: appId },
+          { files: files || {}, message: `update from dweb ${dweb?.version_id?.slice?.(0, 10) ?? ''}` },
+        );
+        let updated;
+        try {
+          updated = await appRegistry.update(appId, {
           ...(typeof entryFile === 'string' ? { entryFile } : {}),
-          ...(dweb && typeof dweb === 'object' ? { dweb } : {}),
-        });
+          ...(dweb && typeof dweb === 'object' ? {
+            dweb: {
+              ...dweb,
+              git_oid: committed.oid,
+              published_hashes: [...new Set([
+                ...(rec.dweb?.published_hashes ?? []),
+                ...(typeof dweb.hash === 'string' ? [dweb.hash] : []),
+              ])],
+            },
+          } : {}),
+          });
+          if (!updated) throw new Error('app disappeared while recording update lineage');
+        } catch (error) {
+          // Restore executable bytes before surfacing a metadata failure. The
+          // rollback commit intentionally makes the old baseline look diverged
+          // if registry persistence remains unavailable, so a retry cannot
+          // silently overwrite state under the wrong lineage.
+          await repositories.replaceWorkingTree(
+            { kind: 'app', id: appId },
+            { files: previousFiles, message: 'rollback failed dweb update' },
+          );
+          throw error;
+        }
         appTabTracker.reloadTab(appId).catch(() => {});
         await auditLog.append({
           type: 'dweb_app_updated',
           details: { appId, uri: dweb?.uri ?? null, version_id: dweb?.version_id ?? null },
         });
-        return { ok: true, app: updated };
+        return { ok: true, app: updated, ...(fork ? { fork: { id: fork.id, name: fork.name } } : {}) };
+        });
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      } finally {
+        if (reopen) appTabTracker.ensureTab(appId, { active: false, groupTitle: APP_TAB_GROUP_TITLE }).catch(() => {});
       }
     },
 
@@ -244,17 +367,50 @@ export const makeDwebRoutes = (deps) => {
     // dwapp_id stays stable. On success we persist the version identity.
     'dweb/base/share-app': async ({ appId, slug } = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
-      const record = await appRegistry.get(appId);
-      if (!record) return { ok: false, error: 'app-not-found' };
-      const opfs = opfsHelpers(['peerd-apps', appId]);
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      try {
+        return await appClient.withWriteLock(appId, async () => {
+        const record = await appRegistry.get(appId);
+        if (!record) return { ok: false, error: 'app-not-found' };
+        const beforeRelease = await repositories.statusApp(appId);
+        const releaseChanges = beforeRelease.changed ?? [];
+        const releasePaths = releaseChanges.slice(0, 3).map((/** @type {{path:string}} */ change) => change.path);
+        const committed = await repositories.commitApp(appId, {
+          message: releasePaths.length
+            ? `release: update ${releasePaths.join(', ')}${releaseChanges.length > releasePaths.length ? ', …' : ''}`
+            : 'publish dweb release',
+        });
+        const history = await repositories.historyApp(appId, { depth: 100 });
+        const previousGit = record.dweb?.git_oid;
+        const messages = [];
+        for (const item of history) {
+          if (previousGit && item.oid === previousGit) break;
+          if (item.message) messages.push(item.message.split('\n')[0]);
+          if (messages.length >= 20) break;
+        }
+        const changelog = messages.reverse().join('\n').slice(0, 1200);
+        const snapshot = await repositories.snapshot({ kind: 'app', id: appId }, { at: committed.oid });
+      const release = {
+        previousVersionId: record.dweb?.version_id ?? null,
+        gitCommitOid: committed.oid,
+        changelog,
+      };
       /** @type {Record<string, any>} */
-      const files = {};
-      for (const f of await opfs.list()) { const path = f.path.replace(/^\/+/, ''); files[path] = await opfs.read(path); }
+      const files = Object.create(null);
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+        for (const [path, bytes] of Object.entries(snapshot)) files[path] = decoder.decode(bytes);
+        if (!Object.hasOwn(files, record.entryFile)) return { ok: false, error: 'release-entry-missing' };
       // Reshare locks to the stored slug; first share takes the dialog's edited slug.
       const useSlug = record.dweb?.slug || slug || undefined;
       await ensureOffscreen();
-      const r = await browser.runtime.sendMessage({ type: 'dweb/base-host/share-app', name: record.name, entry: record.entryFile, files, slug: useSlug });
-      if (r?.ok) {
+      const nextSeq = Math.max(Date.now(), Number(record.dweb?.seq ?? -1) + 1);
+      // Manifest `created` is hashed. Persist this exact value so a network-host
+      // restart can re-seed the SAME signed version instead of accidentally
+      // minting new content identity from unchanged files.
+      const releaseCreated = Date.now();
+        const publishedName = record.name.slice(0, 64);
+        const r = await browser.runtime.sendMessage({ type: 'dweb/base-host/share-app', appId, name: publishedName, entry: record.entryFile, files, slug: useSlug, seq: nextSeq, release, created: releaseCreated });
+        if (!r?.ok) return r;
         // `shared` drives the "you're seeding this" delete confirm + the un-share path;
         // the dweb slot records the version identity (merged, so it survives reshares).
         try {
@@ -263,11 +419,45 @@ export const makeDwebRoutes = (deps) => {
             dweb: {
               uri: r.uri, publisher: r.publisher ?? null, hash: r.hash, version_id: r.hash,
               slug: r.slug, dwapp_id: r.dwapp_id, seq: r.seq, local: record.dweb?.local ?? true,
+              git_oid: committed.oid, source_git_oid: committed.oid,
+              previous_version_id: release.previousVersionId ?? undefined,
+              changelog, release_created: releaseCreated,
+              published_hashes: [...new Set([...(record.dweb?.published_hashes ?? []), r.hash])],
             },
           });
-        } catch (e) { console.debug('[share-app] persist version slot failed', e); }
+        } catch (error) {
+          // Network publication is externally visible. If its revocation record
+          // cannot be made durable, immediately remove both card and bytes.
+          const compensation = await browser.runtime.sendMessage({
+            type: 'dweb/base-host/unshare-app', name: publishedName,
+            slug: r.slug, publisher: r.publisher, hash: r.hash, hashes: [r.hash],
+          }).catch(() => null);
+          const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+          if (pending[appId]?.hash === r.hash) {
+            const next = { ...pending }; delete next[appId];
+            await kv.set('dweb.pendingPublications.v1', next).catch(() => {});
+          }
+          return {
+            ok: false,
+            error: `share-persistence-failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}`,
+            compensated: compensation?.ok === true,
+          };
+        }
+        // A stale journal is safe: startup sees the hash in the durable App
+        // record and clears it without revoking. Journal cleanup is therefore
+        // best-effort and must never roll back a committed release.
+        try {
+          const pending = (await kv.get('dweb.pendingPublications.v1')) ?? {};
+          if (pending[appId]?.hash === r.hash) {
+            const next = { ...pending }; delete next[appId];
+            await kv.set('dweb.pendingPublications.v1', next);
+          }
+        } catch { /* reconciled on the next base-network start */ }
+        return r;
+        });
+      } catch (error) {
+        return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
       }
-      return r;
     },
     // Discover: what peers have announced (gossip cache + DHT hits).
     'dweb/base/heard': async () => {
@@ -278,10 +468,10 @@ export const makeDwebRoutes = (deps) => {
     // Install a discovered app: the offscreen fetches its signed bundle over the
     // base mesh, verifies it, and persists it. The card's version identity rides
     // along so the installed record can be matched against future announces.
-    'dweb/base/install': async ({ uri, name, dwappId, slug, seq } = {}) => {
+    'dweb/base/install': async ({ uri, name, dwappId, slug, seq, publisher } = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
       await ensureOffscreen();
-      return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name, dwappId, slug, seq });
+      return browser.runtime.sendMessage({ type: 'dweb/base-host/install-app', uri, name, dwappId, slug, seq, publisher });
     },
     // Which installed dweb apps have a NEWER version announced? Cross-reference the
     // local catalog against the offscreen discovery Library (the heard cards).
@@ -301,7 +491,7 @@ export const makeDwebRoutes = (deps) => {
         for (const a of tracked) {
           const card = cards.get(a.dweb.dwapp_id);
           if (card?.version_id && card.version_id !== a.dweb.version_id && (card.seq ?? 0) > (a.dweb.seq ?? 0)) {
-            updates[a.id] = { uri: card.uri, version_id: card.version_id, seq: card.seq, name: card.name, slug: card.slug ?? a.dweb.slug ?? null, dwapp_id: a.dweb.dwapp_id };
+            updates[a.id] = { uri: card.uri, version_id: card.version_id, seq: card.seq, name: card.name, slug: card.slug ?? a.dweb.slug ?? null, dwapp_id: a.dweb.dwapp_id, publisher: card.publisher ?? null, previous_version_id: card.previous_version_id ?? null, git_commit_oid: card.git_commit_oid ?? null, changelog: card.changelog ?? '' };
           }
         }
         return { ok: true, updates };
@@ -312,12 +502,12 @@ export const makeDwebRoutes = (deps) => {
     // Update an installed app in place to a newer announced version: the offscreen
     // refetches + verifies the new bundle and the SW overwrites the existing app's
     // files. The user keeps ONE copy that just updates.
-    'dweb/base/update-app': async ({ appId, uri, name, dwappId, slug, seq } = {}) => {
+    'dweb/base/update-app': async ({ appId, uri, name, dwappId, slug, seq, strategy, publisher } = {}) => {
       if (!dwebOn()) return { ok: false, error: 'dweb-disabled' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof uri !== 'string') return { ok: false, error: 'appId-and-uri-required' };
       await ensureOffscreen();
-      return browser.runtime.sendMessage({ type: 'dweb/base-host/update-app', appId, uri, name, dwappId, slug, seq });
+      return browser.runtime.sendMessage({ type: 'dweb/base-host/update-app', appId, uri, name, dwappId, slug, seq, strategy, publisher });
     },
     // A dwapp room op (join/leave/publish/subscribe/dm/presence/history/…) — one
     // thin relay to the offscreen base host. Events flow back to the app-tab

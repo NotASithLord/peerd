@@ -221,6 +221,80 @@ describe('home.library', () => {
     } finally { unmount(); }
   });
 
+  it('an update never overwrites local work without a fork-or-replace choice', async () => {
+    const installed = [{ id: 'app-7', name: 'Notes', tags: [], entryFile: 'index.html',
+      favorite: false, source: 'dweb', thumbnail: null, updatedAt: 4000,
+      dweb: { dwapp_id: 'D', version_id: 'v1', seq: 1, uri: 'peerd://x/v1' } }];
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone(installed) }),
+      'dweb/base/updates': () => ({ ok: true, updates: { 'app-7': { uri: 'peerd://x/v2', version_id: 'v2', seq: 2, name: 'Notes', slug: 'notes', dwapp_id: 'D', changelog: 'Improve sync' } } }),
+      'dweb/base/update-app': (msg) => msg.strategy === 'fork'
+        ? { ok: true, app: { dweb: { version_id: 'v2' } }, fork: { id: 'fork-1', name: 'Notes — local fork' } }
+        : { ok: false, error: 'local-changes' },
+    });
+    const { root, unmount } = await mountView(send, { dweb: true });
+    try {
+      await flush();
+      expect(root.textContent).toContain('Improve sync');
+      clickText(root, 'button', 'Update');
+      await flush();
+      expect(root.textContent).toContain('will not overwrite');
+      clickText(root, 'button', 'Keep a fork & update');
+      await flush();
+      const calls = send.calls.filter((c) => c.type === 'dweb/base/update-app');
+      expect(calls.at(-1)?.strategy).toBe('fork');
+      expect(root.textContent).toContain('Kept your local work');
+    } finally { unmount(); }
+  });
+
+  it('History & Git shows status/log and restore requires a second click', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'index.html', status: 'modified' }] }, remote: { url: 'https://github.com/me/app.git', host: 'github.com' } }),
+      'apps/repository/history': () => ({ ok: true, commits: [{ oid: 'abcdef123456', message: 'checkpoint', timestamp: Date.now() - 1000 }] }),
+      'apps/repository/diff': () => ({ ok: true, diff: { files: [{ path: 'index.html', status: 'modified' }], patch: '--- a/index.html\n+++ b/index.html', truncated: false } }),
+      'apps/repository/restore': () => ({ ok: true, result: { oid: 'restored', restored: true } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      expect(root.textContent).toContain('1 uncommitted change');
+      expect(root.textContent).toContain('checkpoint');
+      clickText(root, '.library-commit button', 'Diff');
+      await flush();
+      expect(root.textContent).toContain('--- a/index.html');
+      clickText(root, '.library-commit button', 'Restore');
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/repository/restore')).toBe(false);
+      clickText(root, '.library-commit button', 'Restore?');
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/repository/restore' && c.to === 'abcdef123456')).toBe(true);
+    } finally { unmount(); }
+  });
+
+  it('uses a developer-supplied checkpoint message', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'script.js', status: 'modified' }] }, remote: null }),
+      'apps/repository/history': () => ({ ok: true, commits: [] }),
+      'apps/repository/commit': () => ({ ok: true, result: { oid: 'new', created: true } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      const input = need(root, '.library-repository-dirty input', HTMLInputElement);
+      input.value = 'Explain the renderer fix';
+      input.dispatchEvent(new Event('input'));
+      clickText(root, '.library-repository-dirty button', 'Checkpoint');
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/repository/commit' && c.message === 'Explain the renderer fix')).toBe(true);
+    } finally { unmount(); }
+  });
+
   it('Open dispatches apps/open with the app id', async () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);

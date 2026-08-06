@@ -16,7 +16,7 @@ import { createPeerNode } from './peer-node.js';
 import { createPresence } from './gossip/presence.js';
 import { mutableKey, signProvider } from './dht/records.js';
 import { decodeDidKey } from './identity/did.js';
-import { buildManifest, manifestHash } from './content/manifest.js';
+import { assertBundleWithinLimits, buildManifest, manifestHash } from './content/manifest.js';
 import { packBundle } from './content/bundle.js';
 import { chunkBytes } from './content/chunk.js';
 import { swarmFetch } from './content/swarm.js';
@@ -143,13 +143,29 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
     catch { return []; }
   };
 
-  /** @param {{ name: string, entry: string, files: Record<string, string> }} opts */
-  const publishApp = async ({ name, entry, files }) => {
+  /** @param {{ name: string, entry: string, files: Record<string, string>, release?: Record<string, any>, created?: number, expectedHash?: string }} opts */
+  const publishApp = async ({ name, entry, files, release, created, expectedHash }) => {
     /** @type {Record<string, Uint8Array>} */
-    const bytes = {};
+    const bytes = Object.create(null);
     for (const [path, text] of Object.entries(files)) bytes[path] = utf8(text);
     const payload = packBundle({ entry, files: bytes });
-    const { manifest, hash, chunks } = await buildManifest({ payload, type: 'app', entry, identity });
+    const createdAt = Number.isSafeInteger(created) && /** @type {number} */ (created) >= 0
+      ? /** @type {number} */ (created)
+      : null;
+    // why release metadata lives HERE: this manifest is immutable,
+    // content-addressed and publisher-signed. The mutable discovery card may
+    // repeat the fields for cheap UX, but only this copy forms a retrievable
+    // release chain after a newer card replaces it.
+    const { manifest, hash, chunks } = await buildManifest({
+      payload, type: 'app', entry, identity,
+      ...(release ? { meta: { release } } : {}),
+      ...(createdAt !== null ? { now: () => createdAt } : {}),
+    });
+    // Reject base64/JSON-expanded releases before serving or advertising them.
+    assertBundleWithinLimits(manifest);
+    if (expectedHash && hash !== expectedHash) {
+      throw new Error('reconstructed release does not match its stored version identity');
+    }
     node.content.publish({ manifest, hash, chunks });
     const uri = formatPeerdUri({ did: identity.did, hash });
     // why NOT awaited: we already serve the bytes (content.publish), so the DHT
@@ -184,14 +200,16 @@ export const createBaseNetwork = async ({ identity, mesh, meta = () => ({}), dia
   // card's head; an INSTALLED app passes its hash explicitly (its card is the
   // ORIGINAL publisher's, so we can't author a fresh version). Best-effort +
   // idempotent: an app we never shared unshares to a clean no-op.
-  /** @param {{ slug?: string | null, publisher?: string, hash?: string | null }} [opts] */
-  const unshareApp = async ({ slug = null, publisher = identity.did, hash = null } = {}) => {
+  /** @param {{ slug?: string | null, publisher?: string, hash?: string | null, hashes?: string[] }} [opts] */
+  const unshareApp = async ({ slug = null, publisher = identity.did, hash = null, hashes = [] } = {}) => {
     const id = slug ? await dwappId(publisher, slug) : null;
     // Prefer the caller's hash (installed apps carry it on their record); else read
     // it off our own card (a self-published app — version_id IS the bundle hash).
     let h = hash;
     if (!h && id) { const card = library.get(id); h = card?.value?.head?.version_id ?? null; }
-    const unserved = h ? node.content.unannounce(h) : false;
+    const releaseHashes = [...new Set([h, ...hashes].filter((value) => typeof value === 'string'))];
+    let unserved = 0;
+    for (const releaseHash of releaseHashes) if (node.content.unannounce(releaseHash)) unserved += 1;
     // tombstone (not a bare remove): also blocks a peer's cached copy from
     // re-infecting our Library on the next snapshot. Lifted if we re-share.
     if (id) discovery.tombstone(id);

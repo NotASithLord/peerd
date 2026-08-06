@@ -51,6 +51,9 @@ import { appWriteFileTool }           from './app-write-file.js';
 import { appReadFileTool }            from './app-read-file.js';
 import { appListFilesTool }           from './app-list-files.js';
 import { appDeleteFileTool }          from './app-delete-file.js';
+import { repositoryHistoryTool }      from './app-history.js';
+import { repositoryVersionTool }      from './app-version.js';
+import { repositoryRemoteTool }       from './app-remote.js';
 import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
@@ -126,6 +129,9 @@ export {
   appReadFileTool,
   appListFilesTool,
   appDeleteFileTool,
+  repositoryHistoryTool,
+  repositoryVersionTool,
+  repositoryRemoteTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules)
@@ -241,6 +247,9 @@ export const BUILTIN_TOOLS = Object.freeze([
   appReadFileTool,
   appListFilesTool,
   appDeleteFileTool,
+  repositoryHistoryTool,
+  repositoryVersionTool,
+  repositoryRemoteTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules the

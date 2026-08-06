@@ -132,10 +132,12 @@ const ENGINE_ACTOR_TOOLS = Object.freeze({
   ])),
   notebook: Object.freeze(new Set([
     'js_notebook', 'js_write_file', 'js_read_file', 'js_delete', 'edit_file',
+    'repo_history', 'repo_version', 'repo_remote',
   ])),
   app: Object.freeze(new Set([
     'app_update', 'app_write_file', 'app_read_file', 'app_list_files',
     'app_delete_file', 'app_delete', 'edit_file',
+    'repo_history', 'repo_version', 'repo_remote',
   ])),
 });
 

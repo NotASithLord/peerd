@@ -98,6 +98,23 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
     expect(mt.results().find((r) => r.id === 1)).toMatchObject({ ok: false });
   });
 
+  test('prototype-shaped room names cannot inherit a remembered grant', async () => {
+    for (const roomId of ['__proto__', 'constructor', 'toString']) {
+      const { mt, calls } = makeBridge();
+      mt.drive({ peerd: 'dweb', id: roomId, op: 'join', args: { roomId } });
+      await tick();
+      expect(mt.results().find((r) => r.id === roomId)).toMatchObject({ ok: false });
+      expect(calls.some((call) => call.op === 'join')).toBe(false);
+    }
+  });
+
+  test('a dwapp cannot publish its live source through the room bridge', async () => {
+    const { mt } = makeBridge();
+    mt.drive({ peerd: 'dweb', id: 1, op: 'publish-app', args: {} });
+    await tick();
+    expect(mt.results().find((r) => r.id === 1)).toMatchObject({ ok: false, error: 'unknown op: publish-app' });
+  });
+
   test('unknown op is rejected; dispose unsubscribes transport + host events', async () => {
     const { mt, bridge } = makeBridge();
     mt.drive({ peerd: 'dweb', id: 7, op: 'nonsense', args: {} });

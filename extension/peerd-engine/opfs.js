@@ -12,6 +12,18 @@
  *                              ['peerd-apps', 'app-xyz'].
  */
 export const opfsHelpers = (rootPath) => {
+  /** @param {string} path */
+  const safeParts = (path) => {
+    if (typeof path !== 'string' || path.includes('\\') || path.includes('\0')) {
+      throw new Error('opfs: invalid path');
+    }
+    const parts = path.replace(/^\/+/, '').split('/').filter(Boolean);
+    if (!parts.length || parts.some((part) => part === '.' || part === '..')) {
+      throw new Error(`opfs: unsafe path: ${path}`);
+    }
+    return parts;
+  };
+
   const ensureRoot = async () => {
     if (!navigator.storage?.getDirectory) {
       throw new Error('OPFS not supported in this context');
@@ -29,8 +41,7 @@ export const opfsHelpers = (rootPath) => {
    */
   const walkParent = async (path, { create = false } = {}) => {
     const root = await ensureRoot();
-    const parts = path.replace(/^\/+/, '').split('/').filter(Boolean);
-    if (parts.length === 0) throw new Error('opfs: empty path');
+    const parts = safeParts(path);
     // why cast: the length guard above makes pop() non-undefined; TS can't
     // narrow that across the call.
     const leaf = /** @type {string} */ (parts.pop());
@@ -48,6 +59,13 @@ export const opfsHelpers = (rootPath) => {
       const { dir, leaf } = await walkParent(path);
       const fh = await dir.getFileHandle(leaf);
       return (await fh.getFile()).text();
+    },
+
+    /** Read a file without UTF-8 decoding (Git and artifact exports need bytes). */
+    readBytes: async (/** @type {string} */ path) => {
+      const { dir, leaf } = await walkParent(path);
+      const fh = await dir.getFileHandle(leaf);
+      return new Uint8Array(await (await fh.getFile()).arrayBuffer());
     },
 
     /**
@@ -105,8 +123,10 @@ export const opfsHelpers = (rootPath) => {
           dir = await dir.getDirectoryHandle(rootPath[i]);
         }
         await dir.removeEntry(rootPath[rootPath.length - 1], { recursive: true });
-      } catch {
-        // No subtree to nuke; ignore.
+      } catch (error) {
+        // Missing is idempotent; permission/quota/storage failures must reach
+        // callers so they do not drop the only registry handle to live bytes.
+        if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') throw error;
       }
     },
   };

@@ -25,6 +25,12 @@ import { EXTENSION_DIR } from './lib.ts';
 const VENDOR_DIR = join(EXTENSION_DIR, 'vendor');
 export const VENDOR_LOCK_PATH = join(VENDOR_DIR, 'vendor.lock.json');
 const LOCK_BASENAME = 'vendor.lock.json';
+const REQUIRED_NOTICE_PAIRS = [
+  {
+    bundle: 'isomorphic-git/isomorphic-git.umd.min.js',
+    notice: 'isomorphic-git/index.umd.min.js.LICENSE.txt',
+  },
+] as const;
 
 const sha256 = (buf: Buffer | Uint8Array): string =>
   createHash('sha256').update(buf).digest('hex');
@@ -69,6 +75,17 @@ const checkLock = (): void => {
   const lock = JSON.parse(readFileSync(VENDOR_LOCK_PATH, 'utf8')) as { files: Record<string, string> };
   const actual = computeVendorHashes();
   const problems: string[] = [];
+  // why: minifiers commonly leave a license-file pointer while packaging
+  // drops the referenced sidecar. Hashing alone would faithfully pin that
+  // non-compliant state, so the relationship itself is a release invariant.
+  for (const pair of REQUIRED_NOTICE_PAIRS) {
+    if (!Object.hasOwn(actual, pair.notice)) problems.push(`missing required notice: ${pair.notice}`);
+    if (Object.hasOwn(actual, pair.bundle)) {
+      const bundle = readFileSync(join(VENDOR_DIR, pair.bundle), 'utf8');
+      const basename = pair.notice.slice(pair.notice.lastIndexOf('/') + 1);
+      if (!bundle.includes(basename)) problems.push(`bundle does not reference required notice: ${pair.bundle}`);
+    }
+  }
   for (const [rel, hash] of Object.entries(lock.files)) {
     if (!(rel in actual)) problems.push(`missing:  ${rel} (pinned in lock, gone from disk)`);
     else if (actual[rel] !== hash) problems.push(`changed:  ${rel}`);

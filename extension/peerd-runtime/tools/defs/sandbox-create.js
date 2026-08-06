@@ -40,26 +40,19 @@ export const sandboxCreateTool = {
   // create-RESULT note (NOTEBOOK_NOTE / APP_RUNTIME_NOTE) and the owning
   // actor's prompt, disclosed once when the agent actually commits to that kind.
   description: [
-    'Create a SANDBOX — an isolated execution instance in its own background',
-    'tab — and get back its id. Pick `kind` by the job:',
-    '"webvm" = a full Linux VM (bash, persistent disk, POSIX tools — compilers,',
-    'python, git); heavyweight, boots in seconds.',
-    '"notebook" = a fresh-run JS IDE (file tree, sealed realm, OPFS scratch);',
-    'lightweight. ✅ JSON/parsing/numerical work and DATA ANALYSIS with charts +',
-    'tables — a chart or explained analysis wants a notebook, NOT an app.',
-    '"app" = a user-facing multi-file HTML app in a sandboxed iframe (full DOM,',
-    'no extension access, NO ambient network; bundle every dependency). ✅ "build',
-    'a TODO app / calculator / snapshot dashboard"; live web/API work belongs to',
-    'the web actor. A dwapp:true App gets only the consent-gated dweb bridge.',
+    'Create an isolated SANDBOX in a background tab; returns its id. Pick `kind`:',
+    '"webvm" = full Linux (bash, disk, POSIX, compilers, python, git); heavyweight.',
+    '"notebook" = lightweight fresh-run JS IDE (files, sealed realm, OPFS);',
+    'gitUrl clones without Linux. Use for JSON, numerical work, analysis, charts, tables.',
+    '"app" = user-facing multi-file HTML in a sandboxed iframe (DOM, no extension',
+    'access, NO ambient network; bundle dependencies). Live APIs belong to the web actor;',
+    'dwapp:true grants only the consent-gated dweb bridge.',
     'Apps currently run only on Chrome; on Firefox the artifact is saved but cannot',
     'open, so tell the user to open peerd in Chrome to run it.',
-    'REQUIRES `name` plus `files` (or `html` shorthand). For a MULTIPLAYER dwapp',
-    'that talks to peers, pass dwapp:true.',
-    'The new instance becomes the chat\'s current of its kind; when its host opens,',
-    'a "go there" card lands in chat. Then DELEGATE the work: message_actor(<id>, goal) — the',
-    'instance\'s actor holds all its file/run tools and gets the how-to in the',
-    'create result. (For quick headless compute with no tab and no instance,',
-    'script is simpler.)',
+    'Create from `name` + `files`/`html`, or gitUrl when peerd.json declares the',
+    'entry and bound App contract. Use dwapp:true for peer communication.',
+    'It becomes the chat\'s current instance and returns a go-there card. Delegate with',
+    'message_actor(<id>, goal); use script for quick headless compute.',
   ].join(' '),
   schema: {
     type: 'object',
@@ -89,11 +82,17 @@ export const sandboxCreateTool = {
           + "dweb('join'/'publish'/'subscribe'/'dm-send'/…). REQUIRED for any app "
           + 'that talks to peers. Pair with dweb_guide.',
       },
+      gitUrl: { type: 'string', description: 'app/notebook: HTTPS remote to clone.' },
+      gitRef: { type: 'string', description: 'app/notebook: branch.' },
+      gitDepth: { type: 'integer', description: 'app/notebook: depth, 1–500.' },
     },
     required: ['kind'],
   },
   sideEffect: 'write',
-  origins: () => [],
+  origins: (args) => {
+    if (typeof args?.gitUrl !== 'string') return [];
+    try { return [new URL(args.gitUrl).origin]; } catch { return []; }
+  },
   // why the wrapper around executeByKind: refuse (not ignore) app-only args on
   // other kinds — a notebook create that silently drops `files` looks seeded
   // when it isn't; the model would delegate "run parse.js" to an actor staring
@@ -102,10 +101,22 @@ export const sandboxCreateTool = {
     const dispatch = executeByKind('sandbox_create', SANDBOX_KIND_HANDLERS);
     return /** @type {(args: any, ctx: ToolContext) => Promise<ToolResult>} */ (async (args, ctx) => {
       const kind = args?.kind;
+      if (kind === 'app' && typeof args?.gitUrl === 'string') {
+        const conflicting = ['files', 'html', 'entryFile', 'tags', 'dwapp'].filter((key) => args?.[key] !== undefined);
+        if (conflicting.length) {
+          return { ok: false, error: `sandbox_create: ${conflicting.join(', ')} cannot accompany gitUrl — the cloned peerd.json alone declares the App entry and capabilities.` };
+        }
+      }
       if (typeof kind === 'string' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
         const appOnly = ['files', 'html', 'entryFile', 'tags', 'dwapp'].filter((k) => args?.[k] !== undefined);
         if (appOnly.length) {
           return { ok: false, error: `sandbox_create: ${appOnly.join(', ')} ${appOnly.length === 1 ? 'is' : 'are'} app-only — a ${kind} starts empty; seed its files by messaging its actor after create.` };
+        }
+      }
+      if (typeof kind === 'string' && kind !== 'notebook' && kind !== 'app' && kind in SANDBOX_KIND_HANDLERS) {
+        const notebookOnly = ['gitUrl', 'gitRef', 'gitDepth'].filter((k) => args?.[k] !== undefined);
+        if (notebookOnly.length) {
+          return { ok: false, error: `sandbox_create: ${notebookOnly.join(', ')} ${notebookOnly.length === 1 ? 'is' : 'are'} notebook-only — use kind:'notebook' for a lightweight Git clone or kind:'webvm' for a full Linux checkout.` };
         }
       }
       return dispatch(args, ctx);

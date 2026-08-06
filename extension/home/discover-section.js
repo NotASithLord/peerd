@@ -111,7 +111,7 @@ export const DiscoverSection = () => {
     try {
       // Pass the card's version identity so the installed record can later be
       // matched against newer announces ("update available").
-      const r = await send({ type: 'dweb/base/install', uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq });
+      const r = await send({ type: 'dweb/base/install', uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
         installedId[id] = r.app?.id ?? r.appId ?? null;
@@ -141,7 +141,7 @@ export const DiscoverSection = () => {
     busy[id] = 'updating';
     if (!dead) m.redraw();
     try {
-      const r = await send({ type: 'dweb/base/update-app', appId, uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq });
+      const r = await send({ type: 'dweb/base/update-app', appId, uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
         try { window.dispatchEvent(new CustomEvent('peerd:app-installed', { detail: { appId } })); } catch { /* no-op */ }

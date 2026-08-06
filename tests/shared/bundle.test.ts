@@ -71,4 +71,17 @@ describe('bundle codec', () => {
 		expect(entry).toBe('index.html');
 		expect(files['index.html']).toBe('<h1>héllo wörld</h1>');
 	});
+
+	it('preserves prototype-shaped root filenames without dictionary collisions', () => {
+		const files: Record<string, Uint8Array> = Object.create(null);
+		files['__proto__'] = utf8('proto');
+		(files as any).constructor = utf8('ctor');
+		(files as any).toString = utf8('string');
+		const out = unpackBundle(packBundle({ files }));
+
+		expect(Object.keys(out.files).sort()).toEqual(['__proto__', 'constructor', 'toString']);
+		expect(fromUtf8(out.files['__proto__'])).toBe('proto');
+		expect(fromUtf8((out.files as any).constructor)).toBe('ctor');
+		expect(fromUtf8((out.files as any).toString)).toBe('string');
+	});
 });

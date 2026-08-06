@@ -157,6 +157,12 @@
   transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
 }
 .library-card:hover { border-color: var(--fg-muted); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); transform: translateY(-1px); }
+/* Git history is a developer workspace, not a card footnote. Give an expanded
+   repository two grid tracks where the home surface is wide enough, while the
+   narrow/single-column layout remains naturally contained. */
+@media (min-width: 800px) {
+  .library-card.is-repository-open { grid-column: span 2; }
+}
 .library-head { display: flex; align-items: flex-start; gap: 9px; }
 /* The avatar is the card's one splash of brand color (hue set inline, stable
    per app id) — a saturated block with dark glyph for contrast on every hue. */
@@ -177,7 +183,9 @@
 .library-refresh.is-spinning { animation: library-spin 0.85s linear infinite; }
 @keyframes library-spin { to { transform: rotate(360deg); } }
 /* "update available" for an installed dwapp — a quiet brand-cyan line. */
-.library-update-badge { font-size: 11px; margin: 2px 0 0; color: var(--accent); display: flex; align-items: center; gap: 5px; }
+.library-update-badge { font-size: 11px; margin: 2px 0 0; color: var(--fg); display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.library-changelog { color: var(--fg-muted); line-height: 1.35; white-space: pre-wrap; }
+.library-notice { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
 
 /* Buttons: override the inherited filled-cyan default (styles.css button) on
    these surfaces — quiet monochrome ghosts; Open is the lone weight-primary. */
@@ -207,6 +215,31 @@
 .library-menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
 .library-menu-item.is-danger { color: var(--danger); }
 .library-menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+.library-repository, .library-update-conflict { margin-top: 4px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
+.library-repository-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.library-repository-head .muted { flex: 1; font-family: var(--font-mono); font-size: 10.5px; }
+.library-repository-dirty, .library-remote-actions { display: flex; align-items: center; gap: 6px; margin-top: 9px; font-size: 11px; }
+.library-repository-dirty span, .library-remote-actions span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-repository-dirty input { flex: 2; min-width: 8rem; font-size: 11px; }
+.library-repository-clean { margin: 8px 0 0; font-size: 11px; }
+.library-change-list { display: flex; flex-direction: column; gap: 2px; margin-top: 5px; font-size: 10px; overflow: hidden; }
+.library-branch-row, .library-remote-row { display: flex; gap: 6px; margin-top: 9px; }
+.library-branch-row input, .library-remote-row input { flex: 1; min-width: 0; font-size: 11px; }
+.library-branch-row select {
+  min-width: 0; padding: 0 24px 0 7px; border: 1px solid var(--border); border-radius: var(--radius);
+  background-color: var(--bg); color: var(--fg); font: inherit; font-size: 11px;
+}
+.library-repository-help { margin: 7px 0 0; font-size: 10.5px; line-height: 1.4; }
+.library-commit-list { display: flex; flex-direction: column; gap: 0; margin-top: 10px; border-top: 1px solid var(--border); max-height: 260px; overflow: auto; }
+.library-commit-block { border-bottom: 1px solid var(--border); }
+.library-commit { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto auto auto; align-items: center; gap: 7px; padding: 6px 0; font-size: 10.5px; }
+.library-commit-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-diff { padding: 0 0 8px; }
+.library-diff-summary { margin-bottom: 4px; font-size: 10px; }
+.library-diff pre { max-height: 210px; margin: 0; padding: 7px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); font: 10px/1.45 var(--font-mono); white-space: pre; }
+.library-btn.is-armed { color: var(--danger); border-color: var(--danger); }
+.library-update-conflict strong { font-size: 12px; }
+.library-update-conflict p { margin: 5px 0 9px; color: var(--fg-muted); font-size: 11px; line-height: 1.4; }
 
 /* ── Discover (the dweb app store) — shares the Library's card skeleton ───────
    so the two home tabs read as one surface: same grid, card, avatar (one brand
