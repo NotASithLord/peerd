@@ -21,7 +21,7 @@ peerd's core invariants. It is not a complete adversarial audit.
   workflows cannot manipulate the user, poison durable memory, mislead a
   confirmation prompt, or induce a bad action that is not itself blocked by a
   gate. Those are architectural and UX questions; the threat model names the
-  relevant residual risks (R1–R11) rather than claiming they are closed.
+  relevant residual risks rather than claiming they are closed.
 
 The honest posture is: peerd has a formal threat model and CI-gated red-team
 probes for its core security invariants. It is not a claim that peerd is immune
@@ -49,6 +49,9 @@ to prompt injection.
 | 06 | Malicious iframe or sandboxed code escapes | Notebook realm seal, App-iframe shim, WebVM HTTP bridge |
 | 07 | Private-network URL attempts SSRF | `isPrivateOrLocalHost` guard and redirect fail-closed |
 | 08 | Prompt-injection benchmark versus browser-use agents | keyless heap, exposure and tier gates, Plan mode, denylist, fence |
+| 09 | Hostile page content steers reads, writes, or egress | content disarmament, user-generated-content confirmation, egress checks |
+| 10 | A moved or redirected tab retasks a web actor | origin lock, landing checks, trusted terminal reply |
+| 11 | Login orchestration captures a credential | verified affordance, fixed confirmation, user-held authentication factor |
 
 ### Scenario 05 and MCP
 

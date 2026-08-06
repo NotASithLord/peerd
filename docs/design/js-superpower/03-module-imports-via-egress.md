@@ -1,5 +1,21 @@
 # Design 3 — remote module imports: make them real AND audited, or delete the claim
 
+## Current implementation note
+
+Both execution hosts fetch HTTPS module source through `sw/web-fetch` and run
+it as blob modules in sealed workers. The headless Script host records that the
+run used egress and fences its result. The visible Notebook host does not yet
+carry that provenance into `js_notebook` output, so remote-controlled console,
+error, and return text reaches the Notebook actor without an untrusted-content
+fence. Treat that as an open security gap, not as the completed guarantee in
+the original design below.
+
+Optional `#sha256-<base64>` integrity fragments are implemented and fail closed
+on a mismatch. An import without a fragment can change at the publisher's
+discretion. In the visible Notebook, imported code inherits the run's audited
+egress bridge, OPFS access, and subagent capability. The store-package policy
+decision is tracked in `docs/store/OPEN-DECISIONS.md`.
+
 ## Problem
 
 The module resolver passes absolute-URL and bare specifiers through untouched,
@@ -43,26 +59,24 @@ then blob it like a local file:
   just another same-realm blob — the CSP question disappears.
 - Hosts inject `fetchRemote` as the SAME audited fetch their fetch bridge
   uses (`sw/web-fetch`): denylist, SSRF, redirect fail-closed, audit all
-  apply to module fetches exactly as to data fetches. The run is marked
-  `usedEgress` → output fenced. No new chokepoint, no new policy.
+  apply to module fetches exactly as to data fetches. The design requires the
+  run to be marked `usedEgress` and its output fenced. The headless host does
+  this; the visible Notebook host does not yet propagate that provenance.
 - Bare specifiers (`lodash`) keep failing with today's clear resolver error.
   We are not building npm resolution; a script wanting a library names a
   full URL and owns that choice, or the dependency gets vendored properly.
-- Caps: remote module source counts against a per-module size ceiling
-  (propose the same order as `js_write_file`'s per-file cap) and a
-  per-run remote-module count ceiling (propose single digits) — fan-out
-  module graphs are a hostile-input amplification vector.
+- Caps: remote module source counts against a per-module size ceiling and a
+  per-run module count ceiling. The live values are exported by
+  `module-resolver.js` and tested with the resolver.
 - Caching: per-run memory cache only (the resolver's existing `cache` map).
   No persistent module cache in v1 — stale third-party code silently pinned
   in IDB is a worse failure mode than a re-fetch.
 
-### Integrity (optional hardening, same PR or follow-up)
+### Integrity
 
-Support `import 'https://…#sha256-<base64>'`: when the fragment is present,
-hash the fetched source and refuse on mismatch. Cheap (one `crypto.subtle`
-call host-side), makes reproducible notebooks possible, and gives the
-security-review story a pin. Not required for v1 since the fetch is already
-denylisted + fenced, but it's small enough to consider immediately.
+`import 'https://…#sha256-<base64>'` hashes the fetched source and refuses a
+mismatch. Base64url is also accepted. The pin is optional, so an unpinned
+module remains controlled by its publisher.
 
 ### Capability interaction
 
@@ -97,13 +111,14 @@ gap to Designs 2 and 6 alone.
 
 - **Bun**: remote graph resolution with a fake `fetchRemote` (remote→remote
   relative import, remote→builtin, cycle detection across the URL branch,
-  size/count cap refusals, sha256 mismatch refusal if shipped).
+  size/count cap refusals, and sha256 mismatch refusal).
 - **In-browser**: end-to-end — a notebook run statically importing a fixture
   URL gets the module through the audited path; denylisted URL refused with
   the resolver's error; `page_code` lane refused.
 
 ## Open questions
 
-1. Real-then-audited (proposed) vs delete-the-claim — owner call; this is a
-   philosophy decision about third-party code, not an implementation detail.
-2. Ship the `#sha256` pin in v1? Proposed: yes if the diff stays small.
+1. Whether remote imports may ship in the store artifact remains a policy and
+   packaging decision.
+2. Preview builds still need an explicit capability and trust policy for remote
+   code in visible Notebooks.

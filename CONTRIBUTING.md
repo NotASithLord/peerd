@@ -1,7 +1,8 @@
 # Contributing to peerd
 
 Thanks for helping out. peerd is a browser-native AI agent with no hosted agent
-backend, account, or telemetry. It supports bring-your-own-key providers.
+backend, account, or telemetry. It supports user-configured cloud and local
+providers.
 That requirement applies to every change. It is documented in the README,
 `CLAUDE.md`, and the manifest. **Do not add a backend call,
 telemetry, analytics, or an undeclared network service.**
@@ -86,8 +87,8 @@ The full list lives in `CLAUDE.md` and `eslint.config.js`.
 - Make sure `bun run preflight` is green first.
 - The pull-request template will prompt for the rest.
 
-**New here?** Look for issues labelled **`good first issue`**. They are scoped to
-be a clean first contribution.
+For a first contribution, choose a small open issue with a clear acceptance
+case. Ask on the issue before expanding its scope.
 
 Found a security issue? Please follow [`SECURITY.md`](SECURITY.md) rather than
 opening a public issue.

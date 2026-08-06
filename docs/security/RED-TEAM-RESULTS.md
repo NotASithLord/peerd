@@ -7,7 +7,7 @@
 > [`docs/security/THREAT-MODEL.md`](./THREAT-MODEL.md) and to a CI-gated test
 > (`tests/red-team/red-team.test.ts`, plus the in-browser suite for realm escapes).
 
-_Last run: 2026-08-03 · Bun 1.3.11 · 11 scenarios._
+_Last run: 2026-08-06 · Bun 1.3.9 · 11 scenarios._
 
 11 of 11 scenarios held. 147 of 147 individual hostile probes blocked.
 
