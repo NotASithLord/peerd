@@ -16,6 +16,9 @@ export const CHANNEL = "preview";
 export const DWEB_ENABLED = true;
 export const REMOTE_MODULE_IMPORTS_ENABLED = true;
 
+// Disabled until the #346 staging origin and fixed receipt are verified.
+export const CONTRIBUTION_UPLOAD_CONFIG = null;
+
 export const CHANNEL_DEFAULTS = Object.freeze({
   voiceEnabled: false,
   voiceVariant: "base",

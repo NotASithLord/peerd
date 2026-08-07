@@ -147,6 +147,20 @@ describe('store feature flags', () => {
     const flags = await import('../../extension/shared/flags.js');
     expect(flags.REMOTE_SKILL_INSTALL).toBe(false);
   });
+
+  test('contribution upload config exists only as a disabled preview boundary', () => {
+    const storeSource = genChannelConfigSource('store');
+    const previewSource = genChannelConfigSource('preview');
+    expect(previewSource).toContain('export const CONTRIBUTION_UPLOAD_CONFIG = null');
+    expect(previewSource).not.toContain('/v1/contributions');
+    expect(storeSource).not.toContain('CONTRIBUTION_UPLOAD_CONFIG');
+    expect(storeSource).not.toContain('/v1/contributions');
+  });
+
+  test('store packaging structurally prunes the preview-only uploader', () => {
+    const pkg = readFileSync(join(EXTENSION_DIR, '..', 'packaging', 'package.ts'), 'utf8');
+    expect(pkg).toContain("'peerd-egress/contributor-upload'");
+  });
   // DESIGN-17: the actor model is UNCONDITIONAL — the source flags were removed
   // (the branch was the flag; it landed wholesale). flags.js carries no actor
   // flag to assert; the model is exercised by exposure/actor-messaging/actor-

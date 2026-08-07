@@ -220,6 +220,22 @@ export const checkWebBoundary = async (): Promise<void> => {
   if (existsSync(join(WEB_DIST, 'peerd-distributed'))) {
     f.violations.push('peerd-distributed/ is present in web-dist/ — the web target must not stage the dweb module');
   }
+  if (existsSync(join(WEB_DIST, 'peerd-egress', 'contributor-upload'))) {
+    f.violations.push('peerd-egress/contributor-upload/ is present in web-dist/ — contribution upload is preview-only');
+  }
+  for (const token of [
+    '/v1/contributions',
+    'CONTRIBUTION_UPLOAD_CONFIG',
+    'peerd-egress/contributor-upload',
+    'contribution-upload-attempt',
+    'contributor_upload.sealed',
+  ]) {
+    for (const rel of allFiles) {
+      if (readFileSync(join(WEB_DIST, rel)).includes(token)) {
+        f.violations.push(`preview-only contribution token "${token}" found in ${rel}`);
+      }
+    }
+  }
 
   // Build stamp.
   const buildJson = join(WEB_DIST, 'build.json');

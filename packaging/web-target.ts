@@ -55,6 +55,9 @@ export const WEB_INCLUDE_FILES = [
 //     was only ever the demo's Gemma runtime, never imported by staged code.)
 export const WEB_PRUNE_WITHIN = [
   'shared/channel-config.js',
+  // Web inherits the store no-contribution posture. Keep the whole dormant
+  // preview uploader out, not merely disabled at runtime.
+  'peerd-egress/contributor-upload',
   'vendor/onnxruntime-web',
   'vendor/cheerpx',
   'vendor/vad-web',

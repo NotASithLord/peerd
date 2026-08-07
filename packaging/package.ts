@@ -47,7 +47,14 @@ const PRUNE_ALWAYS = ['tests', 'manifest.json', 'shared/channel-config.js'];
 // dev tool), the entire dweb module, plus the system-prompt paragraph that
 // describes it (the loader inserts it only when DWEB_ENABLED — a store prompt
 // must make no dweb claims).
-const PRUNE_STORE = ['eval', 'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
+const PRUNE_STORE = [
+  'eval',
+  'peerd-distributed',
+  'peerd-provider/system-prompt-dweb.txt',
+  // The uploader is a preview-only source island. It is pruned wholesale so
+  // store artifacts have no dormant route/path/client to activate later.
+  'peerd-egress/contributor-upload',
+];
 
 // Reproducible artifacts: two builds of the same tree must produce
 // byte-identical zips, so a shipped artifact can be independently rebuilt

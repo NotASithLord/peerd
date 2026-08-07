@@ -511,3 +511,51 @@ export const serializeContributorEnvelope = (state) => {
   });
   return Object.freeze({ envelope, bytes: JSON.stringify(envelope) });
 };
+
+/**
+ * Re-validate already serialized contributor bytes at the sealing boundary.
+ * Canonical byte equality is intentional: it rejects duplicate JSON keys,
+ * whitespace/reordering changes, and any hand-built envelope that did not
+ * come from the serializer above. The uploader can therefore freeze the
+ * exact reviewed bytes without growing a second schema implementation.
+ * @param {unknown} bytes
+ */
+export const validateContributorEnvelopeBytes = (bytes) => {
+  if (typeof bytes !== 'string') throw new ContributorSchemaError('envelope bytes: string required');
+  /** @type {unknown} */
+  let parsed;
+  try { parsed = JSON.parse(bytes); }
+  catch { throw new ContributorSchemaError('envelope bytes: invalid JSON'); }
+  requireExactKeys(/** @type {Record<string, unknown>} */ (parsed), ['schemaVersion', 'rows'], 'envelope');
+  const candidate = /** @type {{ schemaVersion?: unknown, rows?: unknown }} */ (parsed);
+  if (candidate.schemaVersion !== CONTRIBUTOR_SCHEMA_VERSION || !Array.isArray(candidate.rows)) {
+    throw new ContributorSchemaError('envelope: unsupported schema');
+  }
+  if (candidate.rows.length > CONTRIBUTOR_MAX_ROWS) {
+    throw new ContributorSchemaError('row cap exceeded');
+  }
+  const cohortKeys = new Set();
+  const rows = candidate.rows.map((row) => {
+    const frozen = validateAndFreezeRow(/** @type {Record<string, unknown>} */ (row));
+    const key = contributorCohortKey(frozen);
+    if (cohortKeys.has(key)) throw new ContributorSchemaError('row cohort duplicated');
+    cohortKeys.add(key);
+    if (frozen.worked + frozen.didntWork > frozen.actorTurns) {
+      throw new ContributorSchemaError('feedback total exceeds actorTurns');
+    }
+    return frozen;
+  });
+  const sorted = [...rows].sort((left, right) =>
+    contributorCohortKey(left).localeCompare(contributorCohortKey(right)));
+  if (rows.some((row, index) => contributorCohortKey(row) !== contributorCohortKey(sorted[index]))) {
+    throw new ContributorSchemaError('row order is noncanonical');
+  }
+  const envelope = Object.freeze({
+    schemaVersion: CONTRIBUTOR_SCHEMA_VERSION,
+    rows: Object.freeze(rows),
+  });
+  if (JSON.stringify(envelope) !== bytes) {
+    throw new ContributorSchemaError('envelope bytes are noncanonical');
+  }
+  return envelope;
+};

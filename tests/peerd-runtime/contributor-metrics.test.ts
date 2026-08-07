@@ -17,7 +17,7 @@ import {
   emptyContributorLocalState, normalizeContributorCohort,
   normalizeContributorModelFamily, normalizeContributorProvider,
   recordContributorWebAction, recordContributorWebTurn,
-  serializeContributorEnvelope,
+  serializeContributorEnvelope, validateContributorEnvelopeBytes,
 } from '../../extension/peerd-runtime/observability/contributor-metrics.js';
 import {
   DEFAULT_CONTEXT_WINDOWS, OPENAI_POPULAR, OPENROUTER_POPULAR, listProviders,
@@ -80,6 +80,23 @@ describe('Contributor Metrics closed schema', () => {
       pageCodeRuns: 1, pageActionCalls: 0, modelFamily: 'claude-haiku',
     });
     expect(Object.keys(first.envelope)).toEqual(['schemaVersion', 'rows']);
+  });
+
+  test('the sealing validator accepts only byte-canonical envelopes', () => {
+    const serialized = serializeContributorEnvelope(
+      recordContributorWebTurn(emptyContributorLocalState(), turn()),
+    );
+    expect(validateContributorEnvelopeBytes(serialized.bytes)).toEqual(serialized.envelope);
+    expect(() => validateContributorEnvelopeBytes(` ${serialized.bytes}`)).toThrow('noncanonical');
+    expect(() => validateContributorEnvelopeBytes(JSON.stringify({
+      rows: serialized.envelope.rows, schemaVersion: 1,
+    }))).toThrow('noncanonical');
+    expect(() => validateContributorEnvelopeBytes(
+      serialized.bytes.replace('{"schemaVersion":1', '{"schemaVersion":1,"schemaVersion":1'),
+    )).toThrow('noncanonical');
+    expect(() => validateContributorEnvelopeBytes(JSON.stringify({
+      ...serialized.envelope, arbitrary: 'remote-control',
+    }))).toThrow('unknown or missing key');
   });
 
   test('accepts every reviewed v1 enum value', () => {

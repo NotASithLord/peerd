@@ -106,6 +106,28 @@ export const verifyStoreArtifact = async (artifactPath: string): Promise<void> =
       }
     }
 
+    // c2. Contributor upload remains preview-only. The store may keep the
+    // local aggregate/consent feature, but it must ship neither the dormant
+    // uploader island nor any route/path/config token that could activate it.
+    if (existsSync(join(tmp, 'peerd-egress', 'contributor-upload'))) {
+      failures.push('preview-only peerd-egress/contributor-upload/ is present in store artifact');
+    }
+    const uploadOnlyTokens = [
+      '/v1/contributions',
+      'CONTRIBUTION_UPLOAD_CONFIG',
+      'peerd-egress/contributor-upload',
+      'contribution-upload-attempt',
+      'contributor_upload.sealed',
+    ];
+    for (const f of files) {
+      const body = readFileSync(f);
+      for (const token of uploadOnlyTokens) {
+        if (body.includes(token)) {
+          failures.push(`preview-only contribution token "${token}" found in ${relative(tmp, f)}`);
+        }
+      }
+    }
+
     // d. manifest sanity for the store channel
     const manifest = JSON.parse(readFileSync(join(tmp, 'manifest.json'), 'utf8'));
     if (manifest.name !== 'peerd') failures.push(`store manifest name is "${manifest.name}", expected "peerd"`);

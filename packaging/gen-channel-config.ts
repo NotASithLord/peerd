@@ -45,6 +45,16 @@ export const genChannelConfigSource = (channel: ConfigChannel): string => {
   const entries = Object.entries(flat)
     .map(([k, v]) => `  ${k}: ${JSON.stringify(v)},`)
     .join('\n');
+  // why null, and only in preview source: #347 may not embed an invented
+  // collector host before #346 verifies staging. Store/web artifacts must not
+  // even carry this config symbol; structural pruning, not a false runtime
+  // flag, is the package boundary.
+  const contributionConfig = channel === 'preview'
+    ? `// Disabled until the #346 staging origin and fixed receipt are verified.
+export const CONTRIBUTION_UPLOAD_CONFIG = null;
+
+`
+    : '';
   // why the directive: this file is checked into the typed extension tree,
   // so emit // @ts-check to keep it under the typecheck ratchet — and emit
   // it FROM the generator so `bun run gen:dev` stays drift-clean (a
@@ -67,7 +77,7 @@ export const CHANNEL = ${JSON.stringify(channel)};
 export const DWEB_ENABLED = ${JSON.stringify(channel === 'preview')};
 export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(channel === 'preview')};
 
-export const CHANNEL_DEFAULTS = Object.freeze(${'{'}
+${contributionConfig}export const CHANNEL_DEFAULTS = Object.freeze(${'{'}
 ${entries}
 ${'}'});
 `;

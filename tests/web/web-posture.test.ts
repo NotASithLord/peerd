@@ -33,6 +33,12 @@ describe('web channel flavor', () => {
     expect(src).toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = false');
   });
 
+  test('web build carries no contribution uploader config or endpoint path', () => {
+    expect(src).not.toContain('CONTRIBUTION_UPLOAD_CONFIG');
+    expect(src).not.toContain('/v1/contributions');
+    expect(WEB_PRUNE_WITHIN).toContain('peerd-egress/contributor-upload');
+  });
+
   test('web defaults fall back to the STORE posture per key', () => {
     // why: safety defaults stay strict; the web tree diverges only where a
     // key declares an explicit web value. No web overrides exist yet, so the
