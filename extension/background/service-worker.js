@@ -294,7 +294,7 @@ import {
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
-  canonicalCodeTraceLabel, CODE_CLIENT_MANIFESTS, DWEB_INBOUND_TOOL_NAMES,
+  canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES, resolveWebActorSurface,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
   validateProviderCallArgs, providerQuotaError, foldProviderEvents,
@@ -1585,12 +1585,12 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // descriptors) AND the capability strip below — the turn driver doesn't pass
   // actorSurface, so the strip can't read the raw param; it must use THIS.
   const requestedActorSurface = actorSurface ?? (settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools');
-  const codeSurfaceAllowed = toolAllow === null || (
-    toolAllow.has('page_code')
-    && Object.values(CODE_CLIENT_MANIFESTS.page.methods).every((method) => !method.tool || toolAllow.has(method.tool))
-  );
   const effectiveActorSurface = (actorType === 'web' && actorBacking !== 'api')
-    ? (requestedActorSurface === 'code' && codeSurfaceAllowed ? 'code' : 'tools')
+    ? resolveWebActorSurface({
+      requested: requestedActorSurface,
+      allowedTools: toolAllow,
+      headlessAvailable: offscreenAvailable,
+    })
     : undefined;
   const ctx = {
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
@@ -5128,12 +5128,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     // advertised the TOOLS descriptors (no page_code) and taught the tools
     // lore, so the whole code arm silently degrades on the offscreen heap.
     const actorToolAllow = resolveManifestAllow(rec.toolManifest);
-    const codeSurfaceAllowed = actorToolAllow === null || (
-      actorToolAllow.has('page_code')
-      && Object.values(CODE_CLIENT_MANIFESTS.page.methods).every((method) => !method.tool || actorToolAllow.has(method.tool))
-    );
     const actorSurface = (kind === 'web' && rec.backing !== 'api')
-      ? (settingsStore.get().webActorActionSurface === 'code' && codeSurfaceAllowed ? 'code' : 'tools')
+      ? resolveWebActorSurface({
+        requested: settingsStore.get().webActorActionSurface,
+        allowedTools: actorToolAllow,
+        headlessAvailable: offscreenAvailable,
+      })
       : undefined;
     // #241 parity, and it is the load-bearing one: on Chrome EVERY actor turn
     // runs through this path, so a schemaReply stamped only in buildToolContext
@@ -5204,6 +5204,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
       // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
       oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
+      ...(actorSurface ? { actorSurface } : {}),
       inbound: inbound === true,
     }, { signal: controller.signal, onEvent });
     if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW

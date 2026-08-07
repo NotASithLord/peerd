@@ -55,8 +55,8 @@ export const CODE_CLIENT_MANIFESTS = Object.freeze({
     readDocument: { op: 'readDocument', signature: 'readDocument(url, options?)', effect: 'read', tool: 'read_doc', canonical: true, worker: "(url, options) => pageCall('readDocument', { url, options })" },
     readCache: { op: 'readCache', signature: 'readCache(key, options?)', effect: 'read', tool: 'read_web_cache', canonical: true, worker: "(key, options) => pageCall('readCache', { key, options })" },
     readSiteClient: { op: 'readSiteClient', signature: 'readSiteClient(origin)', effect: 'read', tool: 'site_client_read', canonical: true, worker: "(origin) => pageCall('readSiteClient', { origin })" },
-    writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, definition)', effect: 'write', tool: 'site_client_write', canonical: true, worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
-    captureSite: { op: 'captureSite', signature: 'captureSite(action)', effect: 'read', tool: 'site_capture', canonical: true, worker: "(action) => pageCall('captureSite', { action })" },
+    writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})', effect: 'write', tool: 'site_client_write', canonical: true, worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
+    captureSite: { op: 'captureSite', signature: 'captureSite("start"|"stop")', effect: 'read', tool: 'site_capture', canonical: true, worker: "(action) => pageCall('captureSite', { action })" },
     login: { op: 'login', signature: 'login(selectorOrRef, options?)', effect: 'write', tool: 'login', canonical: true, worker: "(target, options) => pageCall('login', { target, options })" },
   }),
   mesh: client('mesh', 'a2a', {
@@ -206,6 +206,20 @@ export const buildCodeClientSource = (clientName, options = {}) => {
     `const __${local} = {`, assignments, '};',
     `globalThis.${manifest.global} = __${local};${aliases}`,
   ].join('\n');
+};
+
+/**
+ * Resolve the tab-web action surface from the setting, session manifest, and
+ * runtime host. Firefox currently lacks the offscreen worker host, so a stored
+ * or packaged `code` preference must still advertise the usable tools surface.
+ * @param {{ requested?: unknown, allowedTools?: Set<string>|null, headlessAvailable?: boolean }} input
+ */
+export const resolveWebActorSurface = ({ requested, allowedTools = null, headlessAvailable = false }) => {
+  const codeAllowed = allowedTools === null || (
+    allowedTools.has('page_code')
+    && Object.values(CODE_CLIENT_MANIFESTS.page.methods).every((method) => !method.tool || allowedTools.has(method.tool))
+  );
+  return requested === 'code' && headlessAvailable && codeAllowed ? 'code' : 'tools';
 };
 
 // The positive, declarative tool contract for bound actors. `codeDecision`
