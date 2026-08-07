@@ -546,6 +546,29 @@ throw new Error('unrelated failure');`,
     expect(r.actorDeliveryIds).toEqual(['delivery-vm-1', 'delivery-vm-2']);
   });
 
+  it('actors: preserves delivery custody when a later self import terminates on policy', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'await actors.call("vm-1", "one");',
+          'return await peerd.self.import("bad.js");',
+        ].join('\n'),
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-policy-custody',
+      },
+      {
+        sendToSW: async () => ({
+          ok: true,
+          actorDeliveryId: 'delivery-before-import',
+          value: { reply: 'done', failed: false },
+        }),
+      },
+    );
+
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(r.actorDeliveryIds).toEqual(['delivery-before-import']);
+  });
+
   it('actors: the DELEGATIONS trace records every op with outcome + timing, and usedActors flags the run', async () => {
     const r = await runJob(
       {
