@@ -454,6 +454,7 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   // single-Chrome speed path for the verify loop.
   let currentResponder = modelResponder || (() => ({ sse: sseText('e2e-smoke-ok') }));
   let modelCalls = 0;
+  let remoteModuleRequests = 0;
   const swConn = await attach(sw.wsUrl, async (method, params) => {
     if (method !== 'Fetch.requestPaused') return;
     const { requestId, request } = params;
@@ -472,6 +473,9 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
         else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
       } else if (url.includes('/api/tags')) {
         await fulfill('application/json', JSON.stringify({ models: [{ name: tagsModel, size: 1 }] }));
+      } else if (url === 'https://remote-module.test/store-policy-canary.js') {
+        remoteModuleRequests += 1;
+        await fulfill('application/javascript', "export const value = 'remote-canary-executed';");
       } else if (url.includes('11434')) {
         await fulfill('application/json', '{}');
       } else {
@@ -479,7 +483,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
       }
     } catch { /* request may have been torn down (e.g. an aborted turn); ignore */ }
   });
-  await swConn.send('Fetch.enable', { patterns: [{ urlPattern: '*11434*' }] });
+  await swConn.send('Fetch.enable', { patterns: [
+    { urlPattern: '*11434*' },
+    { urlPattern: 'https://remote-module.test/*' },
+  ] });
   log('Fetch interception armed on the service worker');
 
   // 3) open the side panel as a normal tab (chrome.sidePanel.open is not
@@ -508,6 +515,7 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
     sw, swConn, page, port, profile, screenshot,
     close: () => { try { page.close(); } catch { /* */ } try { swConn.close(); } catch { /* */ } cleanup(); },
     modelCallCount: () => modelCalls,
+    remoteModuleRequestCount: () => remoteModuleRequests,
     // Swap the model behaviour + reset the per-state call counter — lets one
     // Chrome run many states back-to-back (the single-Chrome verify path).
     setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },

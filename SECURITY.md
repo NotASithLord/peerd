@@ -105,11 +105,15 @@ states both plainly rather than counting them as defenses.
 
 - **Sandboxed execution.** WebVM uses CheerpX. Notebook and headless script
   execution use sealed workers. Apps use opaque-origin sandboxed iframes and
-  currently run only on Chrome. Script and Notebook jobs may import HTTPS
-  JavaScript. Pins are optional, imported code inherits the run's capabilities,
-  and visible Notebook output is not yet fenced before its actor reads it. The
-  sealed worker protects the extension process; it does not make remote code a
-  trusted dependency.
+  currently run only on Chrome. Store and web builds refuse direct remote
+  JavaScript imports without requesting the module source. Preview permits
+  audited literal static remote imports. Dynamic imports are refused in every
+  package.
+  Pins are optional there, imported code inherits the run's capabilities, and
+  visible Notebook output is not yet fenced before its actor reads it. The
+  sealed worker protects the extension process. It does not make remote code a
+  trusted dependency. The broader network-derived code contract for Store is
+  tracked separately.
 
 ## In scope
 

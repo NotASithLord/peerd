@@ -22,11 +22,13 @@ supported. The live feature gate and service-worker checks are the authority.
 
 ### Remote JavaScript imports
 
-The current Script and Notebook resolver can fetch HTTPS JavaScript and execute
-it in a sealed worker. The store package does not disable that path. Store
-submission is blocked until packaging removes or disables remote imports, or a
-documented Chrome Web Store decision accepts and accurately discloses the
-isolated-worker behavior.
+Store and web builds refuse direct HTTP and HTTPS JavaScript imports without
+requesting the module source. Preview keeps the audited import path. Tests and
+both Store artifact checks verify the generated policy and resolver behavior.
+
+This decision closes the direct URL import path only. The broader Store policy
+for code that a run fetches as data, saves locally, or passes to a JavaScript or
+WebAssembly execution API is tracked separately.
 
 ### Dweb
 
@@ -46,7 +48,7 @@ and assist-only behavior still need implementation and field testing. See
 Before a store submission:
 
 - confirm the current package contents with the packaging and verification commands
-- resolve the remote JavaScript import blocker and verify the uploaded artifact
+- resolve the open isolated execution policy for fetched data
 - review `PERMISSION-JUSTIFICATIONS.md`, `PRIVACY.md`, and `REVIEWER-NOTES.md`
 - replace any submission placeholders, including the reviewer demo URL
 - verify the public privacy policy URL in the store dashboards

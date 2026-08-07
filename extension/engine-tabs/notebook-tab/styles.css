@@ -19,6 +19,18 @@
 
 * { box-sizing: border-box; }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 html, body {
   margin: 0; padding: 0;
   height: 100vh; width: 100vw;
@@ -246,7 +258,7 @@ html, body {
 }
 .log-line.log-info   { color: var(--fg); }
 .log-line.log-warn   { color: var(--warn); border-left-color: color-mix(in srgb, var(--warn) 60%, transparent); }
-.log-line.log-error  { color: var(--fail); border-left-color: color-mix(in srgb, var(--fail) 60%, transparent); }
+.log-line.log-error  { color: var(--fg); border-left-color: var(--fail); }
 .log-line.log-eval   { color: var(--green); opacity: 0.85; }
 .log-line.log-return { color: var(--ok); }
 

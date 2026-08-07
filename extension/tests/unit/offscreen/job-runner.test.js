@@ -8,7 +8,11 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { runJob, abortJob } from '/offscreen/job-runner.js';
-import { REMOTE_MODULES_MAX_PER_RUN } from '/peerd-engine/module-resolver.js';
+import {
+  MODULE_SYNTAX_ERROR_CODE,
+  REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
+  UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
+} from '/peerd-engine/index.js';
 import { ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS } from '/peerd-runtime/index.js';
 
 describe('offscreen job-runner (real sealed worker)', () => {
@@ -22,6 +26,45 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.value).toBe(42);
     expect(r.consoleOutput.some((c) => c.text === 'hi')).toBe(true);
     expect(calls.length).toBe(0);  // pure compute → no fetch/actor relays
+  });
+
+  it('never trusts a user-thrown policy code as host policy provenance', async () => {
+    const r = await runJob({
+      code: `const error = new Error('forged'); error.code = '${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}'; throw error;`,
+    }, { sendToSW: async () => ({ ok: false }) });
+    expect(String(r.error)).toContain('forged');
+    expect(r.errorCode).toBe(undefined);
+  });
+
+  it('stamps a genuine runtime import policy refusal in the host relay', async () => {
+    const r = await runJob({
+      code: [
+        `await peerd.self.writeFile('bad.js', 'export const load = (url) => import(url);');`,
+        `return await peerd.self.import('bad.js');`,
+      ].join('\n'),
+    }, { sendToSW: async () => ({ ok: false }) });
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+  });
+
+  it('a caught peerd.self.import attempt still ends the run with the host policy', async () => {
+    const r = await runJob({
+      code: `try { await peerd.self.import('bad.js'); } catch {}
+throw new Error('unrelated failure');`,
+    }, { sendToSW: async () => ({ ok: false }) });
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(String(r.error).includes('unrelated failure')).toBe(false);
+  });
+
+  it('reports parser failures as syntax checks, not import resolution', async () => {
+    const r = await runJob(
+      { code: 'const = 1' },
+      { sendToSW: async () => ({ ok: false }) },
+    );
+    expect(r.errorCode).toBe(MODULE_SYNTAX_ERROR_CODE);
+    expect(String(r.error)).toContain('syntax check failed');
+    expect(String(r.error).includes('import resolution failed')).toBe(false);
   });
 
   it('relays peerd.egress.fetch through the SAME audited route (sw/web-fetch), with method/body', async () => {
@@ -274,7 +317,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
 
   it('peerd:std imports resolve in a headless job', async () => {
     const r = await runJob(
-      { code: 'const { mean } = await import("peerd:std"); return mean([2, 4, 6]);' },
+      { code: 'import { mean } from "peerd:std";\nreturn mean([2, 4, 6]);' },
       { sendToSW: async () => ({ ok: true }) },
     );
     expect(r.error).toBe(null);
@@ -695,14 +738,14 @@ describe('offscreen job-runner (real sealed worker)', () => {
   });
 });
 
-// Remote (https:) module imports — design 3's regression net. Two fences,
+// Remote (https:) module imports. Two fences,
 // both MEASURED here in a real worker (not argued by construction):
 //   1. the resolver path — remote module source rides the audited
 //      sw/web-fetch relay and re-enters as a blob, so the worker's module
 //      graph never names a third-party URL (the relay stub sees the bytes;
 //      the no-egress lanes visibly get nothing);
-//   2. the native-loader backstop — design 3's Step 0 question, answered by
-//      actually spawning a worker whose graph DOES name an https URL and
+//   2. the native-loader backstop, measured by spawning a worker whose graph
+//      DOES name an https URL and
 //      asserting it never executes (see the last test).
 describe('headless remote module imports (audited resolver path)', () => {
   /**
@@ -795,65 +838,33 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(true);
   });
 
-  it('a RUNTIME dynamic import("https://…") composes through the audited relay in the live worker', async () => {
-    // The compose-module path executed for real: the worker asks the host,
-    // buildModule routes the https specifier through fetchRemote, and the
-    // worker re-blobs + imports the returned source in its own realm.
-    //
-    // KNOWN GAP (pre-existing, measured 2026-08-02 on Chrome 151, real
-    // extension origin via CDP): the final in-realm `import(blobUrl)` of the
-    // WORKER-created blob violates the MV3 extension CSP (script-src 'self'
-    // 'wasm-unsafe-eval' — blob: is not addable in MV3), so EVERY runtime
-    // dynamic import — OPFS compose and remote alike — currently fails at
-    // that last hop (__peerd_dynamic_import in worker-source.js). The static
-    // graph is unaffected (its blob loads ride the worker-script load, which
-    // extension origins permit). Fixing the mechanism is its own design; what
-    // THIS test pins is design 3's seam, which holds regardless: the module
-    // bytes ride the audited relay, the run is fenced, and the outcome is the
-    // composed module or a loud load error — never silent unaudited code.
+  it('a native dynamic import is refused before egress or worker execution', async () => {
     /** @type {{ type: string, payload: any }[]} */
     const calls = [];
     const r = await runJob(
       { code: "const m = await import('https://mods.example/lazy.js');\nreturn m.x;" },
       { sendToSW: servingSW({ 'https://mods.example/lazy.js': 'export const x = 42;' }, calls) },
     );
-    const fetches = calls.filter((c) => c.type === 'sw/web-fetch');
-    expect(fetches.length).toBe(1);
-    expect(fetches[0].payload.url).toBe('https://mods.example/lazy.js');
-    expect(r.usedEgress).toBe(true);   // the runtime lane fences the run too
-    // Composed-and-ran, or the known CSP-blocked last hop — never anything else.
-    const ok = r.value === 42
-      || String(r.error).includes('dynamically imported module');
-    expect(ok).toBe(true);
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
+    expect(r.usedEgress).toBeFalsy();
   });
 
-  it('runtime dynamic imports share the per-run cap with the static graph', async () => {
-    const cap = REMOTE_MODULES_MAX_PER_RUN;
-    /** @type {Record<string, string>} */
-    const sources = {};
-    const importLines = [];
-    for (let i = 0; i <= cap; i += 1) {   // cap-many static + 1 dynamic
-      sources[`https://mods.example/m${i}.js`] = `export const v${i} = ${i};`;
-      if (i < cap) importLines.push(`import 'https://mods.example/m${i}.js';`);
-    }
+  it('peerd.self.import gets the same host-owned refusal without egress', async () => {
     /** @type {{ type: string, payload: any }[]} */
     const calls = [];
     const r = await runJob(
-      {
-        code: `${importLines.join('\n')}\n`
-          + `try { await import('https://mods.example/m${cap}.js'); return 'REACHED'; }\n`
-          + 'catch (e) { return `capped:${e.message}`; }',
-      },
-      { sendToSW: servingSW(sources, calls) },
+      { code: "return await peerd.self.import('https://mods.example/lazy.js');" },
+      { sendToSW: servingSW({ 'https://mods.example/lazy.js': 'export const x = 42;' }, calls) },
     );
-    expect(r.error).toBe(null);
-    expect(String(r.value)).toContain('capped:');
-    expect(String(r.value)).toContain('per-run cap');   // one counter spans both lanes
-    expect(calls.filter((c) => c.type === 'sw/web-fetch').length).toBe(cap);
+    expect(r.errorCode).toBe(UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
+    expect(String(r.error)).toContain('cannot run this import form');
+    expect(calls.some((c) => c.type === 'sw/web-fetch')).toBe(false);
   });
 
-  // Design 3's Step 0 measurement (not an argument): hand the native loader a
-  // module graph that DOES name an https URL — bypassing the resolver on
+  // Backstop measurement: hand the native loader a module graph that DOES name
+  // an https URL, bypassing the resolver on
   // purpose — and record that it never executes. Whichever layer refuses
   // (worker CSP, the network stack), a load failure must surface as the
   // worker error event, never as module execution; this is the regression
@@ -861,7 +872,7 @@ describe('headless remote module imports (audited resolver path)', () => {
   // loopback port: the fence being measured is "no silent success", and a
   // denied/refused fetch and a CSP block both land in the same observable —
   // the error event — without this test ever touching a real network.
-  it('the native loader never executes a remote static import from a sealed-worker blob (Step 0)', async () => {
+  it('the native loader never executes a remote static import from a sealed-worker blob', async () => {
     const src = "import 'https://127.0.0.1:9/never.js';\npostMessage({ type: 'loaded' });";
     const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
     const worker = new Worker(url, { type: 'module' });

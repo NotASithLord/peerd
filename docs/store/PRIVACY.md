@@ -60,10 +60,11 @@ Some features download public runtime assets, such as a speech model or a
 WebVM disk image. Integrity and source controls are defined in the code and
 vendored dependency records.
 
-Script and Notebook jobs can also import JavaScript from an HTTPS URL. peerd
-fetches that source through its audited web path and executes it in a sealed
-worker. Store packages must disable this path or disclose an accepted policy
-exemption before submission.
+Store and web builds refuse direct JavaScript imports from HTTP and HTTPS URLs
+without requesting the module source. Preview can fetch a requested module
+through the audited web path and execute it in a sealed worker. This distinction
+does not cover code fetched as ordinary data and later passed to an execution
+surface.
 
 ### Browser speech services
 

@@ -10,6 +10,9 @@
 // back next call.
 
 import { clamp } from '/shared/util.js';
+import {
+  moduleImportPolicyMessage,
+} from '/peerd-engine/index.js';
 import { pushValueBlock } from './value-block.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -19,6 +22,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @typedef {Object} EvalResult
  * @property {number} durationMs
  * @property {string} [error]
+ * @property {string} [errorCode]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
  */
@@ -37,8 +41,8 @@ export const jsNotebookTool = {
     'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
     'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
     'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
-    'relative static imports work (dynamic import() does not on the packaged',
-    'extension). No `notebook` arg → the chat\'s',
+    'literal relative static imports work; dynamic, computed, and attributed',
+    'imports do not. No `notebook` arg → the chat\'s',
     'current Notebook. Returns the return value, console output, and any error.',
   ].join(' '),
   schema: {
@@ -103,6 +107,13 @@ export const jsNotebookTool = {
         sessionId: ctx.session?.sessionId,
         notebookId: targetNotebookId,
       });
+      const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
+      if (importPolicyMessage) {
+        return {
+          ok: false,
+          error: `${result.errorCode}: ${importPolicyMessage}`,
+        };
+      }
       // evalError: the eval infrastructure succeeded but the CODE crashed —
       // ok:true (the [ERROR] text IS the result) with the marker the one-shot
       // latch reads, so an actor delegation gets its recovery turn.

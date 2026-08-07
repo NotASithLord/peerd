@@ -15,10 +15,10 @@
     connect-src 'none' is the second fence, exactly as tight as the seal:
     neither this page, nor the blob worker (which inherits this policy),
     nor any realm that somehow escaped the seal can open a connection-class
-    request to ANY host — ours included. Remote module imports don't ride the
-    native loader: the host resolver fetches their source over the same audited
-    SW relay (module-resolver.js fetchRemote → sw/web-fetch) and re-blobs it,
-    so no script load leaves this page either.
+    request to ANY host, ours included. Store and web builds refuse remote
+    URL imports without requesting the module source. Preview resolves permitted
+    URL imports through the audited SW relay and re-blobs them, so the native
+    loader never receives a third-party script URL.
     The SW keeps its own (manifest) CSP with https:, so webFetch still works.
   -->
   <meta http-equiv="Content-Security-Policy" content="connect-src 'none'">
@@ -70,6 +70,7 @@
     <div id="output-pane">
       <div id="console-output"></div>
     </div>
+    <p id="run-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
   </main>
 
   <script type="module" src="/engine-tabs/notebook-tab/notebook-tab.js"></script>

@@ -1,9 +1,8 @@
 # Chrome Web Store reviewer notes
 
-**Blocked draft. Do not submit this text with the current package.** Script and
-Notebook jobs can fetch and execute HTTPS JavaScript modules. Resolve the remote
-code decision in `OPEN-DECISIONS.md`, verify the uploaded artifact, and then
-replace the blocked section below with accurate final text.
+**Blocked draft. Do not submit this text until the fetched-data execution policy is resolved.** The
+direct URL import path is disabled in Store, but the broader isolated execution
+policy still needs a final decision and matching dashboard answer.
 
 One placeholder must be filled before submitting: the demo video URL below.
 No test API key is provided. The demo video covers
@@ -42,11 +41,16 @@ extension data through the extension.
 
 ## Remotely hosted code
 
-The current package can fetch HTTPS JavaScript through the audited web relay
-and execute it as a blob module inside sealed Script and Notebook workers. Do
-not claim that the package contains no remotely hosted code. Store submission
-is blocked until this path is disabled and verified in the store artifact, or
-the behavior receives a documented policy decision and accurate disclosure.
+The Store package refuses direct HTTP and HTTPS JavaScript imports in Script
+and Notebook without requesting the module source. A generated package constant
+disables the path in both execution hosts, the resolver fails closed when the
+constant is absent or false, and artifact verification checks both Store
+packages. Preview is a separate distribution and keeps audited literal static
+remote imports. Dynamic imports are refused in every package.
+
+This does not establish that Store cannot execute network-derived code. The
+open fetched-data execution policy covers data that a run later gives to local
+JavaScript or WebAssembly execution surfaces.
 
 Other network-loaded assets that a scan may flag are listed below:
 

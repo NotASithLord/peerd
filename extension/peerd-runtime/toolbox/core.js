@@ -3,8 +3,8 @@
 // agent imports as `peerd:toolbox/<name>` from its own-compute lanes (script +
 // notebook). This file is the PURE core: name/description/body validation, the
 // export extractor, the confirm-gated write proposal, the meta stamp, the
-// write-time import-resolution check (the resolver's transform, IO injected —
-// it validates IMPORT RESOLUTION, not JS syntax), and the fenced list
+// write-time syntax and import check (resolver parser/transform, IO injected),
+// and the fenced list
 // rendering.
 //
 // THE TRUST CONTRACT (the reason this is its own module + its own DB):
@@ -222,23 +222,24 @@ export const stampToolboxMeta = ({ name, description, exports, body, prior, prio
 };
 
 /**
- * The write-time IMPORT-RESOLUTION CHECK — the resolver's transform run against
- * the candidate body under its own specifier, so an unresolvable import (unknown
- * sibling, a toolbox→toolbox cycle, a relative path escaping the namespace)
- * fails the WRITE, not some future run. buildModule is INJECTED (functional
- * core; also: the SW has no URL.createObjectURL, so the blob-url dep is a stub
- * — the check never imports the transformed result). why NOT a syntax check: it
- * only runs the resolver's regex import-rewrite; it never parses or imports the
- * body, so a body that RESOLVES its imports but has a JS syntax error still
- * passes (eval is CSP-blocked, so there is no in-realm way to parse it).
+ * The write-time module check uses the resolver's parser and transform against
+ * the candidate body under its own specifier. Invalid syntax, unknown local or
+ * toolbox modules, cycles, and namespace escapes fail the write. Preview
+ * remote imports validate their specifier policy and direct graph count
+ * without fetching source, so availability and transitive dependencies remain
+ * runtime checks. buildModule is injected. The SW has no URL.createObjectURL,
+ * so the blob-url dependency is a stub and the result is never imported.
  *
  * @param {Object} deps
  * @param {typeof import('../../peerd-engine/module-resolver.js').buildModule} deps.buildModule
  * @param {(name: string) => Promise<string>} deps.readSibling  body of an EXISTING module; throws when unknown
- * @returns {(name: string, body: string) => Promise<void>}  throws on an import-resolution failure
+ * @param {boolean} deps.remoteModulesEnabled immutable generated channel policy
+ * @returns {(name: string, body: string) => Promise<void>} throws on invalid syntax or imports
  */
-export const makeToolboxParseCheck = ({ buildModule, readSibling }) => async (name, body) => {
+export const makeToolboxParseCheck = ({ buildModule, readSibling, remoteModulesEnabled }) => async (name, body) => {
   await buildModule(`${TOOLBOX_SPECIFIER_PREFIX}${name}`, {
+    remoteModulesEnabled,
+    validateRemoteSpecifiersOnly: true,
     // A '../'-escaped path lands here — a toolbox module has no directory to be
     // relative to, so refuse with a message that names the legal specifiers.
     readFile: async (/** @type {string} */ path) => {

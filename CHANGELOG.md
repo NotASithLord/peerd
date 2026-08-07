@@ -21,6 +21,8 @@ and storage formats may move until the surface stabilizes.
 
 ### Changed
 
+- Store and web builds now refuse direct remote JavaScript imports without
+  requesting the module source. Preview keeps the audited literal static path.
 - Trusted spawned actors can orchestrate delegation from JavaScript when both
   `script` and `message_actor` are explicitly granted. Bound environment actors
   remain pinned and cannot cross-delegate.

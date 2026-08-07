@@ -68,6 +68,32 @@ describe('sidepanel.failure-kind chip', () => {
     } finally { unmount(); }
   });
 
+  it('a remote import refusal is an expandable policy failure', async () => {
+    const message = 'remote_module_imports_unavailable: This version of peerd does not allow remote module imports. No request was made for this module.';
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a-policy', content: '',
+        toolUses: [{ id: 't-policy', name: 'script', input: { code: 'import(url)' } }],
+      },
+      {
+        role: 'user', id: 'u-policy', content: '',
+        toolResults: [{ tool_use_id: 't-policy', content: message, is_error: true }],
+      },
+    ]);
+    try {
+      await flush();
+      const card = /** @type {HTMLElement} */ (root.querySelector('.tool-call.tool-failed'));
+      const header = /** @type {HTMLButtonElement} */ (card.querySelector('button.tool-call-header'));
+      expect(header.tagName).toBe('BUTTON');
+      expect(header.getAttribute('aria-expanded')).toBe('false');
+      expect(card.querySelector('.failure-kind-chip')?.textContent).toBe('policy');
+      header.click();
+      await flush();
+      expect(header.getAttribute('aria-expanded')).toBe('true');
+      expect(card.textContent).toContain('No request was made for this module');
+    } finally { unmount(); }
+  });
+
   it('a clean turn renders no chip', async () => {
     const { root, unmount } = mount([{ role: 'assistant', id: 'a3', content: 'all done' }]);
     try {

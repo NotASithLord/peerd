@@ -18,7 +18,9 @@ import {
   MAX_TOOLBOX_BODY_CHARS,
   MAX_TOOLBOX_MODULES,
 } from '../../extension/peerd-runtime/toolbox/core.js';
-import { buildModule, TOOLBOX_SPECIFIER_PREFIX } from '../../extension/peerd-engine/module-resolver.js';
+import {
+  buildModule, REMOTE_MODULES_MAX_PER_RUN, TOOLBOX_SPECIFIER_PREFIX,
+} from '../../extension/peerd-engine/module-resolver.js';
 import type { ToolboxMeta } from '../../extension/peerd-runtime/toolbox/core.js';
 
 const meta = (over: Partial<ToolboxMeta> = {}): ToolboxMeta => ({
@@ -160,6 +162,7 @@ describe('stampToolboxMeta — rot counters reset only on a BODY change', () => 
 describe('makeToolboxParseCheck — the resolver transform at write time', () => {
   const check = (siblings: Record<string, string>) => makeToolboxParseCheck({
     buildModule,
+    remoteModulesEnabled: false,
     readSibling: async (n) => {
       if (!(n in siblings)) throw new Error(`unknown toolbox module '${n}'`);
       return siblings[n];
@@ -178,6 +181,11 @@ describe('makeToolboxParseCheck — the resolver transform at write time', () =>
       .rejects.toThrow(/ghost/);
   });
 
+  test('a top-level return is rejected as invalid module syntax', async () => {
+    await expect(check({})('bad', 'return 1; export const x = 1;'))
+      .rejects.toThrow('JavaScript syntax error');
+  });
+
   test('a toolbox→toolbox cycle through an EXISTING module is refused', async () => {
     await expect(check({ other: "import { t } from 'peerd:toolbox/tables';\nexport const o = 1;" })(
       'tables',
@@ -188,6 +196,40 @@ describe('makeToolboxParseCheck — the resolver transform at write time', () =>
   test("a '../' path escaping the toolbox namespace is refused", async () => {
     await expect(check({})('tables', "import { x } from '../secrets.js';\nexport const t = 1;"))
       .rejects.toThrow(/outside the toolbox/);
+  });
+
+  test('Preview validates a static remote specifier without fetching code', async () => {
+    const previewCheck = makeToolboxParseCheck({
+      buildModule,
+      remoteModulesEnabled: true,
+      readSibling: async () => { throw new Error('unexpected sibling read'); },
+    });
+    await expect(previewCheck(
+      'remote', "import { value } from 'https://cdn.test/mod.js'; export const result = value;",
+    )).resolves.toBe(undefined);
+    await expect(previewCheck(
+      'dynamic', "export const load = () => import('https://cdn.test/mod.js');",
+    )).rejects.toThrow('cannot run this import form');
+  });
+
+  test('Preview enforces the runtime remote graph cap during validation', async () => {
+    const previewCheck = makeToolboxParseCheck({
+      buildModule,
+      remoteModulesEnabled: true,
+      readSibling: async () => { throw new Error('unexpected sibling read'); },
+    });
+    const imports = Array.from(
+      { length: REMOTE_MODULES_MAX_PER_RUN + 1 },
+      (_, index) => `import 'https://cdn.test/module-${index}.js';`,
+    ).join('\n');
+    await expect(previewCheck('too-wide', `${imports}\nexport const result = 1;`))
+      .rejects.toThrow('per-run cap');
+  });
+
+  test('Store refuses a static remote toolbox import without fetching code', async () => {
+    await expect(check({})(
+      'remote', "import { value } from 'https://cdn.test/mod.js'; export const result = value;",
+    )).rejects.toThrow('does not allow remote module imports');
   });
 });
 

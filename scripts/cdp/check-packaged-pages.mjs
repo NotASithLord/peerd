@@ -62,6 +62,107 @@ const sameOriginNetFails = (events) => (events || [])
     && !/\.map(\?|#|$)/.test(e));
 const exceptions = (events) => (events || []).filter((e) => /^EXC |^ERR /.test(e));
 
+// Runs inside a real packaged extension page. Preview first proves that the
+// reachable module fixture is fetched and its canary executes in the sealed
+// worker. Store then receives the same fetch capability deliberately and must
+// still refuse every adversarial source before a request or worker exists.
+const packagedRemoteImportProbe = async (remoteUrl, channel) => {
+  const [{ buildWorkerSource }, { makeFetchRemote }, { REMOTE_MODULE_IMPORTS_ENABLED }] = await Promise.all([
+    import('/engine-tabs/notebook-tab/worker-source.js'),
+    import('/peerd-engine/index.js'),
+    import('/shared/channel-config.js'),
+  ]);
+  let fetchCalls = 0;
+  const urls = [];
+  const makeDeps = () => ({
+    remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
+    // Inject even in Store. The package policy must remain the independent
+    // fail-closed grant, not merely rely on the production host omitting this.
+    fetchRemote: async (url) => {
+      fetchCalls += 1;
+      urls.push(url);
+      return makeFetchRemote((request) => chrome.runtime.sendMessage({
+        type: 'sw/web-fetch',
+        ...request,
+      }))(url);
+    },
+    readFile: async () => { throw new Error('unexpected local module read'); },
+    makeBlobUrl: (source) => URL.createObjectURL(
+      new Blob([source], { type: 'application/javascript' })),
+  });
+
+  if (channel === 'preview') {
+    let computedRefusal = null;
+    try {
+      await buildWorkerSource(`const url = ${JSON.stringify(remoteUrl)}; return import(url);`, {
+        notebookId: 'packaged-policy-preview-computed',
+        resolverDeps: makeDeps(),
+      });
+    } catch (error) {
+      computedRefusal = error?.code ?? null;
+    }
+    // The source spells the scheme with a JavaScript escape. Acorn must decode
+    // it and the resolver must still route the request through audited fetch.
+    const escapedRemoteUrl = remoteUrl.replace(/^h/, '\\x68');
+    const built = await buildWorkerSource(
+      `import { value } from '${escapedRemoteUrl}'; return value;`,
+      { notebookId: 'packaged-policy-preview', resolverDeps: makeDeps() },
+    );
+    const workerUrl = URL.createObjectURL(new Blob([built.source], {
+      type: 'application/javascript',
+    }));
+    const result = await new Promise((resolve) => {
+      const worker = new Worker(workerUrl, { type: 'module' });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        resolve({ error: 'worker timed out' });
+      }, 8000);
+      worker.addEventListener('message', (event) => {
+        if (event.data?.type !== 'done') return;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve({ value: event.data.value, error: event.data.error ?? null });
+      });
+      worker.addEventListener('error', (event) => {
+        clearTimeout(timer);
+        worker.terminate();
+        resolve({ error: event.message || 'worker crashed' });
+      });
+    });
+    URL.revokeObjectURL(workerUrl);
+    for (const entry of built.cache.values()) URL.revokeObjectURL(entry.blobUrl);
+    return {
+      enabled: REMOTE_MODULE_IMPORTS_ENABLED,
+      computedRefusal,
+      fetchCalls,
+      urls,
+      result,
+    };
+  }
+
+  const cases = [
+    ['static', `import ${JSON.stringify(remoteUrl)};`],
+    ['postfix', `let n = 1; const url = ${JSON.stringify(remoteUrl)}; n++ / import(url) / 2;`],
+    ['ASI', `const url = ${JSON.stringify(remoteUrl)}; { import(url)\n{} }`],
+    ['normalized', `import ' https:\\\\remote-module.test/normalized.js';`],
+    ['escaped', `import '\\x68ttps://remote-module.test/escaped.js';`],
+    ['data', "import('data:text/javascript,globalThis.__storeCanary=true')"],
+  ];
+  const refusals = [];
+  for (const [name, source] of cases) {
+    try {
+      await buildWorkerSource(source, {
+        notebookId: `packaged-policy-${name}`,
+        resolverDeps: makeDeps(),
+      });
+      refusals.push({ name, code: null });
+    } catch (error) {
+      refusals.push({ name, code: error?.code ?? null });
+    }
+  }
+  return { enabled: REMOTE_MODULE_IMPORTS_ENABLED, fetchCalls, urls, refusals };
+};
+
 let failed = false;
 for (const channel of ['preview', 'store']) {
   await packageArtifact({ channel, browser: 'chrome', version, sign: false, verify: false });
@@ -72,6 +173,57 @@ for (const channel of ['preview', 'store']) {
     // Loads the PACKAGED tree (not extension/). launchPeerd opens + mounts the
     // side panel as part of setup, so a packaged side-panel break throws here.
     ctx = await launchPeerd({ extensionDir: root });
+
+    // Browser-level package policy proof. CDP fulfills one HTTPS module URL at
+    // the wire, so the fixture is deterministic and no public network is used.
+    // Preview must execute it; Store must not request it.
+    const remoteUrl = 'https://remote-module.test/store-policy-canary.js';
+    let policyPage = null;
+    const fixtureRequestsBefore = ctx.remoteModuleRequestCount();
+    try {
+      policyPage = await openExtPage(ctx, 'home/home.html');
+      const probe = await evalIn(
+        policyPage,
+        `(${packagedRemoteImportProbe.toString()})(${JSON.stringify(remoteUrl)}, ${JSON.stringify(channel)})`,
+        true,
+      );
+      const fixtureRequests = ctx.remoteModuleRequestCount() - fixtureRequestsBefore;
+      const storeCodes = channel === 'store'
+        ? Object.fromEntries(probe.refusals.map((entry) => [entry.name, entry.code]))
+        : {};
+      const expectedStoreCodes = {
+        static: 'remote_module_imports_unavailable',
+        postfix: 'unsupported_native_module_import',
+        ASI: 'unsupported_native_module_import',
+        normalized: 'remote_module_imports_unavailable',
+        escaped: 'remote_module_imports_unavailable',
+        data: 'unsupported_native_module_import',
+      };
+      const policyOk = channel === 'preview'
+        ? probe.enabled === true
+          && probe.computedRefusal === 'unsupported_native_module_import'
+          && probe.fetchCalls === 1
+          && fixtureRequests === 1
+          && probe.result?.value === 'remote-canary-executed'
+          && !probe.result?.error
+        : probe.enabled === false
+          && probe.fetchCalls === 0
+          && fixtureRequests === 0
+          && JSON.stringify(storeCodes) === JSON.stringify(expectedStoreCodes);
+      if (!policyOk) {
+        failed = true;
+        log(`  ✗ [${channel}] packaged remote-import policy: ${JSON.stringify({ probe, fixtureRequests })}`);
+      } else {
+        log(`  ✓ [${channel}] packaged remote-import policy exercised in browser`);
+      }
+    } catch (error) {
+      failed = true;
+      const fixtureRequests = ctx.remoteModuleRequestCount() - fixtureRequestsBefore;
+      log(`  ✗ [${channel}] packaged remote-import policy probe failed after ${fixtureRequests} fixture request(s): ${error?.message ?? error}`);
+    } finally {
+      try { policyPage?.close(); } catch { /* */ }
+    }
+
     for (const page of pages) {
       const app = isAppPage(root, page);
       let p = null; let mounted = true; let openErr = null;

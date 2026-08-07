@@ -104,13 +104,12 @@ describe('resolver — peerd:toolbox static imports', () => {
 });
 
 describe('resolver — peerd:toolbox dynamic imports', () => {
-  test('a string-literal dynamic toolbox import routes through __peerd_dynamic_import (compose-module path)', async () => {
+  test('a string-literal dynamic toolbox import is refused before worker execution', async () => {
     const deps = makeDeps({}, { tables: 'export const x = 1;' });
-    const out = await buildEntry(
+    await expect(buildEntry(
       "const m = await import('peerd:toolbox/tables');\nreturn m.x;",
       'job.js',
       deps,
-    );
-    expect(out.body).toContain('__peerd_dynamic_import("peerd:toolbox/tables")');
+    )).rejects.toThrow('cannot run this import form');
   });
 });
