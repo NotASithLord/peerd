@@ -12,6 +12,7 @@ import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { generateManifest } from '../../packaging/gen-manifest.ts';
+import { genChannelConfigSource } from '../../packaging/gen-channel-config.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 const manifest = generateManifest({ channel: 'store', browser: 'chrome', version: '0.0.0' });
@@ -135,6 +136,13 @@ describe('store manifest posture', () => {
 });
 
 describe('store feature flags', () => {
+  test('store disables remote module imports while preview opts in', () => {
+    expect(genChannelConfigSource('store'))
+      .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = false');
+    expect(genChannelConfigSource('preview'))
+      .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
+  });
+
   test('remote skill install is off for V1', async () => {
     const flags = await import('../../extension/shared/flags.js');
     expect(flags.REMOTE_SKILL_INSTALL).toBe(false);

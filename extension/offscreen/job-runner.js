@@ -25,8 +25,13 @@
 //   • Hardening path if the backstop is wanted: spawn the worker from a
 //     same-origin iframe carrying its own `connect-src 'none'` meta-CSP.
 
-import { opfsHelpers, buildModule, makeFetchRemote, TOOLBOX_SPECIFIER_PREFIX } from '/peerd-engine/index.js';
+import {
+  opfsHelpers, makeFetchRemote,
+  MODULE_SYNTAX_ERROR_CODE, TOOLBOX_SPECIFIER_PREFIX,
+  UnsupportedNativeModuleImportError,
+} from '/peerd-engine/index.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/engine-tabs/notebook-tab/worker-source.js';
+import { REMOTE_MODULE_IMPORTS_ENABLED } from '/shared/channel-config.js';
 import {
   ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS,
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS,
@@ -141,7 +146,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -402,15 +407,16 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
     makeBlobUrl: (src) => URL.createObjectURL(new Blob([src], { type: 'application/javascript' })),
     log: () => {},
     builtins: NOTEBOOK_BUILTINS,
-    // Remote (https:) imports ride the run's EGRESS capability: an a2a or
-    // no-egress lane (page_code, site-client) gets NO fetchRemote, so the
-    // resolver refuses the import with the why ("no network"). This wall is
+    remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
+    // Remote imports require package policy AND run egress. Store and web
+    // builds fail the first check. An a2a or no-egress lane (page_code,
+    // site-client) gets NO fetchRemote and fails the second check. This wall is
     // load-bearing at RUNTIME too: the worker reaches the resolver via the
     // compose-module relay below (a worker-supplied path may be an https
     // URL), so it's the resolver's fetchRemote-absence check — plus
     // profile.opfs gating that relay — that keeps a no-egress realm from
     // pulling code bytes, not any absence of a runtime surface.
-    ...((!a2a && profile.egress) ? {
+    ...((REMOTE_MODULE_IMPORTS_ENABLED && !a2a && profile.egress) ? {
       /** @param {string} url */
       fetchRemote: (url) => {
         usedEgress = true;   // module bytes are untrusted web bytes → fence the output
@@ -475,7 +481,14 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
     // usedEgress still rides out: a partially-fetched remote graph that then
     // failed (denylist, pin mismatch) DID touch the web.
     const deadlineHit = /** @type {{ name?: string }} */ (e)?.name === 'JobDeadlineError';
-    return { value: undefined, consoleOutput: [], durationMs: deadlineHit ? timeoutMs : 0, error: `import resolution failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, usedEgress, usedWorkspace, workspaceOverBudget, codeTrace };
+    const errorCode = /** @type {{ code?: string }} */ (e)?.code;
+    const phase = errorCode === MODULE_SYNTAX_ERROR_CODE ? 'syntax check' : 'import resolution';
+    return {
+      value: undefined, consoleOutput: [], durationMs: deadlineHit ? timeoutMs : 0,
+      error: `${phase} failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
+      errorCode,
+      usedEgress, usedWorkspace, workspaceOverBudget, codeTrace,
+    };
   }
   // Drop the build-phase Stop handle: its kill can only settle the (already
   // settled) build promise. The run phase re-registers with a worker kill
@@ -831,6 +844,25 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             worker.postMessage({ type: 'opfs-response', rid: m.rid, error: 'opfs capability is disabled for this job' });
             return;
           }
+          if (m.op === 'compose-module') {
+            // Dynamic import is unsupported, so this host-owned event is
+            // terminal. That binds the stable policy code to the run outcome
+            // even if user code tries to catch the bridge rejection.
+            const error = new UnsupportedNativeModuleImportError();
+            clearTimeout(timer);
+            abortHostOperations();
+            try { worker.terminate(); } catch {}
+            recordToolboxUse(false);
+            resolve({
+              value: undefined, consoleOutput: [], durationMs: 0,
+              error: `import resolution failed: ${error.message}`,
+              errorCode: error.code,
+              usedEgress, usedActors, usedPage, images: pageImages,
+              usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace,
+              usedProvider, providerCalls, providerTokens,
+            });
+            return;
+          }
           try {
             const result = await trackHostOperation(runCodeOp('opfs', m.op, async () => {
               let value;
@@ -862,13 +894,15 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               // the ONE in-band way back under it (the over-budget nudge names it).
               else if (m.op === 'delete') { await opfs.delete(m.args.path, { signal: hostOpsAbort.signal }); value = null; }
               else if (m.op === 'list') value = await opfs.list({ signal: hostOpsAbort.signal });
-              else if (m.op === 'compose-module') value = (await buildModule(m.args.path, resolverDeps, cache)).source;
               else throw new Error(`unknown opfs op: ${m.op}`);
               return value;
             }));
             worker.postMessage({ type: 'opfs-response', rid: m.rid, result });
           } catch (e) {
-            worker.postMessage({ type: 'opfs-response', rid: m.rid, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+            worker.postMessage({
+              type: 'opfs-response', rid: m.rid,
+              error: /** @type {{ message?: string }} */ (e)?.message ?? String(e),
+            });
           }
           return;
         }

@@ -25,10 +25,9 @@ const SEAL_MODULE_URL = new URL('./realm-seal.js', import.meta.url).href;
 const STD_MODULE_URL = new URL('./notebook-std.js', import.meta.url).href;
 const WASI_MODULE_URL = new URL('./notebook-wasi.js', import.meta.url).href;
 
-// The bare-specifier → URL map both hosts feed the resolver. Exported so a host's
-// own `compose-module` (dynamic-import) path resolves the builtins the same way
-// the static entry import does. Don't let it drift from buildEntry's builtins
-// below. peerd:wasi is pure compute over caller-built capabilities (its own
+// The bare-specifier → URL map both hosts feed the resolver. Do not let it
+// drift from buildEntry's builtins below. peerd:wasi is pure compute over
+// caller-built capabilities (its own
 // header has the security story), so exposing it everywhere peerd:std goes adds
 // no authority to the realm.
 export const NOTEBOOK_BUILTINS = { 'peerd:std': STD_MODULE_URL, 'peerd:wasi': WASI_MODULE_URL };
@@ -88,7 +87,6 @@ export const buildWorkerSource = async (userCode, { entryPath = 'notebook.js', n
   const source = `import ${JSON.stringify(SEAL_MODULE_URL)}; // realm seal — MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
-const PEERD_BUILTINS = ${JSON.stringify(NOTEBOOK_BUILTINS)};
 const consoleOutput = [];
 
 const stringify = (v) => {
@@ -158,7 +156,11 @@ const makeBridge = (name, { timeoutMs, shape, timeoutMessage } = {}) => {
     const p = pending.get(m.rid);
     if (p) {
       pending.delete(m.rid);
-      if (m.error) p.reject(new Error(m.error));
+      if (m.error) {
+        const error = new Error(m.error);
+        if (m.errorCode) error.code = m.errorCode;
+        p.reject(error);
+      }
       else p.resolve(shape ? shape(m.result) : m.result);
     }
     return true;
@@ -257,23 +259,11 @@ globalThis.peerd = {
   },
 };
 
-// Dynamic import shim. Static imports resolve to host-realm blob URLs at build
-// time and work via the worker's module loader. Dynamic import() of a host-realm
-// blob URL fails to fetch (realm scoping), so we go through the host: it returns
-// the fully-transformed source, we wrap it in a WORKER-realm blob URL, and
-// dynamic-import that.
+// Compatibility relay for peerd.self.import. The host refuses this operation
+// with the same stable policy error as native dynamic import syntax because a
+// packaged MV3 worker cannot complete the final blob-import hop.
 globalThis.__peerd_dynamic_import = async (opfsPath) => {
-  // A BUILTIN (peerd:std) is not an OPFS file — the compose path would miss and
-  // throw "cannot resolve". Import its real URL directly, same as the static
-  // resolver does (the literal-specifier rewrite already does this at build
-  // time; this covers the non-literal peerd.self.import(name) route).
-  if (Object.prototype.hasOwnProperty.call(PEERD_BUILTINS, opfsPath)) {
-    return import(PEERD_BUILTINS[opfsPath]);
-  }
-  const source = await opfsCall('compose-module', { path: opfsPath });
-  const blob = new Blob([source], { type: 'application/javascript' });
-  const url = URL.createObjectURL(blob);
-  return import(url);
+  return opfsCall('compose-module', { path: opfsPath });
 };
 
 // --- peerd.runtime.runAgent (embedded agent) proxy ---

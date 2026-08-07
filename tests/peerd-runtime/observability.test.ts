@@ -10,6 +10,12 @@ import {
   DEBUG_BUNDLE_FORMAT, BUNDLE_MAX_AUDIT_ENTRIES, BUNDLE_MAX_CHILD_SESSIONS,
 } from '../../extension/peerd-runtime/observability/debug-bundle.js';
 import { bundleToOtlp, traceIdFromUuid, spanIdFrom } from '../../extension/peerd-runtime/observability/otel-export.js';
+import {
+  REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
+  REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE,
+  UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
+  UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE,
+} from '../../extension/peerd-engine/errors.js';
 
 describe('classifyFailure — the strings the codebase actually produces', () => {
   const cases: Array<[string, ReturnType<typeof classifyFailure>['kind']]> = [
@@ -25,6 +31,8 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     ['User declined the outbound write.', 'policy'],
     ['EgressDeniedError: https://evil.example is not on the allowlist', 'policy'],
     ['egress denied: denylist matched host tracker.example', 'policy'],
+    [`${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}: ${REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE}`, 'policy'],
+    [`${UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE}: ${UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE}`, 'policy'],
     ['vault is locked — unlock to continue', 'auth'],
     ["Provider 'anthropic' HTTP 401: {\"error\":\"invalid x-api-key\"}", 'auth'],
     // a bare HTTP 403 in an asset-download failure is NOT a credential

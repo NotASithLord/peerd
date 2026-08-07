@@ -398,9 +398,9 @@ RETURN a structured result: the body runs as an async function, so \`return <val
 that value back as your answer — return the object/array/number the parent can USE (it is
 JSON-serialized), never prose. console.log is TRACING only (captured apart from the result);
 a run that only logs returns nothing. Each run is a FRESH worker: module-level state does
-NOT carry between runs — persist across them via peerd.self.writeFile/readFile. Static
-\`import\`, \`export … from\`, and dynamic \`import('./x.js')\` of relative paths all work
-(peerd.self.import is the dynamic alias); \`import { chart, table, sum, mean, median } from
+NOT carry between runs. Persist across them via peerd.self.writeFile/readFile. Literal
+relative static \`import\` and \`export … from\` work. Dynamic imports and
+\`peerd.self.import\` do not. \`import { chart, table, sum, mean, median } from
 'peerd:std'\` is the built-in stdlib. \`import { runWasi } from 'peerd:wasi'\` runs a compiled
 wasm32-wasi BINARY over an in-memory FS — runWasi(bytes, { args, env, stdin, files }) →
 { exitCode, stdout, stderr, files } (bytes via peerd.egress.fetch(url).bytes; the module gets

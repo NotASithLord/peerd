@@ -108,19 +108,24 @@ blocker below is resolved against the package being uploaded.
 
 ## Remote code question
 
-**Submission blocker. Do not answer No for the current package.**
+**Do not answer No until the fetched-data execution policy is resolved.**
 
-The Script and Notebook module resolver accepts HTTPS JavaScript imports. It
-fetches the source through peerd's audited web relay and executes it as a blob
-module in a sealed worker. The current store package does not disable that path.
+The Store Script and Notebook resolver refuses direct HTTP and HTTPS JavaScript
+imports without requesting the module source. The package generates
+`REMOTE_MODULE_IMPORTS_ENABLED = false`, both hosts consume it, and the
+resolver requires an explicit true value before it can use the audited fetch
+relay. Preview keeps that import path.
 
-This matches the Chrome Web Store dashboard's definition of remotely hosted
-code. Before submission, either disable and verify remote imports in the store
-artifact, or obtain a clear policy decision for the isolated-worker exemption
-and declare the behavior accurately. Do not reuse the old data-only answer.
+This does not settle every remote code question. A run can still fetch bytes as
+data and later use local JavaScript or WebAssembly execution surfaces. The open
+fetched-data execution policy must decide and document that broader contract
+before the dashboard answer is final.
 
-Current source: `extension/peerd-engine/module-resolver.js` and
-`extension/offscreen/job-runner.js`.
+Current source: `extension/peerd-engine/module-resolver.js`,
+`extension/offscreen/job-runner.js`,
+`extension/engine-tabs/notebook-tab/notebook-tab.js`,
+`packaging/gen-channel-config.ts`, and
+`packaging/verify-store-artifact.ts`.
 
 ---
 

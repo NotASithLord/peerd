@@ -97,6 +97,16 @@ describe('buildEntry — static imports', () => {
     expect(aSrc).toContain('blob:test/');
   });
 
+  test('extracts multiple static imports on one physical line', async () => {
+    const out = await buildEntry(
+      "import { a } from './a.js'; import { b } from './b.js'; return a + b;",
+      'scratch.js',
+      makeDeps({ 'a.js': 'export const a = 1;', 'b.js': 'export const b = 2;' }),
+    );
+    expect(out.imports.match(/import \{/g)?.length).toBe(2);
+    expect(out.body).toContain('return a + b');
+  });
+
   test('relative paths resolve against the importing module dir', async () => {
     const files = {
       'lib/foo.js': "import { bar } from './bar.js'; export const foo = () => bar();",
@@ -152,53 +162,22 @@ describe('buildEntry — re-exports', () => {
 });
 
 describe('buildEntry — dynamic imports', () => {
-  test('import(./literal.js) is rewritten to __peerd_dynamic_import("<resolved>")', async () => {
-    const files = { 'lazy.js': 'export const lazy = () => 42;' };
-    const out = await buildEntry(
-      "const m = await import('./lazy.js'); return m.lazy();",
-      'scratch.js',
-      makeDeps(files),
-    );
-    expect(out.body).not.toContain("'./lazy.js'");
-    expect(out.body).toContain('__peerd_dynamic_import("lazy.js")');
+  test.each([
+    "const m = await import('./lazy.js'); return m.lazy();",
+    "return import('lodash');",
+    "return import('peerd:std');",
+  ])('refuses a dynamic import before worker execution: %s', async (source) => {
+    await expect(buildEntry(source, 'scratch.js', makeDeps({})))
+      .rejects.toThrow('cannot run this import form');
   });
 
-  test('dynamic import inside an imported module is rewritten too', async () => {
-    const files = {
-      'a.js': "export const a = async () => (await import('./b.js')).b;",
-      'b.js': 'export const b = 99;',
-    };
-    const out = await buildEntry(
-      "import { a } from './a.js';\nreturn await a();",
+  test('refuses a dynamic import inside an imported module', async () => {
+    const files = { 'a.js': "export const a = async () => import('./b.js');" };
+    await expect(buildEntry(
+      "import { a } from './a.js';\nreturn a();",
       'scratch.js',
       makeDeps(files),
-    );
-    const aSrc = out.cache.get('a.js')!.source;
-    expect(aSrc).not.toContain("import('./b.js')");
-    expect(aSrc).toContain('__peerd_dynamic_import("b.js")');
-  });
-
-  test('relative dynamic import resolves against the importing module dir', async () => {
-    const files = {
-      'lib/loader.js': "export const lazy = () => import('./helper.js');",
-      'lib/helper.js': "export const x = 1;",
-    };
-    const out = await buildEntry(
-      "import { lazy } from './lib/loader.js';\nreturn lazy();",
-      'scratch.js',
-      makeDeps(files),
-    );
-    const loaderSrc = out.cache.get('lib/loader.js')!.source;
-    expect(loaderSrc).toContain('__peerd_dynamic_import("lib/helper.js")');
-  });
-
-  test('bare specifier dynamic import passes through', async () => {
-    const out = await buildEntry(
-      "return import('lodash');",
-      'scratch.js',
-      makeDeps({}),
-    );
-    expect(out.body).toContain('__peerd_dynamic_import("lodash")');
+    )).rejects.toThrow('cannot run this import form');
   });
 });
 
@@ -249,6 +228,7 @@ describe('remote (https) imports via injected fetchRemote', () => {
     fetched: string[] = [],
   ) => ({
     ...makeDeps(files),
+    remoteModulesEnabled: true,
     fetchRemote: async (url: string) => {
       fetched.push(url);
       if (!(url in remote)) throw new Error(`denylisted: ${url}`);
@@ -272,26 +252,52 @@ describe('remote (https) imports via injected fetchRemote', () => {
     const out = await buildEntry(
       "import { x } from 'HTTPS://cdn.test/lib.js';\nreturn x;",
       'scratch.js',
-      makeRemoteDeps({ 'HTTPS://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched),
+      makeRemoteDeps({ 'https://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched),
     );
-    expect(fetched).toEqual(['HTTPS://cdn.test/lib.js']);
+    expect(fetched).toEqual(['https://cdn.test/lib.js']);
     expect(out.imports).toContain('blob:test/');
     expect(out.imports).not.toContain('HTTPS://');
   });
 
-  test('a protocol-relative specifier fails CLOSED with a named refusal (static + dynamic)', async () => {
+  test.each([
+    ["import { x } from '\\x68ttps://cdn.test/escaped.js';\nreturn x;", 'https://cdn.test/escaped.js'],
+    ["import { x } from '\\u0068ttps://cdn.test/unicode.js';\nreturn x;", 'https://cdn.test/unicode.js'],
+  ])('an escaped Preview scheme is decoded and routed through audited fetch', async (code, url) => {
+    const fetched: string[] = [];
+    const out = await buildEntry(
+      code,
+      'scratch.js',
+      makeRemoteDeps({ [url]: 'export const x = 1;' }, {}, fetched),
+    );
+    expect(fetched).toEqual([url]);
+    expect(out.imports).toContain('blob:test/');
+    expect(out.imports).not.toContain('ttps://');
+  });
+
+  test('remote URL canonicalization preserves backslashes in the query', async () => {
+    const url = 'https://cdn.test/mod.js?name=a\\b';
+    const fetched: string[] = [];
+    await buildEntry(
+      "import 'https://cdn.test/mod.js?name=a\\\\b';",
+      'scratch.js',
+      makeRemoteDeps({ [url]: 'export const x = 1;' }, {}, fetched),
+    );
+    expect(fetched).toEqual([url]);
+  });
+
+  test('a protocol-relative static specifier fails closed before the native loader', async () => {
     // '//cdn…' is not remote per the predicate and would otherwise pass
     // through to the worker's native loader — the unaudited near-miss.
     await expect(buildEntry(
       "import '//cdn.test/x.js';",
       'scratch.js',
       makeRemoteDeps({}),
-    )).rejects.toThrow('protocol-relative');
+    )).rejects.toThrow('cannot run this import form');
     await expect(buildEntry(
       "return import('//cdn.test/x.js');",
       'scratch.js',
       makeRemoteDeps({}),
-    )).rejects.toThrow('protocol-relative');
+    )).rejects.toThrow('cannot run this import form');
   });
 
   test('a static https import is fetched through fetchRemote and re-blobbed', async () => {
@@ -334,8 +340,8 @@ describe('remote (https) imports via injected fetchRemote', () => {
       },
     );
     const src = out.cache.get('https://cdn.test/stats.js')!.source;
-    expect(src).toContain(`from '${STD}'`);
-    expect(src).not.toContain("'peerd:std'");
+    expect(src).toContain(STD);
+    expect(src).not.toContain('peerd:std');
   });
 
   test('the same URL imported twice is fetched once (per-run cache)', async () => {
@@ -371,8 +377,107 @@ describe('remote (https) imports via injected fetchRemote', () => {
     await expect(buildEntry(
       "import { x } from 'https://cdn.test/lib.js';\nreturn x;",
       'scratch.js',
-      makeDeps({}),
+      { ...makeDeps({}), remoteModulesEnabled: true },
     )).rejects.toThrow('no network');
+  });
+
+  test('channel policy refuses static imports before fetch', async () => {
+    const fetched: string[] = [];
+    const deps = {
+      ...makeRemoteDeps({ 'https://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched),
+      remoteModulesEnabled: false,
+    };
+    try {
+      await buildEntry(
+        "import { x } from 'https://cdn.test/lib.js';\nreturn x;",
+        'scratch.js',
+        deps,
+      );
+      throw new Error('expected channel policy refusal');
+    } catch (error) {
+      expect((error as { name?: string }).name)
+        .toBe('RemoteModuleImportsUnavailableError');
+      expect((error as { code?: string }).code)
+        .toBe('remote_module_imports_unavailable');
+      expect(String((error as { message?: string }).message))
+        .toContain('does not allow remote module imports');
+    }
+    expect(fetched).toEqual([]);
+  });
+
+  test('channel policy refuses a direct remote module build before fetch', async () => {
+    const fetched: string[] = [];
+    const deps = {
+      ...makeRemoteDeps({ 'https://cdn.test/lazy.js': 'export const x = 1;' }, {}, fetched),
+      remoteModulesEnabled: false,
+    };
+    await expect(buildModule('https://cdn.test/lazy.js', deps))
+      .rejects.toThrow('No request was made for this module');
+    expect(fetched).toEqual([]);
+  });
+
+  test('channel policy refuses a mixed-case nested remote import before fetch', async () => {
+    const fetched: string[] = [];
+    const deps = {
+      ...makeRemoteDeps({ 'HTTPS://cdn.test/nested.js': 'export const x = 1;' }, {
+        'local.js': "import 'HTTPS://cdn.test/nested.js'; export const local = true;",
+      }, fetched),
+      remoteModulesEnabled: false,
+    };
+    await expect(buildEntry(
+      "import { local } from './local.js';\nreturn local;",
+      'scratch.js',
+      deps,
+    )).rejects.toThrow('does not allow remote module imports');
+    expect(fetched).toEqual([]);
+  });
+
+  test('an injected fetch cannot enable remote imports without an explicit policy grant', async () => {
+    const fetched: string[] = [];
+    const granted = makeRemoteDeps({ 'https://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched);
+    const { remoteModulesEnabled: _grant, ...ungranted } = granted;
+    await expect(buildModule('https://cdn.test/lib.js', ungranted))
+      .rejects.toThrow('does not allow remote module imports');
+    expect(fetched).toEqual([]);
+  });
+
+  test.each([
+    ["const url = 'https://cdn.test/lib.js'; return import(url);", 'unsupported_native_module_import'],
+    ["return import('https:' + '//cdn.test/lib.js');", 'unsupported_native_module_import'],
+    ["let n = 1; const url = 'https://cdn.test/lib.js'; n++ / import(url) / 2;", 'unsupported_native_module_import'],
+    ["import/* split */'https://cdn.test/lib.js'; return true;", 'remote_module_imports_unavailable'],
+    ["import 'https:\\x2f\\x2fcdn.test/lib.js'; return true;", 'remote_module_imports_unavailable'],
+    ["import ' https://cdn.test/lib.js'; return true;", 'remote_module_imports_unavailable'],
+  ])('channel policy catches native-loader syntax before fetch: %s', async (code, errorCode) => {
+    const fetched: string[] = [];
+    const deps = {
+      ...makeRemoteDeps({ 'https://cdn.test/lib.js': 'export const x = 1;' }, {}, fetched),
+      remoteModulesEnabled: false,
+    };
+    try {
+      await buildEntry(code, 'scratch.js', deps);
+      throw new Error('expected channel policy refusal');
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe(errorCode);
+    }
+    expect(fetched).toEqual([]);
+  });
+
+  test('channel policy catches a computed import inside a nested local module', async () => {
+    const fetched: string[] = [];
+    const deps = {
+      ...makeRemoteDeps({}, {
+        'local.js': "let n = 1; const url = 'https://cdn.test/lib.js'; n++ / import(url) / 2;",
+      }, fetched),
+      remoteModulesEnabled: false,
+    };
+    try {
+      await buildEntry("import './local.js';", 'scratch.js', deps);
+      throw new Error('expected channel policy refusal');
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe('unsupported_native_module_import');
+    }
+    expect(fetched).toEqual([]);
   });
 
   test('a fetch failure (denylist et al) surfaces as the resolver error', async () => {
@@ -467,7 +572,7 @@ describe('remote (https) imports via injected fetchRemote', () => {
     expect(fetched).toEqual([]);   // refused BEFORE any fetch
   });
 
-  test('a #sha256 pin applies on the dynamic-import (compose-module) path too', async () => {
+  test('a #sha256 pin applies on the direct buildModule path too', async () => {
     const source = 'export const pinned = 7;';
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
     const pin = btoa(String.fromCharCode(...new Uint8Array(digest)));
@@ -495,27 +600,22 @@ describe('remote (https) imports via injected fetchRemote', () => {
     expect(out.imports).toContain('blob:test/');
   });
 
-  test('a string-literal dynamic import of an https URL routes through __peerd_dynamic_import', async () => {
-    const out = await buildEntry(
+  test('a string-literal dynamic import of an https URL is refused before fetch', async () => {
+    await expect(buildEntry(
       "const m = await import('https://cdn.test/lazy.js'); return m.x;",
       'scratch.js',
-      makeDeps({}),
-    );
-    // resolution is deferred to the host compose-module path at runtime,
-    // where buildModule applies the SAME fetchRemote gating.
-    expect(out.body).toContain('__peerd_dynamic_import("https://cdn.test/lazy.js")');
+      { ...makeDeps({}), remoteModulesEnabled: true },
+    )).rejects.toThrow('cannot run this import form');
   });
 
-  test('a relative dynamic import INSIDE a remote module resolves against its URL', async () => {
-    const out = await buildEntry(
+  test('a dynamic import inside a remote module is refused', async () => {
+    await expect(buildEntry(
       "import { lazy } from 'https://cdn.test/pkg/loader.js';\nreturn lazy();",
       'scratch.js',
       makeRemoteDeps({
         'https://cdn.test/pkg/loader.js': "export const lazy = () => import('./helper.js');",
       }),
-    );
-    const src = out.cache.get('https://cdn.test/pkg/loader.js')!.source;
-    expect(src).toContain('__peerd_dynamic_import("https://cdn.test/pkg/helper.js")');
+    )).rejects.toThrow('cannot run this import form');
   });
 });
 
@@ -553,8 +653,8 @@ describe('buildEntry — peerd:std builtin', () => {
       'notebook.js',
       withStd(),
     );
-    expect(out.imports).toContain(`from '${STD_URL}'`);
-    expect(out.imports).not.toContain("'peerd:std'");
+    expect(out.imports).toContain(STD_URL);
+    expect(out.imports).not.toContain('peerd:std');
   });
 
   test('without a builtins map, the bare specifier passes through untouched', async () => {
@@ -574,8 +674,8 @@ describe('buildEntry — peerd:std builtin', () => {
       withStd(files),
     );
     const helper = out.cache.get('helper.js');
-    expect(helper?.source).toContain(`from '${STD_URL}'`);
-    expect(helper?.source).not.toContain("'peerd:std'");
+    expect(helper?.source).toContain(STD_URL);
+    expect(helper?.source).not.toContain('peerd:std');
   });
 
   test('other bare specifiers still pass through when builtins is set', async () => {
@@ -587,13 +687,11 @@ describe('buildEntry — peerd:std builtin', () => {
     expect(out.imports).toContain("from 'lodash'");
   });
 
-  test('dynamic import("peerd:std") becomes a NATIVE import of the URL (not the OPFS helper)', async () => {
-    const out = await buildEntry(
+  test('dynamic import("peerd:std") is refused like every other dynamic import', async () => {
+    await expect(buildEntry(
       "const std = await import('peerd:std');\nreturn std.mean([1, 2, 3]);",
       'notebook.js',
       withStd(),
-    );
-    expect(out.body).toContain(`import(${JSON.stringify(STD_URL)})`);
-    expect(out.body).not.toContain('__peerd_dynamic_import("peerd:std")');
+    )).rejects.toThrow('cannot run this import form');
   });
 });

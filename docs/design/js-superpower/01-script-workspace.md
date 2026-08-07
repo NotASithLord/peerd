@@ -70,9 +70,8 @@ condition in `formatRunResult` (`tools/defs/script.js`).
 
 Rejected refinement: fence only when the run performed an OPFS *read*. It
 saves fences on write-only runs but makes the security property depend on
-correctly classifying every relay op forever (a `peerd.self.import` of a
-workspace module is also a read, and executes). Unconditional is one line
-and survives new ops. Revisit only if fence fatigue shows up in the field.
+correctly classifying every relay op forever. Unconditional is one line and
+survives new ops. Revisit only if fence fatigue shows up in the field.
 
 ### Hygiene and limits
 

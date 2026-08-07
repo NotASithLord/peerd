@@ -4,19 +4,24 @@
 // Most of the heavy lifting lives in peerd-engine:
 //   - createEditor()  — CodeMirror + file tree + OPFS, mounted into
 //                       #editor-host
-//   - buildEntry()    — static/re-export/dynamic import resolver
+//   - buildEntry()    - static import/re-export resolver
 //
 // This file is the per-page glue: spawn a worker per eval, route
 // shimmed fetch + OPFS calls back through the host, mirror agent
 // js_notebook into the editor's notebook.js, post the result back to the SW.
 
 import browser from '/vendor/browser-polyfill.js';
-import { buildModule, createEditor, isRemoteSpecifier, makeFetchRemote, TOOLBOX_SPECIFIER_PREFIX } from '/peerd-engine/index.js';
+import {
+  createEditor, isRemoteSpecifier, makeFetchRemote,
+  moduleImportPolicyMessage, MODULE_SYNTAX_ERROR_CODE,
+  TOOLBOX_SPECIFIER_PREFIX, UnsupportedNativeModuleImportError,
+} from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
 // with the headless offscreen job runner so the security surface can't diverge.
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from './worker-source.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
+import { REMOTE_MODULE_IMPORTS_ENABLED } from '/shared/channel-config.js';
 
 const notebookId = location.hash.slice(1).split(/[?&]/)[0];
 if (!notebookId) {
@@ -51,6 +56,7 @@ const els = {
   exportBtn:  /** @type {HTMLButtonElement} */ (byId('export-btn')),
   idChip:     byId('notebook-id-chip'),
   saveStatus: byId('save-status'),
+  runStatus:  byId('run-status'),
 };
 
 els.idChip.textContent = notebookId;
@@ -71,6 +77,12 @@ const appendLine = (cls, text) => {
 };
 
 const showApp = () => { els.boot.hidden = true; els.app.hidden = false; };
+
+/** @param {string} text @param {boolean} busy */
+const setRunStatus = (text, busy) => {
+  els.outputPane.setAttribute('aria-busy', String(busy));
+  els.runStatus.textContent = text;
+};
 
 /** @param {'dirty' | 'saving' | 'saved'} state */
 const setSaveStatus = (state) => {
@@ -142,20 +154,25 @@ const makeResolverDeps = () => ({
   makeBlobUrl: (source) => URL.createObjectURL(
     new Blob([source], { type: 'application/javascript' }),
   ),
-  // Remote (https:) module SOURCE rides the audited sw/web-fetch relay —
-  // shared decode in module-resolver.js makeFetchRemote (see its header).
-  fetchRemote: makeFetchRemote(
-    (req) => /** @type {Promise<any>} */ (browser.runtime.sendMessage({ type: 'sw/web-fetch', ...req }))),
-  /** @param {{ type: string, path: string, blobUrl?: string, error?: string }} entry */
+  // Package policy and egress are separate grants. Store never receives the
+  // fetch function, and the resolver also checks the false policy literal
+  // before requesting module source on the static graph path.
+  remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
+  ...(REMOTE_MODULE_IMPORTS_ENABLED ? {
+    fetchRemote: makeFetchRemote(
+      (req) => /** @type {Promise<any>} */ (browser.runtime.sendMessage({ type: 'sw/web-fetch', ...req }))),
+  } : {}),
+  /** @param {{ type: string, path: string, blobUrl?: string, error?: string, errorCode?: string }} entry */
   log: (entry) => {
     const label = isRemoteSpecifier(entry.path) ? entry.path : `./${entry.path}`;
     if (entry.type === 'resolved') {
       appendLine('log-info', `[import] ${label} → ${shortenBlob(entry.blobUrl)}`);
-    } else if (entry.type === 'resolve-failed') {
+    } else if (entry.type === 'resolve-failed'
+      && !moduleImportPolicyMessage(entry.errorCode)) {
       appendLine('log-error', `[import] FAILED ${label}: ${entry.error}`);
     }
   },
-  // peerd:std for nested/dynamic imports too (compose-module path below).
+  // peerd:std for entry and nested static imports.
   builtins: NOTEBOOK_BUILTINS,
   // design 06: toolbox modules resolve through the SW body store. The Notebook
   // is an own-compute lane, so the dep is ALWAYS injected here (the lane gate
@@ -194,6 +211,7 @@ const dimPreviousOutput = () => {
 /** @param {string} code @param {number} [timeoutMs] @param {string} [entryPath] */
 const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   dimPreviousOutput();
+  setRunStatus('Running notebook.', true);
   let source;
   let bodyLine = 1;
   try {
@@ -215,8 +233,16 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
     if (entryCache.size > 0) appendLine('log-info', `[import] ${entryCache.size} module(s) resolved`);
   } catch (e) {
     const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
-    appendLine('log-error', `import resolution failed — ${msg}`);
-    return { value: undefined, consoleOutput: [], durationMs: 0, error: `import resolution failed: ${msg}` };
+    const errorCode = /** @type {{ code?: string }} */ (e)?.code;
+    const phase = errorCode === MODULE_SYNTAX_ERROR_CODE ? 'syntax check' : 'import resolution';
+    appendLine('log-error', `${phase} failed: ${msg}`);
+    const policyMessage = moduleImportPolicyMessage(errorCode);
+    setRunStatus(policyMessage ?? 'Notebook run failed.', false);
+    return {
+      value: undefined, consoleOutput: [], durationMs: 0,
+      error: `${phase} failed: ${msg}`,
+      errorCode,
+    };
   }
   const blob = new Blob([source], { type: 'application/javascript' });
   const url = URL.createObjectURL(blob);
@@ -225,6 +251,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
   catch (e) {
     URL.revokeObjectURL(url);
     clearModuleCache();
+    setRunStatus('Notebook run failed.', false);
     throw new Error(`worker spawn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
   }
 
@@ -307,27 +334,33 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           return;
         }
         if (m.type === 'opfs-request') {
+          if (m.op === 'compose-module') {
+            // Dynamic import is unsupported, so this host-owned event ends the
+            // run. User code cannot catch it and replace it with an unrelated
+            // failure that inherits the policy code.
+            const error = new UnsupportedNativeModuleImportError();
+            clearTimeout(timer);
+            try { worker.terminate(); } catch {}
+            recordToolboxUse(false);
+            appendLine('log-error', `import resolution failed: ${error.message}`);
+            resolve({
+              value: undefined, consoleOutput: [], durationMs: 0,
+              error: `import resolution failed: ${error.message}`,
+              errorCode: error.code,
+            });
+            return;
+          }
           try {
             let result;
             if (m.op === 'read') result = await editor.opfs.read(m.args.path);
             else if (m.op === 'write') { await editor.opfs.write(m.args.path, m.args.content); result = null; }
             else if (m.op === 'delete') { await editor.opfs.delete(m.args.path); result = null; }
             else if (m.op === 'list') result = await editor.opfs.list();
-            else if (m.op === 'compose-module') {
-              // Runtime dynamic-import request. Recursively transforms
-              // the module's source (nested static → host blob URLs,
-              // nested dynamic → __peerd_dynamic_import calls) and
-              // returns the source. The worker re-blobs in its own
-              // realm and import()s.
-              const sub = await buildModule(m.args.path, makeResolverDeps(), entryCache);
-              appendLine('log-info', `[import] dynamic ${m.args.path} → composed (${sub.source.length}B)`);
-              result = sub.source;
-            }
             else throw new Error(`unknown opfs op: ${m.op}`);
             worker.postMessage({ type: 'opfs-response', rid: m.rid, result });
           } catch (e) {
             const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
-            appendLine('log-error', `[import] FAILED dynamic ${m.args?.path}: ${msg}`);
+            appendLine('log-error', `[file] FAILED ${m.op}: ${msg}`);
             worker.postMessage({ type: 'opfs-response', rid: m.rid, error: msg });
           }
           return;
@@ -361,6 +394,7 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
           resolve({
             value: m.value, consoleOutput: m.consoleOutput,
             durationMs: m.durationMs, error,
+            errorCode: undefined,
           });
           return;
         }
@@ -386,9 +420,16 @@ const runEval = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH) => {
         recordToolboxUse(false);
         resolve({
           value: undefined, consoleOutput: [], durationMs: 0,
-          error: `worker error: ${detail}${loc}`,
+          error: `worker error: ${detail}${loc}`, errorCode: undefined,
         });
       });
+    }).then((result) => {
+      setRunStatus(
+        moduleImportPolicyMessage(result.errorCode)
+          ?? (result.error ? 'Notebook run failed.' : 'Notebook run complete.'),
+        false,
+      );
+      return result;
     });
   } finally {
     URL.revokeObjectURL(url);

@@ -28,6 +28,7 @@ const ADDON_ID = 'peerd@peerd.ai';
 const TEST_UUID = '7d12f198-31fc-4e95-9184-e954123981a6';
 const EXTENSION_ORIGIN = `moz-extension://${TEST_UUID}`;
 const FIXTURE_PATH = '/__firefox-runtime-fixture';
+const MODULE_IMPORT_PROBE_PATH = '/__firefox-module-import-probe.js';
 const RESULT_BUDGET_MS = 180_000;
 const PROVIDER_PATH = '/v1/messages';
 const PASSPHRASE_CANARY = 'firefox-runtime-passphrase-canary-7d12f198';
@@ -60,6 +61,7 @@ const TYPES = {
 };
 
 const startTestServer = async () => {
+  let moduleImportProbeRequests = 0;
   const server = createServer((request, response) => {
     let pathname;
     try { pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname); }
@@ -84,6 +86,12 @@ const startTestServer = async () => {
 </body></html>`);
       return;
     }
+    if (pathname === MODULE_IMPORT_PROBE_PATH) {
+      moduleImportProbeRequests += 1;
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+      response.end("export default 'network request escaped the module policy';");
+      return;
+    }
     if (pathname.endsWith('/')) pathname += 'index.html';
     const file = join(EXTENSION, pathname);
     if (!file.startsWith(`${EXTENSION}${sep}`) || !existsSync(file) || !statSync(file).isFile()) {
@@ -99,7 +107,11 @@ const startTestServer = async () => {
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   if (!port) throw new Error('Firefox test server did not receive a port');
-  return { port, close: () => new Promise((resolveClose) => server.close(resolveClose)) };
+  return {
+    port,
+    get moduleImportProbeRequests() { return moduleImportProbeRequests; },
+    close: () => new Promise((resolveClose) => server.close(resolveClose)),
+  };
 };
 
 const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -434,6 +446,90 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     'provider request bodies contain no key canary');
 };
 
+const runModuleImportPolicySmoke = async (driver, server) => {
+  console.log('Firefox module import policy smoke: enforce Store channel and syntax policy before request');
+  const notebookId = 'firefox-module-import-policy';
+  const notebookUrl = `${EXTENSION_ORIGIN}/engine-tabs/notebook-tab/index.html#${notebookId}`;
+  const probeUrl = `http://127.0.0.1:${server.port}${MODULE_IMPORT_PROBE_PATH}`;
+  const computedCode = `const target = ${JSON.stringify(probeUrl)};
+return await import(target);`;
+  const escapedProbeUrl = String.raw`h\x74tp${probeUrl.slice(4)}`;
+  const staticCode = `import '${escapedProbeUrl}';
+return 'REACHED';`;
+  const requestCountBefore = server.moduleImportProbeRequests;
+  let notebookTabId = null;
+  try {
+    const policy = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      import(browser.runtime.getURL('peerd-engine/index.js'))
+        .then((engine) => done({
+          ok: true,
+          unsupportedCode: engine.UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
+          storeCode: engine.REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
+        }), (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(policy?.ok === true
+      && policy.unsupportedCode === 'unsupported_native_module_import'
+      && policy.storeCode === 'remote_module_imports_unavailable',
+    'the packaged engine exports both import-policy codes', JSON.stringify(policy));
+
+    const opened = await driver.executeAsync(`
+      const [url] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.tabs.create({ url, active: false })
+        .then((tab) => done({ ok: true, tabId: tab.id }),
+          (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [notebookUrl]);
+    assert(opened?.ok === true && Number.isInteger(opened.tabId),
+      'the packaged Firefox Notebook host opens', JSON.stringify(opened));
+    notebookTabId = opened.tabId;
+
+    const computedReply = await waitFor(() => driver.executeAsync(`
+      const [tabId, id, source] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.tabs.sendMessage(tabId, {
+        type: 'js/eval', notebookId: id, code: source, timeoutMs: 10_000,
+      }).then((response) => done(response?.ok === true ? response : null), () => done(null));
+    `, [notebookTabId, notebookId, computedCode]), { budgetMs: 30_000, pollMs: 200 });
+    assert(computedReply?.ok === true, 'the live Notebook returns its computed-import result',
+      JSON.stringify(computedReply));
+    assert(computedReply.result?.errorCode === policy.unsupportedCode
+      && computedReply.result?.durationMs === 0
+      && computedReply.result?.error?.startsWith('import resolution failed:'),
+    'Firefox refuses the computed native import during Acorn preflight',
+    JSON.stringify(computedReply.result));
+    assert(server.moduleImportProbeRequests === requestCountBefore,
+      'the refused computed import makes no module request',
+      JSON.stringify({ before: requestCountBefore, after: server.moduleImportProbeRequests }));
+
+    const staticReply = await waitFor(() => driver.executeAsync(`
+      const [tabId, id, source] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.tabs.sendMessage(tabId, {
+        type: 'js/eval', notebookId: id, code: source, timeoutMs: 10_000,
+      }).then((response) => done(response?.ok === true ? response : null), () => done(null));
+    `, [notebookTabId, notebookId, staticCode]), { budgetMs: 30_000, pollMs: 200 });
+    assert(staticReply?.ok === true, 'the live Notebook returns its Store-import result',
+      JSON.stringify(staticReply));
+    assert(staticReply.result?.errorCode === policy.storeCode
+      && staticReply.result?.durationMs === 0
+      && staticReply.result?.error?.startsWith('import resolution failed:'),
+    'Firefox Store refuses an escaped literal static URL during Acorn preflight',
+    JSON.stringify(staticReply.result));
+    assert(server.moduleImportProbeRequests === requestCountBefore,
+      'the Store policy refusal makes no module request',
+      JSON.stringify({ before: requestCountBefore, after: server.moduleImportProbeRequests }));
+  } finally {
+    if (notebookTabId != null) {
+      await driver.executeAsync(`
+        const [tabId] = arguments;
+        const done = arguments[arguments.length - 1];
+        browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+      `, [notebookTabId]).catch(() => {});
+    }
+  }
+};
+
 const main = async () => {
   if (!firefoxBinary) throw new Error('Firefox not found. Set FIREFOX_PATH.');
   if (!geckodriverBinary) throw new Error('geckodriver not found. Set GECKODRIVER_PATH.');
@@ -571,6 +667,7 @@ const main = async () => {
     assert(background?.locked === true && background?.unlocked === true,
       'Firefox locks and unlocks the vault with the same passphrase', JSON.stringify(background));
 
+    await runModuleImportPolicySmoke(driver, server);
     await runBoundActorSmoke(driver, providerServer);
 
     const scriptingFlow = await driver.executeAsync(`

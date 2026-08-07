@@ -13,6 +13,9 @@
 // iframe, peerd-engine).
 
 import { clamp } from '/shared/util.js';
+import {
+  moduleImportPolicyMessage,
+} from '/peerd-engine/index.js';
 import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
@@ -37,6 +40,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @typedef {Object} RunResult
  * @property {number} durationMs
  * @property {string} [error]
+ * @property {string} [errorCode]
  * @property {Array<{ level: string, text: string }>} [consoleOutput]
  * @property {unknown} [value]
  * @property {boolean} [usedEgress]   the run called peerd.egress.fetch (job-runner)
@@ -229,6 +233,13 @@ export const scriptTool = {
         });
       }
       const result = await jsOffscreenClient.execHeadless(args.code, opts);
+      const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
+      if (importPolicyMessage) {
+        return {
+          ok: false,
+          error: `${result.errorCode}: ${importPolicyMessage}`,
+        };
+      }
       // Value spill (run cache): when the serialized [VALUE] overflows its cap,
       // store the FULL text keyed by this run/tool-use, stamped with the owning
       // session and the run's FENCE state — read_run_cache re-applies exactly
@@ -311,8 +322,7 @@ export const scriptTool = {
  * files an earlier run may have filled with fetched bytes, so nothing read
  * (or imported) from it is reliably agent-authored. UNCONDITIONAL for
  * workspace runs by design: fencing only on observed OPFS reads would make
- * the security property depend on classifying every relay op forever
- * (a `peerd.self.import` of a workspace module is also a read, and executes).
+ * the security property depend on classifying every relay op forever.
  * @param {RunResult} r
  */
 export const runIsFenced = (r) => !!(r.usedEgress || r.usedActors || r.usedPage || r.usedWorkspace);

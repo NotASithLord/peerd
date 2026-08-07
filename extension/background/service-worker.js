@@ -33,7 +33,9 @@ import {
   isOffscreenSender as senderIsOffscreen, isOptionsSender,
 } from '/shared/sender-trust.js';
 import { loadDweb } from '/shared/dweb-loader.js';
-import { CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
+import {
+  CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED, REMOTE_MODULE_IMPORTS_ENABLED,
+} from '/shared/channel-config.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
 import {
@@ -922,11 +924,12 @@ const nukeSessionWorkspace = (/** @type {string} */ sid) => opfsHelpers(['peerd-
 // resolution hosts read bodies via the toolbox/read route.
 const toolboxStore = createToolboxStore();
 // The write-time import-resolution check: the resolver transform run against a
-// candidate body, siblings read from the store. It validates import resolution,
-// NOT JS syntax. makeBlobUrl inside is a stub — the SW has no
+// candidate body, siblings read from the store. It validates syntax and import
+// resolution. makeBlobUrl inside is a stub because the SW has no
 // URL.createObjectURL, and the check never imports the result.
 const toolboxParseCheck = makeToolboxParseCheck({
   buildModule,
+  remoteModulesEnabled: REMOTE_MODULE_IMPORTS_ENABLED,
   readSibling: async (/** @type {string} */ name) => {
     const body = await toolboxStore.getBody(name);
     if (body == null) throw new Error(`unknown toolbox module '${name}' — write it first (toolbox_write)`);

@@ -1,0 +1,37 @@
+Acorn
+=====
+
+Upstream:   https://github.com/acornjs/acorn
+Package:    https://www.npmjs.com/package/acorn
+Version:    8.17.0
+Source URL: https://registry.npmjs.org/acorn/-/acorn-8.17.0.tgz
+License:    MIT (see LICENSE)
+
+Why vendored
+------------
+Store and web packages reject JavaScript module loads that cannot pass through
+peerd's host resolver. This is a security boundary, so it needs a grammar-correct
+parser rather than a handwritten token scanner. Acorn is already pinned through
+the repository's development dependency graph. The extension imports this copy
+directly because extension runtime code cannot depend on npm.
+
+Files committed
+---------------
+  acorn.mjs  dist/acorn.mjs from the published package, byte-identical
+  LICENSE    LICENSE from the published package, byte-identical
+
+SHA-256
+-------
+  acorn.mjs  1cbcbf252a5800e496dc505c706f309a9dd4e1789392e12963c77ae9497ff6f7
+  LICENSE    76a876cf886ff9be2a8b5e2e86514fed06223c8c9f0c1e9ee9606e93841e00b7
+
+Modification
+------------
+None.
+
+Update procedure
+----------------
+1. Download the published package for the new version.
+2. Copy dist/acorn.mjs and LICENSE without modification.
+3. Update the version and hashes above.
+4. Run `bun packaging/check-vendor.ts --write`.

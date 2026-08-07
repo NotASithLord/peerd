@@ -30,13 +30,11 @@
 // (the voice model downloads there) — so in that host the realm seal is the
 // ONLY fence. Every network-capable primitive must therefore be sealed by the
 // realm itself, not deferred to the page CSP.
-// Module loads are NOT an open channel: a remote (https:) import never
-// reaches this realm's native loader — the HOST resolver fetches its source
-// through the same audited relay as data fetches (module-resolver.js
-// fetchRemote → sw/web-fetch: denylist + SSRF + audit) and hands the worker
-// a same-realm blob, so the module graph the loader sees carries no
-// third-party URLs. import() itself is syntax, not a global — nothing to
-// seal here.
+// Module loads are NOT an open channel. Store and web builds refuse remote
+// URL imports without requesting the module source. Preview's HOST resolver
+// fetches permitted module source through the audited data relay and hands the
+// worker a same-realm blob, so the native loader still sees no third-party URL.
+// import() itself is syntax, not a global, so there is nothing to seal here.
 //
 // One implementation, three callers: realm-seal.js (the worker entry's
 // first static import — the production path), the bun unit tests (mock

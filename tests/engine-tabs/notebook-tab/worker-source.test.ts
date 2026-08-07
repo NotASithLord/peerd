@@ -1,28 +1,28 @@
-// The sealed-worker source template. The dynamic-import shim must short-circuit
-// BUILTINS (peerd:std) to a native import of their real URL — the compose-module
-// path reads OPFS, where a builtin has no file, so routing a builtin there
-// throws "cannot resolve" (the field failure: peerd.self.import('peerd:std')).
+// The sealed-worker source template. peerd.self.import remains as a compatibility
+// relay, but the host refuses it with the stable unsupported-import policy.
 
 import { describe, test, expect } from 'bun:test';
-import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
+import { buildWorkerSource, mapWorkerError } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 
 const resolverDeps = {
   readFile: async () => { throw new Error('no OPFS in this test'); },
   makeBlobUrl: (source: string) => `blob:test/${source.length}`,
 };
 
-describe('buildWorkerSource — the builtin short-circuit in the dynamic shim', () => {
-  test('the emitted worker source embeds the builtins map and checks it before the OPFS compose path', async () => {
+describe('buildWorkerSource dynamic import compatibility relay', () => {
+  test('peerd.self.import always routes to the host policy boundary', async () => {
     const { source } = await buildWorkerSource('return 1', { notebookId: 'nb-1', resolverDeps });
-    // the map itself rides into the worker realm…
-    expect(source).toContain(`const PEERD_BUILTINS = ${JSON.stringify(NOTEBOOK_BUILTINS)}`);
-    // …and the shim consults it BEFORE calling out to compose-module
     const shimAt = source.indexOf('__peerd_dynamic_import = async');
-    const checkAt = source.indexOf('hasOwnProperty.call(PEERD_BUILTINS', shimAt);
     const composeAt = source.indexOf("opfsCall('compose-module'", shimAt);
     expect(shimAt).toBeGreaterThan(-1);
-    expect(checkAt).toBeGreaterThan(shimAt);
-    expect(composeAt).toBeGreaterThan(checkAt);
+    expect(composeAt).toBeGreaterThan(shimAt);
+    expect(source.slice(shimAt, composeAt)).not.toContain('PEERD_BUILTINS');
+  });
+
+  test('bridge error codes stay local and final payloads claim no policy provenance', async () => {
+    const { source } = await buildWorkerSource('return 1', { notebookId: 'nb-1', resolverDeps });
+    expect(source).toContain('if (m.errorCode) error.code = m.errorCode');
+    expect(source).not.toContain('errorCode: err?.code');
   });
 });
 

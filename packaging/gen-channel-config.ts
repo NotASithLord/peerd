@@ -3,7 +3,7 @@
 // inside a packaged artifact). This is the §3/§11 injection mechanism: the
 // channel flag and the channel's defaults become literal constants in
 // the shipped tree; the store artifact's copy has DWEB_ENABLED =
-// false and NO dweb keys at all.
+// false, REMOTE_MODULE_IMPORTS_ENABLED = false, and NO dweb keys at all.
 //
 // The CHECKED-IN extension/shared/channel-config.js is the dev default
 // (preview channel) so the load-unpacked dev loop needs no build step.
@@ -65,6 +65,7 @@ export const genChannelConfigSource = (channel: ConfigChannel): string => {
 
 export const CHANNEL = ${JSON.stringify(channel)};
 export const DWEB_ENABLED = ${JSON.stringify(channel === 'preview')};
+export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(channel === 'preview')};
 
 export const CHANNEL_DEFAULTS = Object.freeze(${'{'}
 ${entries}
