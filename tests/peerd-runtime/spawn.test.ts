@@ -650,7 +650,7 @@ describe('actor context building', () => {
   });
 });
 
-describe('makeSpawnActor — isolated job inputs', () => {
+describe('makeSpawnActor: isolated job inputs', () => {
   test('the worker receives the exact task and provenance remains visible', async () => {
     const store = makeStore();
     const parent = await store.create({});

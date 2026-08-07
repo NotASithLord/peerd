@@ -595,7 +595,7 @@ describe('actor/model-call — spend-limit preflight', () => {
   });
 });
 
-describe('actor/model-call — trusted run metadata wins over worker args', () => {
+describe('actor/model-call: trusted run metadata wins over worker args', () => {
   test('pins provider, model, and Ollama host at the key-bearing boundary', async () => {
     let seen: any = null;
     const { client, during } = clientWithRelay({
@@ -615,7 +615,7 @@ describe('actor/model-call — trusted run metadata wins over worker args', () =
   });
 });
 
-describe('run() — relay lifetime', () => {
+describe('run(): relay lifetime', () => {
   test('aborts the SW-side relay signal whenever the host settles', async () => {
     let relaySignal: AbortSignal | null = null;
     let client: any;

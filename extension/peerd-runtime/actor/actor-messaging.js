@@ -720,19 +720,19 @@ export const makeActorMessaging = (deps) => {
     trackIntent(rootSessionId, intentK);
     appendAudit({ type: 'actor_message', details: { to: instanceId, kind, senderSessionId, rootSessionId, lineagePath: provenance.lineagePath, ...(typeof via === 'string' ? { via } : {}) } }).catch(() => {});
 
-    // ASYNC for EVERY long-lived sender — web included — unless the caller opted
+    // ASYNC for EVERY long-lived sender, including web, unless the caller opted
     // into `await:true`, which takes the awaitReply branch below instead. On THIS
     // path the orchestrator does not block: it hands a task
     // to the actor and gets woken with the reply on a
     // later turn (the actor model, uniformly). Persist the correlation to the
     // durable mailbox FIRST (await the write so the record is on disk before any
-    // requested actor work begins — closing the accept→persist window an SW death
+    // requested actor work begins, closing the accept→persist window an SW death
     // could otherwise drop), then queue the wake. Target resolution happened above
     // and may itself have read or minted the actor binding, so a persistence failure
     // reports that honestly even though it never queues the requested turn. The
     // actor's slot serializes its
     // turns (one actor per tab/instance), and deliver() wrapUntrusted-fences the
-    // reply — so a web actor's page-derived reply is fenced like any other
+    // reply, so a web actor's page-derived reply is fenced like any other
     // untrusted content. A storage failure refuses instead of running heap-only.
     // Keep the durable key opaque and bounded. Actor addresses include API
     // origins and may legitimately be much longer than the post-commit hook's

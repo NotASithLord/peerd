@@ -2053,15 +2053,22 @@ const runBrokenWorkerSmoke = async ({ providerServer, fixturePort }) => {
       && accessible?.expanded === 'false',
     'the failed message_actor card is a collapsed Not run disclosure', JSON.stringify(accessible));
 
-    const expanded = await driver.execute(`
+    const disclosureClicked = await driver.execute(`
       const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
         .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
       header?.click();
-      return {
+      return !!header;
+    `);
+    assert(disclosureClicked === true, 'the Not run disclosure accepts its expand action');
+    const expanded = await waitFor(() => driver.execute(`
+      const header = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+        .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+      const state = {
         expanded: header?.getAttribute('aria-expanded') ?? null,
         error: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? null,
       };
-    `);
+      return state.expanded === 'true' && typeof state.error === 'string' ? state : null;
+    `), { budgetMs: 5_000, pollMs: 100 });
     assert(expanded?.expanded === 'true' && typeof expanded?.error === 'string'
       && expanded.error.includes('actor_isolation_temporarily_unavailable')
       && !/Do not retry automatically|Use the Try again control/i.test(expanded.error),

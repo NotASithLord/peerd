@@ -203,15 +203,15 @@ const formatActorResult = (out) => {
   let result = out.result ?? '';
   if (result.length > MAX_RESULT_CHARS) {
     const head = result.slice(0, MAX_RESULT_CHARS);
-    result = `${head}\n\n…[result truncated at ${MAX_RESULT_CHARS} chars — expand the card in the side panel for the full transcript]`;
+    result = `${head}\n\n…[result truncated at ${MAX_RESULT_CHARS} chars; expand the card in the side panel for the full transcript]`;
   }
   const outcomeUnknown = out.outcomeKnown === false
     || (out.executionFailed === true && out.outcomeKnown !== true);
-  const flag = outcomeUnknown ? ' — EXECUTION FAILED AFTER WORK BEGAN'
-    : out.executionFailed ? ' — FAILED BEFORE TARGET WORK RAN'
-    : out.timedOut ? ' — HIT WALL-CLOCK TIMEOUT, result is partial'
-    : out.stopped ? ' — STOPPED before finishing, result is partial'
-    : out.exceeded ? ' — HIT STEP CAP, result may be incomplete' : '';
+  const flag = outcomeUnknown ? ': EXECUTION FAILED AFTER WORK BEGAN'
+    : out.executionFailed ? ': FAILED BEFORE TARGET WORK RAN'
+    : out.timedOut ? ': HIT WALL-CLOCK TIMEOUT, result is partial'
+    : out.stopped ? ': STOPPED before finishing, result is partial'
+    : out.exceeded ? ': HIT STEP CAP, result may be incomplete' : '';
   // why UNTRUSTED (parity with the async path, async-actors.js): the child's
   // result is model-authored from a fresh context over possibly page-derived
   // bytes, so it is DATA to the parent, not instructions. Only the one-line

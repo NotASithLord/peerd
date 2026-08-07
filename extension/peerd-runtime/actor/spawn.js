@@ -303,7 +303,7 @@ export const makeSpawnActor = (deps) => {
     setTimer = (/** @type {() => void} */ fn, /** @type {number} */ ms) => setTimeout(fn, ms),
     clearTimer = (/** @type {unknown} */ handle) => clearTimeout(/** @type {any} */ (handle)),
     // Heap-split phase 1: run a PURE-REASONING (empty granted toolset) child in a
-    // dedicated Worker — its own heap, no key or extension APIs.
+    // dedicated Worker with its own heap and no key or extension APIs.
     // Tool-bearing children run here too (heap-split phase 4): their tool calls
     // relay to the SW-gated dispatch. A missing host fails closed.
     // renderSystemPromptForChild renders the child's prompt host-side so
@@ -611,7 +611,7 @@ export const makeSpawnActor = (deps) => {
       // Announce the child up-front so the side panel can map the parent's
       // tool card → this session id and render live, before any loop event.
       onEvent?.({ type: 'actor-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
-      // Heap split: EVERY child runs its loop in a dedicated Worker — its own
+      // Heap split: EVERY child runs its loop in a dedicated Worker with its own
       // heap, no key or extension APIs. A tool-LESS child (phase 1) only
       // relays its model call; a tool-BEARING child (phase 4) also relays each tool
       // call to the SW, which rebuilds the child's restricted ctx from the persisted

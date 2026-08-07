@@ -2913,14 +2913,14 @@ const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenA
   EXPOSURE_REVIEW,
   recordModelCall: contextSnapshots.record,
   // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
-  // defined below, read at call time — same pattern as ownedTabFor). why: the
+  // defined below, read at call time, using the same pattern as ownedTabFor). why: the
   // isolated actor heap has no turn/tool-use broadcast, so without this the
-  // eval harness's OM2W recorder — and any
-  // activity view — is blind to what an actor actually did.
+  // eval harness's OM2W recorder and any
+  // activity view are blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
   // The relay boundary. `runtime.sendMessage` cannot address one extension
   // context, so the actor/run job (grant token included) is broadcast to every
-  // listener — the side panel and the engine tab pages among them. Pinning the
+  // listener, including the side panel and the engine tab pages. Pinning the
   // three relay routes to the offscreen document is therefore what actually
   // keeps another first-party page from dispatching as an actor; the token
   // carries run identity and liveness on top of it.
@@ -4384,7 +4384,7 @@ const mailboxUpdate = (/** @type {(m: Record<string, any>) => Record<string, any
   // Keep the serialization lane usable after a failure, but return the original
   // rejecting operation to the caller. message_actor then reports Not run and
   // starts no actor side effect.
-  mailboxChain = operation.catch((e) => console.warn('[actor] mailbox persist failed — request not run', e));
+  mailboxChain = operation.catch((e) => console.warn('[actor] mailbox persist failed: request not run', e));
   return operation;
 };
 const actorMailbox = {
@@ -5688,7 +5688,7 @@ const actorMessaging = makeActorMessaging({
       landingStopReports.delete(actorSessionId);
       return { result: report, stopped: true };
     };
-    // Heap-split: every BOUND actor runs its loop in its own dedicated Worker heap —
+    // Heap-split: every BOUND actor runs its loop in its own dedicated Worker heap.
     // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
     // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
     // tools + fetch_url run in the privileged host via the gated relay; the worker

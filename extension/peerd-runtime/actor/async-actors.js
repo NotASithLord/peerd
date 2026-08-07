@@ -166,10 +166,10 @@ export const makeAsyncActors = (deps) => {
       const flag = outcomeUnknown
         ? ' (execution failed after work began; outcome unknown; do not retry automatically)'
         : c.executionFailed ? ' (failed before target work ran)'
-        : c.interrupted ? ' (interrupted before finishing — partial)'
-        : c.timedOut ? ' (hit its wall-clock timeout — partial)'
-        : c.stopped ? ' (stopped before finishing — partial)'
-        : c.exceeded ? ' (hit its step cap — may be incomplete)' : '';
+        : c.interrupted ? ' (interrupted before finishing, partial)'
+        : c.timedOut ? ' (hit its wall-clock timeout, partial)'
+        : c.stopped ? ' (stopped before finishing, partial)'
+        : c.exceeded ? ' (hit its step cap, may be incomplete)' : '';
       return `Actor "${c.task.slice(0, 80)}"${flag}:\n${wrapped}`;
     });
     const hasUnknownOutcome = finished.some((entry) => entry.executionFailed && entry.outcomeKnown === false);

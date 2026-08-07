@@ -74,7 +74,7 @@ describe('message_actor — the sender gate (fail closed)', () => {
   });
 });
 
-describe('message_actor — actor isolation wall', () => {
+describe('message_actor: actor isolation wall', () => {
   const unavailable = {
     status: 'unsupported' as const,
     host: null,

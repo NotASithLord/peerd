@@ -2241,9 +2241,9 @@ export const STATES = [
   },
 
   // --- functional: an offscreen actor DELEGATES to its own web actor ------
-  // Heap-split phase 4, the deepest chain — two isolated heaps stacked. The
+  // Heap-split phase 4, the deepest chain, with two isolated heaps stacked. The
   // orchestrator spawns a sync actor granted message_actor; that actor's loop
-  // runs in its OWN isolated Worker heap and calls message_actor({to:'web'}) — which relays
+  // runs in its OWN isolated Worker heap and calls message_actor({to:'web'}), which relays
   // to the SW, dispatches actorMessaging from the child's restricted ctx, and (because
   // the sender is an actor) AWAITS the web actor's fenced reply into the child's tool
   // result. The web actor is ITSELF an isolated Worker heap (phase 3). Proof: the child
@@ -2291,7 +2291,7 @@ export const STATES = [
       const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
       const isolation = actorIsolationEvidence(entries);
       const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
-      rec.check('the actor looped in isolation (message_actor emitted, then answered) — 2 child calls', actorDelegatesState.childCalls >= 2, `childCalls=${actorDelegatesState.childCalls}`);
+      rec.check('the actor looped in isolation (message_actor emitted, then answered), 2 child calls', actorDelegatesState.childCalls >= 2, `childCalls=${actorDelegatesState.childCalls}`);
       rec.check('the actor ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length}`);
       rec.check('the actor delegated via message_actor from its heap (tool_executed audit)', msgActorRan === true, `msgActorRan=${msgActorRan}`);
       rec.check('a WEB-ACTOR sub-loop ran (its own heap) for the child delegation', actorDelegatesState.webCalls >= 1, `webCalls=${actorDelegatesState.webCalls}`);

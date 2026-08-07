@@ -1,5 +1,5 @@
 // @ts-check
-// background/offscreen-actor-client.js — the privileged-host client for EVERY isolated
+// background/offscreen-actor-client.js: the privileged-host client for EVERY isolated
 // agent loop (the heap split): ephemeral spawned reasoners (spawn.js) AND bound
 // actors (the actor turn). One client, one set of routes (model-call + tool-dispatch
 // + loop-event); a reasoning child grants no tools, so it only ever exercises
