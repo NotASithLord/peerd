@@ -5242,9 +5242,9 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
       const actor = await resolveDwebActor();
       if (!actor || !dwebAgentOn() || vault.isLocked()) return;
       const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
-      // On a standing thread, hand the actor the recent turns (fenced — they carry
+      // On a standing thread, hand the actor the recent turns. They are fenced because they carry
       // peer bytes) so it answers in context, and steer it to reply to the PEER.
-      // Thread context only for a thread WE own (ownsThread) — a foreign convId
+      // Include thread context only for a thread WE own (ownsThread). A foreign convId
       // must not pull another peer's turns into this wake.
       const threadContext = priorTurnsForWake.length
         ? `\n\nEarlier turns in this conversation (oldest first):\n${wrapUntrusted({ origin: did, tool: 'mesh_thread', body: priorTurnsForWake.map((t) => `${t.role === 'self' ? 'you' : 'peer'}: ${t.message}`).join('\n') })}`
@@ -5274,7 +5274,7 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
             const settledMessages = off?.turnSnapshot?.messages ?? [];
             const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: settledMessages.slice(before) })) ?? '';
             // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
-            // here by the NO_REPORT convention — silence costs the user nothing.
+            // here by the NO_REPORT convention; silence costs the user nothing.
             if (!note.trim() || note.includes(DWEB_AGENT_NO_REPORT)) return;
             // STANDING CONVERSATION: the actor's answer goes BACK to the peer, gated
             // by per-conversation reply consent (the owner's chosen gate for this new
