@@ -2065,13 +2065,13 @@ const runBrokenWorkerSmoke = async ({ providerServer, fixturePort }) => {
         .find((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
       const state = {
         expanded: header?.getAttribute('aria-expanded') ?? null,
-        error: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? null,
+        detail: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? null,
       };
-      return state.expanded === 'true' && typeof state.error === 'string' ? state : null;
+      return state.expanded === 'true' && typeof state.detail === 'string' ? state : null;
     `), { budgetMs: 5_000, pollMs: 100 });
-    assert(expanded?.expanded === 'true' && typeof expanded?.error === 'string'
-      && expanded.error.includes('actor_isolation_temporarily_unavailable')
-      && !/Do not retry automatically|Use the Try again control/i.test(expanded.error),
+    assert(expanded?.expanded === 'true' && typeof expanded?.detail === 'string'
+      && expanded.detail.includes('actor_isolation_temporarily_unavailable')
+      && !/Do not retry automatically|Use the Try again control/i.test(expanded.detail),
     'the Not run disclosure exposes the failure reason without relying on color',
     JSON.stringify(expanded));
   } finally {
