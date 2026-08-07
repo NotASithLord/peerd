@@ -138,6 +138,7 @@ let harvestActorSawPage = '';
 let harvestActorTurn = 0;
 let harvestOrchTurn = 0;
 let harvestDelegated = false;
+let harvestActorUsedCode = false;
 let harvestFixtureUrl = '';
 
 // --- issue 251: the origin lock, end to end --------------------------------
@@ -571,6 +572,13 @@ export const STATES = [
       if (body.includes('<actor_agent>')) {
         if (body.includes('Coffee Mug')) harvestActorSawPage = body;
         const t = harvestActorTurn++;
+        if (body.includes('tools: page_code')) {
+          harvestActorUsedCode = true;
+          if (t === 0) return { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(harvestFixtureUrl)}); return await page.content();`,
+          }) };
+          return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: harvestFixtureUrl }) };
         if (t === 1) return { sse: sseToolCall('read_page', {}) };
         return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
@@ -594,6 +602,7 @@ export const STATES = [
       harvestActorTurn = 0;
       harvestOrchTurn = 0;
       harvestDelegated = false;
+      harvestActorUsedCode = false;
       // Serve the order page over localhost; the WEB ACTOR opens + reads it ITSELF
       // through the real actor-model path. navigate is NOT under the private-network
       // SSRF guard (that's fetch_url-only) and localhost isn't denylisted, so the
@@ -626,7 +635,8 @@ export const STATES = [
         }, { budgetMs: 40_000 });
 
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
-        rec.check('the web-actor sub-loop ran (navigate → read_page, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
+        rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
+        rec.check('the preview web actor used the code-first page surface', harvestActorUsedCode === true);
         // load-bearing proof: the web actor REALLY read the live page — the page's
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
@@ -651,6 +661,13 @@ export const STATES = [
       // lock refuses — so the actor must be told to do something after looking.
       if (body.includes('<actor_agent>')) {
         const t = lockActorTurn++;
+        if (body.includes('tools: page_code')) {
+          if (t === 0) return { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(`${lockFixtureUrl}login`)}); return await page.snapshot();`,
+          }) };
+          if (t === 1) return { sse: sseToolCall('page_code', { code: 'return await page.snapshot();' }) };
+          return { sse: sseText('LOCK-DID-NOT-FIRE: I read the signed-in page.') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: `${lockFixtureUrl}login` }) };
         if (t === 1) return { sse: sseToolCall('snapshot', {}) };
         if (t === 2) return { sse: sseToolCall('snapshot', {}) };
@@ -761,6 +778,12 @@ export const STATES = [
       if (body.includes('<actor_agent>')) {
         if (body.includes('Members only')) siteActorSawPage = body;
         const t = siteActorTurn++;
+        if (body.includes('tools: page_code')) {
+          if (t === 0) return { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(`${siteFixtureUrl}account`)}); return await page.content();`,
+          }) };
+          return { sse: sseText('The account page says: Members only — balance 42.') };
+        }
         if (t === 0) return { sse: sseToolCall('navigate', { url: `${siteFixtureUrl}account` }) };
         if (t === 1) return { sse: sseToolCall('read_page', {}) };
         return { sse: sseText('The account page says: Members only — balance 42.') };
@@ -800,10 +823,10 @@ export const STATES = [
 
         rec.check('the site: handle RESOLVED to a real actor that ran a turn',
           siteActorTurn >= 2, `actor turns: ${siteActorTurn}`);
-        // Load-bearing: a fetch-only API integration has NO DOM tools, so read_page
-        // returning the page's own text proves the handle reached a TAB-backed
+        // Load-bearing: a fetch-only API integration has NO page client, so page
+        // content returning the live text proves the handle reached a TAB-backed
         // helper — the distinction the whole `site:` prefix exists to make.
-        rec.check('it is TAB-backed — it really drove a page (read_page returned the live text)',
+        rec.check('it is TAB-backed — it really drove a page (page content returned the live text)',
           siteActorSawPage.includes('Members only'), siteActorSawPage.slice(0, 200));
         rec.check('the reply reached the orchestrator as a SUCCESS, not a lock stop',
           siteReplyBody.includes('you messaged has replied'), siteReplyBody.slice(0, 200));
@@ -1443,7 +1466,7 @@ export const STATES = [
       const isActor = body.includes('<actor_agent>');
       scriptFanState.seen.push({
         isActor,
-        isWebActor: body.includes("You are peerd's web actor"),
+        isWebActor: body.includes('kind: bound; type: web'),
         // why all three: GOT proves the script shaped the value, the price
         // proves the actor reply entered the realm, and the fence proves code
         // could not launder that reply back into authoritative prompt text.
@@ -1553,7 +1576,7 @@ export const STATES = [
       const isActor = body.includes('<actor_agent>');
       actorState.seen.push({
         isActor,
-        isWebActor: body.includes("You are peerd's web actor"),
+        isWebActor: body.includes('kind: bound; type: web'),
         hasReplyLead: body.includes('you messaged has replied'),
         hasFence: body.includes('<untrusted_web_content'),
         hasActorText: body.includes('PRICE_IS_42'),

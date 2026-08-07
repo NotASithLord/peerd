@@ -2,19 +2,26 @@
 
 ## Decision
 
-Keep the tab web actor on the discrete `tools` surface by default, and keep
-`message_actor` as the scalar one-delegation shortcut. Prefer code for compound
-orchestration: fan-out, reply-dependent chains, retry, filtering, and
-aggregation.
+Make the tab web actor code-first in preview/dev and keep store on the discrete
+`tools` surface while field evidence accumulates. A browser without the
+offscreen sealed-worker host falls back to tools at runtime, regardless of its
+package default. Keep `message_actor` as the scalar one-delegation shortcut;
+prefer `actors.call` for compound orchestration such as fan-out,
+reply-dependent chains, retry, filtering, and aggregation.
 
-This is a fail-closed measurement decision, not a rejection of the code-first
-direction. The code bridge has the expected round-trip advantage, but the
-available deterministic evidence cannot establish model reliability. The
-contract scorer therefore refuses to remove the scalar tool. The web code arm
-also deliberately omits nested `site_client_run`: nesting a sealed site job
-inside `page_code` can deadlock the bounded relay pool. Until a qualifying live
-model bench clears both reliability and capability-fit gates, changing the
-default would be ahead of the evidence.
+The web bridge is Playwright-shaped because that vocabulary is common in model
+training data, but every call still translates into the existing gated tool.
+Code changes composition and round trips, not authority. `site_client_run`
+remains outside `page_code`: nesting a sealed site job inside a sealed page job
+can deadlock the bounded relay pool.
+
+Persist the stable layer, not the volatile one. Existing origin-pinned site
+clients hold learned API request shapes and can be read, repaired, and rerun as
+the API evolves. Page/UI scripts stay short and disposable: observe, run a few
+Playwright-shaped actions for rendering/login/gaps, observe again, then rewrite
+the next small script against the current page. Do not add a durable DOM-routine
+library until field evidence shows repeated script rewriting is a material cost
+that outweighs its code-custody and stale-selector machinery.
 
 The live defaults remain in `packaging/default-settings.mjs`; generated channel
 files must continue to come from the generation scripts.
@@ -44,8 +51,8 @@ declared materiality threshold. Otherwise the scalar shortcut stays.
 
 ## Web-surface bench
 
-The existing provider-backed web harness remains the authority for a later
-default flip:
+The provider-backed web harness remains the authority for comparing the two
+surfaces and deciding whether store should follow:
 
 ```sh
 bun scripts/cdp/run-eval-bench.mjs --actor-surface=tools
@@ -57,16 +64,19 @@ first, then tokens per completed task, wall time, and the failure taxonomy from
 `scripts/cdp/diagnose-page-code.mjs`. The code arm must not lose task success;
 token savings alone are not enough.
 
-The capability-manifest tests enforce the current intentional difference:
-every direct tab-web operation except nested `site_client_run` has a generated
-`page.*` mapping to the same gated tool. Functional E2E states exercise both the
-direct actor path and `script + actors.call` through real worker/SW/actor heaps,
-but the faked model wire makes those protocol evidence, not model-performance
-evidence.
+The capability-manifest tests enforce the intentional difference: every direct
+tab-web operation except nested `site_client_run` has a generated `page.*`
+mapping to the same gated tool. Functional E2E states exercise both the direct
+actor path and `script + actors.call` through real worker/SW/actor heaps, but the
+faked model wire makes those protocol evidence, not model-performance evidence.
 
 ## Revisit condition
 
-Revisit the default only with a qualifying paired dataset from at least the
-representative provider coverage required by the benchmark policy. If the code
-arm earns the flip, change preview/dev first, regenerate derived files, preserve
-the settings escape hatch, and let store follow only after field time.
+Revisit the store default only with a qualifying paired dataset from the
+representative provider coverage required by the benchmark policy. Preserve the
+settings escape hatch and runtime fallback; store follows only after field time.
+
+Do not remove the model-facing `message_actor` descriptor merely for symmetry.
+`actors.call` is an awaited OTP-style call, not a cast. A later removal first
+needs a genuine delivery-ack-only `actors.cast`, semantic parity in cancellation,
+lineage, audit, and mailbox behavior, and a measured non-inferiority result.

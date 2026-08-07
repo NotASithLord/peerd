@@ -78,13 +78,12 @@ export const defaults = {
   // tool action. The chat mode-row dial raises it per task.
   reasoningEffort: { store: 'medium', preview: 'medium' },
 
-  // PR #119 — the web actor's ACTION surface. 'tools' (default, both channels):
-  // the actor drives its tab via discrete click/type/navigate tool calls.
-  // 'code': the Aside-style A/B arm — the actor WRITES Playwright-shaped JS
-  // (page.goto/click/fill/…) in a sealed REPL; perception stays the a11y
-  // snapshot. Experiment knob, off by default even on preview — flipped by the
-  // eval bench to A/B the two surfaces. Unknown stored values coerce to 'tools'.
-  webActorActionSurface: { store: 'tools', preview: 'tools' },
+  // The web actor's ACTION surface. Preview/dev uses Playwright-shaped JS in a
+  // sealed worker; store remains on discrete tools while the code lane earns
+  // broad field evidence. A runtime without the offscreen worker host falls
+  // back to tools even when its package default says code. Per-user stored
+  // values still win; unknown values coerce to tools.
+  webActorActionSurface: { store: 'tools', preview: 'code' },
 
   // Empty on fresh install — NO provider is assumed. The first provider the
   // user configures auto-activates (provider/setKey for keyed providers,

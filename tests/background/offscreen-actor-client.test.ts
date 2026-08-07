@@ -327,6 +327,26 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
     expect(pinned.id).toBe('web');                  // re-pinned to the bound instance
   });
 
+  test('a WEB actor relay keeps the surface resolved at turn start', async () => {
+    let liveSetting = 'code';
+    let ctxOpts: any = null;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', instanceId: 'web' }) },
+      buildToolContext: async (o: any) => { ctxOpts = { ...o, liveSetting }; return {}; },
+      dispatchToolCall: async () => ({ ok: true }),
+    });
+    await during(async (relayToken) => {
+      // Settings can change while the Worker is reasoning. The SW-owned grant
+      // must carry the already-advertised surface into every relayed dispatch.
+      liveSetting = 'tools';
+      return client.routes['actor/tool-dispatch']({
+        relayToken, call: { name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+    }, 's1', undefined, { actorType: 'web', actorSurface: 'code' });
+    expect(ctxOpts.liveSetting).toBe('tools');
+    expect(ctxOpts.actorSurface).toBe('code');
+  });
+
   test('an API actor (backing api) gets NO tab (fetch-only, no DOM)', async () => {
     let ctxOpts: any = null;
     const { client, during } = clientWithRelay({

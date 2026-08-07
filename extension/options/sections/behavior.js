@@ -370,13 +370,13 @@ export const BehaviorSection = {
 
       settingsRow({
         label: 'Web actor: action surface',
-        badge: 'A/B',
+        badge: 'MODE',
         summary: surface === 'code'
           ? 'The web helper drives pages by writing JavaScript. Same gates either way.'
           : 'One tool call per action. Same gates either way.',
         why: surface === 'code'
-          ? 'EXPERIMENT ON — the web actor drives pages by WRITING JavaScript (a Playwright-style page API in a sealed worker) instead of one tool call per action. Same page tools underneath, same denylist/confirmation/audit gates — this changes how the model expresses actions, not what it may do. Being A/B-measured against the default; flip back if web tasks misbehave. Applies to the next web-actor turn; an in-flight actor finishes on the surface it started with.'
-          : 'Default — the web actor drives pages with one tool call per action (click, type, navigate). The experimental alternative has it write short Playwright-style scripts instead; same gates underneath. Used for A/B benchmarking; leave on default unless you\'re experimenting. Applies to the next web-actor turn; an in-flight actor finishes on the surface it started with.',
+          ? 'Selected — the web actor writes short JavaScript against a Playwright-style page API in a sealed worker. The same page tools, denylist, confirmation, and audit gates remain underneath. Preview/dev starts here; a browser without the sealed-worker host automatically falls back to tool calls. Applies to the next web-actor turn; an in-flight actor finishes on the surface it started with.'
+          : 'Selected — the web actor emits one tool call per page action (click, type, navigate). Store packages start here while the code surface gathers field evidence. The same gates apply in both modes. Applies to the next web-actor turn; an in-flight actor finishes on the surface it started with.',
         open: whyOpen('surface'),
         onToggleWhy: toggleWhy('surface'),
         control: m('select.set-select', {
