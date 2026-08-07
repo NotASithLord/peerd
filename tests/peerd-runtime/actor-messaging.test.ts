@@ -15,14 +15,17 @@ type RecoveryNotice = Reenter & { recoveryId: string };
 const harness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) => {
   const reentries: Reenter[] = [];
   const recoveryNotices: RecoveryNotice[] = [];
-  const turnsRun: Array<{ actorSessionId: string; message: string }> = [];
+  const turnsRun: Array<{ actorSessionId: string; message: string; parentSessionId?: string; rootSessionId?: string }> = [];
   const deps = {
     resolveActor: async (to: string) =>
       to === 'app-1'
         ? { instanceId: 'app-1', kind: 'app', actorSessionId: 'res-1', name: 'todo', tabId: 7 }
         : null,
-    runActorTurn: async (o: { actorSessionId: string; message: string }) => {
-      turnsRun.push({ actorSessionId: o.actorSessionId, message: o.message });
+    runActorTurn: async (o: { actorSessionId: string; message: string; parentSessionId?: string; rootSessionId?: string }) => {
+      turnsRun.push({
+        actorSessionId: o.actorSessionId, message: o.message,
+        parentSessionId: o.parentSessionId, rootSessionId: o.rootSessionId,
+      });
       return { result: 'built the thing' };
     },
     reenter: async (r: Reenter) => { reentries.push(r); },
@@ -49,6 +52,7 @@ describe('message_actor — the sender gate (fail closed)', () => {
     expect(r.ok).toBe(true);
     await tick();
     expect(turnsRun.length).toBe(1);
+    expect(turnsRun[0]).toMatchObject({ parentSessionId: 'chat-1', rootSessionId: 'chat-1' });
   });
   test('refuses an INBOUND (untrusted-origin) sender even in the active chat', async () => {
     const { messageActor } = harness();
@@ -159,7 +163,8 @@ describe('message_actor — happy path + correlation', () => {
     expect(r.ok).toBe(true);
     await tick();
     // The actor turn ran against the ACTOR session, with the message.
-    expect(turnsRun).toEqual([{ actorSessionId: 'res-1', message: 'build a todo app' }]);
+    expect(turnsRun).toHaveLength(1);
+    expect(turnsRun[0]).toMatchObject({ actorSessionId: 'res-1', message: 'build a todo app' });
     // The reply re-entered the SENDER (not the actor), synthetic + fenced.
     expect(reentries.length).toBe(1);
     expect(reentries[0].sessionId).toBe('chat-1');
@@ -292,7 +297,8 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
       to: 'app-1', message: 'get the price', senderSessionId: 'chat-1', awaitReply: true,
     });
     // The actor turn still ran on the actor session, exactly like the async path.
-    expect(turnsRun).toEqual([{ actorSessionId: 'res-1', message: 'get the price' }]);
+    expect(turnsRun).toHaveLength(1);
+    expect(turnsRun[0]).toMatchObject({ actorSessionId: 'res-1', message: 'get the price' });
     // The substance came back HERE, fenced — the caller answers with it directly,
     // instead of ending its turn on an "I'll report back" deferral.
     expect(r.ok).toBe(true);

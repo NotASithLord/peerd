@@ -9,7 +9,7 @@
 // why: ctx.actorTasks is the SW-bound snapshot fn (scoped to this session),
 // injected outside the base ToolContext; narrow ctx to it at the use site. The
 // snapshot shape mirrors makeAsyncActors' actorTasks (actor/async-actors.js).
-/** @typedef {{ taskId: string, task: string, status: string, lastOutput: string }} ActorTaskSnapshot */
+/** @typedef {{ taskId: string, task: string, status: string, lastOutput: string, childSessionId?: string|null, grantedTools?: string[]|null }} ActorTaskSnapshot */
 /** @typedef {{ actorTasks?: () => ActorTaskSnapshot[] }} ActorTasksCtx */
 
 /** @type {import('/shared/tool-types.js').Tool} */

@@ -117,6 +117,9 @@ let actorCodeDelegatesState = {
 };
 // heap-split phase 4: an offscreen actor DELEGATING to its own web actor.
 let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
+let actorFabricHierarchyState = {
+  spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
+};
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
@@ -2319,7 +2322,10 @@ export const STATES = [
         hasActorText: body.includes('PRICE_IS_42'),
       });
       // ACTOR sub-loop turn: plain text, no tool call → no fetch_url → no egress.
-      if (isActor) return { sse: sseText('PRICE_IS_42') };
+      // Hold the isolated turn open long enough to inspect the live Actor Fabric
+      // at real side-panel width; without this, the fake reply can settle within
+      // one paint and only the terminal transcript receipt is observable.
+      if (isActor) return { delayMs: 3_500, sse: sseText('PRICE_IS_42') };
       // ORCHESTRATOR — the async wake turn carrying the fenced reply: final answer.
       if (body.includes('you messaged has replied')) return { sse: sseText('FINAL-ORCH-REPLY') };
       // ORCHESTRATOR — delegate ONCE; then the post-ack step ends the turn (the
@@ -2338,7 +2344,98 @@ export const STATES = [
         () => evalIn(ctx.page, `!!document.querySelector('.message-assistant .tool-call.tool-actor')`),
         { budgetMs: 15_000, pollMs: 100 });
       rec.check('an inline message_actor card mounts under the orchestrator turn', !!cardSeen);
-      if (cardSeen) await rec.shot('actor-card');
+      const fabric = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric');
+          const toggle = panel?.querySelector('.actor-fabric-toggle');
+          const actor = panel?.querySelector('[data-node-id^="actor:"]');
+          if (!panel || !toggle || !actor) return null;
+          const toggleRect = toggle.getBoundingClientRect();
+          const panelRect = panel.getBoundingClientRect();
+          const body = panel.querySelector('.actor-fabric-body');
+          return {
+            expanded: toggle.getAttribute('aria-expanded'),
+            actorKind: actor.getAttribute('data-node-kind'),
+            actorPressed: actor.getAttribute('aria-pressed'),
+            text: panel.textContent ?? '',
+            toggleHeight: toggleRect.height,
+            withinViewport: panelRect.left >= 0 && panelRect.right <= innerWidth,
+            contentFits: !!body && body.scrollWidth <= body.clientWidth
+              && [...body.querySelectorAll('.actor-fabric-node')].every((node) => node.scrollWidth <= node.clientWidth),
+          };
+        })()`),
+        { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the live Actor Fabric mounts expanded with an inspectable bound actor',
+        fabric?.expanded === 'true'
+          && fabric?.actorKind === 'bound'
+          && fabric?.actorPressed === 'false',
+        JSON.stringify(fabric));
+      rec.check('the fabric makes exact capability + fenced handoff concrete at a glance',
+        fabric?.text.includes('one web tab ·')
+          && fabric?.text.includes('separate worker')
+          && fabric?.text.includes('fenced reply'),
+        JSON.stringify(fabric?.text));
+      rec.check('the fabric fits the panel and keeps a 44px disclosure target',
+        fabric?.withinViewport === true
+          && fabric?.contentFits === true
+          && fabric?.toggleHeight >= 44,
+        JSON.stringify(fabric));
+      if (fabric) {
+        await ctx.page.send('Page.reload', { ignoreCache: true });
+        const rehydrated = await waitFor(
+          () => evalIn(ctx.page, `(() => {
+            const panel = document.querySelector('.actor-fabric');
+            const actor = panel?.querySelector('[data-node-id^="actor:"]');
+            return panel && actor ? panel.textContent : null;
+          })()`),
+          { budgetMs: 15_000, pollMs: 50 });
+        rec.check('a freshly reconnected panel rehydrates the still-live actor fabric',
+          typeof rehydrated === 'string'
+            && rehydrated.includes('get the price of widget X')
+            && rehydrated.includes('separate worker'),
+          JSON.stringify(rehydrated));
+        await rec.shot('actor-fabric-working');
+        await evalIn(ctx.page, `(() => {
+          const actor = document.querySelector('[data-node-id^="actor:"]');
+          actor?.click();
+          actor?.focus();
+        })()`);
+        const inspected = await waitFor(() => evalIn(ctx.page, `(() => {
+          const actor = document.querySelector('[data-node-id^="actor:"]');
+          const detail = document.querySelector('.actor-fabric-detail');
+          if (!actor || !detail) return null;
+          return {
+            pressed: actor?.getAttribute('aria-pressed'),
+            detail: detail?.textContent ?? '',
+            announced: document.querySelector('.actor-fabric-announcer')?.textContent ?? '',
+          };
+        })()`), { budgetMs: 2_000, pollMs: 25 });
+        rec.check('selecting an actor reveals its authoritative access and memory boundary',
+          inspected?.pressed === 'true'
+            && inspected?.detail.includes('one web tab · page_code · site_client_run')
+            && inspected?.detail.includes('Dedicated keyless worker')
+            && inspected?.detail.includes('no key or extension APIs')
+            && inspected?.announced.includes('details shown'),
+          JSON.stringify(inspected));
+        await rec.shot('actor-fabric-inspected');
+      }
+      const settledFabric = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric.is-settled');
+          const focused = document.querySelector('[data-node-id^="actor:"]');
+          if (!panel || !focused) return null;
+          return {
+            text: panel.textContent ?? '',
+            focusPreserved: document.activeElement === focused,
+          };
+        })()`),
+        { budgetMs: 15_000, pollMs: 50 });
+      rec.check('settling announces completion without dropping focused actor controls',
+        settledFabric?.text.includes('all actor work finished')
+          && settledFabric?.focusPreserved === true,
+        JSON.stringify(settledFabric));
+      if (settledFabric) await rec.shot('actor-fabric-finished');
+      await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
       let out = {};
       await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
@@ -2346,14 +2443,15 @@ export const STATES = [
           const cardOk = !!document.querySelector('.tool-call.tool-actor.tool-ok');
           const name = document.querySelector('.tool-actor .tool-name')?.textContent || '';
           const busy = !!document.querySelector('form.input-bar button.stop');
+          const fabricGone = !document.querySelector('.actor-fabric');
           const users = [...document.querySelectorAll('.message-user')].map((u) => u.textContent.trim());
           const replies = [...document.querySelectorAll('.message-actor-reply')].map((r) => ({
             role: r.querySelector('.role')?.textContent || '',
             body: r.querySelector('.bubble')?.textContent || '',
           }));
-          return { bubbles, cardOk, name, busy, users, replies };
+          return { bubbles, cardOk, name, busy, fabricGone, users, replies };
         })()`) || {};
-        return (out.bubbles || []).includes('FINAL-ORCH-REPLY') && !out.busy;
+        return (out.bubbles || []).includes('FINAL-ORCH-REPLY') && !out.busy && out.fabricGone;
       }, { budgetMs: 30_000 });
 
       const seen = actorState.seen;
@@ -2365,6 +2463,7 @@ export const STATES = [
       rec.check('the reply re-entered the orchestrator ASYNC as a fenced wake turn', wake.length >= 1, `wakeCalls=${wake.length}`);
       rec.check('the fenced wake carried the actor reply text (cross-process proof)', wake.some((s) => s.hasActorText));
       rec.check('the actor card flipped pending → ok after the reply landed', out.cardOk === true);
+      rec.check('the Actor Fabric self-hides when no isolated work remains', out.fabricGone === true);
       rec.check('the wake never renders as a USER bubble (only the original user message shows)',
         (out.users || []).length === 1 && (out.users[0] || '').includes('find the cheapest widget X'), JSON.stringify(out.users));
       // The trickle-up: the actor reply surfaces at the bottom of the chat as its
@@ -2765,6 +2864,138 @@ export const STATES = [
       rec.check('the composed result reached the orchestrator', (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // --- functional + visual: the real nested Actor Fabric at panel width ----
+  // Two async siblings overlap; one delegates to its bound web actor. This is
+  // the defining topology (root → temporary child → resource-bound child), not
+  // a component fixture, and catches indentation/connector/overflow failures.
+  {
+    name: 'actor-fabric-hierarchy', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('kind: bound; type: web')) {
+        actorFabricHierarchyState.webCalls += 1;
+        return { delayMs: 5_000, sse: sseText('NESTED-WEB-DONE') };
+      }
+      if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+        if (body.includes('inspect price through the web actor')) {
+          actorFabricHierarchyState.nestedCalls += 1;
+          if (actorFabricHierarchyState.nestedCalls === 1) {
+            return { sse: sseToolCall('message_actor', { to: 'web', message: 'inspect the current price' }) };
+          }
+          return { sse: sseText('NESTED-CHILD-DONE') };
+        }
+        actorFabricHierarchyState.siblingCalls += 1;
+        return { delayMs: 6_000, sse: sseText('SIBLING-DONE') };
+      }
+      if (actorFabricHierarchyState.spawned === 0) {
+        actorFabricHierarchyState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'inspect price through the web actor', tools: ['message_actor'],
+        }) };
+      }
+      if (actorFabricHierarchyState.spawned === 1) {
+        actorFabricHierarchyState.spawned += 1;
+        return { sse: sseToolCall('actor_create', {
+          task: 'compare warranty terms independently', tools: [],
+        }) };
+      }
+      return { sse: sseText('FABRIC-MAIN-IDLE') };
+    },
+    async run(ctx, rec) {
+      actorFabricHierarchyState = {
+        spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
+      };
+      const sent = await rpc(ctx.page, {
+        type: 'agent/send', text: 'compare price and warranty with isolated actors',
+      });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const hierarchy = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric');
+          const body = panel?.querySelector('.actor-fabric-body');
+          const top = body?.querySelector(':scope > .actor-fabric-branch');
+          if (!panel || !body || !top) return null;
+          const topSubactors = [...top.children]
+            .filter((item) => item.querySelector(':scope > .actor-fabric-node.is-subactor')).length;
+          const nestedBound = body.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound');
+          if (topSubactors < 2 || !nestedBound) return null;
+          const panelRect = panel.getBoundingClientRect();
+          return {
+            nodes: body.querySelectorAll('.actor-fabric-node').length,
+            topSubactors,
+            nestedBound: !!nestedBound,
+            text: panel.textContent ?? '',
+            contentFits: body.scrollWidth <= body.clientWidth,
+            heightCapped: panelRect.height <= Math.min(innerHeight * 0.61, 525),
+            outerScrollTop: document.querySelector('.body')?.scrollTop ?? 0,
+          };
+        })()`),
+        { budgetMs: 20_000, pollMs: 50 });
+      rec.check('the live fabric renders two sibling subactors and one nested bound actor',
+        hierarchy?.nodes >= 4
+          && hierarchy?.topSubactors >= 2
+          && hierarchy?.nestedBound === true,
+        JSON.stringify(hierarchy));
+      rec.check('the deep hierarchy fits 390px and stays height-bounded',
+        hierarchy?.contentFits === true && hierarchy?.heightCapped === true,
+        JSON.stringify(hierarchy));
+      rec.check('solid/dashed semantics and both real tasks are legible',
+        hierarchy?.text.includes('temporary subactor')
+          && hierarchy?.text.includes('web actor')
+          && hierarchy?.text.includes('inspect price through the web actor')
+          && hierarchy?.text.includes('compare warranty terms independently'),
+        JSON.stringify(hierarchy?.text));
+      if (hierarchy) await rec.shot('actor-fabric-hierarchy-default');
+
+      await evalIn(ctx.page, `document.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound')?.click()`);
+      const inspected = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const detail = document.querySelector('.actor-fabric-detail');
+          const body = detail?.closest('.actor-fabric-body');
+          const toggle = document.querySelector('.actor-fabric-toggle');
+          if (!detail || !body) return null;
+          const detailRect = detail.getBoundingClientRect();
+          const bodyRect = body.getBoundingClientRect();
+          const toggleRect = toggle?.getBoundingClientRect();
+          return {
+            text: detail.textContent ?? '',
+            fullyVisible: detailRect.top >= bodyRect.top - 1 && detailRect.bottom <= bodyRect.bottom + 1,
+            headerVisible: !!toggleRect && toggleRect.top >= 0 && toggleRect.bottom <= innerHeight,
+            outerScrollTop: document.querySelector('.body')?.scrollTop ?? 0,
+          };
+        })()`),
+        { budgetMs: 2_000, pollMs: 25 });
+      rec.check('the nested bound actor remains inspectable',
+        inspected?.fullyVisible === true
+          && inspected?.headerVisible === true
+          && inspected?.outerScrollTop === hierarchy?.outerScrollTop
+          && inspected?.text.includes('one web tab')
+          && inspected?.text.includes('Dedicated keyless worker'),
+        JSON.stringify(inspected));
+      if (inspected) await rec.shot('actor-fabric-hierarchy-inspected');
+
+      const finished = await waitFor(
+        () => evalIn(ctx.page, `(() => {
+          const panel = document.querySelector('.actor-fabric.is-settled');
+          const body = panel?.querySelector('.actor-fabric-body');
+          if (!panel || !body) return null;
+          return {
+            nodes: body.querySelectorAll('.actor-fabric-node').length,
+            nested: !!body.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound'),
+            text: panel.textContent ?? '',
+          };
+        })()`),
+        { budgetMs: 25_000, pollMs: 50 });
+      rec.check('the completion receipt preserves the full work-batch topology',
+        finished?.nodes === 4
+          && finished?.nested === true
+          && finished?.text.includes('all actor work finished'),
+        JSON.stringify(finished));
+      if (finished) await rec.shot('actor-fabric-hierarchy-finished');
+      await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
     },
   },
 
