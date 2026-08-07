@@ -11,6 +11,7 @@
 import { describe, test, expect } from 'bun:test';
 import { inboundActorCallAllowed, makeTurnDriver } from '/peerd-runtime/loop/turn-driver.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
+import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 
 /** Minimal deps maybeAutoResume touches; the rest stay undefined (never invoked). */
 const deps = (/** @type {any} */ over: any = {}) => ({
@@ -111,6 +112,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   failover = false, boundaryFailure = false, streamBoundaryFailure = false,
   waitForAbort = false, abortDuringFallback = false, uiDisconnected = false,
   waitForActorIsolation = async () => {},
+  dynamicIsolation = false,
 } = {}) => {
   const liveGetSecret = async () => 'sk-live';
   const liveSafeFetch = async () => new Response('ok');
@@ -118,7 +120,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   const rogueSafeFetch = async () => new Response('rogue');
   const rogueSignal = new AbortController().signal;
   const turnAbortController = new AbortController();
-  const session = {
+  const session: any = {
     sessionId: 's1', kind, provider: 'anthropic', model: 'claude-test',
     messages: [],
     ...(kind === 'actor' ? { actorType: 'web', instanceId: 'web' } : {}),
@@ -132,6 +134,10 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   const chatNotes: string[] = [];
   let lateProviderContinuation = 0;
   const audits: any[] = [];
+  let actorIsolation: any = {
+    status: 'available', host: 'background-page-worker', reason: null, retryable: false,
+  };
+  let systemPromptRenders = 0;
   let releases = 0;
   const settings = {
     reasoningEnabled: false,
@@ -151,6 +157,15 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     },
     sessions: {
       get: async () => session,
+      appendMessage: async (_sessionId: string, message: any) => {
+        session.messages.push({ ...message });
+        return session;
+      },
+      updateAssistantMessage: async (_sessionId: string, messageId: string, patch: any) => {
+        const message = session.messages.find((entry: any) => entry.id === messageId);
+        if (message) Object.assign(message, patch);
+        return session;
+      },
       setCost: async () => {},
     },
     sessionState: { set: () => {} },
@@ -163,7 +178,10 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     browser: { tabs: { query: async () => [] } },
     originOfTabUrl: () => '',
     skillRegistry: { describeForPrompt: async () => '' },
-    renderSystemPrompt: async () => 'system',
+    renderSystemPrompt: async () => {
+      systemPromptRenders++;
+      return 'system';
+    },
     resolveManifestAllow: () => null,
     buildToolContext: async (args: any) => {
       toolContextArgs = args;
@@ -173,14 +191,23 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     filterByDwebEnabled: identity,
     filterDescriptorsByManifest: identity,
     mainAgentDescriptors: identity,
-    listTools: () => [],
+    listTools: () => dynamicIsolation
+      ? ['message_actor', 'actor_create', 'request_review', 'actor_list']
+        .map((name) => ({ name, description: `${name} test tool.`, schema: { type: 'object' } }))
+      : [],
     settingsStore: { get: () => settings },
     DWEB_ENABLED: false,
     filterByGoalActive: identity,
     goalActiveFor: () => false,
     dwebEngagedSessions: new Set(),
     markDwebEngaged: () => {},
-    dispatchToolCall: async () => ({ ok: true }),
+    dispatchToolCall: async () => {
+      actorIsolation = {
+        status: 'temporarily_unavailable', host: 'background-page-worker',
+        reason: 'worker startup failed', retryable: true,
+      };
+      return { ok: false, error: 'actor worker unavailable' };
+    },
     maybeNudgeDebuggerGrant: () => {},
     getTool: () => null,
     decideAction: () => null,
@@ -203,6 +230,16 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     recordModelCall: (call: any) => recordedModelCalls.push(call),
     callModel: async function* (args: any) {
       modelCalls.push(args);
+      if (dynamicIsolation) {
+        if (modelCalls.length === 1) {
+          yield { type: 'tool-use-start', id: 'actor-tool', name: 'message_actor' };
+          yield { type: 'tool-use-stop', id: 'actor-tool' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        } else {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        }
+        return;
+      }
       if (abortDuringFallback) {
         modelKeyReads.push(args.provider);
         await args.getSecret(args.provider);
@@ -223,7 +260,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       }
       yield { type: 'message-stop', stopReason: 'end_turn' };
     },
-    runUserTurn: async function* (ctx: any) {
+    runUserTurn: dynamicIsolation ? runUserTurn : async function* (ctx: any) {
       loopCtx = ctx;
       if (boundaryFailure) {
         await ctx.safeFetch('https://provider.invalid');
@@ -259,6 +296,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     currentAppScope: async () => null,
     checkpointMgr: { capture: async () => {} },
     detectInterruptedTurn: () => ({ resumable: false }),
+    getActorIsolation: () => actorIsolation,
     waitForActorIsolation,
   });
   return {
@@ -267,6 +305,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     liveGetSecret, liveSafeFetch,
     rogueGetSecret, rogueSafeFetch, rogueSignal,
     audits,
+    systemPromptRenders: () => systemPromptRenders,
     releases: () => releases,
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
@@ -286,6 +325,21 @@ describe('runAgentTurn credential custody', () => {
     releaseReady();
     await running;
     expect(fixture.modelCalls).toHaveLength(1);
+  });
+
+  test('a mid-turn actor-host failure updates the next model prompt', async () => {
+    const fixture = turnDeps('chat', { dynamicIsolation: true });
+    expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' }))
+      .toEqual({ ok: true, stopReason: 'end_turn' });
+    expect(fixture.modelCalls).toHaveLength(2);
+    expect(fixture.modelCalls[0].system).not.toContain('<actor_execution');
+    expect(fixture.modelCalls[0].tools.map((tool: any) => tool.name))
+      .toEqual(['message_actor', 'actor_create', 'request_review', 'actor_list']);
+    expect(fixture.modelCalls[1].system)
+      .toContain('<actor_execution status="temporarily_unavailable">');
+    expect(fixture.modelCalls[1].system).toContain('Do not retry automatically');
+    expect(fixture.modelCalls[1].tools.map((tool: any) => tool.name)).toEqual(['actor_list']);
+    expect(fixture.systemPromptRenders()).toBe(1);
   });
 
   test('a bound actor session is refused before the background loop, tools, or model', async () => {

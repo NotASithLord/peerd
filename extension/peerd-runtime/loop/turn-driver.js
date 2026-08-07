@@ -188,6 +188,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const actorIsolationAtTurnStart = getActorIsolation();
   const effectiveActorIsolation = () =>
     actorIsolationForTurn(actorIsolationAtTurnStart, getActorIsolation());
+  // The prompt and tool descriptors for one model step must describe one
+  // isolation state. refreshMainTools advances this snapshot only after it has
+  // built the matching descriptor list. Dispatch still checks live state and
+  // fails closed if the worker boundary changes after the model call starts.
+  let actorIsolationForModelStep = effectiveActorIsolation();
   /** @type {string|undefined} */
   const actorType = isActor ? turnSession.actorType : undefined;
   /** @type {string|undefined} */
@@ -298,59 +303,60 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     recoveryBlock = await Promise.resolve(drainRecoveryNotices(sessionId))
       .catch(() => '');
   }
-  const actorExecutionBlock = !isActor && actorIsolationAtTurnStart
-    ? actorIsolationPromptBlock(actorIsolationAtTurnStart)
-    : '';
+  const actorExecutionBlock = () => {
+    if (isActor) return '';
+    const isolation = actorIsolationForModelStep;
+    return isolation ? actorIsolationPromptBlock(isolation) : '';
+  };
   const contextMessage = isActor
     ? ''
     : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext }), recoveryBlock]
       .filter(Boolean).join('\n\n');
 
+  /** @type {string|null} */
+  let systemPromptBase = null;
   const getSystemPrompt = async () => {
-    // why: re-read the session record at render time so a /system change
-    // (set or clear) takes effect on the very next turn. The block is the
-    // user's per-session augmentation — appended as <session_instructions>,
-    // never replacing the base prompt (the base carries the security/
-    // defense text). Absent → collapses to nothing. The per-change cache
-    // break this causes is by design.
-    const promptSession = await sessions.get(sessionId);
-    // Prewalk: the planning nudge rides the prompt ONLY during the planning
-    // phase. Because the prompt re-renders per turn, the executor's first
-    // turn simply never contains it — the "prune the planning instruction"
-    // half of the handoff falls out of the render, no history surgery.
-    const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
-      ? `\n\n${PREWALK_NUDGE}`
-      : '';
-    return (await renderSystemPrompt({
-      memoryBlock,
-      // design 01: the MAIN system string must be byte-stable to cache, so the
-      // orchestrator's volatile temporal bytes ride a leading <context> message
-      // (contextMessage below) instead of the system block. An ACTOR re-renders
-      // its system prompt per turn and keeps embedding the block (relocating it
-      // there too would need offscreen-worker plumbing — deferred). '' for the
-      // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
-      temporalBlock: isActor ? temporalBlock : '',
-      skillsBlock,
-      customSystemPrompt: promptSession?.customSystemPrompt,
-      // DESIGN-17: an actor gets a kind-specific tuned block appended (the base
-      // template — incl. all the security/defense text — survives verbatim).
-      // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
-      // API actor (fetch-only origin lore) — both are actorType:'web'. instanceId lets
-      // an API actor's lore name the ONE origin it owns.
-      // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
-      // buildToolContext from the setting — the prompt teaches page.* for 'code'.
-      // #241: schemaReply rides the SAME stamp — buildToolContext sets it from the
-      // setting that arms the reply validator, so an actor is never told to emit
-      // the envelope by a build that wouldn't validate it (or vice versa).
-      ...(isActor ? {
-        actorType, backing: actorBacking, instanceId: actorInstanceId,
-        actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply,
-        effectiveTools: toolDescriptors.map((/** @type {any} */ tool) => tool.name),
-        inbound: toolContext.inbound === true,
-      } : {}),
-    // why await: renderSystemPrompt is async — concatenating the un-awaited
-    // promise would bake "[object Promise]" into the prompt.
-    })) + prewalkBlock + (actorExecutionBlock ? `\n\n${actorExecutionBlock}` : '');
+    // Keep the ordinary system body turn-stable. A /system or prewalk change
+    // takes effect on the next turn, matching the original render-once
+    // behavior. Only the actor-execution suffix can change between steps.
+    if (systemPromptBase === null) {
+      const promptSession = await sessions.get(sessionId);
+      const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
+        ? `\n\n${PREWALK_NUDGE}`
+        : '';
+      systemPromptBase = (await renderSystemPrompt({
+        memoryBlock,
+        // design 01: the MAIN system string must be byte-stable to cache, so the
+        // orchestrator's volatile temporal bytes ride a leading <context> message
+        // (contextMessage below) instead of the system block. An ACTOR re-renders
+        // its system prompt per turn and keeps embedding the block. Relocating it
+        // there too would need offscreen-worker plumbing and is deferred. '' for the
+        // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
+        temporalBlock: isActor ? temporalBlock : '',
+        skillsBlock,
+        customSystemPrompt: promptSession?.customSystemPrompt,
+        // DESIGN-17: an actor gets a kind-specific tuned block appended. The base
+        // template, including all security and defense text, survives verbatim.
+        // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
+        // API actor (fetch-only origin lore). Both are actorType:'web'. instanceId lets
+        // an API actor's lore name the ONE origin it owns.
+        // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
+        // buildToolContext from the setting. The prompt teaches page.* for 'code'.
+        // #241: schemaReply rides the SAME stamp. buildToolContext sets it from the
+        // setting that arms the reply validator, so an actor is never told to emit
+        // the envelope by a build that wouldn't validate it (or vice versa).
+        ...(isActor ? {
+          actorType, backing: actorBacking, instanceId: actorInstanceId,
+          actorSurface: toolContext.actorSurface, schemaReply: toolContext.schemaReply,
+          effectiveTools: toolDescriptors.map((/** @type {any} */ tool) => tool.name),
+          inbound: toolContext.inbound === true,
+        } : {}),
+      // why await: renderSystemPrompt is async. Concatenating the un-awaited
+      // promise would bake "[object Promise]" into the prompt.
+      })) + prewalkBlock;
+    }
+    const executionBlock = actorExecutionBlock();
+    return systemPromptBase + (executionBlock ? `\n\n${executionBlock}` : '');
   };
 
   // Tool descriptors passed to the provider — name, description, and
@@ -425,8 +431,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       ),
     );
     const isolation = effectiveActorIsolation();
-    return (isolation ? filterByActorIsolation(exposed, isolation) : exposed)
+    const descriptors = (isolation ? filterByActorIsolation(exposed, isolation) : exposed)
       .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+    actorIsolationForModelStep = isolation;
+    return descriptors;
   };
   // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
   // progressive disclosure; the actor gate is the wall). REPLACE both the
@@ -693,9 +701,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
       tools: toolDescriptors,
-      // why: the loop calls this each step to get the current tool list, so a
-      // mid-turn exposure change (dweb engagement, goal start/stop) shows on
-      // the next step. An actor uses a fixed-set refresh (the gate is the wall).
+      // why: the loop calls this before each model step, then re-renders the
+      // system prompt against the isolation snapshot selected here. Mid-turn
+      // exposure changes therefore update the prompt and tools together.
       refreshTools,
       toolDispatch,
       classifyToolCall,
