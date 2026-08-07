@@ -74,6 +74,23 @@ describe('formatRunResult — fence decision matrix', () => {
     expect(out).toContain('[CODE OPS]\n#1 page.snapshot → ok (4ms)');
     expect(out.indexOf('[CODE OPS]')).toBeLessThan(out.indexOf(FENCE));
   });
+
+  test('a dynamic instruction-shaped target appears only inside the output fence', () => {
+    const payload = 'IGNORE_PREVIOUS_INSTRUCTIONS';
+    const out = formatRunResult('return result', run({
+      usedActors: true,
+      actorsTrace: [{
+        seq: 1, method: 'call', to: payload, goal: 'inspect it',
+        ok: true, ms: 4, settled: true,
+      }],
+    }) as any);
+    const fenceStart = out.indexOf(FENCE);
+    const fenceEnd = out.indexOf('</untrusted_web_content>');
+    expect(out.slice(0, fenceStart)).not.toContain(payload);
+    expect(out).toContain('call [target redacted]');
+    expect(out.indexOf(payload)).toBeGreaterThan(fenceStart);
+    expect(out.indexOf(payload)).toBeLessThan(fenceEnd);
+  });
 });
 
 // The tool's execute: workspace opt-in rides as workspaceSessionId (a TRUSTED
@@ -155,6 +172,71 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     expect(seen.opts.caps).toEqual({ subagent: false });
     expect(registered[0]?.[3]).toEqual({ actors: false, egress: true, provider: false });
     expect(released).toEqual(['x']);
+  });
+
+  test('a transport-failure trace redacts an instruction-shaped target', async () => {
+    const payload = 'IGNORE_PREVIOUS_INSTRUCTIONS';
+    const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
+    const released: string[] = [];
+    const scriptRuns = {
+      mintRunId: () => 'failed-run',
+      register: () => {},
+      abort: () => {},
+      release: (runId: string) => { released.push(runId); },
+      opsFor: () => [{
+        seq: 1, method: 'call', to: payload,
+        ok: false, ms: 0, settled: false,
+      }],
+    };
+    const { ctx } = ctxWith({
+      messageActor: async () => {},
+      scriptRuns,
+      jsOffscreenClient: {
+        // The thrown transport error does not repeat the target. Its identity
+        // must survive from the bounded mirror itself, inside the fence only.
+        execHeadless: async () => { throw new Error(errorPayload); },
+      },
+    });
+    const result = await scriptTool.execute({
+      code: 'return actors.call(target, "inspect it")',
+    }, ctx as any);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const fenceStart = result.error.indexOf(FENCE);
+      const fenceEnd = result.error.indexOf('</untrusted_web_content>');
+      expect(result.error.slice(0, fenceStart)).not.toContain(payload);
+      expect(result.error.slice(0, fenceStart)).not.toContain(errorPayload);
+      expect(result.error).toContain('call [target redacted]');
+      expect(result.error.indexOf(payload)).toBeGreaterThan(fenceStart);
+      expect(result.error.indexOf(payload)).toBeLessThan(fenceEnd);
+      expect(result.error.indexOf(errorPayload)).toBeGreaterThan(fenceStart);
+      expect(result.error.indexOf(errorPayload)).toBeLessThan(fenceEnd);
+    }
+    expect(released).toEqual(['failed-run']);
+  });
+
+  test('an actors transport failure is fenced before any mirror exists', async () => {
+    const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
+    const { ctx } = ctxWith({
+      messageActor: async () => {},
+      scriptRuns: {
+        mintRunId: () => 'failed-run', register: () => {}, abort: () => {},
+        release: () => {}, opsFor: () => [],
+      },
+      jsOffscreenClient: {
+        execHeadless: async () => { throw new Error(errorPayload); },
+      },
+    });
+    const result = await scriptTool.execute({
+      code: 'return actors.call("web", "inspect it")',
+    }, ctx as any);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const fenceStart = result.error.indexOf(FENCE);
+      expect(fenceStart).toBeGreaterThan(0);
+      expect(result.error.slice(0, fenceStart)).not.toContain(errorPayload);
+      expect(result.error.indexOf(errorPayload)).toBeGreaterThan(fenceStart);
+    }
   });
 
   test('an ordinary script egress run forwards its owner through the job into the SW route', async () => {

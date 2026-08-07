@@ -96,7 +96,7 @@
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
  * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} actors
- * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean }>>} scriptOps  live delegation feed per script toolUseId
+ * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean, cancelled?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
  */
@@ -447,7 +447,9 @@ export const reduceChat = (state, msg) => {
       const entry = {
         seq: msg.seq, method: msg.method, to: msg.to ?? list[idx]?.to,
         goalPreview: msg.goalPreview ?? list[idx]?.goalPreview,
-        phase: msg.phase, ms: msg.ms ?? null, failed: msg.failed === true || msg.error != null,
+        phase: msg.phase, ms: msg.ms ?? null,
+        cancelled: msg.cancelled === true || msg.phase === 'cancelled',
+        failed: msg.phase === 'cancelled' ? false : msg.failed === true || msg.error != null,
       };
       if (idx >= 0) list[idx] = { ...list[idx], ...entry };
       else list.push(entry);

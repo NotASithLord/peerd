@@ -22,6 +22,7 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 import {
   renderTraceLines, traceGoalLines, traceErrorDetails,
   ACTORS_JOB_DEFAULT_TIMEOUT_MS, ACTORS_JOB_MAX_TIMEOUT_MS,
+  ACTORS_TRACE_ERROR_MAX_CHARS,
 } from '../../actor/actors-api.js';
 import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
@@ -44,7 +45,7 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {Array<{ data: string, mediaType: string }>} [images] host-captured page images (bounded by job-runner)
  * @property {boolean} [usedWorkspace]   the job was workspace-mounted (host-set, never inferred from ops)
  * @property {boolean} [workspaceOverBudget]   the workspace exceeded its size budget — writes were refused
- * @property {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string }>} [actorsTrace]
+ * @property {Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>} [actorsTrace]
  * @property {Array<{ seq: number, bridge: string, method: string, outcome: string, ms: number }>} [codeTrace]
  * @property {boolean} [usedProvider]   the run sub-called the model (peerd.provider.call, design 5)
  * @property {number} [providerCalls]   host-counted sub-call attempts
@@ -272,7 +273,25 @@ export const scriptTool = {
       const dispatched = mirrored.length
         ? `\n[DELEGATIONS dispatched before the failure]\n${renderTraceLines(mirrored).join('\n')}`
         : '';
-      return { ok: false, error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}${dispatched}` };
+      if (actorsOn) {
+        // The thrown bridge error can repeat a runtime-derived target or actor
+        // reply. Keep only a host-authored failure class and the redacted trace
+        // outside the fence; all thrown text and dynamic trace details stay in it.
+        const errorName = String(err?.name ?? 'Error').slice(0, 80);
+        const errorMessage = String(err?.message ?? e).slice(0, ACTORS_TRACE_ERROR_MAX_CHARS);
+        const unsafeDetails = [
+          '[TRANSPORT ERROR]', `${errorName}: ${errorMessage}`,
+          ...traceGoalLines(mirrored), ...traceErrorDetails(mirrored),
+        ];
+        const fenced = wrapUntrusted({
+          origin: 'script (actor replies)', tool: 'script', body: unsafeDetails.join('\n'),
+        });
+        return {
+          ok: false,
+          error: `script_failed: actor orchestration transport failed${dispatched}\n${fenced}`,
+        };
+      }
+      return { ok: false, error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     } finally {
       // Release ABORTS first (script-runs.js): any ask still pending SW-side
       // is an orphan whose actor turn dies with the run — the non-Stop exits
@@ -334,7 +353,8 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   lines.push(`> ${oneLineCode.replace(/\n/g, '\n  ')} (headless)`);
   lines.push(`[${r.durationMs}ms]`);
   // The DELEGATIONS trace — fence-SAFE by construction (host-recorded method/
-  // target/outcome/timing + the model's own goal previews; never actor bytes).
+  // fixed target label/outcome/timing; never actor bytes). Dynamic targets and
+  // the model's own goal previews ride in the fenced details below.
   // It sits OUTSIDE the fence on purpose: this is the chain-of-events the
   // orchestrator debugs from even when the script failed mid-fan.
   const trace = Array.isArray(r.actorsTrace) ? r.actorsTrace : [];

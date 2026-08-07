@@ -14,11 +14,11 @@ const flush = async () => {
   m.redraw.sync();
 };
 
-/** @param {any[]} messages */
-const mount = (messages) => {
+/** @param {any[]} messages @param {Record<string, any>} [attrs] */
+const mount = (messages, attrs = {}) => {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  m.mount(root, { view: () => m(MessageList, { messages }) });
+  m.mount(root, { view: () => m(MessageList, { messages, ...attrs }) });
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
@@ -40,6 +40,51 @@ describe('sidepanel.message-list aborted cards', () => {
       const chip = /** @type {Element} */ (root.querySelector('.stop-chip'));
       expect(chip).toBeTruthy();
       expect((chip.textContent || '').includes('stopped')).toBe(true);
+    } finally { unmount(); }
+  });
+
+  it('the generic disclosure is a focusable native button with expansion state', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a1', content: '',
+        toolUses: [{ id: 't1', name: 'script', input: { code: 'return 42' } }],
+      },
+      {
+        role: 'user', id: 'u1', content: '',
+        toolResults: [{ tool_use_id: 't1', is_error: true, content: 'script_failed: transport failed' }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('button.tool-call-header'));
+      expect(toggle).toBeTruthy();
+      expect(toggle.type).toBe('button');
+      expect(toggle.tabIndex).toBe(0);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      toggle.focus();
+      expect(document.activeElement).toBe(toggle);
+      toggle.click();
+      await flush();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(root.textContent).toContain('script_failed: transport failed');
+    } finally { unmount(); }
+  });
+
+  it('a stopped script delegation says cancelled, not failed', async () => {
+    const { root, unmount } = mount([{
+      role: 'assistant', id: 'a1', content: '', stopReason: 'aborted',
+      toolUses: [{ id: 't1', name: 'script', input: { code: 'return actors.call()' } }],
+    }], {
+      scriptOps: {
+        t1: [{ seq: 1, method: 'call', to: 'vm-1', phase: 'cancelled', cancelled: true, failed: false, ms: 12 }],
+      },
+    });
+    try {
+      await flush();
+      const state = root.querySelector('.script-op-state');
+      expect(state?.textContent).toBe('cancelled');
+      expect(root.querySelector('.script-op-dot.dot-cancelled')).toBeTruthy();
+      expect(root.querySelector('.script-op-dot.dot-failed')).toBeFalsy();
     } finally { unmount(); }
   });
 

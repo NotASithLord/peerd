@@ -291,7 +291,8 @@ import {
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
-  ACTORS_RUN_MAX_OPS, canonicalCodeTraceLabel, CODE_CLIENT_MANIFESTS, DWEB_INBOUND_TOOL_NAMES,
+  ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
+  canonicalCodeTraceLabel, CODE_CLIENT_MANIFESTS, DWEB_INBOUND_TOOL_NAMES,
   // Design 5 — the pure core the script/model-call route runs: text-only arg
   // validation, per-run quota arithmetic, and the provider-event fold.
   validateProviderCallArgs, providerQuotaError, foldProviderEvents,
@@ -5776,7 +5777,8 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeActorsRoutes({
     sessions, uiPorts, buildToolContext, dispatchToolCall, actorMessaging,
     scriptRuns, actorsCallToOp, shapeActorsResult, askOutcome,
-    ACTORS_ASK_DEFAULT_TIMEOUT_MS, resolveManifestAllow, isOffscreenSender,
+    ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_TRACE_TARGET_MAX_CHARS,
+    ACTORS_TRACE_ERROR_MAX_CHARS, resolveManifestAllow, isOffscreenSender,
   }),
   // A2A: the sealed a2a_run worker's mesh calls relay here (owner-verified,
   // consent-gated, dispatched on the peerd-agent room).

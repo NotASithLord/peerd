@@ -130,7 +130,9 @@ export {
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
   askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
-  ACTORS_RUN_MAX_OPS, ACTORS_API_METHODS, ACTORS_API_ACCEPTED_METHODS,
+  ACTORS_RUN_MAX_OPS, ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS,
+  ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
+  ACTORS_API_METHODS, ACTORS_API_ACCEPTED_METHODS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Design 5 — peerd.provider.call: the pure core (text-only arg validation,

@@ -536,7 +536,9 @@ const ToolCall = {
     // expanded body so the collapsed chip stays small. The architecture
     // is still legible — one click away, not always on screen.
     return m(`.tool-call.tool-${status}`, [
-      m('.tool-call-header', {
+      m('button.tool-call-header', {
+        type: 'button',
+        'aria-expanded': String(ui.expanded),
         onclick: () => { ui.expanded = !ui.expanded; },
       }, [
         m('span.disclosure', ui.expanded ? '▼' : '▶'),
@@ -568,13 +570,14 @@ const ToolCall = {
           ? m('pre.vm-stream-stderr', liveStream.stderr) : null,
       ]) : null,
       showOps ? m('.script-ops', ops.map((/** @type {any} */ o) => m('.script-op', { key: o.seq }, [
-        m(`span.script-op-dot.dot-${o.phase === 'sent' ? 'pending' : (o.failed ? 'failed' : 'ok')}`),
+        m(`span.script-op-dot.dot-${o.phase === 'sent' ? 'pending' : o.cancelled ? 'cancelled' : (o.failed ? 'failed' : 'ok')}`),
         m('span.script-op-line', [
           `${o.method}${o.to ? ` ${o.to}` : ''}`,
           o.goalPreview ? m('span.script-op-goal', ` "${o.goalPreview}"`) : null,
         ]),
         m('span.script-op-state',
           o.phase === 'sent' ? 'working…'
+            : o.cancelled ? 'cancelled'
             : o.phase === 'handed-off' ? 'handed off'
             : `${o.failed ? 'failed' : 'replied'}${typeof o.ms === 'number' ? ` · ${(o.ms / 1000).toFixed(1)}s` : ''}`),
       ]))) : null,

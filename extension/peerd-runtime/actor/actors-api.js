@@ -33,9 +33,13 @@ export class ActorsApiError extends Error {
   constructor(message) { super(message); this.name = 'ActorsApiError'; }
 }
 
-/** @param {unknown} v @param {string} what */
-const nonEmptyString = (v, what) => {
-  if (typeof v !== 'string' || v.trim().length === 0) throw new ActorsApiError(`${what} must be a non-empty string`);
+/** @param {unknown} v @param {string} what @param {number} maxChars */
+const boundedNonEmptyString = (v, what, maxChars) => {
+  if (typeof v !== 'string') throw new ActorsApiError(`${what} must be a non-empty string`);
+  // why length precedes trim: trim would scan and allocate from an attacker-sized
+  // bridge value before the relay had enforced any resource boundary.
+  if (v.length > maxChars) throw new ActorsApiError(`${what} must be at most ${maxChars} characters`);
+  if (v.trim().length === 0) throw new ActorsApiError(`${what} must be a non-empty string`);
   return v;
 };
 
@@ -43,7 +47,7 @@ const nonEmptyString = (v, what) => {
  * @param {unknown} v @param {string} what */
 const actorAddress = (v, what) => {
   if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return String(v);
-  return nonEmptyString(v, what);
+  return boundedNonEmptyString(v, what, ACTORS_ADDRESS_MAX_CHARS);
 };
 
 // The timeout TOWER, defined once so it cannot drift apart (the nesting
@@ -53,6 +57,13 @@ const actorAddress = (v, what) => {
 // DERIVES from the ask ceiling: bump it and the tower moves together.
 export const ACTORS_ASK_MAX_TIMEOUT_MS = 240_000;
 export const ACTORS_ASK_DEFAULT_TIMEOUT_MS = 120_000;
+// Worker-controlled strings cross two heaps and are mirrored for crash
+// recovery. Reject them at the shared translation edge before any trim/regex
+// work, then retain only smaller bounded trace projections in each host.
+export const ACTORS_ADDRESS_MAX_CHARS = 2_048;
+export const ACTORS_GOAL_MAX_CHARS = 32_768;
+export const ACTORS_TRACE_TARGET_MAX_CHARS = 256;
+export const ACTORS_TRACE_ERROR_MAX_CHARS = 4_096;
 // One run may compose many calls, but it is not an unbounded actor-message
 // pump. Shared by the SW admission meter and the offscreen trace ring.
 export const ACTORS_RUN_MAX_OPS = 50;
@@ -87,7 +98,11 @@ const ACTORS_METHODS = {
     op: 'call',
     toArgs: (a) => {
       const to = actorAddress(a?.address ?? a?.to, 'actors.call(address, message): address');
-      const goal = nonEmptyString(a?.message ?? a?.goal, 'actors.call(address, message): message');
+      const goal = boundedNonEmptyString(
+        a?.message ?? a?.goal,
+        'actors.call(address, message): message',
+        ACTORS_GOAL_MAX_CHARS,
+      );
       const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0
         ? Math.min(a.timeoutMs, ACTORS_ASK_MAX_TIMEOUT_MS) : undefined;
       const oneShot = a?.oneShot === true ? true : undefined;
@@ -124,9 +139,12 @@ export const actorsMethodDelegates = (method) => ACTORS_METHODS[method]?.delegat
 export const actorsCallToOp = (call) => {
   const method = call?.method;
   const spec = typeof method === 'string' ? ACTORS_METHODS[method] : undefined;
-  const declared = codeClientMethod('actors', String(method));
+  const declared = typeof method === 'string' ? codeClientMethod('actors', method) : undefined;
   if (!spec || !declared || declared.op !== spec.op) {
-    throw new ActorsApiError(`unknown actors method: ${String(method)}`);
+    const label = typeof method === 'string'
+      ? (method.length > 64 ? '[oversized]' : method)
+      : `[${typeof method}]`;
+    throw new ActorsApiError(`unknown actors method: ${label}`);
   }
   return { op: spec.op, args: spec.toArgs(call?.args ?? {}), delegates: spec.delegates === true };
 };
@@ -184,23 +202,38 @@ export const askOutcome = (r, { timedOut, aborted, timeoutMs, to }) => {
 // may carry actor/web-derived bytes, so renderTraceLines keeps them out; the
 // caller places them in the fenced body via traceErrorDetails).
 
-/** @typedef {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }} ActorsTraceEntry */
+/** @typedef {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }} ActorsTraceEntry */
 
 const GOAL_PREVIEW_CHARS = 60;
+const TARGET_PREVIEW_CHARS = 60;
 
-// Fence-safe target: a chained call's `to` is a RUNTIME value (it can equal a
-// prior actor reply — attacker-influenceable), so only handle-shaped
-// characters survive outside the fence; anything else is elided. Same
-// defensive posture as instance-handle's anchored id patterns.
+// A chained call's `to` is a RUNTIME value and can equal fetched or actor-
+// supplied text. Character filtering cannot make that trusted: an instruction
+// written with letters and underscores still looks handle-shaped. Only the two
+// fixed singleton handles and numeric tab ids have no attacker-chosen language
+// to expose. Every other target gets a host-authored marker outside the fence;
+// its useful preview rides with the goal inside the fenced detail block.
 /** @param {unknown} to @returns {string} */
-const safeTarget = (to) => {
+const traceTargetLabel = (to) => {
+  if (typeof to !== 'string' || to.length === 0) return '';
+  if (to.length > 10) return '[target redacted]';
+  return /^(?:web|dweb|(?:0|[1-9]\d{0,9}))$/.test(to) ? to : '[target redacted]';
+};
+
+/** Runtime target preview for callers that place the result inside a fence.
+ * @param {unknown} to @returns {string} */
+const fencedTargetPreview = (to) => {
   if (typeof to !== 'string') return '';
-  const clean = to.replace(/[^A-Za-z0-9_.:\/-]/g, '').slice(0, 48);
-  return clean.length === to.length ? clean : `${clean}⁈`;
+  // Slice before normalization so a hostile multi-megabyte target cannot make
+  // trace formatting scan or allocate another copy of the whole value.
+  const oneLine = to.slice(0, TARGET_PREVIEW_CHARS + 1).replace(/\s+/g, ' ').trim();
+  return to.length > TARGET_PREVIEW_CHARS || oneLine.length > TARGET_PREVIEW_CHARS
+    ? `${oneLine.slice(0, TARGET_PREVIEW_CHARS)}…`
+    : oneLine;
 };
 
 /**
- * Render the fence-SAFE trace lines: method + sanitized target + outcome +
+ * Render the fence-SAFE trace lines: method + fixed target label + outcome +
  * timing per op — and NOTHING runtime-shaped beyond that. why no goal here:
  * a chained goal (`actors.ask(next, prior.reply)`) carries whatever the prior
  * actor (or a fetched page) said — exactly the bytes the fence exists for —
@@ -212,26 +245,30 @@ const safeTarget = (to) => {
  */
 export const renderTraceLines = (trace) =>
   trace.map((t) => {
-    const target = t.to ? ` ${safeTarget(t.to)}` : '';
+    const target = t.to ? ` ${traceTargetLabel(t.to)}` : '';
     const state = t.settled === false
       ? 'IN FLIGHT when the run ended (no reply seen)'
-      : t.ok
-        ? (t.actorFailed ? `replied — the actor REPORTED FAILURE ${t.ms}ms` : `ok ${t.ms}ms`)
-        : `FAILED ${t.ms}ms`;
+      : t.cancelled
+        ? `CANCELLED by Stop ${t.ms}ms`
+        : t.ok
+          ? (t.actorFailed ? `replied: the actor REPORTED FAILURE ${t.ms}ms` : `ok ${t.ms}ms`)
+          : `FAILED ${t.ms}ms`;
     return `  #${t.seq} ${t.method}${target} → ${state}`;
   });
 
 /**
- * The goal previews, for the FENCED body: which text each op actually sent.
- * Runtime-shaped by design (chained goals carry prior replies), hence fenced.
+ * The target + goal previews, for the FENCED body: which values each op sent.
+ * Runtime-shaped by design (either can carry prior replies), hence fenced.
  * @param {ReadonlyArray<ActorsTraceEntry>} trace
  * @returns {string[]}
  */
 export const traceGoalLines = (trace) =>
-  trace.filter((t) => typeof t.goal === 'string' && t.goal.length > 0).map((t) => {
-    const g = /** @type {string} */ (t.goal);
+  trace.filter((t) => (typeof t.goal === 'string' && t.goal.length > 0)
+    || (typeof t.to === 'string' && t.to.length > 0)).map((t) => {
+    const g = typeof t.goal === 'string' ? t.goal : '';
     const preview = g.length > GOAL_PREVIEW_CHARS ? `${g.slice(0, GOAL_PREVIEW_CHARS)}…` : g;
-    return `  #${t.seq} → "${preview}"`;
+    const target = fencedTargetPreview(t.to);
+    return `  #${t.seq}${target ? ` target="${target}"` : ''}${g ? ` → "${preview}"` : ''}`;
   });
 
 /**
@@ -242,4 +279,8 @@ export const traceGoalLines = (trace) =>
  * @returns {string[]}
  */
 export const traceErrorDetails = (trace) =>
-  trace.filter((t) => !t.ok && t.error).map((t) => `  #${t.seq} ${t.method}${t.to ? ` ${safeTarget(t.to)}` : ''}: ${t.error}`);
+  trace.filter((t) => !t.ok && t.error).map((t) => {
+    const target = fencedTargetPreview(t.to);
+    const error = String(t.error).slice(0, ACTORS_TRACE_ERROR_MAX_CHARS);
+    return `  #${t.seq} ${t.method}${target ? ` target="${target}"` : ''}: ${error}`;
+  });

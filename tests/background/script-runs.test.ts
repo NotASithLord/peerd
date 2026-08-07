@@ -76,6 +76,23 @@ describe('createScriptRunRegistry', () => {
     expect(r.admitActorOp('run-p')).toBe(false);
   });
 
+  test('a sent operation is updated in place when it settles', () => {
+    const r = createScriptRunRegistry({ actorOpLimit: 3 });
+    r.register('run-a', undefined, 'chat-1', { actors: true });
+    r.recordOp('run-a', {
+      seq: 1, method: 'call', to: 'vm-1', goal: 'run tests',
+      ok: false, ms: 0, settled: false,
+    });
+    r.recordOp('run-a', {
+      seq: 1, method: 'call', to: 'vm-1', goal: 'run tests',
+      ok: true, ms: 42, settled: true,
+    });
+    expect(r.opsFor('run-a')).toEqual([{
+      seq: 1, method: 'call', to: 'vm-1', goal: 'run tests',
+      ok: true, ms: 42, settled: true,
+    }]);
+  });
+
   test('every code relay gets the same atomic capability/operation wall', () => {
     const r = createScriptRunRegistry({ codeOpLimit: 2 });
     r.register('page-run', undefined, 'web-1', { page: true });

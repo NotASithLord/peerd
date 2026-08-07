@@ -1195,6 +1195,17 @@ button.icon.is-active {
   min-width: 0;
 }
 .tool-call-header:hover { background: rgba(127, 127, 127, 0.06); }
+button.tool-call-header {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  text-align: left;
+}
+button.tool-call-header:focus-visible {
+  outline: 2px solid var(--fg-muted);
+  outline-offset: -2px;
+}
 
 .disclosure { color: var(--fg-muted); font-size: 9px; width: 10px; flex-shrink: 0; }
 
@@ -1371,6 +1382,7 @@ button.icon.is-active {
 .script-op-dot.dot-pending { background: var(--ok); animation: peerd-dot-pulse 1.2s ease-in-out infinite; }
 .script-op-dot.dot-ok { background: var(--ok); }
 .script-op-dot.dot-failed { background: var(--danger); }
+.script-op-dot.dot-cancelled { background: var(--fg-muted); }
 .script-op-line {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;

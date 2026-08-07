@@ -27,7 +27,12 @@
 
 import { opfsHelpers, buildModule, makeFetchRemote, TOOLBOX_SPECIFIER_PREFIX } from '/peerd-engine/index.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS, DEFAULT_WORKER_CAPS } from '/engine-tabs/notebook-tab/worker-source.js';
-import { ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS, buildCodeClientSource, canonicalCodeTraceLabel, CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS } from '/peerd-runtime/index.js';
+import {
+  ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS,
+  ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS,
+  actorsCallToOp, buildCodeClientSource, canonicalCodeTraceLabel,
+  CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS,
+} from '/peerd-runtime/index.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 
 // The workspace's total-size SOFT budget: over it the run still executes but
@@ -598,15 +603,28 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             });
             return;
           }
-          // Compatibility trace fields retain their historical names while the
-          // canonical Elixir-shaped client now emits address/message.
-          const actorAddress = m?.args?.address ?? m?.args?.to;
-          const goalRaw = m?.args?.message ?? m?.args?.goal;
-          /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean }} */
+          // The worker is not an authority boundary. Run the shared translator
+          // here before allocating a trace entry or contacting the SW, so an
+          // oversized address/goal cannot be multiplied across host heaps.
+          let translated;
+          try {
+            translated = actorsCallToOp({ method: m.method, args: m.args });
+          } catch (e) {
+            recordRefusedCodeOp('actors', m.method);
+            worker.postMessage({
+              type: 'actors-response', rid: m.rid,
+              error: /** @type {{ message?: string }} */ (e)?.message ?? 'invalid actors request',
+            });
+            return;
+          }
+          const actorAddress = translated.args.to;
+          const goalRaw = translated.args.goal;
+          /** @type {{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }} */
           const entry = {
             seq,
             method: canonicalCodeTraceLabel('actors', m.method).method,
-            ...(typeof actorAddress === 'string' ? { to: actorAddress } : {}),
+            ...(typeof actorAddress === 'string'
+              ? { to: actorAddress.slice(0, ACTORS_TRACE_TARGET_MAX_CHARS) } : {}),
             ...(typeof goalRaw === 'string' ? { goal: goalRaw.slice(0, 200) } : {}),
             // settled:false until the relay answers — a run that dies first
             // reports this op as IN FLIGHT, never as an instant failure.
@@ -618,7 +636,10 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           try {
             const resp = await runCodeOp(
               'actors', m.method,
-              () => sendToSW('actors/call', { method: m.method, args: m.args, ownerSessionId, ownerToolUseId, runId, seq }),
+              () => sendToSW('actors/call', {
+                method: m.method, args: translated.args,
+                ownerSessionId, ownerToolUseId, runId, seq,
+              }),
               (response) => response?.ok === true && response?.value?.failed !== true,
             );
             entry.ms = Math.round(performance.now() - t0);
@@ -632,13 +653,16 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               if (resp.value && resp.value.failed === true) entry.actorFailed = true;
               worker.postMessage({ type: 'actors-response', rid: m.rid, result: resp.value });
             } else {
-              entry.error = resp?.error ?? 'actors call failed';
+              entry.error = String(resp?.error ?? 'actors call failed')
+                .slice(0, ACTORS_TRACE_ERROR_MAX_CHARS);
+              if (resp?.cancelled === true) entry.cancelled = true;
               worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
             }
           } catch (e) {
             entry.ms = Math.round(performance.now() - t0);
             entry.settled = true;
-            entry.error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+            entry.error = String(/** @type {{ message?: string }} */ (e)?.message ?? e)
+              .slice(0, ACTORS_TRACE_ERROR_MAX_CHARS);
             worker.postMessage({ type: 'actors-response', rid: m.rid, error: entry.error });
           }
           return;
