@@ -25,7 +25,7 @@ const ORCHESTRATOR_AWAIT_CAP_MS = 3 * 60_000;
  * The ctx slot message_actor reads (an SW-injected extra, not on the base
  * ToolContext contract).
  * @typedef {Object} MessageActorCtx
- * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string }>} [messageActor]
+ * @property {(req: { to: string, message: string, senderSessionId?: string|null, inbound?: boolean, toolUseId?: string, oneShot?: boolean, awaitReply?: boolean, awaitSignal?: any, degradeToAsync?: boolean, awaitCapMs?: number }) => Promise<{ ok: boolean, content?: string, error?: string, actorDeliveryId?: string }>} [messageActor]
  * @property {{ sessionId?: string, kind?: string }} [session]
  * @property {boolean} [inbound]
  * @property {string} [toolUseId]
@@ -139,9 +139,19 @@ export const messageActorTool = {
       degradeToAsync: args?.await === true && c.session?.kind !== 'spawned',
       awaitCapMs: ORCHESTRATOR_AWAIT_CAP_MS,
     });
-    // Narrow the orchestrator's {ok, content?, error?} into the ToolResult union.
+    // Keep the internal delivery id until the caller's tool-result message is
+    // durably appended. The session store acknowledges the mailbox only after
+    // that commit, closing the crash window without exposing the id to the model.
     return res.ok
-      ? { ok: true, content: res.content ?? 'message delivered' }
-      : { ok: false, error: res.error ?? 'message_actor failed' };
+      ? {
+        ok: true,
+        content: res.content ?? 'message delivered',
+        ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
+      }
+      : {
+        ok: false,
+        error: res.error ?? 'message_actor failed',
+        ...(res.actorDeliveryId ? { actorDeliveryId: res.actorDeliveryId } : {}),
+      };
   },
 };

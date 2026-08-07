@@ -37,9 +37,13 @@ import { PREWALK_NUDGE } from './prewalk.js';
 // main system string byte-stable and prompt-cacheable (design 01).
 import { buildTemporalContext } from './system-prompt.js';
 import { DWEB_INBOUND_TOOL_NAMES } from '../actor/capability-manifest.js';
+import {
+  actorIsolationAvailable, actorIsolationForTurn, actorIsolationPromptBlock, actorIsolationRefusal,
+  ACTOR_ISOLATION_UNAVAILABLE_TOOLS, filterByActorIsolation,
+} from '../actor/isolation.js';
 
 /**
- * The in-SW fallback's positive inbound authority check. Kept pure/exported so
+ * The positive inbound authority check. Kept pure/exported so
  * the hidden-tool forgery case is pinned without constructing a whole turn.
  * @param {{ isActor: boolean, inbound: boolean, actorType?: string, name?: string }} input
  */
@@ -83,6 +87,11 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // carried — including the do-not-repeat instruction for outcome_unknown.
     // Optional so actor/test drivers stay inert.
     drainRecoveryNotices = null,
+    // Live execution-boundary capability. Null keeps older test harnesses inert.
+    getActorIsolation = () => null,
+    // The service-worker shell hydrates durable actor-host health before a
+    // turn may snapshot it. Tests and non-browser callers stay synchronous.
+    waitForActorIsolation = async () => {},
   } = deps;
 
 /**
@@ -93,6 +102,10 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  */
 const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
+  // why before session work: a cold background page starts fail-closed while
+  // durable actor-host health loads. Sampling that sentinel would falsely tell
+  // the model actors are unavailable and can consume a mailbox wake for good.
+  await waitForActorIsolation();
 
   // Lazy session create — bind the chat to whatever provider/model the user
   // has configured (no provider is assumed on a fresh install; see
@@ -155,6 +168,26 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     } catch (e) { console.warn('[turn] prewalk reconcile failed', e); }
   }
   const isActor = turnSession?.kind === 'actor';
+  const isSpawned = turnSession?.kind === 'spawned';
+  // Defensive backstop for auto-resume and any future caller: actor sessions
+  // are driven only by the dedicated-worker host. Reaching this in-background
+  // turn driver is a refusal, never a degraded execution mode.
+  if (isActor || isSpawned) {
+    auditLog.append({
+      type: 'actor_background_turn_refused',
+      sessionId,
+      details: { reason: 'dedicated_worker_required', performed: false },
+    }).catch(() => {});
+    releaseTurnSlot();
+    return;
+  }
+  // why snapshot: an unavailable boundary stays unavailable to the model for
+  // this whole turn even if a user retry repairs it mid-turn. That keeps the
+  // system prompt, descriptor list, and dispatch story coherent. A boundary
+  // that fails after the turn starts can still remove tools immediately.
+  const actorIsolationAtTurnStart = getActorIsolation();
+  const effectiveActorIsolation = () =>
+    actorIsolationForTurn(actorIsolationAtTurnStart, getActorIsolation());
   /** @type {string|undefined} */
   const actorType = isActor ? turnSession.actorType : undefined;
   /** @type {string|undefined} */
@@ -164,12 +197,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // the egress boundary scopes to the FIXED origin for an API actor.
   /** @type {'tab'|'api'|undefined} */
   const actorBacking = isActor ? turnSession.backing : undefined;
-  // Firefox has no offscreen actor host, so a bound actor can reach this
-  // in-service-worker loop. Keep the live provider credentials out of that
-  // loop frame just as the spawned-actor fallback does. The model wrapper
-  // below restores them only at the provider-call boundary. This narrows
-  // custody but does not create heap isolation; that contract is tracked
-  // separately in #305.
+  // Defense in depth: if a future caller bypasses the dedicated-worker
+  // refusal above, no actor loop receives live credential functions.
   const loopCredentials = isActor
     ? {
       getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
@@ -269,6 +298,9 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     recoveryBlock = await Promise.resolve(drainRecoveryNotices(sessionId))
       .catch(() => '');
   }
+  const actorExecutionBlock = !isActor && actorIsolationAtTurnStart
+    ? actorIsolationPromptBlock(actorIsolationAtTurnStart)
+    : '';
   const contextMessage = isActor
     ? ''
     : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext }), recoveryBlock]
@@ -318,7 +350,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       } : {}),
     // why await: renderSystemPrompt is async — concatenating the un-awaited
     // promise would bake "[object Promise]" into the prompt.
-    })) + prewalkBlock;
+    })) + prewalkBlock + (actorExecutionBlock ? `\n\n${actorExecutionBlock}` : '');
   };
 
   // Tool descriptors passed to the provider — name, description, and
@@ -380,7 +412,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // SIXTH cut (DESIGN-17): the actor surface. The actor-only instance tier
     // (writes AND the fenced reads) LEAVES the main agent (it delegates via
     // message_actor, which it keeps). Outermost so it composes over everything.
-    const descriptors = filterActorSurface(
+    const exposed = filterActorSurface(
       filterByGoalActive(
         filterByDwebActive(
           filterByDwebEnabled(
@@ -391,8 +423,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         ),
         !!goalActiveFor?.(sessionId),
       ),
-    ).map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
-    return descriptors;
+    );
+    const isolation = effectiveActorIsolation();
+    return (isolation ? filterByActorIsolation(exposed, isolation) : exposed)
+      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
   };
   // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
   // progressive disclosure; the actor gate is the wall). REPLACE both the
@@ -415,13 +449,21 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
-    // The descriptor filter is model guidance; this is the in-SW fallback's
-    // authority wall. A remote-peer wake may use only the positive inbound
-    // dweb subset even if it forges a hidden tool name.
+    // The descriptor filter is model guidance. A remote-peer wake may use only
+    // the positive inbound dweb subset even if it forges a hidden tool name.
     if (!inboundActorCallAllowed({
       isActor, inbound: toolContext.inbound === true, actorType, name: call?.name,
     })) {
       return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
+    }
+    const isolation = effectiveActorIsolation();
+    if (!isActor && isolation && !actorIsolationAvailable(isolation)
+        && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(String(call?.name ?? ''))) {
+      const refusal = actorIsolationRefusal(isolation);
+      return {
+        ...refusal,
+        meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+      };
     }
     // DESIGN-17 per-instance pin: force an actor's instance-target arg to its
     // BOUND instance before dispatch, so it can only ever touch its own (the gate
@@ -545,7 +587,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   /** @type {{ provider: string, model: string } | null} */ let failoverLastGood = null;
   const callModelWithFailover = async function* (/** @type {any} */ modelArgs) {
     // Pin the first candidate to the persisted turn record. The loop normally
-    // forwards those same values, but the in-SW actor is not a trust boundary:
+    // forwards those same values, but the loop is not the credential boundary:
     // it must not select another keyed adapter by colliding with broker fields.
     // Later calls stay on a successful failover candidate for this turn.
     const start = failoverLastGood ?? {
@@ -553,9 +595,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       model: costSession?.model ?? modelArgs.model,
     };
     const chain = resolveFailoverChain(start);
-    // The context inspector sees main turns and the bound-actor in-SW
-    // fallback here. Offscreen actors use the actor/model-call relay; spawned
-    // in-SW children use their capped wrapper.
+    // The context inspector sees orchestrator turns here. Every actor model
+    // call uses the isolated actor relay.
     // record() is contractually non-throwing; label with the provider the
     // call will actually start on.
     recordModelCall({
@@ -563,7 +604,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       provider: start.provider,
       model: start.model,
       sessionId,
-      label: isActor ? `actor ${actorType ?? 'bound'} (in-SW)` : 'main',
+      label: 'main',
     });
     // why: the Ollama adapter reads `ollamaHost` to reach a remote daemon (issue
     // #104). Thread it from settings for every candidate; non-ollama adapters
@@ -574,9 +615,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       const cand = chain[i];
       let streamedContent = false;
       try {
-        // The loop forwards its credential fields with every model call. For
-        // an in-SW actor those fields are throwing stubs, so all broker-owned
-        // fields must come AFTER modelArgs. Reversing this order lets the loop
+        // The loop forwards credential fields with every model call. All
+        // broker-owned fields must come AFTER modelArgs. Reversing this order lets the loop
         // change credential custody, provider choice, or cancellation.
         for await (const ev of callModel({
           ...modelArgs,
@@ -646,9 +686,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // persistently-overloaded or out-of-credit provider switches to a
       // configured fallback mid-turn instead of failing the whole turn.
       callModel: callModelWithFailover,
-      // Bound actors on the in-SW fallback get throwing stubs. Main turns keep
-      // the live functions. callModelWithFailover brokers the real credentials
-      // at the provider boundary for both paths.
+      // Only orchestrator turns reach this driver. Actor sessions are refused
+      // above and use the dedicated-worker host.
       ...loopCredentials,
       sessions,
       getSystemPrompt,

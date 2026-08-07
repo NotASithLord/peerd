@@ -144,6 +144,8 @@ export const ProvidersSection = {
   view: ({ attrs: { state, send }, state: ui }) => {
     const provider = state.providers ?? { current: 'anthropic', hasKey: false };
     const providerModel = state.settings?.providerModel ?? '';
+    const actorExecution = state.capabilities?.actorExecution;
+    const actorUnavailable = actorExecution && actorExecution.status !== 'available';
 
     // Per-provider key prefixes — a cheap "looks like a real key" format
     // check so a wrong paste is caught at save time instead of silently
@@ -472,6 +474,7 @@ export const ProvidersSection = {
           m('label', { for: 'runner-model' }, 'Web actor model'),
           m('input', {
             id: 'runner-model',
+            'aria-describedby': actorUnavailable ? 'runner-model-hint runner-model-status' : 'runner-model-hint',
             type: 'text',
             spellcheck: false,
             // why: blank no longer means "inherit chat model" — it means this
@@ -485,13 +488,18 @@ export const ProvidersSection = {
             },
           }),
         ]),
-        m('p.hint', [
+        m('p.hint', { id: 'runner-model-hint' }, [
           'The web actor — peerd’s page reader and operator — runs on a fast, cheap ',
           'model by default: ',
           m('code', runnerPlaceholder),
           ' on ', m('strong', defaultProvRow?.label ?? 'this provider'),
           '. Leave blank for that default, or pin any same-provider model id.',
         ]),
+        actorUnavailable
+          ? m('p.hint', { id: 'runner-model-status' }, actorExecution.status === 'temporarily_unavailable'
+              ? 'Actor work is paused. You can set this now; it will apply after actor execution recovers.'
+              : 'This browser cannot run actors. You can still save this setting for a browser that can.')
+          : null,
         resetRow(send, ['providerName', 'providerModel', 'runnerModel']),
 
         m('p.muted.settings-footer', [

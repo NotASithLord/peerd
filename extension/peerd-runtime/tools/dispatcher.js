@@ -545,11 +545,24 @@ export const dispatchToolCall = async (call, ctx) => {
         outcomeKind: /** @type {{ outcomeKind?: any }} */ (result)?.outcomeKind,
       }).catch(() => null);
     }
-    // A rewrite replaces the failure shape wholesale (it only ever fires on
-    // an already-failed result) so the discriminated ok:false stays literal.
+    // A rewrite replaces the model-facing failure shape, but custody metadata
+    // is not presentation. An awaited actor reply may already exist and its
+    // mailbox row cannot be acknowledged unless these host-only ids reach the
+    // durable tool-result block.
+    const actorDeliveryId = typeof result?.actorDeliveryId === 'string'
+      ? result.actorDeliveryId : undefined;
+    const actorDeliveryIds = Array.isArray(result?.actorDeliveryIds)
+      ? [...new Set(result.actorDeliveryIds.filter(
+        (id) => typeof id === 'string' && id.length > 0))]
+      : [];
     /** @type {ToolResult} */
     const settled = recoveryRewrite
-      ? { ok: false, error: recoveryRewrite.error }
+      ? {
+        ok: false,
+        error: recoveryRewrite.error,
+        ...(actorDeliveryId ? { actorDeliveryId } : {}),
+        ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
+      }
       : result;
     /** @type {ToolResult} */
     const enriched = {

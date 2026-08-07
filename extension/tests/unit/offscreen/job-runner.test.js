@@ -522,6 +522,30 @@ throw new Error('unrelated failure');`,
     expect(c.payload.runId).toBe('run-1');
   });
 
+  it('actors: collects delivery custody outside the worker-visible call result', async () => {
+    const r = await runJob(
+      {
+        code: [
+          'const one = await actors.call("vm-1", "one");',
+          'const two = await actors.call("vm-2", "two");',
+          'return [one.reply, two.reply, Object.keys(one)];',
+        ].join('\n'),
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-custody',
+      },
+      {
+        sendToSW: async (_type, payload) => ({
+          ok: true,
+          actorDeliveryId: `delivery-${/** @type {any} */ (payload).args.to}`,
+          value: { reply: /** @type {any} */ (payload).args.to, failed: false },
+        }),
+      },
+    );
+
+    expect(r.error).toBe(null);
+    expect(r.value).toEqual(['vm-1', 'vm-2', ['reply', 'failed']]);
+    expect(r.actorDeliveryIds).toEqual(['delivery-vm-1', 'delivery-vm-2']);
+  });
+
   it('actors: the DELEGATIONS trace records every op with outcome + timing, and usedActors flags the run', async () => {
     const r = await runJob(
       {

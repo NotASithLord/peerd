@@ -76,6 +76,25 @@ describe('callLocalWebgpu', () => {
     expect(out.at(-1)).toMatchObject({ type: 'message-stop' });
     setLocalGenerate(null);
   });
+
+  test('projects messages before the local provider transport', async () => {
+    let received: any = null;
+    setLocalGenerate((request) => {
+      received = request;
+      return streamOf(['ok']);
+    });
+    await collect(callLocalWebgpu({
+      messages: [{
+        role: 'user', content: 'tool result', actorDeliveryId: 'actor:private',
+        actorReply: { actorDeliveryId: 'actor:private' },
+        toolResults: [{ content: 'done', actorDeliveryIds: ['actor:private'] }],
+      }],
+      system: 'sys',
+    } as any));
+    expect(received.messages).toEqual([{ role: 'user', content: 'tool result' }]);
+    expect(JSON.stringify(received)).not.toContain('actor:private');
+    setLocalGenerate(null);
+  });
 });
 
 describe('localWebgpuAdapter descriptor', () => {

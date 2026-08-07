@@ -214,7 +214,7 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   from the chat UI, like the truncation-continue path). Used by the
  *   async-actor reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
- * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [ctx.actorReply]
+ * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string }} [ctx.actorReply]
  *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
  *   message so the chat surfaces it as its own attributed bubble (the one
  *   synthetic turn the UI shows).
@@ -932,11 +932,19 @@ export async function* runUserTurn(ctx) {
       // requested page survives instead of being re-cut by the 8k backstop.
       // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.
       const paged = dispatchResult.ok && dispatchResult.paged === true;
+      const actorDeliveryIds = Array.isArray(dispatchResult.actorDeliveryIds)
+        ? [...new Set(dispatchResult.actorDeliveryIds.filter(
+          (id) => typeof id === 'string' && id.length > 0))]
+        : [];
       const block = {
         tool_use_id: tu.id,
         content: redactToolResult(rawContent, paged ? { maxChars: PAGED_MAX_CHARS } : undefined),
         is_error: !dispatchResult.ok,
         meta: dispatchResult.meta,
+        ...(typeof dispatchResult.actorDeliveryId === 'string'
+          ? { actorDeliveryId: dispatchResult.actorDeliveryId }
+          : {}),
+        ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
       };
       return { tu, dispatchResult, block };
     };

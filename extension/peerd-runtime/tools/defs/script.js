@@ -45,6 +45,8 @@ const MAX_TIMEOUT_MS = 120_000;
  * @property {unknown} [value]
  * @property {boolean} [usedEgress]   the run called peerd.egress.fetch (job-runner)
  * @property {boolean} [usedActors]   the run delegated via the actors client
+ * @property {string[]} [actorDeliveryIds] durable mailbox correlations for
+ *   actor replies consumed by this run; host-only, never part of formatted output
  * @property {boolean} [usedPage]     the run consumed page/DOM/pixel data through page.*
  * @property {Array<{ data: string, mediaType: string }>} [images] host-captured page images (bounded by job-runner)
  * @property {boolean} [usedWorkspace]   the job was workspace-mounted (host-set, never inferred from ops)
@@ -181,6 +183,22 @@ export const scriptTool = {
       : clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
     /** @type {string | undefined} */
     let runId;
+    // A script can consume several actor replies. Custody follows the complete
+    // set into the one outer ToolResult that will be committed to history.
+    // Keep a host-owned union with the SW mirror so an offscreen transport loss
+    // after an actor reply cannot orphan its acknowledgement.
+    /** @type {Set<string>} */
+    const actorDeliveryIds = new Set();
+    const addActorDeliveryIds = (/** @type {unknown} */ ids) => {
+      if (!Array.isArray(ids)) return;
+      for (const id of ids) if (typeof id === 'string' && id) actorDeliveryIds.add(id);
+    };
+    const custody = () => actorDeliveryIds.size > 0
+      ? { actorDeliveryIds: [...actorDeliveryIds] }
+      : {};
+    const mirroredOps = () => runId && c.scriptRuns && 'opsFor' in c.scriptRuns
+      ? /** @type {{ opsFor: (id: string) => Array<any> }} */ (/** @type {unknown} */ (c.scriptRuns)).opsFor(runId)
+      : [];
     /** @type {(() => void) | undefined} */
     let onAbort;
     try {
@@ -233,11 +251,14 @@ export const scriptTool = {
         });
       }
       const result = await jsOffscreenClient.execHeadless(args.code, opts);
+      addActorDeliveryIds(result.actorDeliveryIds);
+      addActorDeliveryIds(mirroredOps().map((op) => op?.actorDeliveryId));
       const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
       if (importPolicyMessage) {
         return {
           ok: false,
           error: `${result.errorCode}: ${importPolicyMessage}`,
+          ...custody(),
         };
       }
       // Value spill (run cache): when the serialized [VALUE] overflows its cap,
@@ -271,16 +292,15 @@ export const scriptTool = {
       if (oncePerSession(sid, 'js-pitfalls')) {
         content += `\n\n${JS_PITFALLS_NOTE}\n\n${SCRIPT_BUILTINS_NOTE}`;
       }
-      return { ok: true, content };
+      return { ok: true, content, ...custody() };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       // The offscreen heap died mid-run (doc evicted / channel death) — the
       // worker-held trace died with it, but the SW-side mirror survived:
       // report which delegations were already dispatched so the orchestrator
       // doesn't blind-re-send goals actors may have already acted on.
-      const mirrored = runId && c.scriptRuns && 'opsFor' in c.scriptRuns
-        ? /** @type {{ opsFor: (id: string) => Array<any> }} */ (/** @type {unknown} */ (c.scriptRuns)).opsFor(runId)
-        : [];
+      const mirrored = mirroredOps();
+      addActorDeliveryIds(mirrored.map((op) => op?.actorDeliveryId));
       const dispatched = mirrored.length
         ? `\n[DELEGATIONS dispatched before the failure]\n${renderTraceLines(mirrored).join('\n')}`
         : '';
@@ -300,9 +320,14 @@ export const scriptTool = {
         return {
           ok: false,
           error: `script_failed: actor orchestration transport failed${dispatched}\n${fenced}`,
+          ...custody(),
         };
       }
-      return { ok: false, error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+      return {
+        ok: false,
+        error: `script_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}`,
+        ...custody(),
+      };
     } finally {
       // Release ABORTS first (script-runs.js): any ask still pending SW-side
       // is an orphan whose actor turn dies with the run — the non-Stop exits

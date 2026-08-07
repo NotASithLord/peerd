@@ -27,7 +27,7 @@ const baseDeps = (over: any = {}) => {
       clear: () => { cache.current = null; calls.cacheCleared = true; },
     },
     autoMemory: { maybeExtract: async (id: string, reason: string) => { calls.extract.push([id, reason]); } },
-    maybeAutoResume: () => {},
+    maybeAutoResumeAfterRecovery: () => {},
     haltGoalRun: (sid: string) => { calls.halted.push(sid); },
     // session/reset stops the abandoned session's turn + cascades to its actors.
     // Defaults = "nothing in flight" so the other reset tests are unaffected.

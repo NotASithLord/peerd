@@ -21,7 +21,7 @@ export const makeVaultRoutes = (deps) => {
   const {
     vault, auditLog, kv, idb, base64ToBytes,
     ensureOffscreen, maybeStartBaseNetwork, pushState, purgeVaultBlob,
-    confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns, resumeSchedules,
+    confirmCoordinator, sessionCache, maybeAutoResumeAfterRecovery, resumeGoalRuns, resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
     VaultLockedError,
@@ -67,7 +67,7 @@ export const makeVaultRoutes = (deps) => {
           // interrupted (a cold SW wake unlocks here; finish what the eviction
           // cut off). Fire-and-forget; gated + deduped in the helper.
           .then(() => sessionCache.sessionGet('currentSessionId'))
-          .then((/** @type {any} */ cur) => maybeAutoResume(cur))
+          .then((/** @type {any} */ cur) => maybeAutoResumeAfterRecovery(cur))
           .catch(() => {});
         // Background scheduling: run any routine that came due while the vault
         // was locked (tick() deferred it) now that the key is back.
@@ -206,7 +206,7 @@ export const makeVaultRoutes = (deps) => {
           // #72: then auto-resume the current chat if its last turn was
           // interrupted. Fire-and-forget; gated + deduped in the helper.
           .then(() => sessionCache.sessionGet('currentSessionId'))
-          .then((/** @type {any} */ cur) => maybeAutoResume(cur))
+          .then((/** @type {any} */ cur) => maybeAutoResumeAfterRecovery(cur))
           .catch(() => {});
         // Background scheduling: drain routines that came due while locked.
         Promise.resolve(resumeSchedules?.()).catch(() => {});

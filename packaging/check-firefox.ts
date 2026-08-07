@@ -42,8 +42,8 @@ import { REPO_ROOT, ARTIFACTS_DIR } from './lib.ts';
  * once the guard exists.
  */
 const GUARDED_CHROME_ONLY: readonly { api: string; file: string; why: string }[] = [
-  // The heap split needs the offscreen API; Firefox has none, so actorClient is
-  // null and the actor turn falls back to the in-SW loop (THREAT-MODEL R1).
+  // Chrome uses this for the actor-worker host and other document-only jobs.
+  // Firefox starts the actor Worker directly from its extension background page.
   { api: 'offscreen.createDocument', file: 'background/service-worker.js', why: 'guarded by offscreenAvailable' },
   { api: 'runtime.getContexts', file: 'background/offscreen-contexts.js', why: 'one capability-checked offscreen liveness probe' },
   // CDP. The `debugger` permission is STRIPPED from every Firefox manifest

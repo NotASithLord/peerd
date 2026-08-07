@@ -52,6 +52,7 @@ import {
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
 } from '../permissions/index.js';
+import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -73,6 +74,7 @@ import {
  *   actorType?: string,
  *   backing?: 'tab' | 'api',
  *   actorSurface?: 'tools' | 'code',
+ *   actorIsolation?: import('../actor/isolation.js').ActorIsolationCapability,
  * }} GateContext
  */
 
@@ -225,6 +227,11 @@ export const actorTierGate = (tool, args, ctx) => {
  * @returns {Omit<GateResult, 'name'>}
  */
 export const exposureGate = (tool, args, ctx) => {
+  if (ctx?.actorIsolation
+      && !actorIsolationAvailable(ctx.actorIsolation)
+      && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(tool.name)) {
+    return { allowed: false, reason: `actor isolation ${ctx.actorIsolation.status}: '${tool.name}' was not run` };
+  }
   if (ctx?.exposure === 'main') {
     if (isHiddenFromMain(tool.name)) {
       return { allowed: false, reason: `'${tool.name}' is actor-only — message a tab's actor to reach the page` };

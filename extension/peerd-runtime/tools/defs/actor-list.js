@@ -82,16 +82,17 @@ export const actorListTool = {
   name: 'actor_list',
   primitive: 'spawned',
   description: [
-    'Enumerate EVERY actor you can address with message_actor, in one call.',
+    'Enumerate actor targets in one call. The result includes actor_execution;',
+    'targets are addressable with message_actor only when its status is available.',
     'Returns a row per actor with: type (webvm | notebook | app | tab |',
     'integration), handle (pass it as message_actor `to`), name, live (has a',
     'warm tab / open page right now), current (this chat\'s default of that',
     'type — what an instance op defaults to), and detail (a tab\'s origin, an',
     'integration\'s keyed-ness, an app\'s tags). Use it to decide whether to',
     'reuse an existing instance/tab or spawn fresh, and to find the handle to',
-    'message. (The general "web" actor is always addressable as to:"web" and',
-    'is not listed here; likewise the mesh operator, when enabled, is always',
-    'addressable as to:"dweb". App full-text search is app_search.)',
+    'message. (When actor_execution is available, the general "web" actor is',
+    'addressable as to:"web" and is not listed here; likewise the mesh operator,',
+    'when enabled, is addressable as to:"dweb". App full-text search is app_search.)',
   ].join(' '),
   schema: { type: 'object', properties: {} },
   sideEffect: 'read',
@@ -109,6 +110,7 @@ export const actorListTool = {
      *   listApiIntegrations?: () => Promise<Array<{ origin: string, keyed: boolean, formed: boolean }>>,
      *   denylist?: string[],
      *   session?: { sessionId?: string },
+     *   actorIsolation?: { status: string, host: string|null, reason: string|null, retryable: boolean },
      * }} */ (/** @type {unknown} */ (ctx));
     const sessionId = c.session?.sessionId;
 
@@ -196,6 +198,10 @@ export const actorListTool = {
       structured,
       content: serializeListResult({
         count: actors.length,
+        actor_execution: c.actorIsolation ?? {
+          status: 'unsupported', host: null,
+          reason: 'Actor isolation capability was not provided.', retryable: false,
+        },
         // Tell the agent SOMETHING was withheld so it doesn't loop hunting for a
         // tab it can see in the browser but not here.
         ...(denylistedTabsHidden > 0 ? { denylisted_tabs_hidden: denylistedTabsHidden } : {}),

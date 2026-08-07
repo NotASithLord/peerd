@@ -1,5 +1,5 @@
 // @ts-check
-// background/offscreen-actor-client.js — the SW-side client for EVERY offscreen
+// background/offscreen-actor-client.js — the privileged-host client for EVERY isolated
 // agent loop (the heap split): ephemeral spawned reasoners (spawn.js) AND bound
 // actors (the actor turn). One client, one set of routes (model-call + tool-dispatch
 // + loop-event); a reasoning child grants no tools, so it only ever exercises
@@ -10,7 +10,7 @@
 // there — the pin, the gate, the engine clients, the tabs, and the audit are ALL
 // SW-side. It NEVER trusts the worker's call args (they may derive from injected
 // instance/page output): it re-pins the bound instance and runs the full gate,
-// exactly as the in-SW actor turn does.
+// with the same policy on every browser host.
 //
 // Pure shell — every IO injected — so it is unit-testable without a browser.
 
@@ -21,7 +21,8 @@
 // inbound turns until somebody deliberately classifies it here.
 /**
  * @param {Object} deps
- * @param {() => Promise<void>} deps.ensureOffscreen
+ * @param {() => Promise<void>} [deps.ensureHost]
+ * @param {() => Promise<void>} [deps.ensureOffscreen] legacy Chrome host alias
  * @param {(msg: object) => Promise<any>} deps.sendMessage
  * @param {(args: object) => AsyncIterable<any>} deps.callModel
  * @param {(name: string) => Promise<string | null>} deps.getSecret
@@ -41,7 +42,7 @@
  * @param {string} [deps.EXPOSURE_REVIEW]  issue 160 - the review-exemption marker. A review
  *   child's session record carries `review:true` (persisted SW-side at spawn); the
  *   tool-dispatch route re-stamps ctx.exposure from it so the tier gate admits the
- *   three instance reads on the offscreen path too, not just the in-SW fallback.
+ *   three instance reads on every dedicated-worker host.
  *   Optional and fail-closed: not injected → nothing is ever stamped.
  * @param {() => number} [deps.now]
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
@@ -49,13 +50,14 @@
  *   identity (never the worker's own claim). Optional; defaults to a no-op.
  * @param {(msg: Record<string, any>) => void} [deps.broadcastOp]  announce each settled
  *   ACTOR tool dispatch on the UI ports ('actor/op' — bounded name/ok only).
- *   The offscreen heap emits no turn/tool-use, so this is how the eval harness's OM2W
+ *   The isolated heap emits no turn/tool-use, so this is how the eval harness's OM2W
  *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
- * @param {(sender: unknown) => boolean} [deps.isOffscreenSender]  is this message from the
- *   OFFSCREEN DOCUMENT? The three relay routes below refuse anything else. REQUIRED in
+ * @param {(sender: unknown) => boolean} [deps.isRelaySender]  is this message from the
+ *   exact actor host? The three relay routes below refuse anything else. REQUIRED in
  *   production and fail-CLOSED by omission (an unwired client refuses every relay), because
  *   this is the boundary, not a hint — see the grants-map note for why the token alone is
  *   not sufficient.
+ * @param {(sender: unknown) => boolean} [deps.isOffscreenSender] legacy Chrome sender alias
  * @param {() => string} [deps.mintRelayToken]  mints the per-run relay grant (below).
  *   Injected so the grant is testable without a browser; defaults to crypto.randomUUID.
  * @param {(sessionId: string) => Promise<string | null>} [deps.spendRefusalFor]  spend-limit
@@ -68,19 +70,21 @@
  *   supplied from the runtime capability manifest; omission fails closed.
  */
 export const makeOffscreenActorClient = ({
-  ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
+  ensureHost, ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, now = Date.now,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
   spendRefusalFor = undefined,
-  isOffscreenSender = () => false,
+  isRelaySender, isOffscreenSender,
   inboundDwebToolNames = [],
 }) => {
+  const ensureActorHost = ensureHost ?? ensureOffscreen ?? (async () => {});
+  const relaySenderAllowed = isRelaySender ?? isOffscreenSender ?? (() => false);
   const inboundDwebTools = new Set(inboundDwebToolNames);
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', signal: AbortSignal }>} relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal }>} relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: these three routes
@@ -124,27 +128,33 @@ export const makeOffscreenActorClient = ({
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabUrl?: string, origin?: string, inbound?: boolean }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabUrl?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {
-    // Stop can land while Chrome is still creating the offscreen document. Do
-    // not mint a relay grant or dispatch actor/run for a turn that is already
-    // over; actor/abort cannot cancel a Worker that does not exist yet.
+    // A cancelled turn must not create a host, mint authority, or start a Worker.
+    // why: Stop can win before an async actor reaches this client; sending abort
+    // before actor/run exists cannot cancel the Worker that actor/run then creates.
     if (signal?.aborted) {
-      return { ok: false, started: true, aborted: true, error: 'actor aborted before offscreen startup' };
+      return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
     }
-    await ensureOffscreen();
+    try {
+      await ensureActorHost();
+    } catch (error) {
+      return {
+        ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
+        error: `actor host unavailable: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`,
+      };
+    }
     if (signal?.aborted) {
-      return { ok: false, started: true, aborted: true, error: 'actor aborted during offscreen startup' };
+      return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
     }
     const runId = `aw-${now().toString(36)}-${++seq}`;
     const relayToken = mintRelayToken();
-    // This controller belongs to the RUN, not to its caller. The outer signal
-    // chains into it, but runner timeout/crash/normal settlement abort it too so
-    // an already-admitted SW relay cannot outlive the Worker whose request it
-    // serves. The signal rides in the host-only grant; the Worker never sees it.
-    const runController = new AbortController();
+    // This controller is the authoritative relay lifetime. Put it in the grant
+    // itself so a route that already resolved the token can re-check authority
+    // after every await, even after run() retires the Map entry.
+    const relayController = new AbortController();
     // Only the SW caller can stamp `inbound:true`. From here onward the bit is
     // monotonic: the runner/Worker may echo it but can never widen its tool grant
     // or rebuild a trusted ctx. Unknown inbound actor kinds get no tools.
@@ -158,11 +168,13 @@ export const makeOffscreenActorClient = ({
       ? new Set((tools ?? []).map((tool) => tool?.name).filter((name) => typeof name === 'string'))
       : null;
     grants.set(relayToken, {
-      runId, actorSessionId: job.actorSessionId, inbound, allowedTools,
+      runId, actorSessionId: job.actorSessionId,
+      provider: job.provider, model: job.model,
+      inbound, allowedTools, relaySignal: relayController.signal,
+      ...(job.ollamaHost ? { ollamaHost: job.ollamaHost } : {}),
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
         : {}),
-      signal: runController.signal,
     });
     if (onEvent) runOnEvent.set(runId, onEvent);
     runMeta.set(runId, {
@@ -171,7 +183,7 @@ export const makeOffscreenActorClient = ({
     });
     const abortRelays = () => {
       abortedRuns.add(runId);   // cover a model-call that hasn't reached the route yet
-      runController.abort();
+      relayController.abort();
       for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
     };
     const abortRun = () => {
@@ -201,6 +213,8 @@ export const makeOffscreenActorClient = ({
       // Drop the abort listener a completed-without-Stop run left attached (a no-op if
       // it already fired under {once:true}); keeps nothing dangling on the turn signal.
       signal?.removeEventListener('abort', abortRun);
+      relayController.abort();
+      for (const ac of inflight.get(runId) ?? []) { try { ac.abort(); } catch { /* already */ } }
       // Retiring the grant is what makes it a liveness check: every relay for
       // this run is refused from here on, so a late/replayed one can't dispatch.
       grants.delete(relayToken);
@@ -218,10 +232,10 @@ export const makeOffscreenActorClient = ({
    * that as a hard refusal, so an unauthorized caller learns nothing beyond "no".
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', signal: AbortSignal } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, ollamaHost?: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal } | null}
    */
   const grantFor = (msg, sender) => {
-    if (!isOffscreenSender(sender)) return null;
+    if (!relaySenderAllowed(sender)) return null;
     const token = msg?.relayToken;
     if (typeof token !== 'string' || token.length === 0) return null;
     return grants.get(token) ?? null;
@@ -243,7 +257,7 @@ export const makeOffscreenActorClient = ({
       const key = runId;
       // Race guard 1: a Stop that fired BEFORE this call reached the route (the card
       // appears first) → refuse without ever making the key-bearing request.
-      if (abortedRuns.has(key)) return { ok: false, error: 'aborted' };
+      if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
       // Spend-limit preflight, script/model-call's posture applied to the actor lane:
       // an actor's model calls spend the user's money on the OWNING chat session, so a
       // session past the hard cap must not be pushed further by its own actors. Without
@@ -253,10 +267,9 @@ export const makeOffscreenActorClient = ({
         const refusal = await spendRefusalFor(grant.actorSessionId).catch(() => null);
         if (refusal) return { ok: false, error: refusal };
       }
-      // The run may have settled while the spend preflight was reading state.
-      // Its grant object remains locally reachable, so the run-owned signal is
-      // the durable liveness proof even after the grants Map entry is retired.
-      if (grant.signal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
+      // The host may have settled while the spend lookup was in flight. A
+      // token lookup made before settlement is not continuing authority.
+      if (grant.relaySignal.aborted || abortedRuns.has(key)) return { ok: false, error: 'aborted' };
       const ac = new AbortController();
       const set = inflight.get(key) ?? new Set();
       set.add(ac); inflight.set(key, set);
@@ -265,11 +278,17 @@ export const makeOffscreenActorClient = ({
       // runMeta stash, never the worker's args (a worker must not be able to
       // relabel whose context this was).
       const meta = runMeta.get(key);
-      if (meta) recordModelCall({ ...(args ?? {}), sessionId: meta.sessionId, label: meta.label });
+      const pinnedArgs = {
+        ...(args ?? {}),
+        provider: grant.provider,
+        model: grant.model,
+        ollamaHost: grant.ollamaHost,
+      };
+      if (meta) recordModelCall({ ...pinnedArgs, sessionId: meta.sessionId, label: meta.label });
       /** @type {any[]} */
       const events = [];
       try {
-        for await (const ev of callModel({ ...(args ?? {}), getSecret, safeFetch, signal: ac.signal })) events.push(ev);
+        for await (const ev of callModel({ ...pinnedArgs, getSecret, safeFetch, signal: ac.signal })) events.push(ev);
         // Race guard 2: a Stop that fired DURING the call → honor it even if the stream
         // still fulfilled (a fake responder, or a provider that flushed before cancel),
         // so a mid-call abort never delivers a completed turn.
@@ -292,8 +311,8 @@ export const makeOffscreenActorClient = ({
         // that could name its own session would inherit any actor's pin and toolset.
         const grant = grantFor(msg, sender);
         if (!grant) return { ok: false, error: 'actor/tool-dispatch: unauthorized relay' };
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         const { actorSessionId } = grant;
-        if (grant.signal.aborted) return { ok: false, error: 'actor/tool-dispatch: run aborted' };
         const call = msg.call;
         // Descriptor narrowing makes the model unlikely to ask; this check is the
         // authority wall. The grant's set was minted from the SW-stamped inbound
@@ -302,7 +321,7 @@ export const makeOffscreenActorClient = ({
           return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
         }
         const rec = await sessions.get(actorSessionId);
-        if (grant.signal.aborted) return { ok: false, error: 'actor/tool-dispatch: run aborted' };
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
 
         // Phase 4 — a spawned child is a tool-bearing EPHEMERAL actor. Its toolset is the
@@ -323,6 +342,7 @@ export const makeOffscreenActorClient = ({
             sessionId: actorSessionId,
             ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
           });
+          if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
           // Stamp the child lineage on every audit its tools emit (parity with spawn.js's taggedAudit).
           const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, actorSessionId, depth: rec.depth } });
           // #160: re-stamp the review-exemption marker from the PERSISTED record
@@ -333,13 +353,14 @@ export const makeOffscreenActorClient = ({
           // fallback path. Fail-closed: rec.review !== true, or no injected
           // EXPOSURE_REVIEW, stamps nothing.
           const ctx = restrictCtxCapabilities({
-            ...base, audit, abortSignal: grant.signal,
+            ...base, audit, abortSignal: grant.relaySignal,
             // Monotonic backstop: even a miswired context builder cannot erase
             // the provenance attached to this live SW grant.
             ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
             ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
           }, granted);
           const result = await dispatchToolCall(call, ctx);
+          if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
           return { ok: true, result };
         }
 
@@ -363,13 +384,14 @@ export const makeOffscreenActorClient = ({
           ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
           ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
         });
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         // Stop/cancel belongs to the ACTOR TURN, not only spawned children.
         // Thread the live SW-owned signal into every bound context so a
         // page_code/a2a_run/site_client_run tool cannot outlive the reasoning
         // worker that invoked it.
         const stamped = {
           ...base,
-          abortSignal: grant.signal,
+          abortSignal: grant.relaySignal,
           ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
         };
         // Strip the ctx's closures as well as its descriptors: an injected model
@@ -387,6 +409,7 @@ export const makeOffscreenActorClient = ({
         // Announce the settled dispatch — pure, privacy-minimal observability.
         // Arguments can contain form text, credentials, or attacker-derived
         // bytes, so no UI port receives them.
+        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
         // why: an OFFSCREEN actor turn emits no turn/tool-use broadcast (that
         // path is turn-driver's, in-SW only) — without this the eval harness's
         // OM2W recorder can't see the actor's page actions. Best-effort.
@@ -413,6 +436,7 @@ export const makeOffscreenActorClient = ({
       // fabricated progress/cost events into another run's UI.
       const grant = grantFor(msg, sender);
       if (!grant) return { ok: false, error: 'actor/loop-event: unauthorized relay' };
+      if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
       try { if (msg.event) runOnEvent.get(grant.runId)?.(msg.event); } catch { /* never break the relay */ }
       return { ok: true };
     },

@@ -57,6 +57,57 @@ describe('makeAsyncActors', () => {
     expect(reenters).toHaveLength(0); // no synthetic wake after a user Stop
   });
 
+  test('a post-start Worker failure wakes the parent with unknown-outcome guidance', async () => {
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({
+        result: 'The actor worker crashed. Its outcome is unknown and must not be retried automatically.',
+        sessionId: 'c1', stopped: true, executionFailed: true, outcomeKnown: false,
+      }),
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('execution failed after work began');
+    expect(reenters[0].userText).toContain('outcome unknown');
+    expect(reenters[0].userText).toContain('do not retry automatically');
+    expect(reenters[0].userText).toContain('[UNTRUSTED]');
+  });
+
+  test('a post-start persistence exception wakes the parent as outcome unknown', async () => {
+    const reenters: any[] = [];
+    const failure = Object.assign(new Error('transcript write failed'), {
+      executionFailed: true, performed: true, outcomeKnown: false, retryable: false,
+    });
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => { throw failure; },
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('outcome is unknown');
+    expect(reenters[0].userText).toContain('Do not retry automatically');
+    expect(reenters[0].userText).not.toContain('has finished');
+  });
+
+  test('a graceful pre-tool failure is not described as an unknown outcome', async () => {
+    const reenters: any[] = [];
+    const as = makeAsyncActors(baseDeps({
+      spawnActor: async () => ({
+        result: 'The actor model request was not run.', sessionId: 'c1',
+        stopped: true, executionFailed: true, outcomeKnown: true,
+      }),
+      reenter: async (o: any) => { reenters.push(o); },
+    }));
+    await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('failed before target work ran');
+    expect(reenters[0].userText).not.toContain('outcome unknown');
+  });
+
   // A TIMEOUT is different from a user Stop — the parent is still working and
   // wants the partial, so a timed-out child DOES reintegrate.
   test('a timed-out child still wakes the parent with its partial', async () => {

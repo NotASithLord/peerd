@@ -131,7 +131,7 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
       // actor_create/spawn path). Fold it into the SAME runner bucket — without
       // this an engine actor's spend is invisible here, so the engine-actor
       // prewalk down-shift wouldn't register in the A/B. Tokens ride msg.usage
-      // (absent on the in-SW fallback, which sends cost only); the SW-priced USD
+      // from the isolated relay; the SW-priced USD
       // (msg.cost.cost) is accumulated so the row reports the actor's REAL spend.
       case 'turn/actor-cost':
         if (msg.usage) {
@@ -140,9 +140,9 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
           turn.runner.cacheReadTokens += msg.usage.cacheReadTokens || 0;
           turn.runner.cacheWriteTokens += msg.usage.cacheWriteTokens || 0;
         }
-        // USD accounting differs by broadcaster: the offscreen heap-split path
-        // (service-worker) fires ONCE per actor turn with that turn's TOTAL, while
-        // the in-SW path (turn-driver onCost) RE-EMITS a GROWING CUMULATIVE per
+        // USD accounting differs by broadcaster: the isolated actor path fires
+        // ONCE per turn with that turn's TOTAL, while the main turn-driver path
+        // RE-EMITS a GROWING CUMULATIVE per
         // usage fold. Key the latest value per actor turn (parentToolUseId) and sum
         // the keys — correct for both; a straight += multiply-counts the in-SW stream.
         if (typeof msg.cost?.cost === 'number') {

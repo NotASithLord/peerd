@@ -37,6 +37,9 @@ import {
   CHANNEL_DEFAULTS, CHANNEL, DWEB_ENABLED, REMOTE_MODULE_IMPORTS_ENABLED,
 } from '/shared/channel-config.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
+import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
+import { makeActorIsolationStateStore } from './actor-isolation-state.js';
+import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
 
 import {
   // vault
@@ -292,6 +295,8 @@ import {
   // DESIGN-17: the message_actor orchestrator + the actor capability-tier
   // helpers the actor tool context is built from (keyless strip + kind scope).
   makeActorMessaging, restrictCtxCapabilities, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors, buildAncestry,
+  actorIsolationCapability, actorIsolationAvailable, actorIsolationTemporarilyUnavailable,
+  actorIsolationRefusal, actorIsolationSpawnRefusal, filterByActorIsolation, actorIsolationPromptBlock,
   actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
   canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES, resolveWebActorSurface,
@@ -335,6 +340,7 @@ import { createScriptRunRegistry } from './script-runs.js';
 import { createContextSnapshots } from './context-snapshots.js';
 import { confirmGrantKey } from './confirm-grant-key.js';
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
+import { makeDirectActorHost, makeStorageSessionKeepAlive } from './direct-actor-host.js';
 import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
@@ -889,7 +895,15 @@ const originCredentialRoutes = makeOriginCredentialRoutes({
 // 2. Layer 2 — runtime owns sessions + agent loop
 // ---------------------------------------------------------------------------
 
-const sessions = createSessionStore({ idb });
+// The actor mailbox is declared later with the actor wiring. Keep a mutable
+// post-commit seam here so an awaited actor reply is acknowledged only after
+// its parent tool-result message has reached durable session history.
+/** @type {(sessionId: string, message: import('/peerd-provider/types.js').InternalMessage) => Promise<void>} */
+let onSessionMessageAppended = async () => {};
+const sessions = createSessionStore({
+  idb,
+  onMessageAppended: (sessionId, message) => onSessionMessageAppended(sessionId, message),
+});
 
 // Memory store (V1.5). Binds the egress `idb` adapter to the
 // 'agents_memory' object store. The loader assembles the always-loaded
@@ -1593,6 +1607,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     })
     : undefined;
   const ctx = {
+    // One browser-neutral execution-boundary value. Descriptor filtering is
+    // model UX; this dispatch-time gate stamp is the authority backstop.
+    actorIsolation,
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name.
@@ -2114,27 +2131,7 @@ const forwardActorEvent = (/** @type {any} */ ev) => {
 
 const spawnActorCore = makeSpawnActor({
   sessions,
-  runUserTurn,
-  callModel: /** @type {any} */ (callModel),
-  // why the closure: contextSnapshots is declared further down the module —
-  // defer the reference to call time (the postChatNote late-dep pattern).
-  recordModelCall: (/** @type {Record<string, any>} */ call) => contextSnapshots.record(call),
-  getSecret,
-  safeFetch,
   appendAudit: /** @type {any} */ (auditLog.append),
-  buildToolContext,
-  dispatchToolCall: /** @type {any} */ (dispatchToolCall),
-  // why: resolve background-tabs from CURRENT settings at call time, not
-  // boot — settings load async and can change over the SW's life. This
-  // design 01: a spawned child renders its prompt FRESH per spawn (no cross-turn
-  // cache to bust), so it embeds its own temporal grounding — without this an
-  // ephemeral child gets zero time bytes (the main path's <context> message is
-  // built only in turn-driver and never reaches a child). Caller-supplied
-  // temporalBlock still wins.
-  renderSystemPrompt: (/** @type {any} */ opts) => renderSystemPrompt({
-    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
-    ...opts,
-  }),
   getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
   // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
   // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
@@ -2143,22 +2140,22 @@ const spawnActorCore = makeSpawnActor({
     claim: (/** @type {string} */ sessionId) => turnSlots.claim(sessionId),
     stop: (/** @type {string} */ sessionId) => turnSlots.stop(sessionId),
   },
-  // Heap split: run a child's loop in a dedicated offscreen Worker instead of the
-  // in-SW loop — the SAME substrate a bound actor uses (an actor is an ephemeral
+  // Heap split: run a child's loop in a dedicated Worker. The SAME substrate a
+  // bound actor uses (an actor is an ephemeral
   // actor: tool-less = pure reasoning, tool-bearing = a narrowed-general toolset), so
   // it flows through the ONE actorClient. A LAZY arrow — actorClient is a const
-  // assigned LATER in module init (after ensureOffscreen); reading it at wiring time
-  // would see the TDZ, so we only DEREFERENCE at call time. null on Firefox / when
-  // offscreen is unavailable → the unavailable sentinel so spawn.js falls back to the
-  // in-SW loop. The key never enters the worker; the model call and every tool call
+  // assigned LATER in module init (after host detection); reading it at wiring time
+  // would see the TDZ, so we only DEREFERENCE at call time. Null means no conforming
+  // worker host exists and spawn.js refuses. The key never enters the worker; the model call and every tool call
   // relay back to SW-gated routes. Adapt the child job shape (sessionId/task/tools) to
   // the actor run shape (actorSessionId/message/tools); the 'actor/tool-dispatch' route
   // rebuilds the child's restricted ctx from the persisted grantedTools (never the
   // worker's args). Tools default to [] (a pure-reasoning child that never dispatches).
   runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ opts) => actorClient
-    ? actorClient.run({
+    ? runActorIsolated({
       actorSessionId: job.sessionId, message: job.task, systemPrompt: job.systemPrompt,
       provider: job.provider, model: job.model, depth: job.depth,
+      ollamaHost: settingsStore.get().ollamaHost,
       maxSteps: job.maxSteps, maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
       tools: job.tools ?? [],
     }, opts)
@@ -2175,7 +2172,12 @@ const spawnActorCore = makeSpawnActor({
 
 // SW-bound spawn. Defaults the live forwarder so neither surface has to
 // wire streaming; an explicit onEvent in `req` still wins.
-const spawnActor = (/** @type {any} */ req) => spawnActorCore({ onEvent: forwardActorEvent, ...req });
+const spawnActor = async (/** @type {any} */ req) => {
+  await actorIsolationReady;
+  return actorIsolationAvailable(actorIsolation)
+    ? spawnActorCore({ onEvent: forwardActorEvent, ...req })
+    : actorIsolationSpawnRefusal(actorIsolation, req?.parentDepth);
+};
 // PR #134 phase 5: the live-children registry riding on the spawn orchestrator —
 // agent/stop and actor_cancel walk it to end whole delegation subtrees.
 const actorLifecycle = {
@@ -2581,9 +2583,9 @@ const maybeNudgeDebuggerGrant = (/** @type {any} */ result) => {
 const domRefs = createRefRegistry();
 
 const ensureOffscreen = async () => {
-  // why: Firefox has no chrome.offscreen — its MV3 background is an event
-  // page, which doesn't need the keepalive trick (different lifetime
-  // model). Degrade quietly instead of throwing on every vault unlock:
+  // why: Firefox has no chrome.offscreen. Actor turns use a run-scoped session
+  // heartbeat in direct-actor-host.js; the other offscreen-only services
+  // remain unavailable. Degrade quietly instead of throwing on every unlock:
   // the offscreen-hosted voice transcriber is simply absent there (the
   // mic UI's capability detection already reports voice unsupported).
   if (typeof (/** @type {any} */ (browser)).offscreen?.createDocument !== 'function') {
@@ -2636,6 +2638,61 @@ const ensureOffscreen = async () => {
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
 const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+// Firefox MV3 runs this module in an extension background page/event page. It
+// can host a dedicated Worker directly. Chrome runs it as a service worker,
+// where `document` is absent and the offscreen host above is required.
+const backgroundPageWorkerAvailable = !offscreenAvailable
+  && typeof document !== 'undefined'
+  && typeof Worker === 'function';
+const ACTOR_HOST_KEEPALIVE_KEY = 'peerdActorHostKeepAlive';
+const ACTOR_HOST_KEEPALIVE_MS = 10_000;
+const ACTOR_HOST_KEEPALIVE_ACK_MS = 2_000;
+let notifyActorHostKeepAliveLost = (/** @type {Error} */ _error) => {};
+const actorHostKeepAlive = backgroundPageWorkerAvailable
+  ? makeStorageSessionKeepAlive({
+    storage: browser.storage.session,
+    key: ACTOR_HOST_KEEPALIVE_KEY,
+    intervalMs: ACTOR_HOST_KEEPALIVE_MS,
+    ackTimeoutMs: ACTOR_HOST_KEEPALIVE_ACK_MS,
+    onLost: (error) => notifyActorHostKeepAliveLost(error),
+  })
+  : null;
+// why: Firefox currently has no official long-task lifetime signal for MV3
+// event pages. Mozilla Bug 1851373 documents storage.session activity plus a
+// synchronously registered change listener as the extension-side workaround.
+// The helper verifies the exact lease generation before actor work begins.
+if (actorHostKeepAlive) {
+  browser.storage.session.onChanged.addListener((changes) => {
+    actorHostKeepAlive.onChanged(changes);
+  });
+}
+const baseActorIsolation = actorIsolationCapability({
+  offscreenWorker: offscreenAvailable,
+  backgroundPageWorker: backgroundPageWorkerAvailable,
+});
+const actorIsolationState = makeActorIsolationStateStore({
+  storage: browser.storage.local,
+  protocol: ACTOR_WORKER_PROTOCOL,
+});
+let actorIsolation = actorIsolationAvailable(baseActorIsolation)
+  ? {
+    status: /** @type {const} */ ('temporarily_unavailable'),
+    host: baseActorIsolation.host,
+    reason: 'Actor isolation state is loading.',
+    retryable: false,
+  }
+  : baseActorIsolation;
+const actorIsolationReady = actorIsolationAvailable(baseActorIsolation)
+  ? actorIsolationState.load(baseActorIsolation)
+    .then((stored) => {
+      actorIsolation = /** @type {typeof baseActorIsolation} */ (stored ?? baseActorIsolation);
+      return actorIsolation;
+    })
+    .catch((error) => {
+      actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
+      return actorIsolation;
+    })
+  : Promise.resolve(actorIsolation);
 // Relays that redeem an offscreen worker's authority need the exact browser-
 // owned host, not the broader "one of our extension pages" sender check.
 const isOffscreenSender = (/** @type {any} */ sender) => senderIsOffscreen(sender, {
@@ -2785,15 +2842,57 @@ const rootChatSessionFor = async (sessionId) => {
   return null;
 };
 
-// The heap split: the ONE offscreen agent-loop client. It runs every non-
+// Firefox hosts the same worker runner directly from its background page. The
+// relay sender is a private object identity and these routes are never exposed
+// through runtime.onMessage on that path.
+const directActorHost = baseActorIsolation.host === 'background-page-worker'
+  ? makeDirectActorHost({
+    workerUrl: browser.runtime.getURL('offscreen/actor-worker.js'),
+    // Firefox MV3 event pages may unload while an unreturned task is pending.
+    // A small storage.session change refreshes the idle budget only while a run
+    // is active. The packaged lifetime lane proves this exact host.
+    startKeepAlive: () => actorHostKeepAlive?.start(),
+    stopKeepAlive: () => actorHostKeepAlive?.stop(),
+  })
+  : null;
+let actorHostLossPersistence = Promise.resolve();
+notifyActorHostKeepAliveLost = (error) => {
+  // Pause actor exposure before settling current runs. A later user retry must
+  // establish a fresh heartbeat and realm proof before actors become available.
+  actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
+  directActorHost?.failKeepAlive(error);
+  actorHostLossPersistence = (async () => {
+    let persisted = true;
+    try {
+      await actorIsolationState.markUnavailable(
+        baseActorIsolation,
+        error,
+        'actor_host_keepalive_lost',
+      );
+    } catch { persisted = false; }
+    await auditLog.append({
+      type: 'actor_isolation_unavailable',
+      details: {
+        host: baseActorIsolation.host,
+        code: 'actor_host_keepalive_lost',
+        retryable: true,
+        persisted,
+      },
+    }).catch(() => {});
+    await pushState().catch(() => {});
+  })();
+};
+
+// The heap split: the ONE isolated agent-loop client. It runs every non-
 // orchestrator loop — an ephemeral reasoning actor (spawn.js, tools:[]) OR a
 // bound actor (VM/Notebook/App/web) — in its own dedicated Worker heap. Its
 // 'actor/tool-dispatch' route builds the actor's instance-pinned, gated ctx SW-side
 // and dispatches there — the worker holds no
-// key, no engine clients, no chrome.*. Null when offscreen is unavailable.
-const actorClient = offscreenAvailable ? makeOffscreenActorClient({
-  ensureOffscreen,
-  sendMessage: (m) => browser.runtime.sendMessage(m),
+// key, no engine clients, no browser extension APIs. Null only when no
+// dedicated-worker host exists.
+const actorClient = actorIsolationAvailable(baseActorIsolation) ? makeOffscreenActorClient({
+  ensureHost: offscreenAvailable ? ensureOffscreen : async () => {},
+  sendMessage: directActorHost?.sendMessage ?? ((m) => browser.runtime.sendMessage(m)),
   callModel: /** @type {any} */ (callModel),
   getSecret,
   safeFetch,
@@ -2815,8 +2914,8 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   recordModelCall: contextSnapshots.record,
   // Announce each settled ACTOR tool dispatch on the UI ports (lazy: uiPorts is
   // defined below, read at call time — same pattern as ownedTabFor). why: the
-  // offscreen actor heap has no turn/tool-use broadcast (that's turn-driver's,
-  // in-SW only), so without this the eval harness's OM2W recorder — and any
+  // isolated actor heap has no turn/tool-use broadcast, so without this the
+  // eval harness's OM2W recorder — and any
   // activity view — is blind to what an actor actually did.
   broadcastOp: (/** @type {any} */ msg) => uiPorts.broadcast(msg),
   // The relay boundary. `runtime.sendMessage` cannot address one extension
@@ -2825,7 +2924,7 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
   // three relay routes to the offscreen document is therefore what actually
   // keeps another first-party page from dispatching as an actor; the token
   // carries run identity and liveness on top of it.
-  isOffscreenSender,
+  isRelaySender: directActorHost?.isRelaySender ?? isOffscreenSender,
   inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
   // Spend-limit preflight for the actor lane. Two tallies, because they fail in
   // different directions and each alone leaves a hole:
@@ -2852,6 +2951,102 @@ const actorClient = offscreenAvailable ? makeOffscreenActorClient({
     return null;
   },
 }) : null;
+directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
+
+const ACTOR_HOST_STARTUP_CODES = new Set([
+  'actor_host_unavailable',
+  'actor_host_not_ready',
+  'actor_host_keepalive_failed',
+  'actor_worker_spawn_failed',
+  'actor_worker_start_timeout',
+  'actor_worker_crashed',
+  'actor_worker_message_error',
+  'actor_worker_protocol_error',
+]);
+
+/**
+ * Run on the detected dedicated-worker host. A failure before the realm proof
+ * is safe to retry once because no model call or tool relay could have begun.
+ * Every post-proof failure is terminal for that turn.
+ * @param {any} job
+ * @param {any} [opts]
+ */
+const runActorIsolated = async (job, opts) => {
+  await actorIsolationReady;
+  if (!actorClient || !actorIsolationAvailable(actorIsolation)) {
+    return actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false });
+  }
+  let result = await actorClient.run(job, opts);
+  if (result?.started || result?.ok || !ACTOR_HOST_STARTUP_CODES.has(result?.code)) return result;
+  // Stop can win while the first host proof is failing. A second Worker would
+  // be safe from relays but would still be needless post-cancel execution.
+  if (opts?.signal?.aborted) return { ...result, aborted: true };
+  result = await actorClient.run(job, opts);
+  if (result?.started || result?.ok || !ACTOR_HOST_STARTUP_CODES.has(result?.code)) return result;
+  actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, result?.error ?? 'actor worker startup failed');
+  let persisted = true;
+  try {
+    await actorIsolationState.markUnavailable(
+      baseActorIsolation,
+      result?.error ?? 'actor worker startup failed',
+      result?.code ?? 'unknown',
+    );
+  } catch { persisted = false; }
+  auditLog.append({
+    type: 'actor_isolation_unavailable',
+    details: { host: baseActorIsolation.host, code: result?.code ?? 'unknown', retryable: true, persisted },
+  }).catch(() => {});
+  void pushState().catch(() => {});
+  return {
+    ...actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false }),
+    cause: result?.error ?? null,
+  };
+};
+
+const retryActorIsolation = async () => {
+  await actorIsolationReady;
+  await actorHostLossPersistence;
+  if (!actorIsolationAvailable(baseActorIsolation)) return actorIsolationRefusal(baseActorIsolation);
+  const result = await actorClient?.run({
+    actorSessionId: '__actor_isolation_probe__',
+    message: '', systemPrompt: '', provider: '', model: '', probeOnly: true,
+  });
+  if (!result?.ok) {
+    actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, result?.error ?? 'actor worker startup failed');
+    let persisted = true;
+    try {
+      await actorIsolationState.markUnavailable(
+        baseActorIsolation,
+        result?.error ?? 'actor worker startup failed',
+        result?.code ?? 'unknown',
+      );
+    } catch { persisted = false; }
+    auditLog.append({
+      type: 'actor_isolation_retry_failed',
+      details: { host: baseActorIsolation.host, code: result?.code ?? 'unknown', performed: false, persisted },
+    }).catch(() => {});
+    await pushState();
+    return { ...actorIsolationRefusal(actorIsolation), cause: result?.error ?? null };
+  }
+  try {
+    await actorIsolationState.clear(baseActorIsolation);
+  } catch (error) {
+    actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, error);
+    auditLog.append({
+      type: 'actor_isolation_retry_failed',
+      details: { host: baseActorIsolation.host, code: 'actor_isolation_state_clear_failed', performed: false, persisted: true },
+    }).catch(() => {});
+    await pushState();
+    return { ...actorIsolationRefusal(actorIsolation), cause: actorIsolation.reason };
+  }
+  actorIsolation = baseActorIsolation;
+  auditLog.append({
+    type: 'actor_isolation_restored',
+    details: { host: actorIsolation.host, realmVerified: true, extensionApisPresent: false },
+  }).catch(() => {});
+  await pushState();
+  return { ok: true, capability: { ...actorIsolation } };
+};
 
 // The PDF-extraction client (the read_pdf tool). ensureOffscreen, then a
 // 'pdf/extract' message to offscreen/pdf-extract.js (pdf.js in a Worker).
@@ -3180,6 +3375,7 @@ const sessionState = makeSessionState();
  * derived from the vault, never the secret itself.
  */
 const buildStateSnapshot = async () => {
+  await actorIsolationReady;
   const sessionId = await sessionCache.sessionGet('currentSessionId');
   // prfEnrolled is cheap to read (one kv.get) and the side panel uses it
   // (permission resolved per-path below — needs the session record.)
@@ -3204,6 +3400,7 @@ const buildStateSnapshot = async () => {
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
       providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },
+      capabilities: { actorExecution: { ...actorIsolation } },
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
       streaming: false,
@@ -3266,6 +3463,7 @@ const buildStateSnapshot = async () => {
       // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
+    capabilities: { actorExecution: { ...actorIsolation } },
     profile: {
       id: profile.id,
       peerName: profile.peerName,
@@ -3570,6 +3768,8 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   // plus the engine-actor reconcile (VM/Notebook/App swap after their first turn).
   reconcilePrewalk: prewalk.reconcile, maybePrewalkSwap: prewalk.maybeSwap,
   reconcileEngineActor: prewalk.reconcileEngineActor,
+  getActorIsolation: () => actorIsolation,
+  waitForActorIsolation: () => actorIsolationReady,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -4164,7 +4364,10 @@ const listApiIntegrations = async (/** @type {string | null | undefined} */ chat
 
 // DESIGN-17 P1 — the DURABLE MESSAGE MAILBOX. An in-flight engine message→reply
 // correlation persists here, so an SW death between accept and deliver() doesn't
-// silently drop the reply-wake; redrain() re-queues it on boot. chrome.storage.
+// silently drop the reply-wake. The queued to started transition is the durable
+// no-replay boundary. Recovery never executes stored work: queued entries become
+// Not run notices, while started and legacy entries become Outcome unknown.
+// chrome.storage.
 // session (not local): a pending message only makes sense within ONE browser
 // session — a full browser restart drops the orchestrator turn anyway, so a stale
 // resurrection would be wrong. The blob is keyed by correlationId for O(1) removal.
@@ -4173,18 +4376,26 @@ const ACTOR_MAILBOX_KEY = 'actorMailbox';
 // otherwise clobber. A promise chain makes each update see the prior one's write.
 let mailboxChain = Promise.resolve();
 const mailboxUpdate = (/** @type {(m: Record<string, any>) => Record<string, any>} */ mutate) => {
-  mailboxChain = mailboxChain.then(async () => {
+  const operation = mailboxChain.catch(() => {}).then(async () => {
     const cur = await sessionCache.sessionGet(ACTOR_MAILBOX_KEY);
     const base = (cur && typeof cur === 'object') ? /** @type {Record<string, any>} */ (cur) : {};
     await sessionCache.sessionSet(ACTOR_MAILBOX_KEY, mutate(base));
-    // why log (not swallow): a persist failure silently degrades a message to
-    // heap-only (P0) durability — surface it so a lost-wake-after-restart is at
-    // least explicable in the SW console rather than a mystery.
-  }).catch((e) => console.warn('[actor] mailbox persist failed — message is heap-only this SW lifetime', e));
-  return mailboxChain;
+  });
+  // Keep the serialization lane usable after a failure, but return the original
+  // rejecting operation to the caller. message_actor then reports Not run and
+  // starts no actor side effect.
+  mailboxChain = operation.catch((e) => console.warn('[actor] mailbox persist failed — request not run', e));
+  return operation;
 };
 const actorMailbox = {
   append: (/** @type {{ id: string }} */ e) => mailboxUpdate((m) => ({ ...m, [e.id]: e })),
+  markStarted: (/** @type {string} */ id) => mailboxUpdate((m) => {
+    const entry = m[id];
+    if (!entry || typeof entry !== 'object' || (entry.state !== undefined && entry.state !== 'queued')) {
+      throw new Error('actor mailbox entry is missing or not queued');
+    }
+    return { ...m, [id]: { ...entry, state: 'started', startedAt: Date.now() } };
+  }),
   remove: (/** @type {string} */ id) => mailboxUpdate((m) => { const n = { ...m }; delete n[id]; return n; }),
   // Carry the storage KEY as the entry id so redrain can PRUNE a malformed/legacy
   // value (one missing its own id) under its real key — else it would skip forever
@@ -4195,6 +4406,11 @@ const actorMailbox = {
     return Object.entries(/** @type {Record<string, any>} */ (m))
       .map(([k, v]) => (v && typeof v === 'object') ? { ...v, id: v.id ?? k } : { id: k });
   },
+};
+
+onSessionMessageAppended = async (_sessionId, message) => {
+  const deliveryIds = actorDeliveryIdsFromMessage(message);
+  await Promise.all(deliveryIds.map((id) => actorMailbox.remove(id)));
 };
 
 // Lazily mint a web actor for a tab (the analog of mintActor). No registry
@@ -4364,9 +4580,7 @@ const mintWebActor = async (/** @type {string} */ ownerChatId) => mintWebSession
 // undefined in the 0-tab state, where buildToolContext leaves activeTab unset so fetch_url
 // works and the DOM tools fail closed (the pin) until navigate adopts a tab. Re-mints when
 // the bound session vanished (SW death cleared session storage). The owner is the SENDER
-// chat (threaded by the messaging layer), NOT the ambient active chat — equal on the live
-// path (the sender gate proves it), but on a boot redrain the focused chat may differ, so
-// resolving by sender is what re-attaches a redrained message to its real actor.
+// chat threaded by the messaging layer, not the ambient active chat.
 const resolveWebActor = async (/** @type {string | null | undefined} */ ownerOverride) => {
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
@@ -4898,9 +5112,25 @@ const a2aCallRoute = async (/** @type {{ method?: string, args?: any, ownerSessi
   }
 };
 
-const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
+// Assigned after the durable mailbox is wired. Runtime messages cannot arrive
+// until module evaluation finishes, and the fail-closed default prevents an
+// automatic peer wake from racing incomplete boot wiring.
+/** @type {(key: string, action: () => Promise<any>|any) => Promise<boolean>} */
+let runWhenActorRecoveryReady = async () => false;
+let dwebRecoveryWakeSequence = 0;
+
+const handleDwebAgentInbound = async (/** @type {{ from?: string, data?: unknown, ts?: number }} */ evt) => {
   if (!dwebAgentOn() || vault.isLocked()) return;           // opt-out or locked → drop
+  await actorIsolationReady;
+  if (!dwebAgentOn() || vault.isLocked()) return;
   const did = typeof evt?.from === 'string' ? evt.from : 'unknown';
+  if (!actorIsolationAvailable(actorIsolation)) {
+    auditLog.append({
+      type: 'dweb_agent_inbound_dropped',
+      details: { did, reason: 'actor_isolation_unavailable', performed: false },
+    }).catch(() => {});
+    return;
+  }
   // A2A routing FIRST: an inbound a2a REPLY resolves a pending ask and is
   // consumed (never a wake); an a2a ask/tell falls through to the fenced wake
   // below (the actor sees a peer's request). A non-a2a DM also falls through.
@@ -4934,7 +5164,8 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
   const canReplyToPeer = ownsThread && deliver?.kind === 'ask';
   const body = typeof evt?.data === 'string' ? evt.data : JSON.stringify(evt?.data ?? null);
   auditLog.append({ type: 'dweb_agent_inbound', details: { did, chars: body.length, ...(convId ? { convId } : {}) } }).catch(() => {});
-  (async () => {
+  await runWhenActorRecoveryReady(`dweb-inbound:${++dwebRecoveryWakeSequence}`, async () => {
+    if (!dwebAgentOn() || vault.isLocked()) return;
     const actor = await resolveDwebActor();
     if (!actor) return;
     const fenced = wrapUntrusted({ origin: did, tool: 'mesh_inbound', body: body.slice(0, 16 * 1024) });
@@ -4952,12 +5183,10 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
     turnSlots.runWhenIdle(actor.actorSessionId, () => {
       (async () => {
         const before = ((await sessions.get(actor.actorSessionId))?.messages ?? []).length;
-        // HEAP ISOLATION: the inbound wake feeds LIVE untrusted peer bytes to the
-        // actor's reasoning, so it MUST run in the offscreen keyless worker like
-        // every other actor turn — never in-SW alongside the vault DK. Mirror the
-        // message_actor path: offscreen first, fall back to the in-SW driver only
-        // where offscreen is unavailable (Firefox). runActorTurnOffscreen claims
-        // the slot itself; we're already inside runWhenIdle, so no double-claim.
+        // HEAP ISOLATION: the inbound wake feeds live untrusted peer bytes to the
+        // actor's reasoning, so it must run in a dedicated keyless worker. A host
+        // failure drops the wake after audit; it never moves those bytes into the
+        // privileged background heap.
         const off = await runActorTurnOffscreen({
           actorSessionId: actor.actorSessionId, message: wake,
           instanceId: 'dweb', kind: 'dweb', oneShot: false, display: null,
@@ -4965,11 +5194,7 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
           // preserves this monotonic bit and rebuilds synthetic/untrusted ctx from it.
           inbound: true,
         });
-        if (!off) {
-          // INBOUND: synthetic + NOT trusted — the sender gate refuses any delegation
-          // from this turn; the tier gate holds it to the dweb toolset.
-          await runAgentTurn({ sessionId: actor.actorSessionId, userText: wake, synthetic: true, trusted: false });
-        }
+        if (off?.stopped) return;
         const s = await sessions.get(actor.actorSessionId);
         const note = off?.result ?? finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) })) ?? '';
         // Trickle up ONLY the notable: the lore's stay-quiet default is enforced
@@ -5005,12 +5230,12 @@ const handleDwebAgentInbound = (/** @type {{ from?: string, data?: unknown, ts?:
         });
       })().catch((e) => console.warn('[sw] dweb agent inbound wake failed', e));
     });
-  })().catch(() => {});
+  });
 };
 
 browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
   if (msg?.type === 'dweb/base-room/event' && msg.roomId === DWEB_AGENT_ROOM && msg.event === 'direct') {
-    handleDwebAgentInbound(msg.data ?? {});
+    void handleDwebAgentInbound(msg.data ?? {});
   }
   return false;   // never claims the message — the dwapp bridge path is untouched
 });
@@ -5018,7 +5243,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // Resolve (+ lazy-mint) the API actor a chat owns for `origin`. The integration
 // AUTO-FORMS on first address (the same lazy-mint shape as the web actor). Re-mints when
 // the bound session vanished (SW death cleared session storage). Owner is the SENDER chat
-// (threaded by the messaging layer) so a boot redrain re-attaches to the right integration.
+// threaded by the messaging layer so each chat keeps its own integration.
 const resolveApiActor = async (/** @type {string} */ origin, /** @type {string | null | undefined} */ ownerOverride) => {
   const ownerChatId = ownerOverride ?? /** @type {string | null} */ (await sessionCache.sessionGet('currentSessionId'));
   if (!ownerChatId) return null;
@@ -5095,21 +5320,23 @@ browser.tabs?.onRemoved?.addListener((/** @type {number} */ tabId) => {
   pageActivity.release(tabId).catch(() => {});
 });
 
-// Heap-split phase 2: run an ENGINE actor's loop (vm/notebook/app) in its own
-// offscreen Worker heap. Renders the actor prompt + descriptors SW-side (the
+// Heap-split phase 2: run an actor loop in its own dedicated Worker heap.
+// Renders the actor prompt + descriptors in the privileged host (the
 // worker never assembles them), seeds the worker with the actor's prior history
 // (statefulness), forwards loop events to the card, and persists the turn back.
-// Returns the runActorTurn reply shape, or null to FALL BACK to the in-SW turn
-// (offscreen unavailable / never started). The worker holds no key, no engine
-// clients, no chrome.* — its model call + every tool call relay to SW-gated routes.
+// Returns the runActorTurn reply shape. It never falls back to the background
+// heap: unavailable or failed isolation is a visible stopped turn.
 const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, message, instanceId, kind, actorTabId, oneShot, display, inbound }) => {
-  if (!actorClient) return null;
+  await actorIsolationReady;
+  if (!actorClient || !actorIsolationAvailable(actorIsolation)) {
+    const refusal = actorIsolationRefusal(actorIsolation, { targetRead: false, targetChanged: false });
+    return { result: refusal.error, stopped: true, isolationFailure: refusal };
+  }
   const loaded = await sessions.get(actorSessionId);
-  if (!loaded) return null;
-  // Engine-actor prewalk swap on the OFFSCREEN path. reconcileEngineActor is ALSO
-  // wired into the in-SW turn-driver, but a Chrome engine actor runs HERE and
-  // returns before that path is reached — so without this the swap NEVER fires on
-  // the primary platform. why here: the worker is seeded from rec.provider/rec.model
+  if (!loaded) return { result: 'the actor session no longer exists.', stopped: true };
+  // Engine-actor prewalk swap on the isolated path. The background turn driver
+  // refuses actor sessions, so this is the one place an engine actor can swap.
+  // why here: the worker is seeded from rec.provider/rec.model
   // below, so the swap must land (and persist) before we read them; costOf + the
   // card then also read the executor model. No-op for a non-engine / unarmed actor
   // (returns the record unchanged when there's no prewalk).
@@ -5118,9 +5345,9 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
   catch (e) { console.warn('[actor] engine prewalk reconcile failed', e); }
   const { controller, release } = turnSlots.claim(actorSessionId);
   try {
-    // Prompt PARITY with the in-SW actor turn: temporal grounding + any /system
-    // override (rec.customSystemPrompt). Actors get no memory/skills block (same
-    // as turn-driver). Absolute-time temporal block (an actor has no prev-turn gap).
+    // Bound-actor prompt contract: temporal grounding + any /system override
+    // (rec.customSystemPrompt). Actors get no memory/skills block. Absolute-time
+    // temporal block (an actor has no prev-turn gap).
     const temporalBlock = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() });
     // PR #119 surface parity: the OFFSCREEN actor path must thread the web
     // actor's action surface exactly like the in-SW path — same setting-derived
@@ -5195,19 +5422,30 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
         if (ownedTab != null) tabUrl = (await browser.tabs.get(ownedTab).catch(() => null))?.url;
       }
     }
-    const r = await actorClient.run({
+    const r = await runActorIsolated({
       actorSessionId, message, systemPrompt,
       provider: rec.provider, model: rec.model, depth: rec.depth,
-      // maxSteps omitted → the worker's runUserTurn uses its OWN default (parity
-      // with the in-SW path, not a hardcoded fifth of it). Seed the actor's prior
-      // history for statefulness.
+      ollamaHost: settingsStore.get().ollamaHost,
+      // maxSteps omitted → the worker's runUserTurn uses its OWN default, not a
+      // hardcoded fifth of it. Seed the actor's prior history for statefulness.
       tools, priorMessages: rec.messages ?? [], reasoning, contextWindow,
       // Phase 3 web/API parity: oneShot loop mode + the self-fence provenance.
       oneShot: oneShot === true, actorType: kind, backing: rec.backing, tabUrl, origin: apiOrigin,
       ...(actorSurface ? { actorSurface } : {}),
       inbound: inbound === true,
     }, { signal: controller.signal, onEvent });
-    if (!(r.ok || r.started)) return null; // never started → caller falls back to in-SW
+    if (!(r.ok || r.started)) {
+      const error = r.error ?? 'the isolated actor worker did not start';
+      auditLog.append({
+        type: 'actor_isolation_failure',
+        details: { host: actorIsolation.host, kind, instanceId, code: r.code ?? 'unknown', performed: false },
+      }).catch(() => {});
+      if (display && uiConnected()) {
+        uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error });
+        uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: false, aborted: false });
+      }
+      return { result: error, stopped: true, isolationFailure: r };
+    }
     // Persist THIS turn's FULL transcript (user + assistant rounds + tool_use/
     // tool_result), not a lossy user+finalText pair — so a long-lived actor keeps
     // its tool-round memory across turns, matching the in-SW path.
@@ -5241,9 +5479,59 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
         }
       } catch { /* cost telemetry is best-effort */ }
     }
-    auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
-    if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
-    return finalActorTurnReply(/** @type {any} */ ({ messages: newMessages }));
+    const fresh = finalActorTurnReply(/** @type {any} */ ({ messages: newMessages }));
+    const persistedAssistantError = [...newMessages].reverse()
+      .find((entry) => entry?.role === 'assistant' && typeof entry?.error === 'string')?.error ?? null;
+    const executionError = r.ok === true || r.aborted === true
+      ? null
+      : (r.error ?? 'the isolated actor turn failed before it produced a reply');
+    const terminalError = !persistOk
+      ? 'the actor ran, but its response could not be saved reliably; the outcome is unknown and must not be retried automatically.'
+      : (persistedAssistantError ?? executionError);
+    const outcomeUnknown = terminalError != null
+      && (!persistOk || r.outcomeKnown !== true);
+    const turnOk = persistOk && persistedAssistantError == null && r.ok === true && r.aborted !== true;
+    auditLog.append({
+      type: 'actor_ran_isolated',
+      details: {
+        host: actorIsolation.host, workerType: 'dedicated', realmVerified: true,
+        extensionApisPresent: false, actorSessionId, kind, instanceId,
+        ok: turnOk, aborted: r.aborted === true, persistOk,
+        ...(terminalError && r.aborted !== true ? {
+          performed: outcomeUnknown,
+          outcomeKnown: !outcomeUnknown,
+        } : {}),
+      },
+    }).catch(() => {});
+    if (display && uiConnected()) {
+      if (terminalError) {
+        uiPorts.broadcast({
+          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+          error: terminalError, outcomeKnown: !outcomeUnknown,
+        });
+      }
+      uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true });
+    }
+    if (!persistOk) {
+      return {
+        result: terminalError,
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: false,
+        persistenceFailure: { performed: true, outcomeKnown: false, retryable: false },
+      };
+    }
+    if (terminalError) {
+      return {
+        result: terminalError,
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: !outcomeUnknown,
+        executionFailure: r,
+      };
+    }
+    if (r.aborted === true) return { result: fresh.result, stopped: true, aborted: true };
+    return fresh;
   } finally {
     release();
     // The turn is over, so the pill comes down — leaving it up through the idle
@@ -5283,8 +5571,8 @@ const actorMessaging = makeActorMessaging({
     // The chat's WEB ACTOR — the 0-or-1-tab entry point for page-driving / session web
     // work, addressed by the literal 'web'. It decides fetch-vs-render itself: a
     // pure-fetch task never opens a tab; navigate adopts one on the render path. Owned by
-    // the SENDER chat (opts.senderSessionId), not the ambient active chat — so a boot
-    // redrain re-attaches to the right actor. (A numeric tabId, below, targets the
+    // the SENDER chat (opts.senderSessionId), not the ambient active chat. A numeric
+    // tabId below targets the
     // actor owning that SPECIFIC existing tab — e.g. one the orchestrator open_tab'd.)
     if (String(instanceId) === 'web') return resolveWebActor(opts.senderSessionId);
     // The DWEB ACTOR — the global mesh operator, addressed by the literal 'dweb'.
@@ -5370,11 +5658,6 @@ const actorMessaging = makeActorMessaging({
     const display = parentToolUseId
       ? { parentToolUseId, kind, instanceId, name }
       : undefined;
-    // Count the actor's messages BEFORE the turn so we read only the reply THIS
-    // turn produced — finalAssistantText scans backward and would otherwise return a
-    // PRIOR exchange's reply when this turn was Stop-cascaded before emitting any
-    // text (the stale-reply bug). `stopped` lets the caller mark the wake failed.
-    const before = (await sessions.get(actorSessionId))?.messages?.length ?? 0;
     // issue 251 — clear any report left over from an earlier turn BEFORE running,
     // so a stop can only ever be attributed to the turn that caused it. A stale
     // report surfacing on a later, unrelated message would be a lie in the one
@@ -5405,40 +5688,41 @@ const actorMessaging = makeActorMessaging({
       landingStopReports.delete(actorSessionId);
       return { result: report, stopped: true };
     };
-    // Heap-split: every BOUND actor runs its loop in its own offscreen Worker heap —
+    // Heap-split: every BOUND actor runs its loop in its own dedicated Worker heap —
     // engine kinds (vm/notebook/app, phase 2) AND the web/API actor (phase 3, the
     // highest-value isolation: it ingests untrusted PAGE/response content). Its DOM
-    // tools + fetch_url run SW-side via the 'actor/tool-dispatch' relay (chrome.* is
-    // SW-only); the worker holds no key, no chrome.*. Returns the reply, or null to
-    // fall back to the in-SW turn below (offscreen unavailable / never started).
+    // tools + fetch_url run in the privileged host via the gated relay; the worker
+    // holds no key or extension APIs. There is no background-heap fallback.
     if (kind === 'webvm' || kind === 'notebook' || kind === 'app' || kind === 'web' || kind === 'dweb') {
-      const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display });
-      if (off) return withLandingStop(off);
+      const off = await runActorTurnOffscreen({ actorSessionId, message: deliveredMessage, instanceId, kind, actorTabId, oneShot: oneShot === true, display, inbound: false });
+      return withLandingStop(off);
     }
-    // oneShot: the loop synthesizes the reply from the first clean tool round and
-    // stops (no summarize inference) — finalAssistantText below reads that synthetic
-    // assistant message exactly like a normal reply, so nothing else changes here.
-    try {
-      await runAgentTurn({ sessionId: actorSessionId, userText: deliveredMessage, synthetic: false, activeTabId: actorTabId, display, oneShot: oneShot === true });
-    } finally {
-      // why here too: runActorTurnOffscreen takes the pill down in its own
-      // finally, but this is the IN-SW fallback the offscreen path returns null
-      // for (Firefox has no offscreen API). Without it the pill outlives the
-      // turn on Firefox and sits on "Thinking…" forever — peerd saying it is
-      // working while nothing is happening, the exact misreading the indicator
-      // exists to prevent. The GROUP still stays; only the pill comes down.
-      const drivenTabId = webActorTabBindings.tabFor(actorSessionId);
-      if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
-    }
-    const s = await sessions.get(actorSessionId);
-    const fresh = finalActorTurnReply(/** @type {any} */ ({
-      messages: (s?.messages ?? []).slice(before),
-    }));
-    return withLandingStop(fresh);
+    return withLandingStop({ result: `actor kind ${kind || 'unknown'} is unsupported`, stopped: true });
   },
   reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
+  // Restart recovery is a receipt, not a turn. Persist it directly with a
+  // stable id so a second background loss can finish the same append without
+  // duplicating the notice or giving the model another chance to act.
+  recordRecovery: async ({ userText, sessionId, actorReply, recoveryId }) => {
+    await sessions.appendMessage(sessionId, {
+      role: 'user',
+      content: userText,
+      synthetic: true,
+      actorReply,
+      id: `actor-recovery:${sessionId}:${recoveryId}`,
+      when: Date.now(),
+    });
+    await pushState();
+    return true;
+  },
+  deliveryCommitted: async ({ sessionId, deliveryId }) => {
+    const session = await sessions.get(sessionId);
+    return (session?.messages ?? []).some((message) =>
+      actorDeliveryIdsFromMessage(message).includes(deliveryId));
+  },
   turnSlots,
   getActiveSessionId: () => /** @type {Promise<any>} */ (sessionCache.sessionGet('currentSessionId')),
+  getActorIsolation: () => actorIsolation,
   // PR #134 phase 3 — the shell walk behind the trusted-lineage gate. The pure
   // walk (fail-closed rules + hop cap + cycle guard) lives in delegation-lineage
   // so it's unit-tested; here we only inject the store read. spawnedTrusted per
@@ -5466,20 +5750,23 @@ const actorMessaging = makeActorMessaging({
   log: (/** @type {any[]} */ ...a) => console.warn('[actor]', ...a),
 });
 
-// Redrain the durable mailbox ONCE per SW lifetime, the moment the vault is
-// unlocked (a re-queued actor turn needs the model key). Boots already-unlocked
-// → fires from the attemptResume chain below; booted locked → fires on the first
-// unlock via the subscription. The once-guard prevents a double-drain (entries
-// aren't cleared until their turn SETTLES, so a second drain would double-deliver).
-let mailboxRedrained = false;
-const maybeRedrainMailbox = () => {
-  if (mailboxRedrained || vault.isLocked()) return;
-  mailboxRedrained = true;
-  Promise.resolve(actorMessaging.redrain())
-    .then((r) => { if (r?.redrained) console.warn('[actor] redrained', r.redrained, 'pending message(s) after restart'); })
-    .catch((e) => console.error('[sw] actor redrain failed', e));
+// Recover the durable mailbox before any automatic model work. Stored actor work
+// is never executed here. A failed receipt stays durable and gets another passive
+// write attempt in this background lifetime; a later background boot also retries.
+const actorRecoveryGate = makeActorRecoveryGate({
+  redrain: () => actorMessaging.redrain(),
+  log: (e) => console.error('[sw] actor redrain failed', e),
+});
+runWhenActorRecoveryReady = actorRecoveryGate.runWhenReady;
+const maybeRedrainMailbox = actorRecoveryGate.recover;
+const actorRecoveryReady = actorRecoveryGate.ready;
+const maybeAutoResumeAfterRecovery = (/** @type {string | null | undefined} */ sessionId) => {
+  if (!sessionId) return Promise.resolve(false);
+  return actorRecoveryGate.runWhenReady(
+    `auto-resume:${sessionId}`,
+    () => maybeAutoResume(sessionId),
+  );
 };
-vault.subscribe(() => { maybeRedrainMailbox(); });
 
 // ---------------------------------------------------------------------------
 // 5b. /init — workspace scan → draft AGENTS.md → confirm → persist (V1.5)
@@ -5643,7 +5930,9 @@ const haltGoalRun = (/** @type {string} */ sid) => /** @type {any} */ (goalRunne
 // §2.5: session archive/delete purges its lifecycle state — pending recovery
 // notices + nonterminal operations settle cancelled (boot.purgeSession).
 const purgeLifecycleSession = (/** @type {string} */ sid) => lifecycleBoot.purgeSession(sid);
-const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
+const resumeGoalRuns = () => actorRecoveryGate.runWhenReady(
+  'goal-resume',
+  () => /** @type {any} */ (goalRunner)?.resume());
 // Background scheduling: drive a full scheduler catch-up. The SINGLE entry point
 // for every wake (alarm, onStartup, cold boot, vault unlock) so the ordering is
 // defined in ONE place and can't drift per-caller.
@@ -5658,10 +5947,11 @@ const resumeGoalRuns = () => /** @type {any} */ (goalRunner)?.resume();
 // Sequencing resume() → load() → tick() closes that window. Both resume() and
 // load() are idempotent (skip ids already live), so calling this from every wake
 // — even one where goal runs were already resumed — is safe.
-const resumeSchedules = () => Promise.resolve(/** @type {any} */ (goalRunner)?.resume())
-  .catch(() => {})
-  .then(() => /** @type {any} */ (scheduler)?.load())
-  .then(() => /** @type {any} */ (scheduler)?.tick())
+const resumeSchedules = () => actorRecoveryGate.runWhenReady('schedules', async () => {
+    await Promise.resolve(/** @type {any} */ (goalRunner)?.resume()).catch(() => {});
+    await /** @type {any} */ (scheduler)?.load();
+    await /** @type {any} */ (scheduler)?.tick();
+  })
   .catch((e) => console.error('[sw] schedule catch-up failed', e));
 const ensureSession = ensureCurrentSession;
 
@@ -5736,6 +6026,7 @@ const makeSystemRouteSet = () => makeSystemRoutes({
   uiPorts, loadUserEndpoints, inspectImport, applyImport, settingsStore, saveUserHook,
   CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
   onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+  retryActorIsolation,
 });
 const makeSettingsRouteSet = () => makeSettingsRoutes({
   vault, auditLog, pushState, kv, memory, settingsStore,
@@ -5776,7 +6067,10 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // actor card + cost meter). Serves both spawned reasoners and bound actors; a
   // reasoning child never exercises tool-dispatch. actorClient is defined above (after
   // ensureOffscreen), before this dispatcher literal — safe to spread.
-  ...(actorClient?.routes ?? {}),
+  // Chrome's offscreen document relays over runtime messaging. Firefox's
+  // direct background-page host binds these routes in-process above, so they
+  // must not be callable from any extension page.
+  ...(offscreenAvailable ? (actorClient?.routes ?? {}) : {}),
   // The script tool's actors-in-code relay: live-run/owner/grant verified,
   // then every ask re-enters the existing messageActor gate chain.
   ...makeActorsRoutes({
@@ -5795,7 +6089,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     scriptModelCallRoute(msg, sender),
   ...makeVaultRoutes({
     vault, auditLog, kv, idb, base64ToBytes, ensureOffscreen, maybeStartBaseNetwork,
-    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResume, resumeGoalRuns,
+    pushState, purgeVaultBlob, confirmCoordinator, sessionCache, maybeAutoResumeAfterRecovery, resumeGoalRuns,
     resumeSchedules,
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError,
@@ -5831,7 +6125,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     browser, originOfTabUrl, matchesDenylist, denylistStore,
     // goal mode (the mode-row Goal toggle): start an autonomous run, and halt
     // any active one when the user stops or steers with a fresh message.
-    startGoalRun, haltGoalRun, ensureSession,
+    startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady,
     // DESIGN-17 P1: agent/stop cascades to this chat's in-flight actors.
     actorMessaging,
     // PR #134 phase 5: agent/stop also cascades through the live actor
@@ -5896,7 +6190,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume, haltGoalRun,
+    maybeAutoResumeAfterRecovery, haltGoalRun,
     // session/reset (New chat) must stop the abandoned session's live turn AND
     // cascade to its in-flight actors — same primitives agent/stop uses — so
     // background web/VM/App work doesn't keep running on the orphaned session.
@@ -6117,7 +6411,11 @@ ensureOffscreen().then(async () => {
 // is still there and we can pick up where we left off — no passphrase
 // re-entry required. Returns false (no-op) if the vault was never
 // unlocked or session storage was cleared.
-vault.attemptResume().then((resumed) => {
+vault.attemptResume().then(async (resumed) => {
+  // A passive recovery receipt must be durable before any automatic model turn
+  // can inspect this history. If storage is temporarily unavailable, keep the
+  // mailbox row, retry the receipt separately, and leave automatic work paused.
+  await maybeRedrainMailbox();
   if (resumed) {
     console.log('[sw] vault resumed from session storage');
     auditLog.append({ type: 'vault_unlocked' }).catch(() => {});
@@ -6142,23 +6440,24 @@ vault.attemptResume().then((resumed) => {
     // drive() awaits. Sequencing it ahead of maybeAutoResume guarantees the
     // goalActiveFor guard in maybeAutoResume sees the goal run and bails —
     // otherwise the two could race to drive the SAME interrupted session.
-    Promise.resolve(goalRunner?.resume())
-      .catch((e) => console.error('[sw] goal resume failed', e))
-      .then(() => settingsStore.load())
-      .then(() => sessionCache.sessionGet('currentSessionId'))
-      .then((/** @type {any} */ cur) => maybeAutoResume(cur)).catch(() => {});
+    actorRecoveryGate.runWhenReady('boot-resume', async () => {
+      await Promise.resolve(goalRunner?.resume())
+        .catch((e) => console.error('[sw] goal resume failed', e));
+      await settingsStore.load();
+      const currentSessionId = /** @type {string | null | undefined} */ (
+        await sessionCache.sessionGet('currentSessionId')
+      );
+      await maybeAutoResume(currentSessionId);
+    }).catch(() => {});
   } else {
     // Vault not resumed (locked): still rehydrate goal runs so the Goal bar is
     // restored; their next turn pauses on the locked vault and waits for unlock.
     // No auto-resume here — it needs an unlocked vault to call the model.
-    goalRunner?.resume().catch((e) => console.error('[sw] goal resume failed', e));
+    actorRecoveryGate.runWhenReady(
+      'locked-goal-resume',
+      () => goalRunner?.resume(),
+    ).catch((e) => console.error('[sw] goal resume failed', e));
   }
-  // DESIGN-17 P1: redrain any in-flight actor message→reply correlations the SW
-  // death interrupted. Once-guarded + internally gated on an unlocked vault (a
-  // re-queued actor turn needs the model key); also fires on the first vault
-  // unlock if the SW booted locked. resolveActor lazy-loads the registries, so
-  // no ordering vs goal/auto-resume above is needed (actor sessions are separate).
-  maybeRedrainMailbox();
 }).catch((e) => console.error('[sw] attemptResume failed', e));
 
 // One-time cleanup of Ralph's leftover storage. Ralph (removed 2026-06-22) wrote

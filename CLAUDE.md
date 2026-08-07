@@ -342,9 +342,11 @@ gotchas to know going in:
   keyed by the lineage root, and an actor's actor reply resolves into
   its tool result (an ephemeral child has no later turn to wake).
 - The heap split — EVERY non-orchestrator agent loop runs in its OWN
-  dedicated offscreen Worker heap (`peerd-runtime/actor/actor-worker-core.js`
+  dedicated Worker heap (`peerd-runtime/actor/actor-worker-core.js`
   drives it; `offscreen/actor-worker.js` + `actor-runner.js` +
-  `background/offscreen-actor-client.js` host + relay it). One substrate,
+  `background/offscreen-actor-client.js` host + relay it). Chrome starts the
+  runner from its offscreen document. Firefox starts the same runner directly
+  from its extension background page. One substrate,
   two shapes: a BOUND actor (web/webvm/notebook/app, instance-pinned) and an
   EPHEMERAL actor (spawned — tool-less = pure reasoning, tool-bearing =
   a narrowed-general toolset). The worker holds NO key, NO `chrome.*`, NO
@@ -352,19 +354,18 @@ gotchas to know going in:
   call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
   and every tool call (the SW rebuilds the caller's instance-pinned or
   `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
-  args). Both relays are pinned to the OFFSCREEN DOCUMENT as sender and carry a
-  per-run GRANT minted SW-side (`isOffscreenSender` + the grants map): the sender
-  check is the boundary — `runtime.sendMessage` can't address one context, so the
-  job and its token reach every extension page — and the token adds run identity
-  plus liveness on top, so a replayed relay from a settled run is refused. So the
+  args). Chrome pins both relays to the offscreen document and a per-run grant.
+  Firefox keeps the runner and relay calls inside the background page behind a
+  private object-identity sender. The grant adds run identity and liveness on
+  both hosts, so a replayed relay from a settled run is refused. A run-scoped,
+  acknowledged Firefox `storage.session` heartbeat keeps the MV3 event page
+  alive only while actor work is active, then stops after the last turn settles.
+  A lost heartbeat pauses actor work until a manual probe succeeds. So the
   actor fence is a MEMORY boundary, not a prompt boundary: untrusted
   page/instance/response content stays behind the heap, one process-eviction from
-  the vault DK no longer reachable. Chrome-only (needs the offscreen API); Firefox
-  falls back to an in-SW loop with no heap separation — its SPAWNED children keep
-  the keyless custody (throwing credential stubs; the SW-owned `callModel` wrapper
-  adds the real ones at the call boundary), its BOUND actors go through
-  `runAgentTurn` and still hold live credentials — the honest residual,
-  THREAT-MODEL R1. why it matters: prompt
+  the vault DK no longer reachable. A versioned readiness and realm probe must
+  pass before a model call or tool relay can begin. A missing or failed host
+  refuses the actor turn before any target action. why it matters: prompt
   injection has no filter — the fix is to never hand untrusted reasoning the
   authority in the first place.
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model

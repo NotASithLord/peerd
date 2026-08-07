@@ -135,6 +135,11 @@ export const startGeckodriver = async ({
       execute: (script, args = []) => command('POST', '/execute/sync', { script, args }),
       executeAsync: (script, args = []) => command('POST', '/execute/async', { script, args }),
       setWindowRect: (rect) => command('POST', '/window/rect', rect),
+      windowHandle: () => command('GET', '/window'),
+      windowHandles: () => command('GET', '/window/handles'),
+      newWindow: (type = 'tab') => command('POST', '/window/new', { type }),
+      switchToWindow: (handle) => command('POST', '/window', { handle }),
+      closeWindow: () => command('DELETE', '/window'),
       screenshot: () => command('GET', '/screenshot'),
       close: async () => {
         try {

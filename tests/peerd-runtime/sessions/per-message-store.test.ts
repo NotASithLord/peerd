@@ -104,6 +104,104 @@ describe('session store v2 — per-message records', () => {
     expect(idb._tbl('session_messages').get('m2').sessionId).toBe(s.sessionId);
   });
 
+  test('appendMessage is idempotent for a stable message id', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const s = await store.create();
+    const receipt = { role: 'user', content: 'Outcome unknown', id: 'actor-recovery:1', when: 1 } as any;
+
+    await store.appendMessage(s.sessionId, receipt);
+    const out = await store.appendMessage(s.sessionId, { ...receipt, when: 2 });
+
+    expect(out.messages.map((m: any) => m.id)).toEqual(['actor-recovery:1']);
+    expect(out.messages[0].when).toBe(1);
+    expect(idb._tbl('sessions').get(s.sessionId).msgIndex).toEqual(['actor-recovery:1']);
+  });
+
+  test('concurrent appends to one session preserve both ordered message ids', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const s = await store.create();
+
+    await Promise.all([
+      store.appendMessage(s.sessionId, { role: 'user', content: 'one', id: 'm-concurrent-1', when: 1 } as any),
+      store.appendMessage(s.sessionId, { role: 'assistant', content: 'two', id: 'm-concurrent-2', when: 2 } as any),
+    ]);
+
+    expect(idb._tbl('sessions').get(s.sessionId).msgIndex).toEqual(['m-concurrent-1', 'm-concurrent-2']);
+    expect((await store.get(s.sessionId))!.messages.map((message: any) => message.id))
+      .toEqual(['m-concurrent-1', 'm-concurrent-2']);
+  });
+
+  test('a metadata update cannot erase an append that is between its row and index commits', async () => {
+    const base = makeIdb();
+    let armed = false;
+    let metadataReads = 0;
+    let releaseWrite = () => {};
+    let signalWriteStarted = () => {};
+    const writeStarted = new Promise<void>((resolve) => { signalWriteStarted = resolve; });
+    const writeReleased = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const idb = {
+      ...base,
+      get: async (store: string, key: string) => {
+        if (armed && store === 'sessions') metadataReads += 1;
+        return base.get(store, key);
+      },
+      put: async (store: string, value: any) => {
+        if (armed && store === 'sessions') {
+          armed = false;
+          signalWriteStarted();
+          await writeReleased;
+        }
+        await base.put(store, value);
+      },
+    };
+    const store = makeStore(idb);
+    const session = await store.create();
+    armed = true;
+
+    const append = store.appendMessage(session.sessionId, {
+      role: 'user', content: 'kept', id: 'm-race', when: 1,
+    } as any);
+    const setCost = store.setCost(session.sessionId, { input: 1, output: 2, total: 3 } as any);
+    await writeStarted;
+
+    // The cost writer must not read the stale pre-append metadata snapshot.
+    expect(metadataReads).toBe(1);
+    releaseWrite();
+    await Promise.all([append, setCost]);
+
+    const raw = base._tbl('sessions').get(session.sessionId);
+    expect(raw.msgIndex).toEqual(['m-race']);
+    expect(raw.cost).toEqual({ input: 1, output: 2, total: 3 });
+  });
+
+  test('the post-append hook runs after the session index commit and cannot fail the append', async () => {
+    const idb = makeIdb();
+    const observations: any[] = [];
+    let calls = 0;
+    const store = createSessionStore({
+      idb,
+      now: () => 1000,
+      makeId: () => 'session-hook',
+      onMessageAppended: async (sessionId, message: any) => {
+        calls += 1;
+        observations.push([...idb._tbl('sessions').get(sessionId).msgIndex]);
+        expect(idb._tbl('session_messages').get(message.id).message).toEqual(message);
+        throw new Error('post-commit acknowledgement unavailable');
+      },
+    });
+    const s = await store.create();
+    const message = { role: 'user', content: '', id: 'tool-result-1', when: 1 } as any;
+
+    await store.appendMessage(s.sessionId, message);
+    await store.appendMessage(s.sessionId, message);
+
+    expect(calls).toBe(2);
+    expect(observations).toEqual([['tool-result-1'], ['tool-result-1']]);
+    expect((await store.get(s.sessionId))!.messages.map((entry: any) => entry.id)).toEqual(['tool-result-1']);
+  });
+
   test('updateAssistantMessage patches ONLY the message record, never the session blob', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

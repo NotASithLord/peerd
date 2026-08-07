@@ -35,6 +35,8 @@ const probeBoundActorTurnDriver = async () => {
   };
   let loopCtx: any = null;
   let modelCall: any = null;
+  const audits: any[] = [];
+  let releases = 0;
   const settings = {
     reasoningEnabled: false,
     reasoningEffort: 'medium',
@@ -56,7 +58,7 @@ const probeBoundActorTurnDriver = async () => {
     },
     sessionState: { set: () => {} },
     turnSlots: {
-      claim: () => ({ controller: new AbortController(), release: () => {} }),
+      claim: () => ({ controller: new AbortController(), release: () => { releases++; } }),
       isBusy: () => false,
     },
     buildTemporalBlock: () => '',
@@ -87,7 +89,7 @@ const probeBoundActorTurnDriver = async () => {
     makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
     uiConnected: () => false,
     uiPorts: { broadcast: () => {} },
-    auditLog: { append: async () => {} },
+    auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: () => {},
     resolveFailoverChain: (start: any) => [start],
     shouldFailover: () => false,
@@ -122,30 +124,11 @@ const probeBoundActorTurnDriver = async () => {
   });
 
   const result = await driver.runAgentTurn({ sessionId: session.sessionId, userText: 'inspect the page' });
-  const captureBoundary = async (call: () => Promise<unknown>) => {
-    try { await call(); return null; }
-    catch (error) { return error as any; }
-  };
-  const secretError = await captureBoundary(() => loopCtx.getSecret('anthropic'));
-  const networkError = await captureBoundary(() => loopCtx.safeFetch('https://example.com'));
+  const refused = audits.some((entry) => entry.type === 'actor_background_turn_refused'
+    && entry.details?.performed === false);
   return {
-    held: result.ok === true
-      && secretError?.name === 'ActorCredentialBoundaryError'
-      && secretError?.capability === 'secret'
-      && networkError?.name === 'ActorCredentialBoundaryError'
-      && networkError?.capability === 'provider-network'
-      && modelCall?.provider === session.provider
-      && modelCall?.model === session.model
-      && modelCall?.ollamaHost === settings.ollamaHost
-      && modelCall?.signal !== rogueSignal
-      && modelCall?.getSecret === liveGetSecret
-      && modelCall?.safeFetch === liveSafeFetch
-      && modelCall?.getSecret !== rogueGetSecret
-      && modelCall?.safeFetch !== rogueSafeFetch,
-    evidence: `secret=${secretError?.name}/${secretError?.capability} `
-      + `network=${networkError?.name}/${networkError?.capability} `
-      + `provider=${modelCall?.provider}/${modelCall?.model} brokerCredentials=${
-        modelCall?.getSecret === liveGetSecret && modelCall?.safeFetch === liveSafeFetch}`,
+    held: result === undefined && loopCtx === null && modelCall === null && refused && releases === 1,
+    evidence: `result=${String(result)} loopEntered=${loopCtx !== null} modelCalled=${modelCall !== null} refused=${refused} releases=${releases}`,
   };
 };
 
@@ -160,13 +143,13 @@ export const scenario: Scenario = {
   async run() {
     const probes: Probe[] = [];
 
-    // 1) Firefox bound fallback: production turn driver gives the loop named
-    // custody stubs and overwrites every broker-owned field at the provider edge.
+    // 1) The production turn driver refuses every actor session before the
+    // privileged background loop or provider boundary can run.
     {
       const proof = await probeBoundActorTurnDriver();
       probes.push(proof.held
-        ? blocked('bound Firefox actor tries to carry live credentials and broker fields in its loop frame', proof.evidence)
-        : leaked('bound Firefox actor tries to carry live credentials and broker fields in its loop frame', proof.evidence));
+        ? blocked('bound actor tries to enter the privileged background loop', proof.evidence)
+        : leaked('bound actor tries to enter the privileged background loop', proof.evidence));
     }
 
     // 2) Restricted tool context: no live provider capability survives any grant.
@@ -232,6 +215,6 @@ export const scenario: Scenario = {
         : leaked('forge </untrusted_web_content> to break out of the data fence', `defanged=${defanged} realCloses=${realCloses}`));
     }
 
-    return summarize(probes, ['makeTurnDriver (bound fallback custody and broker overwrite)', 'restrictCtxCapabilities (tool-context narrowing)', 'makeRelayedCallModel (isolated boundary function strip)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)']);
+    return summarize(probes, ['makeTurnDriver (background actor refusal)', 'restrictCtxCapabilities (tool-context narrowing)', 'makeRelayedCallModel (isolated boundary function strip)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)']);
   },
 };
