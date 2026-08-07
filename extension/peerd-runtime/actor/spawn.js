@@ -26,6 +26,7 @@
 // manifest into the allow-set the narrowing intersects.
 import { confirmActionsFromRecord } from '../permissions/policy.js';
 import { resolveManifestAllow } from '../tools/manifests.js';
+import { ActorCredentialBoundaryError } from '../errors.js';
 // The MAIN-AGENT tool surface: an actor is a CHILD of the main agent and must hold
 // no more than it could. mainAgentDescriptors drops MAIN_AGENT_HIDDEN_TOOLS (the
 // actor-only DOM/page/fetch tools — read_page, page_exec, click, navigate, fetch_url,
@@ -225,6 +226,29 @@ export const finalAssistantText = (session) => {
     }
   }
   return '';
+};
+
+/**
+ * Shape one completed bound-actor turn for the delivery layer. A provider
+ * error is persisted on the assistant message without reply text, so it must
+ * win over the generic stopped fallback or the caller loses the actionable
+ * refusal and may misread the turn as an ordinary Stop.
+ *
+ * @param {Session | undefined} session
+ * @returns {{ result: string, stopped?: boolean }}
+ */
+export const finalActorTurnReply = (session) => {
+  const messages = session?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === 'assistant' && typeof message.error === 'string' && message.error.length > 0) {
+      return { result: message.error, stopped: true };
+    }
+  }
+  const result = finalAssistantText(session);
+  return result
+    ? { result }
+    : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
 };
 
 /**
@@ -658,8 +682,8 @@ export const makeSpawnActor = (deps) => {
     // (restrictCtxCapabilities strips both unconditionally) but not of the loop.
     // Now it is true of both, and the residual is honestly just the shared heap.
     const keylessCredentials = {
-      getSecret: async () => { throw new Error('actor loop has no secret access'); },
-      safeFetch: async () => { throw new Error('actor loop has no egress'); },
+      getSecret: async () => { throw new ActorCredentialBoundaryError('secret'); },
+      safeFetch: async () => { throw new ActorCredentialBoundaryError('provider-network'); },
     };
 
     // why: the child's model usage is yielded as 'usage' events but is NOT

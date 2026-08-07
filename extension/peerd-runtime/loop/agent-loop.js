@@ -27,7 +27,10 @@
 // routinely want 30+ steps, and 25 false-positived on genuine work).
 
 import { uuidv7 } from '/shared/util.js';
-import { RuntimeContextIncompleteError } from '../errors.js';
+import {
+  ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
+  RuntimeContextIncompleteError,
+} from '../errors.js';
 import { redactToolResult, PAGED_MAX_CHARS } from './redact.js';
 import { stripAttachments } from './attachments.js';
 import { planTrim } from './trim.js';
@@ -707,7 +710,13 @@ export async function* runUserTurn(ctx) {
         return;
       }
       errored = true;
-      const message = err?.message ?? String(e);
+      // The provider stream is consumed inside this generator, so typed
+      // boundary errors are erased here unless they are mapped before the
+      // string event crosses to the turn driver. Keep the refusal explicit:
+      // no model request ran, and retrying is safe.
+      const message = e instanceof ActorCredentialBoundaryError
+        ? ACTOR_CREDENTIAL_BOUNDARY_FAILURE
+        : err?.message ?? String(e);
       await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
         content: textBuf,
         streaming: false,

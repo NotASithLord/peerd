@@ -143,4 +143,187 @@ describe('sidepanel.message-list actor-reply bubbles', () => {
       expect(((msg.querySelector('.role')?.textContent) || '').includes('failed')).toBe(true);
     } finally { unmount(); }
   });
+
+  it('labels a custody refusal Not run and keeps its recovery copy visible', async () => {
+    const { root, unmount } = mount([{
+      role: 'user', id: 'u1', synthetic: true,
+      actorReply: { kind: 'web', instanceId: 'web', failed: true },
+      content: 'The web actor could not complete your request:\n\n'
+        + 'actor-provider-boundary-blocked: The actor model request was not run. '
+        + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
+    }]);
+    try {
+      await flush();
+      const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
+      expect(message.querySelector('.role')?.textContent).toContain('Not run');
+      expect(message.querySelector('.role')?.textContent?.includes(' · failed')).toBe(false);
+      expect(message.querySelector('.bubble')?.textContent).toContain('Reload peerd, then try again');
+      expect(message.querySelector('.bubble')?.textContent?.includes('Do not retry automatically')).toBe(false);
+    } finally { unmount(); }
+  });
+});
+
+describe('sidepanel.message-list actor disclosures', () => {
+  it('keeps model-directed custody recovery text out of a live actor card', async () => {
+    const { root, unmount } = mount([{
+      role: 'assistant', id: 'a0', content: '',
+      toolUses: [{ id: 't0', name: 'message_actor', input: { to: 'web', message: 'inspect it' } }],
+    }], {
+      actors: {
+        t0: {
+          kind: 'web', instanceId: 'web', streaming: false,
+          error: 'actor-provider-boundary-blocked: The actor model request was not run. '
+            + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
+        },
+      },
+    });
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('Not run');
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('Reload peerd, then try again');
+      expect(root.textContent.includes('Do not retry automatically')).toBe(false);
+      expect(root.textContent.includes('Ask the user')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('renders a boundary refusal as a native Not run disclosure', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a1', content: '',
+        toolUses: [{ id: 't1', name: 'message_actor', input: { to: 'web', message: 'inspect it', await: true } }],
+      },
+      {
+        role: 'user', id: 'u1', content: '',
+        toolResults: [{
+          tool_use_id: 't1', is_error: true,
+          content: 'actor-provider-boundary-blocked: The actor model request was not run.',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle).toBeTruthy();
+      expect(toggle.type).toBe('button');
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(toggle.textContent).toContain('Not run');
+      toggle.focus();
+      expect(document.activeElement).toBe(toggle);
+      toggle.click();
+      await flush();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(root.textContent).toContain('actor-provider-boundary-blocked');
+      expect(root.textContent).toContain('Reload peerd, then try again');
+      expect(root.textContent.includes('Do not retry automatically')).toBe(false);
+      expect(root.textContent.includes('reply will arrive')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('renders actor_create with native disclosure state and a visible terminal label', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a2', content: '',
+        toolUses: [{ id: 't2', name: 'actor_create', input: { task: 'check it' } }],
+      },
+      {
+        role: 'user', id: 'u2', content: '',
+        toolResults: [{ tool_use_id: 't2', is_error: false, content: 'complete' }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle).toBeTruthy();
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(toggle.textContent).toContain('done');
+      toggle.click();
+      await flush();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    } finally { unmount(); }
+  });
+
+  it('labels a no-card async acknowledgement accepted, not done', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a3', content: '',
+        toolUses: [{ id: 't3', name: 'message_actor', input: { to: 'web', message: 'inspect it' } }],
+      },
+      {
+        role: 'user', id: 'u3', content: '',
+        toolResults: [{
+          tool_use_id: 't3', is_error: false,
+          content: 'Message delivered. Its reply will arrive on a later turn.',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('accepted');
+      expect(toggle.textContent?.includes('done')).toBe(false);
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('request accepted; check later messages for the reply');
+    } finally { unmount(); }
+  });
+
+  it('labels a completed awaited reply done and shows its result after reload', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a4', content: '',
+        toolUses: [{
+          id: 't4', name: 'message_actor',
+          input: { to: 'web', message: 'inspect it', await: true },
+        }],
+      },
+      {
+        role: 'user', id: 'u4', content: '',
+        toolResults: [{
+          tool_use_id: 't4', is_error: false,
+          content: 'The web actor you messaged has replied:\n\nThe result is 42.',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('done');
+      expect(toggle.textContent?.includes('accepted')).toBe(false);
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('The result is 42');
+      expect(root.textContent.includes('check later messages')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('labels an await-cap handoff separately from a completed reply', async () => {
+    const { root, unmount } = mount([
+      {
+        role: 'assistant', id: 'a5', content: '',
+        toolUses: [{
+          id: 't5', name: 'message_actor',
+          input: { to: 'web', message: 'inspect it', await: true },
+        }],
+      },
+      {
+        role: 'user', id: 'u5', content: '',
+        toolResults: [{
+          tool_use_id: 't5', is_error: false,
+          content: 'The web actor is still working; its reply will arrive as a fenced note on a later turn.',
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('.tool-actor > button.tool-call-header'));
+      expect(toggle.textContent).toContain('handed off');
+      expect(toggle.textContent?.includes('done')).toBe(false);
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('the actor is still working; check later messages for the reply');
+    } finally { unmount(); }
+  });
 });

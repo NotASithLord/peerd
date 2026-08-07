@@ -1,10 +1,9 @@
-// The FIREFOX gate — the only check in the tree that judges peerd AS a Firefox
-// extension rather than as a Chrome one.
+// The static Firefox package gate. The separate `firefox-runtime` CI job runs
+// the packaged Store XPI and the shared browser suite in Gecko.
 //
-// why this exists: every executing lane is Chrome (in-browser tests, e2e, visual,
-// packaged page boot). Firefox is BUILT, import-checked, and signed — never run.
-// So a Chrome-only API landing in the Firefox package ships green today. This
-// closes the cheapest slice of that gap without needing a browser at all:
+// why this exists: runtime coverage cannot replace AMO validation or an exact
+// inventory of guarded Chrome-only call sites. A bad manifest or a new unguarded
+// API must fail before runtime. This gate does that without launching a browser:
 // `web-ext lint` is AMO's own static validator, so it knows Firefox's API surface
 // and its manifest rules, and it runs offline.
 //
@@ -23,9 +22,8 @@
 //      NEW one. A new unguarded Chrome API in the Firefox build is exactly the
 //      bug this repo currently cannot catch.
 //
-// What this does NOT do: execute anything. It cannot tell you the guards actually
-// hold at runtime — only that the set of things needing a guard has not grown.
-// Real Firefox execution is the next rung and needs a Firefox binary.
+// What this does NOT do: execute anything. It proves the static package posture;
+// the `firefox-runtime` job proves the installed Store package in Firefox.
 //
 // Run: bun run check:firefox   (also part of `bun run preflight`)
 

@@ -83,6 +83,7 @@ let pdaToolResultBody = '';
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
 let actorState = { delegates: 0, seen: [] };
+let actorBoundaryState = { delegates: 0 };
 let scriptFanState = { scripts: 0, seen: [] };
 let dwebActorState = { delegates: 0, actorCalls: 0 };
 let a2aState = { delegates: 0, actorCalls: 0 };
@@ -1616,6 +1617,75 @@ export const STATES = [
       rec.check('the orchestrator emitted the final user-visible answer', (out.bubbles || []).includes('FINAL-ORCH-REPLY'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
+    },
+  },
+
+  // The custody boundary has two audiences. The actor needs an instruction it
+  // can act on without looping; the person needs a short recovery step. Drive
+  // the live actor-error stream and prove the card never crosses those copies.
+  {
+    name: 'actor-boundary-error-card', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>')) {
+        const error = JSON.stringify({ error: {
+          message: 'actor-provider-boundary-blocked: The actor model request was not run. '
+            + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.',
+        } });
+        return { sse: `data: ${error}\n\n${sseText('')}` };
+      }
+      if (body.includes('could not complete your request')) return { sse: sseText('BOUNDARY-FAILURE-NOTED') };
+      if (actorBoundaryState.delegates === 0) {
+        actorBoundaryState.delegates += 1;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: 'inspect the current page' }) };
+      }
+      return { sse: sseText('Delegated to the web actor.') };
+    },
+    async run(ctx, rec) {
+      actorBoundaryState = { delegates: 0 };
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'inspect this page safely' });
+      rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const failed = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-failed')`),
+        { budgetMs: 25_000, pollMs: 100 });
+      rec.check('the live actor card settles as failed', !!failed);
+      await evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.click()`);
+      const expanded = await waitFor(
+        () => evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.getAttribute('aria-expanded') === 'true'
+          && !!document.querySelector('.tool-actor .actor-body')`),
+        { budgetMs: 5_000, pollMs: 50 });
+      rec.check('the live actor card expands', !!expanded);
+      const out = await evalIn(ctx.page, `(() => {
+        const card = document.querySelector('.tool-call.tool-actor');
+        return {
+          label: card?.querySelector('.tool-duration')?.textContent || '',
+          body: card?.querySelector('.actor-body')?.textContent || '',
+        };
+      })()`);
+      rec.check('the live card labels the request Not run', out?.label === 'Not run', JSON.stringify(out?.label));
+      rec.check('the live card gives the person a direct recovery step',
+        /Reload peerd, then try again/.test(out?.body || ''), JSON.stringify(out?.body));
+      rec.check('the live card hides model-directed recovery text',
+        !/Do not retry automatically|Ask the user/.test(out?.body || ''), JSON.stringify(out?.body));
+      const replyReady = await waitFor(
+        () => evalIn(ctx.page, `!!document.querySelector('.message-actor-reply')`),
+        { budgetMs: 25_000, pollMs: 100 });
+      rec.check('the failed actor reply is visible', !!replyReady);
+      const reply = await evalIn(ctx.page, `(() => {
+        const message = document.querySelector('.message-actor-reply');
+        return {
+          role: message?.querySelector('.role')?.textContent || '',
+          body: message?.querySelector('.bubble')?.textContent || '',
+        };
+      })()`);
+      rec.check('the failed actor reply is also labeled Not run',
+        /Not run/.test(reply?.role || ''), JSON.stringify(reply?.role));
+      rec.check('the failed actor reply preserves the human recovery step only',
+        /Reload peerd, then try again/.test(reply?.body || '')
+          && !/Do not retry automatically|Ask the user/.test(reply?.body || ''),
+        JSON.stringify(reply?.body));
+      await waitFor(async () => { const state = await probe(ctx); return !state.busy; }, { budgetMs: 25_000 });
+      await rec.shot('not-run-expanded');
     },
   },
 

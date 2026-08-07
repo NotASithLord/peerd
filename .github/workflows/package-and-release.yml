@@ -90,9 +90,9 @@ jobs:
         run: bun run check:boundary
       - name: Packaged import graph (no pruned-but-imported file black-screens a page)
         run: bun run check:imports
-      # The only gate that judges peerd AS a Firefox extension — every executing
-      # lane is Chrome, so a Chrome-only API reaching the Firefox package would
-      # otherwise ship green. Runs after check:imports, which stages the builds.
+      # Static Firefox package gate: AMO validation and the guarded Chrome-only
+      # API inventory. The separate firefox-runtime job installs the Store XPI
+      # and runs the shared browser suite in Gecko.
       - name: Firefox package lint (AMO validator; no unguarded Chrome-only API)
         run: bun run check:firefox
       - name: Doc path references (top-level docs point at real files)
@@ -187,6 +187,8 @@ jobs:
         with:
           geckodriver-version: ${{ steps.browser-pins.outputs.geckodriver }}
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check local TLS dependency
+        run: openssl version
       - run: bun install --frozen-lockfile
       - name: Run the packaged Store smoke and Gecko browser suite
         env:
@@ -640,7 +642,7 @@ jobs:
     name: GitHub Release (preview channel)
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [test, checks, package]
+    needs: [test, checks, firefox-runtime, package]
     # The one job that holds signing secrets. Bound to a GitHub Environment so
     # the secrets can be scoped to it AND protection rules (required reviewers,
     # tag-pattern restrictions) can gate every run that touches the signing

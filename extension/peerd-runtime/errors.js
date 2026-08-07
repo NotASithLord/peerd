@@ -40,3 +40,23 @@ export class RuntimeContextIncompleteError extends TypedError {
     this.missing = missing;
   }
 }
+
+/**
+ * An actor loop tried to use a live provider capability directly instead of
+ * crossing the service-worker-owned model boundary.
+ */
+export class ActorCredentialBoundaryError extends TypedError {
+  /** @param {'secret'|'provider-network'} capability */
+  constructor(capability) {
+    super(`Actor provider boundary refused direct ${capability} access`);
+    this.capability = capability;
+  }
+}
+
+export const ACTOR_CREDENTIAL_BOUNDARY_FAILURE = 'actor-provider-boundary-blocked: '
+  + 'The actor model request was not run because its provider boundary blocked direct access. '
+  + 'Do not retry automatically. Ask the user to reload peerd before another actor attempt.';
+
+export const ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE = 'The actor model request was not run because '
+  + 'its provider boundary blocked direct access. Reload peerd, then try again. '
+  + '(actor-provider-boundary-blocked)';

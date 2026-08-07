@@ -316,7 +316,7 @@ import {
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
   isKnownIdp, knownIdpDomains, describeLandingStop, originPhrase, isUgcHost,
-  finalAssistantText,
+  finalActorTurnReply, finalAssistantText,
   // The debug surface: the bundle assembler + the delegation-tree walk the
   // session/debugBundle route runs (pure; the SW supplies the reads).
   assembleDebugBundle, childSessionIdsOf,
@@ -1958,9 +1958,9 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
   // narrow trust model. restrictCtxCapabilities strips every capability closure
   // (getSecret, safeFetch, webFetch, spawnActor, memory, messageActor, …)
   // that none of the actor's OWN kind tools need, so a confused/injected tool
-  // has no path to secrets/egress/spawn. The loop still gets the provider key
-  // via the turn driver's injected getSecret (off this ctx), exactly like a
-  // actor. Non-actor ctx is unchanged.
+  // has no path to secrets/egress/spawn. The loop also receives throwing
+  // credential stubs. The turn driver's provider wrapper adds live functions
+  // only at the model-call boundary. Non-actor ctx is unchanged.
   if (exposure === EXPOSURE_ACTOR) {
     // DESIGN-18: an API actor's allow-set is fetch_url-only (backing-aware), so the
     // strip drops the closures keyed in CAPABILITY_CONSUMERS that fetch_url doesn't use
@@ -5174,6 +5174,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
       ? (/** @type {any} */ ev) => {
         try {
           if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+          if (ev.type === 'error') uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, error: ev.error });
         } catch { /* display best-effort */ }
       }
       : undefined;
@@ -5238,7 +5239,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ { actorSessionId, messag
     }
     auditLog.append({ type: 'actor_ran_offscreen', details: { heapSplit: true, kind, instanceId, ok: r.ok === true, aborted: r.aborted === true, persistOk } }).catch(() => {});
     if (display && uiConnected()) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: r.ok === true, aborted: r.aborted === true });
-    return r.finalText ? { result: r.finalText } : { result: 'the actor turn was stopped before it produced a reply.', stopped: true };
+    return finalActorTurnReply(/** @type {any} */ ({ messages: newMessages }));
   } finally {
     release();
     // The turn is over, so the pill comes down — leaving it up through the idle
@@ -5426,10 +5427,10 @@ const actorMessaging = makeActorMessaging({
       if (typeof drivenTabId === 'number') pageActivity.idle(drivenTabId).catch(() => {});
     }
     const s = await sessions.get(actorSessionId);
-    const fresh = finalAssistantText(/** @type {any} */ ({ messages: (s?.messages ?? []).slice(before) }));
-    return withLandingStop(fresh
-      ? { result: fresh }
-      : { result: 'the actor turn was stopped before it produced a reply.', stopped: true });
+    const fresh = finalActorTurnReply(/** @type {any} */ ({
+      messages: (s?.messages ?? []).slice(before),
+    }));
+    return withLandingStop(fresh);
   },
   reenter: ({ userText, sessionId, synthetic, trusted, actorReply }) => runAgentTurn({ userText, sessionId, synthetic, trusted, actorReply }),
   turnSlots,

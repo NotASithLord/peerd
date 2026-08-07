@@ -8,8 +8,12 @@
 // Chrome remains the only pixel-baseline authority; Firefox screenshots are
 // diagnostic.
 
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { connect as connectSocket } from 'node:net';
+import { tmpdir } from 'node:os';
 import { delimiter, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageArtifact } from '../../packaging/package.ts';
@@ -25,6 +29,12 @@ const TEST_UUID = '7d12f198-31fc-4e95-9184-e954123981a6';
 const EXTENSION_ORIGIN = `moz-extension://${TEST_UUID}`;
 const FIXTURE_PATH = '/__firefox-runtime-fixture';
 const RESULT_BUDGET_MS = 180_000;
+const PROVIDER_PATH = '/v1/messages';
+const PASSPHRASE_CANARY = 'firefox-runtime-passphrase-canary-7d12f198';
+const PROVIDER_KEY_CANARY = 'sk-ant-firefox-provider-canary-7d12f198';
+const ACTOR_REPLY_CANARY = 'firefox-bound-actor-reply-7d12f198';
+const FINAL_REPLY_CANARY = 'firefox-parent-final-reply-7d12f198';
+const ACTOR_PROMPT = 'Return the Firefox bound actor proof token.';
 
 const onPath = (name) => (process.env.PATH ?? '').split(delimiter)
   .map((directory) => join(directory, name))
@@ -92,6 +102,338 @@ const startTestServer = async () => {
   return { port, close: () => new Promise((resolveClose) => server.close(resolveClose)) };
 };
 
+const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+const textResponse = (text) => [
+  sse('message_start', { type: 'message_start' }),
+  sse('content_block_start', {
+    type: 'content_block_start', index: 0,
+    content_block: { type: 'text', text: '' },
+  }),
+  sse('content_block_delta', {
+    type: 'content_block_delta', index: 0,
+    delta: { type: 'text_delta', text },
+  }),
+  sse('content_block_stop', { type: 'content_block_stop', index: 0 }),
+  sse('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
+  sse('message_stop', { type: 'message_stop' }),
+].join('');
+
+const delegationResponse = () => {
+  const input = JSON.stringify({ to: 'web', message: ACTOR_PROMPT, await: true });
+  return [
+    sse('message_start', { type: 'message_start' }),
+    sse('content_block_start', {
+      type: 'content_block_start', index: 0,
+      content_block: { type: 'tool_use', id: 'firefox-actor-tool', name: 'message_actor', input: {} },
+    }),
+    sse('content_block_delta', {
+      type: 'content_block_delta', index: 0,
+      delta: { type: 'input_json_delta', partial_json: input },
+    }),
+    sse('content_block_stop', { type: 'content_block_stop', index: 0 }),
+    sse('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use' } }),
+    sse('message_stop', { type: 'message_stop' }),
+  ].join('');
+};
+
+// why a browser-level TLS proxy: the production adapter's endpoint is fixed,
+// and safeFetch correctly rejects HTTP redirects. The proxy leaves the URL as
+// https://api.anthropic.com/v1/messages, so the real adapter and egress policy
+// run unchanged while the local server can inspect the final request header.
+// The proxy refuses every other CONNECT target. Its certificate key exists only
+// in the OS temp directory for this run and is deleted during cleanup.
+const startProviderServer = async () => {
+  const records = [];
+  const connections = [];
+  const tlsErrors = [];
+  const certificateDirectory = mkdtempSync(join(tmpdir(), 'peerd-firefox-provider-'));
+  const certificatePath = join(certificateDirectory, 'provider-cert.pem');
+  const keyPath = join(certificateDirectory, 'provider-key.pem');
+  try {
+    execFileSync('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+      '-subj', '/CN=api.anthropic.com',
+      '-addext', 'subjectAltName=DNS:api.anthropic.com',
+      '-keyout', keyPath, '-out', certificatePath,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch (error) {
+    rmSync(certificateDirectory, { recursive: true, force: true });
+    const detail = error?.stderr?.toString().trim() || error?.message || String(error);
+    throw new Error(`Firefox runtime tests need OpenSSL with req -addext support: ${detail}`);
+  }
+
+  const providerRequestHandler = (request, response) => {
+    if (request.method !== 'POST' || request.url !== PROVIDER_PATH) {
+      response.writeHead(404);
+      response.end('not found');
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    request.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 2 * 1024 * 1024) tooLarge = true;
+      else chunks.push(chunk);
+    });
+    request.on('end', () => {
+      if (tooLarge) {
+        response.writeHead(413);
+        response.end('request too large');
+        return;
+      }
+      const body = Buffer.concat(chunks).toString('utf8');
+      records.push({ method: request.method, url: request.url, headers: { ...request.headers }, body });
+      const payload = body.includes('<actor_agent>')
+        ? textResponse(ACTOR_REPLY_CANARY)
+        : body.includes(ACTOR_REPLY_CANARY)
+          ? textResponse(FINAL_REPLY_CANARY)
+          : delegationResponse();
+      response.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      response.end(payload);
+    });
+  };
+
+  const tlsServer = createHttpsServer({
+    cert: readFileSync(certificatePath),
+    key: readFileSync(keyPath),
+    ALPNProtocols: ['http/1.1'],
+  }, providerRequestHandler);
+  tlsServer.on('tlsClientError', (error) => {
+    if (tlsErrors.length < 20) tlsErrors.push(error?.code ?? error?.message ?? 'tls-error');
+  });
+  await new Promise((resolveListen, reject) => {
+    tlsServer.once('error', reject);
+    tlsServer.listen(0, '127.0.0.1', resolveListen);
+  }).catch((error) => {
+    rmSync(certificateDirectory, { recursive: true, force: true });
+    throw error;
+  });
+  const tlsAddress = tlsServer.address();
+  const tlsPort = typeof tlsAddress === 'object' && tlsAddress ? tlsAddress.port : 0;
+  if (!tlsPort) {
+    tlsServer.close();
+    rmSync(certificateDirectory, { recursive: true, force: true });
+    throw new Error('Firefox provider TLS server did not receive a port');
+  }
+
+  const sockets = new Set();
+  const proxyServer = createServer((_request, response) => {
+    response.writeHead(405);
+    response.end('CONNECT required');
+  });
+  proxyServer.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  proxyServer.on('connect', (request, socket, head) => {
+    if (request.url?.toLowerCase() !== 'api.anthropic.com:443') {
+      socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      return;
+    }
+    connections.push(request.url);
+    const upstream = connectSocket({ host: '127.0.0.1', port: tlsPort }, () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length > 0) upstream.write(head);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    });
+    sockets.add(upstream);
+    upstream.once('close', () => sockets.delete(upstream));
+    upstream.once('error', () => socket.destroy());
+  });
+  proxyServer.on('clientError', (_error, socket) => socket.destroy());
+  try {
+    await new Promise((resolveListen, reject) => {
+      proxyServer.once('error', reject);
+      proxyServer.listen(0, '127.0.0.1', resolveListen);
+    });
+  } catch (error) {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolveClose) => tlsServer.close(resolveClose));
+    rmSync(certificateDirectory, { recursive: true, force: true });
+    throw error;
+  }
+  const proxyAddress = proxyServer.address();
+  const port = typeof proxyAddress === 'object' && proxyAddress ? proxyAddress.port : 0;
+  if (!port) {
+    proxyServer.close();
+    tlsServer.close();
+    rmSync(certificateDirectory, { recursive: true, force: true });
+    throw new Error('Firefox provider proxy did not receive a port');
+  }
+  return {
+    port, records, connections, tlsErrors,
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await Promise.all([
+        new Promise((resolveClose) => proxyServer.close(resolveClose)),
+        new Promise((resolveClose) => tlsServer.close(resolveClose)),
+      ]);
+      rmSync(certificateDirectory, { recursive: true, force: true });
+    },
+  };
+};
+
+const runBoundActorSmoke = async (driver, providerServer) => {
+  console.log('Firefox bound actor smoke: run the packaged adapter through a local provider double');
+  const started = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const sent = await browser.runtime.sendMessage({
+          type: 'agent/send',
+          text: 'Delegate the Firefox actor proof and return its exact result.',
+        });
+        return { ok: sent?.ok === true, sendError: sent?.error ?? null };
+      })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+  `);
+  assert(started?.ok === true, 'Firefox starts the installed agent turn', JSON.stringify(started));
+
+  const actorProof = await waitFor(() => driver.executeAsync(`
+      const [actorCanary, finalCanary] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const root = listed?.sessions?.slice().sort((a, b) => b.createdAt - a.createdAt)[0];
+        if (!root?.sessionId) return null;
+        const debug = await send({ type: 'session/debugBundle', sessionId: root.sessionId });
+        if (!debug?.ok || !debug.bundle) return null;
+        const rootDone = debug.bundle.session?.messages?.some((message) =>
+          message.role === 'assistant'
+            && typeof message.content === 'string'
+            && message.content.includes(finalCanary));
+        const child = (debug.bundle.childSessions ?? []).find((session) =>
+          session.kind === 'actor' && session.actorType === 'web');
+        const actorDone = child?.messages?.some((message) =>
+          message.role === 'assistant'
+            && typeof message.content === 'string'
+            && message.content.includes(actorCanary));
+        if (!rootDone || !actorDone) return null;
+        const [audit, state] = await Promise.all([
+          send({ type: 'audit/list', limit: 500 }),
+          send({ type: 'state/get' }),
+        ]);
+        return {
+          ok: audit?.ok === true && state?.ok === true,
+          bundle: debug.bundle,
+          audit: audit?.entries ?? [],
+          state: state?.state ?? null,
+        };
+      })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+  `, [ACTOR_REPLY_CANARY, FINAL_REPLY_CANARY]), { budgetMs: 60_000, pollMs: 250 });
+
+  const timeoutDiagnostic = actorProof ? null : await driver.executeAsync(`
+    const done = arguments[arguments.length - 1];
+    const send = (message) => browser.runtime.sendMessage(message);
+    (async () => {
+      const listed = await send({ type: 'session/list' });
+      const root = listed?.sessions?.slice().sort((a, b) => b.createdAt - a.createdAt)[0];
+      const debug = root?.sessionId
+        ? await send({ type: 'session/debugBundle', sessionId: root.sessionId })
+        : null;
+      const summarize = (session) => ({
+        kind: session?.kind,
+        actorType: session?.actorType,
+        backing: session?.backing,
+        messages: (session?.messages ?? []).map((message) => ({
+          role: message.role,
+          content: typeof message.content === 'string' ? message.content.slice(0, 300) : '',
+          stopReason: message.stopReason,
+          toolUses: message.toolUses?.map((tool) => ({ name: tool.name, input: tool.input })),
+          toolResults: message.toolResults?.map((result) => ({
+            is_error: result.is_error, content: String(result.content ?? '').slice(0, 300),
+          })),
+        })),
+      });
+      return {
+        listOk: listed?.ok,
+        root: summarize(debug?.bundle?.session),
+        children: (debug?.bundle?.childSessions ?? []).map(summarize),
+        labels: (debug?.bundle?.contextSnapshots ?? []).map((snapshot) => snapshot.label),
+      };
+    })().then(done, (error) => done({ error: error?.message || String(error) }));
+  `);
+  const providerDiagnostic = providerServer.records.map((record) => ({
+    actor: record.body.includes('<actor_agent>'),
+    actorReply: record.body.includes(ACTOR_REPLY_CANARY),
+    keyHeaderPresent: record.headers['x-api-key'] === PROVIDER_KEY_CANARY,
+  }));
+  const transportDiagnostic = {
+    connections: providerServer.connections,
+    tlsErrors: providerServer.tlsErrors,
+  };
+  const failureDiagnostic = JSON.stringify({
+    timeoutDiagnostic, providerDiagnostic, transportDiagnostic,
+  })
+    .replaceAll(PROVIDER_KEY_CANARY, '<provider-key-canary-redacted>')
+    .replaceAll(PASSPHRASE_CANARY, '<passphrase-canary-redacted>');
+  assert(providerServer.connections.length > 0,
+    'Firefox routes the provider request through the local TLS proxy', failureDiagnostic);
+  assert(actorProof?.ok === true, 'the installed Firefox actor turn completes',
+    actorProof
+      ? JSON.stringify({ ok: actorProof.ok, error: actorProof.error })
+      : failureDiagnostic);
+  const child = actorProof.bundle.childSessions.find((session) =>
+    session.kind === 'actor' && session.actorType === 'web');
+  assert(child?.instanceId === 'web' && child?.backing === undefined,
+    'Firefox creates the chat-scoped web actor before it adopts a tab',
+    JSON.stringify(child ? {
+      kind: child.kind, actorType: child.actorType, instanceId: child.instanceId, backing: child.backing,
+    } : null));
+  assert(child.messages.some((message) => message.role === 'assistant'
+    && typeof message.content === 'string' && message.content.includes(ACTOR_REPLY_CANARY)),
+    'the bound actor stores its provider reply');
+  assert(actorProof.bundle.session.messages.some((message) => message.role === 'assistant'
+    && typeof message.content === 'string' && message.content.includes(FINAL_REPLY_CANARY)),
+    'the parent chat receives the actor result and returns a final reply');
+  assert(actorProof.bundle.contextSnapshots.some((snapshot) => snapshot.label === 'actor web (in-SW)'),
+    'the installed Firefox actor uses the in-service-worker route');
+  assert(!actorProof.audit.some((entry) => entry.type === 'actor_ran_offscreen'),
+    'Firefox does not claim offscreen heap isolation');
+  const storedProof = JSON.stringify({
+    bundle: actorProof.bundle, audit: actorProof.audit, state: actorProof.state,
+  });
+  assert(!storedProof.includes(PROVIDER_KEY_CANARY) && !storedProof.includes(PASSPHRASE_CANARY),
+    'installed Firefox session, state, audit, and debug data contain no exact credential canary');
+
+  const providerRequests = providerServer.records.filter((record) => record.method === 'POST');
+  const actorRequests = providerRequests.filter((record) => record.body.includes('<actor_agent>'));
+  const parsedRequests = providerRequests.map((record) => {
+    try { return JSON.parse(record.body); }
+    catch { return null; }
+  });
+  const parentContinuation = parsedRequests.find((request) =>
+    request?.messages?.some((message) => Array.isArray(message.content)
+      && message.content.some((block) => block?.type === 'tool_result'
+        && block.tool_use_id === 'firefox-actor-tool')));
+  const actorToolResult = parentContinuation?.messages
+    ?.flatMap((message) => Array.isArray(message.content) ? message.content : [])
+    .find((block) => block?.type === 'tool_result'
+      && block.tool_use_id === 'firefox-actor-tool');
+  const actorToolResultText = typeof actorToolResult?.content === 'string'
+    ? actorToolResult.content : '';
+  const fenceStart = actorToolResultText.indexOf(
+    '<untrusted_web_content origin="web" tool="message_actor"');
+  const canaryIndex = actorToolResultText.indexOf(ACTOR_REPLY_CANARY);
+  const fenceEnd = actorToolResultText.indexOf('</untrusted_web_content>');
+  assert(providerRequests.length >= 3, 'the real adapter reaches the provider for parent and actor turns',
+    String(providerRequests.length));
+  assert(actorRequests.length >= 1, 'the provider observes an actor-marked model request',
+    String(actorRequests.length));
+  assert(providerRequests.every((record) => record.headers['x-api-key'] === PROVIDER_KEY_CANARY),
+    'the installed provider boundary attaches the model-provider API key to every model request');
+  assert(actorToolResult?.tool_use_id === 'firefox-actor-tool'
+    && fenceStart >= 0 && canaryIndex > fenceStart && fenceEnd > canaryIndex,
+    'the awaited actor reply re-enters as the matching fenced tool result');
+  assert(providerRequests.every((record) => !record.body.includes(PROVIDER_KEY_CANARY)),
+    'provider request bodies contain no key canary');
+};
+
 const main = async () => {
   if (!firefoxBinary) throw new Error('Firefox not found. Set FIREFOX_PATH.');
   if (!geckodriverBinary) throw new Error('geckodriver not found. Set GECKODRIVER_PATH.');
@@ -105,15 +447,23 @@ const main = async () => {
     channel: 'store', browser: 'firefox', version: VERSION, sign: false, verify: true,
   });
   const server = await startTestServer();
-  const driver = await startGeckodriver({
-    binary: geckodriverBinary,
-    firefoxBinary,
-    prefs: {
-      'extensions.webextensions.uuids': JSON.stringify({ [ADDON_ID]: TEST_UUID }),
-    },
-  });
-
+  let providerServer = null;
+  let driver = null;
   try {
+    providerServer = await startProviderServer();
+    driver = await startGeckodriver({
+      binary: geckodriverBinary,
+      firefoxBinary,
+      acceptInsecureCerts: true,
+      proxy: {
+        proxyType: 'manual',
+        sslProxy: `127.0.0.1:${providerServer.port}`,
+        noProxy: ['localhost', '127.0.0.1'],
+      },
+      prefs: {
+        'extensions.webextensions.uuids': JSON.stringify({ [ADDON_ID]: TEST_UUID }),
+      },
+    });
     await driver.setWindowRect({ width: 400, height: 900, x: 0, y: 0 });
     console.log(`  installing ${artifact}`);
     const installedId = await driver.installAddon(resolve(artifact));
@@ -145,8 +495,8 @@ const main = async () => {
       const send = (message) => browser.runtime.sendMessage(message);
       (async () => {
         const before = await send({ type: 'state/get' });
-        const passphrase = 'firefox-runtime-passphrase-canary-7d12f198';
-        const providerKey = 'sk-ant-firefox-provider-canary-7d12f198';
+        const passphrase = ${JSON.stringify(PASSPHRASE_CANARY)};
+        const providerKey = ${JSON.stringify(PROVIDER_KEY_CANARY)};
         const sensitiveNames = new Set([
           'key', 'plaintext', 'passphrase', 'prfoutput', 'apikey', 'secret',
           'keymaterial', 'accesstoken', 'providertoken', 'providerkey',
@@ -220,6 +570,8 @@ const main = async () => {
       'Firefox refuses a wrong vault passphrase', JSON.stringify(background));
     assert(background?.locked === true && background?.unlocked === true,
       'Firefox locks and unlocks the vault with the same passphrase', JSON.stringify(background));
+
+    await runBoundActorSmoke(driver, providerServer);
 
     const scriptingFlow = await driver.executeAsync(`
       const done = arguments[arguments.length - 1];
@@ -312,6 +664,14 @@ const main = async () => {
       "return document.readyState === 'complete' && document.querySelector('.topbar') !== null;",
     ), { budgetMs: 30_000 });
     assert(remounted === true, 'packaged Firefox side panel receives the unlocked state');
+    const renderedActorTurn = await waitFor(() => driver.execute(`
+      const messages = document.querySelector('.message-list')?.innerText ?? '';
+      const actorCard = [...document.querySelectorAll('.tool-call.tool-actor .tool-name')]
+        .some((node) => node.textContent === 'message_actor');
+      return messages.includes(${JSON.stringify(FINAL_REPLY_CANARY)}) && actorCard;
+    `), { budgetMs: 30_000 });
+    assert(renderedActorTurn === true,
+      'packaged Firefox renders the actor card and final answer in the side panel');
     // Let the one-shot wordmark intro settle so diagnostics show the final UI,
     // without changing the motion preference used by the browser test suite.
     await new Promise((resolveWait) => setTimeout(resolveWait, 1_700));
@@ -394,14 +754,16 @@ const main = async () => {
     console.log('Firefox Store smoke + Gecko suite OK');
   } catch (error) {
     try {
+      if (!driver) throw new Error('Firefox driver did not start');
       const screenshot = await driver.screenshot();
       writeFileSync(join(OUTPUT, 'failure.png'), Buffer.from(screenshot, 'base64'));
     } catch { /* the browser may already be gone */ }
-    const geckoLog = driver.logs.join('');
+    const geckoLog = driver?.logs.join('') ?? '';
     if (geckoLog) writeFileSync(join(OUTPUT, 'geckodriver.log'), geckoLog);
     throw error;
   } finally {
-    await driver.close();
+    await driver?.close();
+    await providerServer?.close();
     await server.close();
   }
 };

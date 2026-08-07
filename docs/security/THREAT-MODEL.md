@@ -31,14 +31,17 @@ will eventually be prompt-injected, and that no content filter reliably prevents
 this. peerd does not rely on filtering. Instead it separates untrusted reasoning
 from dangerous capability in three ways:
 
-1. Memory. The reasoning that reads a page runs in a separate worker heap that
-   holds no key and no network access.
+1. Memory. Where the browser provides an isolated host, reasoning that reads a
+   page runs in a separate worker heap. Firefox currently uses the keyless
+   in-service-worker fallback described in R1, without heap isolation.
 2. Policy. Every tool call is checked at dispatch against a fixed set of gates.
 3. Chokepoints. All outbound network traffic and all signing pass through a single
    audited path.
 
-Injected text can influence a reasoning context, but the context that reads
-untrusted content does not hold the key or the network capability.
+Injected text can influence a reasoning context, but the actor loop does not
+receive live vault or provider-egress functions. Tool and model calls still pass
+through service-worker policy. An isolated host also keeps the reasoning out of
+the service-worker heap.
 
 ---
 
@@ -49,8 +52,8 @@ between them.
 
 | Surface | What runs there | Holds the key |
 |---|---|---|
-| Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays | Yes. The vault key and API key live only here |
-| Offscreen document (`offscreen/`) | Per-actor and per-actor worker heaps, headless `script`, voice, the dweb base network | No. Worker heaps are keyless |
+| Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays. Firefox also runs fallback actor loops here | Yes. Fallback actor loop frames receive no live credential functions, but share this realm |
+| Offscreen document (`offscreen/`, Chrome) | Hosts isolated actor workers, headless `script`, voice, and the dweb base network | No. Actor worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
@@ -77,22 +80,24 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
 | The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
 | A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| An actor | A short-lived actor spawned to break down a task. Keyless, own heap, a narrowed toolset | Escalate past its grant, hold the key, or reach another heap. Every tool call is re-checked in the service worker |
-| The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
+| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset. It gets its own heap when an isolated host is available | Escalate past its grant or hold the key. Every tool call is re-checked in the service worker |
+| The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, with its own heap when an isolated host is available | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
 ### 3.2 Trust boundaries
 
-- B1. Untrusted content and the orchestrator's heap. This is the most important
-  boundary. Page text, command output, file contents, and peer bytes are read only
-  inside a keyless actor or actor worker heap, and return to the orchestrator
-  only as `wrapUntrusted`-fenced data. Enforced by the heap split
+- B1. Untrusted content and the orchestrator's heap. When an isolated host is
+  available, page text, command output, file contents, and peer bytes are read in
+  a separate keyless actor worker and return only as `wrapUntrusted`-fenced data
   (`peerd-runtime/actor/actor-worker-core.js`,
-  `background/offscreen-actor-client.js`).
-- B2. An agent heap and the network or the key. Model calls and tool calls leave a
-  worker only through two service-worker-gated relays. The service worker adds
-  `getSecret` and `safeFetch` and re-checks the call. It does not trust the
-  worker's arguments.
+  `background/offscreen-actor-client.js`). Firefox currently shares the
+  service-worker realm. Its actor loop still receives throwing credential stubs,
+  but it does not have this memory boundary. See R1.
+- B2. An actor loop and the network or the key. On the isolated path, model and
+  tool calls leave the worker only through service-worker-gated relays. On the
+  fallback path, the loop receives throwing credential stubs. In both cases the
+  service worker adds live provider functions only at the model-call boundary
+  and re-checks every tool call.
 - B3. The extension and the open web. All outbound bytes pass through
   `peerd-egress/fetch/`: `safeFetch` (exact-origin provider allowlist, carries the
   key) or `webFetch` (SSRF and private-network block plus denylist, keyless).
@@ -117,12 +122,12 @@ malicious separate extension, and physical device access.
 
 | Asset | Where it lives | Primary protection |
 |---|---|---|
-| Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never enters a keyless heap, egress allowlist |
+| Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never handed to an actor loop, egress allowlist |
 | Origin-bound API keys (per integration) | Vault, injected at the egress boundary only | `origin-credentials.js`. Sent only to the exact owned https origin |
 | Proof-of-possession key (DPoP, per origin — opt-in per integration) | A non-extractable `CryptoKey` handle in IndexedDB — the key material never leaves the browser's crypto implementation and peerd never holds it as bytes | Non-extractable by construction, checked at generate and on every load (`usableDpopPrivateKey`; `exportKey` rejects for every caller, including us); usable only at the audited egress boundary, which mints a fresh per-request proof and never exposes one to the agent. Minted when the user saves a DPoP credential, retired when they remove it (INV-15) |
 | The user's session cookies (logged-in tabs) | The browser's cookie jar. peerd never reads cookies | Sensitive-origin denylist, Plan and Act mode, confirm gate |
 | User authentication factor (login) | Never held by the agent — a passkey stays on the user's device; an SSO session stays with the provider; a password is never read or filled | The agent never holds it; a login is initiated only through a gated, origin-verified, always-confirmed, affordance-verified action (`tools/defs/login.js`, Tier 0). The factor stays with the user |
-| Page content the agent reads | Transiently, inside an actor heap | The memory boundary (B1) and the untrusted-content fence |
+| Page content the agent reads | Transiently, inside an actor loop | Credential custody, actor tool gates, the untrusted-content fence, and the B1 memory boundary where an isolated host is available |
 | Durable memory (notes loaded into every future prompt) | `peerd-runtime/memory/` | User-approved writes. The digest excludes tool results (see residual risk R2) |
 | Local files (WebVM filesystem, Notebook and App OPFS) | Sandbox-local storage | Per-instance OPFS root, path-traversal collapse, realm seal |
 | Peer bundles (dwapps, data, agent cards) | Received over the mesh | Content addressing, Ed25519 signatures, size and shape caps |
@@ -142,12 +147,13 @@ Can: serve arbitrary HTML, JS, and text, plant prompt-injection payloads in cont
 the agent reads, try to induce fetches, and run script in its own origin.
 Cannot: reach the vault key, run in a privileged context, or make the agent's
 authority act outside its gates.
-Defenses: the memory boundary keeps page bytes out of the orchestrator's heap (B1).
-The web actor that reads the page is keyless (`actor/spawn.js`
-`restrictCtxCapabilities` strips `getSecret` and `safeFetch`). The credentialed
-egress path is an exact-origin allowlist (`safeFetch`). Open-web fetches are gated
-by the SSRF block and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced
-with a delimiter the page cannot forge (`tools/prompt-wrap.js`).
+Defenses: where an isolated host is available, the memory boundary keeps page
+bytes out of the orchestrator's heap (B1). Every web actor loop is keyless: the
+isolated worker receives stubs in `actor-worker-core.js`, and the Firefox fallback
+receives stubs in `loop/turn-driver.js`. The credentialed egress path is an
+exact-origin allowlist (`safeFetch`). Open-web fetches are gated by the SSRF block
+and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced with a delimiter
+the page cannot forge (`tools/prompt-wrap.js`).
 Proven by: scenarios 01, 02, 03, 07, 08.
 
 ### 5.2 Malicious MCP server (mapped)
@@ -185,9 +191,11 @@ Defenses: the gate stack (`tools/gates.js`). The exposure gate hides low-level D
 and page tools from the main turn. The actor-tier gate pins each actor to its kind's
 toolset and instance and refuses actor-only tools on non-actor contexts. Plan and Act
 mode blocks writes (`permissions/policy.js`). The origin gate applies the denylist.
-Every tool call carries an append-only audit entry. The heap split means a model call
-cannot smuggle the key across the postMessage boundary (`actor-worker-core.js`
-`makeRelayedCallModel` strips every function).
+Every tool call carries an append-only audit entry. On the isolated path,
+`actor-worker-core.js` strips every function before the model request crosses the
+`postMessage` relay. On the fallback path, the actor loop receives throwing
+credential stubs and the service-worker-owned provider wrapper overwrites its
+credential fields at the call boundary.
 Proven by: scenarios 03, 08 (and 05 for delegation).
 
 ### 5.5 Malicious extension (out of scope, see section 7)
@@ -246,14 +254,28 @@ Code: `peerd-egress/denylist/denylist.js`, `fetch/web-fetch.js`,
 `fetch/origin-credentials.js` (`authOriginForRequestUrl`). Red-team: scenario 02.
 
 <a id="inv-3"></a>
-### INV-3. The heap that reads a page holds no secret and returns only fenced data
-The web, actor, and actor worker heap has `getSecret` and `safeFetch`
-unconditionally stripped (`restrictCtxCapabilities`), cannot pass a function or key
-across the model-call boundary (`makeRelayedCallModel` drops every function), and its
-untrusted summary re-enters the orchestrator wrapped as data (`makeActorSummaryFence`
-and `wrapUntrusted`) with a delimiter the content cannot forge (`neutralizeFence`).
+### INV-3. Actor loops receive no live credential functions and return fenced data
+Every actor loop receives throwing `getSecret` and `safeFetch` stubs. This is
+enforced in `actor-worker-core.js` for isolated workers, `actor/spawn.js` for the
+spawned in-service-worker fallback, and `loop/turn-driver.js` for the bound
+fallback. Service-worker-owned wrappers add the live functions only at the model
+provider boundary. An isolated worker also cannot pass functions across its relay
+because `makeRelayedCallModel` drops them. Every untrusted summary re-enters the
+orchestrator wrapped as data (`makeActorSummaryFence` and `wrapUntrusted`) with a
+delimiter the content cannot forge (`neutralizeFence`). The Firefox fallback has
+credential custody but not heap isolation. See R1.
 Code: `peerd-runtime/actor/spawn.js`, `peerd-runtime/actor/actor-worker-core.js`,
-`tools/prompt-wrap.js`. Red-team: scenario 03.
+`peerd-runtime/loop/turn-driver.js`, `tools/prompt-wrap.js`.
+
+The proof is composite. Red-team scenario 03 drives the production turn driver to
+check the bound fallback stubs and broker-owned field overwrite, then checks the
+isolated relay and result fence. The browser test in
+`extension/tests/unit/peerd-runtime/turn-driver-credentials.test.js` runs the real
+turn driver and agent loop together. The installed-XPI Firefox smoke in
+`scripts/firefox/run-runtime-tests.mjs` proves that the packaged browser takes the
+in-service-worker route, attaches the key only at the provider request boundary,
+and returns the actor result through the matching untrusted-content fence. The XPI
+smoke does not claim heap isolation or inspect JavaScript closure reachability.
 
 <a id="inv-4"></a>
 ### INV-4. A tampered or re-attributed peer bundle is detectable and rejected
@@ -325,7 +347,8 @@ Code: `peerd-egress/fetch/private-network.js`, `fetch/web-fetch.js`,
 <a id="inv-8"></a>
 ### INV-8. Injected instructions cannot reach a capability
 For a corpus of injection payloads, the authority each one seeks is denied by a real
-mechanism: exfil is denied by the keyless heap and the allowlist, navigation to a
+mechanism: exfil is denied by keyless loop custody, tool gates, and the allowlist,
+navigation to a
 sensitive site by the denylist, SSRF by the private-network guard, a low-level DOM tool
 on the main turn by the exposure gate, an actor-only tool via an actor by the tier
 gate, a cross-instance call by the instance pin, a write in Plan mode by Plan and Act
@@ -547,8 +570,9 @@ verifies against its persisted public key; the Bun tier can only prove this over
 
 ### In scope
 - Exfiltration of the vault, API key, or conversation off-device.
-- Prompt injection that bypasses the actor boundary (the keyless per-environment heap)
-  and reaches the orchestrator's tools, memory, or the key.
+- Prompt injection that bypasses actor credential custody, tool gates, the
+  untrusted-content fence, or the isolated heap where available, and reaches the
+  orchestrator's tools, memory, or key.
 - Sandbox escape (WebVM, Notebook, App iframe) reaching the host, other origins, or
   privileged extension contexts.
 - Denylist, egress-chokepoint, or SSRF-guard bypass.
@@ -576,31 +600,25 @@ verifies against its persisted public key; the Bun tier can only prove this over
 These are stated plainly. Several are deliberate tradeoffs. All are things a reader
 evaluating peerd should know. Each cites where it lives in the code.
 
-- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox — and for
-  a run that never started offscreen — the actor falls back to an in-service-worker
-  loop where the boundary is a prompt boundary rather than a memory boundary, which
-  is the pre-heap-split posture. The memory boundary is not universal.
+- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox, and for
+  a run that never started offscreen, the actor falls back to an in-service-worker
+  loop. Capability gates and keyless loop custody still apply, but the memory
+  boundary is not universal.
   (`background/service-worker.js` offscreen fallback.)
 
-  Scoped precisely, because the two fallback lanes differ:
+  Both fallback lanes keep live credentials out of the loop frame:
 
-  - A SPAWNED (ephemeral) child is keyless in the same sense the offscreen worker is.
-    `restrictCtxCapabilities` strips `getSecret`/`safeFetch` from the tool context
-    unconditionally, and the loop itself is handed throwing stubs while the real
-    credentials are closed over by the SW-owned `callModel` wrapper and added at the
-    call boundary (`actor/spawn.js`, `keylessCredentials`).
-  - A BOUND actor (web, webvm, notebook, app, dweb) does NOT take that path. With no
-    offscreen client, `runActorTurnOffscreen` returns null and the turn falls through
-    to `runAgentTurn`, which comes from the turn driver and forwards the live
-    `getSecret`/`safeFetch` into the loop. So on Firefox a web actor ingesting page
-    content, and the dweb actor consuming peer bytes, still run with live credentials
-    reachable from the loop frame.
+  - A spawned child receives throwing `getSecret` and `safeFetch` stubs. Its
+    service-worker-owned model wrapper adds the live functions at the provider call
+    boundary (`actor/spawn.js`, `keylessCredentials`).
+  - A bound actor receives the same custody when it falls through to `runAgentTurn`.
+    The turn driver derives the posture from the persisted session kind and adds the
+    live functions only inside its provider wrapper (`loop/turn-driver.js`).
 
   Neither lane has heap separation, which is the deeper point: the child's untrusted
   transcript shares a realm with the vault broker and the engine clients, so a
   memory-disclosure bug there is not fenced the way it is on Chrome. Extending the
-  stub custody to the bound-actor lane, and retiring this branch in favor of an
-  isolated Firefox host — or failing closed — is P0-1 in
+  isolated host to Firefox, or failing closed when it is unavailable, remains P0-1 in
   [`HARDENING-ROADMAP.md`](HARDENING-ROADMAP.md).
 - R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
   synthetic messages, but still includes raw assistant text, which can echo
@@ -664,7 +682,8 @@ evaluating peerd should know. Each cites where it lives in the code.
   (`tests/peerd-runtime/system-prompt-framing.test.ts`), so a template edit that
   strips that framing fails CI. What is still not covered: whether that framing is
   actually persuasive to the model. The framing is a soft defense; the structural
-  defenses (the keyless heap, the gates) are the real story. The red-team benchmark
+  defenses (keyless loop custody, the isolated heap where available, and the gates)
+  are the real story. The red-team benchmark
   (scenario 08) tests the gates, not the prompt text.
   (`peerd-provider/system-prompt.txt`, `peerd-runtime/loop/system-prompt.js`.)
 - R11. Open-web exfil, and what is left of key extractability. The extractability half is

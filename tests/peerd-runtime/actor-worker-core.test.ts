@@ -113,13 +113,13 @@ describe('runActorLoop', () => {
     expect(dispatched).toBe(false);   // a tool-less child never dispatches
   });
 
-  test('the loop never receives a real getSecret/safeFetch (the worker holds no key/egress)', async () => {
+  test('the worker loop receives named credential-boundary stubs', async () => {
     const sessions = makeInMemorySessions({ sessionId: 'act-1' });
-    let secretThrew = false;
-    let fetchThrew = false;
+    let secretError: unknown = null;
+    let fetchError: unknown = null;
     const probeLoop = async function* (ctx: any) {
-      try { await ctx.getSecret('anything'); } catch { secretThrew = true; }
-      try { await ctx.safeFetch('https://x'); } catch { fetchThrew = true; }
+      try { await ctx.getSecret('anything'); } catch (error) { secretError = error; }
+      try { await ctx.safeFetch('https://x'); } catch (error) { fetchError = error; }
       await ctx.sessions.appendMessage(ctx.sessionId, { id: 'a', role: 'assistant', content: 'done' });
       yield { type: 'stop', stopReason: 'end_turn' };
     };
@@ -127,8 +127,14 @@ describe('runActorLoop', () => {
       { runUserTurn: probeLoop as any, sessions, callModel: (async function* () {})() as any, toolDispatch: async () => ({}), getSystemPrompt: () => 'S', tools: [] },
       { sessionId: 'act-1', userText: 't', maxSteps: 5 },
     );
-    expect(secretThrew).toBe(true);   // getSecret in the worker is a throwing stub
-    expect(fetchThrew).toBe(true);    // safeFetch too — no egress in the heap
+    expect(secretError).toEqual(expect.objectContaining({
+      name: 'ActorCredentialBoundaryError',
+      capability: 'secret',
+    }));
+    expect(fetchError).toEqual(expect.objectContaining({
+      name: 'ActorCredentialBoundaryError',
+      capability: 'provider-network',
+    }));
   });
 
   test('preserves inbound as a synthetic, explicitly untrusted loop turn', async () => {

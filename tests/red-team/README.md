@@ -43,12 +43,12 @@ to prompt injection.
 |---|--------|-------------------------------|
 | 01 | Malicious page exfiltrates the API key | `safeFetch` exact-origin allowlist and redirect fail-closed |
 | 02 | Malicious page induces a cross-origin fetch | sensitive-origin denylist and origin-bound credential gate |
-| 03 | Malicious page summarizes secrets into model context | keyless actor heap, model-call function strip, untrusted-data fence |
+| 03 | Malicious page summarizes secrets into model context | actor-loop credential custody, model-call function strip, untrusted-data fence |
 | 04 | Malicious peer sends a hostile bundle | content address, Ed25519 signature, amplification guard, card caps |
 | 05 | Malicious MCP server or peer poisons tools | sender gate, mesh-op validation, signing consent |
 | 06 | Malicious iframe or sandboxed code escapes | Notebook realm seal, App-iframe shim, WebVM HTTP bridge |
 | 07 | Private-network URL attempts SSRF | `isPrivateOrLocalHost` guard and redirect fail-closed |
-| 08 | Prompt-injection benchmark versus browser-use agents | keyless heap, exposure and tier gates, Plan mode, denylist, fence |
+| 08 | Prompt-injection benchmark versus browser-use agents | actor tool-context credential stripping, exposure and tier gates, Plan mode, denylist, fence |
 | 09 | Hostile page content steers reads, writes, or egress | content disarmament, user-generated-content confirmation, egress checks |
 | 10 | A moved or redirected tab retasks a web actor | origin lock, landing checks, trusted terminal reply |
 | 11 | Login orchestration captures a credential | verified affordance, fixed confirmation, user-held authentication factor |
