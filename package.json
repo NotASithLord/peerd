@@ -55,6 +55,7 @@
     "check:firefox": "bun packaging/check-firefox.ts",
     "check:docpaths": "bun packaging/check-doc-paths.ts",
     "check:hygiene": "bun packaging/check-source-hygiene.ts",
+    "check:copy": "bun packaging/check-copy-hygiene.ts",
     "check:vendor": "bun packaging/check-vendor.ts",
     "check:invariants": "bun packaging/check-invariants.ts",
     "verify:store": "bun packaging/verify-store-artifact.ts",
