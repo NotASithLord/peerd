@@ -111,6 +111,7 @@ import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/failure-chip.test.js';
+import './unit/sidepanel/actor-isolation.test.js';
 import './unit/sidepanel/confirm-note.test.js';
 import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/options/activity-origin-events.test.js';

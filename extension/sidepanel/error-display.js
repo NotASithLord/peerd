@@ -21,6 +21,7 @@ export const mapError = (e) => {
   if (e === 'provider-key-missing') return 'No API key yet — add one in Settings.';
   if (e === 'unknown-provider') return 'No provider registered yet.';
   if (e === 'session-not-found') return 'Session was reset mid-turn.';
+  if (e === 'actor-recovery-pending') return 'Actor recovery is still being recorded. Wait a moment, then send again.';
   if (e === 'spend-limit-reached') return 'Spend limit reached — the agent was halted. Raise the limit in Settings to continue.';
 
   // Hard account limit (out of credit / over a spend or usage cap). The SW's

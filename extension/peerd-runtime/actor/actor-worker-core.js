@@ -23,7 +23,7 @@
 //     SW-side). why the SW MUST re-pin+gate: the worker's `call` args are
 //     attacker-influenceable (they derive from injected instance/page output), so
 //     the SW never trusts them — it force-pins the bound instance and runs the
-//     full gate, exactly as the in-SW actor path does.
+//     full gate, exactly as the privileged host policy requires.
 //
 // PURE / injected-IO → Bun-testable without a Worker: the imperative shell
 // (offscreen/actor-worker.js) wires self.postMessage/onmessage to these functions;
@@ -242,12 +242,12 @@ export const runActorLoop = async (deps, req) => {
     // worker cannot turn an inbound peer wake into a trusted continuation.
     ...(inbound === true ? { synthetic: true, trusted: false, inbound: true } : {}),
     ...(signal ? { signal } : {}),
-    // maxSteps: omit when undefined so runUserTurn uses its OWN default (parity
-    // with the in-SW actor path, which passes none). Only cap when the caller asks.
+    // maxSteps: omit when undefined so runUserTurn uses its OWN default. Only
+    // cap when the caller asks.
     ...(maxSteps != null ? { maxSteps } : {}),
     // oneShot: a message_actor delegation may ask the loop to synthesize its reply
     // from the first clean tool round and stop (no summarize inference) — parity
-    // with the in-SW path (turn-driver threads it to runAgentTurn).
+    // with the bound-actor contract.
     ...(oneShot === true ? { oneShot: true } : {}),
     // A web/API actor self-fences its own untrusted-provenance rolling summary on a
     // context trim (heap-split phase 3); absent for engine actors → summary verbatim.

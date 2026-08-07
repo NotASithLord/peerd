@@ -21,6 +21,7 @@ export const makeSystemRoutes = (deps) => {
     inspectImport, applyImport, settingsStore, saveUserHook,
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
     onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
+    retryActorIsolation,
   } = deps;
 
   return {
@@ -29,6 +30,7 @@ export const makeSystemRoutes = (deps) => {
     // pushed over its port, but deliberately holds no port. It fetches on
     // load and refetches on focus; sendMessage also revives a dead SW.
     'state/get': async () => ({ ok: true, state: await buildStateSnapshot() }),
+    'actor-isolation/retry': async () => retryActorIsolation(),
 
     // --- logs (human-facing audit log) ---
     // The agent can already introspect this (inspect kind:'audit_log'); this route

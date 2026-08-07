@@ -12,13 +12,16 @@
  * @param {(sender: unknown) => boolean} deps.isActualHomeSender
  * @param {(sessionId: string) => boolean} deps.isSessionBusy
  * @param {(rootSessionId: string) => boolean} deps.hasInFlightFor
+ * @param {() => Promise<boolean>} deps.actorRecoveryReady
+ * @param {(messages: unknown) => Map<string, { humanMessageId: string, toolUseIds: string[] }>} deps.contributorFeedbackTargets
  * @param {string} deps.channel
  * @returns {Record<string, Function>}
  */
 export const makeContributorRoutes = (deps) => {
   const {
     contributorStore, sessions, isActualOptionsSender, isActualSidepanelSender,
-    isActualHomeSender, isSessionBusy, hasInFlightFor, channel,
+    isActualHomeSender, isSessionBusy, hasInFlightFor, actorRecoveryReady,
+    contributorFeedbackTargets, channel,
   } = deps;
   // Store/web builds retain their existing no-contribution posture. Returning
   // no handlers is stronger than a UI-only gate: another first-party page
@@ -50,6 +53,12 @@ export const makeContributorRoutes = (deps) => {
     if (typeof msg.sessionId !== 'string' || typeof msg.messageId !== 'string') {
       return { ok: false, error: 'invalid-feedback-target' };
     }
+    // A background restart clears the live actor counters before durable
+    // mailbox recovery has written its passive receipts. Fail closed during
+    // that window so an old assistant answer cannot be labeled final first.
+    if (typeof actorRecoveryReady !== 'function' || !(await actorRecoveryReady())) {
+      return { ok: false, error: 'actor-recovery-pending' };
+    }
     // A tool-use step is pushed before dispatch, so message persistence alone
     // cannot prove that the answer is final. The live slot is authoritative;
     // fail closed if the dependency is absent or this chat is still running.
@@ -58,47 +67,26 @@ export const makeContributorRoutes = (deps) => {
       return { ok: false, error: 'invalid-feedback-target' };
     }
     const session = await sessions.get(msg.sessionId).catch(() => null);
+    // Recheck after the storage await: an actor can settle and queue/claim its
+    // parent reply while the session read is in flight.
+    if (isSessionBusy(msg.sessionId) || hasInFlightFor(msg.sessionId)) {
+      return { ok: false, error: 'invalid-feedback-target' };
+    }
     if (!session || session.kind === 'actor' || session.kind === 'spawned') {
       return { ok: false, error: 'invalid-feedback-target' };
     }
     const messages = Array.isArray(session.messages) ? session.messages : [];
-    const targetIndex = messages.findIndex((/** @type {any} */ message) =>
-      message?.id === msg.messageId && message?.role === 'assistant'
-        && typeof message?.content === 'string' && message.content.length > 0
-        && message?.streaming !== true && !message?.error
-        && (!Array.isArray(message?.toolUses) || message.toolUses.length === 0)
-        && message?.stopReason === 'end_turn');
-    if (targetIndex < 0) return { ok: false, error: 'invalid-feedback-target' };
-    const laterInTurn = messages.slice(targetIndex + 1).find((/** @type {any} */ message) => {
-      const nextHumanTurn = message?.role === 'user' && message?.synthetic !== true
-        && typeof message?.content === 'string' && message.content.length > 0;
-      return nextHumanTurn || message?.role === 'assistant';
-    });
-    if (laterInTurn?.role === 'assistant') {
+    if (typeof contributorFeedbackTargets !== 'function') {
       return { ok: false, error: 'invalid-feedback-target' };
     }
-    let turnStart = targetIndex - 1;
-    while (turnStart >= 0) {
-      const candidate = messages[turnStart];
-      if (candidate?.role === 'user' && candidate?.synthetic !== true
-          && typeof candidate?.content === 'string' && candidate.content.length > 0) break;
-      turnStart -= 1;
-    }
-    const humanTurn = messages[turnStart];
-    if (turnStart < 0 || typeof humanTurn?.id !== 'string' || humanTurn.id.length === 0) {
-      return { ok: false, error: 'invalid-feedback-target' };
-    }
-    const contextKeys = messages.slice(turnStart + 1, targetIndex + 1)
-      .flatMap((/** @type {any} */ message) => Array.isArray(message?.toolUses) ? message.toolUses : [])
-      .map((/** @type {any} */ toolUse) => typeof toolUse?.id === 'string'
-        ? `${msg.sessionId}:${toolUse.id}`
-        : null)
-      .filter(Boolean);
+    const target = contributorFeedbackTargets(messages).get(msg.messageId);
+    if (!target) return { ok: false, error: 'invalid-feedback-target' };
+    const contextKeys = target.toolUseIds.map((toolUseId) => `${msg.sessionId}:${toolUseId}`);
     const result = await contributorStore.recordFeedback({
       // A provider retry may replace the final assistant record while the real
       // human turn remains the same. Pinning to that user message preserves one
       // idempotent verdict for the task instead of one vote per generated reply.
-      selectionKey: `${msg.sessionId}:${humanTurn.id}`,
+      selectionKey: `${msg.sessionId}:${target.humanMessageId}`,
       verdict: msg.verdict,
       candidateContextKeys: contextKeys,
     });

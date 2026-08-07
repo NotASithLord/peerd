@@ -186,8 +186,15 @@ export async function* callLocalWebgpu({ messages, system, model = LOCAL_MODEL_I
   }
   let outTokens = 0;
   try {
+    // The local-model transport needs only role + content. Project that exact
+    // shape before runtime messaging so host-only custody ids never cross a
+    // provider boundary, even to an on-device provider.
+    const transportMessages = messages.map((/** @type {any} */ message) => ({
+      role: message?.role,
+      content: message?.content,
+    }));
     const tokenStream = (async function* () {
-      for await (const tok of generateLocal({ messages, system, tools, model, signal })) {
+      for await (const tok of generateLocal({ messages: transportMessages, system, tools, model, signal })) {
         outTokens += 1; // ~one streamer chunk ≈ one token (good enough for the cost split)
         yield tok;
       }

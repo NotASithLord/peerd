@@ -1,5 +1,5 @@
 // @ts-check
-// Contributor Metrics — the closed, local-only contribution core.
+// Contributor Metrics: the closed, local-only contribution core.
 //
 // This is deliberately NOT an analytics/event API. Callers may fold only the
 // two reviewed v1 facts below: one settled web-actor turn, or one settled page

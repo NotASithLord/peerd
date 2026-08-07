@@ -31,6 +31,7 @@ const baseDeps = (over: any = {}) => {
       startGoalRun: async (req: any) => { calls.goal.push(req); },
       haltGoalRun: (sid: string) => { calls.halted.push(sid); },
       ensureSession: async () => 'a',
+      actorRecoveryReady: async () => true,
       handleSystemCommand: async (a: string) => { calls.system.push(a); },
       handleToolsCommand: async (a: string) => { calls.tools.push(a); },
       postChatNote: () => {},
@@ -68,6 +69,17 @@ describe('agent/send slash-command routing', () => {
     expect(calls.goal).toEqual([{ sessionId: 'a', goal: 'build a drum machine' }]);
     expect(calls.turns.length).toBe(0);
   });
+  test('recovery pending refuses a goal before creating or starting it', async () => {
+    let ensured = false;
+    const { deps, calls } = baseDeps({
+      actorRecoveryReady: async () => false,
+      ensureSession: async () => { ensured = true; return 'a'; },
+    });
+    expect(await makeSessionRoutes(deps)['agent/send']({ text: 'build it', goal: true }))
+      .toEqual({ ok: false, error: 'actor-recovery-pending' });
+    expect(ensured).toBe(false);
+    expect(calls.goal).toEqual([]);
+  });
   test('a plain message halts an active goal run (steer-takeover)', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionRoutes(deps)['agent/send']({ text: 'hello' });
@@ -87,6 +99,19 @@ describe('agent/send slash-command routing', () => {
     await makeSessionRoutes(deps)['agent/send']({ text: '/tools research' });
     expect(calls.system).toEqual(['be terse']);
     expect(calls.tools).toEqual(['research']);
+  });
+  test('recovery pending refuses a model turn without halting its goal', async () => {
+    const { deps, calls } = baseDeps({ actorRecoveryReady: async () => false });
+    expect(await makeSessionRoutes(deps)['agent/send']({ text: 'hello' }))
+      .toEqual({ ok: false, error: 'actor-recovery-pending' });
+    expect(calls.turns).toEqual([]);
+    expect(calls.halted).toEqual([]);
+  });
+  test('local slash commands remain available while recovery is pending', async () => {
+    const { deps, calls } = baseDeps({ actorRecoveryReady: async () => false });
+    expect(await makeSessionRoutes(deps)['agent/send']({ text: '/system be terse' }))
+      .toEqual({ ok: true, handled: 'system' });
+    expect(calls.system).toEqual(['be terse']);
   });
   test('plain message runs a turn with composer-expanded text', async () => {
     const { deps, calls } = baseDeps();

@@ -79,11 +79,11 @@ _Last run: 2026-08-07 · Bun 1.3.9 · 11 scenarios._
 - Asset: API key + any vault secret + the orchestrator’s authority
 - Claim checked: Actor loops receive no live credential functions, broker-owned provider fields are restored only at the model boundary, isolated relays drop functions, and actor results return as structurally-fenced untrusted data.
 - Threat-model invariant: INV-3
-- Defenses exercised: makeTurnDriver (bound fallback custody and broker overwrite), restrictCtxCapabilities (tool-context narrowing), makeRelayedCallModel (isolated boundary function strip), makeActorSummaryFence + wrapUntrusted (untrusted-data fence), neutralizeFence (structural break-out defense)
+- Defenses exercised: makeTurnDriver (background actor refusal), restrictCtxCapabilities (tool-context narrowing), makeRelayedCallModel (isolated boundary function strip), makeActorSummaryFence + wrapUntrusted (untrusted-data fence), neutralizeFence (structural break-out defense)
 
 | Probe (adversary action) | Result | Evidence |
 |--------------------------|--------|----------|
-| bound Firefox actor tries to carry live credentials and broker fields in its loop frame | blocked | secret=ActorCredentialBoundaryError/secret network=ActorCredentialBoundaryError/provider-network provider=anthropic/claude-test brokerCredentials=true |
+| bound actor tries to enter the privileged background loop | blocked | result=undefined loopEntered=false modelCalled=false refused=true releases=1 |
 | actor granted [read_memory] tries to read a secret | blocked | getSecret & safeFetch stripped from the narrowed ctx; input untouched |
 | actor granted [read_page, click, type] tries to read a secret | blocked | getSecret & safeFetch stripped from the narrowed ctx; input untouched |
 | actor granted [script, read_memory, write_memory] tries to read a secret | blocked | getSecret & safeFetch stripped from the narrowed ctx; input untouched |

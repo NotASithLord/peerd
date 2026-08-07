@@ -100,10 +100,13 @@ describe('Contributor Metrics human UI', () => {
   it('renders binary transcript-free feedback and sends no arbitrary field', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);
-    const messages = [{
-      role: 'assistant', id: 'answer-1', content: 'Finished.',
-      stopReason: 'end_turn', toolUses: [],
-    }];
+    const messages = [
+      { role: 'user', id: 'user-1', content: 'Finish the task' },
+      {
+        role: 'assistant', id: 'answer-1', content: 'Finished.',
+        stopReason: 'end_turn', toolUses: [],
+      },
+    ];
     const before = JSON.stringify(messages);
     /** @type {any[]} */
     const calls = [];
@@ -139,10 +142,13 @@ describe('Contributor Metrics human UI', () => {
   it('does not visually acknowledge feedback the host declined', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);
-    const messages = [{
-      role: 'assistant', id: 'answer-1', content: 'Finished.',
-      stopReason: 'end_turn', toolUses: [],
-    }];
+    const messages = [
+      { role: 'user', id: 'user-1', content: 'Finish the task' },
+      {
+        role: 'assistant', id: 'answer-1', content: 'Finished.',
+        stopReason: 'end_turn', toolUses: [],
+      },
+    ];
     m.mount(root, {
       view: () => m(MessageList, {
         messages,
@@ -168,7 +174,7 @@ describe('Contributor Metrics human UI', () => {
     document.body.appendChild(root);
     const messages = [
       { role: 'user', id: 'user-1', content: 'First' },
-      { role: 'assistant', id: 'step-1', content: 'I will check.', toolUses: [{ id: 'tool-1', name: 'message_actor' }] },
+      { role: 'assistant', id: 'step-1', content: 'I will check.', toolUses: [{ id: 'tool-1', name: 'message_actor', input: { await: true } }] },
       { role: 'user', id: 'result-1', content: '', toolResults: [{ tool_use_id: 'tool-1', content: '{}' }] },
       { role: 'assistant', id: 'answer-1', content: 'Done.', stopReason: 'end_turn', toolUses: [] },
       { role: 'user', id: 'user-2', content: 'Second' },
@@ -185,6 +191,43 @@ describe('Contributor Metrics human UI', () => {
         'peerdDone.did this work?workeddidn’t work',
         'peerdAlso done.did this work?workeddidn’t work',
       ]);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('attributes a late actor completion to its original human task', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const messages = [
+      { role: 'user', id: 'user-a', content: 'First task' },
+      {
+        role: 'assistant', id: 'dispatch-a', content: 'Delegating.', stopReason: 'tool_use',
+        toolUses: [{ id: 'actor-a', name: 'message_actor', input: {} }],
+      },
+      { role: 'assistant', id: 'ack-a', content: 'Reply later.', stopReason: 'end_turn', toolUses: [] },
+      { role: 'user', id: 'user-b', content: 'Second task' },
+      { role: 'assistant', id: 'answer-b', content: 'Second done.', stopReason: 'end_turn', toolUses: [] },
+      {
+        role: 'user', id: 'reply-a', content: 'Actor replied.', synthetic: true,
+        actorReply: { kind: 'web', instanceId: 'web', parentToolUseId: 'actor-a' },
+      },
+      { role: 'assistant', id: 'answer-a', content: 'First done.', stopReason: 'end_turn', toolUses: [] },
+    ];
+    m.mount(root, {
+      view: () => m(MessageList, { messages, sessionId: 'chat-1', send: async () => ({ ok: true }) }),
+    });
+    try {
+      await settle();
+      const feedbackMessages = Array.from(root.querySelectorAll('.task-feedback'))
+        .map((entry) => entry.closest('.message')?.textContent ?? '');
+      expect(feedbackMessages.length).toBe(2);
+      expect(feedbackMessages.some((text) => text.includes('Second done.'))).toBe(true);
+      expect(feedbackMessages.some((text) => text.includes('First done.'))).toBe(true);
+      const acknowledgement = Array.from(root.querySelectorAll('.message'))
+        .find((entry) => entry.textContent?.includes('Reply later.'));
+      expect(acknowledgement?.querySelector('.task-feedback')).toBe(null);
     } finally {
       m.mount(root, null);
       root.remove();

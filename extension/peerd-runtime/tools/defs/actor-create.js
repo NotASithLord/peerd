@@ -26,7 +26,7 @@ const MAX_RESULT_CHARS = 200 * 1024;
  * @typedef {{
  *   result: string, sessionId: string | null, toolCalls: number,
  *   durationMs: number, depth: number, exceeded?: true, refused?: true,
- *   timedOut?: true, stopped?: true,
+ *   timedOut?: true, stopped?: true, executionFailed?: true, outcomeKnown?: boolean,
  * }} SpawnActorResult
  */
 /**
@@ -153,11 +153,46 @@ export const actorCreateTool = {
     if (typeof sctx.spawnActor !== 'function') {
       return { ok: false, error: 'actor_orchestrator_unavailable' };
     }
-    const out = await sctx.spawnActor(req);
+    let out;
+    try {
+      out = await sctx.spawnActor(req);
+    } catch (error) {
+      const failure = /** @type {{ message?: string, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean }} */ (error);
+      if (failure.outcomeKnown === false) {
+        return {
+          ok: false,
+          error: 'Actor execution failed after work began. Its outcome is unknown. Do not retry automatically. The actor transcript could not be saved reliably.',
+          performed: true,
+          outcomeKnown: false,
+          retryable: false,
+        };
+      }
+      throw error;
+    }
     if (out.refused) {
       // Surface a refusal as an error result so the model sees it clearly
       // and can adjust (e.g. stop trying to recurse deeper).
       return { ok: false, error: out.result };
+    }
+    const outcomeUnknown = out.outcomeKnown === false
+      || (out.executionFailed === true && out.outcomeKnown !== true);
+    if (outcomeUnknown) {
+      return {
+        ok: false,
+        error: formatActorResult(out),
+        performed: true,
+        outcomeKnown: false,
+        retryable: false,
+      };
+    }
+    if (out.executionFailed === true) {
+      return {
+        ok: false,
+        error: formatActorResult(out),
+        performed: false,
+        outcomeKnown: true,
+        retryable: true,
+      };
     }
     return { ok: true, content: formatActorResult(out) };
   },
@@ -168,11 +203,15 @@ const formatActorResult = (out) => {
   let result = out.result ?? '';
   if (result.length > MAX_RESULT_CHARS) {
     const head = result.slice(0, MAX_RESULT_CHARS);
-    result = `${head}\n\n…[result truncated at ${MAX_RESULT_CHARS} chars — expand the card in the side panel for the full transcript]`;
+    result = `${head}\n\n…[result truncated at ${MAX_RESULT_CHARS} chars; expand the card in the side panel for the full transcript]`;
   }
-  const flag = out.timedOut ? ' — HIT WALL-CLOCK TIMEOUT, result is partial'
-    : out.stopped ? ' — STOPPED before finishing, result is partial'
-    : out.exceeded ? ' — HIT STEP CAP, result may be incomplete' : '';
+  const outcomeUnknown = out.outcomeKnown === false
+    || (out.executionFailed === true && out.outcomeKnown !== true);
+  const flag = outcomeUnknown ? ': EXECUTION FAILED AFTER WORK BEGAN'
+    : out.executionFailed ? ': FAILED BEFORE TARGET WORK RAN'
+    : out.timedOut ? ': HIT WALL-CLOCK TIMEOUT, result is partial'
+    : out.stopped ? ': STOPPED before finishing, result is partial'
+    : out.exceeded ? ': HIT STEP CAP, result may be incomplete' : '';
   // why UNTRUSTED (parity with the async path, async-actors.js): the child's
   // result is model-authored from a fresh context over possibly page-derived
   // bytes, so it is DATA to the parent, not instructions. Only the one-line
@@ -180,6 +219,9 @@ const formatActorResult = (out) => {
   // relayed can't steer the parent. The sync path fenced nothing before (MED-1).
   const wrapped = wrapUntrusted({ origin: 'spawned', tool: 'actor_create', body: result || '(actor returned no text)' });
   const lines = [
+    ...(outcomeUnknown
+      ? ['Actor execution failed after work began. Its outcome is unknown. Do not retry automatically.', '']
+      : []),
     `actor (session ${out.sessionId}, depth ${out.depth}) — `
       + `${out.toolCalls} tool call${out.toolCalls === 1 ? '' : 's'}, ${out.durationMs}ms${flag}`,
     '',

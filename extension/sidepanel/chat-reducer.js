@@ -25,7 +25,7 @@
  * @property {string} [thinking]
  * @property {boolean} [streaming]
  * @property {boolean} [synthetic]
- * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [actorReply]
+ * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
  * @property {unknown[]} [toolResults]
@@ -83,6 +83,7 @@
  * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean }} vault
  * @property {SessionState} session
  * @property {{ current: string, hasKey: boolean, model: string }} providers
+ * @property {{ actorExecution?: { status: string, host: string|null, reason: string|null, retryable: boolean } }} [capabilities]
  * @property {{ id: string, peerName: string, onboardingComplete: boolean }} profile
  * @property {SettingsState} settings
  * @property {any} pendingConfirm
@@ -95,7 +96,7 @@
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {Readonly<Record<string, { stdout: string, stderr: string }>>} vmStreams
  * @property {{ byToolUse: Record<string, string>, sessions: Record<string, SpawnedSession> }} spawned
- * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, cost?: any }>>} actors
+ * @property {Readonly<Record<string, { sessionId?: string, kind?: string, instanceId?: string, name?: string, fromIndex?: number, messages?: any[], streaming?: boolean, error?: string|null, aborted?: boolean, outcomeKnown?: boolean, cost?: any }>>} actors
  * @property {Record<string, Array<{ seq: number, method: string, to?: string, goalPreview?: string, phase: string, ms?: number|null, failed?: boolean, cancelled?: boolean }>>} scriptOps  live delegation feed per script toolUseId
  * @property {Readonly<Record<string, unknown>>} asyncTasks
  * @property {Readonly<Record<string, { active: boolean, sessionId: string, iteration: number, maxIterations: number, goal: string, phase: string, summary: string|null }>>} goalRuns
@@ -408,7 +409,11 @@ export const reduceChat = (state, msg) => {
       return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages });
     }
     case 'turn/actor-error':
-      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { error: msg.error, streaming: false });
+      return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
+        error: msg.error,
+        streaming: false,
+        ...(msg.outcomeKnown === false ? { outcomeKnown: false } : {}),
+      });
     case 'turn/actor-done': {
       // An ABORT (Stop cascade) → 'cancelled' card; a clean failure with no error
       // already folded → mark failed; else just stop the spinner. Short-circuit when

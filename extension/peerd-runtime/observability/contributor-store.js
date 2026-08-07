@@ -1,5 +1,5 @@
 // @ts-check
-// Contributor Metrics local shell — one atomic consent+aggregate record and
+// Contributor Metrics local shell: one atomic consent+aggregate record and
 // bounded local-only idempotency/correlation. Network IO intentionally absent.
 
 import {

@@ -41,7 +41,7 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     pushState: () => { calls.pushState.push(1); },
     purgeVaultBlob: async () => {},
     sessionCache: { sessionGet: async () => null },
-    maybeAutoResume: () => {},
+    maybeAutoResumeAfterRecovery: () => {},
     confirmCoordinator: { resolve: (id: string, answer: string) => { calls.resolve = [id, answer]; } },
     VaultAlreadyInitializedError, WrongPassphraseError, VaultNotInitializedError,
     RecoveryPassphraseNotSetError, PrfNotEnrolledError, PrfUnlockFailedError, VaultLockedError,
@@ -162,7 +162,7 @@ describe('vault unlock — goal resume ordering (#60)', () => {
     base64ToBytes: () => new Uint8Array([1]),
     sessionCache: { sessionGet: async () => 'cur' },
     resumeGoalRuns: async () => { await new Promise((r) => setTimeout(r, 30)); order.push('resume'); },
-    maybeAutoResume: () => { order.push('autoresume'); },
+    maybeAutoResumeAfterRecovery: () => { order.push('autoresume'); },
     WrongPassphraseError, VaultNotInitializedError, RecoveryPassphraseNotSetError,
     PrfNotEnrolledError, PrfUnlockFailedError, VaultLockedError,
   });

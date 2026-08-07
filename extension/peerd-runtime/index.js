@@ -118,6 +118,7 @@ export {
 } from './observability/contributor-metrics.js';
 export { CONTRIBUTOR_LOCAL_KEY, ContributorReadOnlyError, makeContributorStore }
   from './observability/contributor-store.js';
+export { contributorFeedbackTargets } from './observability/contributor-feedback.js';
 // The per-turn imperative shell over the accumulator: fold usage events,
 // persist the session total, push the live meter, fire the hard-limit
 // halt once. All IO injected; the SW's streaming switch stays two lines.
@@ -135,6 +136,14 @@ export { makeAsyncActors } from './actor/async-actors.js';
 // DESIGN-17: the message_actor orchestrator (the mailbox to a tab-hosted
 // instance's actor — the async-actors shape, specialized).
 export { makeActorMessaging } from './actor/actor-messaging.js';
+export {
+  actorIsolationCapability, actorIsolationAvailable,
+  actorIsolationTemporarilyUnavailable, actorIsolationRefusal, actorIsolationSpawnRefusal,
+  filterByActorIsolation, actorIsolationPromptBlock,
+  ACTOR_ISOLATION_HOST_OFFSCREEN, ACTOR_ISOLATION_HOST_BACKGROUND,
+  ACTOR_ISOLATION_UNAVAILABLE_TOOLS, ACTOR_ISOLATION_TEMPORARY_USER_FAILURE,
+  ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE,
+} from './actor/isolation.js';
 // A2A — the agent-to-agent code surface: the pure translation + the mesh
 // dispatch/correlation the a2a/call route runs.
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
@@ -273,8 +282,8 @@ export {
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
   actorAllowedToolsFor, isAllowedForActor,
-  // Heap-split phase 2: the per-instance pin, shared by the in-SW actor turn and
-  // the offscreen actor tool relay (one implementation on a security seam).
+  // Heap-split phase 2: the per-instance pin used by the privileged actor tool
+  // relay (one implementation on a security seam).
   pinActorCall,
 } from './tools/exposure.js';
 // Per-session tool exposure manifests (ROADMAP) — presets-as-data + the

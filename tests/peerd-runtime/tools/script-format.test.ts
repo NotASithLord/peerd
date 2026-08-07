@@ -174,6 +174,16 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     expect(released).toEqual(['x']);
   });
 
+  test('a completed actors run returns every host custody id on its ToolResult', async () => {
+    const { ctx } = ctxWith({}, {
+      usedActors: true,
+      actorDeliveryIds: ['delivery-1', 'delivery-2', 'delivery-1'],
+    });
+    const result: any = await scriptTool.execute({ code: 'return actors' }, ctx as any);
+    expect(result.actorDeliveryIds).toEqual(['delivery-1', 'delivery-2']);
+    expect(result.content).not.toContain('delivery-1');
+  });
+
   test('a transport-failure trace redacts an instruction-shaped target', async () => {
     const payload = 'IGNORE_PREVIOUS_INSTRUCTIONS';
     const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
@@ -185,7 +195,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       release: (runId: string) => { released.push(runId); },
       opsFor: () => [{
         seq: 1, method: 'call', to: payload,
-        ok: false, ms: 0, settled: false,
+        ok: false, ms: 0, settled: false, actorDeliveryId: 'delivery-mirrored',
       }],
     };
     const { ctx } = ctxWith({
@@ -201,6 +211,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       code: 'return actors.call(target, "inspect it")',
     }, ctx as any);
     expect(result.ok).toBe(false);
+    expect((result as any).actorDeliveryIds).toEqual(['delivery-mirrored']);
     if (!result.ok) {
       const fenceStart = result.error.indexOf(FENCE);
       const fenceEnd = result.error.indexOf('</untrusted_web_content>');

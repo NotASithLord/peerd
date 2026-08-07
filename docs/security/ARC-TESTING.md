@@ -76,9 +76,25 @@ boundary. See the residual risks in the threat model.
 
 ## Firefox
 
-Firefox does not provide the same offscreen actor isolation host as Chrome.
-Treat this as a known residual risk. A test pass on Firefox does not prove heap
-separation.
+Firefox hosts the actor runner from its extension background page instead of an
+offscreen document. Verify an `actor_ran_isolated` audit entry records the
+background-page worker host, a dedicated worker, a successful realm proof, and
+no extension APIs in the worker. Break the worker import in a test package and
+verify actor work is marked Not run, no target action runs, and Retry is shown.
+Reload the background and verify the failure remains stored until a manual probe
+succeeds. Close every extension UI during a delayed actor turn and verify an
+acknowledged product `storage.session` heartbeat runs after the normal
+event-page idle window while the isolated turn is still active. The test must
+not create a separate storage listener or extension view that could keep the
+page alive. Physically
+close the extension UI and keep a plain page focused through the parent
+continuation. The heartbeat, actor request, and final result must keep one
+background boot identity, and the
+actor request must complete exactly once. Force a failure after a successful actor tool call and
+verify the parent model and UI report Outcome unknown, pause actor work, and do
+not retry automatically. Simulate a second background loss during recovery and verify no
+queued, started, or legacy request is executed from storage. Keep the recovery
+record until its Not run or Outcome unknown warning is accepted by the session.
 
 ## Evidence
 

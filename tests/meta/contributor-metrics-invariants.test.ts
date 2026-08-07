@@ -13,6 +13,9 @@ const metrics = readFileSync(join(
 const store = readFileSync(join(
   EXTENSION_DIR, 'peerd-runtime/observability/contributor-store.js',
 ), 'utf8');
+const feedback = readFileSync(join(
+  EXTENSION_DIR, 'peerd-runtime/observability/contributor-feedback.js',
+), 'utf8');
 const routes = readFileSync(join(
   EXTENSION_DIR, 'background/routes/contributor-metrics.js',
 ), 'utf8');
@@ -25,7 +28,7 @@ const stripComments = (source: string) => source
   .replace(/\/\/[^\n]*/g, '');
 
 describe('Contributor Metrics source invariants', () => {
-  test('exports only named, typed folds — never a generic event/property API', () => {
+  test('exports only named, typed folds, never a generic event/property API', () => {
     const exportedFunctions = [...metrics.matchAll(/export const ([A-Za-z0-9_]+)\s*=\s*\(/g)]
       .map((match) => match[1]);
     expect(exportedFunctions).not.toContain('track');
@@ -35,7 +38,7 @@ describe('Contributor Metrics source invariants', () => {
   });
 
   test('the local core/store/routes contain no network primitive or origin', () => {
-    const source = stripComments([metrics, store, routes].join('\n'));
+    const source = stripComments([metrics, store, feedback, routes].join('\n'));
     expect(source).not.toMatch(/\bfetch\s*\(|XMLHttpRequest|WebSocket|https?:\/\//);
     expect(source).not.toMatch(/collector|contributions\/v[0-9]/i);
   });
@@ -69,8 +72,34 @@ describe('Contributor Metrics source invariants', () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     expect(inboundWake).toContain('turnSlots.runWhenIdleClaimed(actor.actorSessionId');
+    expect(inboundWake).toContain('turnSlots.runWhenIdleClaimed(active');
     expect(inboundWake).toContain('turnLease,');
-    expect(inboundWake).toContain('captureTurnSnapshot: true, turnLease');
-    expect(inboundWake).toContain('driven?.turnSnapshot?.messages ?? []');
+    expect(inboundWake).toContain('off?.turnSnapshot?.messages ?? []');
+    expect(inboundWake).not.toContain('await sessions.get(actor.actorSessionId);');
+    expect(inboundWake).toContain('priorTurnsForWake = conversationRegistry.turnsFor(convId)');
+    expect(inboundWake.indexOf('priorTurnsForWake = conversationRegistry.turnsFor(convId)'))
+      .toBeLessThan(inboundWake.indexOf("conversationRegistry.record(convId, 'peer', deliver.message)"));
+    expect(inboundWake).toContain('runDwebConversationOrdered(convId, runInboundWake)');
+    expect(inboundWake).toContain('const run = ownsThread && convId');
+    expect(inboundWake.slice(0, inboundWake.indexOf('const runInboundWake'))).not.toMatch(/\bawait\b/);
+    expect(inboundWake).toContain('conversationRegistry.ownedBy(cid, did)');
+    expect(inboundWake).toContain('sent?.ok === true');
+    expect(inboundWake).not.toContain('await withDwebPublication');
+    expect(inboundWake).toContain('const parentStopGeneration = turnSlots.generation(active)');
+    expect(inboundWake).toContain('turnSlots.generation(active) !== parentStopGeneration');
+    // Bound actors may only run in their dedicated worker. A regression to the
+    // former background fallback would also re-open the snapshot race.
+    expect(inboundWake).not.toContain('captureTurnSnapshot: true');
+  });
+
+  test('a claimed web actor advances its landing epoch before any async setup', () => {
+    const start = serviceWorker.indexOf('runActorTurn: async ({');
+    const end = serviceWorker.indexOf('reenter: ({ userText', start);
+    const actorTurn = serviceWorker.slice(start, end);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(actorTurn.indexOf('beginLandingTurn(actorSessionId)')).toBeGreaterThanOrEqual(0);
+    expect(actorTurn.indexOf('beginLandingTurn(actorSessionId)'))
+      .toBeLessThan(actorTurn.indexOf('await '));
   });
 });

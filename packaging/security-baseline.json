@@ -464,7 +464,7 @@
     "peerd-runtime/tools/hooks/compile.js": 1
   },
   "messageHostSites": {
-    "background/service-worker.js": 4,
+    "background/service-worker.js": 3,
     "engine-tabs/app-tab/app-tab.js": 1,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,

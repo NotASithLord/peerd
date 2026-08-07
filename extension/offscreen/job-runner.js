@@ -146,7 +146,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -511,6 +511,15 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   const actorsTrace = [];
   let actorsSeq = 0;
   let usedActors = false;
+  // Awaited actor replies stay in the durable mailbox until the script tool
+  // result that consumed them commits. The worker never sees these host-only
+  // ids; the offscreen host gathers them from SW responses and returns them as
+  // custody metadata beside the run result.
+  /** @type {Set<string>} */
+  const actorDeliveryIds = new Set();
+  const actorCustody = () => actorDeliveryIds.size > 0
+    ? { actorDeliveryIds: [...actorDeliveryIds] }
+    : {};
   // The sub-model meter (design 5): host-counted, so the [MODEL CALLS n |
   // tokens t] line the orchestrator reads is never the realm's own claim.
   // Calls count every relayed attempt (an attempt is potential spend); tokens
@@ -548,7 +557,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         abortHostOperations();
         try { worker.terminate(); } catch {}
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       }, Math.ceil(remainingMs()));
       // Stop plumbing: a runId-carrying job can be terminated from the SW
       // (script tool abort). The trace survives — partial work stays visible.
@@ -557,7 +566,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           clearTimeout(timer);
           abortHostOperations();
           try { worker.terminate(); } catch {}
-          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         };
         liveJobs.set(runId, { kill, owner: ownerSessionId });
         // Stop already arrived while we were still building — honor it now.
@@ -655,6 +664,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               }),
               (response) => response?.ok === true && response?.value?.failed !== true,
             );
+            if (typeof resp?.actorDeliveryId === 'string') {
+              actorDeliveryIds.add(resp.actorDeliveryId);
+            }
             entry.ms = Math.round(performance.now() - t0);
             entry.settled = true;
             if (resp?.ok) {
@@ -857,7 +869,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               value: undefined, consoleOutput: [], durationMs: 0,
               error: `import resolution failed: ${error.message}`,
               errorCode: error.code,
-              usedEgress, usedActors, usedPage, images: pageImages,
+              usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages,
               usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace,
               usedProvider, providerCalls, providerTokens,
             });
@@ -916,7 +928,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           // this error; a user-code line number is actionable, a blob one isn't.
           const error = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
           recordToolboxUse(!error);
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedActors, usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         }
       });
 
@@ -928,7 +940,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
         recordToolboxUse(false);
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedActors, ...actorCustody(), usedPage, images: pageImages, usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       });
     });
   } finally {

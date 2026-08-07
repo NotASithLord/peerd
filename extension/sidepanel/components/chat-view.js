@@ -42,6 +42,9 @@ const saveJsonFile = (payload, filename) => {
  * @typedef {Object} ChatViewState
  * @property {boolean} goalArmed             the Goal toggle's arm state (UI-only)
  * @property {string|null|undefined} _sid    which chat the arm state belongs to
+ * @property {boolean} hadMessages           whether this chat already mounted a transcript
+ * @property {boolean} hasObservedSession    whether initial session hydration has completed
+ * @property {Map<string|undefined, Set<string>>} seenRecoveryIdsBySession recovery announcements already heard per chat
  * @property {boolean} [debugMenuOpen]       the debug-export flyout's open state
  * @property {boolean} [inspectorOpen]       the context-inspector modal's open state
  * @property {Array<Record<string, any>>|null} [snapshots]  the inspector's fetched snapshots (null = loading)
@@ -64,14 +67,21 @@ export const ChatView = {
     // InputBar's per-session draft swap.
     vnode.state.goalArmed = false;
     vnode.state._sid = vnode.attrs.state?.session?.sessionId;
+    vnode.state.hadMessages = (vnode.attrs.state?.session?.messages?.length ?? 0) > 0;
+    vnode.state.hasObservedSession = vnode.state._sid != null;
+    vnode.state.seenRecoveryIdsBySession = new Map();
   },
 
   /** @param {ChatViewVnode} vnode */
   view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabIsWeb }, state: ui }) => {
     const sid = state.session?.sessionId;
+    const messages = state.session?.messages ?? [];
+    const changedSession = sid !== ui._sid;
+    const isUserVisibleSwitch = changedSession && ui.hasObservedSession && sid != null;
     if (sid !== ui._sid) {
       ui._sid = sid;
       ui.goalArmed = false;
+      ui.hadMessages = messages.length > 0;
       // The debug surface is per-session UI: a flyout or inspector left open
       // on chat A must not survive a switch to chat B (B would silently show
       // A's snapshots).
@@ -79,7 +89,10 @@ export const ChatView = {
       ui.inspectorOpen = false;
       ui.snapshots = null;
     }
-    const messages = state.session?.messages ?? [];
+    if (sid != null) ui.hasObservedSession = true;
+    const announceOnMount = messages.length > 0
+      && (isUserVisibleSwitch || !ui.hadMessages);
+    if (messages.length > 0) ui.hadMessages = true;
     const hasKey = state.providers?.hasKey;
     // Fingerprint of the settings that shape the model-picker options. The
     // side panel gets live settings pushes (e.g. editing the OpenRouter
@@ -154,8 +167,14 @@ export const ChatView = {
 
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
-      messages.length === 0 ? m(EmptyState, { hasKey, send, surface, activeTabIsWeb })
+      messages.length === 0 ? m(EmptyState, {
+        hasKey, send, surface, activeTabIsWeb,
+        actorExecution: state.capabilities?.actorExecution,
+      })
         : m(MessageList, {
+            sessionId: state.session?.sessionId,
+            announceOnMount,
+            seenRecoveryIdsBySession: ui.seenRecoveryIdsBySession,
             messages,
             vmStreams: state.vmStreams,
             // The AI peer's display name (default profile, set during
@@ -177,7 +196,6 @@ export const ChatView = {
             tabEvents: (state.agentTabEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
             send,
-            sessionId: state.session?.sessionId,
             // A model turn may be idle after acknowledging asynchronous actor
             // work. That is not yet the human task's final answer; mirror the
             // route's in-flight guard so the UI never offers a no-op verdict.
@@ -528,7 +546,7 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabIsWeb?: boolean } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { hasKey?: boolean, send: Send, surface?: string, activeTabIsWeb?: boolean, actorExecution?: { status?: string } } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
@@ -604,6 +622,7 @@ const EmptyState = {
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;
+          const actorUnavailable = attrs.actorExecution && attrs.actorExecution.status !== 'available' && p.type !== 'ask';
           // cursor shows only once this tile has STARTED typing and isn't done
           const typing = (ui.started?.[i] ?? true) && !done;
           return m('button.path-card', {
@@ -612,9 +631,12 @@ const EmptyState = {
             // hexes in JS). The glyph + label carry that color permanently;
             // the tile background + outline stay grey.
             'data-path': p.type,
-            title: p.text,
+            title: actorUnavailable ? 'Unavailable until the isolated actor worker recovers' : p.text,
             // a11y reads the full prompt even mid-type
-            'aria-label': `${p.label}: ${p.text}`,
+            'aria-label': actorUnavailable
+              ? `${p.label}: unavailable while actor work is paused`
+              : `${p.label}: ${p.text}`,
+            disabled: actorUnavailable,
             // Fire-and-forget: the SW pushes turn state, which flips the
             // view out of the empty state into the live transcript.
             onclick: () => send({ type: 'agent/send', text: p.text }),

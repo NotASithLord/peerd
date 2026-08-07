@@ -10,6 +10,7 @@ import m from '/vendor/mithril/mithril.js';
 import { VaultGate } from './vault-gate.js';
 import { ChatView } from './chat-view.js';
 import { SessionsView } from './sessions-view.js';
+import { ActorIsolationBanner } from './actor-isolation-banner.js';
 import { openOptions } from '/shared/open-options.js';
 import { openHome } from '/shared/open-home.js';
 import { CHANNEL } from '/shared/channel-config.js';
@@ -60,10 +61,14 @@ export const App = {
     const notices = unlocked && state.notices?.length
       ? m(NoticeBar, { notices: state.notices, uiActions })
       : null;
+    const actorIsolation = unlocked
+      ? m(ActorIsolationBanner, { capability: state.capabilities?.actorExecution, send })
+      : null;
 
     return m('div', { class: 'app-shell' }, [
       unlocked ? m(TopBar, { state, send, optionsActive }) : null,
       notices,
+      actorIsolation,
       m('.body', unlocked
         ? [
             view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabIsWeb })

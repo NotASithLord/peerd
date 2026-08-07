@@ -35,6 +35,7 @@ const baseDeps = (over: any = {}) => ({
   onSettingsChanging: () => {},
   onSettingsChanged: async () => {},
   privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
+  retryActorIsolation: async () => ({ ok: true, capability: { status: 'available' } }),
   ...over,
 });
 
@@ -42,6 +43,10 @@ describe('state/get + audit/list', () => {
   test('state/get wraps the snapshot', async () => {
     const r = makeSystemRoutes(baseDeps());
     expect(await r['state/get']()).toEqual({ ok: true, state: { vault: { locked: false }, session: {} } });
+  });
+  test('actor isolation retry delegates to the capability controller', async () => {
+    const r = makeSystemRoutes(baseDeps());
+    expect(await r['actor-isolation/retry']()).toEqual({ ok: true, capability: { status: 'available' } });
   });
   test('audit/list newest-first, capped, with total', async () => {
     const r = makeSystemRoutes(baseDeps());
