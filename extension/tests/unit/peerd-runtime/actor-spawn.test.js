@@ -9,6 +9,9 @@ import { describe, it, expect } from '../../framework.js';
 import {
   makeSpawnActor, createSessionStore, runUserTurn,
 } from '/peerd-runtime/index.js';
+import {
+  makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop,
+} from '/peerd-runtime/actor/actor-worker-core.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
 /** @typedef {import('/peerd-provider/format/from-anthropic.js').ProviderEvent} ProviderEvent */
@@ -37,17 +40,35 @@ const buildDeps = (overrides = {}) => {
   /** @type {any[]} */
   const audits = [];
   let t = 0;
+  const callModel = (/** @type {any} */ _args) => mockTextStream('child result text');
   /** @type {SpawnDeps} */
   const deps = /** @type {SpawnDeps} */ (/** @type {unknown} */ ({
     sessions,
-    runUserTurn,
-    callModel: () => mockTextStream('child result text'),
-    getSecret: async () => 'sk-test',
-    safeFetch: async () => new Response('ok'),
     appendAudit: async (/** @type {any} */ e) => { audits.push(e); },
-    buildToolContext: async () => ({ session: {}, audit: async () => {} }),
-    dispatchToolCall: async () => ({ ok: true, content: 'ran' }),
-    renderSystemPrompt: async () => 'system prompt',
+    renderSystemPromptForChild: async () => 'system prompt',
+    runChildOffscreen: async (/** @type {any} */ job, /** @type {any} */ opts = {}) => {
+      const workerSessions = makeInMemorySessions({
+        sessionId: job.sessionId, provider: job.provider, model: job.model, depth: job.depth,
+      });
+      const result = await runActorLoop({
+        runUserTurn,
+        sessions: workerSessions,
+        callModel: makeRelayedCallModel(async (args) => {
+          const events = [];
+          for await (const event of callModel(args)) events.push(event);
+          return { events };
+        }, job.maxOutputTokens),
+        toolDispatch: makeRelayedToolDispatch(async () => ({ ok: true, result: { ok: true, content: 'ran' } })),
+        getSystemPrompt: () => job.systemPrompt,
+        appendAudit: async () => {},
+        onEvent: opts.onEvent,
+        tools: job.tools ?? [],
+      }, {
+        sessionId: job.sessionId, userText: job.task, maxSteps: job.maxSteps,
+        signal: opts.signal,
+      });
+      return { ok: true, started: true, ...result };
+    },
     getToolDescriptors: () => [],
     now: () => (t += 10),
     ...overrides,
@@ -95,15 +116,13 @@ describe('actor orchestrator — e2e with real loop', () => {
     expect(all.length).toBe(1);
   });
 
-  it('tags loop audits with parentage so the trail reads from any level', async () => {
+  it('tags lifecycle audits with parentage so the trail reads from any level', async () => {
     const { sessions, deps, audits } = buildDeps();
     const parent = await sessions.create();
     const spawn = makeSpawnActor(deps);
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId });
 
-    // The loop's own session_started audit flows through the tagged
-    // appendAudit, so it carries parentSessionId + depth.
-    const started = audits.find((a) => a.type === 'session_started');
+    const started = audits.find((a) => a.type === 'actor_ran_isolated');
     expect(started?.details?.parentSessionId).toBe(parent.sessionId);
     expect(started?.details?.actorSessionId).toBe(out.sessionId);
     expect(started?.details?.depth).toBe(1);

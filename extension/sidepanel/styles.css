@@ -123,6 +123,18 @@
 
 * { box-sizing: border-box; }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 html, body, #app {
   height: 100%;
   margin: 0;
@@ -940,6 +952,45 @@ button.icon.is-active {
 }
 .error-banner button { padding: 4px 10px; font-size: 12px; }
 
+.actor-isolation-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--elev);
+  color: var(--text);
+}
+.actor-isolation-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.actor-isolation-copy strong { color: var(--fg); }
+.actor-isolation-banner.is-recovered .actor-isolation-copy strong { color: var(--fg); }
+.actor-isolation-banner.is-recovered:focus {
+  outline: 2px solid var(--fg);
+  outline-offset: -2px;
+}
+.actor-isolation-copy small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.actor-isolation-banner button {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.actor-isolation-banner button:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
 /* Rate-limit retry indicator — amber, calmer than the error banner. */
 .rate-limit-banner {
   display: flex;
@@ -1269,6 +1320,17 @@ button.tool-call-header:focus-visible {
 }
 .tool-call-header .spacer { flex: 1; min-width: 8px; }
 .tool-duration { color: var(--fg-muted); font-size: 11px; flex-shrink: 0; }
+.actor-unknown-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .tool-pending { color: var(--accent); font-size: 11px; font-style: italic; flex-shrink: 0; }
 
 /* Expanded detail body — the §02 lineage + result live here now, so the
@@ -2630,6 +2692,14 @@ button.tool-call-header:focus-visible {
   /* outline stays monochrome — color lives on the glyph + label */
   background: var(--bg);
 }
+/* The reveal animation owns `opacity`, so the global button:disabled opacity
+ * cannot visually win after the card settles. A non-animated filter keeps the
+ * actor-only starters visibly unavailable while Ask remains active. */
+.path-card:disabled {
+  filter: grayscale(1) opacity(0.5);
+  cursor: not-allowed;
+}
+.path-card:disabled:hover { background: var(--elev); }
 /* Per-tile cascade = 90ms. Step 1 (container) starts at 40ms + i*90ms. */
 .path-card:nth-child(1) { animation-delay: 40ms; }
 .path-card:nth-child(2) { animation-delay: 130ms; }

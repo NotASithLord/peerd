@@ -24,9 +24,11 @@
 // this path; it never blocked the orchestrator, and the fence is now uniform.)
 //
 // Durable mailbox (P1). The correlation is persisted (deps.mailbox): an SW death
-// between accept and deliver() no longer drops the reply-wake — redrain() re-queues
-// every pending message on boot (mirrors goalRunner.resume). The default no-op
-// mailbox keeps the pure-heap behavior in tests.
+// between accept and deliver() no longer drops the reply-wake. Each entry is
+// persisted as queued, then moved to started before actor work can begin. Boot
+// recovery never executes a stored request automatically. Queued work is reported
+// as Not run; started or legacy work is reported as outcome unknown. The default
+// no-op mailbox keeps pure-heap tests lightweight.
 //
 // Posture (PR #134 — spawned as async actors): a message is accepted when the
 // turn is NOT `inbound` AND the sender passes the TRUSTED-LINEAGE gate
@@ -58,13 +60,14 @@
 // orphan turn nobody consumes AND rebuild its context on the MAIN exposure
 // surface, escalating past the child's narrowed toolset.
 
-import { escapeAttr } from '/shared/util.js';
+import { escapeAttr, uuidv7 } from '/shared/util.js';
 import { ASYNC_ACTOR_ACTORS, mayMessageActor, messageProvenance } from './delegation-lineage.js';
 // #241 — the deterministic schema boundary for an untrusted actor's reply.
 // Pure policy (no IO), imported directly like the other pure helpers here; the
 // FLAG that turns it on is injected (schemaValidatedReplies), SW-side.
 import { validateActorReply, renderValidatedReply, REPLY_VALIDATION_FAILED } from './reply-schema.js';
 import { ABORT_STEER } from '../loop/turn-slots.js';
+import { actorIsolationAvailable, actorIsolationRefusal } from './isolation.js';
 
 /**
  * The reason a turn's abort signal carries, when it carries one.
@@ -115,15 +118,21 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
  *   so it must be threaded (not re-derived from the ambient active chat, which is wrong
  *   on a boot redrain). Engine/per-tab kinds ignore it (globally/tab keyed).
- * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string, oneShot?: boolean }) => Promise<{ result: string, stopped?: boolean }>} deps.runActorTurn
+ * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, parentToolUseId?: string, name?: string, oneShot?: boolean }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.runActorTurn
  *   Drive ONE actor turn (runAgentTurn against the actor session) and
  *   resolve with its final assistant text. parentToolUseId (the message_actor
  *   tool_use id, absent on a boot redrain) keys the actor's live DISPLAY stream
  *   to its card. Contracted to CLAIM the actor's
  *   turn slot (so runWhenIdle drains correctly).
- * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean, actorReply?: { kind: string, instanceId: string, name?: string, failed: boolean } }) => Promise<unknown>} deps.reenter
+ * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, trusted?: boolean, actorReply?: { kind: string, instanceId: string, name?: string, failed: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string } }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn. trusted:true
  *   marks a first-party continuation allowed to message actors (the reply-wake).
+ * @param {(opts: { userText: string, sessionId: string, synthetic: true, actorReply: { kind: string, instanceId: string, name?: string, failed: boolean, outcomeKnown?: boolean, performed?: boolean }, recoveryId: string }) => Promise<boolean>} [deps.recordRecovery]
+ *   Persist a restart notice without running a model turn. The shell gives the
+ *   notice a stable id derived from recoveryId, making a second restart safe.
+ * @param {(opts: { sessionId: string, deliveryId: string }) => Promise<boolean>} [deps.deliveryCommitted]
+ *   Check whether the original reply or outer tool result is already durable.
+ *   Recovery removes that mailbox row without adding a second warning.
  * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, advanceQueue?: (sessionId: string) => void, stop?: (sessionId: string) => boolean }} deps.turnSlots
  * @param {() => Promise<string | null>} deps.getActiveSessionId
  * @param {(sessionId: string) => Promise<Array<import('./delegation-lineage.js').LineageHop>>} [deps.getAncestry]
@@ -133,22 +142,25 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  *   Default returns [] — FAIL-CLOSED: without a chain only the foreground chat
  *   itself passes the gate, and provenance collapses to the sender.
  * @param {() => boolean} deps.isVaultLocked
+ * @param {() => import('./isolation.js').ActorIsolationCapability | null} [deps.getActorIsolation]
  * @param {(opts: { origin: string, tool: string, body: string, retrievedAt?: string }) => string} deps.wrapUntrusted
  * @param {(entry: object) => Promise<unknown>} [deps.appendAudit]
  * @param {() => number} [deps.now]
  * @param {{ outstanding?: number, rateCap?: number, rateWindowMs?: number, resultChars?: number }} [deps.caps]
  * @param {(...args: unknown[]) => void} [deps.log]
- * @param {{ append: (e: { id: string, senderSessionId: string, to: string, message: string, createdAt: number, provenance?: { rootSessionId: string, lineagePath: string[] }, oneShot?: boolean }) => Promise<unknown>, remove: (id: string) => Promise<unknown>, load: () => Promise<any[]> }} [deps.mailbox]
+ * @param {{ append: (e: { id: string, senderSessionId: string, to: string, message: string, createdAt: number, state?: 'queued'|'started', kind?: string, name?: string, provenance?: { rootSessionId: string, lineagePath: string[] }, oneShot?: boolean }) => Promise<unknown>, markStarted?: (id: string) => Promise<unknown>, remove: (id: string) => Promise<unknown>, load: () => Promise<any[]> }} [deps.mailbox]
  *   DURABLE MAILBOX (DESIGN-17 P1). Persists EVERY actor's in-flight
  *   message→reply correlation — web included — so an SW death between accept and
- *   deliver() doesn't silently drop the reply-wake. append() on accept, remove()
- *   on settle, load() at boot (redrain). Default no-op = the pure-heap behavior
- *   tests run with. Mirrors goal-runner's persist/resume.
+ *   deliver() doesn't silently drop the reply-wake. append() records queued,
+ *   markStarted() commits the no-replay boundary before dispatch, remove() runs
+ *   after reply delivery, and load() feeds boot recovery. Mirrors goal-runner
+ *   persistence.
  */
 export const makeActorMessaging = (deps) => {
   const {
     resolveActor, runActorTurn, reenter, turnSlots,
     getActiveSessionId, isVaultLocked, wrapUntrusted,
+    getActorIsolation = () => null,
     getAncestry = async () => [],
     // #241 — when this reads true, an untrusted actor's (web/api) reply must be a
     // strict JSON envelope, validated by deterministic code before it reaches the
@@ -161,9 +173,18 @@ export const makeActorMessaging = (deps) => {
     // half has the same property for free (ctx.schemaReply is stamped per turn),
     // so reading per reply is what keeps the two halves ONE switch.
     schemaValidatedReplies = () => false,
+    recordRecovery = async () => false,
+    deliveryCommitted = async () => false,
     appendAudit = async () => {}, now = Date.now, caps = {}, log = () => {},
-    mailbox = { append: async () => {}, remove: async () => {}, load: async () => [] },
+    mailbox: mailboxInput = {},
   } = deps;
+  const mailbox = {
+    append: async (/** @type {any} */ _entry) => {},
+    markStarted: async (/** @type {string} */ _id) => {},
+    remove: async (/** @type {string} */ _id) => {},
+    load: async () => /** @type {any[]} */ ([]),
+    ...mailboxInput,
+  };
 
   // The kinds oneShot is honored for — the agent's OWN engine sandboxes, whose
   // raw results are (relatively) trusted instance output. Never web/api/dweb.
@@ -227,7 +248,6 @@ export const makeActorMessaging = (deps) => {
   };
   // Monotonic correlation id — durable-mailbox key + de-dupe. Process-unique
   // (not now()-derived, which is fixed in tests and collides on same-ms sends).
-  let seq = 0;
 
   /** @param {string} root @param {string} actorSessionId */
   const trackActor = (root, actorSessionId) => {
@@ -290,8 +310,8 @@ export const makeActorMessaging = (deps) => {
   // Build the ONE reply text shape (trusted lead + fenced body) both reply
   // modes share: deliver() re-enters a long-lived sender with it; the
   // awaitReply path (an actor's call) resolves it into the tool result.
-  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] */
-  const replyText = (instanceId, kind, name, body, failed = false) => {
+  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {boolean} [outcomeUnknown] @param {boolean|undefined} [performed] */
+  const replyText = (instanceId, kind, name, body, failed = false, outcomeUnknown = false, performed = undefined) => {
     const wrapped = wrapUntrusted({
       origin: instanceId, tool: 'message_actor', body,
       retrievedAt: new Date(now()).toISOString(),
@@ -318,10 +338,33 @@ export const makeActorMessaging = (deps) => {
       : (kind === 'web' && /^https?:\/\//.test(String(instanceId)))
         ? `The ${instanceId} integration`
         : `The ${kind} actor ${safeName ? `${safeName} (${instanceId})` : instanceId}`;
-    const lead = failed
-      ? `${subject} could not complete your request:`
-      : `${subject} you messaged has replied:`;
+    const lead = outcomeUnknown
+      ? `${subject} did not complete cleanly. Its outcome is unknown. Do not retry automatically:`
+      : performed === false
+        ? `${subject} did not run the request:`
+        : failed
+        ? `${subject} could not complete your request:`
+        : `${subject} you messaged has replied:`;
     return `${lead}\n\n${wrapped}`;
+  };
+
+  // Build the one envelope used by live delivery and passive restart recovery.
+  // Only the locally composed lead is trusted. The body remains fenced even for
+  // fixed recovery copy, so the model-facing shape never depends on its source.
+  /** @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} failed @param {string|undefined} via @param {boolean} outcomeUnknown @param {boolean|undefined} performed @param {string|undefined} actorDeliveryId */
+  const deliveryEnvelope = (instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId = undefined) => {
+    const userText = replyText(instanceId, kind, name, body, failed, outcomeUnknown, performed);
+    const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
+    return {
+      userText,
+      actorReply: {
+        kind, instanceId, ...(safeName ? { name: safeName } : {}), failed,
+        ...(outcomeUnknown ? { outcomeKnown: false } : performed === false ? { outcomeKnown: true } : {}),
+        ...(performed !== undefined ? { performed } : {}),
+        ...(via ? { via } : {}),
+        ...(actorDeliveryId ? { actorDeliveryId } : {}),
+      },
+    };
   };
 
   // Re-enter the SENDER with the actor's reply as a synthetic, wrapUntrusted-
@@ -329,9 +372,8 @@ export const makeActorMessaging = (deps) => {
   // user's live turn (the focus/work-theft bug, DECISIONS #20). Only the one-line
   // lead is trusted; the actor's body is fenced (mandatory for App actors,
   // which render attacker content).
-  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] */
-  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined) => {
-    const text = replyText(instanceId, kind, name, body, failed);
+  /** @param {string} senderSessionId @param {string} instanceId @param {string} kind @param {string|undefined} name @param {string} body @param {boolean} [failed] @param {string} [via] @param {boolean} [outcomeUnknown] @param {boolean} [performed] @param {string} [actorDeliveryId] @returns {Promise<boolean>} */
+  const deliver = (senderSessionId, instanceId, kind, name, body, failed = false, via = undefined, outcomeUnknown = false, performed = undefined, actorDeliveryId = undefined) => {
     // actorReply rides the wake so the UI can render the reply as its OWN
     // attributed chat bubble at the bottom (not buried in the tool-call card).
     // `synthetic` alone can't carry this — it also marks truncation/resume
@@ -339,23 +381,30 @@ export const makeActorMessaging = (deps) => {
     // lead is (it renders un-fenced in the bubble's attribution line). `via`
     // attributes a mediated delegation if a future async code surface routes
     // its reply here; without that, a late bubble would be unexplainable.
-    const safeName = name ? escapeAttr(name.replace(/\s+/g, ' ').trim().slice(0, 80)) : undefined;
-    const actorReply = { kind, instanceId, ...(safeName ? { name: safeName } : {}), failed, ...(via ? { via } : {}) };
-    turnSlots.runWhenIdle(senderSessionId, () => {
-      // trusted:true — the reply-wake is a FIRST-PARTY continuation (the sender's
-      // own actor replied), so the sender's turn that reads it MAY fire a
-      // follow-up message_actor. The reply BODY is still wrapUntrusted-fenced:
-      // trusted is about the turn's ORIGIN (peerd's own loop), not its content.
-      Promise.resolve(reenter({ userText: text, sessionId: senderSessionId, synthetic: true, trusted: true, actorReply }))
-        .catch((e) => log('reenter failed', e));
+    const { userText, actorReply } = deliveryEnvelope(
+      instanceId, kind, name, body, failed, via, outcomeUnknown, performed, actorDeliveryId,
+    );
+    return new Promise((resolve) => {
+      try {
+        turnSlots.runWhenIdle(senderSessionId, () => {
+          // trusted:true: the reply wake is a first-party continuation. The reply
+          // body remains fenced. Resolve false instead of rejecting because most
+          // live deliveries are fire-and-forget; recovery callers use the boolean
+          // to retain their durable record until the warning lands successfully.
+          Promise.resolve(reenter({ userText, sessionId: senderSessionId, synthetic: true, trusted: true, actorReply }))
+            .then(() => resolve(true), (e) => { log('reenter failed', e); resolve(false); });
+        });
+      } catch (e) {
+        log('reenter queue failed', e);
+        resolve(false);
+      }
     });
   };
 
-  // Queue ONE engine actor turn on its slot, route the fenced reply to the
-  // sender, and clear the mailbox entry on settle. Shared by a fresh message and a
-  // boot redrain() so the in-flight bookkeeping (count, Stop-cascade tracking,
-  // durable entry) stays identical on both paths. parentToolUseId (absent on a
-  // redrain — the orchestrator card is gone) keys the actor's display stream.
+  // Queue one engine actor turn on its slot and route the fenced reply to the
+  // sender. Durable acknowledgement belongs to the session post-commit hook;
+  // this module clears only correlations that provably have no persistence path.
+  // parentToolUseId keys the actor's display stream.
   //
   // Reply routing: `onReply` (the awaitReply path — an actor's call) receives
   // the composed reply text and its failed flag INSTEAD of the deliver() wake;
@@ -365,13 +414,13 @@ export const makeActorMessaging = (deps) => {
   //
   // Bookkeeping is keyed by rootSessionId (phase 4/5): the lineage root shares
   // one budget and one Stop generation, whoever in the tree actually sent.
-  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean) => void, deliverInstead?: () => boolean }} o */
+  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean, outcomeUnknown: boolean) => boolean|void, deliverInstead?: () => boolean }} o */
   const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, via, onReply, deliverInstead }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(rootSessionId, actorSessionId);
     // Keyed on actorSessionId, NOT instanceId — must match the live-path track
     // (a constant 'web' instanceId would alias-collapse sender-scoped web actors;
-    // see the dedupe note in messageActor). clear() untracks with THIS key, so
+    // see the dedupe note in messageActor). clearTracking() uses THIS key, so
     // the track/untrack pair stays symmetric across both paths (#4/#8).
     const intentK = intentKey(actorSessionId, message);
     // Capture the root's Stop generation NOW — if the user Stops while this turn is
@@ -379,7 +428,7 @@ export const makeActorMessaging = (deps) => {
     // skip it when the slot finally frees (so Stop reaches queued work, not just the
     // running slot turnSlots.stop aborts). The bookkeeping is cleared either way.
     const genAtQueue = stopGen.get(rootSessionId) ?? 0;
-    const clear = () => {
+    const clearTracking = () => {
       decInFlight(rootSessionId);
       untrackActor(rootSessionId, actorSessionId);
       untrackIntent(rootSessionId, intentK);
@@ -390,8 +439,8 @@ export const makeActorMessaging = (deps) => {
       // the cancelled set after the queued-wake check had already passed — drop
       // it on settle so the set never grows past the in-flight deliveries.
       cancelledDeliveries.delete(correlationId);
-      mailbox.remove(correlationId).catch(() => {});
     };
+    const clearMailbox = () => mailbox.remove(correlationId).catch(() => {});
     // ONE reply seam for both modes (see routing note above). `bare` hands the
     // awaiting caller the RAW reply body instead of the formatted lead+fence:
     // the script surface's asks resolve into CODE, where fence markup is
@@ -405,8 +454,8 @@ export const makeActorMessaging = (deps) => {
     // a false "did not match format" reject. The schema's own field caps
     // (reply-schema.js) are the size bound for the validated path; the free-form
     // and error paths keep the RESULT_CHARS clamp on the way out.
-    /** @param {string} rawBody @param {boolean} failed */
-    const settle = (rawBody, failed) => {
+    /** @param {string} rawBody @param {boolean} failed @param {boolean} [outcomeUnknown] */
+    const settle = (rawBody, failed, outcomeUnknown = false) => {
       let outBody = rawBody;
       let outFailed = failed;
       // #241 — the deterministic schema boundary. An untrusted actor (web/api)
@@ -441,8 +490,28 @@ export const makeActorMessaging = (deps) => {
       // Ordering note (rebase onto #255): validation + the RESULT_CHARS clamp run
       // FIRST, so a degraded reply that lands on the later turn is the same
       // validated, bounded body the awaiting caller would have received.
-      if (onReply && !(deliverInstead && deliverInstead())) { onReply(bare ? outBody : replyText(instanceId, kind, name, outBody, outFailed), outFailed); return; }
-      deliver(senderSessionId, instanceId, kind, name, outBody, outFailed, via);
+      if (onReply && !(deliverInstead && deliverInstead())) {
+        const accepted = onReply(
+          bare ? outBody : replyText(instanceId, kind, name, outBody, outFailed, outcomeUnknown),
+          outFailed,
+          outcomeUnknown,
+        );
+        // An accepted awaited reply is not delivered until its parent tool
+        // result is committed to session history. Keep the mailbox row until
+        // that post-commit acknowledgement. If the caller has already stopped
+        // listening, this settled result has no persistence path, so close the
+        // correlation here instead of leaking it forever.
+        if (accepted !== true) clearMailbox();
+        return;
+      }
+      // Reentry success is not durability. The synthetic actorReply carries the
+      // correlation id into the appended user message; the session post-commit
+      // hook owns mailbox removal. A busy or failed parent keeps the row for
+      // passive recovery, and even a fulfilled turn cannot clear it early.
+      void deliver(
+        senderSessionId, instanceId, kind, name, outBody, outFailed, via,
+        outcomeUnknown, undefined, correlationId,
+      );
     };
     // Serialize on the ACTOR's slot — runWhenIdle runs the turn the moment the
     // actor is idle (never interrupting an in-flight actor turn). A thrown/
@@ -457,8 +526,15 @@ export const makeActorMessaging = (deps) => {
       // still resolve, or its tool call would hang past the Stop/abort that was
       // meant to end it.
       if ((stopGen.get(rootSessionId) ?? 0) !== genAtQueue || cancelledDeliveries.has(correlationId)) {
-        if (onReply) onReply(bare ? 'the request was stopped before the actor ran it.' : replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true), true);
-        clear();
+        if (onReply) {
+          onReply(
+            bare ? 'the request was stopped before the actor ran it.' : replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true),
+            true,
+            false,
+          );
+        }
+        clearTracking();
+        clearMailbox();
         // We were handed the idle actor slot but are DECLINING to run a turn
         // (Stopped after we queued). No claim/release will happen, so nothing
         // would re-drain the actor's queue — every turn queued behind us would
@@ -476,17 +552,26 @@ export const makeActorMessaging = (deps) => {
       const turnStartedAt = now();
       // Stamp WHOSE delivery now runs on this actor, so an awaitReply abort can
       // tell "my own turn is running (stop the slot)" from "a sibling's is
-      // (leave it alone)". Cleared self-scoped in clear().
+      // (leave it alone)". Cleared self-scoped in clearTracking().
       runningOnActor.set(actorSessionId, correlationId);
       Promise.resolve(runActorTurn({ actorSessionId, message, actorTabId: tabId, instanceId, kind, parentToolUseId, name, oneShot }))
         .then((res) => {
           log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
           // Unclamped in — settle applies the RESULT_CHARS ceiling per path, AFTER
           // schema validation (#241) so a valid envelope isn't truncated mid-JSON.
-          return settle(res?.result || '(the actor produced no text reply)', res?.stopped === true);
+          return settle(
+            res?.result || '(the actor produced no text reply)',
+            res?.stopped === true,
+            res?.outcomeKnown === false
+              || (res?.executionFailed === true && res?.outcomeKnown !== true),
+          );
         })
-        .catch((e) => settle(`the actor turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, true))
-        .finally(clear);
+        .catch((e) => settle(
+          `the actor turn failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
+          true,
+          true,
+        ))
+        .finally(clearTracking);
     });
   };
 
@@ -504,7 +589,7 @@ export const makeActorMessaging = (deps) => {
    *   awaitSignal — the awaiting actor's AbortSignal (its wall-clock timeout
    *   / cancel). Only meaningful with awaitReply: the await races the reply
    *   against it so an aborted child unblocks instead of parking on a hung actor.
-   * @returns {Promise<{ ok: boolean, content?: string, error?: string }>}
+   * @returns {Promise<{ ok: boolean, content?: string, error?: string, code?: string, performed?: boolean, targetRead?: boolean, targetChanged?: boolean, retryable?: boolean, actorDeliveryId?: string }>}
    */
   const messageActor = async (req) => {
     const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, awaitCapMs, degradeToAsync, via, bareReply } = req;
@@ -542,6 +627,18 @@ export const makeActorMessaging = (deps) => {
     if (!senderAllowed) {
       log('REFUSED', { reason: 'sender_gate', senderSessionId, inbound });
       return { ok: false, error: 'message_actor: only the active foreground chat, its first-party autonomous continuation (a goal turn, or reacting to an actor reply), or a trusted-lineage actor it spawned may message an actor; untrusted/background senders are blocked' };
+    }
+
+    // Preserve sender-gate priority, then refuse before target resolution,
+    // rate accounting, mailbox persistence, tab creation, or any actor work.
+    const isolation = getActorIsolation();
+    if (isolation && !actorIsolationAvailable(isolation)) {
+      const refusal = actorIsolationRefusal(isolation);
+      appendAudit({
+        type: 'actor_isolation_refused',
+        details: { status: isolation.status, host: isolation.host, code: refusal.code, performed: false },
+      }).catch(() => {});
+      return refusal;
     }
 
     // The gate refused every falsy sender above; bind the narrowed string once
@@ -623,29 +720,71 @@ export const makeActorMessaging = (deps) => {
     trackIntent(rootSessionId, intentK);
     appendAudit({ type: 'actor_message', details: { to: instanceId, kind, senderSessionId, rootSessionId, lineagePath: provenance.lineagePath, ...(typeof via === 'string' ? { via } : {}) } }).catch(() => {});
 
-    // ASYNC for EVERY long-lived sender — web included — unless the caller opted
+    // ASYNC for EVERY long-lived sender, including web, unless the caller opted
     // into `await:true`, which takes the awaitReply branch below instead. On THIS
     // path the orchestrator does not block: it hands a task
     // to the actor and gets woken with the reply on a
     // later turn (the actor model, uniformly). Persist the correlation to the
     // durable mailbox FIRST (await the write so the record is on disk before any
-    // actor side effect begins — closing the accept→persist window an SW death
-    // could otherwise drop), then queue the wake. The actor's slot serializes its
+    // requested actor work begins, closing the accept→persist window an SW death
+    // could otherwise drop), then queue the wake. Target resolution happened above
+    // and may itself have read or minted the actor binding, so a persistence failure
+    // reports that honestly even though it never queues the requested turn. The
+    // actor's slot serializes its
     // turns (one actor per tab/instance), and deliver() wrapUntrusted-fences the
-    // reply — so a web actor's page-derived reply is fenced like any other
-    // untrusted content. A storage failure degrades to heap-only rather than
-    // throwing.
-    const correlationId = `${instanceId}:${++seq}:${nowMs}`;
-    // Persist oneShot too, so a redrain after an SW restart re-runs the turn in the
-    // same mode (a dropped flag would just fall back to a full summarize turn — safe,
-    // but inconsistent). Older entries without the field redrain as full turns.
-    // The provenance rides the envelope (phase 7) so a redrain can arbitrate —
-    // notably rerouting a reply whose awaiting sender was an ephemeral actor.
-    await Promise.resolve(mailbox.append({
-      id: correlationId, senderSessionId: sender, to: instanceId, message, createdAt: nowMs,
-      provenance: { rootSessionId, lineagePath: provenance.lineagePath },
-      ...(oneShot === true ? { oneShot: true } : {}),
-    })).catch(() => {});
+    // reply, so a web actor's page-derived reply is fenced like any other
+    // untrusted content. A storage failure refuses instead of running heap-only.
+    // Keep the durable key opaque and bounded. Actor addresses include API
+    // origins and may legitimately be much longer than the post-commit hook's
+    // defensive id ceiling; embedding the address would make those replies
+    // impossible to acknowledge. The mailbox record already stores `to`.
+    const correlationId = `actor:${uuidv7(() => nowMs)}`;
+    // Persist oneShot for diagnostics. The provenance rides the envelope so boot
+    // recovery can reroute a notice whose awaiting sender was ephemeral.
+    try {
+      await Promise.resolve(mailbox.append({
+        id: correlationId, senderSessionId: sender, to: instanceId, message, createdAt: nowMs,
+        state: 'queued', kind, ...(name ? { name } : {}),
+        provenance: { rootSessionId, lineagePath: provenance.lineagePath },
+        ...(oneShot === true ? { oneShot: true } : {}),
+      }));
+    } catch (error) {
+      decInFlight(rootSessionId);
+      untrackIntent(rootSessionId, intentK);
+      appendAudit({ type: 'actor_message_persist_failed', details: { to: instanceId, kind } }).catch(() => {});
+      return {
+        ok: false,
+        code: 'actor_mailbox_unavailable',
+        error: `message_actor: the actor turn was not queued because the durable mailbox could not record the request; target resolution may already have read or created its actor binding: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`,
+        performed: false,
+        targetRead: true,
+        targetChanged: true,
+        retryable: true,
+      };
+    }
+
+    // Commit the no-replay boundary before the delivery can enter the actor's
+    // slot. If this heap disappears after this write, boot recovery reports an
+    // unknown outcome instead of repeating a request that may have used tools.
+    // The small append-to-started window remains safely replayable because no
+    // actor work is queued until both writes finish.
+    try {
+      await Promise.resolve(mailbox.markStarted(correlationId));
+    } catch (error) {
+      decInFlight(rootSessionId);
+      untrackIntent(rootSessionId, intentK);
+      await mailbox.remove(correlationId).catch(() => {});
+      appendAudit({ type: 'actor_message_start_persist_failed', details: { to: instanceId, kind } }).catch(() => {});
+      return {
+        ok: false,
+        code: 'actor_mailbox_unavailable',
+        error: `message_actor: the actor turn was not run because its durable start state could not be saved: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`,
+        performed: false,
+        targetRead: true,
+        targetChanged: true,
+        retryable: true,
+      };
+    }
 
     // PR #134 — the ACTOR reply mode. An ephemeral child has no later turn
     // to wake (and waking its session would re-run it on the wrong exposure
@@ -700,7 +839,7 @@ export const makeActorMessaging = (deps) => {
           if (degradeToAsync === true && abortReasonOf(awaitSignal) === ABORT_STEER) { onCap(); return; }
           stopActorForAwait(correlationId, actor.actorSessionId);
           const notice = 'the request was aborted (timeout or cancel) before the actor replied.';
-          finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, true), failed: true });
+          finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, true), failed: true, outcomeUnknown: false });
         };
         // The await wall-clock cap → DEGRADE TO ASYNC. why distinct from onAbort:
         // Stop/cancel means "stop the work"; a too-slow reply does NOT — the actor
@@ -714,14 +853,15 @@ export const makeActorMessaging = (deps) => {
           if (done) return;
           degraded = true;
           const notice = `the ${kind} actor is still working; its reply will arrive as a fenced note on a later turn.`;
-          finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, false), failed: false });
+          finish({ text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, false), failed: false, outcomeUnknown: false });
         };
-        const finish = (/** @type {{ text: string, failed: boolean }} */ v) => {
-          if (done) return;
+        const finish = (/** @type {{ text: string, failed: boolean, outcomeUnknown: boolean, actorDeliveryId?: string }} */ v) => {
+          if (done) return false;
           done = true;
           if (capTimer) { clearTimeout(capTimer); capTimer = null; }
           try { awaitSignal?.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
           resolve(v);
+          return true;
         };
         // Queue the actor turn FIRST — so the delivery's bookkeeping (trackActor,
         // and the runningOnActor stamp if the idle slot runs it synchronously)
@@ -730,7 +870,7 @@ export const makeActorMessaging = (deps) => {
         runEngineDelivery({
           correlationId, senderSessionId: sender, rootSessionId, actor, message,
           parentToolUseId: toolUseId, oneShot: oneShot === true, bare: bareReply === true,
-          onReply: (text, failed) => finish({ text, failed }),
+          onReply: (text, failed, outcomeUnknown) => finish({ text, failed, outcomeUnknown, actorDeliveryId: correlationId }),
           deliverInstead: () => degraded,
         });
         if (awaitSignal) {
@@ -745,8 +885,19 @@ export const makeActorMessaging = (deps) => {
         }
       });
       return settled.failed
-        ? { ok: false, error: settled.text }
-        : { ok: true, content: settled.text };
+        ? {
+          ok: false,
+          error: settled.text,
+          ...(settled.actorDeliveryId ? { actorDeliveryId: settled.actorDeliveryId } : {}),
+          ...(settled.outcomeUnknown
+            ? { performed: true, outcomeKnown: false, retryable: false }
+            : {}),
+        }
+        : {
+          ok: true,
+          content: settled.text,
+          ...(settled.actorDeliveryId ? { actorDeliveryId: settled.actorDeliveryId } : {}),
+        };
     }
 
     runEngineDelivery({ correlationId, senderSessionId: sender, rootSessionId, actor, message, parentToolUseId: toolUseId, oneShot: oneShot === true, via });
@@ -762,38 +913,49 @@ export const makeActorMessaging = (deps) => {
     };
   };
 
-  // DURABLE REDRAIN (DESIGN-17 P1). Called once on SW boot, after the registries
-  // load + the vault unlocks (an actor turn needs the model key). Re-queues every
-  // persisted message (any kind, web included) so its reply still reaches the
-  // sender. Idempotent: a
-  // stale entry whose instance is gone (or whose sender vanished) wakes the sender
-  // with a failure note and clears; a still-live instance re-runs the turn normally
-  // (resolveActor re-mints a dropped forward pointer). Mirrors goalRunner.resume.
-  /** @returns {Promise<{ redrained: number }>} */
+  // DURABLE RECOVERY (kept as redrain for API compatibility). Called once on SW
+  // boot. It never executes stored actor work. A queued entry proves
+  // the actor was not dispatched, so the sender receives a Not run notice. A
+  // started or legacy entry cannot prove whether tools ran, so the sender receives
+  // Outcome unknown and must inspect the target before retrying. Each record is
+  // removed only after a stable-id passive notice is persisted. Recovery never
+  // invokes the model, so another background loss cannot retry the requested work.
+  /** @returns {Promise<{ redrained: number, retained: number }>} */
   const redrain = async () => {
     let entries;
     try { entries = await mailbox.load(); }
-    catch (e) { log('redrain load failed', e); return { redrained: 0 }; }
-    if (!Array.isArray(entries) || entries.length === 0) return { redrained: 0 };
-    let redrained = 0;
+    catch (e) { log('redrain load failed', e); return { redrained: 0, retained: 1 }; }
+    if (!Array.isArray(entries) || entries.length === 0) return { redrained: 0, retained: 0 };
+    let retained = 0;
     for (const e of entries) {
       if (!e?.id || typeof e.senderSessionId !== 'string' || typeof e.to !== 'string' || typeof e.message !== 'string') {
         if (e?.id) mailbox.remove(e.id).catch(() => {});
         continue;
       }
-      let actor = null;
-      // Thread the ORIGINAL sender so a web-actor (to:'web') redrain re-attaches to the
-      // sender's actor, not whatever chat is focused at boot.
-      try { actor = await resolveActor(e.to, { senderSessionId: e.senderSessionId }); }
-      catch { actor = null; }
-      // Phase 7 (envelope arbitration) — a redrained reply must reach a session
-      // that can actually receive a wake. When the envelope's provenance says
-      // the sender was NOT its own lineage root, the sender was an EPHEMERAL
-      // actor awaiting the reply in a tool call; that await died with the SW,
-      // and waking the child's session would run an orphan turn on the wrong
-      // exposure surface. Reroute to the ROOT — the chat that ultimately asked —
-      // which handles it like any other fenced actor note. Entries without
-      // provenance (pre-#134) keep the old sender-addressed behavior.
+      // The session append and mailbox acknowledgement are separate durable
+      // writes. A crash between them leaves the row even though the reply is
+      // already visible. Detect that committed custody marker first so recovery
+      // does not add a misleading duplicate warning. A failed read retains the
+      // row and the recovery gate, then retries passively.
+      let alreadyCommitted = false;
+      try {
+        alreadyCommitted = await deliveryCommitted({
+          sessionId: e.senderSessionId,
+          deliveryId: e.id,
+        });
+      } catch (error) {
+        log('delivery commit check failed', error);
+        retained += 1;
+        continue;
+      }
+      if (alreadyCommitted) {
+        try { await mailbox.remove(e.id); }
+        catch (error) {
+          log('committed delivery cleanup failed', error);
+          retained += 1;
+        }
+        continue;
+      }
       const wakeTarget = (typeof e.provenance?.rootSessionId === 'string'
         && e.provenance.rootSessionId !== e.senderSessionId)
         ? e.provenance.rootSessionId
@@ -801,31 +963,56 @@ export const makeActorMessaging = (deps) => {
       if (wakeTarget !== e.senderSessionId) {
         appendAudit({ type: 'actor_reply_rerouted', details: { to: e.to, senderSessionId: e.senderSessionId, rootSessionId: wakeTarget } }).catch(() => {});
       }
-      // The instance is gone (engine instance deleted, or a web actor's tab
-      // closed) → abandon it; wake the target so it isn't left waiting on a reply
-      // that can never come. A live instance (any kind, web included) re-runs.
-      if (!actor) {
-        deliver(wakeTarget, e.to, 'tab-hosted', undefined,
-          'could not be reached after a restart (its instance may have been closed). Re-issue the request if it still matters.', true);
-        mailbox.remove(e.id).catch(() => {});
-        appendAudit({ type: 'actor_message_abandoned', details: { to: e.to, senderSessionId: e.senderSessionId } }).catch(() => {});
+      const uncertain = e.state === 'started' || e.state === undefined;
+      if (uncertain) {
+        const envelope = deliveryEnvelope(
+          e.to,
+          typeof e.kind === 'string' ? e.kind : 'actor',
+          typeof e.name === 'string' ? e.name : undefined,
+          'peerd cannot confirm whether the previous request ran before the background host restarted. Check whether the requested action completed before trying again.',
+          true,
+          undefined,
+          true,
+          undefined,
+        );
+        let recorded = false;
+        try {
+          recorded = await recordRecovery({ ...envelope, sessionId: wakeTarget, synthetic: true, recoveryId: e.id });
+        } catch (error) { log('recovery notice failed', error); }
+        if (recorded) await mailbox.remove(e.id).catch(() => {});
+        else retained += 1;
+        appendAudit({
+          type: 'actor_message_outcome_unknown',
+          details: { to: e.to, senderSessionId: e.senderSessionId, outcomeKnown: false },
+        }).catch(() => {});
         continue;
       }
-      inFlight.set(wakeTarget, (inFlight.get(wakeTarget) ?? 0) + 1);
-      // Track the intent too (#4): runEngineDelivery's clear() unconditionally
-      // untrackIntent()s on settle, so a redrained turn that never tracked would
-      // decrement — and delete — a DIFFERENT live send's refcount, silently
-      // defeating the dedupe guard. Mirror the live path's trackIntent here so
-      // the ref is symmetric. Keyed on the resolved actorSessionId, as the live
-      // path (a constant 'web' instanceId would alias-collapse web actors — #8).
-      trackIntent(wakeTarget, intentKey(actor.actorSessionId, e.message));
-      // senderSessionId here is the DELIVERY address (deliver() wakes it) and the
-      // bookkeeping root on a redrain — for a rerouted entry both are the root.
-      runEngineDelivery({ correlationId: e.id, senderSessionId: wakeTarget, rootSessionId: wakeTarget, actor, message: e.message, oneShot: e.oneShot === true });
-      redrained += 1;
+      if (e.state !== 'queued') {
+        await mailbox.remove(e.id).catch(() => {});
+        continue;
+      }
+      const envelope = deliveryEnvelope(
+        e.to,
+        typeof e.kind === 'string' ? e.kind : 'actor',
+        typeof e.name === 'string' ? e.name : undefined,
+        'The background host restarted before this actor request was dispatched. It was not run. Re-issue it if it still matters.',
+        true,
+        undefined,
+        false,
+        false,
+      );
+      let recorded = false;
+      try {
+        recorded = await recordRecovery({ ...envelope, sessionId: wakeTarget, synthetic: true, recoveryId: e.id });
+      } catch (error) { log('recovery notice failed', error); }
+      if (recorded) await mailbox.remove(e.id).catch(() => {});
+      else retained += 1;
+      appendAudit({
+        type: 'actor_message_not_run',
+        details: { to: e.to, senderSessionId: e.senderSessionId, performed: false, outcomeKnown: true },
+      }).catch(() => {});
     }
-    log('redrained', redrained);
-    return { redrained };
+    return { redrained: 0, retained };
   };
 
   return { messageActor, redrain, actorsFor, stopActorsFor };

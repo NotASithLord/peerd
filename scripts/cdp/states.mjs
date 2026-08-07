@@ -19,7 +19,7 @@
 
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
-import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, sleep, PASSPHRASE } from './e2e-harness.mjs';
+import { rpc, evalIn, waitFor, sseText, sseToolCall, openExtPage, openWidePage, sleep, setEmulatedTheme, PASSPHRASE } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -40,6 +40,23 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
+
+const auditEntries = async (ctx, limit = 800) => {
+  const audit = await rpc(ctx.page, { type: 'audit/list', limit });
+  return (audit && audit.entries) || [];
+};
+
+const actorIsolationEvidence = (entries) => {
+  const isolated = entries.filter((entry) => entry.type === 'actor_ran_isolated');
+  return {
+    isolated,
+    exactProof: isolated.length > 0 && isolated.every((entry) =>
+      entry.details?.workerType === 'dedicated'
+        && entry.details?.realmVerified === true),
+    backgroundRefused: entries.some((entry) => entry.type === 'actor_background_turn_refused'),
+    isolationFailed: entries.some((entry) => entry.type === 'actor_isolation_failure'),
+  };
+};
 
 // Transfer routes require the exact options-page Port. Keep the live E2E on
 // that production boundary instead of calling the generic dispatcher.
@@ -1255,6 +1272,198 @@ export const STATES = [
     },
   },
 
+  // Functional + rendered coverage for the actor-execution failure posture.
+  // It uses the real banner and chat components without forcing a worker crash
+  // into the shared live extension state.
+  {
+    name: 'actor-isolation-ui', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/actor-isolation.html');
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', {
+          width: 400,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        const rendered = await waitFor(() => evalIn(page, `(() => {
+          const banner = document.querySelector('.actor-isolation-banner');
+          const retry = banner?.querySelector('button');
+          const cards = [...document.querySelectorAll('button.path-card')];
+          if (!banner || !retry || cards.length !== 6) return null;
+          retry.focus();
+          const rect = retry.getBoundingClientRect();
+          return {
+            role: banner.getAttribute('role'),
+            live: banner.getAttribute('aria-live'),
+            text: banner.textContent ?? '',
+            retryFocused: document.activeElement === retry,
+            retryWidth: rect.width,
+            retryHeight: rect.height,
+            askDisabled: cards[0].disabled,
+            actorCardsDisabled: cards.slice(1).every((card) => card.disabled),
+            actorCardFilters: cards.slice(1).map((card) => getComputedStyle(card).filter),
+            actorLabels: cards.slice(1).map((card) => card.getAttribute('aria-label') ?? ''),
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+
+        rec.check('paused actor work is a polite persistent status',
+          rendered?.role === 'status'
+            && rendered?.live === 'polite'
+            && rendered?.text.includes('Actor work is paused'));
+        rec.check('the user-facing notice hides the raw worker failure',
+          !!rendered && !rendered.text.includes('fixture-private-worker-error'));
+        rec.check('retry is keyboard focusable with a 44px target',
+          rendered?.retryFocused === true
+            && rendered?.retryWidth >= 44
+            && rendered?.retryHeight >= 44,
+          JSON.stringify(rendered));
+        rec.check('Ask remains available while every actor starter is unavailable and named honestly',
+          rendered?.askDisabled === false
+            && rendered?.actorCardsDisabled === true
+            && rendered?.actorCardFilters.every((filter) => filter !== 'none')
+            && rendered?.actorLabels.every((label) => label.includes('unavailable while actor work is paused')),
+          JSON.stringify(rendered));
+        // The real starter cards have a one-time staggered reveal. Let its
+        // longest icon/label delay settle so the screenshot captures the
+        // disabled state, not an intermediate animation frame.
+        await sleep(1_200);
+        await setEmulatedTheme(page, 'light');
+        await sleep(80);
+        await rec.shotPage('paused.light', page);
+        await setEmulatedTheme(page, 'dark');
+        await sleep(80);
+        await rec.shotPage('paused.dark', page);
+
+        await evalIn(page, `document.querySelector('.actor-isolation-banner button')?.click()`);
+        const retryFailed = await waitFor(() => evalIn(page, `(() => {
+          const status = document.querySelector('.actor-isolation-banner');
+          return status?.textContent?.includes('Actor work is still paused')
+            ? { text: status.textContent ?? '', live: status.getAttribute('aria-live') }
+            : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('failed retry is announced without raw worker details',
+          retryFailed?.live === 'polite'
+            && retryFailed?.text.includes('Actor execution could not be restored')
+            && !retryFailed?.text.includes('actor_worker_start_timeout'),
+          JSON.stringify(retryFailed));
+        await rec.shotPage('retry-failed.dark', page);
+
+        await evalIn(page, `document.querySelector('.actor-isolation-banner button')?.click()`);
+        const recovered = await waitFor(() => evalIn(page, `(() => {
+          const status = document.querySelector('.actor-isolation-banner.is-recovered');
+          return status ? {
+            text: status.textContent ?? '',
+            focused: document.activeElement === status,
+            retryPresent: !!status.querySelector('button'),
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('successful retry moves focus to an honest recovery status',
+          recovered?.focused === true
+            && recovered?.retryPresent === false
+            && recovered?.text.includes('Actor work is ready'),
+          JSON.stringify(recovered));
+        await rec.shotPage('recovered.dark', page);
+
+        await evalIn(page, `document.querySelector('textarea')?.focus()`);
+        const recoveryDismissed = await waitFor(() => evalIn(page,
+          `!document.querySelector('.actor-isolation-banner')`),
+        { budgetMs: 2_000, pollMs: 50 });
+        rec.check('the recovery status clears after the user moves focus onward', recoveryDismissed === true);
+
+        await evalIn(page, `globalThis.actorIsolationFixtureShowUnknownOutcome()`);
+        const unknownOutcome = await waitFor(() => evalIn(page, `(() => {
+          const card = document.querySelector('.tool-actor > button.tool-call-header');
+          const reply = document.querySelector('.message-actor-reply');
+          const announcement = document.querySelector('.actor-recovery-announcement[role="status"]');
+          if (!card || !reply) return null;
+          return {
+            card: card.textContent ?? '',
+            role: reply.querySelector('.role')?.textContent ?? '',
+            body: reply.querySelector('.bubble')?.textContent ?? '',
+            liveRole: announcement?.getAttribute('role') ?? null,
+            live: announcement?.getAttribute('aria-live') ?? null,
+            atomic: announcement?.getAttribute('aria-atomic') ?? null,
+            announcement: announcement?.textContent ?? '',
+            replyLive: reply.getAttribute('aria-live'),
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('a post-start failure is labeled Outcome unknown, never Not run or done',
+          unknownOutcome?.card.includes('Outcome unknown')
+            && unknownOutcome?.role.includes('Outcome unknown')
+            && !unknownOutcome?.card.includes('Not run')
+            && !unknownOutcome?.card.includes('done'),
+          JSON.stringify(unknownOutcome));
+        rec.check('unknown-outcome recovery guidance remains visible to the user',
+          unknownOutcome?.body.includes('peerd cannot confirm whether the actor ran or completed')
+            && unknownOutcome?.body.includes('Check the target before trying again')
+            && !unknownOutcome?.body.includes('Do not retry automatically'),
+          JSON.stringify(unknownOutcome));
+        const queuedRecovery = await evalIn(page, `(() => {
+          const replies = [...document.querySelectorAll('.message-actor-reply')];
+          const reply = replies.find((node) => node.querySelector('.role')?.textContent?.includes('Not run'));
+          return reply ? {
+            role: reply.querySelector('.role')?.textContent ?? '',
+            body: reply.querySelector('.bubble')?.textContent ?? '',
+            replyLive: reply.getAttribute('aria-live'),
+            nestedStatuses: reply.querySelectorAll('[role="status"]').length,
+          } : null;
+        })()`);
+        rec.check('a queued recovery receipt is labeled Not run, never failed or unknown',
+          queuedRecovery?.role.includes('Not run')
+            && !queuedRecovery?.role.includes('failed')
+            && !queuedRecovery?.role.includes('Outcome unknown')
+            && queuedRecovery?.body.includes('before this actor request was dispatched'),
+          JSON.stringify(queuedRecovery));
+        rec.check('recovery receipts use one transient polite atomic announcement',
+          unknownOutcome?.liveRole === 'status'
+            && unknownOutcome?.live === 'polite'
+            && unknownOutcome?.atomic === 'true'
+            && unknownOutcome?.announcement.includes('Actor outcome unknown')
+            && unknownOutcome?.announcement.includes('Actor request not run')
+            && unknownOutcome?.replyLive === null
+            && queuedRecovery?.replyLive === null
+            && queuedRecovery?.nestedStatuses === 0,
+          JSON.stringify(unknownOutcome));
+        const spawnedUnknown = await evalIn(page, `(() => {
+          const cards = [...document.querySelectorAll('.tool-actor')];
+          const card = cards.find((node) => node.querySelector('.tool-name')?.textContent === 'actor_create');
+          const header = card?.querySelector('button.tool-call-header');
+          header?.click();
+          const announcement = document.querySelector('.actor-recovery-announcement[role="status"]');
+          return {
+            label: header?.textContent ?? '',
+            permanentStatuses: card?.querySelectorAll('[role="status"]').length ?? 0,
+            live: announcement?.getAttribute('aria-live'),
+            atomic: announcement?.getAttribute('aria-atomic'),
+            liveLabel: announcement?.textContent ?? '',
+          };
+        })()`);
+        const spawnedUnknownBody = await waitFor(() => evalIn(page, `(() => {
+          const cards = [...document.querySelectorAll('.tool-actor')];
+          const card = cards.find((node) => node.querySelector('.tool-name')?.textContent === 'actor_create');
+          return card?.querySelector('.actor-body')?.textContent ?? '';
+        })()`), { budgetMs: 2_000, pollMs: 50 });
+        rec.check('sync actor_create also labels the failure Outcome unknown',
+          spawnedUnknown?.label.includes('Outcome unknown')
+            && !spawnedUnknown?.label.includes('done'),
+          JSON.stringify(spawnedUnknown));
+        rec.check('sync actor_create shows only the human recovery step',
+          spawnedUnknownBody?.includes('Check the target before trying again')
+            && !spawnedUnknownBody?.includes('Do not retry automatically'),
+          JSON.stringify({ ...spawnedUnknown, body: spawnedUnknownBody }));
+        rec.check('sync actor_create uses the shared transient unknown-outcome announcement',
+          spawnedUnknown?.permanentStatuses === 0
+            && spawnedUnknown?.live === 'polite'
+            && spawnedUnknown?.atomic === 'true'
+            && spawnedUnknown?.liveLabel?.includes('Actor outcome unknown'),
+          JSON.stringify(spawnedUnknown));
+        await rec.shotPage('outcome-unknown.dark', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // --- visual (WIDE): the full-tab options / settings page --------------------
   {
     name: 'options-fulltab', kind: 'visual', phase: 'post-unlock',
@@ -1864,13 +2073,13 @@ export const STATES = [
     },
   },
 
-  // --- functional: a pure-reasoning actor runs in its OWN offscreen heap ---
+  // --- functional: a pure-reasoning actor runs in its OWN isolated heap ---
   // Heap-split phase 1. The orchestrator spawns a sync tools:[] actor; that
-  // child's loop runs in a dedicated offscreen Worker (its own heap, no key),
+  // child's loop runs in a dedicated Worker (its own heap, no key),
   // relaying its model call back to the SW. Proof: the child model call happens
   // (its prompt carries the EPHEMERAL ACTOR block), the result round-trips into
-  // the orchestrator's final answer, AND the actor_ran_offscreen audit marker
-  // is present (it fired only on the offscreen path, never the in-SW fallback).
+  // the orchestrator's final answer, AND the host-neutral actor_ran_isolated
+  // audit carries the dedicated-worker and verified-realm proof fields.
   {
     name: 'reasoning-offscreen', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
@@ -1887,6 +2096,7 @@ export const STATES = [
     },
     async run(ctx, rec) {
       reasoningState = { spawned: 0, childCalls: 0 };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'reason about the answer to life' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -1899,30 +2109,25 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-ANSWER-42') && !out.busy;
       }, { budgetMs: 30_000 });
 
-      // The offscreen PROOF: the child ran in its own worker heap (this audit
-      // type is appended ONLY on the offscreen path; the in-SW fallback appends
-      // actor_offscreen_fallback instead).
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const actorTypes = entries.filter((e) => String(e.type).startsWith('spawned')).map((e) => e.type);
       rec.check('the child sub-loop ran (EPHEMERAL ACTOR prompt seen)', reasoningState.childCalls >= 1, `childCalls=${reasoningState.childCalls}`);
-      rec.check('the pure-reasoning child ran in its OWN offscreen heap (actor_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack} bubbles=${JSON.stringify(out.bubbles)} actorAudits=${JSON.stringify(actorTypes)}`);
-      rec.check('it did NOT silently fall back to the in-SW loop', fellBack === false);
+      rec.check('the pure-reasoning child ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length} backgroundRefused=${isolation.backgroundRefused} isolationFailed=${isolation.isolationFailed} bubbles=${JSON.stringify(out.bubbles)} actorAudits=${JSON.stringify(actorTypes)}`);
+      rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-ANSWER-42'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
     },
   },
 
-  // --- functional: a TOOL-BEARING actor runs in its OWN offscreen heap ---
+  // --- functional: a TOOL-BEARING actor runs in its OWN isolated heap ---
   // Heap-split phase 4. The orchestrator spawns a sync actor GRANTED script;
-  // that child's loop runs in a dedicated offscreen Worker (its own heap, no key)
+  // that child's loop runs in a dedicated Worker (its own heap, no key)
   // and RELAYS its script call back to the SW, which rebuilds the child's restricted
   // ctx from the persisted grantedTools and dispatches script in the offscreen
   // job-runner. Proof: the child looped (two model calls: emit script, then answer),
-  // the actor_ran_offscreen audit fired (offscreen path, not the in-SW fallback),
+  // the actor_ran_isolated audit carries the dedicated-worker realm proof,
   // AND a tool_executed audit for script is present (the relayed tool actually ran).
   {
     name: 'actor-tools-offscreen', kind: 'functional', phase: 'post-unlock',
@@ -1944,6 +2149,7 @@ export const STATES = [
     },
     async run(ctx, rec) {
       actorToolsState = { spawned: 0, childCalls: 0 };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor to compute six times seven' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -1956,15 +2162,13 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-WITH-CHILD') && !out.busy;
       }, { budgetMs: 30_000 });
 
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 500 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
       rec.check('the tool-bearing child looped in its heap (script emitted, then answered) — 2 child calls', actorToolsState.childCalls >= 2, `childCalls=${actorToolsState.childCalls}`);
-      rec.check('the child ran in its OWN offscreen heap (actor_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the child ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length}`);
       rec.check('script actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
-      rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
+      rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
@@ -2010,6 +2214,7 @@ export const STATES = [
       actorCodeDelegatesState = {
         spawned: 0, childCalls: 0, webCalls: 0, sawComposedResult: false,
       };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor script to ask the web actor for the price' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -2022,15 +2227,13 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE') && !out.busy;
       }, { budgetMs: 45_000 });
 
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
       rec.check('the actor script ran through the SW-gated relay', jsRan === true, `jsRan=${jsRan}`);
       rec.check('the actor looped after code received the web reply', actorCodeDelegatesState.childCalls >= 2 && actorCodeDelegatesState.sawComposedResult, `childCalls=${actorCodeDelegatesState.childCalls} composed=${actorCodeDelegatesState.sawComposedResult}`);
       rec.check('actors.call reached a real web-actor heap', actorCodeDelegatesState.webCalls >= 1, `webCalls=${actorCodeDelegatesState.webCalls}`);
-      rec.check('the actor stayed in its isolated offscreen heap', ranOffscreen === true && fellBack === false, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the actor stayed in a dedicated Worker with a verified realm', isolation.exactProof === true && isolation.backgroundRefused === false && isolation.isolationFailed === false, `isolated=${isolation.isolated.length} backgroundRefused=${isolation.backgroundRefused} isolationFailed=${isolation.isolationFailed}`);
       rec.check('the composed result reached the orchestrator', (out.bubbles || []).includes('FINAL-VIA-ACTOR-CODE'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');
@@ -2038,13 +2241,13 @@ export const STATES = [
   },
 
   // --- functional: an offscreen actor DELEGATES to its own web actor ------
-  // Heap-split phase 4, the deepest chain — two isolated heaps stacked. The
+  // Heap-split phase 4, the deepest chain, with two isolated heaps stacked. The
   // orchestrator spawns a sync actor granted message_actor; that actor's loop
-  // runs in its OWN offscreen heap and calls message_actor({to:'web'}) — which relays
+  // runs in its OWN isolated Worker heap and calls message_actor({to:'web'}), which relays
   // to the SW, dispatches actorMessaging from the child's restricted ctx, and (because
   // the sender is an actor) AWAITS the web actor's fenced reply into the child's tool
-  // result. The web actor is ITSELF an offscreen heap (phase 3). Proof: the child looped
-  // offscreen, a web-actor sub-loop ran, message_actor executed via the relay, and the
+  // result. The web actor is ITSELF an isolated Worker heap (phase 3). Proof: the child
+  // looped in isolation, a web-actor sub-loop ran, message_actor executed via the relay, and the
   // web reply round-tripped up through the child into the orchestrator's answer. This is
   // the delegation-from-a-heap path the unit tests can only stub.
   {
@@ -2072,6 +2275,7 @@ export const STATES = [
     },
     async run(ctx, rec) {
       actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor to ask the web actor for the price' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
@@ -2084,16 +2288,14 @@ export const STATES = [
         return (out.bubbles || []).includes('FINAL-VIA-ACTOR') && !out.busy;
       }, { budgetMs: 40_000 });
 
-      const audit = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
-      const entries = (audit && audit.entries) || [];
-      const ranOffscreen = entries.some((e) => e.type === 'actor_ran_offscreen');
-      const fellBack = entries.some((e) => e.type === 'actor_offscreen_fallback');
+      const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+      const isolation = actorIsolationEvidence(entries);
       const msgActorRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'message_actor');
-      rec.check('the actor looped offscreen (message_actor emitted, then answered) — 2 child calls', actorDelegatesState.childCalls >= 2, `childCalls=${actorDelegatesState.childCalls}`);
-      rec.check('the actor ran in its OWN offscreen heap (actor_ran_offscreen audit)', ranOffscreen === true, `offscreen=${ranOffscreen} fellBack=${fellBack}`);
+      rec.check('the actor looped in isolation (message_actor emitted, then answered), 2 child calls', actorDelegatesState.childCalls >= 2, `childCalls=${actorDelegatesState.childCalls}`);
+      rec.check('the actor ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length}`);
       rec.check('the actor delegated via message_actor from its heap (tool_executed audit)', msgActorRan === true, `msgActorRan=${msgActorRan}`);
       rec.check('a WEB-ACTOR sub-loop ran (its own heap) for the child delegation', actorDelegatesState.webCalls >= 1, `webCalls=${actorDelegatesState.webCalls}`);
-      rec.check('it did NOT fall back to the in-SW loop', fellBack === false);
+      rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the web reply round-tripped up through the actor into the final answer', (out.bubbles || []).includes('FINAL-VIA-ACTOR'));
       rec.check('the turn settles idle', out.busy === false);
       await rec.shot('final');

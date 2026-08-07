@@ -23,9 +23,7 @@ import { mainAgentDescriptors } from '../../extension/peerd-runtime/tools/exposu
 import { narrowTools, makeSpawnActor } from '../../extension/peerd-runtime/actor/spawn.js';
 import { WEB_ACTOR_DOM_TOOLS } from '../../extension/peerd-runtime/tools/exposure.js';
 import { createSessionStore } from '../../extension/peerd-runtime/sessions/store.js';
-// why: real JSDoc contracts from source — LoopEvent shapes the mock loop's
-// yields, Session widens setToolManifest's inferred union return.
-import type { LoopEvent } from '../../extension/peerd-runtime/loop/agent-loop.js';
+// why: the source Session contract widens setToolManifest's inferred union return.
 import type { Session } from '../../extension/peerd-runtime/sessions/types.js';
 
 type ToolT = import('../../extension/shared/tool-types.js').Tool;
@@ -274,49 +272,36 @@ describe('makeSpawnActor — the parent manifest caps and follows the child', ()
 
   const harness = (store: any) => {
     const seenTools: any[] = [];
-    const dispatched: string[] = [];
-    async function* loop(ctx: any): AsyncGenerator<LoopEvent> {
-      seenTools.push(ctx.tools);
-      if (ctx.toolDispatch) {
-        await ctx.toolDispatch({ id: 't1', name: 'b', args: {} });
-        await ctx.toolDispatch({ id: 't2', name: 'c', args: {} });
-      }
-      await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
-      // why: LoopEvent's stop variant requires messageId; the orchestrator
-      // never reads it, so a fixed mock id just completes the shape.
-      yield { type: 'stop', sessionId: ctx.sessionId, messageId: 'm-mock', stopReason: 'end_turn' };
-    }
     const deps = {
       sessions: store,
-      runUserTurn: loop,
-      callModel: async function* () { yield { type: 'message-stop', stopReason: 'end_turn' }; },
-      getSecret: async () => 'sk',
-      safeFetch: async () => new Response('ok'),
       appendAudit: async () => {},
-      buildToolContext: async ({ sessionId }: any) => ({ session: { sessionId }, audit: async () => {} }),
-      dispatchToolCall: async (call: any) => { dispatched.push(call.name); return { ok: true, content: 'ran' }; },
-      renderSystemPrompt: async () => 'sys',
+      renderSystemPromptForChild: async () => 'sys',
+      runChildOffscreen: async (job: any) => {
+        seenTools.push(job.tools);
+        return {
+          ok: true, started: true, finalText: 'done',
+          newMessages: [{ role: 'assistant', content: 'done' }],
+        };
+      },
       getToolDescriptors: () => [
         { name: 'a', description: 'A', schema: {} },
         { name: 'b', description: 'B', schema: {} },
         { name: 'c', description: 'C', schema: {} },
       ],
     };
-    return { deps, seenTools, dispatched };
+    return { deps, seenTools };
   };
 
-  test('descriptors intersect the parent manifest; out-of-manifest dispatch is refused; child inherits the manifest', async () => {
+  test('descriptors intersect the parent manifest and the child inherits it', async () => {
     const store = makeMiniStore();
     const parent = await store.create({ toolManifest: { allow: ['b'] } });
-    const { deps, seenTools, dispatched } = harness(store);
+    const { deps, seenTools } = harness(store);
     const spawn = makeSpawnActor(deps);
 
     const out = await spawn({ task: 't', parentSessionId: parent.sessionId, tools: ['b', 'c'] });
 
     // descriptor layer: requested {b,c} ∩ manifest {b} = {b}
     expect(seenTools[0].map((t: any) => t.name)).toEqual(['b']);
-    // dispatch layer: 'c' never reached dispatchToolCall (allowedNames refusal)
-    expect(dispatched).toEqual(['b']);
     // inheritance: the child RECORD carries the parent's manifest verbatim
     const child = store.map.get(out.sessionId!);
     expect(child.toolManifest).toEqual({ allow: ['b'] });

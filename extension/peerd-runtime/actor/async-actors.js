@@ -22,7 +22,7 @@
 
 /**
  * @param {Object} deps
- * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean, timedOut?: boolean, stopped?: boolean }>} deps.spawnActor
+ * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean, timedOut?: boolean, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.spawnActor
  *   The bound child runner (resolves when the child's whole loop finishes).
  * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, isBusy: (sessionId: string) => boolean, stop?: (sessionId: string) => boolean }} deps.turnSlots
  *   stop (optional — PR #134): abort a child session's live turn slot, so
@@ -77,6 +77,8 @@ export const makeAsyncActors = (deps) => {
    * @property {boolean} interrupted
    * @property {boolean} timedOut     the child hit its wall-clock budget (PR #134)
    * @property {boolean} stopped      the child's slot was aborted (Stop cascade)
+   * @property {boolean} executionFailed the Worker failed after execution began
+   * @property {boolean} outcomeKnown false when effects may have landed before failure
    * @property {string | null} childSessionId
    * @property {boolean} reintegrated
    * @property {string[]} ring
@@ -160,15 +162,29 @@ export const makeAsyncActors = (deps) => {
       // a bare millisecond count in the wrapper. Keep the injected `now` for
       // determinism, formatted correctly.
       const wrapped = wrapUntrusted({ origin: 'spawned', tool: 'actor_create', body, retrievedAt: new Date(now()).toISOString() });
-      const flag = c.interrupted ? ' (interrupted before finishing — partial)'
-        : c.timedOut ? ' (hit its wall-clock timeout — partial)'
-        : c.stopped ? ' (stopped before finishing — partial)'
-        : c.exceeded ? ' (hit its step cap — may be incomplete)' : '';
+      const outcomeUnknown = c.executionFailed && c.outcomeKnown === false;
+      const flag = outcomeUnknown
+        ? ' (execution failed after work began; outcome unknown; do not retry automatically)'
+        : c.executionFailed ? ' (failed before target work ran)'
+        : c.interrupted ? ' (interrupted before finishing, partial)'
+        : c.timedOut ? ' (hit its wall-clock timeout, partial)'
+        : c.stopped ? ' (stopped before finishing, partial)'
+        : c.exceeded ? ' (hit its step cap, may be incomplete)' : '';
       return `Actor "${c.task.slice(0, 80)}"${flag}:\n${wrapped}`;
     });
+    const hasUnknownOutcome = finished.some((entry) => entry.executionFailed && entry.outcomeKnown === false);
+    const hasKnownFailure = finished.some((entry) => entry.executionFailed && entry.outcomeKnown !== false);
     const lead = finished.length === 1
-      ? 'An actor you started earlier has finished. Here is its result:'
-      : `${finished.length} spawned you started earlier have finished. Here are their results:`;
+      ? hasUnknownOutcome
+        ? 'An actor you started earlier stopped after execution began. Its outcome is unknown. Do not retry automatically. Here is the failure:'
+        : hasKnownFailure
+          ? 'An actor you started earlier failed before target work ran. Here is the failure:'
+        : 'An actor you started earlier has finished. Here is its result:'
+      : hasUnknownOutcome
+        ? `${finished.length} spawned actors completed or failed. Review each result and do not automatically retry an unknown outcome:`
+        : hasKnownFailure
+          ? `${finished.length} spawned actors completed or failed before target work ran. Review each result:`
+        : `${finished.length} actors you started earlier have finished. Here are their results:`;
     const wakeText = `${lead}\n\n${blocks.join('\n\n')}`;
 
     // Passive surfacing if the parent is NOT the user's active chat (#20).
@@ -213,6 +229,7 @@ export const makeAsyncActors = (deps) => {
     const entry = {
       taskId, task: String(req.task ?? ''), status: 'running', result: '',
       exceeded: false, interrupted: false, timedOut: false, stopped: false,
+      executionFailed: false, outcomeKnown: true,
       childSessionId: null, reintegrated: false, ring: [],
     };
     kids.set(taskId, entry);
@@ -254,8 +271,10 @@ export const makeAsyncActors = (deps) => {
       // a cancel: mark terminal, surface on the bar, no wake. A TIMEOUT is
       // different — the parent is still working and wants the partial — so
       // timedOut still drains. (A goal/auto continuation isn't a user Stop; those
-      // don't cascade stopSubtree, so they never reach here as `stopped`.)
-      if (patch.stopped === true) {
+      // don't cascade stopSubtree, so they never reach here as `stopped`.) A
+      // post-start Worker failure also carries stopped:true, but must drain its
+      // unknown-outcome warning instead of disappearing like a user cancel.
+      if (patch.stopped === true && patch.executionFailed !== true) {
         Object.assign(entry, patch, { status: 'cancelled' });
         onTasksChanged(parentSessionId);
         return;
@@ -272,9 +291,22 @@ export const makeAsyncActors = (deps) => {
         exceeded: out.exceeded === true || out.refused === true,
         timedOut: out.timedOut === true,
         stopped: out.stopped === true,
+        executionFailed: out.executionFailed === true,
+        outcomeKnown: out.outcomeKnown !== false,
         childSessionId: out.sessionId ?? entry.childSessionId,
       }))
-      .catch((e) => settle({ result: `actor errored: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, interrupted: true }));
+      .catch((e) => {
+        const failure = /** @type {{ message?: string, executionFailed?: boolean, outcomeKnown?: boolean }} */ (e);
+        if (failure.outcomeKnown === false) {
+          settle({
+            result: failure.message ?? 'actor transcript persistence failed',
+            executionFailed: true,
+            outcomeKnown: false,
+          });
+          return;
+        }
+        settle({ result: `actor errored: ${failure.message ?? String(e)}`, interrupted: true });
+      });
 
     return {
       ok: true,

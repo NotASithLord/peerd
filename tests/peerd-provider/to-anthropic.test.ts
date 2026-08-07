@@ -198,11 +198,16 @@ describe('toAnthropicMessages — orphan tool_result demotion', () => {
       asst('a1', 'toolu_A'),
       {
         role: 'user', content: '', id: 'u1', when: 0,
-        toolResults: [{ tool_use_id: 'toolu_A', content: 'ok' }],
+        toolResults: [{
+          tool_use_id: 'toolu_A', content: 'ok',
+          actorDeliveryId: 'delivery-one', actorDeliveryIds: ['delivery-two'],
+        }],
       },
     ]);
     const last = out[out.length - 1].content as any[];
     expect(last).toEqual([{ type: 'tool_result', tool_use_id: 'toolu_A', content: 'ok' }]);
+    expect(JSON.stringify(out)).not.toContain('delivery-one');
+    expect(JSON.stringify(out)).not.toContain('delivery-two');
   });
 });
 

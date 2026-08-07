@@ -21,13 +21,19 @@ export const makeSessionRoutes = (deps) => {
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnActor, requestReview, appClient,
     browser, originOfTabUrl, matchesDenylist, denylistStore,
-    startGoalRun, haltGoalRun, ensureSession, actorMessaging,
+    startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady, actorMessaging,
     actorLifecycle,
     // The debug surface: the pure assembler + tree walk from
     // peerd-runtime/observability, the SW's live snapshot ring, and the
     // settings/channel/version identity the bundle stamps.
     settingsStore, contextSnapshots, assembleDebugBundle, childSessionIdsOf, CHANNEL,
   } = deps;
+
+  const recoveryReadyForUserTurn = async () => {
+    if (await actorRecoveryReady()) return true;
+    postChatNote('Actor recovery is still being recorded. Wait a moment, then send again.');
+    return false;
+  };
 
   return {
     // --- agent ---
@@ -83,7 +89,7 @@ export const makeSessionRoutes = (deps) => {
       if (typeof text !== 'string' || !text.trim()) {
         return { ok: false, error: 'empty-message' };
       }
-      const trimmedGoal = text.trim();
+      const trimmed = text.trim();
       // Goal mode (the mode-row Goal toggle): run autonomous turns in THIS chat
       // until the agent calls complete_goal (or the cap / Stop). The goal is the
       // first, visible message; continuations are hidden synthetic turns, so the
@@ -91,28 +97,19 @@ export const makeSessionRoutes = (deps) => {
       // front (a fresh chat has none yet — same lazy-create the model turn does).
       if (goal === true) {
         if (!startGoalRun || !ensureSession) return { ok: false, error: 'goal-mode-unavailable' };
+        if (!(await recoveryReadyForUserTurn())) return { ok: false, error: 'actor-recovery-pending' };
         try {
           const sessionId = await ensureSession();
-          await startGoalRun({ sessionId, goal: trimmedGoal });
+          await startGoalRun({ sessionId, goal: trimmed });
         } catch (e) {
           console.error('[sw] goal start threw', e);
           postChatNote(`Goal couldn't start: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
         }
         return { ok: true, handled: 'goal' };
       }
-      // A normal (non-goal) user message while a goal run is live means the user
-      // is steering / taking over — halt the run so it doesn't auto-continue on
-      // top of the new message.
-      if (haltGoalRun) {
-        const curSid = await sessionCache.sessionGet('currentSessionId');
-        // Awaited: durably forget the run so a steer-takeover can't be undone by
-        // a resume() on the next unlock (parity with agent/stop; #60).
-        if (curSid) await haltGoalRun(/** @type {any} */ (curSid));
-      }
       // /init is handled in the SW, not sent to the model (feature 01) —
       // check it BEFORE composer expansion so the slash command short-
       // circuits the turn entirely (it drafts AGENTS.md, no model call).
-      const trimmed = text.trim();
       if (trimmed === '/init' || trimmed.startsWith('/init ')) {
         runInit().catch((/** @type {unknown} */ e) => {
           console.error('[sw] /init threw', e);
@@ -139,6 +136,18 @@ export const makeSessionRoutes = (deps) => {
           postChatNote(`/tools failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
         });
         return { ok: true, handled: 'tools' };
+      }
+      // A user turn must not pass an uncommitted actor recovery receipt. Return
+      // a typed retryable error instead of accepting and silently dropping it.
+      if (!(await recoveryReadyForUserTurn())) return { ok: false, error: 'actor-recovery-pending' };
+      // A normal (non-goal) user message while a goal run is live means the user
+      // is steering / taking over. Halt only after this send is accepted so a
+      // recovery pause cannot discard the draft and stop the user's goal too.
+      if (haltGoalRun) {
+        const curSid = await sessionCache.sessionGet('currentSessionId');
+        // Awaited: durably forget the run so a steer-takeover can't be undone by
+        // a resume() on the next unlock (parity with agent/stop; #60).
+        if (curSid) await haltGoalRun(/** @type {any} */ (curSid));
       }
       // Composer expansion (feature 04): rewrite /commands and @-references
       // BEFORE the turn starts. @tab/@file pulls (possibly untrusted)

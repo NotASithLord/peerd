@@ -26,6 +26,7 @@ import { ContactsSection } from './contacts-section.js';
 import { INITIAL_STATE, reduceChat, putSpawnedSession } from '../sidepanel/chat-reducer.js';
 import { ChatView } from '../sidepanel/components/chat-view.js';
 import { ConfirmModal, NoticeBar } from '../sidepanel/components/app.js';
+import { ActorIsolationBanner } from '../sidepanel/components/actor-isolation-banner.js';
 import { VaultGate } from '../sidepanel/components/vault-gate.js';
 import { OnboardingView, needsOnboarding } from '../sidepanel/components/onboarding-view.js';
 import { peerNotifications } from '/shared/peer-notifications.js';
@@ -602,6 +603,7 @@ const HomeApp = {
           currentState.notices?.length
             ? m(NoticeBar, { notices: currentState.notices, uiActions })
             : null,
+          m(ActorIsolationBanner, { capability: currentState.capabilities?.actorExecution, send }),
           // Chat is single-homed: when the side panel owns it, home shows tools
           // only — so give an obvious way to bring chat back (the inverse of
           // "Pop to side", since that button rode away with the chat). Closing

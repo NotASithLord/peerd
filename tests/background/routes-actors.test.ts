@@ -228,6 +228,25 @@ describe('actors/call — per-operation authority', () => {
     registry.release('run-1');
   });
 
+  test('an awaited actor reply keeps its delivery id outside the worker-visible value', async () => {
+    const h = makeHarness({
+      messageActor: async () => ({
+        ok: true, content: 'done', actorDeliveryId: 'delivery-1',
+      }),
+    });
+
+    expect(await h.call('call', { address: 'vm-1', message: 'run tests' }))
+      .toEqual({
+        ok: true,
+        actorDeliveryId: 'delivery-1',
+        value: { reply: 'done', failed: false },
+      });
+    expect(h.mirrored).toEqual([expect.objectContaining({
+      settled: true, actorDeliveryId: 'delivery-1',
+    })]);
+    expect(h.mirrored[0].actorDeliveryId).not.toBe(h.mirrored[0].goal);
+  });
+
   test('the SW-side run ceiling refuses work before dispatch', async () => {
     const h = makeHarness({ actorOpAllowed: false });
     expect(await h.call('ask', { to: 'web', goal: 'find it' }))

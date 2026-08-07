@@ -46,7 +46,10 @@ describe('to-openai message mapping', () => {
       },
       {
         role: 'user', content: '', id: '2', when: 0,
-        toolResults: [{ tool_use_id: 'call_1', content: '{"ok":true}' }],
+        toolResults: [{
+          tool_use_id: 'call_1', content: '{"ok":true}',
+          actorDeliveryId: 'delivery-one', actorDeliveryIds: ['delivery-two'],
+        }],
       },
     ]) as OpenAiMsg[];
     const asst = msgs.find((m) => m.role === 'assistant');
@@ -57,6 +60,8 @@ describe('to-openai message mapping', () => {
     const tool = msgs.find((m) => m.role === 'tool');
     if (!tool) throw new Error('expected tool message');
     expect(tool.tool_call_id).toBe('call_1');
+    expect(JSON.stringify(msgs)).not.toContain('delivery-one');
+    expect(JSON.stringify(msgs)).not.toContain('delivery-two');
   });
 
   test('orphan tool_calls get a synthesized tool message', () => {

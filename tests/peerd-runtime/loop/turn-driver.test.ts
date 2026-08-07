@@ -10,9 +10,8 @@
 
 import { describe, test, expect } from 'bun:test';
 import { inboundActorCallAllowed, makeTurnDriver } from '/peerd-runtime/loop/turn-driver.js';
-import {
-  ACTOR_CREDENTIAL_BOUNDARY_FAILURE, ActorCredentialBoundaryError,
-} from '/peerd-runtime/errors.js';
+import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
+import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 
 /** Minimal deps maybeAutoResume touches; the rest stay undefined (never invoked). */
 const deps = (/** @type {any} */ over: any = {}) => ({
@@ -32,7 +31,7 @@ test('makeTurnDriver returns the two entry points', () => {
   expect(typeof d.maybeAutoResume).toBe('function');
 });
 
-test('the in-SW inbound dweb fallback rejects forged hidden/signing tool calls', () => {
+test('the inbound dweb policy rejects forged hidden/signing tool calls', () => {
   expect(inboundActorCallAllowed({
     isActor: true, inbound: true, actorType: 'dweb', name: 'dweb_peers',
   })).toBe(true);
@@ -109,9 +108,11 @@ test('maybeAutoResume does not resume a turn that is not resumable', async () =>
   expect(noted).toBe(false);
 });
 
-const turnDeps = (kind: 'chat' | 'actor', {
+const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   failover = false, boundaryFailure = false, streamBoundaryFailure = false,
   waitForAbort = false, abortDuringFallback = false, uiDisconnected = false,
+  waitForActorIsolation = async () => {},
+  dynamicIsolation = false,
 } = {}) => {
   const liveGetSecret = async () => 'sk-live';
   const liveSafeFetch = async () => new Response('ok');
@@ -119,7 +120,7 @@ const turnDeps = (kind: 'chat' | 'actor', {
   const rogueSafeFetch = async () => new Response('rogue');
   const rogueSignal = new AbortController().signal;
   const turnAbortController = new AbortController();
-  const session = {
+  const session: any = {
     sessionId: 's1', kind, provider: 'anthropic', model: 'claude-test',
     messages: [],
     ...(kind === 'actor' ? { actorType: 'web', instanceId: 'web' } : {}),
@@ -132,6 +133,12 @@ const turnDeps = (kind: 'chat' | 'actor', {
   const broadcasts: any[] = [];
   const chatNotes: string[] = [];
   let lateProviderContinuation = 0;
+  const audits: any[] = [];
+  let actorIsolation: any = {
+    status: 'available', host: 'background-page-worker', reason: null, retryable: false,
+  };
+  let systemPromptRenders = 0;
+  let releases = 0;
   const settings = {
     reasoningEnabled: false,
     reasoningEffort: 'medium',
@@ -150,11 +157,20 @@ const turnDeps = (kind: 'chat' | 'actor', {
     },
     sessions: {
       get: async () => session,
+      appendMessage: async (_sessionId: string, message: any) => {
+        session.messages.push({ ...message });
+        return session;
+      },
+      updateAssistantMessage: async (_sessionId: string, messageId: string, patch: any) => {
+        const message = session.messages.find((entry: any) => entry.id === messageId);
+        if (message) Object.assign(message, patch);
+        return session;
+      },
       setCost: async () => {},
     },
     sessionState: { set: () => {} },
     turnSlots: {
-      claim: () => ({ controller: turnAbortController, release: () => {} }),
+      claim: () => ({ controller: turnAbortController, release: () => { releases++; } }),
       isBusy: () => false,
     },
     buildTemporalBlock: () => '',
@@ -162,7 +178,10 @@ const turnDeps = (kind: 'chat' | 'actor', {
     browser: { tabs: { query: async () => [] } },
     originOfTabUrl: () => '',
     skillRegistry: { describeForPrompt: async () => '' },
-    renderSystemPrompt: async () => 'system',
+    renderSystemPrompt: async () => {
+      systemPromptRenders++;
+      return 'system';
+    },
     resolveManifestAllow: () => null,
     buildToolContext: async (args: any) => {
       toolContextArgs = args;
@@ -172,14 +191,23 @@ const turnDeps = (kind: 'chat' | 'actor', {
     filterByDwebEnabled: identity,
     filterDescriptorsByManifest: identity,
     mainAgentDescriptors: identity,
-    listTools: () => [],
+    listTools: () => dynamicIsolation
+      ? ['message_actor', 'actor_create', 'request_review', 'actor_list']
+        .map((name) => ({ name, description: `${name} test tool.`, schema: { type: 'object' } }))
+      : [],
     settingsStore: { get: () => settings },
     DWEB_ENABLED: false,
     filterByGoalActive: identity,
     goalActiveFor: () => false,
     dwebEngagedSessions: new Set(),
     markDwebEngaged: () => {},
-    dispatchToolCall: async () => ({ ok: true }),
+    dispatchToolCall: async () => {
+      actorIsolation = {
+        status: 'temporarily_unavailable', host: 'background-page-worker',
+        reason: 'worker startup failed', retryable: true,
+      };
+      return { ok: false, error: 'actor worker unavailable' };
+    },
     maybeNudgeDebuggerGrant: () => {},
     getTool: () => null,
     decideAction: () => null,
@@ -188,7 +216,7 @@ const turnDeps = (kind: 'chat' | 'actor', {
     makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
     uiConnected: () => !uiDisconnected && (boundaryFailure || streamBoundaryFailure),
     uiPorts: { broadcast: (message: any) => broadcasts.push(message) },
-    auditLog: { append: async () => {} },
+    auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: (note: string) => { chatNotes.push(note); },
     resolveFailoverChain: (start: any) => abortDuringFallback
       ? [
@@ -202,6 +230,16 @@ const turnDeps = (kind: 'chat' | 'actor', {
     recordModelCall: (call: any) => recordedModelCalls.push(call),
     callModel: async function* (args: any) {
       modelCalls.push(args);
+      if (dynamicIsolation) {
+        if (modelCalls.length === 1) {
+          yield { type: 'tool-use-start', id: 'actor-tool', name: 'message_actor' };
+          yield { type: 'tool-use-stop', id: 'actor-tool' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        } else {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        }
+        return;
+      }
       if (abortDuringFallback) {
         modelKeyReads.push(args.provider);
         await args.getSecret(args.provider);
@@ -222,7 +260,7 @@ const turnDeps = (kind: 'chat' | 'actor', {
       }
       yield { type: 'message-stop', stopReason: 'end_turn' };
     },
-    runUserTurn: async function* (ctx: any) {
+    runUserTurn: dynamicIsolation ? runUserTurn : async function* (ctx: any) {
       loopCtx = ctx;
       if (boundaryFailure) {
         await ctx.safeFetch('https://provider.invalid');
@@ -258,12 +296,17 @@ const turnDeps = (kind: 'chat' | 'actor', {
     currentAppScope: async () => null,
     checkpointMgr: { capture: async () => {} },
     detectInterruptedTurn: () => ({ resumable: false }),
+    getActorIsolation: () => actorIsolation,
+    waitForActorIsolation,
   });
   return {
     driver, modelCalls, modelKeyReads, broadcasts, chatNotes, turnAbortController,
     recordedModelCalls,
     liveGetSecret, liveSafeFetch,
     rogueGetSecret, rogueSafeFetch, rogueSignal,
+    audits,
+    systemPromptRenders: () => systemPromptRenders,
+    releases: () => releases,
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
     lateProviderContinuation: () => lateProviderContinuation,
@@ -271,88 +314,100 @@ const turnDeps = (kind: 'chat' | 'actor', {
 };
 
 describe('runAgentTurn credential custody', () => {
-  test('a bound actor loop gets stubs while the provider call gets live credentials', async () => {
+  test('a turn cannot snapshot actor isolation before durable host health is ready', async () => {
+    let releaseReady = () => {};
+    const ready = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const fixture = turnDeps('chat', { waitForActorIsolation: () => ready });
+    const running = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fixture.modelCalls).toEqual([]);
+    expect(fixture.toolContextArgs()).toBeNull();
+    releaseReady();
+    await running;
+    expect(fixture.modelCalls).toHaveLength(1);
+  });
+
+  test('a mid-turn actor-host failure updates the next model prompt', async () => {
+    const fixture = turnDeps('chat', { dynamicIsolation: true });
+    expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' }))
+      .toEqual({ ok: true, stopReason: 'end_turn' });
+    expect(fixture.modelCalls).toHaveLength(2);
+    expect(fixture.modelCalls[0].system).not.toContain('<actor_execution');
+    expect(fixture.modelCalls[0].tools.map((tool: any) => tool.name))
+      .toEqual(['message_actor', 'actor_create', 'request_review', 'actor_list']);
+    expect(fixture.modelCalls[1].system)
+      .toContain('<actor_execution status="temporarily_unavailable">');
+    expect(fixture.modelCalls[1].system).toContain('Do not retry automatically');
+    expect(fixture.modelCalls[1].tools.map((tool: any) => tool.name)).toEqual(['actor_list']);
+    expect(fixture.systemPromptRenders()).toBe(1);
+  });
+
+  test('a bound actor session is refused before the background loop, tools, or model', async () => {
     const fixture = turnDeps('actor');
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' }))
-      .toEqual({ ok: true, stopReason: 'end_turn' });
+      .toBeUndefined();
 
-    const ctx = fixture.loopCtx();
-    expect(ctx).not.toBeNull();
-    await expect(ctx.getSecret('anthropic')).rejects.toBeInstanceOf(ActorCredentialBoundaryError);
-    await expect(ctx.getSecret('anthropic')).rejects.toMatchObject({ capability: 'secret' });
-    await expect(ctx.safeFetch('https://example.com')).rejects.toMatchObject({
-      name: 'ActorCredentialBoundaryError', capability: 'provider-network',
-    });
-    expect(fixture.toolContextArgs()).toMatchObject({
-      exposure: 'actor', sessionId: 's1',
-      actorInstanceId: 'web', actorType: 'web',
-    });
-    expect(fixture.modelCalls).toHaveLength(1);
-    expect(fixture.modelCalls[0]).toMatchObject({
-      provider: 'anthropic',
-      model: 'claude-test',
-      ollamaHost: 'http://127.0.0.1:11434',
-    });
-    expect(fixture.modelCalls[0].signal).toBe(fixture.turnAbortController.signal);
-    expect(fixture.modelCalls[0].signal).not.toBe(fixture.rogueSignal);
-    expect(fixture.modelCalls[0].getSecret).toBe(fixture.liveGetSecret);
-    expect(fixture.modelCalls[0].safeFetch).toBe(fixture.liveSafeFetch);
-    expect(fixture.modelCalls[0].getSecret).not.toBe(fixture.rogueGetSecret);
-    expect(fixture.modelCalls[0].safeFetch).not.toBe(fixture.rogueSafeFetch);
-    expect(await fixture.modelCalls[0].getSecret('anthropic')).toBe('sk-live');
-    expect(fixture.recordedModelCalls).toHaveLength(1);
-    expect(fixture.recordedModelCalls[0]).toMatchObject({
-      provider: 'anthropic', model: 'claude-test',
-      sessionId: 's1', label: 'actor web (in-SW)',
+    expect(fixture.loopCtx()).toBeNull();
+    expect(fixture.toolContextArgs()).toBeNull();
+    expect(fixture.modelCalls).toEqual([]);
+    expect(fixture.recordedModelCalls).toEqual([]);
+    expect(fixture.releases()).toBe(1);
+    expect(fixture.audits).toContainEqual({
+      type: 'actor_background_turn_refused',
+      sessionId: 's1',
+      details: { reason: 'dedicated_worker_required', performed: false },
     });
   });
 
-  test('a custody trip maps to accurate not-run and recovery language', async () => {
-    const fixture = turnDeps('actor', { boundaryFailure: true });
-    expect(await fixture.driver.runAgentTurn({
-      sessionId: 's1', userText: 'inspect the page',
-      display: { parentToolUseId: 'tool-1', kind: 'web', instanceId: 'web' },
-    })).toEqual({ ok: false, stopReason: null });
+  test('a spawned actor session is refused before the background loop, tools, or model', async () => {
+    const fixture = turnDeps('spawned');
+    expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'continue delegated work' }))
+      .toBeUndefined();
 
-    const errors = fixture.broadcasts.filter((message) =>
-      message.type === 'turn/error' || message.type === 'turn/actor-error');
-    expect(errors).toHaveLength(2);
-    expect(errors.every((message) => message.error === ACTOR_CREDENTIAL_BOUNDARY_FAILURE)).toBe(true);
+    expect(fixture.loopCtx()).toBeNull();
+    expect(fixture.toolContextArgs()).toBeNull();
+    expect(fixture.modelCalls).toEqual([]);
+    expect(fixture.recordedModelCalls).toEqual([]);
+    expect(fixture.releases()).toBe(1);
+    expect(fixture.audits).toContainEqual({
+      type: 'actor_background_turn_refused',
+      sessionId: 's1',
+      details: { reason: 'dedicated_worker_required', performed: false },
+    });
+  });
+
+  test('the custody refusal keeps stable model-facing recovery language', () => {
     expect(ACTOR_CREDENTIAL_BOUNDARY_FAILURE).toContain('model request was not run');
     expect(ACTOR_CREDENTIAL_BOUNDARY_FAILURE).toContain('Do not retry automatically');
     expect(ACTOR_CREDENTIAL_BOUNDARY_FAILURE).toContain('Ask the user to reload peerd');
     expect(ACTOR_CREDENTIAL_BOUNDARY_FAILURE).not.toContain('no egress');
   });
 
-  test('a production loop error event fails the turn and actor completion', async () => {
-    const fixture = turnDeps('actor', { streamBoundaryFailure: true });
+  test('a production loop error event fails a chat turn', async () => {
+    const fixture = turnDeps('chat', { streamBoundaryFailure: true });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'inspect the page',
-      display: { parentToolUseId: 'tool-1', kind: 'web', instanceId: 'web' },
     })).toEqual({ ok: false, stopReason: undefined });
 
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
     }));
-    expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
-      type: 'turn/actor-done', ok: false,
-    }));
+    expect(fixture.broadcasts.some((message) => message.type === 'turn/actor-done')).toBe(false);
   });
 
   test('a production loop error fails a background turn with no UI broadcasts', async () => {
-    const fixture = turnDeps('actor', {
+    const fixture = turnDeps('chat', {
       streamBoundaryFailure: true,
       uiDisconnected: true,
     });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'inspect the page',
-      display: { parentToolUseId: 'tool-1', kind: 'web', instanceId: 'web' },
     })).toEqual({ ok: false, stopReason: undefined });
     expect(fixture.broadcasts).toEqual([]);
   });
 
-  test('actor cancellation reaches the exact broker signal with no late provider continuation', async () => {
-    const fixture = turnDeps('actor', { waitForAbort: true });
+  test('chat cancellation reaches the exact broker signal with no late provider continuation', async () => {
+    const fixture = turnDeps('chat', { waitForAbort: true });
     const running = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
     for (let attempt = 0; attempt < 20 && fixture.modelCalls.length === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -365,7 +420,7 @@ describe('runAgentTurn credential custody', () => {
   });
 
   test('Stop on a fallback never calls or keys the next candidate', async () => {
-    const fixture = turnDeps('actor', { abortDuringFallback: true });
+    const fixture = turnDeps('chat', { abortDuringFallback: true });
     const running = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
     for (let attempt = 0; attempt < 20 && fixture.modelCalls.length < 2; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -389,19 +444,11 @@ describe('runAgentTurn credential custody', () => {
     expect(fixture.modelCalls[0].safeFetch).toBe(fixture.liveSafeFetch);
   });
 
-  test('every actor failover candidate receives only the trusted broker credentials', async () => {
+  test('an actor session cannot reach a failover provider in the background heap', async () => {
     const fixture = turnDeps('actor', { failover: true });
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
 
-    expect(fixture.modelCalls).toHaveLength(2);
-    expect(fixture.modelCalls.map((call) => [call.provider, call.model]))
-      .toEqual([
-        ['anthropic', 'claude-test'],
-        ['openrouter', 'fallback-model'],
-      ]);
-    for (const call of fixture.modelCalls) {
-      expect(call.getSecret).toBe(fixture.liveGetSecret);
-      expect(call.safeFetch).toBe(fixture.liveSafeFetch);
-    }
+    expect(fixture.modelCalls).toEqual([]);
+    expect(fixture.recordedModelCalls).toEqual([]);
   });
 });

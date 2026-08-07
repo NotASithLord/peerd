@@ -309,9 +309,9 @@ export const actorTargetIdField = (name) =>
  * a possibly-injected worker — supplied), and lock edit_file to the actor's kind.
  * The gate's pin check is the defense-in-depth backstop; this is the
  * normalization that makes it pass. Mutates call.args in place. Pure logic,
- * shared by the in-SW actor turn (turn-driver) AND the offscreen actor tool
- * relay (SW re-pins the worker's call — never trusts it). Moved here from
- * turn-driver so both use ONE implementation (no drift on a security seam).
+ * shared by every dedicated-worker host. The privileged relay re-pins the
+ * worker's call and never trusts it. One implementation prevents drift at this
+ * security seam.
  * @param {any} call @param {string|undefined} actorType @param {string|undefined} instanceId
  */
 export const pinActorCall = (call, actorType, instanceId) => {

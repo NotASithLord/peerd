@@ -24,7 +24,7 @@ and product behavior may change. It can drive browser pages and use API keys, so
 review the security model before using it with sensitive data.
 
 Chromium is the primary product target. Firefox support is experimental and
-lacks several execution and actor-isolation features available on Chrome.
+lacks several execution features available on Chrome.
 
 The code is the source of truth for current behavior. Start with
 [`CLAUDE.md`](CLAUDE.md), then read the relevant module under `extension/`.
@@ -47,9 +47,9 @@ External HTTP and HTTPS links require user confirmation.
 
 peerd uses browser isolation, narrow tool exposure, service-worker policy gates,
 and explicit egress controls. The main agent delegates environment work to
-keyless actors. On Chrome, non-orchestrator agent loops run in separate worker
-heaps. Firefox uses a more limited fallback where browser APIs do not provide the
-same isolation features.
+keyless actors. On Chrome and Firefox, non-orchestrator agent loops run in
+separate dedicated worker heaps. If the browser cannot prove that boundary,
+the actor request does not run and performs no work on its target.
 
 Network behavior depends on the operation. Model calls, web reads, runtime asset
 loads, sandbox traffic, and preview dweb traffic use different scoped paths and

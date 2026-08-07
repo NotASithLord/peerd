@@ -163,6 +163,9 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} ctx.safeFetch
  * @param {ReturnType<typeof import('../sessions/store.js').createSessionStore>} ctx.sessions
  * @param {() => Promise<string>} ctx.getSystemPrompt
+ *   Renders the system prompt for the current model contract. When refreshTools
+ *   is present, it is called after each successful tool refresh so policy-driven
+ *   prompt suffixes and the advertised tools advance together.
  * @param {(entry: { type: string, sessionId?: string, details?: object }) => Promise<unknown>} ctx.appendAudit
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [ctx.tools]
  *   Tool descriptors passed to the provider. Optional.
@@ -214,7 +217,7 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   from the chat UI, like the truncation-continue path). Used by the
  *   async-actor reintegration wake (DESIGN-11): the child's result
  *   re-enters its parent as a synthetic user turn rather than a real one.
- * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean }} [ctx.actorReply]
+ * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, actorDeliveryId?: string }} [ctx.actorReply]
  *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
  *   message so the chat surfaces it as its own attributed bubble (the one
  *   synthetic turn the UI shows).
@@ -364,10 +367,10 @@ export async function* runUserTurn(ctx) {
     }
   }
 
-  // 2. Render the system prompt once per turn. We don't re-render on
-  // every step — the prompt assembly is provider-agnostic and depends
-  // only on session-stable context (date).
-  const system = await getSystemPrompt();
+  // 2. Seed the model contract. Main turns refresh both pieces at each step:
+  // most renders are byte-identical and preserve the prompt cache, while a live
+  // policy transition deliberately changes the prompt beside its tool cut.
+  let system = await getSystemPrompt();
 
   // Helper: was the turn aborted? Used at iteration boundaries; the
   // stream catch block has its own AbortError handling.
@@ -396,12 +399,23 @@ export async function* runUserTurn(ctx) {
       return;
     }
 
-    // Recompute the advertised tools for THIS step — mid-turn exposure changes
-    // (dweb engagement, a goal run starting/stopping) show on the next step.
-    // A failure keeps the prior set — never break the turn on a tool refresh.
+    // Recompute the advertised tools for THIS step so mid-turn exposure changes
+    // show on the next model call. Re-render the system only after a successful
+    // refresh: the turn driver binds policy-dependent prompt text to the same
+    // snapshot as the returned descriptors. A refresh failure keeps both prior
+    // values instead of creating a mixed model contract.
     if (typeof refreshTools === 'function') {
-      try { activeTools = await refreshTools(); }
-      catch { /* keep the prior tool set */ }
+      let nextTools = activeTools;
+      let toolsRefreshed = false;
+      try {
+        nextTools = await refreshTools();
+        toolsRefreshed = true;
+      } catch { /* keep the prior model contract */ }
+      if (toolsRefreshed) {
+        const nextSystem = await getSystemPrompt();
+        activeTools = nextTools;
+        system = nextSystem;
+      }
     }
 
     /** @type {InternalMessage} */
@@ -932,11 +946,19 @@ export async function* runUserTurn(ctx) {
       // requested page survives instead of being re-cut by the 8k backstop.
       // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.
       const paged = dispatchResult.ok && dispatchResult.paged === true;
+      const actorDeliveryIds = Array.isArray(dispatchResult.actorDeliveryIds)
+        ? [...new Set(dispatchResult.actorDeliveryIds.filter(
+          (id) => typeof id === 'string' && id.length > 0))]
+        : [];
       const block = {
         tool_use_id: tu.id,
         content: redactToolResult(rawContent, paged ? { maxChars: PAGED_MAX_CHARS } : undefined),
         is_error: !dispatchResult.ok,
         meta: dispatchResult.meta,
+        ...(typeof dispatchResult.actorDeliveryId === 'string'
+          ? { actorDeliveryId: dispatchResult.actorDeliveryId }
+          : {}),
+        ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
       };
       return { tu, dispatchResult, block };
     };
