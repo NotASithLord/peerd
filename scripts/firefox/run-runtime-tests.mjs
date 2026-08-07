@@ -646,6 +646,17 @@ const createBrokenWorkerArtifact = () => {
   const staging = join(directory, 'staging');
   const artifact = join(directory, `peerd-${VERSION}-store-firefox-broken-worker.xpi`);
   cpSync(join(ROOT, 'artifacts', 'staging', 'store-firefox'), staging, { recursive: true });
+  const probe = join(staging, 'background', 'firefox-broken-worker-probe.js');
+  writeFileSync(probe, `const bootId = crypto.randomUUID();
+browser.runtime.onMessage.addListener((message) =>
+  message?.type === 'firefox-broken-worker/boot-id'
+    ? Promise.resolve({ ok: true, bootId })
+    : undefined);
+`, { flag: 'wx', mode: 0o600 });
+  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
+  overwriteRegularFile(serviceWorker,
+    `import './firefox-broken-worker-probe.js';\n${serviceWorkerSource}`);
   const worker = join(staging, 'offscreen', 'actor-worker.js');
   overwriteRegularFile(worker, `await fetch('https://api.anthropic.com${WORKER_PROBE_PATH}', { method: 'POST', cache: 'no-store' });
 throw new Error('Firefox runtime test fault: actor worker failed before ready');
@@ -1788,8 +1799,11 @@ const runBrokenWorkerSmoke = async ({ providerServer, fixturePort }) => {
         const provider = await send({
           type: 'provider/setKey', provider: 'anthropic', plaintext: ${JSON.stringify(PROVIDER_KEY_CANARY)},
         });
+        const boot = await send({ type: 'firefox-broken-worker/boot-id' });
         return {
-          ok: before?.ok === true && vault?.ok === true && provider?.ok === true,
+          ok: before?.ok === true && vault?.ok === true && provider?.ok === true
+            && typeof boot?.bootId === 'string',
+          bootId: boot?.bootId ?? null,
           capability: before?.state?.capabilities?.actorExecution ?? null,
         };
       })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
@@ -1944,29 +1958,66 @@ const runBrokenWorkerSmoke = async ({ providerServer, fixturePort }) => {
       'the broken-worker state, audit, and session diagnostics contain no credential canaries');
 
     const probesBeforeReload = providerServer.workerStartupProbes;
-    try { await driver.execute('browser.runtime.reload(); return true;'); }
-    catch { /* the page can disconnect before WebDriver receives the return */ }
-    const reloaded = await waitFor(async () => {
+    // Use Firefox's real event-page lifecycle here too. runtime.reload removes
+    // the temporary add-on document from under WebDriver and can make its
+    // moz-extension origin unavailable for the remainder of the command budget.
+    const extensionHandle = await driver.windowHandle();
+    const survivor = await driver.newWindow('tab');
+    assert(typeof survivor?.handle === 'string',
+      'the failure restart keeps a plain browser context alive',
+      JSON.stringify(survivor));
+    await driver.switchToWindow(survivor.handle);
+    await driver.navigate('about:blank');
+    await driver.switchToWindow(extensionHandle);
+    await driver.closeWindow();
+    await driver.switchToWindow(survivor.handle);
+    const openHandles = await driver.windowHandles();
+    assert(Array.isArray(openHandles) && !openHandles.includes(extensionHandle),
+      'the failure proof physically closes the extension UI context',
+      JSON.stringify(openHandles));
+    await new Promise((resolveWait) => setTimeout(resolveWait,
+      FIREFOX_EVENT_PAGE_IDLE_MS + FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS));
+    let lastRestartObserved = null;
+    let lastRestartError = null;
+    const restarted = await waitFor(async () => {
       try {
         await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
-        return await driver.execute(`return chrome.runtime.id === ${JSON.stringify(ADDON_ID)}
-          && !!document.querySelector('#app');`);
-      } catch { return false; }
+        const observed = await driver.executeAsync(`
+          const done = arguments[arguments.length - 1];
+          Promise.all([
+            browser.runtime.sendMessage({ type: 'state/get' }),
+            browser.runtime.sendMessage({ type: 'firefox-broken-worker/boot-id' }),
+          ]).then(([state, boot]) => done({
+            mounted: !!document.querySelector('#app'),
+            capability: state?.state?.capabilities?.actorExecution ?? null,
+            bootId: boot?.bootId ?? null,
+          }), (error) => done({ error: error?.message || String(error) }));
+        `);
+        lastRestartObserved = observed;
+        return observed?.mounted === true
+          && observed?.bootId !== initialized.bootId
+          && observed?.capability?.status === 'temporarily_unavailable'
+          && observed?.capability?.host === 'background-page-worker'
+          && observed?.capability?.retryable === true
+          ? observed
+          : null;
+      } catch (error) {
+        lastRestartError = {
+          name: typeof error?.name === 'string' ? error.name : null,
+          message: error?.message ?? String(error),
+        };
+        return null;
+      }
     }, { budgetMs: 30_000, pollMs: 250 });
-    assert(reloaded === true, 'the side panel reconnects after the Firefox background reload');
-    const persistedCapability = await waitFor(() => driver.executeAsync(`
-      const done = arguments[arguments.length - 1];
-      browser.runtime.sendMessage({ type: 'state/get' })
-        .then((reply) => {
-          const capability = reply?.state?.capabilities?.actorExecution ?? null;
-          done(capability?.retryable === true ? capability : null);
-        },
-          (error) => done({ error: error?.message || String(error) }));
-    `), { budgetMs: 30_000, pollMs: 250 });
+    assert(typeof restarted?.bootId === 'string'
+      && restarted.bootId !== initialized.bootId,
+    'the side panel reconnects to a new Firefox event-page generation',
+    JSON.stringify({ previousBootId: initialized.bootId, lastRestartObserved, lastRestartError }));
+    const persistedCapability = restarted.capability;
     assert(persistedCapability?.status === 'temporarily_unavailable'
       && persistedCapability?.host === 'background-page-worker'
       && persistedCapability?.retryable === true,
-    'the worker failure remains fail-closed after the Firefox background reload',
+    'the worker failure remains fail-closed after the Firefox event-page restart',
     JSON.stringify(persistedCapability));
     assert(providerServer.workerStartupProbes === probesBeforeReload,
       'background restart does not clear or automatically probe the stored failure',
