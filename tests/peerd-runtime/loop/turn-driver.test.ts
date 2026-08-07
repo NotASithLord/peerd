@@ -10,6 +10,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { inboundActorCallAllowed, makeTurnDriver } from '/peerd-runtime/loop/turn-driver.js';
+import { makeTurnSlots } from '/peerd-runtime/loop/turn-slots.js';
 import {
   ACTOR_CREDENTIAL_BOUNDARY_FAILURE, ActorCredentialBoundaryError,
 } from '/peerd-runtime/errors.js';
@@ -112,6 +113,7 @@ test('maybeAutoResume does not resume a turn that is not resumable', async () =>
 const turnDeps = (kind: 'chat' | 'actor', {
   failover = false, boundaryFailure = false, streamBoundaryFailure = false,
   waitForAbort = false, abortDuringFallback = false, uiDisconnected = false,
+  turnSlotsOverride = null as any,
 } = {}) => {
   const liveGetSecret = async () => 'sk-live';
   const liveSafeFetch = async () => new Response('ok');
@@ -119,7 +121,7 @@ const turnDeps = (kind: 'chat' | 'actor', {
   const rogueSafeFetch = async () => new Response('rogue');
   const rogueSignal = new AbortController().signal;
   const turnAbortController = new AbortController();
-  const session = {
+  const session: any = {
     sessionId: 's1', kind, provider: 'anthropic', model: 'claude-test',
     messages: [],
     ...(kind === 'actor' ? { actorType: 'web', instanceId: 'web' } : {}),
@@ -153,7 +155,7 @@ const turnDeps = (kind: 'chat' | 'actor', {
       setCost: async () => {},
     },
     sessionState: { set: () => {} },
-    turnSlots: {
+    turnSlots: turnSlotsOverride ?? {
       claim: () => ({ controller: turnAbortController, release: () => {} }),
       isBusy: () => false,
     },
@@ -185,7 +187,13 @@ const turnDeps = (kind: 'chat' | 'actor', {
     decideAction: () => null,
     listProviders: () => [],
     costOf: () => ({ usd: 0, known: true }),
-    makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
+    makeTurnCostTracker: () => ({
+      onUsage: async () => {}, maybeHalt: () => {},
+      turn: () => ({
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+        cacheWriteTokens: 0, cost: 0, turns: 1,
+      }),
+    }),
     uiConnected: () => !uiDisconnected && (boundaryFailure || streamBoundaryFailure),
     uiPorts: { broadcast: (message: any) => broadcasts.push(message) },
     auditLog: { append: async () => {} },
@@ -260,7 +268,7 @@ const turnDeps = (kind: 'chat' | 'actor', {
     detectInterruptedTurn: () => ({ resumable: false }),
   });
   return {
-    driver, modelCalls, modelKeyReads, broadcasts, chatNotes, turnAbortController,
+    driver, session, modelCalls, modelKeyReads, broadcasts, chatNotes, turnAbortController,
     recordedModelCalls,
     liveGetSecret, liveSafeFetch,
     rogueGetSecret, rogueSafeFetch, rogueSignal,
@@ -271,6 +279,44 @@ const turnDeps = (kind: 'chat' | 'actor', {
 };
 
 describe('runAgentTurn credential custody', () => {
+  test('threads the turn-latched actor surface into the in-SW tool context', async () => {
+    const fixture = turnDeps('actor');
+    await fixture.driver.runAgentTurn({
+      sessionId: 's1', userText: 'inspect the page', actorSurface: 'code',
+    });
+    expect(fixture.toolContextArgs()).toMatchObject({
+      exposure: 'actor', actorType: 'web', actorSurface: 'code',
+    });
+  });
+
+  test('captures a settled actor turn before release drains its queued successor', async () => {
+    const slots = makeTurnSlots();
+    const fixture = turnDeps('actor', { turnSlotsOverride: slots, waitForAbort: true });
+    const running = fixture.driver.runAgentTurn({
+      sessionId: 's1',
+      userText: 'first turn',
+      captureTurnSnapshot: true,
+    });
+    for (let attempt = 0; attempt < 20 && !slots.isBusy('s1'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(slots.isBusy('s1')).toBe(true);
+    let secondTurnStarted = false;
+    slots.runWhenIdle('s1', () => {
+      secondTurnStarted = true;
+      fixture.session.messages.push({ role: 'assistant', content: 'turn B' });
+      slots.claim('s1').release();
+    });
+    expect(secondTurnStarted).toBe(false);
+    const result = await running;
+    expect(secondTurnStarted).toBe(true);
+    expect(result.turnSnapshot).toBeDefined();
+    expect(result.turnSnapshot?.messages).toEqual([]);
+    expect(fixture.session.messages).toEqual([
+      { role: 'assistant', content: 'turn B' },
+    ]);
+  });
+
   test('a bound actor loop gets stubs while the provider call gets live credentials', async () => {
     const fixture = turnDeps('actor');
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' }))

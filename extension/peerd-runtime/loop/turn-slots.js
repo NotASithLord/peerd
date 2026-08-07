@@ -46,6 +46,7 @@ export const ABORT_STEER = 'peerd:steer';
  *   stop: (sessionId: string) => boolean,
  *   isBusy: (sessionId: string) => boolean,
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
+ *   runWhenIdleClaimed: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void,
  *   advanceQueue: (sessionId: string) => void,
  * }}
  * @param {{ onAbort?: (sessionId: string) => void, forceReleaseMs?: number }} [deps]
@@ -101,27 +102,30 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     }, forceReleaseMs);
   };
 
+  /** @param {string} sessionId */
+  const claim = (sessionId) => {
+    // Steer-live: a second send into the SAME chat supersedes the
+    // turn already streaming there. onAbort decline-settles the superseded
+    // turn's pending confirm (if any) so it doesn't run the cancelled action.
+    const superseded = slots.get(sessionId);
+    if (superseded) { superseded.abort(ABORT_STEER); onAbort?.(sessionId); }
+    const controller = new AbortController();
+    slots.set(sessionId, controller);
+    return {
+      controller,
+      release: () => {
+        // Only clear our own claim — if a steer already replaced this
+        // controller, the newer turn owns the slot.
+        if (slots.get(sessionId) === controller) {
+          slots.delete(sessionId);
+          drainIdle(sessionId);
+        }
+      },
+    };
+  };
+
   return {
-    claim(sessionId) {
-      // Steer-live: a second send into the SAME chat supersedes the
-      // turn already streaming there. onAbort decline-settles the superseded
-      // turn's pending confirm (if any) so it doesn't run the cancelled action.
-      const superseded = slots.get(sessionId);
-      if (superseded) { superseded.abort(ABORT_STEER); onAbort?.(sessionId); }
-      const controller = new AbortController();
-      slots.set(sessionId, controller);
-      return {
-        controller,
-        release: () => {
-          // Only clear our own claim — if a steer already replaced this
-          // controller, the newer turn owns the slot.
-          if (slots.get(sessionId) === controller) {
-            slots.delete(sessionId);
-            drainIdle(sessionId);
-          }
-        },
-      };
-    },
+    claim,
 
     stop(sessionId) {
       const controller = slots.get(sessionId);
@@ -142,6 +146,24 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
       if (!slots.has(sessionId)) { fn(); return; }
       const q = idleQueues.get(sessionId) ?? [];
       q.push(fn);
+      idleQueues.set(sessionId, q);
+    },
+
+    // Actor delivery has asynchronous setup before its model driver can claim.
+    // Reserve synchronously at dequeue and pass that exact lease through setup,
+    // so a second queued message cannot see an idle slot and overtake it.
+    runWhenIdleClaimed(sessionId, fn) {
+      const startClaimed = () => {
+        const lease = claim(sessionId);
+        try { fn(lease); }
+        catch {
+          // A synchronous setup failure must not strand the reservation.
+          lease.release();
+        }
+      };
+      if (!slots.has(sessionId)) { startClaimed(); return; }
+      const q = idleQueues.get(sessionId) ?? [];
+      q.push(startClaimed);
       idleQueues.set(sessionId, q);
     },
 

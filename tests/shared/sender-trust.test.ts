@@ -6,7 +6,8 @@
 
 import { describe, it, expect } from 'bun:test';
 import {
-  isFirstPartySender, isOffscreenSender, isOptionsSender, isServiceWorkerSender,
+  isFirstPartySender, isHomeSender, isOffscreenSender, isOptionsSender, isServiceWorkerSender,
+  isSidepanelSender,
 } from '../../extension/shared/sender-trust.js';
 
 const ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -164,6 +165,59 @@ describe('isOptionsSender', () => {
     expect(isOptionsSender(
       { id: ID, url: 'https://evil.example/options/options.html', tab: { id: 11 } },
       optionsTrust,
+    )).toBe(false);
+  });
+});
+
+describe('isSidepanelSender', () => {
+  const sidepanelUrl = `${ORIGIN}sidepanel/sidepanel.html`;
+  const sidepanelTrust = { ...trust, sidepanelUrl };
+
+  it('accepts only the exact browser-owned panel/sidebar document', () => {
+    expect(isSidepanelSender({ id: ID, url: sidepanelUrl }, sidepanelTrust)).toBe(true);
+  });
+
+  it('rejects tab-hosted copies, engine pages, and suffix/query variants', () => {
+    expect(isSidepanelSender(
+      { id: ID, url: sidepanelUrl, tab: { id: 12 } }, sidepanelTrust,
+    )).toBe(false);
+    expect(isSidepanelSender(
+      { id: ID, url: `${ORIGIN}engine-tabs/app-tab/index.html`, tab: { id: 9 } },
+      sidepanelTrust,
+    )).toBe(false);
+    expect(isSidepanelSender({ id: ID, url: `${sidepanelUrl}?forged=1` }, sidepanelTrust)).toBe(false);
+    expect(isSidepanelSender({ id: ID, url: `${sidepanelUrl}.evil` }, sidepanelTrust)).toBe(false);
+  });
+});
+
+describe('isHomeSender', () => {
+  const homeUrl = `${ORIGIN}home/home.html`;
+  const homeTrust = { ...trust, homeUrl };
+
+  it('accepts the exact tab-hosted Home document and its one-shot hash links', () => {
+    expect(isHomeSender(
+      { id: ID, url: homeUrl, tab: { id: 12 } }, homeTrust,
+    )).toBe(true);
+    expect(isHomeSender(
+      { id: ID, url: `${homeUrl}#chat`, tab: { id: 12 } }, homeTrust,
+    )).toBe(true);
+  });
+
+  it('rejects no-tab, engine, query, sibling-path, and wrong-origin senders', () => {
+    expect(isHomeSender({ id: ID, url: homeUrl }, homeTrust)).toBe(false);
+    expect(isHomeSender(
+      { id: ID, url: `${ORIGIN}engine-tabs/app-tab/index.html`, tab: { id: 9 } },
+      homeTrust,
+    )).toBe(false);
+    expect(isHomeSender(
+      { id: ID, url: `${homeUrl}?forged=1`, tab: { id: 12 } }, homeTrust,
+    )).toBe(false);
+    expect(isHomeSender(
+      { id: ID, url: `${homeUrl}.evil`, tab: { id: 12 } }, homeTrust,
+    )).toBe(false);
+    expect(isHomeSender(
+      { id: ID, url: 'https://evil.example/home/home.html', tab: { id: 12 } },
+      homeTrust,
     )).toBe(false);
   });
 });

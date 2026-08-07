@@ -91,7 +91,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null, actorSurface = null, captureTurnSnapshot = false, onBeforeRelease = null, turnLease = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
 
   // Lazy session create — bind the chat to whatever provider/model the user
@@ -129,7 +129,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // the claim aborts that turn first (steer-live — the loop's catch-
   // AbortError path persists the partial with stopReason='aborted');
   // turns streaming in OTHER chats are untouched.
-  const { controller: abortController, release: releaseTurnSlot } = turnSlots.claim(sessionId);
+  const { controller: abortController, release: releaseTurnSlot } = turnLease ?? turnSlots.claim(sessionId);
 
   // DESIGN-17: resolve the session kind ONCE (authoritative, persisted — robust
   // even when re-driven by auto-resume). An actor turn runs the SAME wrapper
@@ -354,7 +354,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // message_actor sender gate's untrusted-origin signal (synthetic AND not a
   // trusted first-party continuation → inbound → refused).
   const toolContext = await buildToolContext(isActor
-    ? { exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted, actorInstanceId, actorType, actorBacking }
+    ? {
+      exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted,
+      actorInstanceId, actorType, actorBacking,
+      ...(actorSurface ? { actorSurface } : {}),
+    }
     : { exposure: 'main', sessionId, activeTabId, synthetic, trusted });
   // why: thread THIS turn's abort signal onto the tool ctx so a tool that can
   // block IN-BAND unwinds on Stop / the turn timeout instead of parking the
@@ -465,6 +469,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   };
 
   let lastSession = null;
+  /** @type {{ messages: any[], usage: any } | null} */
+  let turnSnapshot = null;
   // Turn outcome, returned so an outer driver (goal mode — loop/goal-runner.js)
   // can tell a clean turn from a failed/aborted one instead of blindly
   // re-entering. lastStopReason is captured BEFORE the panel guard below (the
@@ -809,6 +815,25 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId, sessionId, error });
     }
   } finally {
+    // release() drains the next queued wake synchronously. An opted-in caller
+    // therefore gets an immutable transcript + exact turn-usage snapshot while
+    // this claim still owns the slot; a later read could include turn B in turn
+    // A's reply or contribution. The extra IDB read is actor-only and opt-in.
+    if (captureTurnSnapshot === true) {
+      try {
+        const settled = await sessions.get(sessionId);
+        turnSnapshot = {
+          messages: [...(settled?.messages ?? [])],
+          usage: { ...costTracker.turn() },
+        };
+      } catch (e) { console.warn('[turn] pre-release snapshot failed', e); }
+    }
+    // A shell may also need to atomically consume in-memory turn state (for
+    // example an origin-lock stop report) before the next wake clears it.
+    if (typeof onBeforeRelease === 'function') {
+      try { await onBeforeRelease(); }
+      catch (e) { console.warn('[turn] pre-release snapshot failed', e); }
+    }
     // Self-scoped: a superseded (steered) turn unwinding late can only
     // clear its own slot, never the newer turn that replaced it.
     releaseTurnSlot();
@@ -848,7 +873,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   }
   // why: the outcome lets goal mode stop on a failed/aborted turn rather than
   // re-driving a broken condition up to the cap. Normal sends ignore it.
-  return { ok: turnOk, stopReason: lastStopReason };
+  return {
+    ok: turnOk,
+    stopReason: lastStopReason,
+    ...(turnSnapshot ? { turnSnapshot } : {}),
+  };
 };
 
 // Per-SW-lifetime dedupe for auto-resume: the interrupted message id we've

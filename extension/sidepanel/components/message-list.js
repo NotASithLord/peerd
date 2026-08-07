@@ -25,6 +25,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
+import { CHANNEL } from '/shared/channel-config.js';
 import {
   ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE, classifyFailure, formatBytes,
 } from '/peerd-runtime/index.js';
@@ -76,6 +77,9 @@ import {
  * @property {number} [depth]
  * @property {TabEvent[]} [tabEvents]
  * @property {UiActions} [uiActions]
+ * @property {((msg: Record<string, any>) => Promise<any>)} [send]
+ * @property {string|null|undefined} [sessionId]
+ * @property {boolean} [busy]
  */
 
 // Auto-scroll heuristic: if the user is reading near the bottom, keep
@@ -97,6 +101,7 @@ const scrollIfNearBottom = (el) => {
 // stopping. Deeper runs still exist and are inspectable, but rendering
 // them inline would explode the layout. See docs/ACTORS.md.
 const MAX_NESTED_DEPTH = 5;
+const CONTRIBUTOR_FEEDBACK_ENABLED = CHANNEL === 'preview' || CHANNEL === 'dev';
 
 // Render one transcript (a flat message array) as keyed user/assistant
 // rows. Shared between the top-level chat and every nested actor
@@ -106,8 +111,30 @@ const MAX_NESTED_DEPTH = 5;
  * @param {TranscriptArgs} args
  * @returns {any[]}
  */
-const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions }) => {
+const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions, send, sessionId, busy = false }) => {
   const groups = groupMessages(messages ?? []);
+  // Feedback belongs to the completed answer for a human turn, not every
+  // intermediate assistant step that happened to contain text before a tool
+  // call. Retain earlier completed answers, while leaving the current streaming
+  // answer ineligible in AssistantMessage below.
+  const feedbackMessageIds = new Set();
+  let finalAssistantId = null;
+  for (const group of groups) {
+    if (group.type === 'user') {
+      if (finalAssistantId) feedbackMessageIds.add(finalAssistantId);
+      finalAssistantId = null;
+    } else if (group.type === 'assistant') {
+      const toolUses = Array.isArray(group.message.toolUses) ? group.message.toolUses : [];
+      finalAssistantId = toolUses.length === 0 && group.message.stopReason === 'end_turn'
+        ? group.message.id
+        : null;
+    }
+  }
+  // A persisted text step can briefly look final while its tool dispatch or
+  // continuation still owns the live turn slot. Only the authoritative idle
+  // state makes the current answer eligible; an earlier answer followed by a
+  // real human turn was already sealed in the branch above.
+  if (finalAssistantId && !busy) feedbackMessageIds.add(finalAssistantId);
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
   // turn — after the agent's later messages — then freeze above the next turn.
@@ -146,6 +173,7 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
         : m(AssistantMessage, {
             key: g.message.id, message: g.message, toolResults: g.toolResults,
             vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth,
+            send, sessionId, allowFeedback: feedbackMessageIds.has(g.message.id),
           }));
   });
   // The current (last) turn's notices render at the very end — fresh; any with an
@@ -166,9 +194,9 @@ export const MessageList = {
   onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
 
   /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions } }) =>
+  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions, send, sessionId, busy } }) =>
     m('.message-list',
-      renderTranscript({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth: 0, tabEvents, uiActions })),
+      renderTranscript({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth: 0, tabEvents, uiActions, send, sessionId, busy })),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -324,9 +352,11 @@ const AssistantMessage = {
    *   scriptOps?: Record<string, any[]>,
    *   loadActor?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
+   *   send?: (msg: Record<string, any>) => Promise<any>, sessionId?: string|null,
+   *   allowFeedback?: boolean,
    * } }} vnode
    */
-  view: ({ attrs: { message, toolResults, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth } }) => {
+  view: ({ attrs: { message, toolResults, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth, send, sessionId, allowFeedback } }) => {
     const hasText = typeof message.content === 'string' && message.content.length > 0;
     const hasToolUses = toolResults.length > 0;
     const hasThinking = typeof message.thinking === 'string' && message.thinking.length > 0;
@@ -404,6 +434,70 @@ const AssistantMessage = {
               depth: depth ?? 0,
             })
           ))
+        : null,
+      CONTRIBUTOR_FEEDBACK_ENABLED && depth === 0 && allowFeedback
+        && hasText && !message.streaming && !message.error && send && sessionId
+        ? m(TaskFeedback, { messageId: message.id, sessionId, send })
+        : null,
+    ]);
+  },
+};
+
+// Optional binary task feedback. The route re-derives the selected assistant
+// turn and cohort, so the DOM cannot submit a cohort, counter, tool id, or
+// arbitrary text. A button becomes selected only after the host confirms the
+// verdict was recorded (or already held); disabled/no-cohort clicks stay honest.
+const TaskFeedback = {
+  /** @param {{ state: any }} vnode */
+  oninit(vnode) {
+    vnode.state.selection = null;
+    vnode.state.busy = false;
+    vnode.state.notice = null;
+  },
+  /** @param {{ state: any, attrs: { messageId: string, sessionId: string, send: (msg: Record<string, any>) => Promise<any> } }} vnode */
+  view(vnode) {
+    /** @param {'worked'|'didnt_work'} verdict */
+    const choose = async (verdict) => {
+      if (vnode.state.busy) return;
+      vnode.state.busy = true;
+      vnode.state.notice = null;
+      m.redraw();
+      try {
+        const reply = await vnode.attrs.send({
+          type: 'contributor/feedback',
+          sessionId: vnode.attrs.sessionId,
+          messageId: vnode.attrs.messageId,
+          verdict,
+        });
+        if (reply?.ok === true && reply?.reason == null) {
+          vnode.state.selection = verdict;
+        } else {
+          vnode.state.notice = reply?.reason === 'disabled'
+            ? 'enable Contributor Metrics in Settings to record feedback'
+            : 'feedback was not recorded';
+        }
+      } catch {
+        vnode.state.notice = 'feedback was not recorded';
+      }
+      vnode.state.busy = false;
+      m.redraw();
+    };
+    return m('.task-feedback', { 'aria-label': 'Was this response useful?' }, [
+      m('span', 'did this work?'),
+      m('button', {
+        type: 'button', class: vnode.state.selection === 'worked' ? 'is-selected' : '',
+        'aria-pressed': vnode.state.selection === 'worked' ? 'true' : 'false',
+        disabled: vnode.state.busy,
+        onclick: () => choose('worked'),
+      }, 'worked'),
+      m('button', {
+        type: 'button', class: vnode.state.selection === 'didnt_work' ? 'is-selected' : '',
+        'aria-pressed': vnode.state.selection === 'didnt_work' ? 'true' : 'false',
+        disabled: vnode.state.busy,
+        onclick: () => choose('didnt_work'),
+      }, 'didn’t work'),
+      vnode.state.notice
+        ? m('span.task-feedback-note', { role: 'status' }, vnode.state.notice)
         : null,
     ]);
   },

@@ -20,7 +20,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
-import { DWEB_ENABLED } from '/shared/channel-config.js';
+import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { OptionsApp } from './components/options-app.js';
 import { makePrivateTransferClient } from './private-transfer-client.js';
 
@@ -149,6 +149,10 @@ const Root = {
 /** @type {Record<string, typeof Root>} */
 const routes = {};
 for (const id of SECTIONS) routes[`/${id}`] = Root;
+// Contributor Metrics is deliberately preview/dev-only until the separate
+// store go/no-go. Omitting the route makes a guessed store hash fall back to
+// Providers instead of mounting a hidden consent surface.
+if (CHANNEL === 'preview' || CHANNEL === 'dev') routes['/contributor-metrics'] = Root;
 // Build-time literal: the store artifact has DWEB_ENABLED=false, so this route
 // (like the nav entry) is structurally dead code there.
 if (DWEB_ENABLED) routes['/dweb'] = Root;

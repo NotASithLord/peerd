@@ -100,6 +100,24 @@ export {
 export {
   normalizeTally, addUsage, limitExceeded,
 } from './cost/accumulator.js';
+
+// Optional, local-only Contributor Metrics. A closed reducer/serializer plus
+// its injected-storage shell; there is deliberately no generic event API and
+// no network client in this issue.
+export {
+  CONTRIBUTOR_SCHEMA_VERSION, CONTRIBUTOR_DISCLOSURE_VERSION,
+  CONTRIBUTOR_LOCAL_VERSION, CONTRIBUTOR_MAX_ROWS, CONTRIBUTOR_MAX_COUNTER,
+  CONTRIBUTOR_MAX_LOCAL_DEDUPE, CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT,
+  CONTRIBUTOR_KNOWN_MODEL_FAMILIES,
+  ContributorSchemaError, emptyContributorLocalState, emptyContributorRow,
+  normalizeContributorProvider, normalizeContributorModelFamily,
+  normalizeContributorCohort, contributorDurationBucket, contributorTokenBucket,
+  contributorCohortKey, contributorActionForTool, contributorTurnResult,
+  recordContributorWebTurn, recordContributorWebAction,
+  adjustContributorFeedback, serializeContributorEnvelope,
+} from './observability/contributor-metrics.js';
+export { CONTRIBUTOR_LOCAL_KEY, ContributorReadOnlyError, makeContributorStore }
+  from './observability/contributor-store.js';
 // The per-turn imperative shell over the accumulator: fold usage events,
 // persist the session total, push the live meter, fire the hard-limit
 // halt once. All IO injected; the SW's streaming switch stays two lines.
@@ -122,10 +140,10 @@ export { makeActorMessaging } from './actor/actor-messaging.js';
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export {
   CODE_CLIENT_MANIFESTS, CODE_RUN_MAX_TRACE_OPS, ACTOR_CAPABILITY_MANIFESTS,
-  DWEB_INBOUND_TOOL_NAMES,
+  DWEB_INBOUND_TOOL_NAMES, WEB_ACTOR_DOM_TOOL_NAMES, WEB_ACTOR_CODE_CLIENT_TOOL_NAMES,
   codeClientMethods, codeClientAllows, codeClientMethod, codeClientReference, buildCodeClientSource,
   renderCodeOpTrace, canonicalCodeTraceLabel,
-  actorCapabilityManifest, resolveWebActorSurface,
+  actorCapabilityManifest, resolveWebActorSurface, resolveWebActorSurfaceDecision,
 } from './actor/capability-manifest.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,

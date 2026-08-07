@@ -1020,6 +1020,63 @@ export const STATES = [
     },
   },
 
+  // --- functional: Contributor Metrics human consent lifecycle --------------
+  {
+    name: 'contributor-consent-lifecycle', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/contributor-metrics');
+      const stored = () => evalIn(page, `(async () => {
+        const browser = (await import('/vendor/browser-polyfill.js')).default;
+        return browser.storage.local.get(['contributor_metrics.aggregate.v1']);
+      })()`, true);
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-metrics') !== null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        const before = await stored();
+        rec.check('fresh/default and prior actor/model activity create no contribution state',
+          Object.keys(before ?? {}).length === 0, JSON.stringify(before));
+
+        // A tab-hosted copy of the panel is first-party, but it is not the
+        // browser-owned side panel. Its observed feedback command must buy no
+        // consent capability and must not create aggregate state.
+        const forged = await evalIn(ctx.page, `(async () => {
+          const browser = (await import('/vendor/browser-polyfill.js')).default;
+          return browser.runtime.sendMessage({ type: 'contributor/enable' });
+        })()`, true);
+        rec.check('non-Options first-party pages cannot enable contribution',
+          forged?.ok === false && forged?.error === 'trusted-options-sender-required',
+          JSON.stringify(forged));
+        rec.check('a rejected enable remains storage-inert',
+          Object.keys(await stored()).length === 0, JSON.stringify(await stored()));
+
+        await evalIn(page, `(() => [...document.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Enable Contributor Metrics')?.click())()`);
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') !== null`),
+          { budgetMs: 8_000, pollMs: 80 });
+        const active = await stored();
+        const record = active?.['contributor_metrics.aggregate.v1'];
+        rec.check('the exact Options button creates one atomic consent+aggregate record',
+          Object.keys(active ?? {}).length === 1
+            && record?.version === 1
+            && record?.consent?.enabled === true
+            && record?.consent?.schemaVersion === 1
+            && record?.consent?.disclosureVersion === 1
+            && record?.aggregate?.version === 1
+            && Object.keys(record?.aggregate?.rows ?? {}).length === 0,
+          JSON.stringify(active));
+
+        await evalIn(page, `(() => [...document.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Disable and clear')?.click())()`);
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') === null`),
+          { budgetMs: 8_000, pollMs: 80 });
+        const cleared = await stored();
+        rec.check('disable revokes consent and clears all pending local state',
+          Object.keys(cleared ?? {}).length === 0, JSON.stringify(cleared));
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
   // (A rate-limit/retry-banner state is deferred: the keyless Ollama adapter
   // doesn't retry 429 — only the keyed OpenRouter/Anthropic adapters do — so
   // exercising the retry banner needs a keyed provider wired into the harness.
@@ -1034,6 +1091,22 @@ export const STATES = [
       await rpc(ctx.page, { type: 'agent/send', text: 'hello there' });
       await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
       await rec.visual('completed-turn');
+      const beforeCount = await evalIn(ctx.page, `document.querySelectorAll('.message').length`);
+      await evalIn(ctx.page, `[...document.querySelectorAll('.task-feedback button')]
+        .find((button) => button.textContent === 'worked')?.click()`);
+      await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.task-feedback-note')?.textContent.includes('not recorded') === true`),
+      { budgetMs: 4_000, pollMs: 50 });
+      const after = await evalIn(ctx.page, `({
+        pressed: document.querySelector('.task-feedback button[aria-pressed="true"]')?.textContent,
+        notice: document.querySelector('.task-feedback-note')?.textContent,
+        messageCount: document.querySelectorAll('.message').length,
+        freeText: document.querySelector('.task-feedback input, .task-feedback textarea') !== null,
+      })`);
+      rec.check('disabled feedback is declined honestly without mutating the transcript',
+        !after?.pressed && after?.notice?.includes('not recorded')
+          && after?.messageCount === beforeCount && after?.freeText === false,
+        JSON.stringify({ beforeCount, after }));
     },
   },
 
@@ -1307,6 +1380,49 @@ export const STATES = [
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-denylist', page);
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-contributor-metrics', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/contributor-metrics');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-metrics') !== null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        // Exercise the exact human route through its real button so the capture
+        // includes both the active disclosure state and the canonical bytes.
+        await evalIn(page, `(() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((entry) => entry.textContent === 'Enable Contributor Metrics');
+          button?.click();
+        })()`);
+        await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') !== null`),
+          { budgetMs: 8_000, pollMs: 80 });
+        const preview = await evalIn(page, `({
+          readOnly: document.querySelector('.contributor-payload')?.readOnly,
+          bytes: document.querySelector('.contributor-payload')?.value,
+          uploadControls: [...document.querySelectorAll('button')]
+            .some((entry) => /upload|send now/i.test(entry.textContent ?? '')),
+        })`);
+        rec.check('Contributor Metrics preview is exact, read-only, and has no upload action',
+          preview?.readOnly === true
+            && preview?.bytes === '{"schemaVersion":1,"rows":[]}'
+            && preview?.uploadControls === false,
+          JSON.stringify(preview));
+        await rec.visualPage('options-contributor-metrics', page);
+      } finally {
+        try {
+          await evalIn(page, `(() => {
+            const button = [...document.querySelectorAll('button')]
+              .find((entry) => entry.textContent === 'Disable and clear');
+            button?.click();
+          })()`);
+          await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') === null`),
+            { budgetMs: 4_000, pollMs: 80 });
+        } catch { /* best-effort fixture cleanup */ }
+        try { page.close(); } catch { /* */ }
+      }
     },
   },
   {

@@ -215,11 +215,31 @@ export const buildCodeClientSource = (clientName, options = {}) => {
  * @param {{ requested?: unknown, allowedTools?: Set<string>|null, headlessAvailable?: boolean }} input
  */
 export const resolveWebActorSurface = ({ requested, allowedTools = null, headlessAvailable = false }) => {
+  return resolveWebActorSurfaceDecision({ requested, allowedTools, headlessAvailable }).resolved;
+};
+
+/**
+ * The contribution-safe form of the surface decision. It reports only the
+ * reviewed product enums — never a missing tool name or host error — so the
+ * actor settlement shell can count fallbacks without accepting raw strings.
+ * @param {{ requested?: unknown, allowedTools?: Set<string>|null, headlessAvailable?: boolean }} input
+ */
+export const resolveWebActorSurfaceDecision = ({ requested, allowedTools = null, headlessAvailable = false }) => {
   const codeAllowed = allowedTools === null || (
     allowedTools.has('page_code')
     && Object.values(CODE_CLIENT_MANIFESTS.page.methods).every((method) => !method.tool || allowedTools.has(method.tool))
   );
-  return requested === 'code' && headlessAvailable && codeAllowed ? 'code' : 'tools';
+  const requestedSurface = requested === 'code' ? 'code' : 'tools';
+  if (requestedSurface === 'tools') {
+    return Object.freeze({ requested: 'tools', resolved: 'tools', fallback: 'none' });
+  }
+  if (!headlessAvailable) {
+    return Object.freeze({ requested: 'code', resolved: 'tools', fallback: 'worker_unavailable' });
+  }
+  if (!codeAllowed) {
+    return Object.freeze({ requested: 'code', resolved: 'tools', fallback: 'capability_grant_incomplete' });
+  }
+  return Object.freeze({ requested: 'code', resolved: 'code', fallback: 'none' });
 };
 
 // The positive, declarative tool contract for bound actors. `codeDecision`
@@ -235,6 +255,14 @@ const ENGINE_TOOLS = Object.freeze({
 export const WEB_ACTOR_DOM_TOOL_NAMES = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes', 'click', 'type',
   'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
+]);
+
+// The tools represented inside one `page_code` run. Contributor Metrics uses
+// this same manifest-derived list for a fair code-vs-direct comparison; a
+// second hand-maintained "page actions" list would drift as the client grows.
+export const WEB_ACTOR_CODE_CLIENT_TOOL_NAMES = Object.freeze([
+  ...new Set(Object.values(CODE_CLIENT_MANIFESTS.page.methods)
+    .flatMap((method) => typeof method.tool === 'string' ? [method.tool] : [])),
 ]);
 
 export const WEB_ACTOR_TOOL_NAMES = Object.freeze([
