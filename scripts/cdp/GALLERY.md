@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**22 states · 44 screens · baselines `linux-x64`**
+**23 states · 46 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -149,7 +149,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-behavior.light.png" alt="options-behavior (light)" width="380"> | <img src="baselines/linux-x64/options-behavior.dark.png" alt="options-behavior (dark)" width="380"> |
 
-### 18 · options-denylist
+### 18 · options-contributor-metrics
+
+`options-contributor-metrics`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/options-contributor-metrics.light.png" alt="options-contributor-metrics (light)" width="380"> | <img src="baselines/linux-x64/options-contributor-metrics.dark.png" alt="options-contributor-metrics (dark)" width="380"> |
+
+### 19 · options-denylist
 
 `options-denylist`
 
@@ -157,7 +165,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-denylist.light.png" alt="options-denylist (light)" width="380"> | <img src="baselines/linux-x64/options-denylist.dark.png" alt="options-denylist (dark)" width="380"> |
 
-### 19 · options-dweb-stop-failed
+### 20 · options-dweb-stop-failed
 
 `options-dweb-stop-failed`
 
@@ -165,7 +173,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-dweb-stop-failed.light.png" alt="options-dweb-stop-failed (light)" width="380"> | <img src="baselines/linux-x64/options-dweb-stop-failed.dark.png" alt="options-dweb-stop-failed (dark)" width="380"> |
 
-### 20 · options-transfer
+### 21 · options-transfer
 
 `options-transfer`
 
@@ -173,7 +181,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer.light.png" alt="options-transfer (light)" width="380"> | <img src="baselines/linux-x64/options-transfer.dark.png" alt="options-transfer (dark)" width="380"> |
 
-### 21 · options-transfer-conflict
+### 22 · options-transfer-conflict
 
 `options-transfer-conflict`
 
@@ -181,7 +189,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer-conflict.light.png" alt="options-transfer-conflict (light)" width="380"> | <img src="baselines/linux-x64/options-transfer-conflict.dark.png" alt="options-transfer-conflict (dark)" width="380"> |
 
-### 22 · vm-tab-failed
+### 23 · vm-tab-failed
 
 `vm-tab-failed`
 
