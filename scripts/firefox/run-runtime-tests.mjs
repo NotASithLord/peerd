@@ -51,6 +51,7 @@ const LIFETIME_ACTOR_PROMPT = 'Return the Firefox background lifetime proof toke
 const LIFETIME_HEARTBEAT_KEY = 'peerdActorHostKeepAlive';
 const LIFETIME_RESPONSE_DELAY_MS = 65_000;
 const FIREFOX_EVENT_PAGE_IDLE_MS = 30_000;
+const FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS = 15_000;
 const LIFETIME_QUIET_MS = 12_000;
 const LIFETIME_FAILURE_SCREENSHOT = 'lifetime-failure.png';
 const LIFETIME_FAILURE_LOG = 'lifetime-geckodriver.log';
@@ -1516,7 +1517,7 @@ const runActorKeepaliveLossSmoke = async ({ providerServer, fixturePort }) => {
 };
 
 const runActorRecoverySmoke = async ({ providerServer }) => {
-  console.log('Firefox actor recovery smoke: reload twice without replaying durable mailbox work');
+  console.log('Firefox actor recovery smoke: idle-restart twice without replaying durable mailbox work');
   const { artifact, directory } = createRecoveryArtifact();
   let driver = null;
   try {
@@ -1622,22 +1623,32 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       }, (error) => done({ ok: false, error: error?.message || String(error) }));
     `, [prepared.sessionId, expectedReceiptIds]);
 
-    const reloadAndRecover = async (previousBoot) => {
-      // runtime.reload invalidates the extension document that issued it. Keep a
-      // neutral WebDriver context alive so the session has somewhere valid to
-      // land before navigating back into the reloaded extension.
+    const idleRestartAndRecover = async (previousBoot) => {
+      // Exercise Firefox's real event-page lifecycle. runtime.reload tears down
+      // the temporary add-on's moz-extension document and Gecko may reject
+      // navigation back to that origin for the whole WebDriver command budget,
+      // which tests add-on reinstallation rather than product recovery. Closing
+      // the last extension UI releases its port; after Firefox's idle window the
+      // event page is discarded and the survivor tab can wake a fresh generation.
       const extensionHandle = await driver.windowHandle();
       const survivor = await driver.newWindow('tab');
       assert(typeof survivor?.handle === 'string',
-        'the recovery reload keeps a plain browser context alive',
+        'the recovery restart keeps a plain browser context alive',
         JSON.stringify(survivor));
       await driver.switchToWindow(survivor.handle);
       await driver.navigate('about:blank');
       await driver.switchToWindow(extensionHandle);
-      try { await driver.execute('browser.runtime.reload(); return true;'); }
-      catch { /* the extension page can disconnect before the command returns */ }
+      await driver.closeWindow();
       await driver.switchToWindow(survivor.handle);
+      const openHandles = await driver.windowHandles();
+      assert(Array.isArray(openHandles) && !openHandles.includes(extensionHandle),
+        'the recovery proof physically closes the extension UI context',
+        JSON.stringify(openHandles));
+      await new Promise((resolveWait) => setTimeout(resolveWait,
+        FIREFOX_EVENT_PAGE_IDLE_MS + FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS));
+
       let lastObserved = null;
+      let lastThrownError = null;
       const ready = await waitFor(async () => {
         try {
           await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
@@ -1658,12 +1669,18 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
             && observed.boot.bootId !== previousBoot.bootId
             ? observed
             : null;
-        } catch { return null; }
+        } catch (error) {
+          lastThrownError = {
+            name: typeof error?.name === 'string' ? error.name : null,
+            message: error?.message ?? String(error),
+          };
+          return null;
+        }
       }, { budgetMs: 30_000, pollMs: 250 });
       assert(typeof ready?.boot?.bootId === 'string'
         && ready.boot.bootId !== previousBoot.bootId,
       'the recovery XPI starts a new background generation',
-      JSON.stringify({ previousBoot, lastObserved }));
+      JSON.stringify({ previousBoot, lastObserved, lastThrownError }));
       if (ready.state?.vault?.locked === true) {
         const unlocked = await driver.executeAsync(`
           const [passphrase] = arguments;
@@ -1690,7 +1707,7 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       return recovered;
     };
 
-    const first = await reloadAndRecover(prepared.boot);
+    const first = await idleRestartAndRecover(prepared.boot);
     assert(first.receipts.some((receipt) => receipt.id.endsWith(':firefox-recovery-queued')
       && receipt.outcomeKnown === true && receipt.performed === false
       && receipt.content.includes('It was not run')),
@@ -1707,7 +1724,7 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       'first background recovery performs no provider or actor request',
       JSON.stringify(providerServer.records.slice(recordStart)));
 
-    const second = await reloadAndRecover(first.boot);
+    const second = await idleRestartAndRecover(first.boot);
     await new Promise((resolveWait) => setTimeout(resolveWait, 1_500));
     const finalState = await readRecoveryState();
     assert(finalState?.mailboxKeys?.length === 0
