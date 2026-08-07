@@ -17,15 +17,26 @@
 
 <br>
 
-**peerd is the first AI agent harness native to the browser.** It's a
-Chrome/Firefox extension that runs a full agent loop *inside* the
-browser you already use, with your existing tabs and sessions.
-It reads and drives your pages, spins up sandboxed compute (JS
-Notebooks, compiled WebAssembly tools, full Linux VMs, personal
-client-side apps), and (on the preview channel) shares what it builds over a
-peer-to-peer WebRTC network built for agent-to-agent communication. BYOK
-to the model provider of your choice. **No backend, no telemetry, no
-cloud component in the data path.**
+# The browser-native agent harness
+
+**peerd runs general-purpose agents inside your own Chrome or Firefox — no
+cloud browser or MCP connection required.**
+
+It gives agents the environment the web already lives in: your tabs and
+authenticated sessions, local compute, adaptive site clients, browser Apps,
+memory, and the supported model provider you choose.
+
+Browser-native is not only a capability choice. Browsers have spent decades
+learning how to run powerful software while assuming the content it touches may
+be hostile. peerd applies that shape to agents: environment-specific actors,
+browser execution boundaries, brokered credentials, policy-gated tools,
+explicit egress controls, and lifecycle-aware recovery.
+
+**The browser is both the capability surface and the security boundary.**
+
+[Get Peerd Extension](#install) · [peerd.ai](https://peerd.ai) ·
+[Architecture](#a-mixture-of-actors-not-one-omnipotent-agent) ·
+[Security](SECURITY.md)
 
 <p align="center">
 
@@ -39,41 +50,169 @@ https://github.com/user-attachments/assets/d2e4c285-6952-4c95-bf5a-d06087de084d
 
 </p>
 
-peerd uses *the browser* as its runtime and its security model. It builds
-on decades of hardened browser platform work (V8 isolates for sandboxing,
-WebCrypto for the vault, WebAuthn passkeys to unlock it, opaque-origin
-iframes, Subresource Integrity) and writes none of its own cryptographic
-or process-isolation code. The agent that holds your keys never operates
-an environment itself. Each browser tab, VM, notebook, and app is driven
-by its own actor: a separate agent loop that holds no key and holds only
-that one environment's tools. On Chrome, each actor runs in its own
-worker heap, a separate block of memory, so the untrusted content it
-reads (page text, command output, file contents) stays inside that actor.
-The actor reaches the model, the network, or the page only by asking the
-service worker, which holds the key and re-checks and gates every request
-before running it. The main agent acts as an orchestrator. It delegates a
-goal to an actor and gets back a summary fenced as untrusted, so raw page
-text and command output never reach the context that holds your keys, and
-a confused or prompt-injected main agent has no tool to touch an
-environment in the first place. Every page action reports back what it
-actually changed on the live page (a navigation or a mutation summary),
-so success is judged from observed effect, not from the model's
-assumption. This isolation is the core of peerd's security model, not an
-add-on. (More at [peerd.ai](https://peerd.ai).) The security model is
-documented and testable: see the formal threat model
-([`docs/security/THREAT-MODEL.md`](docs/security/THREAT-MODEL.md)) and the
-CI-gated red-team suite ([`tests/red-team/`](tests/red-team/), results in
-[`docs/security/RED-TEAM-RESULTS.md`](docs/security/RED-TEAM-RESULTS.md)).
+> **0.x experimental beta.** Breaking changes are likely. peerd drives your
+> browser, executes code, and handles secrets on your behalf; read the
+> [security model](SECURITY.md) and use it accordingly. The code under
+> `extension/peerd-*/` is the product specification.
 
-**Status: 0.x, experimental beta.** The initial feature buildout is
-complete and integrated, but the surface is still
-moving: **breaking changes are likely**, storage formats may shift, and
-it drives your browser and holds your API keys, so use it with care.
-There is no "V1" commitment; versions stay in the 0.x range until the
-surface stabilizes.
+## Why I built peerd
 
-For what's shipped, read the module code under `extension/peerd-*/`:
-the code is the spec.
+I think we're putting agents in the wrong place.
+
+A lot of agent systems run somewhere else and reach back into your computer
+through a cloud browser or a growing collection of external tool servers. But
+your browser already contains the applications, sessions, identity, networking,
+security model, and increasingly the compute an agent needs.
+
+It also has decades of scar tissue from running powerful software against
+hostile content.
+
+peerd started from a simple question: **what if the browser wasn't another tool
+for the agent, but the harness itself?**
+
+That's still the project.
+
+## Why the browser?
+
+Agent harnesses are rediscovering a problem the web has spent roughly 30 years
+learning to live with: how do you give software enormous capability while
+assuming the content it interacts with may be hostile?
+
+The web never answered that by trusting the content. Browsers assume origins may
+be adversarial, arbitrary code will execute, vulnerabilities will happen, and
+sensitive state still has to coexist with all of it. Their answer is layered:
+separate execution contexts, origin boundaries, sandboxes, brokered privileges,
+permission gates, Content Security Policy, and mediated access to the network
+and local state.
+
+**The web already solved the shape of this problem.** peerd builds on those
+primitives instead of placing a monolithic agent beside the browser and giving
+it remote control.
+
+That choice does not trade capability away. The browser is where your
+applications, identity, sessions, storage, UI, networking, WebAssembly, Workers,
+WebGPU, and WebRTC already meet. It gives peerd a path toward both sides of the
+equation: more capability and stronger isolation.
+
+## What makes it different?
+
+| Surface | peerd's approach |
+|---|---|
+| Runtime | Runs inside your real browser instead of outsourcing its primary execution environment to a cloud browser |
+| Architecture | A privileged orchestrator delegates to environment-specific, capability-narrowed actors |
+| Web | Page tools, a code-first interaction surface, and reusable origin-scoped site clients |
+| Compute | Sealed JavaScript workers, persistent Notebooks, compiled WASI tools, browser Apps, and Chrome WebVMs |
+| State | Local sessions, memory, workspaces, Apps, and browser-native Git history for Apps and Notebooks |
+| Security | Untrusted reasoning is separated from privileged authority where the browser contract supports it; every tool call is checked again at the privileged boundary |
+| Recovery | Ambiguous side effects remain unknown instead of being silently converted into retries |
+| Providers | Bring a supported cloud provider or use supported local inference; a peerd-hosted model proxy is not required |
+| A2A | Preview builds can communicate directly browser-to-browser over the peerd mesh |
+| License | Apache 2.0 |
+
+## A mixture of actors, not one omnipotent agent
+
+A general-purpose harness needs broad capability. That does not mean every
+reasoning context should inherit every capability.
+
+```text
+                           peerd
+                  privileged orchestrator
+                         plans work
+                              │
+                       delegates goals
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       │                      │                      │
+       ▼                      ▼                      ▼
+   web actor              VM actor           Notebook / App actor
+   one live tab           one WebVM           one local workspace
+   narrowed tools         narrowed tools      narrowed tools
+       │                      │                      │
+       └────────────── brokered requests ───────────┘
+                              │
+                              ▼
+                    privileged policy layer
+                  credentials · egress · gates
+                       audit · lifecycle
+```
+
+The orchestrator plans and delegates. Bound actors operate one tab, VM,
+Notebook, or App with only that environment's tools. Their model and tool calls
+cross a service-worker boundary that reconstructs the actor's permitted context
+and checks the request again. Credentials stay behind the broker; untrusted
+results return through explicit fences.
+
+On Chrome, non-orchestrator loops run in dedicated, keyless Worker heaps. The
+current Firefox fallback is keyless but does **not** provide the same dedicated
+heap boundary; that difference is tracked as a residual risk in the
+[threat model](docs/security/THREAT-MODEL.md#8-known-residual-risks). The WebVM
+also currently depends on Chromium's cross-origin-isolation support.
+
+**Capability is composed. Authority is not ambient.**
+
+## The browser is the runtime, not just the target
+
+- **Web actors.** A dedicated actor can read and operate a live tab without
+  attaching raw page tools to the orchestrator.
+- **Adaptive site clients.** A web actor can derive an origin-scoped client from
+  observed site traffic, ask the user before persisting it, then reuse that
+  programmatic interface on later visits. Derived dossiers stay fenced and
+  clients remain pinned to their origin.
+- **Code-first browser work.** Where enabled, a web actor can use a sealed
+  JavaScript REPL with a Playwright-shaped `page` surface. Each operation still
+  maps onto the same gated page tools; code changes the vocabulary, not the
+  authority.
+- **Local compute.** The headless `script` worker handles quick computation;
+  Notebooks add a visible, persistent OPFS workspace; compiled WASI programs run
+  with no ambient network; WebVMs boot Linux in a browser tab on Chromium.
+- **Browser Apps.** Agents can build multi-file local software, open it in an
+  opaque-origin iframe, keep Git history, inspect diffs, restore versions, and
+  optionally attach a remote.
+- **Memory and continuity.** Sessions, approved memory, local workspaces, Apps,
+  routines, and audit history persist in browser storage.
+- **Delegation.** Bound actors and short-lived actors let the orchestrator split
+  work across specialized contexts without giving every context the full tool
+  surface.
+- **Lifecycle-aware execution.** peerd records an operation before dispatch. If
+  a worker disappears after a non-idempotent side effect may have landed, the
+  outcome becomes `outcome_unknown`; peerd will not blindly replay it without
+  evidence.
+- **Model choice.** Model calls go from the extension to the supported provider
+  you select. No peerd account, hosted browser, or hosted agent backend is
+  required to run the Extension.
+- **P2P A2A (Preview).** The preview channel adds signed identity, a WebRTC mesh,
+  peer-distributed Apps, and direct agent-to-agent work between browsers. It is
+  experimental and does not ship in Store packages.
+
+## Assume the page wins the prompt injection
+
+**Prompt injection is a containment problem, not a filtering problem.** peerd
+does not depend on a model perfectly recognizing malicious instructions. It
+assumes hostile content can influence reasoning and limits what that reasoning
+can actually reach.
+
+1. **Isolate untrusted reasoning.** Environment actors consume page, command,
+   file, and peer content outside the orchestrator's normal context. Chrome adds
+   a dedicated Worker heap per non-orchestrator loop.
+2. **Keep secrets behind the broker.** Sandboxes and actor workers do not receive
+   model keys. Provider credentials are injected only at the egress boundary.
+3. **Re-check capability use.** Exposure rules, actor-kind pins, instance pins,
+   Plan/Act policy, confirmations, denylist/SSRF checks, and audit still apply at
+   dispatch.
+4. **Recover truthfully.** A lost response after a possible side effect is not
+   proof of failure and is not permission to do it again.
+
+Security comes from architecture, not a system prompt asking the model to ignore
+malicious instructions. It is not a claim that prompt injection, browser bugs, or
+model mistakes are solved. Read the [formal threat model](docs/security/THREAT-MODEL.md),
+[red-team results](docs/security/RED-TEAM-RESULTS.md), and
+[security policy](SECURITY.md) for the exact guarantees and residual risks.
+
+## Run it in the browser you already use
+
+**Peerd Extension** adds the peerd runtime to your Chrome or Firefox
+installation. It is available now from source and preview packages. Store links
+will replace the current source/preview install path when approvals land.
 
 ## Install
 
@@ -83,63 +222,56 @@ source-of-truth install path for contributors and early testers.
 
 **Store packages:**
 Chrome Web Store / Firefox Add-ons listings will be linked here once they
-are approved. Store packages omit preview-only dweb pieces and the
-preview/dev advanced automation path.
+are approved. Store packages omit the preview-only dweb module. The initial
+Chrome Store artifact also omits the CDP automation path; it uses the
+scripting/DOM-walk surface shared with Firefox.
 
 **Dweb preview (research package):**
-GitHub Releases may include signed preview artifacts. If there is no
-release attached yet, use the source install path below.
+Use the artifacts attached to the current GitHub release when present; the
+source install path below remains the fallback.
 
 The preview package includes the decentralized web (dweb) layer:
 peer-to-peer dwapps between peerd instances. It's intended for
 contributors and early testers, since the dweb protocol is research-grade
-and subject to change. Most users want one of the two store packages
-above. The preview installs alongside the store package as a separate
-extension ("peerd preview") with its own isolated storage; move state
+and subject to change. Once the store listings are live, most users will want
+one of those packages. The preview installs alongside a store package as a
+separate extension ("peerd preview") with its own isolated storage; move state
 between them explicitly via **Settings → Export & import**.
 
 Preview package install paths (Firefox is the smoother of the two):
 
 - **Firefox:** click `peerd-preview-firefox.xpi` on the release page.
   It's AMO-signed, installs like any extension, and auto-updates.
-- **Chrome on macOS / Windows (recommended): load the zip unpacked.**
+- **Chrome on macOS / Windows (recommended): load the release source unpacked.**
   Chrome hard-disables off-store CRX installs on these platforms
   ("may have been added without your knowledge", enable toggle locked),
   and field testing showed even an `ExtensionInstallAllowlist`
   policy visible in `chrome://policy` does NOT unlock it on an
   unmanaged machine (Chrome wants MDM-grade management). So don't
-  fight it: download `peerd-preview-chrome.zip`, unzip it, enable
+  fight it: download the release's source archive, unzip it, enable
   Developer mode at `chrome://extensions`, **Load unpacked**, and pick
-  the unzipped folder. Caveats: no auto-update (download the new zip
-  per release) and the extension ID is machine-specific, not the
-  table's CRX ID. This is a Chrome platform restriction on all
-  self-hosted extensions, not a peerd choice.
+  its `extension/` folder. Caveats: no auto-update (download the new
+  release explicitly) and the extension ID is machine-specific. This is a
+  Chrome platform restriction on all self-hosted extensions, not a peerd choice.
 - **Chrome on Linux (or any policy-managed Chrome):** download
   `peerd-preview-chrome.crx`, enable Developer mode at
   `chrome://extensions`, and drag the file onto the page. Auto-update
   then follows the feed at `peerd.ai/updates/`.
 
-**Extension IDs** (verify which package you're running):
-
-| package | id |
-|---|---|
-| peerd (Chrome store) | verify from the store listing or `chrome://extensions` after install |
-| peerd (Firefox store) | `peerd@peerd.ai` |
-| peerd preview (Chrome) | `lpdkhfeldihoejbbfonnbekpjclkknoc` *(CRX installs only — an unpacked load gets a machine-specific ID)* |
-| peerd preview (Firefox) | `peerd-preview@peerd.ai` |
+**Extension identity:** verify the installed package in
+`chrome://extensions` or `about:debugging`. Generated manifests, release
+artifacts, and update feeds are authoritative; unpacked Chrome installs receive
+a machine-specific ID.
 
 ## Getting started
 
-peerd has **no build step**: you load the `extension/` folder straight
-into Chrome as it is on disk. You need a Chromium-based browser (Chrome,
-Edge, Brave, Arc, …) and a model to talk to: a key from
-[Anthropic](https://console.anthropic.com/),
-[OpenRouter](https://openrouter.ai/keys),
-[OpenAI](https://platform.openai.com/api-keys), or
-[Z.ai](https://z.ai/) (GLM) — or a local
-[Ollama](https://ollama.com/) (keyless, no bill, nothing leaves your
-machine). BYOK: any key lives encrypted in a local vault and is only
-ever sent to that provider.
+peerd has **no extension build step**: load the `extension/` folder as it
+exists on disk. You need Chrome/Chromium or Firefox and one configured model.
+The live provider inventory is defined in
+[`peerd-provider/registry.js`](extension/peerd-provider/registry.js); it includes
+BYOK cloud providers and keyless local options. Provider secrets live in the
+encrypted local vault and are injected only into requests to the configured
+provider origin.
 
 **1. Get the code**
 
@@ -163,35 +295,34 @@ in the toolbar and **pin** peerd so its icon is always visible.
 
 Click the peerd toolbar icon and the side panel opens. On first run you
 create a local vault: unlock with **Touch ID / a passkey** (recommended)
-or a recovery passphrase. Keys, chat history, and the audit log are all
-encrypted on this device; nothing leaves your machine except the calls
-to your model provider.
+or a recovery passphrase. Keys, chat history, approved memory, and the audit
+log are stored locally. Model traffic goes to the provider you select; web
+work reaches the origins the task requires through peerd's audited egress
+paths; preview P2P traffic uses the peerd mesh.
 
-**4. Add your API key(s)**
+**4. Configure a provider**
 
-Open **Settings** (gear icon) → **API keys**. Paste a key for
-**Anthropic** (`sk-ant-…`), **OpenRouter** (`sk-or-…`), **OpenAI**
-(`sk-…`), or **Z.ai** (GLM) — set as many as you like, each stored
-independently. Choose a default under
-*Default model for new chats*, and switch the model per chat from the
-picker above the message box.
+Open **Settings** (gear icon) → **Providers**. Configure any supported provider
+you want to use, choose a default model for new chats, and switch models per
+chat. Keyed providers are stored independently in the vault; supported local
+providers do not require a peerd account or model proxy.
 
 **5. Chat**
 
-Back in the chat, type a message. peerd can read and drive your open
-tabs, run shell commands in a sandboxed in-browser Linux VM, build small
-apps, search the web, and more. Turn on **Confirm before actions** in
-Settings if you want to approve each tab/automation step first (off by
-default).
+Back in the chat, type a message. peerd can delegate work to web actors, run
+local code, build Apps, use persistent Notebooks, and on Chromium boot a
+sandboxed in-browser Linux VM. Plan/Act mode, write confirmations, origin
+rules, and egress policy control which side effects can proceed.
 
 **Updating after a code change.** Hit the **reload icon** on the peerd
 card in `chrome://extensions`. The side panel, offscreen document, and
 any open VM/JS/App tabs reload with it.
 
-**Firefox (temporary).** `about:debugging#/runtime/this-firefox` →
-**Load Temporary Add-on** → pick `extension/manifest.json`. Re-load on
-each edit. Firefox parity is still being polished; Chrome is the
-primary target for now.
+**Firefox (temporary source install).** Generate a Firefox manifest with the
+packaging script, then use `about:debugging#/runtime/this-firefox` → **Load
+Temporary Add-on**. Firefox does not currently support the WebVM or Chrome's
+dedicated offscreen Worker-heap isolation path; see the threat model before
+assuming browser parity.
 
 **Generated files.** `extension/manifest.json` and
 `extension/shared/channel-config.js` are GENERATED (the checked-in copies
@@ -205,8 +336,8 @@ tabs and reading the page the agent is acting on is the whole point. Each
 permission, why it's needed, and what the store build strips is spelled
 out in
 [`docs/store/PERMISSION-JUSTIFICATIONS.md`](docs/store/PERMISSION-JUSTIFICATIONS.md),
-and the trust boundaries (BYOK vault, egress allowlist,
-untrusted-content handling, no telemetry) in [`SECURITY.md`](SECURITY.md).
+and the trust boundaries (vault, egress, untrusted-content handling, current
+data practices) in [`SECURITY.md`](SECURITY.md).
 
 ## Project conventions (the short version)
 
@@ -220,7 +351,7 @@ untrusted-content handling, no telemetry) in [`SECURITY.md`](SECURITY.md).
   and is meant to be read carefully.
 
 The full version of these conventions and the architectural rationale
-lives in `CLAUDE.md` (orientation) and in the module code under
+lives in [`CLAUDE.md`](CLAUDE.md) (orientation) and in the module code under
 `extension/peerd-*/`: the code is the spec (vault crypto, dispatcher
 gates, prompt-injection defenses, and the MV3 keepalive trick all live
 in the modules that own them).
@@ -232,7 +363,7 @@ one top-level module, each owning its public API through `index.js`:
 
 | | Module | Role |
 |---|---|---|
-| **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — Anthropic, OpenRouter, OpenAI, Z.ai GLM, Ollama (streaming, caching, cost, retries) |
+| **`p`** · cyan | [`peerd-provider`](extension/peerd-provider/) | Model adapters — the registry is the live inventory; adapters normalize streaming, tool use, context windows, cost, and retries |
 | **`e`** · red | [`peerd-egress`](extension/peerd-egress/) | Security — the vault, the egress chokepoint, the denylist, the audit log |
 | **`e`** · amber | [`peerd-engine`](extension/peerd-engine/) | Sandboxes — WebVMs, Notebooks, Apps, and the headless worker |
 | **`r`** · green | [`peerd-runtime`](extension/peerd-runtime/) | The orchestrator — agent loop, tools, the `message_actor` delegation channel, actors, sessions, memory, skills, review, goal mode, voice |
@@ -245,14 +376,12 @@ public API and the dependency graph.
 
 ## Trust boundaries
 
-peerd's safety is *who is allowed to do what*: small boundaries
-enforced by the browser platform, not by peerd's own crypto. Two
-principles run through all of it: **the agent that holds your keys never
-touches a raw page or runs untrusted code** (the environment-operating
-tools are not even attached to it; they belong to per-environment actor
-actors), and **the agent never gets the final word on correctness:
-every page action reports what it actually changed on the live page, and
-success is judged from that observed effect.**
+peerd's safety is *who is allowed to do what*: boundaries enforced by the
+browser platform and by the privileged broker. Two principles run through all
+of it: **the reasoning that consumes raw environment content does not receive
+provider credentials or ambient tools**, and **the model never gets the final
+word on correctness: observed effects and durable lifecycle records decide
+what happened.**
 
 The orchestrator delegates; an actor does the work. Each tab, VM,
 notebook, and app is owned by one actor that holds only that
@@ -263,10 +392,10 @@ asked to, because it never held the tool.
 
 | Actor | Trusted with | Never |
 |---|---|---|
-| **The vault** (`peerd-egress/vault`) | your API keys + secrets, decrypted only after Touch ID / passkey / passphrase unlock; idle auto-lock | leaving the device — keys go only to the provider you chose |
+| **The vault** (`peerd-egress/vault`) | API keys and secrets, unlocked by Touch ID / passkey / passphrase with an auto-lock policy | exposing plaintext secrets to actors or sandboxes; provider keys are injected at the brokered egress boundary |
 | **The orchestrator** (`peerd-runtime/loop`) | the conversation, planning, delegating a goal to an actor via `message_actor` | holding any environment's tools, reading raw page bytes, or running untrusted code directly |
-| **A bound actor** (`peerd-runtime/actor`) | driving ONE tab / VM / notebook / app — it exclusively holds that environment's tools, keyless, in its own worker heap (Chrome) | touching another environment, holding keys, or returning anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| **A actor** (`peerd-runtime/actor`) | a disposable ephemeral actor the orchestrator spawns to decompose a task — keyless, in its own worker heap (Chrome), holding only a narrowed subset of the orchestrator's tools | escalating past its grant, holding keys, or reaching another agent's heap; every tool call is re-checked service-worker-side and its result returns fenced |
+| **A bound actor** (`peerd-runtime/actor`) | driving one tab / VM / Notebook / App with an instance-pinned toolset; keyless and in its own Worker heap on Chrome | touching another instance, receiving provider keys, or returning anything except a fenced summary |
+| **An ephemeral actor** (`peerd-runtime/actor`) | short-lived delegated reasoning with a narrowed grant; keyless and in its own Worker heap on Chrome | escalating past its grant or reaching another heap; every tool call is rebuilt and re-checked service-worker-side |
 | **The egress chokepoint** (`safeFetch` / `webFetch`) | every outbound byte — provider allowlist + denylist + SSRF guard | being bypassed; a bare `fetch` is lint-forbidden |
 | **The sandboxes** (WebVM · Notebook · App) | running code — V8 isolates + opaque-origin iframes | extension access; their HTTP routes back through egress |
 | **Web content** | nothing by default | being trusted — all of it is fenced as untrusted input |
@@ -295,14 +424,14 @@ Read this honestly: these are runnable security probes for peerd's core
 invariants, not a complete adversarial audit. Most probes run at the unit level
 against the real defense functions; the real Worker and iframe realm escapes are
 verified in the in-browser suite. The threat model is explicit about what is out
-of scope and about the residual risks that remain (for example, the Chrome-only
-heap split, memory poisoning, trusted skill bodies, and origin-blind confirm
-grants). See [`tests/red-team/README.md`](tests/red-team/README.md) for how to
-run and extend the suite.
+of scope and about the residual risks that remain, including the current Firefox
+fallback, memory poisoning, trusted skill bodies, open-web exfil paths, and broad
+host permission. See [`tests/red-team/README.md`](tests/red-team/README.md) for
+how to run and extend the suite.
 
 ## Documentation
 
-The code is the spec. Read `CLAUDE.md` for orientation, each module's
+The code is the spec. Read [`CLAUDE.md`](CLAUDE.md) for orientation, each module's
 `index.js` for its public API, and the code itself for the rest.
 `SECURITY.md` and [`docs/security/`](docs/security/) cover the trust boundaries,
 the formal threat model, and the red-team results; `docs/store/` holds the
@@ -317,10 +446,10 @@ detail). Each colored letter maps to a top-level module:
 peerd/
 ├── extension/                # the extension itself — load this dir unpacked
 │   ├── manifest.json
-│   ├── peerd-provider/       # p · cyan    — model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM, Ollama)
+│   ├── peerd-provider/       # p · cyan    — model adapters; registry.js is the live inventory
 │   ├── peerd-egress/         # e · red     — vault, allowlist, denylist, confirm, audit
 │   ├── peerd-engine/         # e · amber   — execution-instance registries (WebVM, Notebook, App). Tab runtimes in engine-tabs/<kind>-tab/; the headless script worker in offscreen/.
-│   ├── peerd-runtime/        # r · green   — agent loop, tools + message_actor delegation, actors + actors, sessions, permissions, composer, skills, memory, review, goal mode, cost, transfer, voice, clock, dom, edit
+│   ├── peerd-runtime/        # r · green   — agent loop, tools, actors, sessions, lifecycle, memory, skills, review, voice, DOM
 │   ├── peerd-distributed/   # d · magenta — the dweb layer between peerd instances (ships ONLY in preview packages)
 │   ├── background/           # chassis: service worker + per-kind tab trackers + clients
 │   ├── offscreen/            # chassis: the actor/actor worker heaps, headless script runs, voice, SW keepalive
@@ -340,7 +469,6 @@ peerd/
 ├── update-feeds/             # generated auto-update feeds served at peerd.ai/updates/ (copied to peerd-site to deploy)
 ├── docs/                     # store/ — store-listing + compliance material
 ├── signaling-node/           # dweb rendezvous server shells (share the pure signaling reducer)
-├── v1-deliverables/          # V1 buildout record: INTEGRATION-LOG.md, TEST-PLAN.md
 └── scripts/                  # dev helpers (cdp/ headless harness, dev-server.sh, vendor-*)
 ```
 
@@ -367,24 +495,19 @@ orchestrator picks the lightest kind that fits the task, bootstraps the
 instance, and then delegates the work to that instance's actor; the
 tool lists below are the surface an actor drives, not the main agent. One
 main-agent tool spans all of them: **`actor_list`** enumerates every
-addressable actor (WebVMs, Notebooks, Apps, open tabs, and API
-integrations), each tagged with its `type` and the handle to pass to
-`message_actor`, so discovery is one call instead of five.
+addressable actor (WebVMs, Notebooks, Apps, open tabs, and API integrations),
+each tagged with its `type` and the handle to pass to `message_actor`.
 
-**WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk (IDB
-overlay), own bash, own POSIX. ~10s first boot. Use it when you need
-real binaries, a shell, or multi-language stacks.
-
-```
-vm_create   vm_boot   vm_import   vm_write_file   vm_delete
-```
+**WebVM**: CheerpX-emulated Debian (sandboxed Linux). Own disk overlay, own
+bash, own POSIX. Use it when you need real binaries, a shell, or multi-language
+stacks. The current WebVM requires Chromium.
 
 HTTP egress from the VM (curl / wget / git clone) is intercepted by
 bash function wrappers that route every request through `peerd-egress`
 before it leaves the browser.
 
 **Notebook**: a sealed Web Worker with its own JS realm and an OPFS file
-tree, in a visible tab. ~hundreds of ms boot. `peerd.egress.fetch` is the
+tree, in a visible tab. `peerd.egress.fetch` is the
 worker's only network, routed through `peerd-egress` so it's honest. Each
 `js_notebook` run spawns a fresh worker, so in-memory state (`globalThis`,
 `let`/`const`) does NOT carry between runs; persist via
@@ -395,29 +518,21 @@ in-memory filesystem, with zero ambient capabilities (a wasm module has no
 network path even in principle; it sees only the stdin/files the call
 passes it).
 
-```
-sandbox_create   js_notebook   script   js_write_file   js_read_file   js_delete
-```
-
 **Headless worker** is the same sealed worker as a Notebook, but headless:
 `script` runs it in the offscreen document with no tab, ephemeral scratch
 discarded after. It's the agent's own quick compute and peerd's code mode
 (one script instead of a chain of tool/MCP calls), not a workspace you
 watch. A distinct kind from the Notebook, same substrate.
 
-**App**: a stored HTML document the agent built for the user, rendered
-in a sandboxed iframe (own opaque origin, no extension access).
-Metadata in `chrome.storage.local`; body in IndexedDB; substring
-search across name, tags, and body. `app_update` auto-reloads the open
-tab so iterations show live.
-
-```
-app_create   app_update   app_open   app_search   app_delete
-```
+**App**: a multi-file local artifact the agent built for the user, rendered in
+an opaque-origin sandboxed iframe with no extension access. Its workspace lives
+in OPFS, participates in the browser-native repository service, and can be
+versioned, diffed, restored, and connected to a Git remote. The App actor edits
+that workspace; the iframe receives only the composed runtime document.
 
 ## Tests
 
-Two surfaces, different jobs (see `CLAUDE.md`):
+Three surfaces, different jobs (see [`CLAUDE.md`](CLAUDE.md)):
 
 **In-browser**: things that need a real browser (DOM, `chrome.*`, IDB,
 side-panel components, the SW). Open
@@ -441,6 +556,11 @@ bun test ./tests
 (Bun is only needed for these terminal tests and for re-vendoring
 third-party deps; running the extension itself needs no toolchain at
 all.)
+
+**Live E2E**: `bun run e2e:verify` loads the unpacked extension into the
+pinned Chrome for Testing and exercises service-worker, vault, provider, actor,
+and side-panel flows end to end. UI work is not complete until the structured
+result and captured screenshots have both been inspected.
 
 **Types: JSDoc + `// @ts-check`, mandatory for browser files.** The
 extension is no-build vanilla JS, so types come from JSDoc checked by a
