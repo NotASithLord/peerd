@@ -75,6 +75,17 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
     recordOp: (runId, op) => {
       const entry = runs.get(runId);
       if (!entry) return;
+      // A delegation is mirrored before dispatch with settled:false, then
+      // updated in place when it replies, fails, or is cancelled. Keeping one
+      // row per sequence makes a crash snapshot honest without duplicating the
+      // same operation in the final trace.
+      const existingIndex = typeof op.seq === 'number'
+        ? entry.ops.findIndex((candidate) => candidate.seq === op.seq)
+        : -1;
+      if (existingIndex >= 0) {
+        entry.ops[existingIndex] = { ...entry.ops[existingIndex], ...op };
+        return;
+      }
       if (entry.ops.length >= actorOpLimit) entry.ops.shift();
       entry.ops.push(op);
     },

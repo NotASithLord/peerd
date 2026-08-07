@@ -9,6 +9,7 @@
 import { describe, it, expect } from '../../framework.js';
 import { runJob, abortJob } from '/offscreen/job-runner.js';
 import { REMOTE_MODULES_MAX_PER_RUN } from '/peerd-engine/module-resolver.js';
+import { ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS } from '/peerd-runtime/index.js';
 
 describe('offscreen job-runner (real sealed worker)', () => {
   it('runs code headless and returns its value + console output', async () => {
@@ -471,7 +472,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
     const c = /** @type {any} */ (calls[0]);
     expect(c.type).toBe('actors/call');
     expect(c.payload.method).toBe('ask');
-    expect(c.payload.args).toEqual({ address: 'vm-9', message: 'run pytest', timeoutMs: undefined, oneShot: true });
+    expect(c.payload.args).toEqual({ to: 'vm-9', goal: 'run pytest', oneShot: true });
     // owner identity rides from job params — the worker cannot spoof it
     expect(c.payload.ownerSessionId).toBe('chat-1');
     expect(c.payload.ownerToolUseId).toBe('tu-7');
@@ -490,7 +491,7 @@ describe('offscreen job-runner (real sealed worker)', () => {
       },
       {
         sendToSW: async (_type, payload) => (
-          /** @type {any} */ (payload).args?.address === 'web'
+          /** @type {any} */ (payload).args?.to === 'web'
             ? { ok: false, error: 'message_actor: refused by the sender gate' }
             : { ok: true, value: { reply: 'ok', failed: false } }),
       },
@@ -533,6 +534,35 @@ describe('offscreen job-runner (real sealed worker)', () => {
     expect(r.value).toBe(2);
     expect(r.usedActors).toBe(false);
     expect(/** @type {any[]} */ (r.actorsTrace).length).toBe(0);
+  });
+
+  it('actors: oversized addresses and goals stop at the host before trace allocation or an SW call', async () => {
+    /** @type {any[]} */
+    const calls = [];
+    const r = await runJob(
+      {
+        code: [
+          'const errors = [];',
+          `for (const [address, message] of [["a".repeat(${ACTORS_ADDRESS_MAX_CHARS + 1}), "x"], ["web", "g".repeat(${ACTORS_GOAL_MAX_CHARS + 1})]]) {`,
+          '  try { await actors.call(address, message); } catch (e) { errors.push(e.message); }',
+          '}',
+          'return errors;',
+        ].join('\n'),
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-bounds',
+      },
+      {
+        sendToSW: async (type, payload) => {
+          calls.push({ type, payload });
+          return { ok: true, value: { reply: 'should not run', failed: false } };
+        },
+      },
+    );
+    expect(r.error).toBe(null);
+    expect(r.usedActors).toBe(true);
+    expect(/** @type {any[]} */ (r.actorsTrace)).toEqual([]);
+    expect(calls.filter((c) => c.type === 'actors/call')).toEqual([]);
+    expect(Array.isArray(r.value)).toBe(true);
+    expect(/** @type {string[]} */ (r.value).every((error) => error.includes('at most'))).toBe(true);
   });
 
   // ── the provider sub-model surface (design 5) ─────────────────────────────

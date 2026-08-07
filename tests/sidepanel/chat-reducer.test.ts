@@ -209,6 +209,26 @@ describe('reduceChat', () => {
     expect(done.goalRuns.s1).toBeUndefined();
     expect(done.goalRuns.s2).toBeDefined();
   });
+
+  test('script operation Stop stays cancelled instead of becoming a failure', () => {
+    const started = reduceChat(withSession('s1'), {
+      type: 'script/op', sessionId: 's1', toolUseId: 'tu-1', seq: 1,
+      method: 'call', to: 'vm-1', goalPreview: 'long task', phase: 'sent',
+    });
+    expect(started.scriptOps['tu-1'][0]).toMatchObject({
+      phase: 'sent', cancelled: false, failed: false,
+    });
+
+    const stopped = reduceChat(started, {
+      type: 'script/op', sessionId: 's1', toolUseId: 'tu-1', seq: 1,
+      method: 'call', phase: 'cancelled', cancelled: true,
+      error: 'aborted', ms: 12,
+    });
+    expect(stopped.scriptOps['tu-1'][0]).toMatchObject({
+      phase: 'cancelled', cancelled: true, failed: false,
+      ms: 12, to: 'vm-1', goalPreview: 'long task',
+    });
+  });
 });
 
 // DESIGN-18: an agent-tab notice anchors to the message_actor turn DRIVING its actor
