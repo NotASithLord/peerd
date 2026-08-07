@@ -33,6 +33,18 @@ describe('remote module package policy reaches the model as a tool failure', () 
     }
   });
 
+  test('script preserves actor reply custody when policy ends the run', async () => {
+    const result = await scriptTool.execute({ code: 'return actors; await import(path)' }, {
+      session: { sessionId: 'session-1', kind: 'chat' },
+      jsOffscreenClient: { execHeadless: async () => ({
+        ...policyResult,
+        actorDeliveryIds: ['delivery-1', 'delivery-2', 'delivery-1'],
+      }) },
+    } as any);
+    expect(result.ok).toBe(false);
+    expect((result as any).actorDeliveryIds).toEqual(['delivery-1', 'delivery-2']);
+  });
+
   test('Notebook keeps code exceptions in-band but returns package policy as a failure', async () => {
     const result = await jsNotebookTool.execute({ code: "import('https://example.test/mod.js')" }, {
       session: { sessionId: 'session-1', kind: 'chat' },

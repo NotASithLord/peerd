@@ -22,6 +22,7 @@ import { SkillsView } from '/sidepanel/components/skills-view.js';
 import { HooksView } from '/sidepanel/components/hooks-view.js';
 import { DenylistView } from '/sidepanel/components/denylist-view.js';
 import { LearnedOriginsView } from '/sidepanel/components/learned-origins-view.js';
+import { ActorIsolationBanner } from '/sidepanel/components/actor-isolation-banner.js';
 import { ProvidersSection } from '../sections/providers.js';
 import { BehaviorSection } from '../sections/behavior.js';
 import { VoiceSection } from '../sections/voice.js';
@@ -231,6 +232,7 @@ export const OptionsApp = {
       ]),
       m('main.options-content', m('.options-page', [
         m('h2', SECTION_TITLES[section] ?? 'Settings'),
+        m(ActorIsolationBanner, { capability: state.capabilities?.actorExecution, send }),
         OptionsApp.section(vnode),
       ])),
     ]);

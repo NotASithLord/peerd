@@ -48,6 +48,7 @@ export const ABORT_STEER = 'peerd:steer';
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
  *   runWhenIdleClaimed: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void,
  *   advanceQueue: (sessionId: string) => void,
+ *   generation: (sessionId: string) => number,
  * }}
  * @param {{ onAbort?: (sessionId: string) => void, forceReleaseMs?: number }} [deps]
  *   onAbort fires whenever a session's turn is aborted (a steer-live supersede
@@ -62,6 +63,11 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
   const slots = new Map();
   /** @type {Map<string, Array<() => void>>} idle-wake queue per session */
   const idleQueues = new Map();
+  // Explicit Stop epoch per session. A direct shell wake can capture this when
+  // it queues and compare it at dequeue, so Stop also cancels work waiting
+  // behind the live turn instead of letting that wake start a fresh turn.
+  /** @type {Map<string, number>} */
+  const stopGenerations = new Map();
 
   // Run the next queued wake for a session that just went idle. The wake
   // is contracted to start a turn (re-claim the slot); when THAT turn
@@ -114,7 +120,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     return {
       controller,
       release: () => {
-        // Only clear our own claim — if a steer already replaced this
+        // Only clear our own claim. If a steer already replaced this
         // controller, the newer turn owns the slot.
         if (slots.get(sessionId) === controller) {
           slots.delete(sessionId);
@@ -128,6 +134,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     claim,
 
     stop(sessionId) {
+      stopGenerations.set(sessionId, (stopGenerations.get(sessionId) ?? 0) + 1);
       const controller = slots.get(sessionId);
       if (!controller) return false;
       controller.abort(ABORT_STOP);
@@ -174,5 +181,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     // decliners drains synchronously and stops at the first wake that starts a
     // turn (its async claim then owns the slot; its release re-drains the rest).
     advanceQueue(sessionId) { drainIdle(sessionId); },
+
+    generation: (sessionId) => stopGenerations.get(sessionId) ?? 0,
   };
 };

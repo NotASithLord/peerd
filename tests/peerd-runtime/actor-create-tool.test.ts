@@ -81,6 +81,43 @@ describe('actor_create tool — MED-1: the SYNC result is fenced as untrusted', 
     expect(r.content.indexOf('HIT WALL-CLOCK TIMEOUT')).toBeLessThan(r.content.indexOf('<untrusted_web_content'));
   });
 
+  test('a post-start execution failure is a trusted unknown-outcome error', async () => {
+    const r = await actorCreateTool.execute({ task: 'change it', sync: true }, syncCtx({
+      result: 'the target may have changed before the worker stopped',
+      stopped: true,
+      executionFailed: true,
+      outcomeKnown: false,
+    }) as any) as any;
+    expect(r).toMatchObject({ ok: false, performed: true, outcomeKnown: false, retryable: false });
+    expect(r.error).toContain('Its outcome is unknown. Do not retry automatically.');
+    expect(r.error).toContain('<untrusted_web_content');
+    expect(r.error.indexOf('Do not retry automatically')).toBeLessThan(r.error.indexOf('<untrusted_web_content'));
+  });
+
+  test('a post-start persistence exception preserves the unknown-outcome contract', async () => {
+    const failure = Object.assign(new Error('storage write failed'), {
+      performed: true, outcomeKnown: false, retryable: false, executionFailed: true,
+    });
+    const ctx = baseCtx({ spawnActor: async () => { throw failure; } });
+    const r = await actorCreateTool.execute({ task: 'change it', sync: true }, ctx as any) as any;
+    expect(r).toMatchObject({ ok: false, performed: true, outcomeKnown: false, retryable: false });
+    expect(r.error).toContain('Do not retry automatically');
+    expect(r.error).not.toContain('storage write failed');
+  });
+
+  test('a graceful pre-tool actor failure is Not run rather than outcome unknown', async () => {
+    const r = await actorCreateTool.execute({ task: 'change it', sync: true }, syncCtx({
+      result: 'actor-provider-boundary-blocked: The actor model request was not run.',
+      stopped: true,
+      executionFailed: true,
+      outcomeKnown: true,
+      toolCalls: 0,
+    }) as any) as any;
+    expect(r).toMatchObject({ ok: false, performed: false, outcomeKnown: true, retryable: true });
+    expect(r.error).toContain('FAILED BEFORE TARGET WORK RAN');
+    expect(r.error).not.toContain('Its outcome is unknown');
+  });
+
   test('a refusal is surfaced as an error, not a fenced result', async () => {
     const ctx = baseCtx({
       spawnActor: async () => ({ result: 'max depth 5 exceeded', sessionId: null, toolCalls: 0, durationMs: 0, depth: 6, refused: true }),

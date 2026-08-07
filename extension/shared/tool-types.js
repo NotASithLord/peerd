@@ -97,6 +97,11 @@
  * @property {any} [structured]        optional host-only structured twin of a
  *   presentation-oriented `content` string. The model loop ignores it; trusted
  *   relays may consume it without parsing human-formatted text.
+ * @property {string} [actorDeliveryId] internal durable mailbox correlation.
+ *   Preserved into the persisted tool-result block and removed from the mailbox
+ *   only after that message commits. Provider formatters ignore this field.
+ * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations
+ *   for a tool that consumed multiple actor replies, such as script.
  */
 
 /**
@@ -112,6 +117,10 @@
  *   failed stamps this so the recovery decision is deterministic instead of
  *   string-matched. Optional — unstamped failures take the heuristic path.
  * @property {ToolMeta} [meta]
+ * @property {string} [actorDeliveryId] internal durable mailbox correlation;
+ *   never serialized to a provider.
+ * @property {string[]} [actorDeliveryIds] internal durable mailbox correlations;
+ *   never serialized to a provider.
  */
 
 /** @typedef {ToolResultOk | ToolResultErr} ToolResult */

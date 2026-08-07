@@ -31,9 +31,10 @@ will eventually be prompt-injected, and that no content filter reliably prevents
 this. peerd does not rely on filtering. Instead it separates untrusted reasoning
 from dangerous capability in three ways:
 
-1. Memory. Where the browser provides an isolated host, reasoning that reads a
-   page runs in a separate worker heap. Firefox currently uses the keyless
-   in-service-worker fallback described in R1, without heap isolation.
+1. Memory. Reasoning that reads a page runs in a separate dedicated worker heap.
+   Chrome hosts it from an offscreen document. Firefox hosts it from the
+   extension background page. Actor work fails closed if the boundary cannot be
+   proved.
 2. Policy. Every tool call is checked at dispatch against a fixed set of gates.
 3. Chokepoints. All outbound network traffic and all signing pass through a single
    audited path.
@@ -52,7 +53,7 @@ between them.
 
 | Surface | What runs there | Holds the key |
 |---|---|---|
-| Service worker (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, all relays. Firefox also runs fallback actor loops here | Yes. Fallback actor loop frames receive no live credential functions, but share this realm |
+| Privileged background (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, and actor relays. Firefox also starts actor workers here | Yes. Actor loops run in separate dedicated worker heaps |
 | Offscreen document (`offscreen/`, Chrome) | Hosts isolated actor workers, headless `script`, voice, and the dweb base network | No. Actor worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
@@ -79,25 +80,23 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
 | The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
-| A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap on Chrome | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset. It gets its own heap when an isolated host is available | Escalate past its grant or hold the key. Every tool call is re-checked in the service worker |
-| The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, with its own heap when an isolated host is available | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
+| A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
+| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset and its own heap | Escalate past its grant or hold the key. Every tool call is re-checked in the privileged background |
+| The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, with its own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
 ### 3.2 Trust boundaries
 
-- B1. Untrusted content and the orchestrator's heap. When an isolated host is
-  available, page text, command output, file contents, and peer bytes are read in
-  a separate keyless actor worker and return only as `wrapUntrusted`-fenced data
+- B1. Untrusted content and the orchestrator's heap. Page text, command output,
+  file contents, and peer bytes are read in a separate keyless actor worker and
+  return only as `wrapUntrusted`-fenced data
   (`peerd-runtime/actor/actor-worker-core.js`,
-  `background/offscreen-actor-client.js`). Firefox currently shares the
-  service-worker realm. Its actor loop still receives throwing credential stubs,
-  but it does not have this memory boundary. See R1.
-- B2. An actor loop and the network or the key. On the isolated path, model and
-  tool calls leave the worker only through service-worker-gated relays. On the
-  fallback path, the loop receives throwing credential stubs. In both cases the
-  service worker adds live provider functions only at the model-call boundary
-  and re-checks every tool call.
+  `background/offscreen-actor-client.js`). A versioned readiness and realm probe
+  must pass before work starts. Missing or failed isolation refuses the actor
+  turn before any target action.
+- B2. An actor loop and the network or the key. Model and tool calls leave the
+  worker only through privileged, gated relays. The host adds live provider
+  functions only at the model-call boundary and re-checks every tool call.
 - B3. The extension and the open web. All outbound bytes pass through
   `peerd-egress/fetch/`: `safeFetch` (exact-origin provider allowlist, carries the
   key) or `webFetch` (SSRF and private-network block plus denylist, keyless).
@@ -147,10 +146,9 @@ Can: serve arbitrary HTML, JS, and text, plant prompt-injection payloads in cont
 the agent reads, try to induce fetches, and run script in its own origin.
 Cannot: reach the vault key, run in a privileged context, or make the agent's
 authority act outside its gates.
-Defenses: where an isolated host is available, the memory boundary keeps page
-bytes out of the orchestrator's heap (B1). Every web actor loop is keyless: the
-isolated worker receives stubs in `actor-worker-core.js`, and the Firefox fallback
-receives stubs in `loop/turn-driver.js`. The credentialed egress path is an
+Defenses: the memory boundary keeps page bytes out of the orchestrator's heap
+(B1). Every web actor loop is keyless and receives stubs in
+`actor-worker-core.js`. The credentialed egress path is an
 exact-origin allowlist (`safeFetch`). Open-web fetches are gated by the SSRF block
 and the denylist (`webFetch`). Page text is `wrapUntrusted`-fenced with a delimiter
 the page cannot forge (`tools/prompt-wrap.js`).
@@ -191,11 +189,10 @@ Defenses: the gate stack (`tools/gates.js`). The exposure gate hides low-level D
 and page tools from the main turn. The actor-tier gate pins each actor to its kind's
 toolset and instance and refuses actor-only tools on non-actor contexts. Plan and Act
 mode blocks writes (`permissions/policy.js`). The origin gate applies the denylist.
-Every tool call carries an append-only audit entry. On the isolated path,
+Every tool call carries an append-only audit entry. In the actor worker,
 `actor-worker-core.js` strips every function before the model request crosses the
-`postMessage` relay. On the fallback path, the actor loop receives throwing
-credential stubs and the service-worker-owned provider wrapper overwrites its
-credential fields at the call boundary.
+relay. The privileged provider wrapper overwrites worker-controlled provider,
+model, host, and credential fields at the call boundary.
 Proven by: scenarios 03, 08 (and 05 for delegation).
 
 ### 5.5 Malicious extension (out of scope, see section 7)
@@ -259,26 +256,19 @@ Code: `peerd-egress/denylist/denylist.js`, `fetch/web-fetch.js`,
 <a id="inv-3"></a>
 ### INV-3. Actor loops receive no live credential functions and return fenced data
 Every actor loop receives throwing `getSecret` and `safeFetch` stubs. This is
-enforced in `actor-worker-core.js` for isolated workers, `actor/spawn.js` for the
-spawned in-service-worker fallback, and `loop/turn-driver.js` for the bound
-fallback. Service-worker-owned wrappers add the live functions only at the model
-provider boundary. An isolated worker also cannot pass functions across its relay
-because `makeRelayedCallModel` drops them. Every untrusted summary re-enters the
+enforced in `actor-worker-core.js`. Privileged wrappers add the live functions
+only at the model provider boundary. A worker cannot pass functions across its
+relay because `makeRelayedCallModel` drops them. Every untrusted summary re-enters the
 orchestrator wrapped as data (`makeActorSummaryFence` and `wrapUntrusted`) with a
-delimiter the content cannot forge (`neutralizeFence`). The Firefox fallback has
-credential custody but not heap isolation. See R1.
-Code: `peerd-runtime/actor/spawn.js`, `peerd-runtime/actor/actor-worker-core.js`,
-`peerd-runtime/loop/turn-driver.js`, `tools/prompt-wrap.js`.
-
-The proof is composite. Red-team scenario 03 drives the production turn driver to
-check the bound fallback stubs and broker-owned field overwrite, then checks the
-isolated relay and result fence. The browser test in
-`extension/tests/unit/peerd-runtime/turn-driver-credentials.test.js` runs the real
-turn driver and agent loop together. The installed-XPI Firefox smoke in
-`scripts/firefox/run-runtime-tests.mjs` proves that the packaged browser takes the
-in-service-worker route, attaches the key only at the provider request boundary,
-and returns the actor result through the matching untrusted-content fence. The XPI
-smoke does not claim heap isolation or inspect JavaScript closure reachability.
+delimiter the content cannot forge (`neutralizeFence`).
+Code: `peerd-runtime/actor/actor-worker-core.js`,
+`background/offscreen-actor-client.js`, `background/direct-actor-host.js`,
+`offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`, and
+`tools/prompt-wrap.js`. The browser custody test proves an actor cannot enter the
+privileged turn driver. The installed-XPI Firefox smoke proves the packaged extension
+starts a dedicated Worker, verifies its realm, attaches credentials only in the host,
+keeps one background heap alive past the event-page idle window, and returns one
+fenced result without replay. Red-team: scenario 03.
 
 <a id="inv-4"></a>
 ### INV-4. A tampered or re-attributed peer bundle is detectable and rejected
@@ -603,26 +593,25 @@ verifies against its persisted public key; the Bun tier can only prove this over
 These are stated plainly. Several are deliberate tradeoffs. All are things a reader
 evaluating peerd should know. Each cites where it lives in the code.
 
-- R1. The heap split is Chrome-only. It needs the offscreen API. On Firefox, and for
-  a run that never started offscreen, the actor falls back to an in-service-worker
-  loop. Capability gates and keyless loop custody still apply, but the memory
-  boundary is not universal.
-  (`background/service-worker.js` offscreen fallback.)
-
-  Both fallback lanes keep live credentials out of the loop frame:
-
-  - A spawned child receives throwing `getSecret` and `safeFetch` stubs. Its
-    service-worker-owned model wrapper adds the live functions at the provider call
-    boundary (`actor/spawn.js`, `keylessCredentials`).
-  - A bound actor receives the same custody when it falls through to `runAgentTurn`.
-    The turn driver derives the posture from the persisted session kind and adds the
-    live functions only inside its provider wrapper (`loop/turn-driver.js`).
-
-  Neither lane has heap separation, which is the deeper point: the child's untrusted
-  transcript shares a realm with the vault broker and the engine clients, so a
-  memory-disclosure bug there is not fenced the way it is on Chrome. Extending the
-  isolated host to Firefox, or failing closed when it is unavailable, remains P0-1 in
-  [`HARDENING-ROADMAP.md`](HARDENING-ROADMAP.md).
+- R1. Actor isolation depends on the browser's dedicated Worker implementation.
+  Chrome starts the runner from its offscreen document. Firefox starts the same
+  runner from the extension background page. A startup handshake checks the
+  protocol, worker realm, host canary separation, and absence of extension APIs
+  before any model or tool relay. Firefox uses a run-scoped, acknowledged
+  `storage.session` heartbeat while the background page owns an active Worker.
+  A failed heartbeat pauses actor work until a manual probe succeeds. The
+  durable actor mailbox never replays stored work after a background
+  restart: queued work becomes Not run, while started and legacy work becomes
+  Outcome unknown until the target is checked. If the
+  startup proof fails twice before work starts,
+  the capability becomes visibly unavailable and actor tools fail closed. This
+  guards against missing support and startup faults. It does not protect against
+  a browser engine defect that breaks Worker isolation itself. The dedicated
+  Worker also retains standard web APIs such as `fetch`; it is a memory boundary,
+  not a sealed code sandbox. Model output is not evaluated as code in that realm,
+  and model or tool requests use the privileged relay paths.
+  (`offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`,
+  `background/direct-actor-host.js`, `peerd-runtime/actor/isolation.js`.)
 - R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
   synthetic messages, but still includes raw assistant text, which can echo
   attacker-paraphrased content, and an approved note persists into every future prompt.

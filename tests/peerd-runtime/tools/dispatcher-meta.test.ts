@@ -107,6 +107,37 @@ describe('dispatcher lineage spine fields', () => {
     expect(r.meta.sideEffect).toBe('read');   // enrichment still attached
   });
 
+  test('a lifecycle recovery rewrite preserves actor delivery custody', async () => {
+    registerTool(baseTool({
+      sideEffect: 'write',
+      execute: async () => ({
+        ok: false,
+        error: 'transport lost',
+        actorDeliveryId: 'delivery-one',
+        actorDeliveryIds: ['delivery-two', 'delivery-two'],
+      }),
+    }) as any);
+    const lifecycle = {
+      beginTracking: async () => ({ handle: { operationId: 'op-1' } }),
+      settleTracking: async () => ({
+        error: 'outcome_unknown: verify before retry',
+        recovery: { category: 'verify_before_retry' },
+      }),
+    };
+
+    const r: any = await dispatchToolCall(
+      { id: 't-custody', name: 'lt', args: {} } as any,
+      { ...ctx, lifecycle },
+    );
+
+    expect(r).toMatchObject({
+      ok: false,
+      error: 'outcome_unknown: verify before retry',
+      actorDeliveryId: 'delivery-one',
+      actorDeliveryIds: ['delivery-two'],
+    });
+  });
+
   test('a throwing origins() fails closed at the origin gate (never reaches meta)', async () => {
     registerTool(baseTool({ origins: () => { throw new Error('origins blew up'); } }) as any);
     const r: any = await dispatchToolCall({ id: 't3', name: 'lt', args: {} } as any, ctx);

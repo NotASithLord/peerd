@@ -144,6 +144,30 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(seq.length).toBe(4);
   });
 
+  test('persists singular and batched actor delivery custody on tool results', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    const ctx = baseCtx(store, {
+      callModel: makeToolModel([{ id: 't_script', name: 'script' }]),
+      tools: [{ name: 'script', description: '', schema: {} }],
+      classifyToolCall: () => WRITE_VERDICT,
+      toolDispatch: async () => ({
+        ok: true,
+        content: 'done',
+        meta: {},
+        actorDeliveryId: 'delivery-one',
+        actorDeliveryIds: ['delivery-two', 'delivery-two', ''],
+      }),
+    });
+
+    await drain(runUserTurn(ctx));
+    const session = await store.get('s1');
+    const block = session.messages.find((m: any) => Array.isArray(m.toolResults))
+      .toolResults[0];
+    expect(block.actorDeliveryId).toBe('delivery-one');
+    expect(block.actorDeliveryIds).toEqual(['delivery-two']);
+  });
+
   test('a write is a barrier: [read, write, read] runs strictly in order', async () => {
     const store = makeStore();
     store.seed('s1');

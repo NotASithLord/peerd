@@ -95,6 +95,12 @@
   padding: 24px 28px 56px;
 }
 
+.options-page > .actor-isolation-banner {
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  margin-bottom: 18px;
+}
+
 /* why the max-width: styles.css assumed a ~400px panel where lines
  * could never run long; a full tab needs an explicit readable column. */
 .options-page { max-width: 760px; }

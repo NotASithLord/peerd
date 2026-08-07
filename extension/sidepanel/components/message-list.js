@@ -27,8 +27,28 @@ import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
 import { CHANNEL } from '/shared/channel-config.js';
 import {
-  ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE, classifyFailure, formatBytes,
+  ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE, ACTOR_ISOLATION_TEMPORARY_USER_FAILURE,
+  ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE, classifyFailure,
+  contributorFeedbackTargets, formatBytes,
 } from '/peerd-runtime/index.js';
+
+/** @param {string} text @returns {string|null} */
+const actorUserFailure = (text) => {
+  if (/actor-provider-boundary-blocked|model request was not run/i.test(text)) {
+    return ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE;
+  }
+  if (/actor_isolation_temporarily_unavailable|isolated worker is temporarily unavailable/i.test(text)) {
+    return ACTOR_ISOLATION_TEMPORARY_USER_FAILURE;
+  }
+  if (/actor_isolation_unavailable|cannot provide the required isolated worker/i.test(text)) {
+    return ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE;
+  }
+  return null;
+};
+
+/** @param {string} _text @returns {string} */
+const actorOutcomeUnknownFailure = (_text) =>
+  'peerd cannot confirm whether the actor ran or completed. Check the target before trying again.';
 
 /** @typedef {import('../chat-reducer.js').ChatMessage} ChatMessage */
 /** @typedef {import('../chat-reducer.js').SpawnedSession} SpawnedSession */
@@ -77,9 +97,11 @@ import {
  * @property {number} [depth]
  * @property {TabEvent[]} [tabEvents]
  * @property {UiActions} [uiActions]
+ * @property {string} [sessionId]
  * @property {((msg: Record<string, any>) => Promise<any>)} [send]
- * @property {string|null|undefined} [sessionId]
  * @property {boolean} [busy]
+ * @property {boolean} [announceOnMount]
+ * @property {Map<string|undefined, Set<string>>} [seenRecoveryIdsBySession]
  */
 
 // Auto-scroll heuristic: if the user is reading near the bottom, keep
@@ -114,27 +136,11 @@ const CONTRIBUTOR_FEEDBACK_ENABLED = CHANNEL === 'preview' || CHANNEL === 'dev';
 const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth = 0, tabEvents = [], uiActions, send, sessionId, busy = false }) => {
   const groups = groupMessages(messages ?? []);
   // Feedback belongs to the completed answer for a human turn, not every
-  // intermediate assistant step that happened to contain text before a tool
-  // call. Retain earlier completed answers, while leaving the current streaming
-  // answer ineligible in AssistantMessage below.
-  const feedbackMessageIds = new Set();
-  let finalAssistantId = null;
-  for (const group of groups) {
-    if (group.type === 'user') {
-      if (finalAssistantId) feedbackMessageIds.add(finalAssistantId);
-      finalAssistantId = null;
-    } else if (group.type === 'assistant') {
-      const toolUses = Array.isArray(group.message.toolUses) ? group.message.toolUses : [];
-      finalAssistantId = toolUses.length === 0 && group.message.stopReason === 'end_turn'
-        ? group.message.id
-        : null;
-    }
-  }
-  // A persisted text step can briefly look final while its tool dispatch or
-  // continuation still owns the live turn slot. Only the authoritative idle
-  // state makes the current answer eligible; an earlier answer followed by a
-  // real human turn was already sealed in the branch above.
-  if (finalAssistantId && !busy) feedbackMessageIds.add(finalAssistantId);
+  // intermediate assistant step before a tool call. The live answer becomes
+  // eligible only after the authoritative turn slot is idle.
+  const feedbackMessageIds = busy
+    ? new Set()
+    : new Set(contributorFeedbackTargets(messages ?? []).keys());
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
   // (its starting user-message id) they belong to. They render at the END of that
   // turn — after the agent's later messages — then freeze above the next turn.
@@ -185,18 +191,144 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
   return out;
 };
 
+/** @param {ChatMessage} message @returns {Array<{ id: string, announcement: string }>} */
+const recoveryReceiptsForMessage = (message) => {
+  /** @type {Array<{ id: string, announcement: string }>} */
+  const receipts = [];
+  const messageId = typeof message.id === 'string' ? message.id : null;
+  if (message.actorReply?.outcomeKnown === false) {
+    if (messageId) receipts.push({
+      id: `${messageId}:actor-reply`,
+      announcement: 'Actor outcome unknown. Check the target before trying again.',
+    });
+  } else if (message.actorReply?.performed === false) {
+    if (messageId) receipts.push({
+      id: `${messageId}:actor-reply`,
+      announcement: 'Actor request not run. Re-issue it if it still matters.',
+    });
+  }
+  for (const rawResult of Array.isArray(message.toolResults) ? message.toolResults : []) {
+    const result = /** @type {any} */ (rawResult);
+    const content = typeof result?.content === 'string'
+      ? result.content
+      : JSON.stringify(result?.content ?? '');
+    if (result?.is_error === true
+      && /outcome is unknown|outcome unknown/i.test(content)
+      && messageId
+      && typeof result?.tool_use_id === 'string') {
+      receipts.push({
+        id: `${messageId}:tool-result:${result.tool_use_id}`,
+        announcement: 'Actor outcome unknown. Check the target before trying again.',
+      });
+    }
+  }
+  return receipts;
+};
+
+/** @param {ChatMessage[]|undefined} messages */
+const recoveryReceipts = (messages) => (messages ?? []).flatMap(recoveryReceiptsForMessage);
+
+/** @param {any} state @param {string} announcement */
+const replaceRecoveryAnnouncement = (state, announcement) => {
+  if (state.recoveryAnnouncementTimer) {
+    clearTimeout(state.recoveryAnnouncementTimer);
+    state.recoveryAnnouncementTimer = null;
+  }
+  state.recoveryAnnouncement = announcement;
+};
+
+/** @param {any} state */
+const scheduleRecoveryAnnouncementClear = (state) => {
+  const announced = state.recoveryAnnouncement;
+  if (!announced || state.recoveryAnnouncementTimer) return;
+  state.recoveryAnnouncementTimer = setTimeout(() => {
+    state.recoveryAnnouncementTimer = null;
+    if (state.recoveryAnnouncement === announced) {
+      state.recoveryAnnouncement = '';
+      m.redraw();
+    }
+  }, 1_000);
+};
+
 export const MessageList = {
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
+  oninit(vnode) {
+    vnode.state.sessionId = vnode.attrs.sessionId;
+    // Existing history on the initial mount is a visual receipt, not a new
+    // alert. Keep the baseline per session after that: a receipt first
+    // encountered when the user switches chats is new to this surface and must
+    // be announced, while switching back must not announce it again.
+    vnode.state.seenRecoveryIdsBySession = vnode.attrs.seenRecoveryIdsBySession ?? new Map();
+    const receipts = recoveryReceipts(vnode.attrs.messages);
+    const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
+    const fresh = existing
+      ? receipts.filter((receipt) => !existing.has(receipt.id))
+      : vnode.attrs.announceOnMount ? receipts : [];
+    const seen = existing ?? new Set();
+    for (const receipt of receipts) seen.add(receipt.id);
+    vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+    vnode.state.recoveryAnnouncement = fresh.map((receipt) => receipt.announcement).join(' ');
+    vnode.state.recoveryAnnouncementTimer = null;
+  },
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
+  onbeforeupdate(vnode) {
+    if (vnode.state.sessionId !== vnode.attrs.sessionId) {
+      vnode.state.sessionId = vnode.attrs.sessionId;
+      const receipts = recoveryReceipts(vnode.attrs.messages);
+      const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
+      const fresh = existing
+        ? receipts.filter((receipt) => !existing.has(receipt.id))
+        : receipts;
+      const seen = existing ?? new Set();
+      for (const receipt of receipts) seen.add(receipt.id);
+      vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+      replaceRecoveryAnnouncement(vnode.state, fresh
+        .map((receipt) => receipt.announcement)
+        .join(' '));
+      return true;
+    }
+    const seen = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId) ?? new Set();
+    const receipts = recoveryReceipts(vnode.attrs.messages);
+    const fresh = receipts.filter((receipt) => !seen.has(receipt.id));
+    for (const receipt of receipts) seen.add(receipt.id);
+    vnode.state.seenRecoveryIdsBySession.set(vnode.attrs.sessionId, seen);
+    if (fresh.length > 0) {
+      replaceRecoveryAnnouncement(vnode.state, fresh
+        .map((receipt) => receipt.announcement)
+        .join(' '));
+    }
+    return true;
+  },
   // Initial mount: jump to the bottom so existing-session render starts
   // with the latest turn visible, not the first message.
-  /** @param {{ dom: HTMLElement }} vnode */
-  oncreate(vnode) { vnode.dom.scrollTop = vnode.dom.scrollHeight; },
-  /** @param {{ dom: HTMLElement }} vnode */
-  onupdate(vnode) { scrollIfNearBottom(vnode.dom); },
+  /** @param {{ dom: HTMLElement, state: any }} vnode */
+  oncreate(vnode) {
+    vnode.dom.scrollTop = vnode.dom.scrollHeight;
+    scheduleRecoveryAnnouncementClear(vnode.state);
+  },
+  /** @param {{ dom: HTMLElement, state: any }} vnode */
+  onupdate(vnode) {
+    scrollIfNearBottom(vnode.dom);
+    scheduleRecoveryAnnouncementClear(vnode.state);
+  },
+  /** @param {{ state: any }} vnode */
+  onremove(vnode) {
+    if (vnode.state.recoveryAnnouncementTimer) clearTimeout(vnode.state.recoveryAnnouncementTimer);
+  },
 
-  /** @param {{ attrs: TranscriptArgs }} vnode */
-  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions, send, sessionId, busy } }) =>
-    m('.message-list',
-      renderTranscript({ messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, depth: 0, tabEvents, uiActions, send, sessionId, busy })),
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
+  view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, uiActions, send, sessionId, busy }, state }) =>
+    m('.message-list', [
+      renderTranscript({
+        messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName,
+        depth: 0, tabEvents, uiActions, send, sessionId, busy,
+      }),
+      state.recoveryAnnouncement
+        ? m('span.sr-only.actor-recovery-announcement', {
+            role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
+          }, state.recoveryAnnouncement)
+        : null,
+    ]),
 };
 
 // Inline "peerd opened a tab" notice — anchored at the turn it happened so it
@@ -324,9 +456,12 @@ const ActorReplyMessage = {
     // Drop replyText()'s one-line lead ("The <kind> actor … has replied:") —
     // the role label above the bubble already says who this is.
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
-    const notRun = reply.failed === true
-      && /actor-provider-boundary-blocked|model request was not run/i.test(body);
-    const displayBody = notRun ? ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE : body;
+    const userFailure = reply.failed === true ? actorUserFailure(body) : null;
+    const outcomeUnknown = reply.outcomeKnown === false;
+    const notRun = !outcomeUnknown && (reply.performed === false || userFailure !== null);
+    const displayBody = outcomeUnknown
+      ? actorOutcomeUnknownFailure(body)
+      : (userFailure ?? body);
     // A `via:'script'` reply came from a fire-and-forget delegation inside an
     // earlier script run — it can land minutes later, so name its origin or the
     // bubble is unexplainable to a user who never saw the fan-out happen.
@@ -335,10 +470,10 @@ const ActorReplyMessage = {
       m('.role', [
         label,
         via === 'script' ? ' · delegated by an earlier script' : '',
-        reply.failed ? ` · ${notRun ? 'Not run' : 'failed'}` : '',
+        reply.failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
       ]),
       m('.bubble', renderText(stripUntrustedFences(displayBody))),
-    ]);
+      ]);
   },
 };
 
@@ -352,7 +487,7 @@ const AssistantMessage = {
    *   scriptOps?: Record<string, any[]>,
    *   loadActor?: (sessionId: string) => void,
    *   peerName?: string, depth?: number,
-   *   send?: (msg: Record<string, any>) => Promise<any>, sessionId?: string|null,
+   *   send?: (msg: Record<string, any>) => Promise<any>, sessionId?: string,
    *   allowFeedback?: boolean,
    * } }} vnode
    */
@@ -444,9 +579,8 @@ const AssistantMessage = {
 };
 
 // Optional binary task feedback. The route re-derives the selected assistant
-// turn and cohort, so the DOM cannot submit a cohort, counter, tool id, or
-// arbitrary text. A button becomes selected only after the host confirms the
-// verdict was recorded (or already held); disabled/no-cohort clicks stay honest.
+// turn and cohort, so the DOM cannot submit a cohort, counter, or arbitrary
+// text. Selection changes only after the host confirms the write.
 const TaskFeedback = {
   /** @param {{ state: any }} vnode */
   oninit(vnode) {
@@ -740,13 +874,15 @@ const ToolCall = {
 const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, loadActor, peerName, depth, ui }) => {
   const meta = toolResult?.meta ?? null;
   const status = toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending');
+  const resultText = toolResult ? formatResultContent(toolResult) : '';
+  const outcomeUnknown = status === 'failed' && /outcome is unknown|outcome unknown/i.test(resultText);
   const childId = resolveChildSessionId(toolUse, toolResult, spawned);
   const childSession = childId ? spawned?.sessions?.[childId] : null;
   const task = childSession?.task ?? toolUse.input?.task ?? '';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
   const terminalLabel = status === 'pending' ? 'running…'
     : status === 'cancelled' ? 'cancelled'
-    : status === 'failed' ? 'failed'
+    : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : 'failed')
     : 'done';
 
   const onToggle = () => {
@@ -762,7 +898,7 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
     }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
-        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+        { title: status === 'failed' ? (outcomeUnknown ? 'outcome unknown' : 'failed') : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'actor_create'),
       m('span.tool-args', `"${truncate(String(task), 48)}"`),
       m('.spacer'),
@@ -771,7 +907,9 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
     ]),
     ui.expanded ? m('.actor-body', [
       status === 'failed' && toolResult
-        ? m('p.error-line', formatResultContent(toolResult))
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(resultText)
+          : formatResultContent(toolResult))
         : null,
       tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
@@ -780,7 +918,9 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
               renderTranscript({ messages: childSession.messages, spawned, actors, loadActor, peerName, depth: depth + 1 }))
           : childId
             ? m('p.muted', status === 'pending' ? 'actor running…' : status === 'cancelled' ? 'actor cancelled' : 'loading transcript…')
-            : m('p.muted', 'no child transcript recorded'),
+            : m('p.muted', outcomeUnknown
+              ? 'No reliable actor transcript is available.'
+              : 'no child transcript recorded'),
     ]) : null,
   ]);
 };
@@ -815,9 +955,13 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     : card ? 'ok'
     : (toolResult ? (toolResult.is_error ? 'failed' : 'ok') : (interrupted ? 'cancelled' : 'pending'));
   const resultText = toolResult ? formatResultContent(toolResult) : '';
-  const notRun = status === 'failed'
-    && /not run|actor-provider-boundary-blocked|actor isolation|isolated worker.*(did not|unavailable)/i
-      .test(`${card?.error ?? ''} ${resultText}`);
+  const failureText = `${card?.error ?? ''} ${resultText}`;
+  const outcomeUnknown = card?.outcomeKnown === false
+    || /outcome is unknown|outcome unknown/i.test(failureText);
+  const userFailure = actorUserFailure(failureText);
+  const notRun = status === 'failed' && !outcomeUnknown
+    && (userFailure !== null
+      || /not run|no work was started|actor isolation|isolated worker.*(did not|unavailable)/i.test(failureText));
   const handedOff = !card && toolUse.input?.await === true
     && /is still working; its reply will arrive as a fenced note on a later turn/i.test(resultText);
   const acceptedAsync = !card && !!toolResult && toolResult.is_error !== true
@@ -826,7 +970,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     && toolUse.input?.await === true && !handedOff;
   const terminalLabel = status === 'pending' ? 'working…'
     : status === 'cancelled' ? 'cancelled'
-    : status === 'failed' ? (notRun ? 'Not run' : 'failed')
+    : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed')
     : handedOff ? 'handed off'
     : acceptedAsync ? 'accepted'
     : 'done';
@@ -838,7 +982,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     }, [
       m('span.disclosure', ui.expanded ? '▼' : '▶'),
       m(`span.tool-status-dot.dot-${status}`,
-        { title: status === 'failed' ? 'failed' : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+        { title: status === 'failed' ? (outcomeUnknown ? 'outcome unknown' : 'failed') : status === 'pending' ? 'working' : status === 'cancelled' ? 'cancelled' : 'ok' }),
       m('span.tool-name', 'message_actor'),
       m('span.tool-args', `${cardLabel}: "${truncate(task, 40)}"`),
       m('.spacer'),
@@ -848,10 +992,12 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
     ]),
     ui.expanded ? m('.actor-body', [
       card?.error
-        ? m('p.error-line', notRun ? ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE : String(card.error))
+        ? m('p.error-line', outcomeUnknown
+          ? actorOutcomeUnknownFailure(String(card.error))
+          : (userFailure ?? String(card.error)))
         : null,
       !card?.error && toolResult?.is_error
-        ? m('p.error-line', notRun ? ACTOR_CREDENTIAL_BOUNDARY_USER_FAILURE : resultText)
+        ? m('p.error-line', userFailure ?? resultText)
         : null,
       card?.error || toolResult?.is_error
         ? null
@@ -862,9 +1008,11 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
               renderTranscript({ messages: card.messages, actors, spawned, loadActor, peerName, depth: depth + 1 }))
           : completedAwait
             ? m('pre.tool-result-content', resultText)
-            : handedOff
-              ? m('p.muted', 'the actor is still working; check later messages for the reply')
+          : handedOff
+            ? m('p.muted', 'the actor is still working; check later messages for the reply')
           : m('p.muted', card?.streaming ? 'actor working…'
+              // Historical success proves acceptance, not delivery. A reload may
+              // have lost the live card while the reply is still pending.
               : (!card && toolResult && !toolResult.is_error) ? 'request accepted; check later messages for the reply'
               : 'no actor activity yet — its reply will arrive on a later turn'),
     ]) : null,

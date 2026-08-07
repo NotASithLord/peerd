@@ -8,11 +8,14 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 type Reenter = {
   userText: string; sessionId: string; synthetic: boolean;
-  actorReply?: { kind: string; instanceId: string; name?: string; failed?: boolean };
+  turnLease?: { controller: AbortController; release: () => void };
+  actorReply?: { kind: string; instanceId: string; name?: string; failed?: boolean; outcomeKnown?: boolean; performed?: boolean; actorDeliveryId?: string; parentToolUseId?: string };
 };
+type RecoveryNotice = Reenter & { recoveryId: string };
 
 const harness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) => {
   const reentries: Reenter[] = [];
+  const recoveryNotices: RecoveryNotice[] = [];
   const turnsRun: Array<{ actorSessionId: string; message: string }> = [];
   const turnCalls: any[] = [];
   const deps = {
@@ -20,12 +23,13 @@ const harness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) =
       to === 'app-1'
         ? { instanceId: 'app-1', kind: 'app', actorSessionId: 'res-1', name: 'todo', tabId: 7 }
         : null,
-    runActorTurn: async (o: { actorSessionId: string; message: string }) => {
+    runActorTurn: async (o: any) => {
       turnCalls.push(o);
       turnsRun.push({ actorSessionId: o.actorSessionId, message: o.message });
       return { result: 'built the thing' };
     },
     reenter: async (r: Reenter) => { reentries.push(r); },
+    recordRecovery: async (r: RecoveryNotice) => { recoveryNotices.push(r); return true; },
     // Run queued work immediately (no real slot in the test).
     turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => fn() },
     getActiveSessionId: async () => 'chat-1',
@@ -37,7 +41,7 @@ const harness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) =
     log: () => {},
     ...over,
   } as Parameters<typeof makeActorMessaging>[0];
-  return { ...makeActorMessaging(deps), reentries, turnsRun, turnCalls };
+  return { ...makeActorMessaging(deps), reentries, recoveryNotices, turnsRun, turnCalls };
 };
 
 describe('message_actor — the sender gate (fail closed)', () => {
@@ -71,6 +75,84 @@ describe('message_actor — the sender gate (fail closed)', () => {
     const r = await messageActor({ to: 'app-1', message: 'hi', senderSessionId: 'chat-1' });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('vault');
+  });
+});
+
+describe('message_actor: actor isolation wall', () => {
+  const unavailable = {
+    status: 'unsupported' as const,
+    host: null,
+    reason: 'no dedicated worker host',
+    retryable: false,
+  };
+
+  test('refuses before target resolution, persistence, or actor work', async () => {
+    let resolved = 0;
+    let persisted = 0;
+    const { messageActor, turnsRun } = harness({
+      getActorIsolation: () => unavailable,
+      resolveActor: async () => { resolved++; return null; },
+      mailbox: {
+        append: async () => { persisted++; },
+        remove: async () => {},
+        load: async () => [],
+      },
+    });
+    const result: any = await messageActor({ to: 'app-1', message: 'click', senderSessionId: 'chat-1' });
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_isolation_unavailable', performed: false,
+      targetRead: false, targetChanged: false, retryable: false,
+    });
+    expect(resolved).toBe(0);
+    expect(persisted).toBe(0);
+    expect(turnsRun).toEqual([]);
+  });
+
+  test('does not disclose isolation state to a sender the lineage gate refuses', async () => {
+    const { messageActor } = harness({ getActorIsolation: () => unavailable });
+    const result: any = await messageActor({ to: 'app-1', message: 'click', senderSessionId: 'other' });
+    expect(result.code).toBeUndefined();
+    expect(result.error).toContain('active foreground chat');
+  });
+
+  test('treats an old state-less mailbox entry as unknown without resolving its target', async () => {
+    const removed: string[] = [];
+    let resolved = 0;
+    const { redrain, reentries, recoveryNotices, turnsRun } = harness({
+      getActorIsolation: () => unavailable,
+      resolveActor: async () => { resolved++; return null; },
+      mailbox: {
+        append: async () => {},
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => [{ id: 'old-1', senderSessionId: 'chat-1', to: 'app-1', message: 'click', createdAt: 1 }],
+      },
+    });
+    expect(await redrain()).toEqual({ redrained: 0, retained: 0 });
+    await tick();
+    expect(removed).toEqual(['old-1']);
+    expect(resolved).toBe(0);
+    expect(turnsRun).toEqual([]);
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices[0].actorReply?.failed).toBe(true);
+    expect(recoveryNotices[0].actorReply?.outcomeKnown).toBe(false);
+    expect(recoveryNotices[0].userText).toContain('cannot confirm whether the previous request ran');
+  });
+
+  test('a mailbox write failure reports the prior target resolution but never queues the actor', async () => {
+    const { messageActor, turnsRun } = harness({
+      mailbox: {
+        append: async () => { throw new Error('storage down'); },
+        remove: async () => {},
+        load: async () => [],
+      },
+    });
+    const result: any = await messageActor({ to: 'app-1', message: 'click', senderSessionId: 'chat-1' });
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_mailbox_unavailable', performed: false,
+      targetRead: true, targetChanged: true,
+    });
+    expect(result.error).toContain('target resolution may already have read or created');
+    expect(turnsRun).toEqual([]);
   });
 });
 
@@ -116,7 +198,46 @@ describe('message_actor — happy path + correlation', () => {
     expect(reentries[0].userText).toContain('<u origin="app-1">built the thing</u>');
     // The wake carries WHO replied so the chat can surface it as its own
     // attributed bubble (trickle-up) instead of hiding it as plumbing.
-    expect(reentries[0].actorReply).toEqual({ kind: 'app', instanceId: 'app-1', name: 'todo', failed: false });
+    expect(reentries[0].actorReply).toMatchObject({ kind: 'app', instanceId: 'app-1', name: 'todo', failed: false });
+    expect(typeof reentries[0].actorReply?.actorDeliveryId).toBe('string');
+  });
+
+  test('reserves the parent slot before reply reentry setup so sibling replies cannot steer-abort', async () => {
+    const slots = makeTurnSlots();
+    const parentStarts: string[] = [];
+    const parentReleases: Array<() => void> = [];
+    const { messageActor, hasInFlightFor } = harness({
+      caps: { rateCap: 100, outstanding: 100 },
+      turnSlots: slots,
+      resolveActor: async (to: string) => to === 'app-1' || to === 'app-2'
+        ? { instanceId: to, kind: 'app', actorSessionId: `actor-${to}` }
+        : null,
+      runActorTurn: async ({ message }: any) => ({ result: `${message} done` }),
+      reenter: (entry: Reenter) => {
+        expect(entry.turnLease?.controller.signal.aborted).toBe(false);
+        parentStarts.push(entry.userText.includes('A done') ? 'A' : 'B');
+        return new Promise<void>((resolve) => {
+          parentReleases.push(() => {
+            entry.turnLease?.release();
+            resolve();
+          });
+        });
+      },
+    });
+    await messageActor({ to: 'app-1', message: 'A', senderSessionId: 'chat-1' });
+    await messageActor({ to: 'app-2', message: 'B', senderSessionId: 'chat-1' });
+    await tick();
+    expect(parentStarts).toEqual(['A']);
+    expect(slots.isBusy('chat-1')).toBe(true);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    parentReleases[0]();
+    await tick();
+    expect(parentStarts).toEqual(['A', 'B']);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    parentReleases[1]();
+    await tick();
+    expect(slots.isBusy('chat-1')).toBe(false);
+    expect(hasInFlightFor('chat-1')).toBe(false);
   });
 
   test('a FAILED reply wake carries actorReply.failed so the bubble can show the failure', async () => {
@@ -126,7 +247,58 @@ describe('message_actor — happy path + correlation', () => {
     await messageActor({ to: 'app-1', message: 'x', senderSessionId: 'chat-1' });
     await tick();
     expect(reentries[0].actorReply?.failed).toBe(true);
+    expect(reentries[0].actorReply?.outcomeKnown).toBe(false);
     expect(reentries[0].actorReply?.kind).toBe('app');
+  });
+
+  test('a post-start failure puts unknown-outcome guidance in trusted framing', async () => {
+    const { messageActor, reentries } = harness({
+      runActorTurn: async () => ({
+        result: 'the target may have changed before the worker stopped',
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: false,
+      }),
+    });
+    await messageActor({ to: 'app-1', message: 'change the target', senderSessionId: 'chat-1' });
+    await tick();
+    expect(reentries[0].actorReply).toMatchObject({ failed: true, outcomeKnown: false });
+    expect(reentries[0].userText).toContain('Its outcome is unknown. Do not retry automatically');
+    expect(reentries[0].userText.indexOf('Do not retry automatically'))
+      .toBeLessThan(reentries[0].userText.indexOf('<u origin="app-1">'));
+  });
+
+  test('an awaited post-start failure preserves non-retryable outcome metadata', async () => {
+    const { messageActor } = harness({
+      runActorTurn: async () => ({
+        result: 'a side effect may already have landed',
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: false,
+      }),
+    });
+    const result: any = await messageActor({
+      to: 'app-1', message: 'change the target', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    expect(result).toMatchObject({ ok: false, performed: true, outcomeKnown: false, retryable: false });
+    expect(result.error).toContain('Do not retry automatically');
+  });
+
+  test('a graceful pre-tool failure stays Not run and does not gain replay warnings', async () => {
+    const { messageActor, reentries } = harness({
+      runActorTurn: async () => ({
+        result: 'actor-provider-boundary-blocked: The actor model request was not run.',
+        stopped: true,
+        executionFailed: true,
+        outcomeKnown: true,
+      }),
+    });
+    await messageActor({ to: 'app-1', message: 'change the target', senderSessionId: 'chat-1' });
+    await tick();
+    expect(reentries[0].actorReply).toMatchObject({ failed: true });
+    expect(reentries[0].actorReply?.outcomeKnown).toBeUndefined();
+    expect(reentries[0].userText).toContain('model request was not run');
+    expect(reentries[0].userText).not.toContain('Its outcome is unknown');
   });
 
   test('an async custody refusal reaches the later turn with its stable recovery guidance', async () => {
@@ -197,6 +369,27 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     // …and it did NOT re-enter the sender on a later turn (that's the async path).
     await tick();
     expect(reentries.length).toBe(0);
+  });
+
+  test('an awaited reply keeps its mailbox row until the parent result is durably acknowledged', async () => {
+    const appended: any[] = [];
+    const removed: string[] = [];
+    const { messageActor } = harness({
+      mailbox: {
+        append: async (entry: any) => { appended.push(entry); },
+        markStarted: async () => {},
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => [],
+      },
+    });
+
+    const result: any = await messageActor({
+      to: 'app-1', message: 'get the price', senderSessionId: 'chat-1', awaitReply: true,
+    });
+
+    expect(result.actorDeliveryId).toBe(appended[0].id);
+    expect(result.actorDeliveryId.length).toBeLessThanOrEqual(512);
+    expect(removed).toEqual([]);
   });
 
   test('await returns the custody refusal in-band without substituting Stop copy', async () => {
@@ -416,7 +609,8 @@ describe('message_actor — error path still wakes the sender', () => {
     expect(reentries.length).toBe(1);
     expect(reentries[0].sessionId).toBe('chat-1');
     expect(reentries[0].synthetic).toBe(true);
-    expect(reentries[0].userText).toContain('could not complete');
+    expect(reentries[0].userText).toContain('outcome is unknown');
+    expect(reentries[0].userText).toContain('Do not retry automatically');
     expect(reentries[0].userText).toContain('boom');
   });
 });
@@ -424,48 +618,142 @@ describe('message_actor — error path still wakes the sender', () => {
 describe('message_actor — durable mailbox (persist + redrain)', () => {
   const makeMailbox = () => {
     const appended: any[] = [];
+    const started: string[] = [];
     const removed: string[] = [];
     let loadReturns: any[] = [];
     return {
       mailbox: {
         append: async (e: any) => { appended.push(e); },
+        markStarted: async (id: string) => { started.push(id); },
         remove: async (id: string) => { removed.push(id); },
         load: async () => loadReturns,
       },
-      appended, removed,
+      appended, started, removed,
       setLoad: (arr: any[]) => { loadReturns = arr; },
     };
   };
 
-  test('an ENGINE message persists on accept and clears on settle', async () => {
+  test('an ENGINE message persists until the synthetic reply commits', async () => {
     const mb = makeMailbox();
     const { messageActor, reentries } = harness({ mailbox: mb.mailbox });
     await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
     expect(mb.appended.length).toBe(1);
-    expect(mb.appended[0]).toMatchObject({ senderSessionId: 'chat-1', to: 'app-1', message: 'build' });
+    expect(mb.appended[0]).toMatchObject({
+      senderSessionId: 'chat-1', to: 'app-1', message: 'build', state: 'queued', kind: 'app',
+    });
     expect(mb.appended[0].id).toBe('correlation-1');
     expect(mb.appended[0].id).not.toContain('app-1');
     expect(mb.appended[0].id).not.toContain('1000');
+    expect(mb.started).toEqual([mb.appended[0].id]);
     await tick();
-    // The reply delivered → the durable entry is cleared (same id).
+    // Reentry fulfillment is not the commit acknowledgement. The id rides the
+    // synthetic user message and the session post-commit hook clears it later.
     expect(reentries.length).toBe(1);
-    expect(mb.removed).toEqual([mb.appended[0].id]);
+    expect(reentries[0].actorReply?.actorDeliveryId).toBe(mb.appended[0].id);
+    expect(mb.removed).toEqual([]);
   });
 
-  test('a live delivery persists and runs with one correlation and parent tool identity', async () => {
+  test('a live delivery runs with the durable correlation and parent tool identity', async () => {
     const mb = makeMailbox();
-    const { messageActor, turnCalls } = harness({ mailbox: mb.mailbox });
+    const { messageActor, turnCalls, reentries } = harness({ mailbox: mb.mailbox });
     await messageActor({
       to: 'app-1', message: 'build', senderSessionId: 'chat-1', toolUseId: 'tool-parent',
     });
-    expect(mb.appended).toHaveLength(1);
-    expect(mb.appended[0]).toMatchObject({ parentToolUseId: 'tool-parent' });
     await tick();
     expect(turnCalls).toHaveLength(1);
     expect(turnCalls[0]).toMatchObject({
       correlationId: mb.appended[0].id,
       parentToolUseId: 'tool-parent',
     });
+    expect(mb.appended[0].parentToolUseId).toBe('tool-parent');
+    expect(reentries[0].actorReply?.parentToolUseId).toBe('tool-parent');
+  });
+
+  test('a live async reply keeps its mailbox row while the parent slot is busy', async () => {
+    const mb = makeMailbox();
+    const parentCallbacks: Array<() => void> = [];
+    const { messageActor, reentries, hasInFlightFor } = harness({
+      mailbox: mb.mailbox,
+      turnSlots: {
+        runWhenIdle: (sessionId: string, fn: () => void) => {
+          if (sessionId === 'res-1') fn();
+          else parentCallbacks.push(fn);
+        },
+      },
+    });
+
+    await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    await tick();
+
+    expect(parentCallbacks).toHaveLength(1);
+    expect(reentries).toEqual([]);
+    expect(mb.removed).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+
+    parentCallbacks[0]();
+    await tick();
+    expect(reentries).toHaveLength(1);
+    expect(reentries[0].actorReply?.actorDeliveryId).toBe(mb.appended[0].id);
+    expect(mb.removed).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
+  });
+
+  test('a failed parent reentry persists a passive receipt and closes the mailbox row', async () => {
+    const mb = makeMailbox();
+    const { messageActor, reentries, recoveryNotices, hasInFlightFor } = harness({
+      mailbox: mb.mailbox,
+      reenter: async () => { throw new Error('parent session write failed'); },
+    });
+
+    await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    await tick();
+
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
+    expect(recoveryNotices[0].recoveryId).toBe(mb.appended[0].id);
+    expect(recoveryNotices[0].actorReply?.actorDeliveryId).toBe(mb.appended[0].id);
+    expect(mb.removed).toEqual([mb.appended[0].id]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
+  });
+
+  test('a failed parent reentry retains custody and terminal blocking when passive persistence fails', async () => {
+    const mb = makeMailbox();
+    const { messageActor, reentries, recoveryNotices, hasInFlightFor } = harness({
+      mailbox: mb.mailbox,
+      reenter: async () => { throw new Error('parent session write failed'); },
+      recordRecovery: async () => false,
+    });
+
+    await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    await tick();
+
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toEqual([]);
+    expect(mb.removed).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(true);
+  });
+
+  test('a post-Stop queued reply stays terminally blocked when mailbox cancellation cannot persist', async () => {
+    const mb = makeMailbox();
+    const slots = makeTurnSlots();
+    const parentTurn = slots.claim('chat-1');
+    const { messageActor, stopActorsFor, hasInFlightFor, reentries } = harness({
+      turnSlots: slots,
+      mailbox: {
+        ...mb.mailbox,
+        remove: async () => { throw new Error('mailbox delete failed'); },
+      },
+    });
+
+    await messageActor({ to: 'app-1', message: 'build', senderSessionId: 'chat-1' });
+    await tick();
+    expect(hasInFlightFor('chat-1')).toBe(true);
+    stopActorsFor('chat-1');
+    parentTurn.release();
+    await tick();
+
+    expect(reentries).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(true);
   });
 
   test('a WEB message IS persisted now (async like every kind)', async () => {
@@ -478,38 +766,200 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     await messageActor({ to: '42', message: 'click', senderSessionId: 'chat-1' });
     await tick();
     expect(mb.appended.length).toBe(1);
-    expect(mb.removed).toEqual([mb.appended[0].id]);   // cleared on settle, same as engine
+    expect(mb.removed).toEqual([]);   // post-commit hook owns acknowledgement
   });
 
-  test('redrain re-queues a persisted engine message → actor runs, sender woken, entry cleared', async () => {
+  test('recovery never executes queued work and reports it as Not run', async () => {
     const mb = makeMailbox();
     mb.setLoad([{
       id: 'c1', senderSessionId: 'chat-1', to: 'app-1', message: 'resume me',
-      createdAt: 1, parentToolUseId: 'tool-parent',
+      createdAt: 1, state: 'queued', kind: 'app', parentToolUseId: 'tool-original',
     }]);
-    const { redrain, reentries, turnsRun, turnCalls } = harness({ mailbox: mb.mailbox });
-    const r = await redrain();
-    expect(r.redrained).toBe(1);
-    await tick();
-    expect(turnsRun).toEqual([{ actorSessionId: 'res-1', message: 'resume me' }]);
-    expect(turnCalls[0]).toMatchObject({
-      correlationId: 'c1',
-      parentToolUseId: 'tool-parent',
-    });
-    expect(reentries.length).toBe(1);
-    expect(reentries[0].sessionId).toBe('chat-1');
-    expect(mb.removed).toEqual(['c1']);
-  });
-
-  test('redrain abandons an entry whose instance is gone — wakes the sender with a failure, clears it', async () => {
-    const mb = makeMailbox();
-    mb.setLoad([{ id: 'c2', senderSessionId: 'chat-1', to: 'gone-9', message: 'x', createdAt: 1 }]);
-    const { redrain, reentries } = harness({ mailbox: mb.mailbox });
+    const { redrain, reentries, recoveryNotices, turnsRun } = harness({ mailbox: mb.mailbox });
     const r = await redrain();
     expect(r.redrained).toBe(0);
     await tick();
-    expect(reentries.length).toBe(1);
-    expect(reentries[0].userText).toContain('could not be reached');
+    expect(turnsRun).toEqual([]);
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
+    expect(recoveryNotices[0].sessionId).toBe('chat-1');
+    expect(recoveryNotices[0].actorReply?.outcomeKnown).toBe(true);
+    expect(recoveryNotices[0].actorReply?.performed).toBe(false);
+    expect(recoveryNotices[0].actorReply?.parentToolUseId).toBe('tool-original');
+    expect(recoveryNotices[0].userText.split('\n\n')[0]).toContain('did not run the request');
+    expect(recoveryNotices[0].userText).toContain('It was not run');
+    expect(mb.removed).toEqual(['c1']);
+  });
+
+  test('redrain never replays a started message and reports its outcome as unknown', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{
+      id: 'started-1', senderSessionId: 'chat-1', to: 'app-1', message: 'submit it',
+      createdAt: 1, state: 'started', kind: 'app', name: 'orders',
+    }]);
+    const { redrain, reentries, recoveryNotices, turnsRun } = harness({ mailbox: mb.mailbox });
+
+    expect(await redrain()).toEqual({ redrained: 0, retained: 0 });
+    await tick();
+
+    expect(turnsRun).toEqual([]);
+    expect(mb.started).toEqual([]);
+    expect(mb.removed).toEqual(['started-1']);
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
+    expect(recoveryNotices[0].actorReply).toMatchObject({
+      kind: 'app', instanceId: 'app-1', name: 'orders', failed: true, outcomeKnown: false,
+    });
+    expect(recoveryNotices[0].userText).toContain('Its outcome is unknown. Do not retry automatically');
+    expect(recoveryNotices[0].userText).toContain('Check whether the requested action completed');
+  });
+
+  test('recovery removes an already committed delivery without adding a duplicate warning', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{
+      id: 'committed-1', senderSessionId: 'chat-1', to: 'app-1', message: 'submit it',
+      createdAt: 1, state: 'started', kind: 'app',
+    }]);
+    const checks: any[] = [];
+    const { redrain, recoveryNotices, turnsRun } = harness({
+      mailbox: mb.mailbox,
+      deliveryCommitted: async (query) => { checks.push(query); return true; },
+    });
+
+    expect(await redrain()).toEqual({ redrained: 0, retained: 0 });
+    expect(checks).toEqual([{ sessionId: 'chat-1', deliveryId: 'committed-1' }]);
+    expect(turnsRun).toEqual([]);
+    expect(recoveryNotices).toEqual([]);
+    expect(mb.removed).toEqual(['committed-1']);
+  });
+
+  test('recovery retains a row when committed-delivery inspection is unavailable', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{
+      id: 'commit-check-failed', senderSessionId: 'chat-1', to: 'app-1', message: 'submit it',
+      createdAt: 1, state: 'started', kind: 'app',
+    }]);
+    const { redrain, recoveryNotices } = harness({
+      mailbox: mb.mailbox,
+      deliveryCommitted: async () => { throw new Error('session storage unavailable'); },
+    });
+
+    expect(await redrain()).toEqual({ redrained: 0, retained: 1 });
+    expect(recoveryNotices).toEqual([]);
+    expect(mb.removed).toEqual([]);
+  });
+
+  test('a start-state write failure returns Not run and never enters the actor slot', async () => {
+    const mb = makeMailbox();
+    mb.mailbox.markStarted = async () => { throw new Error('storage unavailable'); };
+    const { messageActor, turnsRun } = harness({ mailbox: mb.mailbox });
+
+    const result: any = await messageActor({
+      to: 'app-1', message: 'submit it', senderSessionId: 'chat-1', awaitReply: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_mailbox_unavailable', performed: false, retryable: true,
+    });
+    expect(result.error).toContain('was not run');
+    expect(turnsRun).toEqual([]);
+    expect(mb.removed).toEqual([mb.appended[0].id]);
+  });
+
+  test('a failed start write and failed cleanup cannot replay after restart', async () => {
+    const appended: any[] = [];
+    const first = harness({
+      mailbox: {
+        append: async (entry: any) => { appended.push(entry); },
+        markStarted: async () => { throw new Error('storage unavailable'); },
+        remove: async () => { throw new Error('storage unavailable'); },
+        load: async () => [],
+      },
+    });
+    const result: any = await first.messageActor({
+      to: 'app-1', message: 'submit it', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    expect(result).toMatchObject({ ok: false, performed: false, retryable: true });
+    expect(first.turnsRun).toEqual([]);
+
+    const removed: string[] = [];
+    const restarted = harness({
+      mailbox: {
+        append: async () => {},
+        markStarted: async () => {},
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => appended,
+      },
+    });
+    await restarted.redrain();
+    expect(restarted.turnsRun).toEqual([]);
+    expect(restarted.reentries).toEqual([]);
+    expect(restarted.recoveryNotices[0].userText).toContain('It was not run');
+    expect(removed).toEqual([appended[0].id]);
+  });
+
+  test('recovery retains a started record until its passive notice is persisted', async () => {
+    let release = () => {};
+    const removed: string[] = [];
+    const recoveryNotices: RecoveryNotice[] = [];
+    const { redrain, reentries } = harness({
+      recordRecovery: (notice: RecoveryNotice) => new Promise<boolean>((resolve) => {
+        recoveryNotices.push(notice);
+        release = () => resolve(true);
+      }),
+      mailbox: {
+        append: async () => {}, markStarted: async () => {},
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => [{
+          id: 'started-deferred', senderSessionId: 'chat-1', to: 'app-1', message: 'submit it',
+          createdAt: 1, state: 'started', kind: 'app',
+        }],
+      },
+    });
+
+    const pending = redrain();
+    await tick();
+    expect(recoveryNotices).toHaveLength(1);
+    expect(reentries).toEqual([]);
+    expect(removed).toEqual([]);
+    release();
+    await pending;
+    expect(reentries).toEqual([]);
+    expect(removed).toEqual(['started-deferred']);
+  });
+
+  test('recovery retains a started record when passive persistence fails', async () => {
+    const removed: string[] = [];
+    const { redrain, reentries, turnsRun } = harness({
+      recordRecovery: async () => { throw new Error('session write failed'); },
+      mailbox: {
+        append: async () => {}, markStarted: async () => {},
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => [{
+          id: 'started-reject', senderSessionId: 'chat-1', to: 'app-1', message: 'submit it',
+          createdAt: 1, state: 'started', kind: 'app',
+        }],
+      },
+    });
+
+    const recovery = await redrain();
+    expect(recovery.retained).toBe(1);
+    expect(turnsRun).toEqual([]);
+    expect(reentries).toEqual([]);
+    expect(removed).toEqual([]);
+  });
+
+  test('legacy recovery does not resolve a missing instance and reports unknown outcome', async () => {
+    const mb = makeMailbox();
+    mb.setLoad([{ id: 'c2', senderSessionId: 'chat-1', to: 'gone-9', message: 'x', createdAt: 1 }]);
+    const { redrain, reentries, recoveryNotices } = harness({ mailbox: mb.mailbox });
+    const r = await redrain();
+    expect(r.redrained).toBe(0);
+    await tick();
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
+    expect(recoveryNotices[0].actorReply?.outcomeKnown).toBe(false);
+    expect(recoveryNotices[0].userText).toContain('cannot confirm whether the previous request ran');
     expect(mb.removed).toEqual(['c2']);
   });
 
@@ -648,7 +1098,8 @@ describe('message_actor — web actor (now ASYNC, same path as engine)', () => {
     expect(r.ok).toBe(true);   // dispatched
     await tick();
     expect(reentries.length).toBe(1);
-    expect(reentries[0].userText).toContain('could not complete');
+    expect(reentries[0].userText).toContain('outcome is unknown');
+    expect(reentries[0].userText).toContain('Do not retry automatically');
     expect(reentries[0].userText).toContain('tab closed');
   });
 

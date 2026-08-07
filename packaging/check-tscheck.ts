@@ -93,6 +93,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 545/547 → 548: the learned-origins un-learn surface (#262) and the Activity
 // origin-lock rows (#282) land together — both ledgers are kept and the floor
 // is their union, the same shape as the 505/506 → 510 merge above.
+// 648 → 653: Firefox actor isolation adds the direct background host, worker
+// protocol, browser-neutral capability, shared capability banner, and browser
+// UX test.
 // 548 → 549: the in-page activity indicator's two checked cores (#259) —
 // actor/activity-label.js and background/page-activity.js. The injected
 // overlay body itself is ES5 and exempt, so it does not count.
@@ -144,7 +147,15 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 635 → 636: the recoverable publish transaction is shared by dweb hosts.
 // 636 → 639: dweb reseed, content ownership, and share rollback are checked.
 // 650 → 651: Firefox actor credential-custody browser coverage is checked.
-const COVERED_FLOOR = 659;
+// 651 → 657: the direct host, worker protocol, isolation policy, banner,
+// rendered fixture, and UI test are checked.
+// 657 → 658: durable actor isolation failure state is checked.
+// 659 → 660: the remote module import policy is checked.
+// 660 → 665: Contributor Metrics adds the closed accumulator/store, trusted
+// background route, Options surface, and rendered side-panel coverage.
+// 666 → 668: the dormant preview uploader adds its exact-origin client and
+// sealed lifecycle state machine; both are checked before any live wiring.
+const COVERED_FLOOR = 668;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

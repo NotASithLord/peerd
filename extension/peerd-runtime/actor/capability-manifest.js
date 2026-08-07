@@ -220,7 +220,7 @@ export const resolveWebActorSurface = ({ requested, allowedTools = null, headles
 
 /**
  * The contribution-safe form of the surface decision. It reports only the
- * reviewed product enums — never a missing tool name or host error — so the
+ * reviewed product enums, never a missing tool name or host error, so the
  * actor settlement shell can count fallbacks without accepting raw strings.
  * @param {{ requested?: unknown, allowedTools?: Set<string>|null, headlessAvailable?: boolean }} input
  */

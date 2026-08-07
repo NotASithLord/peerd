@@ -27,7 +27,7 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
    *   workspaceSessionId mounts the durable per-session workspace as the job's
    *   OPFS root (trusted job param — the tool derives it from ctx.session, the
    *   worker can never name its own root).
-   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, usedEgress?: boolean, usedActors?: boolean, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+   * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, usedEgress?: boolean, usedActors?: boolean, actorDeliveryIds?: string[], usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
    */
   execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, toolbox, workspaceSessionId, signal } = {}) => {
     const wallMs = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs)

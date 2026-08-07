@@ -178,6 +178,12 @@ export const makeActorsRoutes = (deps) => {
             // let page/instance text become an authoritative chained goal.
             awaitReply: true, awaitSignal: askController.signal,
           });
+          // Custody is independent of the code-visible outcome. Once an awaited
+          // actor reply exists, its mailbox row must survive until the OUTER
+          // script tool result commits. Keep the id host-only while threading it
+          // through both relay heaps; the worker receives only resp.value/error.
+          const actorDeliveryId = typeof result?.actorDeliveryId === 'string'
+            ? result.actorDeliveryId : undefined;
           const ms = Date.now() - startedAt;
           const outcome = askOutcome(result, {
             timedOut, aborted: !timedOut && askController.signal.aborted,
@@ -191,20 +197,24 @@ export const makeActorsRoutes = (deps) => {
             });
             mirror({
               ok: false, ms, settled: true, error: outcome.error,
+              ...(actorDeliveryId ? { actorDeliveryId } : {}),
               ...(cancelled ? { cancelled: true } : {}),
             });
             return {
               ok: false, error: outcome.error,
+              ...(actorDeliveryId ? { actorDeliveryId } : {}),
               ...(cancelled ? { cancelled: true } : {}),
             };
           }
           pushOp('replied', { ms, ...(outcome.failed ? { failed: true } : {}) });
           mirror({
             ok: true, ms, settled: true,
+            ...(actorDeliveryId ? { actorDeliveryId } : {}),
             ...(outcome.failed ? { actorFailed: true } : {}),
           });
           return {
             ok: true,
+            ...(actorDeliveryId ? { actorDeliveryId } : {}),
             value: shapeActorsResult(msg.method === 'ask' ? 'ask' : 'call', {
               ok: true, reply: outcome.reply, failed: outcome.failed,
             }),

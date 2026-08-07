@@ -1,20 +1,16 @@
 // @ts-check
-// Browser-runtime proof for the bound-actor fallback custody shape. This runs
-// the production turn driver, session store, and agent loop in a page realm,
-// with injected shell dependencies and a fake provider. Live service-worker
-// wiring still needs a packaged Firefox actor smoke test.
+// Browser-runtime proof that a bound actor cannot enter the privileged turn
+// driver. Live service-worker wiring is covered by the packaged Firefox smoke.
 
 import { describe, it, expect } from '../../framework.js';
-import {
-  ACTOR_CREDENTIAL_BOUNDARY_FAILURE, createSessionStore, makeTurnDriver, runUserTurn,
-} from '/peerd-runtime/index.js';
+import { createSessionStore, makeTurnDriver } from '/peerd-runtime/index.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
 /** @param {any} value */
 const identity = (value) => value;
 
-describe('bound actor fallback credential custody', () => {
-  it('keeps credentials out of the real loop and restores them at the model boundary', async () => {
+describe('bound actor background-heap refusal', () => {
+  it('refuses before the real loop or provider can run', async () => {
     const sessions = createSessionStore({
       idb: makeMockIdb(),
       now: () => 1_000,
@@ -31,8 +27,8 @@ describe('bound actor fallback credential custody', () => {
     /** @type {Record<string, any>[]} */
     const modelCalls = [];
     /** @type {Record<string, any>[]} */
-    const broadcasts = [];
-    let tripBoundary = false;
+    const audits = [];
+    let releases = 0;
     const settings = {
       reasoningEnabled: false,
       reasoningEffort: 'medium',
@@ -52,7 +48,7 @@ describe('bound actor fallback credential custody', () => {
       sessions,
       sessionState: { set: () => {} },
       turnSlots: {
-        claim: () => ({ controller: new AbortController(), release: () => {} }),
+        claim: () => ({ controller: new AbortController(), release: () => { releases++; } }),
         isBusy: () => false,
       },
       buildTemporalBlock: () => '',
@@ -81,9 +77,9 @@ describe('bound actor fallback credential custody', () => {
       listProviders: () => [],
       costOf: () => ({ usd: 0, known: true }),
       makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
-      uiConnected: () => true,
-      uiPorts: { broadcast: (/** @type {any} */ message) => broadcasts.push(message) },
-      auditLog: { append: async () => {} },
+      uiConnected: () => false,
+      uiPorts: { broadcast: () => {} },
+      auditLog: { append: async (/** @type {any} */ entry) => { audits.push(entry); } },
       postChatNote: () => {},
       /** @param {any} start */
       resolveFailoverChain: (start) => [start],
@@ -96,19 +92,7 @@ describe('bound actor fallback credential custody', () => {
         yield { type: 'text-delta', text: 'actor completed' };
         yield { type: 'message-stop', stopReason: 'end_turn' };
       },
-      /** @param {any} ctx */
-      runUserTurn: (ctx) => {
-        loopCtx = ctx;
-        if (tripBoundary) {
-          return runUserTurn({
-            ...ctx,
-            async *callModel() {
-              await ctx.getSecret('anthropic');
-            },
-          });
-        }
-        return runUserTurn(ctx);
-      },
+      runUserTurn: (/** @type {any} */ ctx) => { loopCtx = ctx; return /** @type {any} */ ([]); },
       getSecret: liveGetSecret,
       safeFetch: liveSafeFetch,
       REASONING_BUDGET_TOKENS: 0,
@@ -126,37 +110,13 @@ describe('bound actor fallback credential custody', () => {
       sessionId: actor.sessionId,
       userText: 'inspect the page',
     });
-    expect(result).toEqual({ ok: true, stopReason: 'end_turn' });
-    expect(modelCalls.length).toBe(1);
-    expect(modelCalls[0].getSecret).toBe(liveGetSecret);
-    expect(modelCalls[0].safeFetch).toBe(liveSafeFetch);
-    const captured = /** @type {Record<string, any>} */ (/** @type {unknown} */ (loopCtx));
-    await expect(() => captured.getSecret('anthropic'))
-      .toThrow((error) => error?.name === 'ActorCredentialBoundaryError'
-        && error?.capability === 'secret');
-    await expect(() => captured.safeFetch('https://example.com'))
-      .toThrow((error) => error?.name === 'ActorCredentialBoundaryError'
-        && error?.capability === 'provider-network');
+    expect(result).toBe(undefined);
+    expect(modelCalls.length).toBe(0);
+    expect(loopCtx).toBe(null);
+    expect(releases).toBe(1);
+    expect(audits.some((entry) => entry.type === 'actor_background_turn_refused'
+      && entry.details?.performed === false)).toBe(true);
     const stored = await sessions.get(actor.sessionId);
-    expect(stored?.messages.at(-1)?.content).toBe('actor completed');
-
-    // Production-path regression: runUserTurn consumes the model iterator and
-    // catches the named error itself. The refusal must be mapped before that
-    // event crosses into the driver, and the driver must report a failed turn.
-    tripBoundary = true;
-    const refused = await driver.runAgentTurn({
-      sessionId: actor.sessionId,
-      userText: 'try direct credential access',
-      display: { parentToolUseId: 'boundary-tool', kind: 'web', instanceId: 'web' },
-    });
-    expect(refused).toEqual({ ok: false, stopReason: undefined });
-    expect(broadcasts.some((message) => message.type === 'turn/error'
-      && message.error === ACTOR_CREDENTIAL_BOUNDARY_FAILURE)).toBe(true);
-    expect(broadcasts.some((message) => message.type === 'turn/actor-done'
-      && message.parentToolUseId === 'boundary-tool' && message.ok === false)).toBe(true);
-    const afterRefusal = await sessions.get(actor.sessionId);
-    expect(String((/** @type {any} */ (afterRefusal?.messages.at(-1)))?.error))
-      .toContain('model request was not run');
-    expect(JSON.stringify(afterRefusal).includes('refused direct secret access')).toBe(false);
+    expect(stored?.messages.length).toBe(0);
   });
 });

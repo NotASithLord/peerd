@@ -16,7 +16,7 @@ export const makeSessionMutationRoutes = (deps) => {
   const {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
-    maybeAutoResume, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
+    maybeAutoResumeAfterRecovery, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
     purgeLifecycleSession,
   } = deps;
 
@@ -101,7 +101,7 @@ export const makeSessionMutationRoutes = (deps) => {
       // #72: auto-resume — if THIS chat's last turn was reclaimed mid-flight
       // (SW eviction etc.), continue it now. Fire-and-forget; gated + deduped
       // inside the helper, so opening a normally-finished chat is a no-op.
-      maybeAutoResume(sessionId);
+      maybeAutoResumeAfterRecovery(sessionId);
       // Auto-memory lifecycle seam: switching AWAY from a session with
       // real substance. Fire-and-forget — the switch itself never waits
       // on (or fails with) the extraction.

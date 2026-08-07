@@ -21,6 +21,7 @@ run() {
 run "bun test"   bun test ./tests
 run "typecheck"  bun run typecheck
 run "lint"       bun run lint
+run "copy"       bun run check:copy
 run "boundary"   bun run check:boundary
 run "gen:dev"    bun run gen:dev
 echo "=== drift ==="

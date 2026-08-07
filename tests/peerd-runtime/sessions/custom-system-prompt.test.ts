@@ -15,7 +15,6 @@ import {
 } from '../../../extension/peerd-runtime/loop/system-prompt.js';
 import { makeSpawnActor } from '../../../extension/peerd-runtime/actor/spawn.js';
 import type { Session } from '../../../extension/peerd-runtime/sessions/types.js';
-import type { LoopEvent } from '../../../extension/peerd-runtime/loop/agent-loop.js';
 
 // ---- minimal in-memory IDB (keyed by sessionId, like the real wrapper) ----
 const makeIdb = () => {
@@ -192,15 +191,6 @@ describe('buildTemporalContext — ephemeral <active_tab> reorientation', () => 
 });
 
 describe('actor spawn — customSystemPrompt is NOT inherited', () => {
-  // Tiny loop stand-in: render the prompt (so the spy fires), finish.
-  async function* loop(ctx: any): AsyncGenerator<LoopEvent> {
-    await ctx.getSystemPrompt();
-    await ctx.sessions.appendMessage(ctx.sessionId, {
-      role: 'assistant', content: 'child done', id: 'a1', when: 2,
-    });
-    yield { type: 'stop', sessionId: ctx.sessionId, messageId: 'a1', stopReason: 'end_turn' };
-  }
-
   test('the child render gets taskOverride only — no parent session instructions', async () => {
     const store = makeStore();
     const parent = await store.create({ customSystemPrompt: 'parent-only secret style guide' });
@@ -208,14 +198,15 @@ describe('actor spawn — customSystemPrompt is NOT inherited', () => {
     const renderCalls: any[] = [];
     const spawn = makeSpawnActor({
       sessions: store,
-      runUserTurn: loop,
-      callModel: async function* () { yield { type: 'message-stop', stopReason: 'end_turn' }; },
-      getSecret: async () => 'sk',
-      safeFetch: async () => new Response('ok'),
       appendAudit: async () => {},
-      buildToolContext: async () => ({ audit: async () => {} }),
-      dispatchToolCall: async () => ({ ok: true, content: 'r' }),
-      renderSystemPrompt: async (opts: any) => { renderCalls.push(opts); return 'sys'; },
+      renderSystemPromptForChild: async (task: string) => {
+        renderCalls.push({ taskOverride: task });
+        return 'sys';
+      },
+      runChildOffscreen: async () => ({
+        ok: true, started: true, finalText: 'child done',
+        newMessages: [{ role: 'assistant', content: 'child done', id: 'a1', when: 2 }],
+      }),
       getToolDescriptors: () => [],
     });
 

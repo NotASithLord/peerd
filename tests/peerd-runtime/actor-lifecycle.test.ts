@@ -83,6 +83,30 @@ const spawnDeps = (store: any, loop: any, extra: any = {}) => ({
   renderSystemPrompt: async ({ taskOverride }: any) => `sys task=${taskOverride}`,
   getToolDescriptors: () => [{ name: 'a', description: 'A', schema: {} }],
   now: (() => { let t = 1000; return () => (t += 25); })(),
+  // Lifecycle tests exercise the dedicated-worker contract through a portable
+  // fake host. The loop still receives the child's abort signal, but no test
+  // relies on the removed privileged-background fallback.
+  runChildOffscreen: async (job: any, opts: any = {}) => {
+    let stopReason: string | undefined;
+    let toolCalls = 0;
+    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    for await (const event of loop({
+      sessionId: job.sessionId,
+      userText: job.task,
+      sessions: store,
+      signal: opts.signal,
+    })) {
+      if (event.type === 'stop') stopReason = event.stopReason;
+      if (event.type === 'tool-use') toolCalls++;
+      if (event.type === 'usage' && event.usage) Object.assign(usage, event.usage);
+      opts.onEvent?.(event);
+    }
+    const session = await store.get(job.sessionId);
+    const finalText = [...(session?.messages ?? [])].reverse()
+      .find((message: any) => message.role === 'assistant' && typeof message.content === 'string')?.content ?? '';
+    return { ok: true, started: true, finalText, stopReason, toolCalls, usage };
+  },
+  renderSystemPromptForChild: (task: string) => `SYS:${task}`,
   ...extra,
 });
 
@@ -290,36 +314,81 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
     expect(offscreenJob.tools.map((t: any) => t.name)).toEqual(['script']);
   });
 
-  test('a NEVER-STARTED offscreen failure falls back to the in-SW loop (never dies on infra)', async () => {
+  test('a NEVER-STARTED worker failure fails closed without running in the background heap', async () => {
     const store = makeStore();
     const parent = await store.create({});
     const spawn = withOffscreen(store, async () => ({ ok: false, started: false, error: 'offscreen doc unavailable' }));
     const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
-    expect(out.result).toBe('IN-SW answer');           // fell back, didn't die
+    expect(out.result).toBe('offscreen doc unavailable');
+    expect(out.refused).toBe(true);
   });
 
-  test('a STARTED-but-errored offscreen run does NOT re-run in-SW (would double-bill)', async () => {
+  test('a tool side effect followed by a Worker error does not re-run in-SW', async () => {
     const store = makeStore();
     const parent = await store.create({});
     let inSwRan = false;
     const inSwLoop = async function* (ctx: any) { inSwRan = true; await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'IN-SW answer' }); yield { type: 'stop', stopReason: 'end_turn' }; };
     const spawn = makeSpawnActor(spawnDeps(store, inSwLoop, {
-      runChildOffscreen: async () => ({ ok: false, started: true, error: 'provider-http-500', finalText: '' }),
+      runChildOffscreen: async () => ({
+        ok: false,
+        started: true,
+        error: 'provider-http-500',
+        finalText: '',
+        toolCalls: 1,
+        newMessages: [
+          { role: 'user', content: 'change the target' },
+          { role: 'assistant', content: '', toolUses: [{ id: 'side-effect-1', name: 'script', input: { code: 'return 42' } }] },
+          { role: 'user', content: '', toolResults: [{ tool_use_id: 'side-effect-1', is_error: false, content: '42' }] },
+        ],
+      }),
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
     }) as any);
     const out = await spawn({ task: 'reason', tools: [], parentSessionId: parent.sessionId });
     expect(inSwRan).toBe(false);                        // did NOT double-run
-    expect(out.result).toBe('');                        // surfaced the (empty) offscreen result
+    expect(out.result).toContain('provider-http-500');  // surfaced the worker failure
+    expect(out.result).toContain('outcome is unknown');
+    expect(out.result).toContain('must not be retried automatically');
+    expect(out.stopped).toBe(true);
+    expect(out.executionFailed).toBe(true);
+    expect(out.outcomeKnown).toBe(false);
+    expect(out.toolCalls).toBe(1);
+  });
+
+  test('a transcript write failure after an isolated run throws structured unknown-outcome metadata', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    store.appendMessage = async () => { throw new Error('storage unavailable'); };
+    const spawn = withOffscreen(store, async () => ({
+      ok: true,
+      started: true,
+      finalText: 'target changed',
+      newMessages: [{ role: 'assistant', content: 'target changed' }],
+      toolCalls: 1,
+    }));
+    try {
+      await spawn({ task: 'change it', tools: [], parentSessionId: parent.sessionId });
+      throw new Error('expected persistence failure');
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: 'ActorPersistenceError',
+        performed: true,
+        outcomeKnown: false,
+        retryable: false,
+        executionFailed: true,
+      });
+    }
   });
 });
 
 // ---- actor-messaging: the lineage gate + arbitration ------------------------
 
 type Reenter = { userText: string; sessionId: string; synthetic: boolean };
+type RecoveryNotice = Reenter & { recoveryId: string };
 type Hop = { sessionId: string; parentSessionId: string | null; spawnedTrusted: boolean };
 
 const gateHarness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {}) => {
   const reentries: Reenter[] = [];
+  const recoveryNotices: RecoveryNotice[] = [];
   const turnsRun: Array<{ actorSessionId: string; message: string }> = [];
   const appended: any[] = [];
   const deps = {
@@ -332,6 +401,7 @@ const gateHarness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {
       return { result: 'built the thing' };
     },
     reenter: async (r: Reenter) => { reentries.push(r); },
+    recordRecovery: async (r: RecoveryNotice) => { recoveryNotices.push(r); return true; },
     turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => fn() },
     getActiveSessionId: async () => 'chat-1',
     isVaultLocked: () => false,
@@ -342,7 +412,7 @@ const gateHarness = (over: Partial<Parameters<typeof makeActorMessaging>[0]> = {
     log: () => {},
     ...over,
   } as Parameters<typeof makeActorMessaging>[0];
-  return { ...makeActorMessaging(deps), reentries, turnsRun, appended };
+  return { ...makeActorMessaging(deps), reentries, recoveryNotices, turnsRun, appended };
 };
 
 // A trusted direct child of the active chat.
@@ -753,50 +823,49 @@ describe('message_actor — envelope provenance + redrain reroute (phase 7)', ()
     expect(appended[0].senderSessionId).toBe('sub-1');
   });
 
-  test('a redrained reply whose sender was an ephemeral actor is rerouted to the ROOT', async () => {
+  test('a recovery notice whose sender was an ephemeral actor is rerouted to the ROOT', async () => {
     const audits: any[] = [];
-    const { redrain, reentries } = gateHarness({
+    const { redrain, reentries, recoveryNotices } = gateHarness({
       appendAudit: async (e: any) => { audits.push(e); },
       mailbox: {
         append: async () => {},
         remove: async () => {},
         load: async () => [{
           id: 'c-1', senderSessionId: 'sub-9', to: 'app-1', message: 'finish it',
-          createdAt: 1, provenance: { rootSessionId: 'chat-1', lineagePath: ['chat-1', 'sub-9'] },
+          createdAt: 1, state: 'started', kind: 'app',
+          provenance: { rootSessionId: 'chat-1', lineagePath: ['chat-1', 'sub-9'] },
         }],
       },
     });
     const r = await redrain();
-    expect(r.redrained).toBe(1);
+    expect(r.redrained).toBe(0);
     await tick();
-    // The wake reached the CHAT, not the dead child.
-    expect(reentries.length).toBe(1);
-    expect(reentries[0].sessionId).toBe('chat-1');
+    // The passive notice reached the CHAT, not the dead child, and no model turn ran.
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices.length).toBe(1);
+    expect(recoveryNotices[0].sessionId).toBe('chat-1');
     expect(audits.some((a) => a.type === 'actor_reply_rerouted')).toBe(true);
   });
 
-  test('a redrained in-flight twin still counts against dedupe (#4 symmetry)', async () => {
-    // Hold every queued turn so the redrained turn stays in flight; its intent
-    // must be tracked so an identical fresh send is refused and — critically —
-    // the redrained turn's settle doesn't decrement a DIFFERENT send's refcount.
-    const queued: Array<() => void> = [];
-    const { messageActor, redrain } = gateHarness({
-      turnSlots: { runWhenIdle: (_sid: string, fn: () => void) => { queued.push(fn); } },
+  test('a queued recovery notice never creates an in-flight actor intent', async () => {
+    const { messageActor, redrain, turnsRun } = gateHarness({
       mailbox: {
         append: async () => {},
         remove: async () => {},
-        load: async () => [{ id: 'c-1', senderSessionId: 'chat-1', to: 'app-1', message: 'reprice', createdAt: 1 }],
+        load: async () => [{
+          id: 'c-1', senderSessionId: 'chat-1', to: 'app-1', message: 'reprice',
+          createdAt: 1, state: 'queued', kind: 'app',
+        }],
       },
     });
-    await redrain(); // re-queues (chat-1 → app-1, 'reprice'); intent now tracked
-    // An identical fresh send from the same chat is refused as a duplicate.
-    const dup = await messageActor({ to: 'app-1', message: 'reprice', senderSessionId: 'chat-1' });
-    expect(dup.ok).toBe(false);
-    expect(dup.error).toContain('already in flight');
+    await redrain();
+    expect(turnsRun).toEqual([]);
+    const retry = await messageActor({ to: 'app-1', message: 'reprice', senderSessionId: 'chat-1' });
+    expect(retry.ok).toBe(true);
   });
 
   test('a pre-#134 envelope (no provenance) keeps the sender-addressed wake', async () => {
-    const { redrain, reentries } = gateHarness({
+    const { redrain, reentries, recoveryNotices } = gateHarness({
       mailbox: {
         append: async () => {},
         remove: async () => {},
@@ -805,7 +874,8 @@ describe('message_actor — envelope provenance + redrain reroute (phase 7)', ()
     });
     await redrain();
     await tick();
-    expect(reentries.length).toBe(1);
-    expect(reentries[0].sessionId).toBe('chat-1');
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices.length).toBe(1);
+    expect(recoveryNotices[0].sessionId).toBe('chat-1');
   });
 });
