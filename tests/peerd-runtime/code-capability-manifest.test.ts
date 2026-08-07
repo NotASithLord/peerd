@@ -8,6 +8,7 @@ import {
   buildCodeClientSource,
   codeClientMethods,
   codeClientReference,
+  resolveWebActorSurface,
   renderCodeOpTrace,
 } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 import { ACTORS_API_ACCEPTED_METHODS, ACTORS_API_METHODS } from '../../extension/peerd-runtime/actor/actors-api.js';
@@ -50,6 +51,20 @@ describe('declarative code-capability contract', () => {
     expect(actors).toContain('actors.list()');
     expect(actors).not.toContain('actors.ask');
     expect(actors).not.toContain('actors.cast');
+  });
+
+  test('code preference falls back honestly without its worker host or complete grant', () => {
+    expect(resolveWebActorSurface({ requested: 'code', headlessAvailable: true })).toBe('code');
+    expect(resolveWebActorSurface({ requested: 'code', headlessAvailable: false })).toBe('tools');
+    expect(resolveWebActorSurface({ requested: 'tools', headlessAvailable: true })).toBe('tools');
+    expect(resolveWebActorSurface({
+      requested: 'code', headlessAvailable: true,
+      allowedTools: new Set(['page_code', 'navigate']),
+    })).toBe('tools');
+    expect(resolveWebActorSurface({
+      requested: 'code', headlessAvailable: true,
+      allowedTools: new Set(actorCapabilityManifest('web', 'tab').tools.concat('page_code')),
+    })).toBe('code');
   });
 
   test('page methods never exceed the tab web actor direct authority', () => {

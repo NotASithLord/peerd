@@ -80,7 +80,7 @@ export const makeOffscreenActorClient = ({
   const inboundDwebTools = new Set(inboundDwebToolNames);
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, inbound: boolean, allowedTools: Set<string> | null, signal: AbortSignal }>} relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', signal: AbortSignal }>} relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: these three routes
@@ -124,7 +124,7 @@ export const makeOffscreenActorClient = ({
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabUrl?: string, origin?: string, inbound?: boolean }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabUrl?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {
@@ -159,6 +159,9 @@ export const makeOffscreenActorClient = ({
       : null;
     grants.set(relayToken, {
       runId, actorSessionId: job.actorSessionId, inbound, allowedTools,
+      ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
+        ? { actorSurface: job.actorSurface }
+        : {}),
       signal: runController.signal,
     });
     if (onEvent) runOnEvent.set(runId, onEvent);
@@ -215,7 +218,7 @@ export const makeOffscreenActorClient = ({
    * that as a hard refusal, so an unauthorized caller learns nothing beyond "no".
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, inbound: boolean, allowedTools: Set<string> | null, signal: AbortSignal } | null}
+   * @returns {{ runId: string, actorSessionId: string, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', signal: AbortSignal } | null}
    */
   const grantFor = (msg, sender) => {
     if (!isOffscreenSender(sender)) return null;
@@ -357,6 +360,7 @@ export const makeOffscreenActorClient = ({
         const base = await buildToolContext({
           exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
           actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
+          ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
           ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
         });
         // Stop/cancel belongs to the ACTOR TURN, not only spawned children.

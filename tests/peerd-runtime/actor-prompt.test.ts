@@ -391,6 +391,7 @@ describe('capability-derived actor profiles', () => {
     const web = actorBlock('web', 'tab', 'tab-1', 'code');
     expect(web.includes('tools: page_code, site_client_run')).toBe(true);
     expect(web.includes(`client: ${codeClientReference('page')}`)).toBe(true);
+    expect(web.split(codeClientReference('page')).length - 1).toBe(1);
     expect(web.includes('site_client_run stays a discrete tool')).toBe(true);
     expect(web.includes('tools: snapshot')).toBe(false);
 
@@ -433,10 +434,22 @@ describe('capability-derived actor profiles', () => {
     expect(pageOnly).toContain('tools: page_code');
     expect(pageOnly).toContain(codeClientReference('page'));
     expect(pageOnly).not.toContain('site_client_run');
+    expect(pageOnly).toContain('PREFER THE STABLE LAYER');
+    expect(pageOnly).toContain('persist the API client');
+    expect(pageOnly).toContain('USE UI CODE AD HOC');
+    expect(pageOnly).toContain('Keep scripts short');
+    expect(pageOnly).not.toContain('save a UI routine');
+    expect(pageOnly).not.toContain('read/run its existing origin-pinned site client');
+    expect(pageOnly).toContain('reuse known endpoint shapes with page.fetch');
+    expect(pageOnly).toContain('return { list: () => site.fetch("/api/items") }');
+    expect(pageOnly).toContain('page.captureSite("start")');
+    expect(codeClientReference('page')).toContain('writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})');
+    expect(codeClientReference('page')).toContain('captureSite("start"|"stop")');
 
     const full = actorBlock('web', 'tab', 'tab-1', 'code', false, ['page_code', 'site_client_run']);
     expect(full).toContain('tools: page_code, site_client_run');
     expect(full).toContain('site_client_run stays a discrete tool');
+    expect(full).toContain('read/run its existing origin-pinned site client');
   });
 
   test('an inbound dweb prompt advertises only its read/moderation subset', () => {

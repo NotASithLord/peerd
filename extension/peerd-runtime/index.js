@@ -125,7 +125,7 @@ export {
   DWEB_INBOUND_TOOL_NAMES,
   codeClientMethods, codeClientAllows, codeClientMethod, codeClientReference, buildCodeClientSource,
   renderCodeOpTrace, canonicalCodeTraceLabel,
-  actorCapabilityManifest,
+  actorCapabilityManifest, resolveWebActorSurface,
 } from './actor/capability-manifest.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
