@@ -29,6 +29,7 @@ import {
 // from) the retry-class taxonomy.
 import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
 import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
+import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 
@@ -44,6 +45,151 @@ import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 const safeOrigins = (tool, args, ctx) => {
   try { return tool.origins(args, ctx) ?? []; }
   catch { return []; }
+};
+
+const EXPOSED_ERROR_CODE = /^[a-z][a-z0-9_]{0,79}$/;
+const EXPOSED_ERROR_CONTENT_MAX_CHARS = 6000;
+const EXPOSED_ERROR_DETAILS_MAX_CHARS = 8000;
+const FAILURE_OUTCOME_VALUES = new Set(Object.values(FAILURE_OUTCOMES));
+const BROWSER_POLICY_REASONS = new Set([
+  'invalid_url', 'unsupported_scheme', 'private_network', 'cloud_metadata',
+  'sensitive_site', 'unverified_target', 'network_guard_unavailable', 'network_guard_unsupported',
+  'network_guard_install_failed',
+]);
+const BROWSER_POLICY_STAGES = new Set(['pre_navigation', 'committed_origin']);
+const BROWSER_POLICY_OUTCOMES = new Set(['not_run', 'page_loaded_not_automated']);
+
+/**
+ * Keep only the fixed browser-policy fields that are safe for the audit log.
+ * The URL, correction text, and any unrecognized structured value stay out.
+ * @param {unknown} carrier
+ */
+const browserPolicyAuditDetails = (carrier) => {
+  const value = /** @type {any} */ (carrier);
+  const structured = value?.structured;
+  if (!structured || typeof structured !== 'object'
+      || typeof value?.error !== 'string'
+      || structured.code !== value.error
+      || !EXPOSED_ERROR_CODE.test(value.error)) return null;
+  if (!BROWSER_POLICY_REASONS.has(structured.reason)
+      || !BROWSER_POLICY_STAGES.has(structured.stage)
+      || !BROWSER_POLICY_OUTCOMES.has(structured.outcome)
+      || typeof structured.retryable !== 'boolean') return null;
+  return {
+    reason: structured.reason,
+    stage: structured.stage,
+    outcome: structured.outcome,
+    retryable: structured.retryable,
+    ...(typeof structured.neutralized === 'boolean'
+      ? { neutralized: structured.neutralized }
+      : {}),
+  };
+};
+
+/**
+ * Add ordered host-stamped child-navigation receipts without breaking tools whose
+ * content is a JSON protocol consumed by the page-code bridge.
+ * @param {ToolResult} result
+ * @param {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} notices
+ * @returns {ToolResult}
+ */
+const withBrowserChildPolicyNotices = (result, notices) => {
+  if (notices.length === 0) return result;
+  const [notice] = notices;
+  const policyFields = {
+    browserPolicy: notice,
+    ...(notices.length > 1 ? { browserPolicies: notices } : {}),
+  };
+  let content = typeof result.content === 'string' ? result.content : '';
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      content = JSON.stringify({ ...parsed, ...policyFields }, null, 2);
+    } else {
+      throw new Error('not an object');
+    }
+  } catch {
+    const receipt = (
+      /** @type {{ reason: string, outcome: string, child: string }} */ entry,
+      /** @type {number} */ index,
+    ) => {
+      const outcome = entry.outcome === 'not_run'
+        ? entry.reason === 'protected_child_request'
+          ? 'A protected child request did not run.'
+          : 'A protected child navigation did not run.'
+        : 'A child navigation was not verified.';
+      const child = entry.child === 'closed'
+        ? 'The child tab was closed.'
+        : entry.child === 'left_blank'
+          ? 'The child tab was left blank.'
+          : entry.child === 'guarded'
+            ? 'The child tab remained guarded.'
+          : 'The browser did not confirm that the child tab was closed or blank.';
+      const label = notices.length > 1 ? `[HOST POLICY ${index + 1}/${notices.length}]` : '[HOST POLICY]';
+      return `${label}\n${outcome} ${child} `
+        + 'No destination details or protected page content were exposed. Do not retry automatically.\n'
+        + `Receipt: ${JSON.stringify(entry)}`;
+    };
+    content = `${content}${content ? '\n\n' : ''}${notices.map(receipt).join('\n\n')}`;
+  }
+  return {
+    ...result,
+    content,
+    structured: {
+      ...(result.structured && typeof result.structured === 'object'
+        ? result.structured
+        : {}),
+      ...policyFields,
+    },
+  };
+};
+
+/** @param {unknown} value */
+const normalizeBrowserChildPolicyNotices = (value) => (Array.isArray(value) ? value : value ? [value] : [])
+  .filter((entry) => {
+    const notice = /** @type {any} */ (entry);
+    return notice && typeof notice === 'object'
+      && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified']
+        .includes(notice.reason)
+      && ['not_run', 'unverified'].includes(notice.outcome)
+      && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
+      && notice.retryable === false;
+  })
+  .map((entry) => ({
+    reason: entry.reason,
+    outcome: entry.outcome,
+    child: entry.child,
+    retryable: false,
+  }));
+
+/**
+ * Project an explicitly exposed typed tool error without depending on the
+ * concrete error class or realm that created it. Unknown thrown fields remain
+ * private. The marker alone is not enough: every projected field is bounded
+ * and validated before it can enter the model or audit result.
+ *
+ * @param {unknown} error
+ * @returns {{ error: string, content: string, structured: Record<string, unknown>, outcomeKind: any } | null}
+ */
+const projectExposedToolError = (error) => {
+  if (!error || typeof error !== 'object') return null;
+  const value = /** @type {Record<string, unknown>} */ (error);
+  if (value.exposeToModel !== true) return null;
+  if (typeof value.code !== 'string' || !EXPOSED_ERROR_CODE.test(value.code)) return null;
+  if (typeof value.content !== 'string' || value.content.length > EXPOSED_ERROR_CONTENT_MAX_CHARS) return null;
+  if (!value.structured || typeof value.structured !== 'object' || Array.isArray(value.structured)) return null;
+  if (!FAILURE_OUTCOME_VALUES.has(/** @type {any} */ (value.outcomeKind))) return null;
+  try {
+    if (JSON.stringify(value.structured).length > EXPOSED_ERROR_DETAILS_MAX_CHARS) return null;
+  } catch {
+    return null;
+  }
+  return {
+    error: value.code,
+    content: value.content,
+    structured: /** @type {Record<string, unknown>} */ (value.structured),
+    outcomeKind: value.outcomeKind,
+  };
 };
 
 /**
@@ -120,12 +266,19 @@ const liveTabUrl = async (ctx) => {
  *
  * @typedef {ToolContext & {
  *   hooks?: import('./hooks/runner.js').Hook[],
- *   permission?: { mode?: string, confirmActions?: boolean },
- *   onToolActivity?: {
- *     begin: (tabId: number, label: string, origin: string) => unknown,
+*   permission?: { mode?: string, confirmActions?: boolean },
+*   judgeLanding?: (url: string) => Promise<{ action: string } | null>,
+*   onToolActivity?: {
+*     begin: (tabId: number, label: string, origin: string, policy?: {
+*       denylist?: readonly string[],
+*       judgeLanding?: (url: string) => Promise<{ action: string } | null>,
+*     }) => unknown,
  *     end: (tabId: number) => unknown,
  *   } | null,
  *   lifecycle?: ReturnType<import('../lifecycle/dispatch-tracking.js').makeDispatchTracker> | null,
+ *   consumeBrowserChildPolicyNotice?: (tabId: number) => Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
+ *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number) => Promise<boolean>,
+ *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
  * }} DispatchContext
  */
 
@@ -136,7 +289,8 @@ const liveTabUrl = async (ctx) => {
  * structurally a ToolMeta where the result type needs one.
  *
  * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned',
- *   recovery?: Record<string, unknown> }} DispatchMeta
+ *   recovery?: Record<string, unknown>,
+ *   browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }} DispatchMeta
  *   `recovery` is the lifecycle contract's agent-facing semantic record —
  *   present only when a dispatch settled as interrupted/outcome_unknown/
  *   refused-replay, so the agent hears the recovery category, not a
@@ -289,7 +443,9 @@ export const dispatchToolCall = async (call, ctx) => {
         tool: call.name,
         sideEffect: tool.sideEffect,
         actionClass: verdict.actionClass,
-        origins: safeOrigins(tool, args, ctx),
+        // Confirmation already names the action. Keep mutable tab origins out
+        // of this pre-dispatch UI payload so a later policy stop stays URL-free.
+        origins: [],
         summary: summarizeCall(call.name, args),
         // why the note and not a longer summary: summarizeCall truncates every
         // string arg to 40 chars, so the card can't show the payload anyway —
@@ -498,17 +654,72 @@ export const dispatchToolCall = async (call, ctx) => {
   if (activity && typeof activityTabId === 'number') {
     const phrase = describeToolActivity(call.name, args, { isTabTool: true });
     if (phrase) {
-      Promise.resolve(activity.begin(activityTabId, phrase, displayOrigin(ctx.activeTab?.origin))).catch(() => {});
+      Promise.resolve(activity.begin(
+        activityTabId,
+        phrase,
+        displayOrigin(ctx.activeTab?.origin),
+        { denylist: ctx.denylist },
+      )).catch(() => {});
     }
   }
 
   const start = performance.now();
+  const consumeBrowserChildPolicyNotice = typeof ctx.consumeBrowserChildPolicyNotice === 'function'
+    ? ctx.consumeBrowserChildPolicyNotice
+    : null;
+  const childPolicyEligible = (tool.primitive === 'tab' || call.name === 'page_code')
+    && tool.sideEffect !== 'read'
+    && typeof activityTabId === 'number'
+    && consumeBrowserChildPolicyNotice != null;
+  const childCapable = ['click', 'type', 'page_code', 'page_exec', 'page_keys']
+    .includes(call.name);
+  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
+  let priorBrowserChildPolicyNotices = [];
+  /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
+  let browserChildPolicyNotices = [];
+  if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
+    const prior = consumeBrowserChildPolicyNotice(activityTabId);
+    priorBrowserChildPolicyNotices = normalizeBrowserChildPolicyNotices(prior);
+  }
   try {
-    const result = await tool.execute(args, execCtx);
+    let result = await tool.execute(args, execCtx);
+    if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
+      const embedded = normalizeBrowserChildPolicyNotices(
+        /** @type {any} */ (result).browserChildPolicyNotices,
+      );
+      let notices = normalizeBrowserChildPolicyNotices(
+        consumeBrowserChildPolicyNotice(activityTabId),
+      );
+      if (notices.length === 0 && embedded.length === 0) {
+        // One task lets tabs/webNavigation report a child raised by a fast
+        // scripting action.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (childCapable && typeof ctx.waitForBrowserChildPolicyNotice === 'function') {
+          // Browser child events can land after the scripting reply. Wait on the
+          // exact source's outcome channel so the current tool result, not some
+          // later action, carries the receipt. Only page actions that can create
+          // a child pay this bounded model-side grace period.
+          await ctx.waitForBrowserChildPolicyNotice(activityTabId, 175);
+        } else if (ctx.hasPendingBrowserChildPolicy?.(activityTabId)) {
+          await ctx.waitForBrowserChildPolicyNotice?.(activityTabId, 100);
+        }
+        notices = normalizeBrowserChildPolicyNotices(
+          consumeBrowserChildPolicyNotice(activityTabId),
+        );
+      }
+      const { browserChildPolicyNotices: _hostOnlyNotices, ...visibleResult } = /** @type {any} */ (result);
+      notices = [...priorBrowserChildPolicyNotices, ...embedded, ...notices];
+      browserChildPolicyNotices = notices;
+      result = withBrowserChildPolicyNotices(
+        visibleResult,
+        notices,
+      );
+    }
     const durationMs = Math.round(performance.now() - start);
     if (activity && typeof activityTabId === 'number') {
       Promise.resolve(activity.end(activityTabId)).catch(() => {});
     }
+    const browserPolicy = browserPolicyAuditDetails(result);
     // why: most tools signal failure by returning { ok: false }, not by
     // throwing — only one tool file throws. Auditing the whole non-throw
     // path as tool_executed made the audit log report ≈zero failures while
@@ -517,7 +728,11 @@ export const dispatchToolCall = async (call, ctx) => {
     ctx.audit(result?.ok === false
       ? {
         type: 'tool_failed',
-        details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, durationMs, error: result.error },
+        details: {
+          tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+          durationMs, error: result.error,
+          ...(browserPolicy ? { browserPolicy } : {}),
+        },
       }
       : {
         type: 'tool_executed',
@@ -575,11 +790,14 @@ export const dispatchToolCall = async (call, ctx) => {
         // compact (sideEffect class) and to render where it touched (origins).
         // Captured here, on the final post-hook args. Both stay off the wire.
         sideEffect: tool.sideEffect,
-        origins: safeOrigins(tool, args, ctx),
+        origins: browserPolicy ? [] : safeOrigins(tool, args, ctx),
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
         ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
+        ...(browserChildPolicyNotices.length > 0
+          ? { browserPolicies: browserChildPolicyNotices }
+          : {}),
       }),
     };
     return enriched;
@@ -592,12 +810,18 @@ export const dispatchToolCall = async (call, ctx) => {
       Promise.resolve(activity.end(activityTabId)).catch(() => {});
     }
     const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+    const exposedError = projectExposedToolError(e);
+    const browserPolicy = browserPolicyAuditDetails(exposedError);
     ctx.audit({
       type: 'tool_failed',
       // why: same rich shape as the returned-{ok:false} failure above so
       // BOTH failure sources are uniform — audit mining can group throws and
       // returned failures by the same primitive/dispatch keys.
-      details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, error: message, durationMs },
+      details: {
+        tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        error: exposedError?.error ?? message, durationMs,
+        ...(browserPolicy ? { browserPolicy } : {}),
+      },
     }).catch(() => {});
     // why: post-hooks still observe a FAILED execution — a failure is an
     // observable event (e.g. an audit/metrics hook wants to count it).
@@ -619,21 +843,42 @@ export const dispatchToolCall = async (call, ctx) => {
         outcomeKind: /** @type {{ outcomeKind?: any }} */ (e)?.outcomeKind,
       }).catch(() => null);
     }
-    return {
+    /** @type {ToolResult} */
+    let failedResult = {
       ok: false,
-      error: recoveryRewrite?.error ?? message,
+      error: recoveryRewrite?.error ?? exposedError?.error ?? message,
+      ...(exposedError && !recoveryRewrite ? exposedError : {}),
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
         primitive: tool.primitive, dispatch: tool.dispatch,
         // Same spine fields on the FAILED path — an errored result still has a
         // body and a lineage (the spine renders "… · error · N chars").
         sideEffect: tool.sideEffect,
-        origins: safeOrigins(tool, args, ctx),
+        origins: browserPolicy ? [] : safeOrigins(tool, args, ctx),
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
         ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
       }),
     };
+    if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
+      let notices = normalizeBrowserChildPolicyNotices(
+        consumeBrowserChildPolicyNotice(activityTabId),
+      );
+      if (notices.length === 0 && childCapable
+          && typeof ctx.waitForBrowserChildPolicyNotice === 'function') {
+        await ctx.waitForBrowserChildPolicyNotice(activityTabId, 175);
+        notices = normalizeBrowserChildPolicyNotices(
+          consumeBrowserChildPolicyNotice(activityTabId),
+        );
+      }
+      browserChildPolicyNotices = [...priorBrowserChildPolicyNotices, ...notices];
+      failedResult = withBrowserChildPolicyNotices(failedResult, browserChildPolicyNotices);
+      failedResult.meta = /** @type {DispatchMeta} */ ({
+        ...failedResult.meta,
+        browserPolicies: browserChildPolicyNotices,
+      });
+    }
+    return failedResult;
   }
 };

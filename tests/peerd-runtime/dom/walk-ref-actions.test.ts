@@ -10,7 +10,7 @@ import { snapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapsh
 import { clickTool, clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
 import { typeTool, typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
 import { createRefRegistry } from '../../../extension/peerd-runtime/dom/ref-registry.js';
-import { hasPasswordFieldInjected } from '../../../extension/peerd-runtime/dom/walk-injected.js';
+import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const WALK_RESULT = {
   ok: true,
@@ -35,7 +35,9 @@ const makeCtx = (scriptImpl: (req: any) => any) => {
       // would make these assertions about injection ORDER a proxy for an
       // unrelated feature — so it is recorded out.
       executeScript: async (req: any) => {
-        if (req?.func !== hasPasswordFieldInjected) injections.push(req);
+        const probe = browserProbeResult(req, { url: 'https://example.com/' });
+        if (probe) return probe;
+        injections.push(req);
         return scriptImpl(req);
       },
     },
@@ -60,8 +62,16 @@ describe('snapshot tool — DOM-walk fallback', () => {
     expect(ctx.domRefs.resolve(7, '@e2')).toMatchObject({ walkId: 2 });
   });
 
-  test('walk failure → honest error, no fake snapshot', async () => {
+  test('an injection refusal reports an unverified target, not a fake snapshot', async () => {
     const { ctx } = makeCtx(() => { throw new Error('Cannot access contents of the page'); });
+    const r = await snapshotTool.execute({}, ctx);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error result');
+    expect(r.error).toBe('browser_target_unverified');
+  });
+
+  test('a page-side walk failure remains explicit', async () => {
+    const { ctx } = makeCtx(() => [{ result: { ok: false, error: 'walk failed' } }]);
     const r = await snapshotTool.execute({}, ctx);
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('expected error result');

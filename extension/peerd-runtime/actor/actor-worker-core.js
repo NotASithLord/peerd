@@ -138,22 +138,22 @@ export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
  * (heap-split phase 3). The loop reads `ctx.fenceActorSummary` when it TRIMS context,
  * wrapping the actor's own (100%-untrusted-provenance) rolling summary so a laundered
  * injection that survives compression re-enters as DATA, not a command. The SW builds
- * this closure over `activeTab.url` on the in-SW path; that closure can't cross
- * postMessage, so the worker rebuilds it here from the PURE fence fns.
+ * this closure over the policy-reduced active-tab origin on the in-SW path; that
+ * closure can't cross postMessage, so the worker rebuilds it here from the PURE fence fns.
  *
- * why the origin/tabUrl is turn-START, not live: it's the fence's provenance TAG only
- * (`web-actor(<url>)`); the BODY-wrap — the security function — is applied regardless,
+ * why the origin/tabOrigin is turn-START, not live: it's the fence's provenance TAG only
+ * (`web-actor(<origin>)`); the BODY-wrap, which is the security function, is applied regardless,
  * so a tag that lags a mid-turn navigate is cosmetic. An API actor's origin is FIXED
  * for its whole life, so it never lags. Returns undefined for a non-web actor (no
- * self-fence — a VM/Notebook/App actor's summary renders verbatim, as in-SW).
+ * self-fence. A VM/Notebook/App actor's summary renders verbatim, as in-SW).
  *
- * @param {{ actorType?: string, backing?: string, tabUrl?: string, origin?: string }} [o]
+ * @param {{ actorType?: string, backing?: string, tabOrigin?: string, origin?: string }} [o]
  * @returns {((text: string) => string) | undefined}
  */
-export const makeActorSummaryFence = ({ actorType, backing, tabUrl, origin } = {}) => {
+export const makeActorSummaryFence = ({ actorType, backing, tabOrigin, origin } = {}) => {
   if (actorType !== 'web') return undefined;
   if (backing === 'api') return (/** @type {string} */ text) => fenceApiActorSummary(text, { origin });
-  return (/** @type {string} */ text) => fenceWebActorSummary(text, { tabUrl });
+  return (/** @type {string} */ text) => fenceWebActorSummary(text, { tabOrigin });
 };
 
 /**

@@ -12,8 +12,9 @@
 
 import { serializeListResult } from './columnar.js';
 import { executeByKind, kindEnum } from './kind-dispatch.js';
-import { originOfUrl } from './dom-helpers.js';
+import { isDenylistedTab, originOfUrl } from './dom-helpers.js';
 import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
+import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js';
 import { clamp } from '/shared/util.js';
 // why the DEEP path (not the /peerd-egress/index.js barrel): the barrel pulls
 // the vault/storage surface, which loads browser-polyfill and throws under Bun.
@@ -90,20 +91,6 @@ const truncate = (s, n) => {
   if (!s) return '';
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 };
-// Strip the path off URLs we don't echo verbatim — a query string can carry a
-// token; the origin is enough for the demonstration.
-/** @param {string | undefined} url @returns {string} */
-const redactSensitivePath = (url) => {
-  if (!url) return '';
-  try {
-    const u = new URL(url);
-    if (u.search) return `${u.origin}${u.pathname}?…`;
-    return `${u.origin}${u.pathname}`;
-  } catch {
-    return url;
-  }
-};
-
 /** @param {any} _args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
 const inspectSessionAccess = async (_args, ctx) => {
   /** @type {Array<Record<string, unknown>>} */
@@ -113,18 +100,22 @@ const inspectSessionAccess = async (_args, ctx) => {
     // one method this tool uses (browser.tabs.query).
     const tabsApi = /** @type {{ query: (q: Record<string, unknown>) => Promise<BrowserTab[]> }} */ (ctx.tabs);
     const raw = await tabsApi.query({});
-    tabs = raw.map((t) => ({
-      id: t.id,
-      // originOfUrl (dom-helpers) so the internal-page rendering (chrome://,
-      // about:) agrees with actor_list + the origin gates for the same tab.
-      origin: originOfUrl(t.url),
-      // The page CHOSE this string. This result is trusted and unfenced, so it
-      // gets the same hardening actor_list gives the same field - a bare
-      // truncate left newlines, angle brackets and invisible-Unicode intact.
-      title: safeTitle(t.title),
-      active: t.active,
-      url: redactSensitivePath(t.url),
-    }));
+    tabs = raw.flatMap((t) => {
+      const target = classifyBrowserAutomationTarget(t.url);
+      if (!target.allowed || isDenylistedTab(t.url, ctx.denylist)) return [];
+      return [{
+        id: t.id,
+        // originOfUrl (dom-helpers) so the internal-page rendering (chrome://,
+        // about:) agrees with actor_list + the origin gates for the same tab.
+        origin: originOfUrl(t.url),
+        // The page CHOSE this string. This result is trusted and unfenced, so it
+        // gets the same hardening actor_list gives the same field - a bare
+        // truncate left newlines, angle brackets and invisible-Unicode intact.
+        title: safeTitle(t.title),
+        active: t.active,
+        url: originOfUrl(t.url),
+      }];
+    });
   } catch (e) {
     return { ok: false, error: `tabs query failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
   }
@@ -132,9 +123,7 @@ const inspectSessionAccess = async (_args, ctx) => {
     ok: true,
     content: serializeListResult({
       accessibleTabs: tabs.length,
-      // why: the denylist is the only origin restriction that exists — say so
-      // here so the model never invents a tighter scope.
-      scopeRule: 'Every tab is in scope. The denylist is the only floor.',
+      scopeRule: 'Private-network, cloud-metadata, and denylisted tabs are outside browser automation scope.',
       tabs,
     }, 'tabs'),
   };
@@ -155,7 +144,7 @@ const inspectDenylist = (args, ctx) => {
         totalPatterns: patterns.length,
         interpretation: match
           ? `'${args.domain}' is on the denylist via pattern '${match}'. peerd will refuse any tool call that touches this origin.`
-          : `'${args.domain}' is NOT on the denylist. The agent may act on it — the denylist is the only origin restriction.`,
+          : `'${args.domain}' is NOT on the denylist. Other browser, network, and origin-scope policies still apply.`,
       }, null, 2),
     };
   }

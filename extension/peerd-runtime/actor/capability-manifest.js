@@ -48,7 +48,6 @@ export const CODE_CLIENT_MANIFESTS = Object.freeze({
     readState: { op: 'readState', signature: 'readState(selectorOrRef)', effect: 'read', tool: 'read_state', canonical: true, worker: "(target) => pageCall('readState', { target })" },
     watchChanges: { op: 'watchChanges', signature: 'watchChanges()', effect: 'read', tool: 'watch_changes', canonical: true, worker: "() => pageCall('watchChanges', {})" },
     query: { op: 'query', signature: 'query(selector, options?)', effect: 'read', tool: 'query_dom', canonical: true, worker: "(selector, options) => pageCall('query', { selector, options })" },
-    keys: { op: 'keys', signature: 'keys(sequence)', effect: 'write', tool: 'page_keys', canonical: true, worker: "(sequence) => pageCall('keys', { sequence })" },
     readPdf: { op: 'readPdf', signature: 'readPdf(options?)', effect: 'read', tool: 'read_pdf', canonical: true, worker: "(options) => pageCall('readPdf', { options })" },
     view: { op: 'view', signature: 'view()', effect: 'read', tool: 'view', canonical: true, worker: "() => pageCall('view', {})" },
     fetch: { op: 'fetch', signature: 'fetch(url, options?)', effect: 'read', tool: 'fetch_url', canonical: true, worker: "(url, options) => pageCall('fetch', { url, options })" },
@@ -254,7 +253,7 @@ const ENGINE_TOOLS = Object.freeze({
 
 export const WEB_ACTOR_DOM_TOOL_NAMES = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes', 'click', 'type',
-  'navigate', 'query_dom', 'page_keys', 'read_pdf', 'view',
+  'navigate', 'query_dom', 'read_pdf', 'view',
 ]);
 
 // The tools represented inside one `page_code` run. Contributor Metrics uses

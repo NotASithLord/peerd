@@ -185,7 +185,8 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-18: the API actor is the same origin actor with NO tab (fetch-only) — its
 // origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {
-  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT, fenceWebActorSummary,
+  makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT,
+  safeWebActorSummaryOrigin, fenceWebActorSummary,
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
   // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a
   // tab. Distinct from the bare-origin API handle on purpose: that one is
@@ -218,7 +219,7 @@ export { describeLandingStop, originPhrase } from './actor/origin-lock-report.js
 export {
   normalizeSiteOrigin, validateDossier, buildClientWriteProposal,
   stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
-  createSiteClientStore, digestCapture, redactHeaders,
+  createSiteClientStore, digestCapture, redactHeaders, shapeSketch,
 } from './site-clients/index.js';
 // design js-superpower/06: the toolbox — durable agent-authored ES modules
 // imported as peerd:toolbox/<name> from the own-compute lanes. Pure core
@@ -439,6 +440,14 @@ export {
   installFetchTapInjected,
   drainFetchTapInjected,
 } from './dom/index.js';
+// Browser target classification and the location-only document probe are also
+// used by the background-owned activity overlay before it injects UI.
+export {
+  browserNetworkGuardUnavailableResult,
+  classifyBrowserAutomationTarget,
+  isAddressableBrowserTab,
+} from './tools/browser-automation-policy.js';
+export { isDenylistedTab, liveDocumentLocationInjected } from './tools/defs/dom-helpers.js';
 
 // --- lifecycle (the interruption/recovery contract's functional core) ---
 // Canonical operation states + the retry-class recovery decision, SW/actor

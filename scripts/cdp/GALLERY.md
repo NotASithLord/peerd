@@ -1,6 +1,6 @@
 # peerd — visual gallery
 
-**23 states · 46 screens · baselines `linux-x64`**
+**24 states · 48 screens · baselines `linux-x64`**
 
 Every screen below is the live UI rendered through the E2E harness at a pinned
 Chrome build and viewport — the exact images the visual-regression gate compares
@@ -133,7 +133,15 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/mic-permission.light.png" alt="mic-permission (light)" width="380"> | <img src="baselines/linux-x64/mic-permission.dark.png" alt="mic-permission (dark)" width="380"> |
 
-### 16 · notebook-tab-failed
+### 16 · narrow-sidebar
+
+`narrow-sidebar`
+
+| light | dark |
+| --- | --- |
+| <img src="baselines/linux-x64/narrow-sidebar.light.png" alt="narrow-sidebar (light)" width="380"> | <img src="baselines/linux-x64/narrow-sidebar.dark.png" alt="narrow-sidebar (dark)" width="380"> |
+
+### 17 · notebook-tab-failed
 
 `notebook-tab-failed`
 
@@ -141,7 +149,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/notebook-tab-failed.light.png" alt="notebook-tab-failed (light)" width="380"> | <img src="baselines/linux-x64/notebook-tab-failed.dark.png" alt="notebook-tab-failed (dark)" width="380"> |
 
-### 17 · options-behavior
+### 18 · options-behavior
 
 `options-behavior`
 
@@ -149,7 +157,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-behavior.light.png" alt="options-behavior (light)" width="380"> | <img src="baselines/linux-x64/options-behavior.dark.png" alt="options-behavior (dark)" width="380"> |
 
-### 18 · options-contributor-metrics
+### 19 · options-contributor-metrics
 
 `options-contributor-metrics`
 
@@ -157,7 +165,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-contributor-metrics.light.png" alt="options-contributor-metrics (light)" width="380"> | <img src="baselines/linux-x64/options-contributor-metrics.dark.png" alt="options-contributor-metrics (dark)" width="380"> |
 
-### 19 · options-denylist
+### 20 · options-denylist
 
 `options-denylist`
 
@@ -165,7 +173,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-denylist.light.png" alt="options-denylist (light)" width="380"> | <img src="baselines/linux-x64/options-denylist.dark.png" alt="options-denylist (dark)" width="380"> |
 
-### 20 · options-dweb-stop-failed
+### 21 · options-dweb-stop-failed
 
 `options-dweb-stop-failed`
 
@@ -173,7 +181,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-dweb-stop-failed.light.png" alt="options-dweb-stop-failed (light)" width="380"> | <img src="baselines/linux-x64/options-dweb-stop-failed.dark.png" alt="options-dweb-stop-failed (dark)" width="380"> |
 
-### 21 · options-transfer
+### 22 · options-transfer
 
 `options-transfer`
 
@@ -181,7 +189,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer.light.png" alt="options-transfer (light)" width="380"> | <img src="baselines/linux-x64/options-transfer.dark.png" alt="options-transfer (dark)" width="380"> |
 
-### 22 · options-transfer-conflict
+### 23 · options-transfer-conflict
 
 `options-transfer-conflict`
 
@@ -189,7 +197,7 @@ against.
 | --- | --- |
 | <img src="baselines/linux-x64/options-transfer-conflict.light.png" alt="options-transfer-conflict (light)" width="380"> | <img src="baselines/linux-x64/options-transfer-conflict.dark.png" alt="options-transfer-conflict (dark)" width="380"> |
 
-### 23 · vm-tab-failed
+### 24 · vm-tab-failed
 
 `vm-tab-failed`
 

@@ -14,7 +14,7 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { disarmMarkup } from '../../dom/cdr.js';
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 
 // Content mode shares fetch_url's body budget — one read costs like one fetch.
@@ -72,7 +72,7 @@ export const readPageTool = {
         /** @type {any} */ (ctx).webOffscreenClient);
       if (webClient?.extractMarkdown) {
         try {
-          const grabbed = (await scripting.executeScript({ target: { tabId: tab.id }, func: readOuterHtmlInjected }))[0]?.result;
+          const grabbed = (await scripting.executeScript({ target: scriptingTarget(tab), func: readOuterHtmlInjected }))[0]?.result;
           if (grabbed?.html) {
             // CDR (dom/cdr.js) on the way in AND on the way out. In: the grabbed
             // DOM is page markup, so the MARKUP sweep (comments too) applies.
@@ -131,7 +131,7 @@ export const readPageTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: readPageInjected,
       });
       scriptResult = results[0]?.result;

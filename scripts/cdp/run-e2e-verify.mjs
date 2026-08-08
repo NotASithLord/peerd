@@ -62,8 +62,8 @@ const makeRecorder = (ctx, state) => {
       screenshots.push({ label, path: relative(ROOT, file) });
       return png;
     },
-    async shotPage(label, page) {
-      const png = await capturePage(page);
+    async shotPage(label, page, options) {
+      const png = await capturePage(page, options);
       const file = join(ARTIFACTS, `${state.name}-${label}.png`);
       writeFileSync(file, png);
       screenshots.push({ label, path: relative(ROOT, file) });

@@ -121,6 +121,8 @@ describe('Contributor Metrics human UI', () => {
       await settle();
       const feedback = /** @type {HTMLElement} */ (root.querySelector('.task-feedback'));
       expect(feedback).toBeTruthy();
+      expect(feedback.getAttribute('role')).toBe('group');
+      expect(feedback.getAttribute('aria-label')).toBe('Was this response useful?');
       expect(feedback.querySelector('input')).toBe(null);
       expect(feedback.querySelector('textarea')).toBe(null);
       button(feedback, 'worked').click();

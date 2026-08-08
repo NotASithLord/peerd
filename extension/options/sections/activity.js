@@ -51,6 +51,12 @@ const EVENT_META = {
   origin_learned_sensitive:   { label: 'site treated as yours',  level: 'info' },
   origin_unlearned_sensitive: { label: 'site no longer yours',   level: 'warn' },
   actor_origin_stop:          { label: 'web helper stopped',     level: 'warn' },
+  browser_child_navigation_blocked:
+                              { label: 'protected child navigation blocked', level: 'warn' },
+  browser_child_navigation_failed:
+                              { label: 'child navigation control failed', level: 'warn' },
+  browser_child_navigation_unverified:
+                              { label: 'child destination not verified', level: 'warn' },
   // dweb (preview-only) — the high-signal, user-facing events. Internal
   // mesh/gossip diagnostics carry the dweb_ prefix too and fall back to a
   // raw-label/info row (the `?? { label: e.type, level: 'info' }` below).
@@ -73,6 +79,48 @@ const fmtTime = (ms) => {
   catch { return String(ms); }
 };
 
+/** @param {unknown} raw */
+const browserPolicyDetail = (raw) => {
+  const policy = /** @type {any} */ (raw);
+  if (!policy || typeof policy !== 'object') return [];
+  const reasonLabels = /** @type {Record<string, string>} */ ({
+    private_network: 'private network blocked',
+    cloud_metadata: 'cloud metadata blocked',
+    sensitive_site: 'sensitive site blocked',
+    unverified_target: 'document could not be verified',
+    network_guard_unavailable: 'network guard unavailable',
+    network_guard_unsupported: 'network guard unsupported',
+    network_guard_install_failed: 'network guard failed',
+    invalid_url: 'invalid address',
+    unsupported_scheme: 'unsupported address type',
+    child_guard_failed: 'child network guard failed',
+    child_resume_failed: 'child navigation failed',
+    child_destination_unverified: 'child destination not verified',
+  });
+  const outcomeLabels = /** @type {Record<string, string>} */ ({
+    not_run: 'not run',
+    unverified: 'outcome not verified',
+    page_loaded_not_automated: 'page loaded, not automated',
+  });
+  const reason = typeof policy.reason === 'string' ? reasonLabels[policy.reason] : undefined;
+  const outcome = typeof policy.outcome === 'string' ? outcomeLabels[policy.outcome] : undefined;
+  const bits = [];
+  if (reason) bits.push(reason);
+  if (policy.stage === 'pre_navigation') bits.push('stopped before navigation');
+  if (policy.stage === 'committed_origin') bits.push('stopped after navigation');
+  if (outcome) bits.push(outcome);
+  if (policy.child === 'closed') bits.push('child closed');
+  if (policy.child === 'left_blank') bits.push('child left blank');
+  if (policy.child === 'uncontained') bits.push('child control not confirmed');
+  if (policy.guarded === true) bits.push('network guard active');
+  if (policy.guarded === false) bits.push('network guard not confirmed');
+  if (policy.neutralized === true) bits.push('tab reset');
+  if (policy.neutralized === false) bits.push('tab reset not confirmed');
+  if (policy.retryable === false) bits.push('do not retry');
+  if (policy.retryable === true) bits.push('retry available');
+  return bits;
+};
+
 /** @param {AuditEntry} entry */
 const detailLine = (entry) => {
   const d = entry.details;
@@ -90,6 +138,7 @@ const detailLine = (entry) => {
   if (d.reason) bits.push(d.reason);
   if (d.provider) bits.push(d.provider);
   if (d.primitive) bits.push(d.primitive);
+  bits.push(...browserPolicyDetail(d.browserPolicy));
   if (d.answer) bits.push(`answer=${d.answer}`);
   if (d.pattern) bits.push(d.pattern);
   // why: denylist events flag seed provenance — disabling built-in

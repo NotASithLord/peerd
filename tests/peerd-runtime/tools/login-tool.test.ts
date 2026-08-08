@@ -10,6 +10,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { loginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 interface Over {
   descriptor?: Record<string, unknown>;
@@ -45,7 +46,8 @@ const makeCtx = (over: Over = {}) => {
         // those are judged against the live resolved tab. It reads nothing back
         // into the turn and drives nothing, so it is not "page-driving" in the
         // sense the counts below pin.
-        if (fn === 'hasPasswordFieldInjected') return [{ result: { has: false, origin, href: `${origin}/login` } }];
+        const probe = browserProbeResult(opts, { url: `${origin}/login` });
+        if (probe) return probe;
         calls.execute.push(opts);
         if (fn === 'loginTargetReader') {
           return [{ result: over.readerResult ?? { ok: true, descriptor: over.descriptor ?? { tag: 'button', name: 'x' } } }];
@@ -200,6 +202,14 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
       denylist: [],
       scripting: {
         executeScript: async (opts: any) => {
+          const url = getCount <= 1
+            ? 'https://acct.example.com/login'
+            : 'https://evil.example.com/login';
+          const probe = browserProbeResult(opts, {
+            url,
+            documentId: getCount <= 1 ? 'login-before' : 'login-after',
+          });
+          if (probe) return probe;
           if (opts?.func?.name === 'loginTargetReader') return [{ result: { ok: true, descriptor: verifiedSsoDescriptor } }];
           if (opts?.func?.name === 'clickInjected') { calls.click += 1; return [{ result: { ok: true } }]; }
           return [{ result: null }];
@@ -226,6 +236,8 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
       denylist: [],
       scripting: {
         executeScript: async (opts: any) => {
+          const probe = browserProbeResult(opts, { url: 'https://acct.example.com/login' });
+          if (probe) return probe;
           if (opts?.func?.name === 'loginTargetReader') {
             readCount += 1;
             // 1st read: verified Google. 2nd (post-confirm) read: the node was swapped

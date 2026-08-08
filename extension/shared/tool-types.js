@@ -111,11 +111,14 @@
  * @property {any} [content]  optional human-readable explanation authored
  *   alongside the machine `error` code (e.g. "User declined the outbound
  *   write."); the loop surfaces it on the failure path — see agent-loop.js.
- * @property {'transport-lost' | 'host-lost' | 'pre-effect-failure'} [outcomeKind]
+ * @property {'transport-lost' | 'host-lost' | 'pre-effect-failure' | 'effect-completed'} [outcomeKind]
  *   typed failure outcome for the lifecycle recovery contract
  *   (peerd-runtime/lifecycle/failure-taxonomy.js): a tool that KNOWS how it
  *   failed stamps this so the recovery decision is deterministic instead of
  *   string-matched. Optional — unstamped failures take the heuristic path.
+ * @property {any} [structured] optional host-side policy or recovery details;
+ *   a tool that needs model-visible structure must serialize a safe compact
+ *   form into `content` as well
  * @property {ToolMeta} [meta]
  * @property {string} [actorDeliveryId] internal durable mailbox correlation;
  *   never serialized to a provider.

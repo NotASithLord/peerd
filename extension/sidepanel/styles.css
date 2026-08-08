@@ -896,6 +896,15 @@ button.linklike:hover { color: var(--fg); }
 
 /* --- top bar actions --- */
 .topbar-actions { display: flex; gap: 6px; }
+@media (max-width: 420px) {
+  .topbar { gap: 4px; padding-inline: 8px; }
+  .topbar-actions { gap: 4px; }
+}
+@media (max-width: 397px) {
+  .topbar { flex-wrap: wrap; }
+  .topbar > .spacer { display: none; }
+  .topbar-actions { flex: 1 0 100%; justify-content: space-between; }
+}
 button.icon {
   display: inline-flex;
   align-items: center;
@@ -1337,6 +1346,16 @@ button.tool-call-header:focus-visible {
 }
 
 .tool-name { font-weight: 600; color: var(--fg); flex-shrink: 0; }
+.policy-kind-chip {
+  flex-shrink: 0;
+  color: var(--danger-ink);
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
 .tool-args {
   color: var(--fg-muted);
   white-space: nowrap;
@@ -2251,6 +2270,19 @@ button.tool-call-header:focus-visible {
 
 /* Plan/Act selector row above the input bar */
 .chat-mode-row { display: flex; align-items: center; padding: 4px 0 0; }
+.chat-mode-row .planact-mode,
+.chat-mode-row .planact-confirm,
+.chat-mode-row .effort-dial,
+.chat-mode-row .goal-toggle {
+  min-height: 28px;
+  box-sizing: border-box;
+}
+@media (max-width: 370px) {
+  .chat-mode-row { flex-wrap: wrap; column-gap: 6px; row-gap: 6px; }
+  .chat-mode-row .planact { flex: 0 0 100%; margin-right: 0; }
+  .chat-mode-row .goal-toggle { margin-left: 0; }
+  .chat-mode-row > .spacer { flex: 1 1 0; min-width: 0; }
+}
 
 /* --- Memory pane (Context tab) ---------------------------------------- */
 .memory-pane { display: flex; flex-direction: column; gap: 10px; }
@@ -2435,28 +2467,43 @@ button.tool-call-header:focus-visible {
   padding: 3px 6px;
   font-size: 11.5px;
   color: var(--fg-muted);
-  opacity: 0.72;
 }
 .agent-tab-notice-icon { flex: none; opacity: 0.7; }
+.agent-tab-notice-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
 .agent-tab-notice-text {
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .agent-tab-notice-label { color: var(--fg); }
-/* The "Go" affordance wears the peerd accent (cyan) — square, word, and arrow —
-   so it reads as the obvious thing to click, even on the muted notice. */
+.agent-tab-notice-detail {
+  color: var(--fg);
+  font-size: 10.5px;
+  line-height: 1.3;
+  white-space: normal;
+}
+/* The Go affordance stays monochrome so its small text and border remain clear
+   in both themes. The hit target is large enough for touch and motor access. */
 .agent-tab-notice-go {
   flex: none;
-  background: none;
-  border: 1px solid rgba(0, 183, 235, 0.5);
+  min-width: 44px;
+  min-height: 44px;
+  background: var(--elev);
+  border: 1px solid var(--fg);
   border-radius: 6px;
-  color: var(--accent);
+  color: var(--fg);
   font: inherit; font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
   white-space: nowrap;
 }
-.agent-tab-notice-go:hover { border-color: var(--accent); background: rgba(0, 183, 235, 0.12); }
+.agent-tab-notice-go:hover { background: var(--elev2); }
+.agent-tab-notice-go:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 /* Current turn: a quiet elevated chip with a one-shot entrance — the surface
    stays monochrome (only the Go button carries the accent). Mutes to the row
    above once the user speaks again (the --fresh class drops). */
@@ -2608,7 +2655,9 @@ button.tool-call-header:focus-visible {
 .contributor-metrics { display: flex; flex-direction: column; gap: 10px; }
 .contributor-disclosure h3,
 .contributor-preview h3 { margin: 0 0 8px; font-size: 14px; }
+.contributor-disclosure h4 { margin: 10px 0 4px; font-size: 13px; }
 .contributor-disclosure p { margin: 0 0 9px; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
+.contributor-disclosure ul { margin: 0 0 9px; padding-left: 20px; color: var(--fg-muted); font-size: 13px; line-height: 1.45; }
 .contributor-disclosure p:last-child { margin-bottom: 0; }
 .contributor-actions { margin-top: 12px; }
 .contributor-preview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -2746,6 +2795,11 @@ button.tool-call-header:focus-visible {
 .path-card:disabled {
   filter: grayscale(1) opacity(0.5);
   cursor: not-allowed;
+}
+.path-card.path-card--protected:disabled {
+  opacity: 1;
+  filter: none;
+  cursor: default;
 }
 .path-card:disabled:hover { background: var(--elev); }
 /* Per-tile cascade = 90ms. Step 1 (container) starts at 40ms + i*90ms. */

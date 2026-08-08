@@ -131,7 +131,7 @@ describe('inspect kind:audit_log', () => {
 });
 
 describe('inspect kind:session_access', () => {
-  it('returns accessible tabs with origin + redacted URL', async () => {
+  it('returns accessible tabs with origin-only URLs', async () => {
     const ctx = baseCtx({
       tabs: { query: async () => [
         { id: 1, url: 'https://github.com/foo/bar?ref=token', title: 'GitHub', active: true },
@@ -142,8 +142,8 @@ describe('inspect kind:session_access', () => {
     const parsed = JSON.parse(okContent(r));
     expect(parsed.accessibleTabs).toBe(2);
     expect(parsed.tabs[0].origin).toBe('https://github.com');
-    // Query string redacted.
-    expect(parsed.tabs[0].url.endsWith('?…')).toBe(true);
+    expect(parsed.tabs[0].url).toBe('https://github.com');
+    expect(okContent(r).includes('token')).toBe(false);
   });
 
   it('truncates long tab titles', async () => {

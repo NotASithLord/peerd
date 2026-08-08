@@ -137,9 +137,13 @@ const DETERMINISM_FLAGS = Object.freeze([
 
 // A side-panel-shaped frame. why: with no override, headless Chrome captured at
 // 756x413 — a landscape letterbox the side panel never has in production. The
-// panel stylesheet has NO width media queries, so the capture width IS the
-// design under test; pin it so every machine composes the same layout.
+// normal 400px capture remains the broad sidebar authority; the explicit
+// narrow metrics below exercise the intentional Firefox-width breakpoints.
 export const PANEL_METRICS = Object.freeze({ width: 400, height: 900, deviceScaleFactor: 1, mobile: false });
+// Firefox's installed sidebar screenshot has a 282px content column. The panel
+// viewport is 310px; .body contributes 14px padding on each side. Keep this as
+// the single narrow-width authority shared by the visual states.
+export const NARROW_PANEL_METRICS = Object.freeze({ width: 310, height: 900, deviceScaleFactor: 1, mobile: false });
 
 const STABLE_STYLE_ID = 'e2e-visual-stable';
 
@@ -227,10 +231,11 @@ export const WIDE_METRICS = Object.freeze({ width: 1280, height: 900, deviceScal
  *     sub-pixel translateZ toggle on the root (invisible in 2D, verified 0.00000
  *     diff) keeps frames flowing until the capture resolves.
  * @param {{ send: (m: string, p?: object) => Promise<any> }} page
+ * @param {{ bringToFront?: boolean }} [options]
  * @returns {Promise<Buffer>}
  */
-export async function capturePage(page) {
-  await page.send('Page.bringToFront').catch(() => {});
+export async function capturePage(page, { bringToFront = true } = {}) {
+  if (bringToFront) await page.send('Page.bringToFront').catch(() => {});
   let pumping = true;
   let toggle = false;
   const pump = (async () => {
@@ -404,6 +409,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
 
   const chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
+    // Browser-policy fixtures need public-looking names while their local HTTP
+    // servers stay deterministic and offline. Reserved .test names preserve the
+    // documented DNS-resolution residual without weakening localhost coverage.
+    '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1',
     '--disable-gpu', '--no-sandbox',
     ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,

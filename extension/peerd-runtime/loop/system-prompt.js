@@ -214,6 +214,18 @@ const activeTabBlock = ({ url, title }) => [
   '</active_tab>',
 ].join('\n');
 
+/** @param {'private_network'|'sensitive_site'} reason */
+const protectedTabBlock = (reason) => [
+  '<protected_tab>',
+  reason === 'private_network'
+    ? 'The foreground tab is a private-network page protected by host policy.'
+    : 'The foreground tab is a sensitive site protected by the user denylist.',
+  'Its address and contents were not provided. Do not claim to read, summarize,',
+  'or automate it. Ask the user to handle it directly or switch to a public,',
+  'non-sensitive page.',
+  '</protected_tab>',
+].join('\n');
+
 /**
  * Build the per-turn EPHEMERAL context message — the wall-clock + active-tab
  * bytes that used to live INSIDE the cached system block and busted its prompt
@@ -237,15 +249,20 @@ const activeTabBlock = ({ url, title }) => [
  * @param {string} [args.temporalBlock]  the <time>…</time> block (clock/context.js)
  * @param {{ url: string, title?: string } | null} [args.activeTab]
  *   The foreground web tab, or null on home / non-web tabs.
+ * @param {'private_network'|'sensitive_site'|null} [args.protectedTab]
+ *   Policy-only foreground status. Carries no address or page content.
  * @returns {string} the <context>…</context> body, or '' when there is nothing
  *   volatile to send (so the caller can skip injecting an empty message).
  */
-export const buildTemporalContext = ({ temporalBlock, activeTab } = {}) => {
+export const buildTemporalContext = ({ temporalBlock, activeTab, protectedTab } = {}) => {
   /** @type {string[]} */
   const parts = [];
   if (typeof temporalBlock === 'string' && temporalBlock.length > 0) parts.push(temporalBlock);
   if (activeTab && typeof activeTab.url === 'string' && activeTab.url.length > 0) {
     parts.push(activeTabBlock(activeTab));
+  }
+  if (protectedTab === 'private_network' || protectedTab === 'sensitive_site') {
+    parts.push(protectedTabBlock(protectedTab));
   }
   if (parts.length === 0) return '';
   return ['<context>', ...parts, '</context>'].join('\n');

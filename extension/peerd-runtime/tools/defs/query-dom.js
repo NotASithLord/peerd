@@ -23,7 +23,7 @@
 // loop the field test kept hitting.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const queryDomTool = {
@@ -79,7 +79,7 @@ export const queryDomTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: queryDomInjected,
         args: [args.selector, limit, includeHidden],
       });

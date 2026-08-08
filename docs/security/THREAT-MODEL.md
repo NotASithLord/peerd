@@ -334,7 +334,36 @@ internal-use on real deployments — before any network call, ahead of the denyl
 and fails closed on redirects so a public host cannot pivot to an internal one. The same
 redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.js`,
 `redirect:'manual'`), which previously validated only the pre-redirect host.
-Code: `peerd-egress/fetch/private-network.js`, `fetch/web-fetch.js`,
+Browser automation applies the same lexical classifier before navigation and
+to the committed document. Driven tabs also receive tab-scoped DNR rules for
+private hosts and address ranges, covering redirects, forms, frames, and
+tab-associated requests at the browser network layer. A page-created child is
+blanked and guarded only when `webNavigation` reports that its exact source tab
+is already under peerd custody. Firefox also synchronously cancels private,
+local, metadata, or denylisted HTTP and WebSocket requests from that exact child
+while its tab-scoped DNR rules are being installed, then releases the temporary
+listener state for that child. It does not read request bodies or act on children
+from user-owned tabs. If actor custody restores before denylist hydration, that
+exact child waits instead of treating an empty policy as permission. A protected
+child is closed after the network guard takes custody. A missing or malformed
+bundled denylist pauses tool dispatch instead of authorizing an empty policy for
+browser or open-web work. The rules never apply to tabs peerd is not driving. Requests the
+browser attributes
+to no tab, including service-worker fetches, remain outside this tab-scoped
+backstop. During a service-worker restart, early adoption requires two positive
+signals for the exact source: restored durable custody or a restored web-actor
+binding, plus the complete surviving private-network DNR rule set.
+`background/startup-popup-network-guard.js` copies only those known block rules
+to the exact child, then hands it to the restored custody set. If either signal
+is absent, peerd leaves the child unchanged until its registries finish loading.
+This avoids interfering with a user popup, but leaves a short cold-start window
+for an autonomous child if the browser lost its session rules while peerd's
+later registry restore still identifies the source as driven. DNS resolution
+and rebinding also remain outside this client-side lexical boundary.
+Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
+`peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
+`background/driven-child-request-guard.js`, `background/startup-popup-network-guard.js`,
+`peerd-runtime/tools/browser-automation-policy.js`, and
 `offscreen/pdf-extract.js`. Red-team: scenario 07.
 
 <a id="inv-8"></a>
@@ -536,6 +565,31 @@ IndexedDB — the handle survives a genuine structured-clone store→evict→loa
 still non-extractable, still `exportKey`-rejecting, and still signing a proof that
 verifies against its persisted public key; the Bun tier can only prove this over a
 `Map`, which never crosses the clone boundary).
+
+<a id="inv-16"></a>
+### INV-16. Local Contributor Metrics cannot collect or transmit without consent
+Contributor Metrics is a closed local accumulator, not an event bus. Before current
+versioned consent, its turn and feedback recorders are inert and create no storage
+record. Only the exact Options document may enable, disable, or clear consent. Only
+the exact side panel and Home chat surfaces may submit binary feedback, and the
+background re-derives the final human turn and cohort instead of accepting them from
+the page.
+
+The schema accepts reviewed enums, bounded counters, and named histogram buckets.
+Unknown keys fail closed. Unknown provider and model strings collapse to `custom`, so
+a caller cannot encode a URL, prompt, identifier, or other content in a cohort field.
+Restart-safe operation and feedback tokens are consent-rotated, bounded, local-only,
+and absent from the canonical payload bytes shown in Settings. Disabling deletes the
+consent, aggregate, tokens, and pending feedback in one storage key.
+
+This stage has no uploader, endpoint, alarm, collector origin, or network primitive.
+Store and web channels register no Contributor Metrics routes or UI. A later uploader
+is a separate security boundary and cannot inherit consent if the disclosure version
+changes.
+Code: `peerd-runtime/observability/contributor-metrics.js`,
+`peerd-runtime/observability/contributor-store.js`,
+`background/routes/contributor-metrics.js`, and
+`options/sections/contributor-metrics.js`. Red-team: scenario 12.
 
 ### Additional invariants (not scenario-gated, enforced in code)
 
@@ -764,8 +818,8 @@ evaluating peerd should know. Each cites where it lives in the code.
   sites lists what was inferred and removes it (#262), and the signal is credited to
   the origin the probe REPORTS rather than to the caller's tab record, so a page that
   navigates mid-call cannot spend it on someone else (#278). Detecting credentials
-  directly would need the `cookies` permission, which is not requested for the same
-  reason `webNavigation` is not.
+  directly would need the `cookies` permission, which is not requested because it
+  would expose browser-wide credential state.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,

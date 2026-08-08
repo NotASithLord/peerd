@@ -158,13 +158,20 @@ describe('runActorLoop', () => {
 });
 
 describe('makeActorSummaryFence', () => {
-  test('a tab web actor fences its summary as untrusted, tagged with the tab url', () => {
-    const fence = makeActorSummaryFence({ actorType: 'web', tabUrl: 'https://example.com/page' });
+  test('a tab web actor fences its summary as untrusted, tagged only with the sanitized origin', () => {
+    const fence = makeActorSummaryFence({ actorType: 'web', tabOrigin: 'https://example.com' });
     expect(typeof fence).toBe('function');
     const wrapped = fence!('did three steps on the page');
     // the BODY is present and the envelope is an untrusted-data wrap (not a command)
     expect(wrapped).toContain('did three steps on the page');
     expect(wrapped).toContain('example.com');
+  });
+
+  test('an offscreen tab actor with restricted provenance carries no tab location', () => {
+    const fence = makeActorSummaryFence({ actorType: 'web', tabOrigin: undefined });
+    const wrapped = fence!('private page summary');
+    expect(wrapped).toContain('origin="web-actor"');
+    expect(wrapped).not.toContain('127.0.0.1');
   });
 
   test('an API actor fences with its FIXED owned origin', () => {

@@ -19,7 +19,7 @@
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
-import { captureSnapshot, signalIsAttributable, describeSource, diffSnapshots } from '../../dom/index.js';
+import { captureSnapshot, describeSource, diffSnapshots } from '../../dom/index.js';
 
 /** @typedef {import('../../dom/snapshot-diff.js').SnapRef} SnapRef */
 /**
@@ -74,7 +74,7 @@ export const snapshotTool = {
     // (Firefox, or Chrome with advanced automation off). Same serializer,
     // same ref contract — the header below names the channel.
     const cap = await captureSnapshot(tab, ctx, { budget });
-    if (!cap.ok) return { ok: false, error: cap.error };
+    if (!cap.ok) return cap.refusal ?? { ok: false, error: cap.error };
     const { text, truncated, capped, refCount, source } = cap;
     // why: captureSnapshot types refs loosely as object[]; the serializer
     // emits the SnapRef shape the registry + differ expect — restate it.
@@ -82,27 +82,6 @@ export const snapshotTool = {
     // Register the refs so a later click/type({ref}) on this tab resolves them.
     domRefs?.setSnapshot?.(tab.id, refs);
     const origin = originOfUrl(tab.url);
-    // issue 251 — LEARN, don't tell. A password field on this page means the
-    // site has accounts, which is what decides whether a roaming actor may be
-    // here at all. It goes to the origin classifier and NOWHERE near the
-    // snapshot text: the model has no use for it and every reason not to know
-    // which origins peerd treats as the user's. Strictly `=== true`, because
-    // `null` from the capture means the probe could not run — unknown, not
-    // absent. Best-effort: a learning failure must never fail a snapshot.
-    //
-    // ATTRIBUTION. `origin` above comes from the tab record resolved BEFORE the
-    // capture; the probe runs after, in whatever document is committed by then.
-    // A page that navigates cross-origin inside that window would otherwise have
-    // its password field recorded against the origin we started on — letting a
-    // hostile page mark arbitrary third parties as "the user has an account
-    // here" (and, repeated, fill the 500-entry cap so nothing further is ever
-    // learned). So the probe reports where it ran, and a signal we cannot
-    // attribute is DROPPED: unknown, not absent, which is the same posture as
-    // the `=== true` check itself.
-    if (cap.hasPasswordField === true && signalIsAttributable(cap.probeOrigin, origin)) {
-      try { /** @type {any} */ (ctx).noteLearnedOrigin?.(origin, 'password-field'); }
-      catch { /* best-effort */ }
-    }
     // why: `capped` (DOM-walk node-count limit) is a DIFFERENT truncation
     // from `truncated` (char budget) — a capped tree stops mid-DOM, so the
     // model must not read a missing element as "absent". Surface it always.

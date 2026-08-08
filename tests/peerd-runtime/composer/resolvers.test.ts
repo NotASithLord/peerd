@@ -4,6 +4,7 @@ import {
   resolveTabRef, resolveFileRef, resolveAllRefs, originOfUrl,
 } from '../../../extension/peerd-runtime/composer/resolvers.js';
 import { parseRefs } from '../../../extension/peerd-runtime/composer/parse.js';
+import { browserProbeResult, TEST_DOCUMENT_ID } from '../../helpers/browser-scripting.ts';
 
 const DENY = ['*.chase.com', 'chase.com', '*.proton.me'];
 
@@ -84,28 +85,41 @@ describe('buildFilePayload — first-party file fence', () => {
 
 // ── resolveTabRef: orchestration over a mocked tab snapshot ────────────────
 
-const makeCtx = (over: any = {}) => ({
-  activeTab: { id: 1, url: 'https://example.com', origin: 'https://example.com' },
-  denylist: DENY,
-  tabs: {
-    get: async (id: number) => ({ id, url: over.tabUrl ?? 'https://example.com/page', title: 'T' }),
-    query: async () => [{ id: 1, url: over.tabUrl ?? 'https://example.com/page', title: 'T' }],
-  },
-  scripting: {
-    executeScript: async () => [{
-      result: { title: 'Doc', url: over.snapUrl ?? 'https://example.com/page', text: 'real DOM text' },
-    }],
-  },
-  appClient: {
-    readFile: async ({ path }: any) => `contents of ${path}`,
-  },
-  session: { sessionId: 's1' },
-  ...over.ctx,
-});
+const makeCtx = (over: any = {}) => {
+  const scriptingCalls: any[] = [];
+  const tabUrl = over.tabUrl ?? 'https://example.com/page';
+  const liveUrl = over.liveUrl ?? tabUrl;
+  return {
+    activeTab: { id: 1, url: 'https://example.com', origin: 'https://example.com' },
+    denylist: DENY,
+    tabs: {
+      get: async (id: number) => ({ id, url: tabUrl, title: 'T' }),
+      query: async () => [{ id: 1, url: tabUrl, title: 'T' }],
+    },
+    scripting: {
+      executeScript: async (request: any) => {
+        scriptingCalls.push(request);
+        const probe = browserProbeResult(request, { url: liveUrl });
+        if (probe) return probe;
+        return [{
+          documentId: TEST_DOCUMENT_ID,
+          result: { title: 'Doc', url: over.snapUrl ?? liveUrl, text: 'real DOM text' },
+        }];
+      },
+    },
+    appClient: {
+      readFile: async ({ path }: any) => `contents of ${path}`,
+    },
+    session: { sessionId: 's1' },
+    scriptingCalls,
+    ...over.ctx,
+  };
+};
 
 describe('resolveTabRef', () => {
   test('builds an untrusted-wrapped payload from the captured snapshot', async () => {
-    const r = await resolveTabRef({ arg: '' }, makeCtx());
+    const ctx = makeCtx();
+    const r = await resolveTabRef({ arg: '' }, ctx);
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.content).toContain('<untrusted_web_content');
@@ -113,6 +127,8 @@ describe('resolveTabRef', () => {
       expect(r.content).toContain('real DOM text');
       expect(r.origin).toBe('https://example.com');
     }
+    expect(ctx.scriptingCalls).toHaveLength(3);
+    expect(ctx.scriptingCalls[2].target).toEqual({ tabId: 1, documentIds: [TEST_DOCUMENT_ID] });
   });
 
   test('refuses a denylisted tab BEFORE capture', async () => {
@@ -127,6 +143,37 @@ describe('resolveTabRef', () => {
     const ctx = makeCtx({ tabUrl: 'https://example.com/go', snapUrl: 'https://secure.chase.com/x' });
     const r = await resolveTabRef({ arg: '' }, ctx);
     expect(r.ok).toBe(false);
+  });
+
+  test('refuses a direct private tab before any page script runs', async () => {
+    const privateUrl = 'http://127.0.0.1/admin?token=private-secret';
+    const ctx = makeCtx({ tabUrl: privateUrl });
+    const r = await resolveTabRef({ arg: '' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(ctx.scriptingCalls).toHaveLength(0);
+    if (!r.ok) {
+      expect(r.error).toContain('browser_private_network_blocked');
+      expect(r.error).not.toContain('/admin');
+      expect(r.error).not.toContain('token=');
+      expect(r.error).not.toContain('private-secret');
+    }
+  });
+
+  test('refuses a public tab record replaced by a private document before capture', async () => {
+    const ctx = makeCtx({
+      tabUrl: 'https://example.com/start',
+      liveUrl: 'http://192.168.1.20/admin?token=private-secret',
+    });
+    const r = await resolveTabRef({ arg: '' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(ctx.scriptingCalls).toHaveLength(1);
+    expect(ctx.scriptingCalls[0].target).toEqual({ tabId: 1 });
+    if (!r.ok) {
+      expect(r.error).toContain('browser_private_network_blocked');
+      expect(r.error).not.toContain('/admin');
+      expect(r.error).not.toContain('token=');
+      expect(r.error).not.toContain('private-secret');
+    }
   });
 });
 

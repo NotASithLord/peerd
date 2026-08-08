@@ -571,17 +571,30 @@ export const makeDispatchTracker = ({ operationLog, generationId, retryClassFor,
       return null;
     }
 
-    const kind = failureKind(outcome.error);
-    const cancelRequested = outcome.aborted === true || kind === 'aborted';
     // A TYPED outcome stamped at the throw site outranks every string
     // heuristic (failure-taxonomy.js): pre-effect-failure is definitive,
-    // transport/host loss is ambiguous, full stop. Unstamped failures
-    // fall back to the regex + taxonomy guesswork below.
+    // effect-completed is positive completion evidence, and transport/host
+    // loss is ambiguous. Unstamped failures fall back to the regex and
+    // taxonomy guesswork below.
     // VALIDATED first — outcomeKind can cross relay boundaries carrying
     // garbage; an unknown value falls back to the heuristics, never trusted.
     const typedKind = isFailureOutcomeKind(outcome.outcomeKind)
       ? outcome.outcomeKind
       : undefined;
+    if (typedKind === FAILURE_OUTCOMES.EFFECT_COMPLETED) {
+      // The operation completed, but its result is still a refusal. Preserve
+      // that refusal for the caller while settling the durable record from the
+      // positive evidence. This is the post-navigation policy-stop shape.
+      await operationLog.transition(operationId, OPERATION_STATES.COMPLETED, {
+        evidence: { kind: 'success-response' },
+      }).catch(() =>
+        operationLog.resolveUnknown(operationId, { kind: 'success-response' })
+          .catch(() => {}));
+      return null;
+    }
+
+    const kind = failureKind(outcome.error);
+    const cancelRequested = outcome.aborted === true || kind === 'aborted';
     // The burden of proof is INVERTED by class. For a DISPATCHED Class D/E
     // action, `failed` is a positive claim — "the effect did not occur" —
     // and only an explicit typed pre-effect-failure carries that proof. An

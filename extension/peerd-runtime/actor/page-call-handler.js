@@ -18,8 +18,8 @@
 import { pageCallToToolCall, shapePageResult } from './page-api.js';
 
 /**
- * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }> } | { ok: false, error: string }} PageCallOutcome
- * @typedef {{ ok?: boolean, error?: string, content?: string, images?: Array<{ data: string, mediaType: string }> }} ToolResult
+ * @typedef {{ ok: true, value: any, images?: Array<{ data: string, mediaType: string }>, browserPolicies?: any[] } | { ok: false, error: string, browserPolicies?: any[] }} PageCallOutcome
+ * @typedef {{ ok?: boolean, error?: string, content?: string, images?: Array<{ data: string, mediaType: string }>, structured?: Record<string, any> }} ToolResult
  */
 
 /**
@@ -111,6 +111,14 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
   }
   if (req.signal?.aborted) return { ok: false, error: 'page_call_aborted' };
 
+  const structured = result.structured && typeof result.structured === 'object'
+    ? result.structured
+    : {};
+  const browserPolicies = Array.isArray(structured.browserPolicies)
+    ? structured.browserPolicies
+    : structured.browserPolicy ? [structured.browserPolicy] : [];
+  const policyFields = browserPolicies.length ? { browserPolicies } : {};
+
   // Shape the result. A gated failure (denylist / confirm decline / count
   // mismatch) lands here as a thrown PageApiError → the worker's awaited page.*
   // call rejects, exactly like a real Playwright error.
@@ -119,9 +127,10 @@ export const makePageCallHandler = ({ dispatchToolCall, buildActorContext }) => 
       ok: true,
       value: shapePageResult(req.method, result),
       ...(Array.isArray(result.images) && result.images.length ? { images: result.images.slice(-1) } : {}),
+      ...policyFields,
     };
   } catch (e) {
-    return { ok: false, error: errMessage(e) };
+    return { ok: false, error: errMessage(e), ...policyFields };
   }
 };
 

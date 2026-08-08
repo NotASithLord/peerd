@@ -71,17 +71,20 @@ export const ContributorMetricsSection = {
       m('.provider-card.contributor-disclosure', [
         m('h3', 'Optional, content-free contribution'),
         m('p', 'peerd works fully without Contributor Metrics. Nothing is collected until you press Enable below.'),
-        m('p', [
-          'If enabled, peerd locally aggregates web-actor technical outcomes: requested and resolved code/tool mode, ',
-          'reviewed fallback and failure categories, coarse browser/version/channel, provider and known model family, bounded ',
-          'turn/action/duration/token counters, and optional worked/didn’t-work votes.',
+        m('h4', 'Included'),
+        m('ul', [
+          m('li', 'Requested and resolved code or tool mode, plus reviewed fallback and failure categories.'),
+          m('li', 'Browser, extension version, channel, provider, and known model family.'),
+          m('li', 'Bounded turn, action, duration, token, and optional worked or didn’t-work counts.'),
         ]),
-        m('p', [m('strong', 'Never included in the exact contribution payload: '),
-          'URLs, origins, hosts, page content, prompts, responses, selectors, search terms, form values, filenames, ',
-          'raw errors, session/message/tool/install identifiers, timestamps, credentials, free-text feedback, or a stable user/device id.']),
-        m('p', 'The local-only record also keeps a bounded set of consent-rotated opaque tokens for restart-safe deduplication and for associating a binary vote with its aggregate cohort. They contain no URL, origin, content, or raw session/message/tool identifier, never appear in the payload preview, and are deleted on Disable and clear.'),
-        m('p', 'This local groundwork is for a preview/dev-only first rollout. This build has no upload client, endpoint, alarm, or network path.'),
-        m('p', 'Disabling clears all local metrics, opaque tokens, and feedback. If a future upload is accepted, its aggregate server row has no identity that can link it back to you, so that row cannot be individually found or deleted. Any uploader still requires a separate transport, retention, and policy review plus this same current disclosure version; this build cannot send these bytes.'),
+        m('h4', 'Never included'),
+        m('ul', [
+          m('li', 'URLs, origins, hosts, page content, prompts, responses, selectors, search terms, form values, or filenames.'),
+          m('li', 'Raw errors, credentials, free text, timestamps, stable user or device IDs, or session, message, tool, and install IDs.'),
+        ]),
+        m('p', 'A bounded local record uses consent-rotated opaque tokens for restart-safe deduplication and binary-vote grouping. The tokens contain no content or raw identifier, never appear in the payload preview, and are deleted when you disable and clear metrics.'),
+        m('p', 'This local groundwork is limited to preview and dev. This build has no upload client, endpoint, alarm, or network path.'),
+        m('p', 'Disabling clears all local metrics, tokens, and feedback. A future accepted aggregate row would contain no identity, so it could not be linked back to you or individually deleted. Any uploader requires a separate transport, retention, and policy review and the current disclosure version.'),
       ]),
 
       m('.provider-card', [

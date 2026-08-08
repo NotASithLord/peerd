@@ -14,8 +14,10 @@
 import m from '/vendor/mithril/mithril.js';
 import browser from '/vendor/browser-polyfill.js';
 import { App } from './components/app.js';
-import { createVoiceManager } from '/peerd-runtime/index.js';
+import { classifyBrowserAutomationTarget, createVoiceManager } from '/peerd-runtime/index.js';
+import { findDenylistMatch } from '/peerd-egress/index.js';
 import { INITIAL_STATE, reduceChat, putSpawnedSession } from './chat-reducer.js';
+import { eventBelongsToSidepanelWindow, focusBrowserTab } from './tab-context.js';
 
 /** @typedef {import('./chat-reducer.js').ChatState} ChatState */
 /** @typedef {import('./chat-reducer.js').ReducerMsg} ReducerMsg */
@@ -253,13 +255,12 @@ const requestDebugger = async (noticeId) => {
   return ok;
 };
 
-// "Open ↗" on the agent-tab card: focus the agent's background tab. The side
-// panel is already open and window-global, so it just follows you there — focus
-// is all that's needed. The card persists (it tracks the live agent tab and
-// clears when that tab closes).
-/** @param {number} tabId */
-const openAgentTab = (tabId) => {
-  try { browser.tabs.update(tabId, { active: true }); } catch (e) { console.warn('[sidepanel] focus tab failed', e); }
+// "Open ↗" on the agent-tab card activates the tab and focuses its window.
+// The card persists until that live agent tab closes.
+/** @param {number} tabId @param {number|undefined} windowId */
+const openAgentTab = async (tabId, windowId) => {
+  const focused = await focusBrowserTab(browser, tabId, windowId);
+  if (!focused) console.warn('[sidepanel] focus tab failed');
 };
 const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab };
 
@@ -283,36 +284,105 @@ const FULLPAGE_URLS = (() => {
   } catch { return []; }
 })();
 let optionsActive = false;
-// Is the tab next to the panel a real, summarizable web page (an http(s) page,
-// not peerd's own home/options tab, a chrome:// page, or the new-tab page)? The
-// fresh-chat "Browse" starter uses this to offer "summarize the current page"
-// over the generic Hacker News demo — same active-tab read, so it rides the
-// same listeners below.
-let activeTabIsWeb = false;
-const refreshOptionsActive = async () => {
-  if (!FULLPAGE_URLS.length || !browser.tabs?.query) return;
+// The fresh-chat starter distinguishes a public page from a policy-protected
+// page without carrying its address into UI state. Unknown is intentionally not
+// summarizable: a failed denylist read must not advertise work the host may
+// refuse when the user clicks it.
+/** @typedef {'none'|'unknown'|'web'|'protected_private'|'protected_sensitive'} ActiveTabStatus */
+/** @type {ActiveTabStatus} */
+let activeTabStatus = 'none';
+let activeTabRefreshGeneration = 0;
+/** @type {number|null} */
+let sidepanelWindowId = null;
+const resolveSidepanelWindowId = async () => {
+  if (Number.isInteger(sidepanelWindowId)) return sidepanelWindowId;
   try {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    const current = await browser.windows?.getCurrent?.();
+    if (typeof current?.id === 'number' && Number.isInteger(current.id)) {
+      sidepanelWindowId = current.id;
+      return sidepanelWindowId;
+    }
+  } catch { /* fall through to the tab-scoped lookup */ }
+  try {
+    const current = (await browser.tabs.query({ active: true, currentWindow: true }))[0];
+    if (typeof current?.windowId === 'number' && Number.isInteger(current.windowId)) {
+      sidepanelWindowId = current.windowId;
+    }
+  } catch { /* the caller keeps the fail-safe unknown state */ }
+  return sidepanelWindowId;
+};
+/**
+ * @param {number|null} [preferredTabId]
+ * @param {number|null} [eventWindowId]
+ */
+const refreshOptionsActive = async (preferredTabId = null, eventWindowId = null) => {
+  if (!FULLPAGE_URLS.length || !browser.tabs?.query) return;
+  const windowId = await resolveSidepanelWindowId();
+  if (!eventBelongsToSidepanelWindow(windowId, eventWindowId)) return;
+  const generation = ++activeTabRefreshGeneration;
+  try {
+    const tab = typeof preferredTabId === 'number' && browser.tabs?.get
+      ? await browser.tabs.get(preferredTabId)
+      : (await browser.tabs.query(typeof windowId === 'number'
+        ? { active: true, windowId }
+        : { active: true, currentWindow: true }))[0];
+    if (Number.isInteger(windowId) && Number.isInteger(tab?.windowId)
+        && tab.windowId !== windowId) return;
     const url = tab?.url;
     const next = !!(url && FULLPAGE_URLS.some((u) => url.startsWith(u)));
-    const nextWeb = !!(url && /^https?:\/\//i.test(url));
-    if (next !== optionsActive || nextWeb !== activeTabIsWeb) {
-      optionsActive = next; activeTabIsWeb = nextWeb; m.redraw();
+    /** @type {ActiveTabStatus} */
+    let nextStatus = 'none';
+    if (url && /^https?:\/\//i.test(url)) {
+      const verdict = classifyBrowserAutomationTarget(url);
+      if (!verdict.allowed) {
+        nextStatus = verdict.reason === 'private_network' || verdict.reason === 'cloud_metadata'
+          ? 'protected_private'
+          : 'none';
+      } else {
+        nextStatus = 'unknown';
+        try {
+          const snapshot = await send({ type: 'denylist/list' });
+          if (snapshot?.ok && Array.isArray(snapshot.patterns)) {
+            const hostname = new URL(url).hostname;
+            nextStatus = findDenylistMatch(hostname, snapshot.patterns)
+              ? 'protected_sensitive'
+              : 'web';
+          }
+        } catch { /* keep the fail-safe unknown state */ }
+      }
     }
-  } catch { /* leave state as-is — fail-safe keeps the logo present */ }
+    // A tab switch can finish while the denylist request is in flight. Only the
+    // latest refresh may update what the starter offers.
+    if (generation !== activeTabRefreshGeneration) return;
+    if (next !== optionsActive || nextStatus !== activeTabStatus) {
+      optionsActive = next;
+      activeTabStatus = nextStatus;
+      // The harness hosts this surface in a tab, where switching foreground
+      // tabs can throttle animation-frame redraws. A synchronous redraw also
+      // keeps the real side panel's page-aware starter current immediately.
+      m.redraw.sync();
+    }
+  } catch {
+    if (generation === activeTabRefreshGeneration && activeTabStatus !== 'unknown') {
+      activeTabStatus = 'unknown';
+      m.redraw.sync();
+    }
+  }
 };
 if (browser.tabs?.onActivated) {
-  browser.tabs.onActivated.addListener(refreshOptionsActive);
-  browser.tabs.onRemoved?.addListener(refreshOptionsActive);
-  browser.tabs.onUpdated?.addListener((_id, info) => {
-    if (info && (info.url || info.status === 'complete')) refreshOptionsActive();
+  browser.tabs.onActivated.addListener((info) => refreshOptionsActive(info.tabId, info.windowId));
+  browser.tabs.onRemoved?.addListener((_tabId, info) => refreshOptionsActive(null, info?.windowId));
+  browser.tabs.onUpdated?.addListener((tabId, info, tab) => {
+    if (tab?.active && info && (info.url || info.status === 'complete')) {
+      refreshOptionsActive(tabId, tab.windowId);
+    }
   });
-  browser.windows?.onFocusChanged?.addListener(refreshOptionsActive);
+  browser.windows?.onFocusChanged?.addListener((windowId) => refreshOptionsActive(null, windowId));
   refreshOptionsActive();
 }
 
 /** @param {string} view */
-const routeArgs = (view) => ({ state: currentState, send, voiceManager, uiActions, view, optionsActive, activeTabIsWeb });
+const routeArgs = (view) => ({ state: currentState, send, voiceManager, uiActions, view, optionsActive, activeTabStatus });
 
 // First-run onboarding is NOT gated here — it lives on the HOME page as a
 // blocker (home.js needsOnboarding gate). The side panel is reached by popping

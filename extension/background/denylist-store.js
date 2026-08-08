@@ -14,6 +14,18 @@
 // SW (a bundled extension asset) and handed to load(); the overlay persists in
 // kv. Imports nothing (kv + normalizePattern injected), so it's Bun-importable.
 
+export class DenylistPolicyUnavailableError extends Error {
+  constructor() {
+    super('The sensitive-origin policy is unavailable. Tool execution is paused.');
+    this.name = 'DenylistPolicyUnavailableError';
+  }
+}
+
+/** @param {{ ok?: boolean } | null | undefined} status */
+export const requireDenylistPolicy = (status) => {
+  if (status?.ok !== true) throw new DenylistPolicyUnavailableError();
+};
+
 /**
  * @param {{
  *   kv: { get: (k: string) => Promise<any>, set: (k: string, v: any) => Promise<any> },

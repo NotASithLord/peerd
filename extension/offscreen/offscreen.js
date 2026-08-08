@@ -402,7 +402,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobAbort));
 // Runs a reasoning (tools:[]) OR bound-actor (VM/Notebook/App/web) loop in a dedicated
 // Worker (its own heap), relaying its model call — AND, for a tool-bearing actor, every
 // tool call — back to the SW (which holds the key and pins + gates + dispatches). Same
-// first-party trust posture as onJobMessage: first-party senders only.
+// command trust posture as onJobMessage: the exact service-worker source only.
 /**
  * @param {any} msg
  * @param {import('webextension-polyfill').Runtime.MessageSender} sender

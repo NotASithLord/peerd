@@ -57,10 +57,11 @@ GUARDRAILS ON BY DEFAULT
 • peerd refuses to operate on sensitive sites out of the box: banks,
   brokerages, crypto exchanges and wallets, health portals, government
   services, and password managers.
-• Direct fetch and document-reading tools block localhost and private-network
-  targets. Browser navigation does not currently carry that private-network
-  guard and remains subject only to denylist and origin policies. Local AI
-  providers use a separate opt-in path.
+• Direct fetch, document reading, and browser automation block localhost,
+  private-network, link-local, and cloud-metadata targets. Driven tabs use a
+  tab-scoped browser network rule so redirects and tab-associated requests are
+  blocked before the target loads. Local AI providers use a separate opt-in
+  path.
 • Risky actions ask for your confirmation first.
 
 Choose a supported local provider or supply your own provider API key. peerd is

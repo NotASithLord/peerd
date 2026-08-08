@@ -11,11 +11,49 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest%20V3-Chrome%20%26%20Firefox-informational.svg)](#install)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
-peerd is a browser extension that runs an AI agent in the browser. It can work
-with tabs, create isolated compute environments, and build local browser apps.
-You choose the model provider and supply any required key. peerd has no account,
-hosted agent backend, or telemetry. Model requests go directly from the
-extension to the provider you choose.
+# The browser-native agent harness
+
+**peerd runs general-purpose agents inside your own Chrome or Firefox.**
+
+It works with the tabs, signed-in sessions, web apps, and browser-contained
+compute you already have. You choose a supported cloud or local model provider.
+No Peerd account or hosted browser is required, and current builds send no
+product telemetry to Peerd.
+
+Local agents can access your whole computer. Remote agents live in someone
+else's. peerd runs inside your browser.
+
+[Install](#install) · [peerd.ai](https://peerd.ai) ·
+[Architecture](#architecture) · [Security](SECURITY.md)
+
+## Why browser-native
+
+Your browser already has your applications, sessions, identity, networking,
+interface, and useful local compute. It also has boundaries built for hostile
+pages.
+
+peerd uses those boundaries. Page work goes to separate actors with only the
+tools for that tab or environment. Credentials, network rules, confirmations,
+and audit stay with the extension. This defense-in-depth design assumes unsafe
+content will eventually get past a filter.
+
+## What makes peerd different
+
+- **Your browser is the workspace.** The agent works with the tabs, apps,
+  sessions, and page content already in front of you.
+- **Page work stays separate.** Web, WebVM, Notebook, App, and preview dweb
+  actors each get tools for their own environment.
+- **Site knowledge is reusable.** The web actor can build an adaptive client for
+  a site and use it again on later tasks.
+- **Compute stays in browser boundaries.** peerd can run scripts, sealed
+  JavaScript Notebooks, compiled WASI tools, browser Apps, and Linux WebVMs on
+  Chromium.
+- **You choose the model.** The live provider inventory is defined in
+  [`registry.js`](extension/peerd-provider/registry.js), including BYOK cloud
+  adapters and keyless local options.
+- **P2P is optional.** Preview builds add signed identity,
+  browser-to-browser discovery, dwapps, and agent-to-agent communication over
+  WebRTC; store packages prune it entirely.
 
 ## Status
 
@@ -71,7 +109,9 @@ Reload the extension from `chrome://extensions` after source changes.
 ### Firefox from source
 
 Firefox needs a Firefox-specific package. Do not load the checked-in Chrome
-development manifest.
+development manifest. Use a Firefox version at or above the minimum declared in
+the channel patch under `manifests/`. That floor tracks the document-bound
+scripting support used by browser tools.
 
 ```sh
 bun run package -- --channel=preview --browser=firefox --no-sign

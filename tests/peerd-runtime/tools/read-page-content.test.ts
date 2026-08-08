@@ -7,6 +7,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const fencedBody = (content: string) =>
   JSON.parse(content.split(/<untrusted_web_content [^>]*>\n/)[1].split('\n</untrusted_web_content>')[0]);
@@ -17,7 +18,10 @@ const ctxWith = (over: any = {}) => ({
   activeTab: { id: 7, url: 'https://site.example/article', origin: 'https://site.example' },
   tabs: { get: async (id: number) => ({ id, url: 'https://site.example/article' }) },
   scripting: {
-    executeScript: async ({ func }: any) => {
+    executeScript: async (request: any) => {
+      const { func } = request;
+      const probe = browserProbeResult(request, { url: 'https://site.example/article' });
+      if (probe) return probe;
       if (String(func.name) === 'readOuterHtmlInjected') {
         return [{ result: { html: '<html><body><article>rendered body</article></body></html>', url: 'https://site.example/article', title: 'T' } }];
       }
@@ -85,7 +89,10 @@ describe('read_page mode:content', () => {
     const ctx = ctxWith({
       webOffscreenClient: { extractMarkdown: async () => ({ readerable: true, markdown: 'unreached', title: 'T' }) },
       scripting: {
-        executeScript: async ({ func }: any) => {
+        executeScript: async (request: any) => {
+          const { func } = request;
+          const probe = browserProbeResult(request, { url: 'https://site.example/article' });
+          if (probe) return probe;
           if (String(func.name) === 'readOuterHtmlInjected') throw new Error('grab boom');
           return [{ result: { title: 'T', url: 'https://site.example/article', text: 'snapshot text', interactables: [] } }];
         },
@@ -100,7 +107,10 @@ describe('read_page mode:content', () => {
     const ctx = ctxWith({
       webOffscreenClient: { extractMarkdown: async () => ({ readerable: true, markdown: '# T\n\nhead only', title: 'T' }) },
       scripting: {
-        executeScript: async ({ func }: any) => {
+        executeScript: async (request: any) => {
+          const { func } = request;
+          const probe = browserProbeResult(request, { url: 'https://site.example/article' });
+          if (probe) return probe;
           if (String(func.name) === 'readOuterHtmlInjected') {
             return [{ result: { html: '<html><body>clipped</body></html>', htmlTruncated: true, url: 'https://site.example/article', title: 'T' } }];
           }

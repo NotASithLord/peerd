@@ -44,6 +44,9 @@
  *   tool-dispatch route re-stamps ctx.exposure from it so the tier gate admits the
  *   three instance reads on every dedicated-worker host.
  *   Optional and fail-closed: not injected → nothing is ever stamped.
+ * @param {(name: string) => boolean} [deps.reviewToolAllowed] call-time reviewer
+ *   allowlist. Optional and fail-closed for review records, so a persisted stale
+ *   grant cannot widen the reviewer when the worker relays a call.
  * @param {() => number} [deps.now]
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
@@ -72,6 +75,7 @@
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, callModel, getSecret, safeFetch,
   sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, now = Date.now,
+  reviewToolAllowed = () => false,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
@@ -128,7 +132,7 @@ export const makeOffscreenActorClient = ({
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabUrl?: string, origin?: string, inbound?: boolean }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, ollamaHost?: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindow?: number, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {
@@ -338,6 +342,12 @@ export const makeOffscreenActorClient = ({
             ? new Set([...persistedGrants].filter((name) => grant.allowedTools?.has(name)))
             : persistedGrants;
           if (typeof call?.name !== 'string' || !granted.has(call.name)) return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
+          // Layer 2 of the clean-context review contract: re-evaluate the live
+          // positive allowlist at call time. The record's grantedTools may be
+          // stale or corrupt; it is never sufficient authority for a reviewer.
+          if (rec.review === true && !reviewToolAllowed(call.name)) {
+            return { ok: false, error: `tool_not_available_to_reviewer: ${call.name}` };
+          }
           const base = await buildToolContext({
             sessionId: actorSessionId,
             ...(grant.inbound ? { synthetic: true, trusted: false } : {}),

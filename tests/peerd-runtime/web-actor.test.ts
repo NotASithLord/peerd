@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   fenceWebActorSummary,
+  safeWebActorSummaryOrigin,
   WEB_ACTOR_SUMMARY_PROMPT,
   makeWebActorTabBindings,
   makeWebActorRegistry,
@@ -15,11 +16,43 @@ describe('fenceWebActorSummary — self-fence the actor\'s own memory', () => {
     expect(stripUntrustedFences(fenced)).toBe('clicked Login; the form is a modal');
   });
   test('tags the origin as the web actor (not a real web origin)', () => {
-    expect(fenceWebActorSummary('x', { tabUrl: 'https://app.com', now: () => 0 }))
+    expect(fenceWebActorSummary('x', { tabOrigin: 'https://app.com', now: () => 0 }))
       .toContain('web-actor(https://app.com)');
   });
   test('a non-string summary fences to an empty body, never throws', () => {
     expect(stripUntrustedFences(fenceWebActorSummary(undefined as unknown as string, { now: () => 0 }))).toBe('');
+  });
+
+  test('keeps only a public origin and removes path, query, fragment, and credentials', () => {
+    const raw = 'https://user:pass@app.example/private/path?secret=token#fragment';
+    expect(safeWebActorSummaryOrigin(raw)).toBe('https://app.example');
+    const fenced = fenceWebActorSummary('x', { tabOrigin: raw, now: () => 0 });
+    expect(fenced).toContain('web-actor(https://app.example)');
+    expect(fenced).not.toContain('private/path');
+    expect(fenced).not.toContain('secret=token');
+    expect(fenced).not.toContain('user:pass');
+  });
+
+  test('omits private, metadata, and denylisted locations from model-facing provenance', () => {
+    const privateFence = fenceWebActorSummary('x', {
+      tabOrigin: 'http://127.0.0.1/admin?secret=loopback',
+      now: () => 0,
+    });
+    expect(privateFence).toContain('origin="web-actor"');
+    expect(privateFence).not.toContain('127.0.0.1');
+    expect(privateFence).not.toContain('secret=loopback');
+
+    const restricted = [
+      safeWebActorSummaryOrigin('http://127.0.0.1/admin?secret=loopback'),
+      safeWebActorSummaryOrigin('http://169.254.169.254/latest/meta-data/?secret=metadata'),
+      safeWebActorSummaryOrigin('https://vault.example/account?secret=denylisted', ['vault.example']),
+    ];
+    expect(restricted).toEqual([undefined, undefined, undefined]);
+    for (const tabOrigin of restricted) {
+      const fenced = fenceWebActorSummary('x', { tabOrigin, now: () => 0 });
+      expect(fenced).toContain('origin="web-actor"');
+      expect(fenced).not.toContain('secret=');
+    }
   });
 });
 

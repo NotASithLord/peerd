@@ -23,8 +23,9 @@
 //     ancestors with role=button) as breadcrumbs so the agent can
 //     refine without paying for a full read_page.
 
-import { resolveTargetTab } from './dom-helpers.js';
+import { browserDocumentIdentity, resolveTargetTab, scriptingTarget } from './dom-helpers.js';
 import { summarizeMutations } from '../../dom/index.js';
+import { browserDocumentRefusalFrom } from '../browser-automation-policy.js';
 
 /**
  * Harness-injected ctx extras (ref registry + CDP pool). Not on the
@@ -33,8 +34,8 @@ import { summarizeMutations } from '../../dom/index.js';
  *
  * @typedef {{ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }} RefEntry
  * @typedef {{ resolve?: (tabId: number, ref: string) => RefEntry | null }} DomRefs
- * @typedef {{ clickBackendNode?: (tabId: number, backendDOMNodeId: number) =>
- *   Promise<{ ok: false, error?: string }
+ * @typedef {{ clickBackendNode?: (tabId: number, backendDOMNodeId: number, expectedDocument: ReturnType<typeof browserDocumentIdentity>) =>
+ *   Promise<{ ok: false, error?: string, outcomeKind?: import('../../lifecycle/failure-taxonomy.js').FailureOutcomeKind }
  *     | { ok: true, tag?: string, text?: string, navigated?: boolean, mutations?: any }> }} DebuggerPool
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
@@ -116,8 +117,13 @@ export const clickTool = {
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
-          const r = await debuggerPool.clickBackendNode(tab.id, entry.backendDOMNodeId);
-          if (!r.ok) return { ok: false, error: r.error ?? 'ref_click_failed' };
+          const r = await debuggerPool.clickBackendNode(
+            tab.id, entry.backendDOMNodeId, browserDocumentIdentity(tab));
+          if (!r.ok) return browserDocumentRefusalFrom(r) ?? {
+            ok: false,
+            error: r.error ?? 'ref_click_failed',
+            ...(r.outcomeKind ? { outcomeKind: r.outcomeKind } : {}),
+          };
           return {
             ok: true,
             content: JSON.stringify({
@@ -128,7 +134,14 @@ export const clickTool = {
             }, null, 2),
           };
         } catch (e) {
-          return { ok: false, error: `ref_click_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+          const outcomeKind = /** @type {{ outcomeKind?: import('../../lifecycle/failure-taxonomy.js').FailureOutcomeKind }} */ (e)?.outcomeKind;
+          const refusal = browserDocumentRefusalFrom(e);
+          if (refusal) return refusal;
+          return {
+            ok: false,
+            error: `ref_click_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
+            ...(outcomeKind ? { outcomeKind } : {}),
+          };
         }
       }
 
@@ -136,7 +149,7 @@ export const clickTool = {
         let scriptResult;
         try {
           const results = await scripting.executeScript({
-            target: { tabId: tab.id },
+            target: scriptingTarget(tab),
             func: clickInjected,
             args: [null, 0, entry.walkId, expectedCount],
           });
@@ -182,7 +195,7 @@ export const clickTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: clickInjected,
         args: [args.selector, nth, null, expectedCount],
       });
