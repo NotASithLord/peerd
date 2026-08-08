@@ -4,7 +4,7 @@
 //
 // Channels:
 //   store    → "peerd"          (Chrome Web Store / AMO; no dweb)
-//   preview  → "peerd preview"  (GitHub Releases; dweb enabled,
+//   preview  → "peerd preview"  (GitHub Releases; dweb on supported targets,
 //                                update_url + locked extension ID)
 //   dev      → "peerd (dev)"    (the checked-in extension/manifest.json
 //                                for the load-unpacked dev loop; includes
@@ -156,6 +156,18 @@ export const generateManifest = (
   let manifest = deepMerge(base, patch);
   manifest.version = version;
   manifest = applyBrowserTransform(manifest, browser);
+
+  if (channel === 'preview' && browser === 'firefox') {
+    // Firefox has no mesh host yet. Its preview package stays useful for the
+    // rest of the preview surface without claiming dweb in store metadata or
+    // retaining a rendezvous endpoint it cannot use.
+    manifest.description = base.description;
+    const extensionPages = manifest.content_security_policy?.extension_pages;
+    if (typeof extensionPages === 'string') {
+      manifest.content_security_policy.extension_pages = extensionPages
+        .replace(' wss://bootstrap.peerd.ai', '');
+    }
+  }
 
   // Channel strip: hold `debugger` out of the store package for initial
   // submission (see STORE_STRIPPED_PERMISSIONS). Applied after the browser

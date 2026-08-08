@@ -53,6 +53,14 @@ describe('detectVoiceCapability — reports BOTH availabilities for the UI', () 
   });
 });
 
+describe('detectVoiceCapability host support', () => {
+  it('an unavailable Moonshine host removes it before any setup begins', () => {
+    const cap = detectVoiceCapability('moonshine', { moonshineHostAvailable: false });
+    expect(cap.moonshine).toBe(false);
+    expect(cap.engine === 'moonshine').toBe(false);
+  });
+});
+
 describe('createBestTranscriber — lockstep with detectVoiceCapability', () => {
   it('builds the engine selected from the browser API', () => {
     const browserGlobal = /** @type {any} */ (globalThis);

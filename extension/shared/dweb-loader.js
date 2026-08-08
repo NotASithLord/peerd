@@ -6,7 +6,7 @@
 // reference is a dynamic import gated on the package-time flag. The store
 // package replaces this whole file with packaging/templates/
 // dweb-loader.store.js (stub-only, no path string), and prunes
-// peerd-distributed/ from the artifact — two structural layers plus the
+// peerd-distributed/ from dweb-disabled artifacts. Two structural layers plus the
 // post-package string check. packaging/check-dweb-boundary.ts enforces
 // the single-reference rule in CI.
 

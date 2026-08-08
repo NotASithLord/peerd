@@ -23,6 +23,7 @@ const setup = (over: any = {}) => {
     state,
     deps: {
       ensureOffscreen: async () => {},
+      localModelHostAvailable: () => true,
       browser: { runtime: { sendMessage: async (_m: any) => over._reply ?? { available: false } } },
       localModelState: state,
       ...over,
@@ -50,5 +51,22 @@ describe('local-model routes', () => {
     const { deps, state } = setup({ _reply: { available: true } });
     await makeLocalModelRoutes(deps)['local-model/init']();
     expect(state.available()).toBe(true);
+  });
+  test('unsupported hosts refuse before starting the offscreen document', async () => {
+    let starts = 0;
+    const { deps } = setup({
+      localModelHostAvailable: () => false,
+      ensureOffscreen: async () => { starts += 1; },
+    });
+    expect(await makeLocalModelRoutes(deps)['local-model/init']()).toEqual({
+      ok: false,
+      error: 'runtime_capability_unavailable',
+      performed: false,
+      facility: 'localWebGpuHost',
+      reasonCode: 'host_unsupported',
+      retryable: false,
+      alternative: 'use_ollama',
+    });
+    expect(starts).toBe(0);
   });
 });

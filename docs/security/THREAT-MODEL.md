@@ -609,6 +609,22 @@ Code: `peerd-runtime/observability/contributor-metrics.js`,
 `background/routes/contributor-metrics.js`, and
 `options/sections/contributor-metrics.js`. Red-team: scenario 12.
 
+<a id="inv-17"></a>
+### INV-17. The model cannot call a facility the runtime cannot host
+The privileged background resolves host support into a browser-neutral runtime
+capability snapshot. The same snapshot removes unavailable tool descriptors,
+corrects static prompt guidance, and drives a dispatch gate that refuses forged
+hidden calls without performing work. Human controls may narrow their own
+presentation from local API probes, but they cannot grant model or dispatch
+authority. Unsupported voice setup is refused before a model download or
+microphone prompt begins. OCR and local WebGPU controls refuse before downloads.
+Artifacts without a dweb mesh host omit the dweb module, controls, defaults,
+and model tools.
+
+Code: `peerd-runtime/runtime-capabilities.js`, `peerd-runtime/tools/gates.js`,
+`peerd-runtime/loop/turn-driver.js`, `packaging/gen-channel-config.ts`.
+Red-team: scenario 08.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`

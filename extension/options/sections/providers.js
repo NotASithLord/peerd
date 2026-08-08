@@ -270,8 +270,11 @@ export const ProvidersSection = {
     // modelOptions[0] fallback covers the brief window where a daemon probe is
     // still in flight (so it never momentarily reads as Anthropic).
     const settingsProviderName = state.settings?.providerName ?? '';
+    const selectableProviderRows = providerRows.filter((p) =>
+      p.name !== 'local-webgpu'
+        || state.capabilities?.localWebGpuHost?.status === 'available');
     const effectiveProvider =
-      (settingsProviderName && providerRows.some((p) => p.name === settingsProviderName))
+      (settingsProviderName && selectableProviderRows.some((p) => p.name === settingsProviderName))
         ? settingsProviderName
         : (firstUsable?.name ?? (ui.modelOptions ?? [])[0]?.provider ?? provider.current);
     const defaultProvRow = providerRows.find((p) => p.name === effectiveProvider);
@@ -412,7 +415,7 @@ export const ProvidersSection = {
               await send({ type: 'settings/update', patch: { providerName: e.target.value, providerModel: '' } });
               m.redraw();
             },
-          }, providerRows.map((p) => m('option', { value: p.name }, p.label))),
+          }, selectableProviderRows.map((p) => m('option', { value: p.name }, p.label))),
         ]),
         m('.input-row', [
           m('label', { for: 'model' }, 'Model'),

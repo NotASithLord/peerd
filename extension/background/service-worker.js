@@ -167,6 +167,9 @@ import {
   filterByDwebEnabled,
   filterByDwebActive,
   filterByGoalActive,
+  resolveRuntimeCapabilities,
+  filterByRuntimeCapabilities,
+  requireRuntimeCapability,
   makeGoalRunner,
   GOAL_MAX_ITERATIONS,
   makeScheduler,
@@ -452,6 +455,10 @@ import { makeActorsRoutes } from './routes/actors.js';
 import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
 import { makeContributorRoutes } from './routes/contributor-metrics.js';
 
+// Firefox has no offscreen document host. Keep this package fact near the
+// imports so provider selection and the later capability snapshot share it.
+const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+
 // ---- §11.5 universal write guard -------------------------------------------
 // EVERY store this file constructs gets its storage through these wrapped
 // adapters, so a read-only verdict from the §11.1 schema check (a NEWER
@@ -682,7 +689,8 @@ const loadSettings = async () => {
  * session creation, the key-presence check, and the settings UI.
  */
 const resolveActiveProvider = () => {
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const fallback = list.find((p) => p.name === 'anthropic') ?? list[0];
   const chosen = list.find((p) => p.name === settingsStore.get().providerName) ?? fallback;
   return {
@@ -711,7 +719,8 @@ const resolveActiveProvider = () => {
  * case skips the vault/daemon probes entirely.
  */
 const ensureActiveProvider = async () => {
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const name = settingsStore.get().providerName;
   if (name && list.some((p) => p.name === name)) return resolveActiveProvider();
   for (const p of list) {
@@ -754,7 +763,8 @@ const resolveFailoverChain = (start) => {
   if (!s.providerFailoverEnabled) return [start];
   const names = Array.isArray(s.providerFallbacks) ? s.providerFallbacks : [];
   if (names.length === 0) return [start];
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const fallbacks = [];
   for (const name of names) {
     const p = list.find((x) => x.name === name);
@@ -2051,6 +2061,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // One browser-neutral execution-boundary value. Descriptor filtering is
     // model UX; this dispatch-time gate stamp is the authority backstop.
     actorIsolation,
+    runtimeCapabilities,
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name.
@@ -2597,7 +2608,10 @@ const forwardActorEvent = (/** @type {any} */ ev) => {
 const spawnActorCore = makeSpawnActor({
   sessions,
   appendAudit: /** @type {any} */ (auditLog.append),
-  getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+  getToolDescriptors: () => filterByRuntimeCapabilities(
+    listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+    runtimeCapabilities,
+  ),
   // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
   // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
   // later in this module (after the agent loop); only called at spawn time.
@@ -3107,7 +3121,13 @@ const ensureOffscreen = async () => {
 // trip — so script/read_pdf report a clean "not supported in this build" signal
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
-const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+// One privileged, browser-neutral snapshot. Consumers ask about facilities,
+// not browser names, so a future native host can replace the implementation.
+const runtimeCapabilities = resolveRuntimeCapabilities({
+  offscreenDocument: offscreenAvailable,
+  dwebPackaged: DWEB_ENABLED,
+});
+const localModelHostAvailable = () => runtimeCapabilities.localWebGpuHost.status === 'available';
 // Firefox MV3 runs this module in an extension background page/event page. It
 // can host a dedicated Worker directly. Chrome runs it as a service worker,
 // where `document` is absent and the offscreen host above is required.
@@ -3617,16 +3637,34 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // to max_new_tokens), yields tokens as they stream, throws on a reported error.
 const generateLocalForAdapter = (/** @type {any} */ opts) => {
   const genId = `lg${++localGenSeq}`;
-  /** @type {{ tokens: any[], waiters: any[], done: boolean, error: any }} */ const state = { tokens: [], waiters: [], done: false, error: null };
+  let hostError = null;
+  try {
+    requireRuntimeCapability(runtimeCapabilities.localWebGpuHost, 'localWebGpuHost');
+  } catch (error) {
+    hostError = error;
+  }
+  const hostAvailable = hostError === null;
+  /** @type {{ tokens: any[], waiters: any[], done: boolean, error: any }} */ const state = {
+    tokens: [],
+    waiters: [],
+    done: !hostAvailable,
+    error: hostError,
+  };
   localGens.set(genId, state);
-  ensureOffscreen()
-    .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
-    .catch((e) => { state.done = true; state.error = (/** @type {{ message?: string }} */ (e))?.message ?? String(e); wakeLocalGen(state); });
+  if (hostAvailable) {
+    ensureOffscreen()
+      .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
+      .catch((e) => { state.done = true; state.error = e; wakeLocalGen(state); });
+  }
   return (async function* () {
     try {
       for (;;) {
         if (state.tokens.length) { yield state.tokens.shift(); continue; }
-        if (state.done) { if (state.error) throw new Error(state.error); return; }
+        if (state.done) {
+          if (state.error instanceof Error) throw state.error;
+          if (state.error) throw new Error(String(state.error));
+          return;
+        }
         await new Promise((resolve) => { state.waiters.push(/** @type {any} */ (resolve)); });
       }
     } finally { localGens.delete(genId); }
@@ -3884,7 +3922,7 @@ const buildStateSnapshot = async () => {
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
       providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },
-      capabilities: { actorExecution: { ...actorIsolation } },
+      capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
       streaming: false,
@@ -3951,7 +3989,7 @@ const buildStateSnapshot = async () => {
       // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
-    capabilities: { actorExecution: { ...actorIsolation } },
+    capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
     profile: {
       id: profile.id,
       peerName: profile.peerName,
@@ -4278,6 +4316,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   reconcileEngineActor: prewalk.reconcileEngineActor,
   getActorIsolation: () => actorIsolation,
   waitForActorIsolation: () => actorIsolationReady,
+  getRuntimeCapabilities: () => runtimeCapabilities,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -5972,9 +6011,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
     // web reply dropped. Read from the SAME setting, at the same moment, as the
     // getter injected into actorMessaging below.
     const schemaReply = settingsStore.get().schemaValidatedReplies === true;
-    const advertisedTools = filterDescriptorsByManifest(
-      actorDescriptors(listTools(), kind, rec.backing, actorSurface),
-      actorToolAllow,
+    const advertisedTools = filterByRuntimeCapabilities(
+      filterDescriptorsByManifest(
+        actorDescriptors(listTools(), kind, rec.backing, actorSurface),
+        actorToolAllow,
+      ),
+      runtimeCapabilities,
     );
     const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
     const tools = (inbound === true && kind === 'dweb'
@@ -6986,7 +7028,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // …and the session's lifecycle state (§2.5 cancellation dominance).
     purgeLifecycleSession,
   }),
-  ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
+  ...makeLocalModelRoutes({
+    ensureOffscreen,
+    browser,
+    localModelState,
+    localModelHostAvailable,
+  }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,

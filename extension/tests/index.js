@@ -121,6 +121,7 @@ import './unit/options/activity-origin-events.test.js';
 import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
 import './unit/options/dweb-section.test.js';
+import './unit/options/runtime-capability-controls.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
 

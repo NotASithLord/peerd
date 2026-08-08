@@ -7,7 +7,7 @@
 // is an OPT-IN PRIVACY UPGRADE. When Web Speech is available, "Enable voice"
 // turns it on instantly with an inline cloud-audio disclosure, and a separate
 // upgrade block offers Moonshine with the rationale shown BEFORE any download.
-// On a browser with no Web Speech (Firefox), Moonshine is the required engine.
+// Without Web Speech, Moonshine is offered only when the runtime has a host.
 //
 // Ported from the panel's "Voice input" section. The one structural
 // difference: this page owns its OWN voice manager instead of receiving
@@ -28,17 +28,19 @@ import { OcrSection } from './ocr.js';
 /** @typedef {import('./reset-row.js').Send} Send */
 
 export const VoiceSection = {
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oninit(vnode) {
     vnode.state.voiceConfirmOpen = false;     // Moonshine download confirmation modal
     vnode.state.voiceBusy = false;
     vnode.state.voiceError = null;
     vnode.state.voiceState = null;            // subscribed snapshot
+    vnode.state.runtimeState = vnode.attrs.state;
     // why the no-op onMessage: SW voice pushes ride the panel port only;
     // this page never listens, so there is nothing to subscribe to.
     vnode.state.mgr = createVoiceManager({
       send: vnode.attrs.send,
       onMessage: () => () => {},
+      moonshineHostAvailable: () => vnode.state.runtimeState?.capabilities?.moonshineVoiceHost?.status === 'available',
     });
     vnode.state.voiceUnsub = vnode.state.mgr.subscribe((/** @type {any} */ s) => {
       vnode.state.voiceState = s;
@@ -53,6 +55,7 @@ export const VoiceSection = {
 
   /** @param {{ attrs: { state: any, send: Send }, state: any }} vnode */
   view: ({ attrs: { state, send }, state: ui }) => {
+    ui.runtimeState = state;
     const voiceManager = ui.mgr;
     const voiceEnabled = !!state.settings?.voiceEnabled;
     const voiceVariant = state.settings?.voiceVariant ?? 'base';
@@ -64,7 +67,9 @@ export const VoiceSection = {
     // Capability snapshot for the CURRENT preference. Reports both
     // availabilities so we can offer the on-device upgrade independently of
     // the live engine.
-    const capability = detectVoiceCapability(voiceEngine);
+    const capability = detectVoiceCapability(voiceEngine, {
+      moonshineHostAvailable: state.capabilities?.moonshineVoiceHost?.status === 'available',
+    });
     // Active engine — live state from the manager. Only set after enable.
     const activeEngine = voice?.engine ?? null;
     const cloudVendor = voice?.cloudVendor ?? capability.cloudVendor ?? 'the browser vendor\'s cloud service';
@@ -102,17 +107,17 @@ export const VoiceSection = {
     return m('div', [
       m('.voice-section', [
         // Lead paragraph — set expectations for the resolved engine.
-        m('p', voiceEnabled
-          ? activeEngine === 'moonshine'
-            ? 'Voice input is enabled. Using Moonshine — transcription runs entirely on this device.'
-            : activeEngine === 'web-speech'
-              ? `Voice input is enabled via the browser's Web Speech API — audio is sent to ${cloudVendor} for transcription.${capability.moonshine ? ' Upgrade to on-device transcription below.' : ''}`
-              : 'Voice input is enabled. Click the mic next to any text field in the peerd panel, then speak.'
-          : capability.webSpeech
-            ? `Talk to peerd instead of typing. Your browser's Web Speech API works instantly — but it typically sends your audio to ${cloudVendor} for transcription.`
-            : capability.moonshine
-              ? 'Talk to peerd instead of typing. This browser has no built-in speech API, so peerd uses the on-device Moonshine model — it downloads once (~250 MB) and then runs fully on this device.'
-              : 'Voice input requires a browser with the Web Speech API or a vendored Moonshine model. Neither is available here.'),
+        m('p', capability.engine === null
+          ? 'Voice input is unavailable in this browser. Type in the composer instead.'
+          : voiceEnabled
+            ? activeEngine === 'moonshine'
+              ? 'Voice input is enabled. Moonshine transcription runs entirely on this device.'
+              : activeEngine === 'web-speech'
+                ? `Voice input is enabled via the browser's Web Speech API. Audio is sent to ${cloudVendor} for transcription.${capability.moonshine ? ' Upgrade to on-device transcription below.' : ''}`
+                : 'Voice input is enabled. Click the mic next to any text field in the peerd panel, then speak.'
+            : capability.webSpeech
+              ? `Talk to peerd instead of typing. Your browser's Web Speech API works instantly, but it typically sends your audio to ${cloudVendor} for transcription.`
+              : 'Talk to peerd instead of typing. This browser has no built-in speech API, so peerd uses the on-device Moonshine model. It downloads once (~250 MB) and then runs fully on this device.'),
 
         // Moonshine download progress (after opt-in).
         voiceStatus === 'downloading' ? m('div', [
@@ -145,7 +150,8 @@ export const VoiceSection = {
             ) : null,
         ui.voiceError ? m('.voice-status.is-err', ui.voiceError) : null,
 
-        m('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' }, [
+        voiceEnabled || capability.engine !== null
+          ? m('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' }, [
           voiceEnabled
             ? m('button.secondary', {
                 type: 'button',
@@ -169,17 +175,15 @@ export const VoiceSection = {
                 disabled: ui.voiceBusy || voiceStatus === 'downloading'
                   || (!capability.webSpeech && !capability.moonshine),
                 onclick: () => {
-                  // why: Web Speech is instant (no download) → enable straight
-                  // away with the inline disclosure above. No Web Speech
-                  // (Firefox) → Moonshine is required, so open the download
-                  // confirm modal first.
+                  // why: Web Speech is instant, so enable it with the inline
+                  // disclosure above. Without Web Speech, Moonshine needs an
+                  // explicit download confirmation first.
                   if (capability.webSpeech) enableVoice();
                   else { ui.voiceConfirmOpen = true; m.redraw(); }
                 },
-              }, capability.webSpeech
-                  ? 'Enable voice'
-                  : capability.moonshine ? 'Enable voice (downloads model)' : 'Unavailable'),
-        ]),
+              }, capability.webSpeech ? 'Enable voice' : 'Enable voice (downloads model)'),
+          ])
+          : null,
 
         // ---- Upgrade to on-device transcription (Moonshine) ----------------
         // Always visible when Moonshine is available and not the live engine.

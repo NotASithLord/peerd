@@ -4,10 +4,11 @@
 //
 //   1. stage a copy of extension/
 //   2. prune what the channel must not ship:
-//        both channels: tests/, eval/, peerd-distributed/demo/, manifest.json
-//        store:         peerd-distributed/ ENTIRELY, and the dweb
-//                       loader is swapped for the stub-only template —
-//                       the boundary is structural, not tree-shaken
+//        both channels: tests/ and checked-in generated files
+//        store:         eval/
+//        dweb-disabled: peerd-distributed/ entirely, and the dweb loader is
+//                       swapped for the stub-only template. This covers store
+//                       packages and Firefox until it has a mesh host.
 //   3. generate shared/channel-config.js (channel flag + CHANNEL_DEFAULTS)
 //   4. generate the manifest for (channel, browser)
 //   5. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
@@ -31,7 +32,7 @@ import {
   readVersion, parseArgs,
 } from './lib.ts';
 import { generateManifest } from './gen-manifest.ts';
-import { genChannelConfigSource } from './gen-channel-config.ts';
+import { dwebEnabledForTarget, genChannelConfigSource } from './gen-channel-config.ts';
 import { verifyStoreArtifact } from './verify-store-artifact.ts';
 import { signPreviewArtifact } from './sign.ts';
 import { buildWebTarget } from './package-web.ts';
@@ -43,11 +44,10 @@ import { buildWebTarget } from './package-web.ts';
 // from STORE only (below), and eval-section lazy-loads it + degrades gracefully
 // when absent — so store's home still mounts.
 const PRUNE_ALWAYS = ['tests', 'manifest.json', 'shared/channel-config.js'];
-// Additionally pruned from store artifacts: the home Lab (eval/, a preview-only
-// dev tool), the entire dweb module, plus the system-prompt paragraph that
-// describes it (the loader inserts it only when DWEB_ENABLED — a store prompt
-// must make no dweb claims).
-const PRUNE_STORE = ['eval', 'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
+// The home Lab is a preview-only dev tool. Dweb source and prompt text are
+// separately pruned from every artifact without a working mesh host.
+const PRUNE_STORE = ['eval'];
+const PRUNE_DWEB = ['peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
 
 // Reproducible artifacts: two builds of the same tree must produce
 // byte-identical zips, so a shipped artifact can be independently rebuilt
@@ -97,7 +97,7 @@ const normalizeStagingForZip = (staging: string): string[] => {
   return entries;
 };
 
-const shouldCopy = (src: string, channel: Channel): boolean => {
+const shouldCopy = (src: string, channel: Channel, browser: Browser): boolean => {
   const rel = relative(EXTENSION_DIR, src);
   if (rel === '') return true;
   if (basename(src) === '.DS_Store') return false;
@@ -105,7 +105,11 @@ const shouldCopy = (src: string, channel: Channel): boolean => {
   // type tooling — tsc reads them at check time; the browser loads the .js
   // and ignores them. They must never ship in either artifact.
   if (src.endsWith('.d.ts')) return false;
-  const pruned = channel === 'store' ? [...PRUNE_ALWAYS, ...PRUNE_STORE] : PRUNE_ALWAYS;
+  const pruned = [
+    ...PRUNE_ALWAYS,
+    ...(channel === 'store' ? PRUNE_STORE : []),
+    ...(!dwebEnabledForTarget(channel, browser) ? PRUNE_DWEB : []),
+  ];
   return !pruned.some((p) => rel === p || rel.startsWith(p + '/'));
 };
 
@@ -119,14 +123,14 @@ export const packageArtifact = async (
 
   cpSync(EXTENSION_DIR, staging, {
     recursive: true,
-    filter: (src) => shouldCopy(src, channel),
+    filter: (src) => shouldCopy(src, channel, browser),
   });
 
   // Channel-specific generated/swapped files. The store loader swap is a
   // wholesale committed-file replacement (packaging/templates/), never a text
   // transform — what ships is exactly what's reviewable in the repo.
-  writeFileSync(join(staging, 'shared', 'channel-config.js'), genChannelConfigSource(channel));
-  if (channel === 'store') {
+  writeFileSync(join(staging, 'shared', 'channel-config.js'), genChannelConfigSource(channel, browser));
+  if (!dwebEnabledForTarget(channel, browser)) {
     copyFileSync(STORE_LOADER_TEMPLATE, join(staging, 'shared', 'dweb-loader.js'));
   }
 
