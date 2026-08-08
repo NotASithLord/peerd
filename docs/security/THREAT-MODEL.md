@@ -625,6 +625,37 @@ Code: `peerd-runtime/runtime-capabilities.js`, `peerd-runtime/tools/gates.js`,
 `peerd-runtime/loop/turn-driver.js`, `packaging/gen-channel-config.ts`.
 Red-team: scenario 08.
 
+<a id="inv-18"></a>
+### INV-18. Durable site clients remain in their actor's origin custody
+A stored site client is executable, origin-keyed knowledge, not a global actor
+library. An API actor can read, run, or change only the client for its fixed
+canonical origin. A bound tab actor can touch only the client for its durable
+owned origin; after it has a tab, that tab must still be live at the owned
+origin. A roaming actor owns no durable origin: it may touch only the exact
+ordinary origin in its live tab, never an unrelated client, a no-tab client, or
+an origin the sensitivity classifier says carries the user's identity. A
+missing guard, unreadable tab, malformed custody state, or legacy session with
+no persisted origin state fails closed.
+
+The actor-tier gate performs a synchronous preliminary custody check before
+confirmation; a denial stops there. On an allow path, each tool checks the final
+normalized target after yielding record reads, worker execution, consent, and
+result-bookkeeping steps before it can expose bytes or admit a later effect.
+Store mutations are authorized immediately before invocation; an already
+admitted IndexedDB commit cannot be retroactively canceled if custody changes
+while it settles. A tab-backed allow reads and judges the authoritative owned
+tab when one exists; an exact-origin bound actor may deliberately use its client
+before it opens a tab. These repeated checks cover both pre-tool argument
+rewrites and self-retasking pages. The sealed worker's `site-fetch/call` relay
+reauthorizes on every operation and again immediately before network IO. Capture
+may observe a common `api.` sibling, but its digest retains exact-origin
+attribution and calls it separate custody; only that origin's actor may verify
+and persist its client.
+Code: `peerd-runtime/actor/origin-lock.js` (`mayUseSiteClientOrigin`),
+`tools/gates.js`, `tools/defs/site-client-{read,run,write}.js`,
+`tools/defs/site-capture.js`, and `background/service-worker.js`. Red-team:
+scenario 13.
+
 ### Additional invariants (not scenario-gated, enforced in code)
 
 - INV-9. Vault fails closed. A secret read or write is refused with `VaultLockedError`
@@ -812,11 +843,12 @@ evaluating peerd should know. Each cites where it lives in the code.
   with no tool call, a page redirecting itself) into one check no redirect chain walks
   around. The same policy is asked synchronously inside the credential-scope getter, so
   a self-redirect onto a credentialed origin cannot be spent by `fetch_url`,
-  `read_web_cache` or `site_client_*` in the window before a DOM tool re-enters the
-  chokepoint. (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
+  `read_web_cache` or a site-client fetch in the window before a DOM tool re-enters
+  the chokepoint. Durable client record custody is a separate invariant (INV-18).
+  (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
   `tools/defs/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
-  The #251 arc hardened the TAB actor's `site_client_*` path but left its API-actor
-  sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
+  The #251 arc hardened the TAB actor's site-client CREDENTIAL path but left its
+  API-actor sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
   MODEL-supplied `origin` argument, so an API actor bound to one origin could name a
   DIFFERENT origin and spend that origin's stored key + cookies — a cross-origin
   credential escalation past the "an API actor owns one origin" containment (DESIGN-18).

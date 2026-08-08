@@ -303,7 +303,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(isAllowedForActorType('read_web_cache', 'app')).toBe(false);
   });
 
-  test('DESIGN-18: an API backing (web actor, no tab) is fetch_url-ONLY', () => {
+  test('DESIGN-18: an API backing keeps only its tab-free origin surface', () => {
     // fetch_url is in; the whole DOM toolset is OUT (it needs a tab the API actor
     // never has). The gate refuses a DOM tool for backing:'api' at the gate.
     expect(isAllowedForActor('fetch_url', 'web', 'api')).toBe(true);
@@ -325,6 +325,15 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(actorAllowedToolsFor('web', 'tab').size).toBe(actorAllowedTools('web').size);
     // backing is web-only — it doesn't change an engine kind's set.
     expect(actorAllowedToolsFor('webvm', 'api').size).toBe(actorAllowedTools('webvm').size);
+  });
+
+  test('a present unknown web backing fails closed instead of inheriting tab tools', () => {
+    expect(actorAllowedToolsFor('web', 'future' as any).size).toBe(0);
+    expect(isAllowedForActor('site_client_read', 'web', 'future' as any)).toBe(false);
+    expect(rt({ name: 'site_client_read' }, { origin: 'https://a.test' }, {
+      exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'future' as any,
+      canUseSiteClientOrigin: () => true,
+    })?.allowed).toBe(false);
   });
 
   test('DESIGN-18: actorTierGate refuses DOM tools for an API backing, allows fetch_url', () => {
@@ -391,19 +400,33 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(actorDescriptors(all, 'web').map((t) => t.name).sort()).toEqual(['click', 'snapshot']);
   });
 
-  test('DESIGN-18: actorDescriptors is backing-aware — an API actor is advertised ONLY fetch_url', () => {
-    const all = [{ name: 'click' }, { name: 'snapshot' }, { name: 'navigate' }, { name: 'fetch_url' }, { name: 'app_update' }];
+  test('DESIGN-18: actorDescriptors advertises the API actor tab-free surface', () => {
+    const all = [
+      { name: 'click' }, { name: 'snapshot' }, { name: 'navigate' },
+      { name: 'fetch_url' }, { name: 'read_web_cache' },
+      { name: 'site_client_run' }, { name: 'site_client_read' }, { name: 'site_client_write' },
+      { name: 'site_capture' }, { name: 'app_update' },
+    ];
     // An API backing drops the DOM tools from the ADVERTISED list (matching the gate +
     // the actor's own "no DOM" lore — so the model isn't shown tools it'd only be refused).
-    expect(actorDescriptors(all, 'web', 'api').map((t) => t.name)).toEqual(['fetch_url']);
+    expect(actorDescriptors(all, 'web', 'api').map((t) => t.name)).toEqual([
+      'fetch_url', 'read_web_cache', 'site_client_run', 'site_client_read', 'site_client_write',
+    ]);
     // A tab backing (and an absent backing) keep the full web surface.
-    expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual(['click', 'fetch_url', 'navigate', 'snapshot']);
+    expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual([
+      'click', 'fetch_url', 'navigate', 'read_web_cache', 'site_capture',
+      'site_client_read', 'site_client_run', 'site_client_write', 'snapshot',
+    ]);
   });
 });
 
 describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
   const webCode = (over: object = {}) =>
-    ({ exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code', ...over });
+    ({
+      exposure: EXPOSURE_ACTOR, actorType: 'web', backing: 'tab', actorInstanceId: '42', actorSurface: 'code',
+      canUseSiteClientOrigin: () => true,
+      ...over,
+    });
 
   test('the code surface is page_code plus the one operation not mapped by page.*', () => {
     expect([...actorAllowedToolsFor('web', 'tab', 'code')]).toEqual(['page_code', 'site_client_run']);

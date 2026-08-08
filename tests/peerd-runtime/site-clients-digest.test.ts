@@ -113,6 +113,25 @@ describe('digestCapture — redacted inventory + inferred posture', () => {
     expect(d.auth).toBe('session');
   });
 
+  test('multiple approved origins remain separately attributed', () => {
+    const d = digestCapture([
+      { method: 'GET', url: 'https://app.x.com/me', reqHeaders: { Cookie: 'sid=1' } },
+      { method: 'POST', url: 'https://api.x.com/v1/items', reqHeaders: { Authorization: 'Bearer secret' } },
+    ], { origins: ['https://app.x.com', 'https://api.x.com'] });
+    expect(d.originDigests).toEqual([
+      {
+        origin: 'https://api.x.com', auth: 'bearer', sampled: 1,
+        endpoints: [{ method: 'POST', path: '/v1/items' }],
+      },
+      {
+        origin: 'https://app.x.com', auth: 'session', sampled: 1,
+        endpoints: [{ method: 'GET', path: '/me' }],
+      },
+    ]);
+    expect(JSON.stringify(d.originDigests)).not.toContain('secret');
+    expect(JSON.stringify(d.originDigests)).not.toContain('sid=1');
+  });
+
   test('no observed in-scope traffic → unknown posture', () => {
     const d = digestCapture([], { origins: ['https://api.x.com'] });
     expect(d.auth).toBe('unknown');

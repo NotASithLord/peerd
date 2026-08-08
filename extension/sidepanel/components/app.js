@@ -265,8 +265,8 @@ export const NoticeBar = {
 
 // Confirmation prompt. Shown when the Plan/Act policy decides a non-read
 // action needs the user's approval (Act mode with confirmActions ON — any
-// non-read action), OR for a memory write (the always-on lethal-trifecta
-// gate, which renders the proposed AGENTS.md diff). Three answers map to
+// non-read action), OR for a persistent code or memory write (the always-on
+// lethal-trifecta gates, which render the exact proposed contents). Three answers map to
 // the ConfirmAnswer union the dispatcher expects: yes_once / yes_session
 // / no. Reuses the .peerd-modal styling.
 /** @type {Record<string, string>} */
@@ -276,12 +276,78 @@ const ACTION_CLASS_LABEL = {
   external: 'a side-effecting',
 };
 
+/** @type {Readonly<Record<string, string>>} */
+const SITE_AUTH_LABEL = Object.freeze({
+  session: 'a signed-in browser session was observed',
+  bearer: 'token authentication was observed; no credential is stored in this client',
+  none: 'no authentication was observed',
+  unknown: 'authentication could not be determined',
+});
+
+/** @type {Readonly<Record<string, string>>} */
+const SITE_DERIVER_LABEL = Object.freeze({
+  probe: 'learned by probing the site',
+  'capture-cdp': 'learned from observed site requests',
+  'capture-tap': 'learned from observed site requests',
+});
+
+/**
+ * The confirmation is the authority boundary, so opening it must move keyboard
+ * and screen-reader attention into the dialog and keep it there until answered.
+ * @param {(answer: string) => void} answer
+ * @param {{ returnFocus?: HTMLElement | null }} state
+ */
+const confirmationDialogAttrs = (answer, state) => {
+  /** @param {{ dom: Element }} vnode */
+  const oncreate = ({ dom }) => {
+    state.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = /** @type {HTMLElement} */ (dom);
+    const reject = /** @type {HTMLElement | null} */ (dialog.querySelector('[data-confirm-reject]'));
+    (reject ?? dialog).focus();
+  };
+  /** @param {KeyboardEvent} event */
+  const onkeydown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      answer('no');
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const dialog = /** @type {HTMLElement} */ (event.currentTarget);
+    const controls = /** @type {HTMLElement[]} */ ([...dialog.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]);
+    if (!controls.length) return;
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  return {
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-labelledby': 'peerd-confirm-title',
+    tabindex: -1,
+    oncreate,
+    onkeydown,
+    onremove: () => state.returnFocus?.focus(),
+  };
+};
+
 /**
  * A pending confirmation prompt broadcast by the SW dispatcher.
  * @typedef {Object} ConfirmPrompt
  * @property {string} id
  * @property {string} [kind]
- * @property {{ op: string, header?: string, addedLines?: number, removedLines?: number, body?: string }} [proposal]
+ * @property {{
+ *   op: string, header?: string, addedLines?: number, removedLines?: number,
+ *   body?: string, prevBody?: string, bodyBytesBefore?: number, bodyBytesAfter?: number,
+ *   dossier?: { origin?: string, summary?: string, endpoints?: Array<{ method?: string, path?: string }>, auth?: string, deriver?: string },
+ *   endpointDelta?: { added?: number, removed?: number },
+ * }} [proposal]
  * @property {string} [actionClass]
  * @property {string} [sideEffect]
  * @property {string} [summary]
@@ -305,8 +371,10 @@ const ACTION_CLASS_LABEL = {
 // full equality) — a confirm broadcast must be answerable on whichever surface
 // is open, not just the side panel.
 export const ConfirmModal = {
-  /** @param {{ attrs: { prompt: ConfirmPrompt, uiActions?: UiActions } }} vnode */
-  view: ({ attrs: { prompt, uiActions } }) => {
+  /** @param {{ attrs: { prompt: ConfirmPrompt, uiActions?: UiActions }, state: { returnFocus?: HTMLElement | null } }} vnode */
+  view: (vnode) => {
+    const { prompt, uiActions } = vnode.attrs;
+    const dialogState = /** @type {{ returnFocus?: HTMLElement | null }} */ (vnode.state);
     /** @param {string} a */
     const answer = (a) => uiActions?.confirmAnswer?.(prompt.id, a);
     const origins = Array.isArray(prompt.origins) ? prompt.origins.filter(Boolean) : [];
@@ -333,8 +401,8 @@ export const ConfirmModal = {
       // not vouch for the destination.
       const unverified = prompt.method === 'sso' && prompt.verified === false;
       return m('.peerd-modal-backdrop', [
-        m('.peerd-modal.confirm-modal.login-modal', [
-          m('h3', 'Approve sign-in'),
+        m('.peerd-modal.confirm-modal.login-modal', confirmationDialogAttrs(answer, dialogState), [
+          m('h3#peerd-confirm-title', 'Approve sign-in'),
           m('.login-hero', [
             m('.badge', icon('lock', 18)),
             m('.ht', [
@@ -357,17 +425,17 @@ export const ConfirmModal = {
               : `peerd never sees your password. You finish signing in yourself — with your device${provider ? ` or ${provider}` : ''}.`),
           ]),
           m('.peerd-modal-actions', [
-            m('button.secondary', { type: 'button', onclick: () => answer('no') }, 'Cancel'),
+            m('button.secondary', { type: 'button', 'data-confirm-reject': '', onclick: () => answer('no') }, 'Cancel'),
             m('button', { type: 'button', disabled: blankOrigin, onclick: () => { if (!blankOrigin) answer('yes_once'); } }, 'Allow sign-in'),
           ]),
         ]),
       ]);
     }
-    // why: memory writes (lethal-trifecta defense) render the proposed
-    // AGENTS.md diff so the user approves the EXACT change, not a one-line
-    // summary. The proposal carries op + the full proposed body.
+    // why: persistent writes render the exact proposed bytes so the user
+    // approves the executable or remembered contents, not a summary of them.
     const isMemory = prompt.kind === 'memory_write' && prompt.proposal;
-    // why non-null in the isMemory branch: isMemory is only truthy when
+    const isSiteClient = prompt.kind === 'site_client_write' && prompt.proposal;
+    // why non-null in either branch: both are only truthy when
     // prompt.proposal exists, so reads of `p` there are always defined.
     const p = /** @type {NonNullable<ConfirmPrompt['proposal']>} */ (prompt.proposal);
     // For non-memory prompts, prefer the Plan/Act policy's action class for
@@ -375,8 +443,8 @@ export const ConfirmModal = {
     const kind = (prompt.actionClass ? ACTION_CLASS_LABEL[prompt.actionClass] : undefined)
       ?? (prompt.sideEffect === 'mutate_external' ? 'a side-effecting' : 'a page');
     return m('.peerd-modal-backdrop', [
-      m('.peerd-modal.confirm-modal', [
-        m('h3', isMemory ? 'Confirm memory write' : 'Confirm action'),
+      m('.peerd-modal.confirm-modal', confirmationDialogAttrs(answer, dialogState), [
+        m('h3#peerd-confirm-title', isMemory ? 'Confirm memory write' : isSiteClient ? 'Confirm site client' : 'Confirm action'),
         isMemory
           ? [
               m('p.muted', { style: 'margin:0 0 8px;' },
@@ -388,7 +456,46 @@ export const ConfirmModal = {
                   'aria-label': 'Proposed memory contents' },
                 p.op === 'delete' ? '(this deletes the document)' : (p.body || '(empty)')),
             ]
-          : prompt.tool === 'a2a_contact' || prompt.tool === 'a2a_reply'
+          : isSiteClient
+            ? p.op === 'delete'
+              ? [
+                  m('p.muted', { style: 'margin:0 0 8px;' },
+                    `The agent wants to delete the saved site client for ${p.dossier?.origin || origins[0] || 'this site'}.`),
+                  m('pre.confirm-summary', { 'aria-label': 'Site-client deletion' },
+                    '(this deletes the saved runnable module and dossier)'),
+                ]
+              : [
+                  m('p.muted', { style: 'margin:0 0 8px;' },
+                    p.op === 'update'
+                      ? `The agent wants to update runnable JavaScript that persists across sessions. Endpoints change by +${p.endpointDelta?.added ?? 0}/-${p.endpointDelta?.removed ?? 0}.`
+                      : `The agent wants to create runnable JavaScript that persists across sessions with ${p.dossier?.endpoints?.length ?? 0} declared endpoint(s).`),
+                  m('.site-client-dossier', [
+                    m('strong', 'Purpose'),
+                    m('p', p.dossier?.summary || '(no purpose provided)'),
+                    m('strong', 'Access'),
+                    m('p', `${SITE_AUTH_LABEL[p.dossier?.auth ?? ''] || 'authentication mode is not recognized'}; ${SITE_DERIVER_LABEL[p.dossier?.deriver ?? ''] || 'learning method is not recognized'}`),
+                    m('strong', 'Endpoints'),
+                    m('pre.confirm-summary', { 'aria-label': 'Proposed site-client endpoints' },
+                      p.dossier?.endpoints?.length
+                        ? p.dossier.endpoints.map((endpoint) => `${endpoint.method || '?'} ${endpoint.path || '?'}`).join('\n')
+                        : '(no endpoints declared)'),
+                  ]),
+                  p.op === 'update'
+                    ? [
+                        m('strong', 'Existing runnable JavaScript'),
+                        m('pre.confirm-summary',
+                          { style: 'max-height:160px; overflow:auto; white-space:pre-wrap;',
+                            'aria-label': 'Existing site-client code' },
+                          p.prevBody || '(empty)'),
+                      ]
+                    : null,
+                  m('strong', p.op === 'update' ? 'Proposed runnable JavaScript' : 'Runnable JavaScript'),
+                  m('pre.confirm-summary',
+                    { style: 'max-height:240px; overflow:auto; white-space:pre-wrap;',
+                      'aria-label': 'Proposed site-client code' },
+                    p.body || '(empty)'),
+                ]
+            : prompt.tool === 'a2a_contact' || prompt.tool === 'a2a_reply'
             ? [
                 m('p.muted', { style: 'margin:0 0 8px;' },
                   prompt.tool === 'a2a_reply'
@@ -413,7 +520,7 @@ export const ConfirmModal = {
           ? m('p.muted', { style: 'font-size:12px;' }, `On: ${origins.join(', ')}`)
           : null,
         m('.peerd-modal-actions', [
-          m('button.secondary', { type: 'button', onclick: () => answer('no') }, 'Reject'),
+          m('button.secondary', { type: 'button', 'data-confirm-reject': '', onclick: () => answer('no') }, 'Reject'),
           // why prompt.ephemeral hides it rather than disabling it: an actor's
           // yes_session is downgraded to yes_once server-side (DESIGN-17 — an
           // actor can be steered by untrusted output across turns, so a standing
@@ -421,10 +528,11 @@ export const ConfirmModal = {
           // gives the user a control that reads as "stop asking me" and does
           // nothing — worse than not offering it, because they stop looking for
           // another way out.
-          isMemory || prompt.ephemeral
+          isMemory || isSiteClient || prompt.ephemeral
             ? null
             : m('button.secondary', { type: 'button', onclick: () => answer('yes_session') }, 'Allow for session'),
-          m('button', { type: 'button', onclick: () => answer('yes_once') }, isMemory ? 'Save' : 'Allow once'),
+          m('button', { type: 'button', onclick: () => answer('yes_once') },
+            isMemory ? 'Save' : isSiteClient ? (p.op === 'delete' ? 'Delete client' : 'Save client') : 'Allow once'),
         ]),
       ]),
     ]);

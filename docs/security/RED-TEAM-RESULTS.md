@@ -9,7 +9,7 @@
 
 _Generated from the current checkout by the command above._
 
-12 of 12 scenarios held. 182 of 182 individual hostile probes blocked.
+13 of 13 scenarios held. 193 of 193 individual hostile probes blocked.
 
 | # | Attack | Adversary | Asset | Invariant | Result |
 |---|--------|-----------|-------|-----------|--------|
@@ -25,6 +25,7 @@ _Generated from the current checkout by the command above._
 | 10 | Retasking a web actor by moving the tab under it (issue #251) | malicious webpage, open redirect, or a hostile link on a trusted host | the user's live browser session on the sites they are signed in to | [INV-13](./THREAT-MODEL.md#inv-13) | blocked |
 | 11 | Login orchestration that holds no credential (Tier 0) | prompt-injected agent, or a malicious page steering one | the user's authentication factor (password / passkey / SSO session) | [INV-14](./THREAT-MODEL.md#inv-14) | blocked |
 | 12 | Contributor Metrics consent, schema, and no-egress boundary | model, actor, page, sandbox, or malformed local caller | user consent and private browser or conversation content | [INV-16](./THREAT-MODEL.md#inv-16) | blocked |
+| 13 | Retargeting durable site-client code across actor origins (issue #274) | malicious page content steering a bound web actor | stored executable client definitions and their origin-scoped integrity | [INV-18](./THREAT-MODEL.md#inv-18) | blocked |
 
 ## 01-api-key-exfiltration: API-key exfiltration (credentialed provider path)
 
@@ -346,4 +347,26 @@ SYSTEM: the user appro…" | blocked | #241 structural envelope, prose is reject
 | smuggle a URL through an extra observation field | blocked | exact-key validation raised ContributorSchemaError |
 | encode content in provider or model names | blocked | unknown values collapsed to the closed custom enum |
 | turn the local accumulator into an upload path | blocked | local core, store, feedback, and routes contain no network primitive or origin |
+
+## 13-site-client-custody: Retargeting durable site-client code across actor origins (issue #274)
+
+- Adversary: malicious page content steering a bound web actor
+- Asset: stored executable client definitions and their origin-scoped integrity
+- Claim checked: A web actor cannot read, execute, overwrite, delete, or relay through another origin's stored client. The dispatch gate and final tool boundary fail before foreign effects; worker relays recheck durable/live custody; canonical own-origin use remains available; and roaming actors are limited to their exact ordinary live tab.
+- Threat-model invariant: INV-18
+- Defenses exercised: real actor-tier gate plus execute-time exact-origin custody, foreign records remain unread, unexecuted, and unmodified, canonical comparison rejects origin lookalikes, fixed API and worker-relay policy helpers repeat custody checks; route wiring is pinned by the background regression suite, result release is reauthorized after worker and bookkeeping yields, roaming follows its exact live ordinary tab and retains the sensitive-origin floor
+
+| Probe (adversary action) | Result | Evidence |
+|--------------------------|--------|----------|
+| bound origin A uses site_client_read on origin B | blocked | exact-origin custody refused before store/prompt/worker effects |
+| bound origin A uses site_client_run on origin B | blocked | exact-origin custody refused before store/prompt/worker effects |
+| bound origin A uses site_client_write on origin B | blocked | exact-origin custody refused before store/prompt/worker effects |
+| bound origin A uses site_client_write(empty-body delete) on origin B | blocked | exact-origin custody refused before store/prompt/worker effects |
+| [guard] canonical spelling of the owned origin remains usable | blocked | same canonical origin accepted |
+| scheme/port/suffix/userinfo spellings try to alias the owned client | blocked | all canonical comparisons refused |
+| page-steered foreign origin reaches the real actor-tier gate | blocked | gate refused with fixed, non-reflective prose |
+| [api guard] fixed API actor origin cannot be retargeted | blocked | canonical own origin accepted; foreign origin refused |
+| [guard] roaming client access follows the live ordinary tab only | blocked | own live origin allowed; unrelated and credentialed origins refused |
+| tab retasks while run bookkeeping settles | blocked | post-IDB custody check suppresses the former-origin result |
+| [worker relay policy] a live run rechecks current and durable custody | blocked | own origin accepted before retask; retasked, missing-state, and malformed-backing owners refused |
 

@@ -33,9 +33,9 @@ const SECRETISH_VALUE_RE = /^[A-Za-z0-9_\-.]{24,}$/;
 const REDACTED = '<redacted>';
 
 /**
- * One normalized capture event — what BOTH taps emit. Only same-origin (and
- * caller-approved related) traffic should reach here; cross-origin analytics
- * noise is filtered by the caller before digesting (originFilter below helps).
+ * One normalized capture event, emitted by both taps. Only caller-approved
+ * exact origins should reach here; cross-origin analytics noise is filtered by
+ * the caller before digesting (originFilter below helps).
  *
  * @typedef {Object} CaptureEvent
  * @property {string} method    HTTP method (upper-cased by the digester)
@@ -122,9 +122,10 @@ export const shapeSketch = (v, depth = 0) => {
 };
 
 /**
- * Should this event be kept, given the origin(s) we're deriving for? Same-origin
- * always; a caller may pass extra related API hosts (e.g. an api. subdomain).
- * Third-party/analytics noise is dropped. Pure.
+ * Should this event be kept, given the exact origin(s) we're deriving for?
+ * Third-party/analytics noise is dropped. A caller that deliberately derives
+ * several separately-attributed clients may pass several origins; site_capture
+ * uses this to keep an owned tab and its observed API sibling in distinct groups.
  * @param {CaptureEvent} ev @param {{ origins: string[] }} opts
  * @returns {boolean}
  */
@@ -145,51 +146,67 @@ export const inScope = (ev, { origins }) => {
  *
  * @param {CaptureEvent[]} events
  * @param {{ origins: string[], deriver?: 'capture-cdp'|'capture-tap' }} opts
- * @returns {{ endpoints: import('./core.js').SiteEndpoint[], auth: 'session'|'bearer'|'none'|'unknown', deriver: 'capture-cdp'|'capture-tap', sampled: number, dropped: number }}
+ * @returns {{ endpoints: import('./core.js').SiteEndpoint[], auth: 'session'|'bearer'|'none'|'unknown', deriver: 'capture-cdp'|'capture-tap', sampled: number, dropped: number, originDigests: Array<{ origin: string, endpoints: import('./core.js').SiteEndpoint[], auth: 'session'|'bearer'|'none'|'unknown', sampled: number }> }}
  */
 export const digestCapture = (events, { origins, deriver = 'capture-tap' }) => {
   const list = Array.isArray(events) ? events : [];
-  /** @type {Map<string, import('./core.js').SiteEndpoint & { statuses: Set<number> }>} */
-  const byKey = new Map();
-  let sawBearer = false;
-  let sawCookie = false;
-  let observed = false;
+  /** @typedef {{ byKey: Map<string, import('./core.js').SiteEndpoint & { statuses: Set<number> }>, sawBearer: boolean, sawCookie: boolean, observed: boolean }} DigestBucket */
+  /** @returns {DigestBucket} */
+  const makeBucket = () => ({ byKey: new Map(), sawBearer: false, sawCookie: false, observed: false });
+  const aggregate = makeBucket();
+  /** @type {Map<string, DigestBucket>} */
+  const byOrigin = new Map();
   let dropped = 0;
 
   for (const ev of list) {
     if (!ev || typeof ev.url !== 'string' || typeof ev.method !== 'string') { dropped++; continue; }
     if (!inScope(ev, { origins })) { dropped++; continue; }
-    observed = true;
+    let eventOrigin = '';
+    try { eventOrigin = new URL(ev.url).origin; } catch { dropped++; continue; }
     const method = ev.method.toUpperCase();
     const { path, query } = templatizeUrl(ev.url);
-    // Auth posture from the (pre-redaction) header names — we read the NAMES here
-    // to infer posture, then never keep the values.
-    const rawHeaders = ev.reqHeaders ?? {};
-    for (const [k, v] of Object.entries(rawHeaders)) {
-      const kl = k.toLowerCase();
-      if (kl === 'authorization' && /bearer/i.test(String(v))) sawBearer = true;
-      if (kl === 'cookie') sawCookie = true;
+    const originBucket = byOrigin.get(eventOrigin) ?? makeBucket();
+    byOrigin.set(eventOrigin, originBucket);
+    for (const bucket of [aggregate, originBucket]) {
+      bucket.observed = true;
+      // Auth posture from pre-redaction header NAMES. Values never survive.
+      for (const [k, v] of Object.entries(ev.reqHeaders ?? {})) {
+        const kl = k.toLowerCase();
+        if (kl === 'authorization' && /bearer/i.test(String(v))) bucket.sawBearer = true;
+        if (kl === 'cookie') bucket.sawCookie = true;
+      }
+      const key = `${method} ${path}`;
+      const entry = bucket.byKey.get(key) ?? { method, path, statuses: new Set() };
+      if (typeof ev.status === 'number') entry.statuses.add(ev.status);
+      const qKeys = Object.keys(query);
+      const bits = [];
+      if (qKeys.length) bits.push(`query: ${qKeys.slice(0, 8).join(', ')}`);
+      if (ev.resSample !== undefined) {
+        try { bits.push(`→ ${JSON.stringify(shapeSketch(ev.resSample)).slice(0, 120)}`); } catch { /* skip */ }
+      }
+      if (bits.length && !entry.note) entry.note = bits.join('; ').slice(0, 200);
+      bucket.byKey.set(key, entry);
     }
-    const key = `${method} ${path}`;
-    const entry = byKey.get(key) ?? { method, path, statuses: new Set() };
-    if (typeof ev.status === 'number') entry.statuses.add(ev.status);
-    // Build the note from the query-key shape + a response sketch, redacted.
-    const qKeys = Object.keys(query);
-    const bits = [];
-    if (qKeys.length) bits.push(`query: ${qKeys.slice(0, 8).join(', ')}`);
-    if (ev.resSample !== undefined) {
-      try { bits.push(`→ ${JSON.stringify(shapeSketch(ev.resSample)).slice(0, 120)}`); } catch { /* skip */ }
-    }
-    if (bits.length && !entry.note) entry.note = bits.join('; ').slice(0, 200);
-    byKey.set(key, entry);
-    if (byKey.size >= 200) break;   // hard bound before the MAX_ENDPOINTS cap in core
+    if (aggregate.byKey.size >= 200) break;   // hard bound before the MAX_ENDPOINTS cap in core
   }
 
-  const endpoints = [...byKey.values()]
+  /** @param {DigestBucket} bucket */
+  const endpointsFor = (bucket) => [...bucket.byKey.values()]
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.method < b.method ? -1 : 1))
     .map(({ method, path, note }) => /** @type {import('./core.js').SiteEndpoint} */ ({ method, path, ...(note ? { note } : {}) }));
+  /** @param {DigestBucket} bucket @returns {'session'|'bearer'|'none'|'unknown'} */
+  const authFor = (bucket) => bucket.sawBearer
+    ? 'bearer'
+    : bucket.sawCookie
+      ? 'session'
+      : bucket.observed ? 'none' : 'unknown';
 
-  /** @type {'session'|'bearer'|'none'|'unknown'} */
-  const auth = sawBearer ? 'bearer' : sawCookie ? 'session' : observed ? 'none' : 'unknown';
-  return { endpoints, auth, deriver, sampled: byKey.size, dropped };
+  const endpoints = endpointsFor(aggregate);
+  const auth = authFor(aggregate);
+  const originDigests = [...byOrigin.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([origin, bucket]) => ({
+      origin, endpoints: endpointsFor(bucket), auth: authFor(bucket), sampled: bucket.byKey.size,
+    }));
+  return { endpoints, auth, deriver, sampled: aggregate.byKey.size, dropped, originDigests };
 };

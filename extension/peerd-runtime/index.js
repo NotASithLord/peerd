@@ -184,7 +184,7 @@ export { buildAncestry } from './actor/delegation-lineage.js';
 // DESIGN-17: the WEB actor — the disposable page-driving agent (an
 // `actorType:'web'` actor that owns one tab). Pure core: the tab→session
 // bindings, the action-log rolling-summary prompt, the self-fence.
-// DESIGN-18: the API actor is the same origin actor with NO tab (fetch-only) — its
+// DESIGN-18: the API actor is the same origin actor with NO tab; its
 // origin-keyed bindings, normalizer, and "what I learned" summary live here too.
 export {
   makeWebActorTabBindings, makeWebActorRegistry, WEB_ACTOR_SUMMARY_PROMPT,
@@ -192,7 +192,7 @@ export {
   makeApiActorBindings, normalizeApiOrigin, API_ACTOR_SUMMARY_PROMPT, fenceApiActorSummary,
   // issue 251: the SITE actor's handle — a web actor BOUND to one origin, with a
   // tab. Distinct from the bare-origin API handle on purpose: that one is
-  // fetch-only and can never log in.
+  // tab-free and can never log in.
   SITE_ACTOR_PREFIX, siteHandleFor, parseSiteHandle,
 } from './actor/web-actor.js';
 // issue 251: authority segmented by origin. A web actor is ROAMING (browses
@@ -207,7 +207,12 @@ export {
   runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
 } from './runtime-capabilities.js';
 export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
-export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
+export {
+  makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
+  makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard,
+  authorizeSiteClientRelayOrigin, mayAddressSiteClientOrigin,
+  mayUseSiteClientOrigin, hasDurableSiteClientState,
+} from './actor/origin-lock.js';
 // …and the three pieces the SW needs to make the lock live: where the state
 // lives (cached + serialized + persisted), which origins are dedicated identity
 // providers (the one narrow exemption), and what the orchestrator is told when
@@ -288,7 +293,7 @@ export {
   // relay so a review child's persisted flag re-stamps ctx.exposure there.
   EXPOSURE_REVIEW,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
-  // DESIGN-18: backing-aware allow-set (an API actor is fetch_url-only).
+  // DESIGN-18: backing-aware allow-set (an API actor has no DOM tools).
   actorAllowedToolsFor, isAllowedForActor,
   // Heap-split phase 2: the per-instance pin used by the privileged actor tool
   // relay (one implementation on a security seam).

@@ -40,6 +40,7 @@ describe('peerd red-team suite', () => {
       '10-origin-retasking',
       '11-login-orchestration',
       '12-contributor-metrics',
+      '13-site-client-custody',
     ]);
   });
 

@@ -1908,6 +1908,97 @@ export const STATES = [
     },
   },
 
+  // --- visual: persisted runnable site-client confirmation -----------------
+  {
+    name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-site-client-confirm';
+          document.body.appendChild(host);
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-site-client',
+            kind: 'site_client_write',
+            tool: 'site_client_write',
+            origins: ['https://shop.example'],
+            proposal: {
+              op: 'create',
+              body: 'return { currentOrder: async () => {\\n  const response = await site.fetch("/api/orders/current");\\n  return response.json;\\n} };',
+              bodyBytesBefore: 0,
+              bodyBytesAfter: 132,
+              dossier: {
+                origin: 'https://shop.example',
+                summary: 'Read the current order status.',
+                endpoints: [{ method: 'GET', path: '/api/orders/current' }],
+                auth: 'session',
+                deriver: 'capture-cdp',
+              },
+            },
+          } }));
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => ({
+          title: document.querySelector('#e2e-site-client-confirm h3')?.textContent,
+          code: document.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
+          endpoints: document.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
+          buttons: [...document.querySelectorAll('#e2e-site-client-confirm button')].map((button) => button.textContent),
+        }))()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('site-client consent exposes its dossier and runnable bytes',
+          rendered?.title === 'Confirm site client'
+            && rendered?.code?.includes('/api/orders/current')
+            && rendered?.endpoints === 'GET /api/orders/current'
+            && JSON.stringify(rendered?.buttons) === JSON.stringify(['Reject', 'Save client']),
+          JSON.stringify(rendered));
+        await rec.visual('site-client-confirm');
+        const maximum = await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ConfirmModal } = await import('/sidepanel/components/app.js');
+          const host = document.querySelector('#e2e-site-client-confirm');
+          const endpoints = Array.from({ length: 60 }, (_, index) => ({
+            method: 'GET', path: '/api/' + String(index).padStart(2, '0') + '/' + 'segment'.repeat(20),
+          }));
+          m.render(host, m(ConfirmModal, { prompt: {
+            id: 'e2e-site-client-maximum', kind: 'site_client_write', tool: 'site_client_write',
+            origins: ['https://shop.example'],
+            proposal: {
+              op: 'update', prevBody: 'return { currentOrder: async () => null };',
+              body: 'return { currentOrder: async () => ({ ok: true }) };',
+              endpointDelta: { added: 60, removed: 0 },
+              dossier: {
+                origin: 'https://shop.example', summary: 'purpose '.repeat(500), endpoints,
+                auth: 'session', deriver: 'capture-cdp',
+              },
+            },
+          } }));
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const modal = host.querySelector('.confirm-modal');
+          const actions = host.querySelector('.peerd-modal-actions');
+          const modalRect = modal.getBoundingClientRect();
+          const actionRect = actions.getBoundingClientRect();
+          return {
+            viewport: innerHeight,
+            modalTop: modalRect.top, modalBottom: modalRect.bottom,
+            actionTop: actionRect.top, actionBottom: actionRect.bottom,
+            scrollable: modal.scrollHeight > modal.clientHeight,
+            overflow: getComputedStyle(modal).overflowY,
+            actionPosition: getComputedStyle(actions).position,
+          };
+        })()`, true);
+        rec.check('maximum site-client dossier keeps Reject and Save reachable',
+          maximum?.modalTop >= 0 && maximum?.modalBottom <= maximum?.viewport
+            && maximum?.actionTop >= maximum?.modalTop && maximum?.actionBottom <= maximum?.viewport
+            && maximum?.scrollable && maximum?.overflow === 'auto'
+            && maximum?.actionPosition === 'sticky',
+          JSON.stringify(maximum));
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('#e2e-site-client-confirm')?.remove()`);
+      }
+    },
+  },
+
   // --- visual: the mode row in Plan mode (segmented Plan/Act + chips) ---------
   {
     name: 'mode-plan', kind: 'visual', phase: 'post-unlock',
