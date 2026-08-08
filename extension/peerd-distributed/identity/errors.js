@@ -15,3 +15,6 @@ class PortableIdentityError extends Error {
 export class IdentityCapsuleError extends PortableIdentityError {}
 export class IdentityCredentialError extends PortableIdentityError {}
 export class IdentityRecordError extends PortableIdentityError {}
+// IdentityHandoffError lives in ./handoff.js, not here: that module must
+// stay import-free so its byte-identical copy runs on the static ceremony
+// page (web-identity/), where this file does not exist.

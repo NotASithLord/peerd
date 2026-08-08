@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>peerd identity</title>
+  <!-- The canonical relying-party ceremony page (identity-rp.js has the
+       threat model). Static, dependency-free, monochrome per the brand
+       rule: no accent color belongs on a consent surface. -->
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #222; background: #fafafa;
+      margin: 0; min-height: 100vh;
+      display: grid; place-items: center; padding: 1rem; box-sizing: border-box;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { color: #ddd; background: #111; }
+      main { border-color: #333; }
+      button { background: #ddd; color: #111; }
+    }
+    main { max-width: 26rem; border: 1px solid #ccc; border-radius: 6px; padding: 1.5rem; }
+    h1 { font-size: 1rem; margin: 0 0 1rem; letter-spacing: 0.02em; }
+    #status { margin: 0 0 0.75rem; white-space: pre-wrap; }
+    #detail { margin: 0 0 1rem; font-size: 0.85em; opacity: 0.75; }
+    .err { color: #b00020; }
+    button {
+      font: inherit; width: 100%; padding: 0.6rem 1rem; cursor: pointer;
+      border: none; border-radius: 4px; background: #222; color: #fafafa;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>peerd identity</h1>
+    <p id="status">loading…</p>
+    <p id="detail"></p>
+    <button id="action" hidden></button>
+  </main>
+  <script type="module" src="./identity-rp.js"></script>
+</body>
+</html>

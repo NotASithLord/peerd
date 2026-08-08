@@ -1,15 +1,16 @@
 // @ts-check
-// peerd-distributed/identity/recovery-record.js — the portable identity
+// peerd-distributed/identity/recovery-record.js - the portable identity
 // record: everything a fresh install needs to become this did EXCEPT the
 // credential itself (docs/design/portable-identity/ 02).
 //
 // Sensitive recovery ciphertext: the capsule is AES-GCM ciphertext and each
 // wrapper is AES-KW ciphertext under a credential-derived KEK, but a stolen
-// record still permits offline passphrase guessing. This implementation carries
-// the record only in the explicit backup file; hosted lookup and passkey
-// ceremonies remain proposals.
+// record still permits offline passphrase guessing (a passkey-prf wrapper has
+// no offline oracle - its KEK needs the authenticator). The record travels
+// only in the explicit backup file; hosted lookup remains a proposal. The
+// passkey ceremony runs at the canonical RP (web-identity/, handoff.js).
 //
-// This file also owns the ADOPTION decision — what an import does when a
+// This file also owns the ADOPTION decision - what an import does when a
 // record meets whatever identity the receiving install already has. The
 // rule is explicit: the same did is accepted without a write, a different did
 // is refused by default, and replacement requires an explicit user decision.
@@ -20,8 +21,9 @@ import { generateCapsuleKey, sealCapsule, openCapsule, MAX_CAPSULE_B64_LENGTH } 
 import { IdentityRecordError } from './errors.js';
 import {
   makePassphraseWrapper, openPassphraseWrapper,
+  makePrfWrapper, openPrfWrapper,
   validateCredentialWrapper,
-  WRAPPER_KIND_PASSPHRASE,
+  WRAPPER_KIND_PASSPHRASE, WRAPPER_KIND_PRF,
 } from './credential-wrapper.js';
 
 export const RECORD_FORMAT = 'peerd-identity-record';
@@ -41,9 +43,14 @@ const MAX_WRAPPERS = 8;
  */
 
 /**
- * A wrapper spec for buildIdentityRecord — the credential material to
- * enroll, by kind.
- * @typedef {{ kind: 'passphrase', passphrase: string }} WrapperSpec
+ * A wrapper spec for buildIdentityRecord - the credential material to
+ * enroll, by kind. The PRF output comes from a ceremony at the canonical
+ * RP (web-identity/), never from an extension-origin credential.
+ * @typedef {(
+ *   { kind: 'passphrase', passphrase: string } |
+ *   { kind: 'passkey-prf', prfOutput: Uint8Array,
+ *     credentialId?: string | null, transports?: string[] | null }
+ * )} WrapperSpec
  */
 
 /**
@@ -78,6 +85,8 @@ export const buildIdentityRecord = async ({ material, wrappers, now }) => {
   for (const spec of wrappers) {
     if (spec.kind === WRAPPER_KIND_PASSPHRASE) {
       built.push(await makePassphraseWrapper(capsuleKey, spec.passphrase));
+    } else if (spec.kind === WRAPPER_KIND_PRF) {
+      built.push(await makePrfWrapper(capsuleKey, spec.prfOutput, spec));
     } else {
       throw new IdentityRecordError(`unknown wrapper kind ${/** @type {any} */ (spec).kind}`, 'unknown-wrapper');
     }
@@ -93,7 +102,7 @@ export const buildIdentityRecord = async ({ material, wrappers, now }) => {
 };
 
 /**
- * Structural validation — cheap, pure, no crypto. Returns an error
+ * Structural validation - cheap, pure, no crypto. Returns an error
  * string (for the import notice) or null when the record is usable.
  *
  * @param {any} record
@@ -122,7 +131,7 @@ export const validateIdentityRecord = (record) => {
 /**
  * Open a record with whatever credentials the caller holds. Tries every
  * wrapper whose kind matches a supplied credential; unknown kinds are
- * skipped (forward compatibility — a future record may carry wrapper
+ * skipped (forward compatibility - a future record may carry wrapper
  * kinds this build can't open, beside ones it can).
  *
  * why the did re-check after decryption: the did in the record is
@@ -132,10 +141,10 @@ export const validateIdentityRecord = (record) => {
  * caller trusts it.
  *
  * @param {IdentityRecord} record
- * @param {{ passphrase?: string }} credentials
+ * @param {{ passphrase?: string, prfOutput?: Uint8Array }} credentials
  * @returns {Promise<{ seed: string, pub: string, did: string }>}
  */
-export const openIdentityRecord = async (record, { passphrase } = {}) => {
+export const openIdentityRecord = async (record, { passphrase, prfOutput } = {}) => {
   const invalid = validateIdentityRecord(record);
   if (invalid) throw new IdentityRecordError(`identity record is invalid: ${invalid}`, invalid);
   /** @type {Error | null} */
@@ -145,6 +154,8 @@ export const openIdentityRecord = async (record, { passphrase } = {}) => {
       let capsuleKey = null;
       if (wrapper.kind === WRAPPER_KIND_PASSPHRASE && typeof passphrase === 'string' && passphrase.length > 0) {
         capsuleKey = await openPassphraseWrapper(wrapper, passphrase);
+      } else if (wrapper.kind === WRAPPER_KIND_PRF && prfOutput instanceof Uint8Array) {
+        capsuleKey = await openPrfWrapper(wrapper, prfOutput);
       }
       if (!capsuleKey) continue;
       const material = await openCapsule(record.capsule, capsuleKey);
@@ -172,6 +183,9 @@ export const openIdentityRecord = async (record, { passphrase } = {}) => {
  * @param {Object} args
  * @param {any} args.record  the record arriving from an export payload
  * @param {string} [args.passphrase]
+ * @param {Uint8Array} [args.prfOutput]  a passkey ceremony's PRF result
+ *        (the id.peerd.ai handoff), usable instead of - or beside - the
+ *        passphrase
  * @param {string | null} [args.existingMaterial]  the receiving install's
  *        current identity secret value (JSON string), or null
  * @param {boolean} [args.replaceExisting] explicit user-approved replacement
@@ -183,14 +197,14 @@ export const openIdentityRecord = async (record, { passphrase } = {}) => {
  *      the record supplied a new identity; null when nothing changes.
  */
 export const adoptIdentityRecord = async ({
-  record, passphrase, existingMaterial = null, replaceExisting = false,
+  record, passphrase, prfOutput, existingMaterial = null, replaceExisting = false,
 }) => {
   const invalid = validateIdentityRecord(record);
   if (invalid) return { adopted: false, did: null, material: null, reason: invalid };
 
   let recovered;
   try {
-    recovered = await openIdentityRecord(record, { passphrase });
+    recovered = await openIdentityRecord(record, { passphrase, prfOutput });
   } catch {
     return { adopted: false, did: null, material: null, reason: 'no-openable-wrapper' };
   }

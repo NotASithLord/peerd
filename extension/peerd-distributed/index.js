@@ -1,5 +1,5 @@
 // @ts-check
-// peerd-distributed — public surface.
+// peerd-distributed - public surface.
 //
 // The decentralized web (dweb) between separate peerd instances:
 // identity, transport, content addressing, discovery, messaging. See
@@ -11,7 +11,7 @@
 // module, files reach for siblings via relative paths.
 //
 // PHASE 0 (the V1-launch wedge): two peers exchange a signed dwapp bundle
-// over WebRTC with manual paste-code pairing — no DHT, no async
+// over WebRTC with manual paste-code pairing - no DHT, no async
 // messaging, no discovery. The surface grows per ROADMAP phase. Sub-areas
 // not yet built (identity subkeys, DHT, messaging, curation) live in
 // docs/distributed and land in later phases.
@@ -19,6 +19,15 @@
 // --- identity (Ed25519, did:key) ----------------------------------------
 export { generateIdentity, createPersistentIdentity, importIdentity, verifySignature } from './identity/keypair.js';
 export { encodeDidKey, decodeDidKey } from './identity/did.js';
+
+// --- identity: the id.peerd.ai ceremony handoff --------------------------
+// The extension side of the passkey ceremony (request mint, tab-return
+// parsing, response opening) - what the backup/restore UI drives when it
+// grows a passkey path. The page side runs a byte-copy of handoff.js.
+export {
+  createHandoffRequest, buildCeremonyUrl, extractSealedResponse, openHandoffResponse,
+  identityPrfInput, IDENTITY_RP_ID, IDENTITY_RP_ORIGIN,
+} from './identity/handoff.js';
 
 // --- content addressing (peerd://, signed manifests, chunked bundles) ----
 export { parsePeerdUri, formatPeerdUri } from './content/uri.js';
@@ -47,7 +56,7 @@ export { createPeer, localDescriptionComplete, DEFAULT_ICE_SERVERS } from './tra
 
 // --- transport: cold-start rendezvous (signaling) -----------------------
 // The pure signaling reducer (shared by the browser client and the server
-// shells — Bun host, CF Worker) and the client adapter that turns a room
+// shells - Bun host, CF Worker) and the client adapter that turns a room
 // code into a Channel over the WebRTC transport.
 export { signalingStep, initialSignalingState, ROOM_CAP, WEBSITE_CAP } from './transport/signaling.js';
 export { connectViaSignaling, openRendezvous, DEFAULT_SIGNALING } from './transport/signaling-client.js';
@@ -74,7 +83,7 @@ export { installAppBundle, BundleRejectedError } from './apps/loader.js';
 export { createDwebBridge } from './apps/bridge.js';
 export { loadSeedApp, COMMONS_SEED } from './apps/seed.js';
 
-// A2A Agent Card validation/caps — exposed so the offscreen base host (dweb-base.js,
+// A2A Agent Card validation/caps - exposed so the offscreen base host (dweb-base.js,
 // which reaches this module only via loadDweb, never a static import) can enforce
 // them on the card-set (validate my own card, reject/strip before it hits the mesh)
 // and card-get (clamp an untrusted peer card before handing it to the actor) paths.

@@ -1,6 +1,9 @@
 # Recovery record and manual transfer
 
-Status: implemented for preview backup files.
+Status: implemented for preview backup files. The record format now also
+accepts `passkey-prf` wrappers (no offline oracle - the KEK needs the
+authenticator; frozen derivation constants and vectors per doc 04); the
+ceremony that produces the PRF output is doc 04's canonical-RP handoff.
 
 The recovery record contains an advertised did, an encrypted capsule, credential
 wrappers, and version metadata. It can be carried as ciphertext, but it is still
