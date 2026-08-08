@@ -11,11 +11,66 @@
 [![Manifest V3](https://img.shields.io/badge/Manifest%20V3-Chrome%20%26%20Firefox-informational.svg)](#install)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 
-peerd is a browser extension that runs an AI agent in the browser. It can work
-with tabs, create isolated compute environments, and build local browser apps.
-You choose the model provider and supply any required key. peerd has no account,
-hosted agent backend, or telemetry. Model requests go directly from the
-extension to the provider you choose.
+# The browser-native agent harness
+
+**peerd runs general-purpose agents inside your own Chrome or Firefox—no cloud
+browser or tool-server connection required.**
+
+It gives agents the environment the web already lives in: your tabs and
+authenticated sessions, adaptive site clients, local compute, browser Apps,
+memory, and the supported model provider you choose.
+
+The current product is Peerd Extension, an experimental 0.x beta. It requires no
+Peerd account or hosted agent backend, and current builds send no product
+telemetry to Peerd. Model requests go directly from the extension to the
+provider you configure; web tasks and optional features use their own documented
+network paths.
+
+**The browser is both the capability surface and the security boundary.**
+
+[Install](#install) · [peerd.ai](https://peerd.ai) ·
+[Architecture](#architecture) · [Security](SECURITY.md)
+
+## Why browser-native
+
+I think we're putting agents in the wrong place.
+
+A lot of agent systems run somewhere else and reach back through a cloud
+browser or a growing collection of external tool servers. The other—and often
+bigger—problem is a local harness running directly on the host with broad or
+effectively full access to the shell, filesystem, credentials, and browser
+sessions.
+
+Remote and host-privileged are opposite deployment choices, but both can put
+reasoning too close to authority. Your browser already contains the
+applications, sessions, identity, networking, UI, and increasingly the compute
+an agent needs—inside boundaries designed for hostile content.
+
+The web has spent decades on the same problem agent harnesses face now: how to
+give software enormous capability while assuming the content it handles may be
+hostile. Origins, isolated contexts, sandboxed frames, permission surfaces,
+Content Security Policy, and privileged brokers are the result. peerd builds on
+those primitives instead of placing one omnipotent process beside the browser
+or controlling another browser remotely.
+
+Capability stays broad. Authority is composed.
+
+## What makes peerd different
+
+- **The browser is the harness.** The agent works with the tabs, applications,
+  sessions, and DOM already in front of you.
+- **A mixture of actors.** The orchestrator delegates to keyless web, WebVM,
+  Notebook, App, and preview dweb actors with narrow, instance-pinned tools.
+- **Code-first page work.** The web actor can turn a site into an adaptive client
+  and reuse that understanding later instead of repeating long tool chains.
+- **Compute inside browser boundaries.** Run scripts, sealed JavaScript
+  Notebooks, compiled WASI tools, browser Apps, and—on Chromium—Linux WebVMs.
+- **Your model choice.** The live provider inventory is defined in
+  [`registry.js`](extension/peerd-provider/registry.js), including BYOK cloud
+  adapters and keyless local options.
+- **Preview P2P.** The optional distributed module adds signed identity,
+  browser-to-browser discovery, dwapps, and agent-to-agent communication over
+  WebRTC; store packages prune it entirely.
 
 ## Status
 
