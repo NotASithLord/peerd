@@ -39,12 +39,13 @@ describe('Contributor Metrics human UI', () => {
     try {
       await settle();
       expect(root.textContent).toContain('peerd works fully without Contributor Metrics');
-      expect(root.textContent).toContain('Never included in the exact contribution payload:');
+      expect(root.textContent).toContain('Included');
+      expect(root.textContent).toContain('Never included');
       expect(root.textContent).toContain('URLs, origins, hosts');
       expect(root.textContent).toContain('consent-rotated opaque tokens');
-      expect(root.textContent).toContain('preview/dev-only');
-      expect(root.textContent).toContain('cannot be individually found or deleted');
-      expect(root.textContent).toContain('provider and known model family');
+      expect(root.textContent).toContain('limited to preview and dev');
+      expect(root.textContent).toContain('individually deleted');
+      expect(root.textContent).toContain('provider, and known model family');
       expect(root.textContent).toContain('Disclosure version 1; payload schema version 1.');
       expect(button(root, 'Enable Contributor Metrics') instanceof HTMLButtonElement).toBe(true);
       button(root, 'Enable Contributor Metrics').click();
