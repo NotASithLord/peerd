@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { makeDenylistNetGuard } from '../../extension/background/denylist-net-guard.js';
 import {
   denylistSessionRuleUpdate,
+  PRIVATE_NETWORK_INITIATOR_RULE_IDS,
   PRIVATE_NETWORK_RULE_IDS,
 } from '../../extension/peerd-egress/denylist/dnr-rules.js';
 
@@ -54,8 +55,30 @@ describe('denylist-net-guard — rule sync', () => {
     const { guard } = guardOver(dnr, ['chase.com'], []);
     await guard.sync();
     expect(dnr.calls[0].addRules).toEqual([]);
-    // The three policy-owned base ids plus every private-network range rule.
-    expect(dnr.calls[0].removeRuleIds).toHaveLength(3 + PRIVATE_NETWORK_RULE_IDS.length);
+    // The three policy-owned base ids plus both private-network rule families.
+    expect(dnr.calls[0].removeRuleIds).toHaveLength(3
+      + PRIVATE_NETWORK_RULE_IDS.length
+      + PRIVATE_NETWORK_INITIATOR_RULE_IDS.length);
+  });
+
+  test('origin changes atomically replace the no-tab worker scope', async () => {
+    const dnr = makeDnr();
+    let domains = ['a.example'];
+    const guard = makeDenylistNetGuard({
+      dnr,
+      buildUpdate: denylistSessionRuleUpdate,
+      getPatterns: () => [],
+      getTabIds: () => [12],
+      getInitiatorDomains: () => domains,
+    });
+    await guard.sync();
+    domains = ['b.example'];
+    await guard.sync();
+    const workerRules = dnr.calls[1].addRules.filter((rule: any) =>
+      rule.condition.tabIds?.includes(-1));
+    expect(workerRules).toHaveLength(PRIVATE_NETWORK_INITIATOR_RULE_IDS.length);
+    expect(workerRules.every((rule: any) =>
+      JSON.stringify(rule.condition.initiatorDomains) === JSON.stringify(['b.example']))).toBe(true);
   });
 
   test('a repeat sync with unchanged state does not re-call the API', async () => {
@@ -206,5 +229,18 @@ describe('denylist-net-guard — degrades, never breaks', () => {
     const { guard } = guardOver(dnr, ['chase.com'], [12], () => { throw new Error('audit down'); });
     await guard.sync();               // must not reject
     expect(guard.state().lastError).toBe('nope');
+  });
+
+  test('a custody projection failure closes page actions until a successful sync', async () => {
+    const dnr = makeDnr();
+    const { guard } = guardOver(dnr, [], [12]);
+    guard.fail(new Error('origin persistence failed'));
+    expect(guard.state().lastError).toBe('origin persistence failed');
+    await guard.sync();
+    expect(guard.state().lastError).toBe('origin persistence failed');
+    guard.recover();
+    await guard.sync();
+    expect(guard.state().lastError).toBeNull();
+    expect(dnr.calls).toHaveLength(2);
   });
 });

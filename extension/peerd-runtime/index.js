@@ -446,6 +446,7 @@ export {
 // used by the background-owned activity overlay before it injects UI.
 export {
   browserNetworkGuardUnavailableResult,
+  browserNetworkGuardPostNavigationResult,
   classifyBrowserAutomationTarget,
   isAddressableBrowserTab,
 } from './tools/browser-automation-policy.js';

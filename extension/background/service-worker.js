@@ -404,6 +404,7 @@ import { makeSettingsStore } from './settings-store.js';
 import { makeDenylistStore, requireDenylistPolicy } from './denylist-store.js';
 import { makeDenylistNetGuard } from './denylist-net-guard.js';
 import { createBrowserNetworkCustody } from './browser-network-custody.js';
+import { createBrowserOriginCustody } from './browser-origin-custody.js';
 import { makeDrivenPopupGuard, popupSourceState } from './driven-popup-guard.js';
 import {
   classifyDrivenChildRequestTarget,
@@ -1139,10 +1140,17 @@ const denylistReady = loadDenylist()
 // access. Current Firefox supports the portable rule shape; Chrome receives
 // its additional request-type enums below.
 const GUARDED_BROWSER_TABS_KEY = 'guardedBrowserTabIds';
+const GUARDED_BROWSER_ORIGINS_KEY = 'guardedBrowserOriginDomains';
 const browserDnr = /** @type {any} */ ((globalThis).chrome?.declarativeNetRequest);
 const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(browserDnr, PRIVATE_NETWORK_RULE_IDS);
 const browserNetworkCustody = createBrowserNetworkCustody({
   persist: (tabIds) => sessionCache.sessionSet(GUARDED_BROWSER_TABS_KEY, tabIds),
+});
+const browserOriginCustody = createBrowserOriginCustody({
+  isGuarded: (tabId) => drivenTabIds().includes(tabId),
+  allowUrl: (rawUrl) => classifyBrowserAutomationTarget(rawUrl).allowed,
+  persist: (rows) => sessionCache.sessionSet(GUARDED_BROWSER_ORIGINS_KEY, rows),
+  deferUntilHydrated: true,
 });
 const guardedBrowserTabsReady = Promise.resolve(sessionCache.sessionGet(GUARDED_BROWSER_TABS_KEY))
   .then(async (ids) => {
@@ -1155,6 +1163,19 @@ const guardedBrowserTabsReady = Promise.resolve(sessionCache.sessionGet(GUARDED_
       error: `guarded_tabs_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   });
+const guardedBrowserOriginsReady = guardedBrowserTabsReady.then(async (tabsResult) => {
+  if (tabsResult.ok === false) return tabsResult;
+  try {
+    const rows = await sessionCache.sessionGet(GUARDED_BROWSER_ORIGINS_KEY);
+    await browserOriginCustody.hydrate(Array.isArray(rows) ? rows : []);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `guarded_origins_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+});
 
 const drivenTabIds = () => {
   /** @type {Set<number>} */
@@ -1205,6 +1226,7 @@ const denylistNetGuard = makeDenylistNetGuard({
   }),
   getPatterns: () => denylistStore.patterns(),
   getTabIds: drivenTabIds,
+  getInitiatorDomains: () => browserOriginCustody.domains(),
   audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
   // Existing session rules survive an MV3 worker restart. Do not replace them
   // from a half-hydrated tab set. The boot barrier starts reconciliation after
@@ -1217,6 +1239,7 @@ const denylistNetGuard = makeDenylistNetGuard({
 // update either lands before execution or the tool fails closed.
 const holdBrowserNetworkGuard = async (
   /** @type {number} */ tabId,
+  /** @type {string | undefined} */ targetUrl,
   /** @type {{ tabId: number, token: string } | undefined} */ requiredLease,
 ) => {
   await browserNetworkGuardReady;
@@ -1234,6 +1257,13 @@ const holdBrowserNetworkGuard = async (
     await denylistNetGuard.sync();
     return browserNetworkGuardUnavailableResult('network_guard_install_failed');
   }
+  let originReceipt = null;
+  try {
+    originReceipt = targetUrl ? await browserOriginCustody.retain(tabId, targetUrl) : null;
+  } catch {
+    if (claim.added) await browserNetworkCustody.removeDurable(tabId).catch(() => {});
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
   await denylistNetGuard.sync();
   const state = denylistNetGuard.state();
   if (state.supported && !state.lastError
@@ -1246,8 +1276,10 @@ const holdBrowserNetworkGuard = async (
   }
   if (claim.added) {
     await browserNetworkCustody.removeDurable(tabId).catch(() => {});
-    await denylistNetGuard.sync();
   }
+  await browserOriginCustody.rollback(originReceipt).catch(() => {});
+  if (claim.added) await browserOriginCustody.close(tabId).catch(() => {});
+  await denylistNetGuard.sync();
   return browserNetworkGuardUnavailableResult(
     state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
   );
@@ -1277,7 +1309,26 @@ const releaseBrowserNetworkGuardLease = async (
   if (!lease || typeof lease.tabId !== 'number' || typeof lease.token !== 'string') return;
   await browserNetworkGuardReady;
   if (!browserNetworkCustody.release(lease)) return;
+  browserOriginCustody.domains();
   await denylistNetGuard.sync();
+};
+
+const updateBrowserNetworkGuardOrigin = async (
+  /** @type {number} */ tabId,
+  /** @type {string | undefined} */ rawUrl,
+) => {
+  if (!rawUrl || !drivenTabIds().includes(tabId)) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  const originReceipt = await browserOriginCustody.retain(tabId, rawUrl).catch(() => null);
+  if (!originReceipt) return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError) return { ok: true };
+  await browserOriginCustody.rollback(originReceipt).catch(() => {});
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
 };
 
 // A page-created child receives authority only from the exact peerd-owned
@@ -1349,7 +1400,8 @@ const adoptPopupBrowserNetworkGuard = async (
     const state = denylistNetGuard.state();
     return { ok: !state.supported || !state.lastError, adopted: false };
   }
-  const result = await holdBrowserNetworkGuard(childTabId, startupLease);
+  const child = await browser.tabs.get(childTabId).catch(() => null);
+  const result = await holdBrowserNetworkGuard(childTabId, child?.url, startupLease);
   releaseStartupLease();
   if (result.ok) startupPopupNetworkGuard.handoff(childTabId);
   else {
@@ -2268,6 +2320,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     domRefs,
     tabs: browser.tabs,
     ensureBrowserNetworkGuard: holdBrowserNetworkGuard,
+    updateBrowserNetworkGuardOrigin,
     acquireBrowserNetworkGuardLease,
     releaseBrowserNetworkGuardLease,
     consumeBrowserChildPolicyNotice,
@@ -4025,6 +4078,7 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
+  browserOriginCustody.close(tabId).catch(() => {});
   browserNetworkCustody.close(tabId).catch(() => {});
   // ...and drop it out of the network backstop's tab scope. Tab ids remain
   // unique within one browser session, but closed tabs no longer need rules.
@@ -4037,6 +4091,20 @@ browser.tabs.onRemoved.addListener((tabId) => {
 // cannot find the node and the model has to take a new snapshot.
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') domRefs.clear(tabId);
+  if (typeof changeInfo.url === 'string' && drivenTabIds().includes(tabId)) {
+    browserOriginCustody.retain(tabId, changeInfo.url, { keepOnPersistFailure: true })
+      .then((originReceipt) => {
+        if (originReceipt) denylistNetGuard.recover();
+        return denylistNetGuard.sync();
+      })
+      .catch(async (error) => {
+        // Keep the volatile domain in the rule projection so the live page and
+        // its worker remain contained. Future tools stay closed until a later
+        // retain successfully persists the complete snapshot.
+        denylistNetGuard.fail(error);
+        await denylistNetGuard.sync();
+      });
+  }
 });
 
 browser.runtime.onConnect.addListener((port) => {
@@ -7135,13 +7203,30 @@ const engineTrackersReady = (async () => {
 const browserNetworkGuardReady = Promise.all([
   denylistReady,
   guardedBrowserTabsReady,
+  guardedBrowserOriginsReady,
   webActorBindingsReady,
   engineTrackersReady,
 ]).then(async (results) => {
-  const failed = results.find((result) => result?.ok === false);
+  let failed = results.find((result) => result?.ok === false);
   startupPopupCandidatesOpen = false;
   await startupPopupCandidateQueue;
   await startupPopupNetworkGuard.seal();
+  if (!failed) {
+    for (const tabId of drivenTabIds()) {
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      if (!tab) {
+        failed = { ok: false, error: 'browser_origin_custody_hydration_failed' };
+        break;
+      }
+      if (tab.url) {
+        try { await browserOriginCustody.retain(tabId, tab.url); }
+        catch {
+          failed = { ok: false, error: 'browser_origin_custody_hydration_failed' };
+          break;
+        }
+      }
+    }
+  }
   await denylistNetGuard.start(failed ?? { ok: true });
   if (!failed) {
     await denylistNetGuard.sync();
