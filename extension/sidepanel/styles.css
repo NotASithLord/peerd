@@ -896,6 +896,15 @@ button.linklike:hover { color: var(--fg); }
 
 /* --- top bar actions --- */
 .topbar-actions { display: flex; gap: 6px; }
+@media (max-width: 420px) {
+  .topbar { gap: 4px; padding-inline: 8px; }
+  .topbar-actions { gap: 4px; }
+}
+@media (max-width: 397px) {
+  .topbar { flex-wrap: wrap; }
+  .topbar > .spacer { display: none; }
+  .topbar-actions { flex: 1 0 100%; justify-content: space-between; }
+}
 button.icon {
   display: inline-flex;
   align-items: center;
@@ -2225,6 +2234,19 @@ button.tool-call-header:focus-visible {
 
 /* Plan/Act selector row above the input bar */
 .chat-mode-row { display: flex; align-items: center; padding: 4px 0 0; }
+.chat-mode-row .planact-mode,
+.chat-mode-row .planact-confirm,
+.chat-mode-row .effort-dial,
+.chat-mode-row .goal-toggle {
+  min-height: 28px;
+  box-sizing: border-box;
+}
+@media (max-width: 370px) {
+  .chat-mode-row { flex-wrap: wrap; column-gap: 6px; row-gap: 6px; }
+  .chat-mode-row .planact { flex: 0 0 100%; margin-right: 0; }
+  .chat-mode-row .goal-toggle { margin-left: 0; }
+  .chat-mode-row > .spacer { flex: 1 1 0; min-width: 0; }
+}
 
 /* --- Memory pane (Context tab) ---------------------------------------- */
 .memory-pane { display: flex; flex-direction: column; gap: 10px; }

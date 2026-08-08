@@ -6,6 +6,7 @@
 // references a past app vaguely ("the chart I had you make last week").
 
 import { serializeListResult } from './columnar.js';
+import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const appSearchTool = {
@@ -47,12 +48,20 @@ export const appSearchTool = {
       }));
       return {
         ok: true,
-        content: serializeListResult({
-          query: args.query,
-          count: trimmed.length,
-          truncated: hits.length > 20,
-          hits: trimmed,
-        }, 'hits'),
+        // why: names, tags, and especially body snippets are user-authored App
+        // bytes. A spawned child or clean-context reviewer may receive this
+        // otherwise-main-visible tool, so fence the result at the tool seam just
+        // like app_read_file rather than letting saved HTML become instructions.
+        content: wrapUntrusted({
+          origin: 'saved-apps',
+          tool: 'app_search',
+          body: serializeListResult({
+            query: args.query,
+            count: trimmed.length,
+            truncated: hits.length > 20,
+            hits: trimmed,
+          }, 'hits'),
+        }),
       };
     } catch (e) {
       return { ok: false, error: `app_search_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };

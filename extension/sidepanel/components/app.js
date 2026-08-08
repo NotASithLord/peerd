@@ -164,6 +164,7 @@ const TopBar = {
         // active state + tooltip carry the meaning (the top bar is icon-only).
         m('button.icon', {
           class: state.settings?.watchAgentTab ? 'is-active' : '',
+          'aria-label': 'Watch the agent’s tab',
           title: state.settings?.watchAgentTab
             ? 'Watching the agent’s tab — click to stop following'
             : 'Watch the agent’s tab (bring it to the front and follow along)',
@@ -171,11 +172,13 @@ const TopBar = {
           onclick: () => send({ type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab } }),
         }, icon('target')),
         m('button.icon', {
+          'aria-label': 'Chats',
           title: 'Chats',
           onclick: () => m.route.set(
             m.route.get() === '/chats' ? '/chat' : '/chats'),
         }, icon('menu')),
         m('button.icon', {
+          'aria-label': 'New chat',
           title: 'New chat',
           onclick: async () => {
             await send({ type: 'session/reset' });
@@ -185,6 +188,7 @@ const TopBar = {
         // Home — opens the full-tab HOME page (a primary surface, distinct from
         // Settings; focus-or-create so it doesn't pile up duplicate tabs).
         m('button.icon', {
+          'aria-label': 'Home',
           title: 'Home',
           onclick: () => openHome(),
         }, icon('home')),
@@ -194,6 +198,7 @@ const TopBar = {
         // openOptions() focuses an existing options tab via
         // runtime.openOptionsPage rather than opening duplicates.
         m('button.icon', {
+          'aria-label': 'Settings',
           title: 'Settings',
           onclick: () => openOptions(),
         }, icon('set')),
@@ -203,6 +208,7 @@ const TopBar = {
         // own dismiss; this reuses the SW's sidepanel/close (disable+re-arm;
         // Chrome-only, no-op on Firefox's sidebar). Lock moved to the Home rail.
         m('button.icon', {
+          'aria-label': 'Close panel',
           title: 'Close panel',
           onclick: () => send({ type: 'sidepanel/close' }),
         }, icon('x')),

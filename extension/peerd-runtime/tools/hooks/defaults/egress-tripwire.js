@@ -28,7 +28,7 @@
 //      belongs beside it, visible in the same Context → Hooks list.
 //
 // ALL the judgement lives in tools/egress-heuristics.js — a pure, never-throwing
-// inspector with its threat model, its three scanned URL slots, and its KNOWN
+// inspector with its threat model, its scanned URL/request slots, and its KNOWN
 // RESIDUALS written down. This file is the WIRING: pick the tab tools out of the
 // stream, hand the inspector the call plus the origin of the tab it would act
 // on, pass its verdict through. Keeping the policy pure is what lets it be
@@ -52,6 +52,8 @@ import { inspectTabToolCall } from '../../egress-heuristics.js';
  *
  * @typedef {Object} TripwireHookCtx
  * @property {(name: string) => Tool | undefined} [getToolMeta]
+ * @property {'tab' | 'api'} [backing]
+ * @property {string} [actorInstanceId]
  */
 
 /** @type {import('../runner.js').Hook} */
@@ -63,7 +65,7 @@ export const egressTripwireHook = {
   // tripwire for a guarantee.
   description: 'Blocks a page-driving tool — or a web helper\'s own fetch — from '
     + 'sending an off-origin URL that carries a high-entropy encoded payload in its '
-    + 'userinfo, host, or path: the DOM-data exfiltration shape. Does NOT scan the '
+    + 'userinfo, host, or path, or a fetch header/body carrying that shape. Does NOT scan the '
     + 'query string, where legitimate login tokens live. Best-effort tripwire, not a '
     + 'guarantee. Built-in code, registered at boot; cannot be disabled or removed.',
   // why: just after egress-allowlist (10) — both are network vetoes and belong
@@ -102,14 +104,21 @@ export const egressTripwireHook = {
     if (!isTabTool && !isActorWebTool) {
       return { action: 'allow', reason: 'egress-tripwire: not a browser-session tool, skipped' };
     }
+    // API actors intentionally have no active tab. Their actorInstanceId is
+    // the fixed origin they own, so it is the equivalent provenance for the
+    // same-origin exemption; treating it as originless falsely blocks opaque
+    // writes back to the integration the actor is bound to.
+    const currentOrigin = ctx.activeTab?.origin
+      ?? (ctx.backing === 'api' && typeof ctx.actorInstanceId === 'string'
+        ? ctx.actorInstanceId
+        : null);
     const verdict = inspectTabToolCall({
       name: toolName,
       args,
-      // The origin of the tab this call acts on — what makes the destination
-      // "off-origin", and the evidence a page was actually read. Absent (no
-      // page loaded yet) means nothing has been scraped, and the inspector
-      // allows.
-      currentOrigin: ctx.activeTab?.origin ?? null,
+      // The origin whose bytes this actor can know. Originless is fail-safe:
+      // the inspector treats every destination as off-origin but still blocks
+      // only a clear payload shape.
+      currentOrigin,
     });
     return verdict.action === 'block'
       ? verdict

@@ -340,6 +340,7 @@ export const ChatView = {
  * @property {string|null} selected
  * @property {boolean} locked
  * @property {string|undefined} fetchedKey
+ * @property {number} requestGeneration
  */
 
 /** @typedef {{ state: ModelPickerState, attrs: { send: Send, sessionId?: string|null, optionsKey?: string } }} ModelPickerVnode */
@@ -351,6 +352,7 @@ const ModelPicker = {
     vnode.state.selected = null;
     vnode.state.locked = false;      // mid-session: provider fixed, model-only
     vnode.state.fetchedKey = undefined;
+    vnode.state.requestGeneration = 0;
     ModelPicker.fetch(vnode);
   },
   /** @param {ModelPickerVnode} vnode */
@@ -366,9 +368,19 @@ const ModelPicker = {
   },
   /** @param {ModelPickerVnode} vnode */
   fetch(vnode) {
-    vnode.state.fetchedKey = ModelPicker.keyOf(vnode);
+    const requestedKey = ModelPicker.keyOf(vnode);
+    const requestGeneration = vnode.state.requestGeneration + 1;
+    vnode.state.requestGeneration = requestGeneration;
+    vnode.state.fetchedKey = requestedKey;
     const sessionId = vnode.attrs.sessionId ?? null;
     vnode.attrs.send({ type: 'models/options', sessionId }).then((r) => {
+      // why: options requests can resolve out of order when settings/provider
+      // pushes redraw the live panel. An older response must not overwrite the
+      // selection fetched for the newer key — that visibly put the picker on a
+      // different provider than the effort dial and the settings snapshot.
+      if (vnode.state.requestGeneration !== requestGeneration
+        || vnode.state.fetchedKey !== requestedKey
+        || ModelPicker.keyOf(vnode) !== requestedKey) return;
       if (r?.ok) {
         vnode.state.options = r.options;
         vnode.state.selected = r.selected;

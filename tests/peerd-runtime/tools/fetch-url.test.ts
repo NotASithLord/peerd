@@ -73,6 +73,15 @@ describe('fetch_url — sessionless secure fetch', () => {
     expect('credentials' in seen.init).toBe(false);
   });
 
+  test('does not turn an array-shaped headers arg into numeric wire headers', async () => {
+    const { ctx, seen } = recordingCtx();
+    await fetchUrlTool.execute({
+      url: 'https://api.shop.com/p',
+      headers: ['payload-that-must-not-become-header-zero'],
+    }, ctx);
+    expect(seen.init.headers).toEqual({});
+  });
+
   test('a non-GET write is confirm-gated (shared web:write key); declines on "no"', async () => {
     const calls: any[] = [];
     let fetched = false;

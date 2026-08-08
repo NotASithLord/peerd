@@ -25,6 +25,7 @@ import { applyRealmSeal } from '../../../extension/engine-tabs/notebook-tab/note
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
+import { isServiceWorkerSender } from '../../../extension/shared/sender-trust.js';
 
 // A mock worker global shaped like a real DedicatedWorkerGlobalScope: raw
 // constructors as own props, fetch/importScripts/caches on the prototype.
@@ -66,7 +67,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook worker, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store — the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; the App iframe cannot break out of its inlined-worker shim or navigate the host; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store — the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; an App cannot break out of its iframe or impersonate the service worker to issue actor commands; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -162,6 +163,28 @@ export const scenario: Scenario = {
       probes.push(noRefresh
         ? blocked('meta-refresh the App frame to an attacker URL', 'meta http-equiv=refresh stripped from the app HTML')
         : leaked('meta-refresh the App frame to an attacker URL', 'meta refresh survived'));
+
+      const id = 'red-team-extension';
+      const origin = `chrome-extension://${id}/`;
+      const trust = {
+        runtimeId: id,
+        extensionOrigin: origin,
+        serviceWorkerUrl: `${origin}background/service-worker.js`,
+      };
+      const engineTabDenied = !isServiceWorkerSender({
+        id,
+        url: `${origin}engine-tabs/app-tab/index.html`,
+        tab: { id: 42 },
+      }, trust);
+      const exactWorkerAccepted = isServiceWorkerSender({
+        id,
+        url: trust.serviceWorkerUrl,
+      }, trust);
+      probes.push(engineTabDenied && exactWorkerAccepted
+        ? blocked('replay a broadcast actor command from a first-party engine tab',
+          'exact service-worker source accepted; same-extension tab provenance rejected')
+        : leaked('replay a broadcast actor command from a first-party engine tab',
+          `engineTabDenied=${engineTabDenied} exactWorkerAccepted=${exactWorkerAccepted}`));
     }
 
     // 7) WebVM HTTP bridge: the guest cannot pick a dangerous scheme, inject
@@ -196,6 +219,7 @@ export const scenario: Scenario = {
       'applyRealmSeal (raw-channel block + native deletion + bridge pin)',
       'resolveRelativePath (OPFS ".." collapse)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
+      'isServiceWorkerSender (actor-command source pin)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',
     ]);
     // The pure seal runs here; the real-worker-realm proof (and the a2a run's
@@ -204,6 +228,7 @@ export const scenario: Scenario = {
       'extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm)',
       'extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
+      'scripts/cdp/states.mjs actor-command-sender-pin (live engine-tab forgery)',
     ].join('; ');
     return result;
   },
