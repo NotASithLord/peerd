@@ -104,7 +104,10 @@ export const createActorLiveProjection = () => {
 
   /** @param {string} parentSessionId @param {any[]} tasks */
   const setAsyncTasks = (parentSessionId, tasks) => {
-    asyncTasks.set(parentSessionId, Array.isArray(tasks) ? tasks : []);
+    const active = (Array.isArray(tasks) ? tasks : [])
+      .filter((task) => task?.status === 'running' || task?.status === 'done');
+    if (active.length > 0) asyncTasks.set(parentSessionId, active);
+    else asyncTasks.delete(parentSessionId);
     pruneSettledSpawned();
   };
 
@@ -159,8 +162,31 @@ export const createActorLiveProjection = () => {
     return [...roots].sort();
   };
 
+  // Count only live worker identities, deduplicating an async placeholder once
+  // its child session snapshot arrives. This deliberately exposes no labels,
+  // session metadata, or transcript state to the navigation activity lamp.
+  const activeActorCount = () => {
+    const identities = new Set();
+    for (const card of bound.values()) {
+      if (card?.streaming === true && card?.sessionId) identities.add(`bound:${card.sessionId}`);
+    }
+    for (const session of spawned.values()) {
+      if (session?.running === true && session?.sessionId) identities.add(`spawned:${session.sessionId}`);
+    }
+    for (const [parentSessionId, tasks] of asyncTasks) {
+      for (const task of tasks) {
+        const childSessionId = typeof task?.childSessionId === 'string' && task.childSessionId
+          ? task.childSessionId : null;
+        identities.add(childSessionId
+          ? `spawned:${childSessionId}`
+          : `task:${parentSessionId}:${String(task?.taskId ?? 'pending')}`);
+      }
+    }
+    return identities.size;
+  };
+
   return {
     startBound, patchBound, finishBound,
-    foldSpawned, rootForSpawned, setAsyncTasks, snapshot, rootSessionIds,
+    foldSpawned, rootForSpawned, setAsyncTasks, snapshot, rootSessionIds, activeActorCount,
   };
 };

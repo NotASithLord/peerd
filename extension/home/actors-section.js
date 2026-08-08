@@ -210,7 +210,10 @@ const overviewCounts = (overview) => {
 };
 
 export const ActorsSection = {
-  /** @param {{ state: ActorSpaceState, attrs: { send: (msg: any) => Promise<any> } }} vnode */
+  /** @param {{ state: ActorSpaceState, attrs: {
+   *   send: (msg: any) => Promise<any>,
+   *   onActiveActorCount?: (count: number) => void,
+   * } }} vnode */
   oninit(vnode) {
     const ui = vnode.state;
     ui.overview = null;
@@ -254,6 +257,7 @@ export const ActorsSection = {
         }
         if (ui.selectedId && !nextIds.has(ui.selectedId)) ui.selectedId = '';
         ui.overview = result;
+        vnode.attrs.onActiveActorCount?.(overviewCounts(result).actors);
         ui.error = '';
         if (manual && !moveFocus) {
           const counts = overviewCounts(result);
@@ -295,6 +299,7 @@ export const ActorsSection = {
   /**
    * @param {{ state: ActorSpaceState, attrs: {
    *   send: (msg: any) => Promise<any>,
+   *   onActiveActorCount?: (count: number) => void,
    *   onOpenSession: (sessionId: string) => void|Promise<void>,
    *   currentSessionId?: string|null,
    *   chatOwnedBySidePanel?: boolean,
@@ -302,13 +307,19 @@ export const ActorsSection = {
    */
   view({ state: ui, attrs }) {
     const roots = /** @type {any[]} */ (Array.isArray(ui.overview?.roots) ? ui.overview.roots : []);
-    /** @type {Array<ReturnType<typeof buildActorFabric>>} */
-    const fabrics = roots.map((/** @type {any} */ root) => buildActorFabric({
-      rootSession: root.session,
-      actors: root.topology?.actors,
-      spawned: root.topology?.spawned,
-      asyncTasks: root.topology?.asyncTasks,
-    }));
+    const rooms = roots.map((/** @type {any} */ root) => ({
+      root,
+      fabric: buildActorFabric({
+        rootSession: root.session,
+        actors: root.topology?.actors,
+        spawned: root.topology?.spawned,
+        asyncTasks: root.topology?.asyncTasks,
+      }),
+    })).sort((a, b) => b.fabric.activeActors - a.fabric.activeActors
+      || Number(b.root.busy) - Number(a.root.busy)
+      || String(a.root.session?.title ?? a.root.session?.sessionId)
+        .localeCompare(String(b.root.session?.title ?? b.root.session?.sessionId)));
+    const fabrics = rooms.map((room) => room.fabric);
     const actorCount = fabrics.reduce((/** @type {number} */ sum, fabric) => sum + fabric.activeActors, 0);
     const boundCount = fabrics.reduce((/** @type {number} */ sum, fabric) => sum
       + fabric.nodes.filter((node) => node.variant === 'bound').length, 0);
@@ -356,7 +367,7 @@ export const ActorsSection = {
               m('h2', 'The instance is quiet'),
               m('p', 'When any chat starts reasoning or delegates work, its orchestrator and actors will appear here.'),
             ])
-          : m('.actor-space-rooms', roots.map((/** @type {any} */ root) => orchestratorRoom(
+          : m('.actor-space-rooms', rooms.map(({ root }) => orchestratorRoom(
               root, ui.selectedId, select, attrs.onOpenSession,
               attrs.currentSessionId, attrs.chatOwnedBySidePanel === true,
             ))),

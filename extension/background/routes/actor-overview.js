@@ -27,20 +27,15 @@ const optionalText = (value, max = DISPLAY_TEXT_MAX) => {
   return text || undefined;
 };
 
-/** @param {any} session @param {boolean} busy @param {boolean} hasActors */
-const activityFor = (session, busy, hasActors) => {
-  const messages = Array.isArray(session?.messages) ? session.messages : [];
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    // Assistant text/tool calls are model claims, not runtime-observed facts.
-    // Synthetic user rows are actor replies/recovery notices, not the request
-    // that caused this orchestrator turn. Only the user's latest real request
-    // is safe to label as what the main context is working on.
-    if ((busy || hasActors) && message?.role === 'user' && message.synthetic !== true
-      && typeof message.content === 'string' && cleanText(message.content)) {
-      const goal = compact(message.content, 82);
-      return hasActors ? `Coordinating: ${goal}` : `Working on: ${goal}`;
-    }
+/** @param {any} message @param {boolean} busy @param {boolean} hasActors */
+const activityFor = (message, busy, hasActors) => {
+  // Assistant text/tool calls are model claims, not runtime-observed facts.
+  // The store supplies only the latest real user request; actor replies and
+  // recovery notices never enter this high-frequency observability path.
+  if ((busy || hasActors) && typeof message?.content === 'string'
+    && cleanText(message.content)) {
+    const goal = compact(message.content, 82);
+    return hasActors ? `Coordinating: ${goal}` : `Working on: ${goal}`;
   }
   if (hasActors) return 'Coordinating isolated actor work…';
   return busy ? 'Reasoning in the main context…' : 'Waiting for isolated work…';
@@ -85,7 +80,9 @@ const safeTopology = (snapshot) => ({
   },
   asyncTasks: Object.fromEntries(Object.entries(snapshot?.asyncTasks ?? {})
     .map(([parentSessionId, tasks]) => [parentSessionId,
-      (Array.isArray(tasks) ? tasks : []).map((task) => {
+      (Array.isArray(tasks) ? tasks : [])
+        .filter((task) => task?.status === 'running' || task?.status === 'done')
+        .map((task) => {
         const taskLabel = optionalText(task?.task, ACTOR_LABEL_MAX);
         return {
           taskId: task?.taskId,
@@ -105,54 +102,78 @@ const safeTopology = (snapshot) => ({
 export const makeActorOverviewRoutes = (deps) => {
   const { vault, sessions, turnSlots, actorLiveProjection, isActualHomeSender } = deps;
 
+  const authorized = (/** @type {any} */ sender) =>
+    typeof isActualHomeSender === 'function' && isActualHomeSender(sender);
+
+  const buildOverview = async () => {
+    const rootIds = new Set([
+      ...actorLiveProjection.rootSessionIds(),
+      ...turnSlots.busySessionIds(),
+    ]);
+    const roots = [];
+    for (const sessionId of rootIds) {
+      const metadata = await sessions.getMetadata(sessionId);
+      const kind = metadata?.kind ?? 'chat';
+      if (!metadata || kind === 'spawned' || kind === 'actor'
+        || metadata.archivedAt !== undefined) continue;
+      const topology = actorLiveProjection.snapshot(sessionId);
+      const busy = !!turnSlots.isBusy(sessionId);
+      const activeTopology = hasTopology(topology);
+      if (!busy && !activeTopology) continue;
+      // Reverse-read one real user message. No poll assembles a transcript or
+      // scans inactive chats merely to label the current work.
+      const latestRequest = await sessions.getLatestNonSyntheticUserMessage(sessionId);
+      const title = optionalText(metadata.title, DISPLAY_TEXT_MAX);
+      const provider = optionalText(metadata.provider, DISPLAY_TEXT_MAX);
+      const model = optionalText(metadata.model, DISPLAY_TEXT_MAX);
+      roots.push({
+        session: {
+          sessionId,
+          title: title ?? null,
+          provider: provider ?? null,
+          model: model ?? null,
+        },
+        busy,
+        activity: activityFor(latestRequest, busy, activeTopology),
+        topology: safeTopology(topology),
+      });
+    }
+    roots.sort((a, b) => Number(b.busy) - Number(a.busy)
+      || String(a.session.title ?? a.session.sessionId)
+        .localeCompare(String(b.session.title ?? b.session.sessionId)));
+    return { ok: true, roots, observedAt: Date.now() };
+  };
+
+  // Multiple Home tabs can tick together. Share one in-flight read so a slow
+  // IDB response never fans out into duplicate monitor work.
+  /** @type {Promise<any>|null} */
+  let overviewInFlight = null;
+  const overview = () => {
+    if (overviewInFlight) return overviewInFlight;
+    const current = buildOverview();
+    overviewInFlight = current;
+    void current.finally(() => {
+      if (overviewInFlight === current) overviewInFlight = null;
+    }).catch(() => {});
+    return current;
+  };
+
   return {
     'actors/overview': async (_msg = {}, sender = undefined) => {
-      if (typeof isActualHomeSender !== 'function' || !isActualHomeSender(sender)) {
+      if (!authorized(sender)) {
         return { ok: false, error: 'actor-overview-unauthorized' };
       }
       if (vault.isLocked()) return { ok: false, error: 'locked' };
-      const rows = await sessions.listMetadata();
-      const chats = rows.filter((/** @type {any} */ session) => {
-        const kind = session?.kind ?? 'chat';
-        return kind !== 'spawned' && kind !== 'actor' && session?.archivedAt === undefined;
-      });
-      const byId = new Map(chats.map((/** @type {any} */ session) => [session.sessionId, session]));
-      const rootIds = new Set(actorLiveProjection.rootSessionIds());
-      for (const session of /** @type {any[]} */ (chats)) {
-        if (turnSlots.isBusy(session.sessionId)) rootIds.add(session.sessionId);
-      }
-
-      const roots = [];
-      for (const sessionId of rootIds) {
-        const metadata = byId.get(sessionId);
-        if (!metadata) continue;
-        const topology = actorLiveProjection.snapshot(sessionId);
-        const busy = !!turnSlots.isBusy(sessionId);
-        const activeTopology = hasTopology(topology);
-        if (!busy && !activeTopology) continue;
-        // Only active roots cross into the message store, and only to recover
-        // the latest real user request. Inactive chats never load transcripts.
-        const session = await sessions.get(sessionId);
-        if (!session) continue;
-        const title = optionalText(metadata.title, DISPLAY_TEXT_MAX);
-        const provider = optionalText(metadata.provider, DISPLAY_TEXT_MAX);
-        const model = optionalText(metadata.model, DISPLAY_TEXT_MAX);
-        roots.push({
-          session: {
-            sessionId,
-            title: title ?? null,
-            provider: provider ?? null,
-            model: model ?? null,
-          },
-          busy,
-          activity: activityFor(session, busy, activeTopology),
-          topology: safeTopology(topology),
-        });
-      }
-      roots.sort((a, b) => Number(b.busy) - Number(a.busy)
-        || String(a.session.title ?? a.session.sessionId)
-          .localeCompare(String(b.session.title ?? b.session.sessionId)));
-      return { ok: true, roots, observedAt: Date.now() };
+      return overview();
+    },
+    'actors/count': async (_msg = {}, sender = undefined) => {
+      if (!authorized(sender)) return { ok: false, error: 'actor-overview-unauthorized' };
+      if (vault.isLocked()) return { ok: false, error: 'locked' };
+      return {
+        ok: true,
+        activeActors: actorLiveProjection.activeActorCount(),
+        observedAt: Date.now(),
+      };
     },
   };
 };

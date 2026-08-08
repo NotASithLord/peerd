@@ -19,11 +19,16 @@ const makeIdb = () => {
   };
   let getManyCalls = 0;
   const getAllCalls: string[] = [];
+  const getCalls: Array<[string, string]> = [];
   return {
     _tbl: tbl,
     _getManyCalls: () => getManyCalls,
     _getAllCalls: () => [...getAllCalls],
-    get: async (store: string, key: string) => tbl(store).get(key),
+    _getCalls: () => [...getCalls],
+    get: async (store: string, key: string) => {
+      getCalls.push([store, key]);
+      return tbl(store).get(key);
+    },
     getMany: async (store: string, keys: string[]) => {
       getManyCalls++;
       return (keys ?? []).map((k) => tbl(store).get(k));
@@ -84,6 +89,50 @@ describe('session store v2 — per-message records', () => {
     expect(JSON.stringify(rows)).not.toContain('private transcript body');
     expect(JSON.stringify(rows)).not.toContain('legacy private body');
     expect(idb._tbl('sessions').get('legacy').messages).toHaveLength(1);
+  });
+
+  test('targeted actor-monitor reads avoid transcript assembly and stop at the latest real request', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const session = await store.create({ provider: 'openai', model: 'gpt-test' });
+    await store.appendMessage(session.sessionId, {
+      role: 'user', content: 'Original request', id: 'request-1', when: 1,
+    } as any);
+    await store.appendMessage(session.sessionId, {
+      role: 'assistant', content: 'Private assistant body', id: 'assistant-1', when: 2,
+    } as any);
+    await store.appendMessage(session.sessionId, {
+      role: 'user', content: 'Actor reply', synthetic: true, id: 'synthetic-1', when: 3,
+    } as any);
+    await store.appendMessage(session.sessionId, {
+      role: 'user', content: 'Current request', id: 'request-2', when: 4,
+    } as any);
+    await store.appendMessage(session.sessionId, {
+      role: 'assistant', content: 'Later private answer', id: 'assistant-2', when: 5,
+    } as any);
+    await store.appendMessage(session.sessionId, {
+      role: 'user', content: 'Later actor reply', synthetic: true, id: 'synthetic-2', when: 6,
+    } as any);
+    // A delayed idempotent retry of an older request must not move the pointer
+    // backward after a newer real user message has committed.
+    await store.appendMessage(session.sessionId, {
+      role: 'user', content: 'Original request', id: 'request-1', when: 1,
+    } as any);
+
+    const getManyBefore = idb._getManyCalls();
+    const metadata = await store.getMetadata(session.sessionId);
+    const callsBeforeLatest = idb._getCalls().length;
+    const latest = await store.getLatestNonSyntheticUserMessage(session.sessionId);
+    const latestCalls = idb._getCalls().slice(callsBeforeLatest);
+
+    expect(metadata).toMatchObject({ sessionId: session.sessionId, provider: 'openai' });
+    expect((metadata as any).messages).toBeUndefined();
+    expect(latest).toMatchObject({ id: 'request-2', content: 'Current request' });
+    expect(latestCalls).toEqual([
+      ['sessions', session.sessionId],
+      ['session_messages', 'request-2'],
+    ]);
+    expect(idb._getManyCalls()).toBe(getManyBefore);
   });
 
   // DESIGN-18 REGRESSION GUARD: create() rebuilds the record from a fixed field

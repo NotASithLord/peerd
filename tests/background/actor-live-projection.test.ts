@@ -49,6 +49,7 @@ describe('actor live projection', () => {
       taskId: 'as-1', childSessionId: 'late-child', task: 'continue', status: 'delivered',
     }]);
     expect(live.snapshot('root').spawned.sessions).toEqual({});
+    expect(live.snapshot('root').asyncTasks).toEqual({});
   });
 
   test('enumerates every active root without merging their snapshots', () => {
@@ -71,5 +72,25 @@ describe('actor live projection', () => {
     live.foldSpawned({ type: 'actor-stop', sessionId: 'child-a', parentToolUseId: 'tu-spawn' });
     live.setAsyncTasks('root-c', [{ taskId: 'as-c', task: 'compare', status: 'delivered' }]);
     expect(live.rootSessionIds()).toEqual([]);
+  });
+
+  test('counts live workers without serializing their metadata or double-counting async hydration', () => {
+    const live = createActorLiveProjection();
+    live.startBound({
+      rootSessionId: 'root', parentSessionId: 'root', parentToolUseId: 'bound-tu',
+      sessionId: 'bound', kind: 'web', streaming: true, task: 'private label',
+    });
+    live.foldSpawned({
+      type: 'actor-start', rootSessionId: 'root', parentSessionId: 'root',
+      parentToolUseId: 'spawn-tu', sessionId: 'child', task: 'private task',
+    });
+    live.setAsyncTasks('root', [
+      { taskId: 'hydrated', childSessionId: 'child', status: 'running' },
+      { taskId: 'pending', status: 'running' },
+      { taskId: 'terminal', status: 'delivered' },
+    ]);
+
+    expect(live.activeActorCount()).toBe(3);
+    expect(JSON.stringify(live.activeActorCount())).not.toContain('private');
   });
 });

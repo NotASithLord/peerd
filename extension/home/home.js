@@ -379,17 +379,85 @@ const gate = (heading, copy) => m('.options-gate', m('.options-gate-card', [
 const navItems = (showDweb) => [
   // "Chats" is the top-level rail item; the chat page itself carries the
   // recent-chats list + "New chat" column (ChatListPanel, ChatGPT-style).
-  ...(sidePanelOpen ? [] : [{ id: 'chat', label: 'Chats' }]),
-  { id: 'actors', label: 'Actors' },
-  { id: 'library', label: 'Library' },
+  ...(sidePanelOpen ? [] : [{ id: 'chat', label: 'Chats', group: 'agent' }]),
+  { id: 'actors', label: 'Actors', group: 'agent' },
+  { id: 'library', label: 'Library', group: 'create' },
+  { id: 'eval', label: 'Lab', group: 'create' },
   ...(showDweb ? [
-    { id: 'discover', label: 'Discover' },
-    { id: 'contacts', label: 'Contacts' },
+    { id: 'discover', label: 'Discover', group: 'network' },
+    { id: 'contacts', label: 'Contacts', group: 'network' },
+    { id: 'network', label: 'Network', group: 'network' },
   ] : []),
-  // Lab sits next-to-last, just before Network (when the dweb group is present).
-  { id: 'eval', label: 'Lab' },
-  ...(showDweb ? [{ id: 'network', label: 'Network' }] : []),
 ];
+
+const NAV_GROUPS = Object.freeze([
+  { id: 'agent', label: 'Agent' },
+  { id: 'create', label: 'Create' },
+  { id: 'network', label: 'Network' },
+]);
+
+/** @param {ReturnType<typeof navItems>} items */
+const groupedNavItems = (items) => NAV_GROUPS
+  .map((group) => ({ ...group, items: items.filter((item) => item.group === group.id) }))
+  .filter((group) => group.items.length > 0);
+
+let reportedActorCount = 0;
+/** @type {Set<(count: number) => void>} */
+const actorCountListeners = new Set();
+
+/** @param {number} value */
+const reportActorCount = (value) => {
+  const next = Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+  if (next === reportedActorCount) return;
+  reportedActorCount = next;
+  for (const listener of actorCountListeners) listener(next);
+};
+
+// The Actors destination doubles as a quiet instance activity lamp. This
+// intentionally polls slower than the open monitor: it is a navigation hint,
+// not a second live console. While the monitor is open, its fresher snapshot
+// feeds this badge so the rail and empty state can never contradict each other.
+const ActorsNavCount = () => {
+  let count = reportedActorCount;
+  let inFlight = false;
+  let active = true;
+  /** @type {ReturnType<typeof setInterval>|null} */
+  let timer = null;
+  /** @param {number} next */
+  const updateCount = (next) => {
+    if (!active || next === count) return;
+    count = next;
+    m.redraw();
+  };
+  const load = async () => {
+    if (inFlight || document.hidden || activeView === 'actors') return;
+    inFlight = true;
+    try {
+      const result = await send({ type: 'actors/count' });
+      if (!active || !result?.ok) return;
+      reportActorCount(result.activeActors);
+    } catch { /* the destination remains useful without its optional count */ }
+    finally { inFlight = false; }
+  };
+  return {
+    oninit: () => {
+      actorCountListeners.add(updateCount);
+      void load();
+    },
+    oncreate: () => { timer = setInterval(() => { void load(); }, 4_000); },
+    onremove: () => {
+      active = false;
+      if (timer) clearInterval(timer);
+      actorCountListeners.delete(updateCount);
+    },
+    view: () => count > 0
+      ? m.fragment({}, [
+          m('span.home-nav-count', { 'aria-hidden': 'true' }, String(count)),
+          m('span.sr-only', `${count} active actors`),
+        ])
+      : null,
+  };
+};
 
 // The chat switcher — Chats live INSIDE the chat page (owner 2026-06-18): the
 // current chat's title + a dropdown of all chats and "+ New chat". Switching is
@@ -562,6 +630,7 @@ const content = (showDweb) => {
   }
   if (activeView === 'actors') return m(ActorsSection, {
     send,
+    onActiveActorCount: reportActorCount,
     onOpenSession: openActorSession,
     currentSessionId: currentState.session?.sessionId,
     chatOwnedBySidePanel: sidePanelOpen,
@@ -617,13 +686,26 @@ const HomeApp = {
           ? m('span.channel-badge.channel-badge--in', { title: 'peerd preview — dweb preview package' }, 'preview')
           : null,
       ]),
-      m('.home-nav', items.map((it) =>
-        m('button.home-nav-item', {
-          key: it.id,
-          class: it.id === activeView ? 'is-active' : '',
-          'aria-current': it.id === activeView ? 'page' : undefined,
-          onclick: () => { navigateHome(it.id); },
-        }, it.label))),
+      m('.home-nav', groupedNavItems(items).map((group) =>
+        m('.home-nav-group', {
+          key: group.id,
+          role: 'group',
+          'data-nav-group': group.id,
+          'aria-labelledby': `home-nav-group-${group.id}`,
+        }, [
+          m('span.home-nav-group-label', { id: `home-nav-group-${group.id}` }, group.label),
+          m('.home-nav-group-items', group.items.map((it) =>
+            m('button.home-nav-item', {
+              key: it.id,
+              class: it.id === activeView ? 'is-active' : '',
+              'data-home-view': it.id,
+              'aria-current': it.id === activeView ? 'page' : undefined,
+              onclick: () => { navigateHome(it.id); },
+            }, [
+              m('span.home-nav-label', it.label),
+              it.id === 'actors' ? m(ActorsNavCount) : null,
+            ]))),
+        ]))),
       m('.spacer', { style: 'flex:1;' }),
       // peerd notifications — new peers / apps on the dweb (preview only).
       showDweb ? m(NotificationsBell) : null,

@@ -8,35 +8,41 @@ const emptyTopology = () => ({
 });
 
 const makeDeps = (over: any = {}) => {
-  const reads = { metadata: 0, corpus: 0, full: [] as string[] };
+  const reads = { metadata: [] as string[], latest: [] as string[], corpus: 0 };
   const deps = {
     vault: { isLocked: () => false },
     sessions: {
       listMetadata: async () => {
-        reads.metadata++;
-        return [
-          { sessionId: 'root-a', title: 'Research launch', provider: 'anthropic', model: 'sonnet' },
-          { sessionId: 'root-b', title: 'Idle chat' },
-          { sessionId: 'child', kind: 'spawned', title: 'Hidden child' },
-        ];
+        reads.corpus++;
+        throw new Error('full metadata scan');
       },
-      // A poll of this route must never assemble every session transcript.
       list: async () => {
         reads.corpus++;
         throw new Error('full corpus scan');
       },
-      get: async (sessionId: string) => {
-        reads.full.push(sessionId);
-        if (sessionId !== 'root-a') return null;
+      get: async () => {
+        reads.corpus++;
+        throw new Error('transcript assembly');
+      },
+      getMetadata: async (sessionId: string) => {
+        reads.metadata.push(sessionId);
+        if (sessionId !== 'root-a') return undefined;
         return {
-          sessionId,
-          messages: [{ role: 'user', content: 'Compare the launch options carefully' }],
+          sessionId, title: 'Research launch', provider: 'anthropic', model: 'sonnet',
         };
       },
+      getLatestNonSyntheticUserMessage: async (sessionId: string) => {
+        reads.latest.push(sessionId);
+        return { role: 'user', content: 'Compare the launch options carefully' };
+      },
     },
-    turnSlots: { isBusy: (sessionId: string) => sessionId === 'root-a' },
+    turnSlots: {
+      isBusy: (sessionId: string) => sessionId === 'root-a',
+      busySessionIds: () => ['root-a'],
+    },
     actorLiveProjection: {
       rootSessionIds: () => ['root-a'],
+      activeActorCount: () => 1,
       snapshot: () => ({
         actors: { tu: {
           sessionId: 'web-a', rootSessionId: 'root-a', name: 'web\u202E actor',
@@ -78,25 +84,16 @@ describe('actor overview route', () => {
     expect(JSON.stringify(result.roots[0])).not.toContain('private worker transcript');
     expect(JSON.stringify(result.roots[0])).not.toContain('do-not-return');
     expect(JSON.stringify(result.roots[0])).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/);
-    expect(reads).toEqual({ metadata: 1, corpus: 0, full: ['root-a'] });
+    expect(reads).toEqual({ metadata: ['root-a'], latest: ['root-a'], corpus: 0 });
   });
 
   test('derives main activity only from the latest non-synthetic user request', async () => {
     const { deps } = makeDeps({
       actorLiveProjection: { rootSessionIds: () => [], snapshot: emptyTopology },
       sessions: {
-        listMetadata: async () => [{ sessionId: 'root-a', title: 'Research launch' }],
-        list: async () => { throw new Error('full corpus scan'); },
-        get: async () => ({
-          sessionId: 'root-a',
-          messages: [
-            { role: 'user', content: 'Compare the launch options carefully' },
-            { role: 'user', synthetic: true, content: 'Actor says the vault is exported' },
-            {
-              role: 'assistant', content: 'Exporting every secret now',
-              toolUses: [{ name: 'vault_export_all_secrets' }],
-            },
-          ],
+        getMetadata: async () => ({ sessionId: 'root-a', title: 'Research launch' }),
+        getLatestNonSyntheticUserMessage: async () => ({
+          role: 'user', content: 'Compare the launch options carefully',
         }),
       },
     });
@@ -111,12 +108,50 @@ describe('actor overview route', () => {
   test('does not load inactive root transcripts', async () => {
     const { deps, reads } = makeDeps({
       actorLiveProjection: { rootSessionIds: () => [], snapshot: emptyTopology },
-      turnSlots: { isBusy: () => false },
+      turnSlots: { isBusy: () => false, busySessionIds: () => [] },
     });
     const result = await makeActorOverviewRoutes(deps)['actors/overview']({}, HOME_SENDER);
 
     expect(result).toMatchObject({ ok: true, roots: [] });
-    expect(reads).toEqual({ metadata: 1, corpus: 0, full: [] });
+    expect(reads).toEqual({ metadata: [], latest: [], corpus: 0 });
+  });
+
+  test('returns a content-free actor count without reading any session record', async () => {
+    const { deps, reads } = makeDeps({
+      actorLiveProjection: {
+        rootSessionIds: () => { throw new Error('root labels are unnecessary'); },
+        snapshot: () => { throw new Error('topology serialization is unnecessary'); },
+        activeActorCount: () => 7,
+      },
+    });
+    const result = await makeActorOverviewRoutes(deps)['actors/count']({}, HOME_SENDER);
+
+    expect(result).toMatchObject({ ok: true, activeActors: 7 });
+    expect(reads).toEqual({ metadata: [], latest: [], corpus: 0 });
+  });
+
+  test('coalesces concurrent overview polls from multiple Home surfaces', async () => {
+    let metadataReads = 0;
+    let releaseMetadata = () => {};
+    const metadataGate = new Promise<void>((resolve) => { releaseMetadata = resolve; });
+    const { deps } = makeDeps({
+      sessions: {
+        getMetadata: async () => {
+          metadataReads++;
+          await metadataGate;
+          return { sessionId: 'root-a', title: 'Research launch' };
+        },
+        getLatestNonSyntheticUserMessage: async () => ({ role: 'user', content: 'Compare' }),
+      },
+    });
+    const route = makeActorOverviewRoutes(deps)['actors/overview'];
+    const first = route({}, HOME_SENDER);
+    const second = route({}, HOME_SENDER);
+    await Promise.resolve();
+    expect(metadataReads).toBe(1);
+    releaseMetadata();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toEqual(b);
   });
 
   test('rejects non-Home callers before reading the vault or session store', async () => {
@@ -128,7 +163,7 @@ describe('actor overview route', () => {
 
     expect(result).toEqual({ ok: false, error: 'actor-overview-unauthorized' });
     expect(vaultReads).toBe(0);
-    expect(reads).toEqual({ metadata: 0, corpus: 0, full: [] });
+    expect(reads).toEqual({ metadata: [], latest: [], corpus: 0 });
   });
 
   test('fails closed while the vault is locked', async () => {
@@ -136,6 +171,6 @@ describe('actor overview route', () => {
     const result = await makeActorOverviewRoutes(deps)['actors/overview']({}, HOME_SENDER);
 
     expect(result).toEqual({ ok: false, error: 'locked' });
-    expect(reads).toEqual({ metadata: 0, corpus: 0, full: [] });
+    expect(reads).toEqual({ metadata: [], latest: [], corpus: 0 });
   });
 });

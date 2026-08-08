@@ -27,9 +27,24 @@
    side-panel layout — undo both here so it aligns with the wordmark). */
 .channel-badge--in { margin-left: 0; align-self: flex-start; }
 
-.home-nav { display: flex; flex-direction: column; gap: 2px; margin-top: 12px; }
+.home-nav { display: flex; flex-direction: column; gap: 16px; margin-top: 12px; }
+.home-nav-group,
+.home-nav-group-items { display: flex; flex-direction: column; gap: 2px; }
+.home-nav-group-label {
+  padding: 0 12px 4px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
 .home-nav-item {
   min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   text-align: left;
   padding: 8px 12px;
   border: none;
@@ -41,6 +56,21 @@
 }
 .home-nav-item:hover { background: var(--bg); }
 .home-nav-item.is-active { background: var(--bg); font-weight: 600; }
+.home-nav-count {
+  min-width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border: 1px solid var(--fg-muted);
+  border-radius: 999px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
 .home-rail-action { display: flex; align-items: center; gap: 8px; }
 .home-action-icon { flex: none; }
 
@@ -532,10 +562,22 @@
     grid-column: 1 / -1;
     grid-row: 2;
     flex-direction: row;
-    gap: 2px;
+    flex-wrap: wrap;
+    gap: 4px 8px;
     margin-top: 0;
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
+  }
+  .home-nav-group { min-width: 0; }
+  .home-nav-group-items { flex-flow: row wrap; }
+  .home-nav-group-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .home-nav .home-nav-item { flex: none; white-space: nowrap; }
   .home-rail > .notif { grid-column: 3; grid-row: 1; }

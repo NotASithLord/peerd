@@ -3081,7 +3081,9 @@ export const STATES = [
           const space = document.querySelector('.actor-space');
           const rooms = [...document.querySelectorAll('.actor-space-room')];
           const nodes = [...document.querySelectorAll('.actor-space-node')];
-          if (!space || rooms.length < 2 || nodes.length < 6) return null;
+          const actorBadge = document.querySelector('[data-home-view="actors"] .home-nav-count');
+          if (!space || rooms.length < 2 || nodes.length < 6
+            || actorBadge?.textContent?.trim() !== '4') return null;
           const rect = space.getBoundingClientRect();
           const alphaRoom = rooms.find((room) => room.getAttribute('data-root-session') === ${JSON.stringify(alphaRoot)});
           const alphaTree = alphaRoom?.querySelector('.actor-space-tree');
@@ -3092,6 +3094,9 @@ export const STATES = [
             nodes: nodes.length,
             subactors: document.querySelectorAll('.actor-space-node.is-subactor').length,
             orbs: document.querySelectorAll('.actor-space .peerd-spinner').length,
+            actorBadge: actorBadge.textContent.trim(),
+            navGroups: [...document.querySelectorAll('.home-nav-group-label')]
+              .map((label) => label.textContent.trim()),
             text: space.textContent ?? '',
             highFanoutScrolls: !!alphaTree && alphaTree.scrollHeight > alphaTree.clientHeight,
             headerVisible: !!alphaHead && alphaHead.getBoundingClientRect().top >= 0,
@@ -3102,10 +3107,16 @@ export const STATES = [
         rec.check('Actor Space renders two orchestrator rooms and both workers',
           rendered?.rooms === 2 && rendered?.nodes >= 6 && rendered?.subactors >= 4,
           JSON.stringify(rendered));
+        rec.check('rooms with isolated actors lead main-only orchestrators',
+          rendered?.roots?.[0] === alphaRoot, JSON.stringify(rendered?.roots));
         rec.check('the rooms stay root-separated and use the brand orb on live contexts',
           rendered?.roots?.includes(alphaRoot)
             && rendered?.roots?.includes(betaRoot)
             && rendered?.orbs >= 5,
+          JSON.stringify(rendered));
+        rec.check('the rail groups Chats and Actors under Agent and shows a live actor count',
+          rendered?.actorBadge === '4'
+            && rendered?.navGroups?.join('|') === 'Agent|Create|Network',
           JSON.stringify(rendered));
         rec.check('the full-screen map exposes current work, topology semantics, and fits the viewport',
           rendered?.text.includes('alpha isolated research')
@@ -3126,12 +3137,14 @@ export const STATES = [
         const narrow = await evalIn(page, `(() => {
           const shell = document.querySelector('.home-shell');
           const rail = document.querySelector('.home-rail');
+          const nav = document.querySelector('.home-nav');
           const targets = [...document.querySelectorAll('.home-rail button')];
           return {
             direction: getComputedStyle(shell).flexDirection,
             viewport: innerWidth,
             documentWidth: document.documentElement.scrollWidth,
             railWidth: rail.getBoundingClientRect().width,
+            navFits: nav.scrollWidth <= nav.clientWidth,
             targetsTall: targets.every((button) => button.getBoundingClientRect().height >= 44),
           };
         })()`);
@@ -3139,6 +3152,7 @@ export const STATES = [
           narrow?.direction === 'column'
             && narrow?.documentWidth <= narrow?.viewport
             && narrow?.railWidth <= narrow?.viewport
+            && narrow?.navFits === true
             && narrow?.targetsTall === true,
           JSON.stringify(narrow));
         if (narrow) await rec.shotPage('actor-space-live-narrow.light', page);
@@ -3167,17 +3181,25 @@ export const STATES = [
           viewport: innerWidth,
           documentWidth: document.documentElement.scrollWidth,
           railWidth: document.querySelector('.home-rail')?.getBoundingClientRect().width,
+          navFits: document.querySelector('.home-nav')?.scrollWidth
+            <= document.querySelector('.home-nav')?.clientWidth,
         })`);
         rec.check('Actor Space still reflows at the 320 CSS-pixel equivalent of 400% zoom',
           zoomReflow?.documentWidth <= zoomReflow?.viewport
-            && zoomReflow?.railWidth <= zoomReflow?.viewport,
+            && zoomReflow?.railWidth <= zoomReflow?.viewport
+            && zoomReflow?.navFits === true,
           JSON.stringify(zoomReflow));
 
         const empty = await waitFor(() => evalIn(page,
-          `document.querySelector('.actor-space-empty')?.textContent ?? null`),
+          `(() => {
+            const text = document.querySelector('.actor-space-empty')?.textContent ?? '';
+            const badge = document.querySelector('[data-home-view="actors"] .home-nav-count');
+            return text && !badge ? { text, badge: null } : null;
+          })()`),
         { budgetMs: 28_000, pollMs: 150 });
         rec.check('the permanent monitor settles to an honest empty state',
-          typeof empty === 'string' && empty.includes('The instance is quiet'), String(empty));
+          empty?.text?.includes('The instance is quiet') && empty.badge === null,
+          JSON.stringify(empty));
         if (empty) await rec.shotPage('actor-space-empty-narrow.dark', page);
       } finally { try { page.close(); } catch { /* */ } }
     },

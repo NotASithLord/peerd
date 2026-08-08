@@ -45,6 +45,7 @@ export const ABORT_STEER = 'peerd:steer';
  *   claim: (sessionId: string) => { controller: AbortController, release: () => void },
  *   stop: (sessionId: string) => boolean,
  *   isBusy: (sessionId: string) => boolean,
+ *   busySessionIds: () => string[],
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
  *   advanceQueue: (sessionId: string) => void,
  * }}
@@ -137,6 +138,10 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     },
 
     isBusy: (sessionId) => slots.has(sessionId),
+
+    // A monitor can enumerate the already-in-memory slot keys without scanning
+    // every durable chat just to ask which orchestrators are currently active.
+    busySessionIds: () => [...slots.keys()],
 
     runWhenIdle(sessionId, fn) {
       if (!slots.has(sessionId)) { fn(); return; }
