@@ -6,6 +6,10 @@ import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh
 import { createBaseNetwork } from '../../extension/peerd-distributed/base-network.js';
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick(10);
+};
 
 // Two base networks linked over a memoryPair mesh — the live offscreen lobby's
 // shape, minus WebRTC. A "room" is openRoom() on top: a namespaced overlay on
@@ -110,7 +114,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     const got: any[] = [];
     rb.gossip.subscribe('feed', (m: any) => got.push(m));
     rb.sync.retain('feed');                // reconciles against the pre-existing link
-    await tick(60);
+    await waitFor(() => got.some((m) => m.data.text === 'said-before-you-opened'));
 
     expect(got.map((m) => m.data.text)).toContain('said-before-you-opened');
     ra.leave(); rb.leave(); a.close(); b.close();

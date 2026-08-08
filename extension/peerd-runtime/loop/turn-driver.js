@@ -41,6 +41,38 @@ import {
   actorIsolationAvailable, actorIsolationForTurn, actorIsolationPromptBlock, actorIsolationRefusal,
   ACTOR_ISOLATION_UNAVAILABLE_TOOLS, filterByActorIsolation,
 } from '../actor/isolation.js';
+import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
+import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
+
+/**
+ * Reduce the foreground tab to safe, minimal prompt context.
+ * @param {{ url?: string } | null | undefined} tab
+ * @param {readonly string[]} denylist
+ * @returns {{ workspace: string, activeTab: { url: string, title: string } | null, protectedTab: 'private_network'|'sensitive_site'|null }}
+ */
+export const safeForegroundTabContext = (tab, denylist = []) => {
+  const verdict = classifyBrowserAutomationTarget(tab?.url);
+  if (!verdict.allowed) {
+    const protectedTab = verdict.reason === 'private_network' || verdict.reason === 'cloud_metadata'
+      ? 'private_network'
+      : null;
+    return { workspace: '', activeTab: null, protectedTab };
+  }
+  let hostname = '';
+  try { hostname = new URL(/** @type {string} */ (tab?.url)).hostname; } catch {
+    return { workspace: '', activeTab: null, protectedTab: null };
+  }
+  if (findDenylistMatch(hostname, denylist)) {
+    return { workspace: '', activeTab: null, protectedTab: 'sensitive_site' };
+  }
+  // Origin only. Paths and titles are page-controlled and can contain reset
+  // tokens, private document names, newlines, or prompt-fence text.
+  return {
+    workspace: verdict.origin,
+    activeTab: { url: verdict.origin, title: '' },
+    protectedTab: null,
+  };
+};
 
 /**
  * The positive inbound authority check. Kept pure/exported so
@@ -57,7 +89,7 @@ export const inboundActorCallAllowed = ({ isActor, inbound, actorType, name }) =
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
-    sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser, originOfTabUrl,
+    sessions, sessionState, turnSlots, buildTemporalBlock, memory, browser,
     skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
     filterByDwebActive, filterByDwebEnabled,
     filterDescriptorsByManifest, mainAgentDescriptors, listTools, settingsStore, DWEB_ENABLED,
@@ -68,6 +100,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     safeFetch, REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
     contextWindowFor, liveContextWindow, currentAppScope,
     checkpointMgr, detectInterruptedTurn,
+    getDenylist = () => [],
     // The context inspector's capture hook (optional; a no-op default so the
     // driver never depends on the debug surface being wired).
     recordModelCall = () => {},
@@ -256,6 +289,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // vanishes (the user's "back on home → gone" requirement, by construction).
   // Re-derived per turn from the live active tab; never persisted to history.
   let activeTabContext = null;
+  /** @type {'private_network'|'sensitive_site'|null} */
+  let protectedTabContext = null;
   // why: an ACTOR has no user-workspace memory and no foreground-tab
   // reorientation — its context is its INSTANCE, not the user's browsing. Pulling
   // the user's current page + that origin's memory into an actor turn would be
@@ -264,12 +299,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   if (!isActor) {
     try {
       const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-      const ws = activeTab?.url ? originOfTabUrl(activeTab.url) : '';
-      const loaded = await memory.loadAlwaysLoaded({ workspace: ws });
+      const safeTab = safeForegroundTabContext(activeTab, getDenylist());
+      activeTabContext = safeTab.activeTab;
+      protectedTabContext = safeTab.protectedTab;
+      const loaded = await memory.loadAlwaysLoaded({ workspace: safeTab.workspace });
       memoryBlock = loaded.text;
-      if (typeof activeTab?.url === 'string' && /^https?:\/\//i.test(activeTab.url)) {
-        activeTabContext = { url: activeTab.url, title: (activeTab.title || '').slice(0, 200) };
-      }
     } catch (e) {
       console.warn('[sw] memory load failed', e);
     }
@@ -310,7 +344,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   };
   const contextMessage = isActor
     ? ''
-    : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext }), recoveryBlock]
+    : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext, protectedTab: protectedTabContext }), recoveryBlock]
       .filter(Boolean).join('\n\n');
 
   /** @type {string|null} */

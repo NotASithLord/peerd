@@ -97,6 +97,8 @@ const PAGE_METHODS = {
       clicked: c?.clicked === true,
       ...(typeof c?.matchedCount === 'number' ? { matchedCount: c.matchedCount } : {}),
       ...(c?.navigated ? { navigated: true } : {}),
+      ...(c?.browserPolicy ? { browserPolicy: c.browserPolicy } : {}),
+      ...(Array.isArray(c?.browserPolicies) ? { browserPolicies: c.browserPolicies } : {}),
     }),
   },
 
@@ -116,6 +118,8 @@ const PAGE_METHODS = {
       ok: true,
       filled: true,
       ...(typeof c?.matchedCount === 'number' ? { matchedCount: c.matchedCount } : {}),
+      ...(c?.browserPolicy ? { browserPolicy: c.browserPolicy } : {}),
+      ...(Array.isArray(c?.browserPolicies) ? { browserPolicies: c.browserPolicies } : {}),
     }),
   },
 
@@ -273,7 +277,9 @@ export const shapePageResult = (method, toolResult) => {
   const spec = PAGE_METHODS[method];
   if (!spec) throw new PageApiError(`unknown page method: ${String(method)}`);
   if (!toolResult || toolResult.ok !== true) {
-    throw new PageApiError(toolResult?.error ?? `page.${method} failed`);
+    const code = toolResult?.error ?? `page.${method} failed`;
+    const content = typeof toolResult?.content === 'string' ? toolResult.content.trim() : '';
+    throw new PageApiError(content ? `${code}: ${content}` : code);
   }
   return spec.shape(parseContent(toolResult.content));
 };

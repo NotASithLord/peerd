@@ -97,6 +97,9 @@ export const pageCodeTool = {
         ok: true,
         content: formatRunResult(args.code, result),
         ...(Array.isArray(result.images) && result.images.length ? { images: result.images } : {}),
+        ...(Array.isArray(result.browserPolicies) && result.browserPolicies.length
+          ? { browserChildPolicyNotices: result.browserPolicies }
+          : {}),
       };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);

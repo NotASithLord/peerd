@@ -13,8 +13,9 @@
 // keystroke-by-keystroke autocomplete that needs typing flow, the
 // agent can call type() with progressively longer prefixes.
 
-import { resolveTargetTab } from './dom-helpers.js';
+import { browserDocumentIdentity, resolveTargetTab, scriptingTarget } from './dom-helpers.js';
 import { summarizeMutations } from '../../dom/index.js';
+import { browserDocumentRefusalFrom } from '../browser-automation-policy.js';
 
 /**
  * Harness-injected ctx extras (ref registry + CDP pool). Not on the
@@ -23,8 +24,8 @@ import { summarizeMutations } from '../../dom/index.js';
  *
  * @typedef {{ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }} RefEntry
  * @typedef {{ resolve?: (tabId: number, ref: string) => RefEntry | null }} DomRefs
- * @typedef {{ setValueBackendNode?: (tabId: number, backendDOMNodeId: number, text: string, submit: boolean) =>
- *   Promise<{ ok: false, error?: string }
+ * @typedef {{ setValueBackendNode?: (tabId: number, backendDOMNodeId: number, text: string, submit: boolean, expectedDocument: ReturnType<typeof browserDocumentIdentity>) =>
+ *   Promise<{ ok: false, error?: string, outcomeKind?: import('../../lifecycle/failure-taxonomy.js').FailureOutcomeKind }
  *     | { ok: true, tag?: string, navigated?: boolean, mutations?: any }> }} DebuggerPool
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
@@ -114,8 +115,13 @@ export const typeTool = {
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
-          const r = await debuggerPool.setValueBackendNode(tab.id, entry.backendDOMNodeId, args.text, !!args.submit);
-          if (!r.ok) return { ok: false, error: r.error ?? 'ref_type_failed' };
+          const r = await debuggerPool.setValueBackendNode(
+            tab.id, entry.backendDOMNodeId, args.text, !!args.submit, browserDocumentIdentity(tab));
+          if (!r.ok) return browserDocumentRefusalFrom(r) ?? {
+            ok: false,
+            error: r.error ?? 'ref_type_failed',
+            ...(r.outcomeKind ? { outcomeKind: r.outcomeKind } : {}),
+          };
           return {
             ok: true,
             content: JSON.stringify({
@@ -127,7 +133,14 @@ export const typeTool = {
             }, null, 2),
           };
         } catch (e) {
-          return { ok: false, error: `ref_type_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+          const outcomeKind = /** @type {{ outcomeKind?: import('../../lifecycle/failure-taxonomy.js').FailureOutcomeKind }} */ (e)?.outcomeKind;
+          const refusal = browserDocumentRefusalFrom(e);
+          if (refusal) return refusal;
+          return {
+            ok: false,
+            error: `ref_type_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
+            ...(outcomeKind ? { outcomeKind } : {}),
+          };
         }
       }
 
@@ -135,7 +148,7 @@ export const typeTool = {
         let scriptResult;
         try {
           const results = await scripting.executeScript({
-            target: { tabId: tab.id },
+            target: scriptingTarget(tab),
             func: typeInjected,
             args: [null, args.text, !!args.submit, entry.walkId, expectedCount],
           });
@@ -180,7 +193,7 @@ export const typeTool = {
     let scriptResult;
     try {
       const results = await scripting.executeScript({
-        target: { tabId: tab.id },
+        target: scriptingTarget(tab),
         func: typeInjected,
         args: [args.selector, args.text, !!args.submit, null, expectedCount],
       });

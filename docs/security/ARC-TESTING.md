@@ -26,9 +26,9 @@ production credentials or third-party data.
 | Move an actor-owned tab to another origin by hand, then continue the task. | The actor rechecks the live tab before acting. |
 | Fetch public content from an account site without a tab session. | The request remains sessionless. It may return public content. |
 
-Known limitation: the raw numeric-tab actor path can bind after a redirect
-without applying the normal sensitivity classification. Issue #263 tracks this
-authority bypass. Do not treat the checks above as coverage for that path.
+Address a tab by numeric id after moving it to a private, metadata, or
+denylisted page. Actor resolution must refuse it. Numeric addressing applies
+the same live target policy as every browser tool.
 
 ## Learned sites
 
@@ -51,12 +51,29 @@ authority bypass. Do not treat the checks above as coverage for that path.
 | Check | Expected result |
 |---|---|
 | Navigate or fetch a cross-origin URL with a long encoded blob in the host, credentials, or path. | Supported paths refuse the request and record the denial. |
-| Use a direct fetch or document-reading tool on localhost, a private network address, or cloud metadata. | The request is refused before network access. Browser navigation is a separate path and does not currently carry this private-network guard. |
-| Follow a redirect from an allowed request to a blocked destination. | The redirect is refused. |
+| Use a fetch, document-reading, or browser tool on localhost, a private network address, or cloud metadata. | The operation is refused. Driven tabs also carry a tab-scoped network rule that blocks redirects and tab-associated requests before they reach the target. |
+| Follow a redirect from an allowed request or navigation to a blocked destination. | The destination is refused. Browser automation stops and the tab is reset when the browser can verify the reset. |
+| From an actor-owned test page, open a child toward a private target. | The private request does not reach the target. The child is closed, and the tool result and Activity log carry a URL-free policy receipt. |
+| From the same test page, open a child toward a public target. | Only that child receives the driven-tab network floor, then the public navigation continues. |
+| Open a child from an ordinary user tab while no actor owns it. | peerd does not blank, close, focus, or guard the child. |
 
 The exfiltration heuristic is intentionally narrow. Query strings and URL
 fragments have legitimate uses and are not a complete data-loss prevention
 boundary. See the residual risks in the threat model.
+
+Private-network classification is lexical. It covers direct hostnames and IP
+spellings but does not resolve DNS. DNS rebinding remains outside this client-side
+check.
+
+The child observer is non-blocking. On a cold service-worker start, peerd acts
+early only when the exact source has restored custody and its complete browser
+rule set survives. Otherwise it waits for the ownership registries. This avoids
+changing user popups, but it cannot guarantee that a first child request is
+stopped if the browser discarded the session rules during the restart.
+
+The tab-scoped browser rule does not cover requests the browser attributes to no
+tab, such as a previously installed service worker. Test and track that boundary
+separately. Do not treat the tab vectors above as service-worker coverage.
 
 ## Login
 
@@ -95,6 +112,9 @@ verify the parent model and UI report Outcome unknown, pause actor work, and do
 not retry automatically. Simulate a second background loss during recovery and verify no
 queued, started, or legacy request is executed from storage. Keep the recovery
 record until its Not run or Outcome unknown warning is accepted by the session.
+The packaged Firefox CI lane also proves browser-tool fallbacks and the
+tab-scoped private-network rules. It uses the pinned current release. ESR is
+not a separate support lane.
 
 ## Evidence
 

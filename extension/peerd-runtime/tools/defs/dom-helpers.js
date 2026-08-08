@@ -17,6 +17,13 @@ import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
 // the same reason as above — dom/index.js is fine, but this file is unit-tested
 // without a browser and the barrel is wider than the one function needed.
 import { hasPasswordFieldInjected } from '../../dom/walk-injected.js';
+import {
+  BROWSER_TARGET_STAGES,
+  BrowserAutomationPolicyError,
+  BrowserNetworkGuardUnavailableError,
+  classifyBrowserAutomationTarget,
+  unverifiedBrowserTargetVerdict,
+} from '../browser-automation-policy.js';
 //
 //   2. Functions that get INJECTED into the page via
 //      chrome.scripting.executeScript. Those functions:
@@ -37,12 +44,44 @@ import { hasPasswordFieldInjected } from '../../dom/walk-injected.js';
  * injections the DOM tools already do, long enough that an ordinary busy page
  * still answers.
  */
-const LIVE_PROBE_TIMEOUT_MS = 400;
+const LIVE_PROBE_TIMEOUT_MS = 1000;
+
+/** @param {Promise<any>} operation */
+const boundedProbe = async (operation) => {
+  /** @type {any} */
+  let timer = null;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), LIVE_PROBE_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+/**
+ * Read only the current document location. The injection result also carries
+ * the browser-issued documentId used to bind every later scripting operation
+ * to this exact document.
+ *
+ * @returns {{ origin: string | null, href: string | null, timeOrigin: number | null }}
+ */
+export function liveDocumentLocationInjected() {
+  'use strict';
+  let origin = null;
+  let href = null;
+  let timeOrigin = null;
+  try { origin = location.origin; } catch (e) { origin = null; }
+  try { href = location.href; } catch (e) { href = null; }
+  try { timeOrigin = Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : null; } catch (e) { timeOrigin = null; }
+  return { origin, href, timeOrigin };
+}
 
 /**
  * Ask the document that is ACTUALLY committed in the target tab where it is and
- * whether it is showing a password field. Best-effort by construction: null
- * means "could not look", never "nothing there".
+ * bind later work to that exact document. Password observation runs only after
+ * the location is allowed and is targeted to the same documentId.
  *
  * why here and not in each tool: this is the only place that knows the tool is
  * about to touch a specific tab, and it is the only place every DOM tool passes
@@ -54,34 +93,110 @@ const LIVE_PROBE_TIMEOUT_MS = 400;
  *
  * @param {{ id?: number }} tab
  * @param {{ scripting?: any }} ctx
- * @returns {Promise<{ origin: string | null, href: string | null, hasPasswordField: boolean | null } | null>}
+ * @returns {Promise<{ origin: string | null, href: string | null, timeOrigin: number | null, hasPasswordField: boolean | null, documentId: string | null } | null>}
  */
 const probeLiveDocument = async (tab, ctx) => {
-  if (typeof tab?.id !== 'number' || typeof ctx?.scripting?.executeScript !== 'function') return null;
-  /** @type {any} */
-  let timer = null;
+  if (typeof tab?.id !== 'number' || typeof ctx?.scripting?.executeScript !== 'function') {
+    throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), { effectCompleted: false });
+  }
   try {
-    const probe = ctx.scripting.executeScript({ target: { tabId: tab.id }, func: hasPasswordFieldInjected });
-    const raced = await Promise.race([
-      probe,
-      new Promise((resolve) => { timer = setTimeout(() => resolve(null), LIVE_PROBE_TIMEOUT_MS); }),
-    ]);
-    const v = raced?.[0]?.result;
-    if (!v) return null;
+    const raced = await boundedProbe(ctx.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: liveDocumentLocationInjected,
+    }));
+    const injection = raced?.[0];
+    const v = injection?.result;
+    if (!v || typeof injection?.documentId !== 'string' || !Number.isFinite(v.timeOrigin)) {
+      throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), { effectCompleted: false });
+    }
+    enforceCommittedBrowserTarget(v.href ?? v.origin);
+    let hasPasswordField = /** @type {boolean | null} */ (null);
+    try {
+      const passwordProbe = await boundedProbe(ctx.scripting.executeScript({
+        target: { tabId: tab.id, documentIds: [injection.documentId] },
+        func: hasPasswordFieldInjected,
+      }));
+      const passwordValue = passwordProbe?.[0]?.result;
+      if (typeof passwordValue?.has === 'boolean') hasPasswordField = passwordValue.has;
+    } catch {
+      // A navigation destroys the pinned document. The later tool call carries
+      // the same documentId and will fail instead of retargeting the new page.
+      hasPasswordField = null;
+    }
     return {
       origin: typeof v.origin === 'string' ? v.origin : null,
       href: typeof v.href === 'string' ? v.href : null,
-      hasPasswordField: typeof v.has === 'boolean' ? v.has : null,
+      timeOrigin: Number.isFinite(v.timeOrigin) ? v.timeOrigin : null,
+      hasPasswordField,
+      documentId: injection.documentId,
     };
-  } catch {
-    // Pages the browser refuses to inject into (chrome:, the extension stores,
-    // a tab mid-navigation) land here. FAIL OPEN: the caller keeps the verdict
-    // it already reached on tab.url. Refusing instead would break every
-    // CDP-driven tool on exactly the pages CDP exists for.
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
+  } catch (error) {
+    if (error instanceof BrowserAutomationPolicyError) throw error;
+    throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), { effectCompleted: false });
   }
+};
+
+/**
+ * Build an exact-document scripting target from a resolved tab.
+ *
+ * @param {{ id?: number, peerdDocumentId?: string, url?: string }} tab
+ * @returns {{ tabId: number, documentIds: string[] }}
+ */
+export const scriptingTarget = (tab) => {
+  if (typeof tab?.id !== 'number') {
+    throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), { effectCompleted: false });
+  }
+  if (typeof tab.peerdDocumentId === 'string') {
+    return { tabId: tab.id, documentIds: [tab.peerdDocumentId] };
+  }
+  throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), { effectCompleted: false });
+};
+
+/**
+ * Exact browser document identity minted by resolveTargetTab's live scripting
+ * probe. CDP callers pass the whole value back to the debugger pool, which
+ * bridges the browser-issued documentId to one checked loader and main-world
+ * execution context before it grants any debugger capability.
+ *
+ * @param {{ url?: string, peerdDocumentId?: string, peerdDocumentTimeOrigin?: number }} tab
+ * @returns {{ origin: string, href: string, documentId: string, timeOrigin: number }}
+ */
+export const browserDocumentIdentity = (tab) => {
+  let href = '';
+  let origin = '';
+  try {
+    const parsed = new URL(tab?.url ?? '');
+    href = parsed.href;
+    origin = parsed.origin;
+  } catch { /* refused below */ }
+  if (!/^https?:\/\//.test(origin)
+      || typeof tab?.peerdDocumentId !== 'string'
+      || !Number.isFinite(tab?.peerdDocumentTimeOrigin)) {
+    throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), { effectCompleted: false });
+  }
+  return {
+    origin,
+    href,
+    documentId: tab.peerdDocumentId,
+    timeOrigin: /** @type {number} */ (tab.peerdDocumentTimeOrigin),
+  };
+};
+
+/**
+ * Refuse every browser destination outside the public HTTP(S) surface. A
+ * navigation tool may select a restricted owned tab only to move it away;
+ * no page operation receives scripting or debugger authority there.
+ *
+ * @param {unknown} target
+ */
+const enforceCommittedBrowserTarget = (target) => {
+  const verdict = classifyBrowserAutomationTarget(target, {
+    stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+  });
+  if (verdict.allowed) return;
+  // The page is committed, but the current tool has not run. Keep the browser
+  // location truth in `structured` separate from this operation's lifecycle.
+  throw new BrowserAutomationPolicyError(verdict, { effectCompleted: false });
 };
 
 /**
@@ -100,14 +215,15 @@ const probeLiveDocument = async (tab, ctx) => {
  * yields null, which every caller already surfaces as a refusal.
  *
  * @param {{ tabId?: number }} args
- * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void }} ctx
+ * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void, ensureBrowserNetworkGuard?: (tabId: number) => Promise<{ ok?: boolean, structured?: { reason?: string } }> }} ctx
+ * @param {{ allowRestrictedSource?: boolean }} [options]
  *
  * `judgeLanding` (issue 251) is the origin lock, injected by the SW so this
  * file stays free of actor state and the policy stays pure and unit-tested
  * (`peerd-runtime/actor/landing-rule.js`). Absent — a non-actor context, or an
  * actor kind with no tab — means no lock, which is the pre-251 behaviour.
  */
-export const resolveTargetTab = async (args, ctx) => {
+export const resolveTargetTab = async (args, ctx, options = {}) => {
   let tab = null;
   if (args?.tabId) {
     try { tab = await ctx.tabs.get(args.tabId); } catch { return null; }
@@ -127,6 +243,33 @@ export const resolveTargetTab = async (args, ctx) => {
     tab = t ?? null;
   }
   if (!tab) return null;
+  if (typeof tab.id === 'number' && typeof ctx.ensureBrowserNetworkGuard === 'function') {
+    const guarded = await ctx.ensureBrowserNetworkGuard(tab.id);
+    if (!guarded?.ok) {
+      const reason = guarded?.structured?.reason;
+      throw new BrowserNetworkGuardUnavailableError(
+        reason === 'network_guard_unsupported' || reason === 'network_guard_install_failed'
+          ? reason
+          : 'network_guard_unavailable',
+      );
+    }
+  }
+  const sourceVerdict = classifyBrowserAutomationTarget(tab.url, {
+    stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+  });
+  if (!sourceVerdict.allowed) {
+    // Only a chat web actor's internally adopted blank tab can be selected to
+    // move away. Numeric tab actors are never minted for restricted pages, so
+    // a guessed id cannot replace a local file, browser page, or extension UI.
+    const activeTab = ctx.activeTab;
+    const internallyAdoptedBlank = options.allowRestrictedSource
+      && tab.url === 'about:blank'
+      && ctx.actorType === 'web'
+      && activeTab?.id === tab.id
+      && (activeTab?.url === '' || activeTab?.url === 'about:blank');
+    if (internallyAdoptedBlank) return tab;
+    throw new BrowserAutomationPolicyError(sourceVerdict, { effectCompleted: false });
+  }
   if (isDenylistedTab(tab.url, ctx.denylist)) return null;
   // issue 251 — THE ORIGIN LOCK, enforced here and only here.
   //
@@ -161,11 +304,12 @@ export const resolveTargetTab = async (args, ctx) => {
   //
   // issue 267: while we are in there, observe the password field — so every DOM
   // tool teaches the classifier, not just `snapshot`.
-  const live = await probeLiveDocument(tab, ctx);
-  // Only a WEB origin is actionable: the denylist matches hostnames and the
-  // landing rule reasons about http(s) origins, so handing either an opaque
-  // `null`, a data: or a blob: document would be asking a question neither can
-  // answer. Those fall through untouched — fail open, as everywhere else here.
+  const live = /^https?:/i.test(tab.url ?? '') ? await probeLiveDocument(tab, ctx) : null;
+  // A document can replace itself after tabs.get(). Check the URL observed in
+  // the renderer before using any other signal from that probe.
+  enforceCommittedBrowserTarget(live?.href ?? live?.origin);
+  // Only a verified web origin is actionable. Opaque and non-web documents
+  // were refused before the live probe and never reach this path.
   const liveOrigin = live?.origin && /^https?:\/\//.test(live.origin) ? live.origin : null;
   if (liveOrigin && liveOrigin !== originOfUrl(tab.url)) {
     const liveUrl = live?.href ?? liveOrigin;
@@ -184,6 +328,8 @@ export const resolveTargetTab = async (args, ctx) => {
     // ceremony runs in the document that replaced it.
     if (live?.href) tab = { ...tab, url: live.href };
   }
+  if (live?.documentId) tab = { ...tab, peerdDocumentId: live.documentId };
+  if (typeof live?.timeOrigin === 'number') tab = { ...tab, peerdDocumentTimeOrigin: live.timeOrigin };
   if (live?.hasPasswordField === true && liveOrigin) {
     // Attributed to the origin that REPORTED it, never to the tab record — the
     // #278 rule, held by construction here rather than by comparison.

@@ -109,7 +109,9 @@ Reload the extension from `chrome://extensions` after source changes.
 ### Firefox from source
 
 Firefox needs a Firefox-specific package. Do not load the checked-in Chrome
-development manifest.
+development manifest. Use a Firefox version at or above the minimum declared in
+the channel patch under `manifests/`. That floor tracks the document-bound
+scripting support used by browser tools.
 
 ```sh
 bun run package -- --channel=preview --browser=firefox --no-sign

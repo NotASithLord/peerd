@@ -58,12 +58,25 @@ describe('shapeSketch — structure, never verbatim payload', () => {
   test('keeps keys + types, redacts secret keys, samples arrays', () => {
     const s = shapeSketch({ id: 5, name: 'short', token: 'anything', items: [{ a: 1 }, { a: 2 }] }) as Record<string, unknown>;
     expect(s.id).toBe('number');
-    expect(s.name).toBe('short');           // short strings kept
+    expect(s.name).toBe('string');
     expect(s.token).toBe('<redacted>');
     expect(Array.isArray(s.items)).toBe(true);
   });
   test('long strings collapse to the type', () => {
     expect(shapeSketch('x'.repeat(50))).toBe('string');
+  });
+
+  test('short PII strings never enter the model-facing shape', () => {
+    const shape = shapeSketch({
+      email: 'alice@example.com',
+      name: 'Jane Doe',
+      city: 'Rome',
+    });
+    const serialized = JSON.stringify(shape);
+    expect(serialized).not.toContain('alice@example.com');
+    expect(serialized).not.toContain('Jane Doe');
+    expect(serialized).not.toContain('Rome');
+    expect(shape).toEqual({ email: 'string', name: 'string', city: 'string' });
   });
 });
 

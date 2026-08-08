@@ -65,7 +65,7 @@ describe('pageCallToToolCall — validation fails closed', () => {
 
   test('PAGE_API_METHODS lists exactly the supported surface', () => {
     expect([...PAGE_API_METHODS].sort()).toEqual([
-      'captureSite', 'click', 'content', 'fetch', 'fill', 'goto', 'keys',
+      'captureSite', 'click', 'content', 'fetch', 'fill', 'goto',
       'login', 'query', 'readCache', 'readDocument', 'readPdf', 'readSiteClient',
       'readState', 'snapshot', 'view', 'watchChanges', 'writeSiteClient',
     ]);
@@ -90,11 +90,11 @@ describe('pageCallToToolCall — web capability parity', () => {
     expect(pageCallToToolCall({ method: 'login', args: { target: '@e2' } })).toEqual({ name: 'login', args: { ref: '@e2' } });
   });
 
-  test('DOM, keyboard, PDF, and vision parity methods map to the direct actor tools', () => {
+  test('DOM, PDF, and vision parity methods map to the direct actor tools', () => {
     expect(pageCallToToolCall({ method: 'readState', args: { target: '@e2' } })).toEqual({ name: 'read_state', args: { ref: '@e2' } });
     expect(pageCallToToolCall({ method: 'watchChanges' }).name).toBe('watch_changes');
     expect(pageCallToToolCall({ method: 'query', args: { selector: '.row', options: { limit: 3 } } })).toEqual({ name: 'query_dom', args: { selector: '.row', limit: 3 } });
-    expect(pageCallToToolCall({ method: 'keys', args: { sequence: 'Shift+I' } })).toEqual({ name: 'page_keys', args: { keys: 'Shift+I' } });
+    expect(() => pageCallToToolCall({ method: 'keys', args: { sequence: 'Shift+I' } })).toThrow(/unknown page method/);
     expect(pageCallToToolCall({ method: 'readPdf', args: { options: { engine: 'pdfjs' } } })).toEqual({ name: 'read_pdf', args: { engine: 'pdfjs' } });
     expect(pageCallToToolCall({ method: 'view' })).toEqual({ name: 'view', args: {} });
   });
@@ -117,9 +117,34 @@ describe('shapePageResult — tool result -> Playwright-ish return', () => {
     expect(r).toEqual({ ok: true, clicked: true, matchedCount: 1, navigated: true });
   });
 
+  test('click preserves a host child-navigation receipt', () => {
+    const browserPolicy = {
+      reason: 'protected_child_navigation',
+      outcome: 'not_run',
+      child: 'left_blank',
+      retryable: false,
+    };
+    const r = shapePageResult('click', {
+      ok: true,
+      content: JSON.stringify({ clicked: true, browserPolicy }),
+    });
+    expect(r).toEqual({ ok: true, clicked: true, browserPolicy });
+  });
+
   test('fill reports filled', () => {
     const r = shapePageResult('fill', { ok: true, content: JSON.stringify({ typed: 'a@b.com', matchedCount: 1 }) });
     expect(r).toEqual({ ok: true, filled: true, matchedCount: 1 });
+  });
+
+  test('fill preserves a host child-navigation receipt', () => {
+    const browserPolicy = {
+      reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false,
+    };
+    const r = shapePageResult('fill', {
+      ok: true,
+      content: JSON.stringify({ typed: 'value', browserPolicy }),
+    });
+    expect(r).toEqual({ ok: true, filled: true, browserPolicy });
   });
 
   test('a failed gated tool rejects like Playwright does', () => {

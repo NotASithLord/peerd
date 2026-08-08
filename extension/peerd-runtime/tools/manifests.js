@@ -55,7 +55,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // page DOM toolset (inherited by the web actor, which DOES the page work —
       // see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
-      'click', 'type', 'navigate', 'query_dom', 'page_keys', 'read_pdf', 'read_doc', 'view',
+      'click', 'type', 'navigate', 'query_dom', 'read_pdf', 'read_doc', 'view',
       // memory
       'remember', 'read_memory',
       // sovereignty / sessions introspection (one kind-discriminated tool)

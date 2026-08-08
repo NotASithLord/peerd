@@ -262,6 +262,14 @@ describe('reduceChat — agent-tab anchoring by message_actor turn', () => {
     expect(s2.agentTabEvents[0].turnId).toBe('u3');                           // moved to turn 3
   });
 
+  test('carries and refreshes an unconfirmed blank-child state into the rendered event', () => {
+    const first = reduceChat(convo(), tab({ protected: false, parentToolUseId: 'tu-vm-1' }));
+    expect(first.agentTabEvents[0]).toMatchObject({ turnId: 'u1', protected: false });
+
+    const refreshed = reduceChat(first, tab({ protected: true, parentToolUseId: 'tu-vm-1' }));
+    expect(refreshed.agentTabEvents[0]).toMatchObject({ turnId: 'u1', protected: true });
+  });
+
   test('a DIFFERENT actor anchors to ITS own turn (cards do not clump)', () => {
     let s = reduceChat(convo(), tab({ tabId: 100, parentToolUseId: 'tu-vm-2' }));   // vm → turn 3
     s = reduceChat(s, tab({ tabId: 200, parentToolUseId: 'tu-web-1' }));            // web → turn 2

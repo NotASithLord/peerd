@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import {
   BROWSER_TARGET_CODES,
   BROWSER_TARGET_STAGES,
+  BrowserAutomationPolicyError,
+  browserNetworkGuardUnavailableResult,
+  browserTargetRefusalResult,
   classifyBrowserAutomationTarget,
+  formatBrowserTargetRefusal,
+  isAddressableBrowserTab,
+  sensitiveSiteBrowserTargetVerdict,
 } from '../../extension/peerd-runtime/tools/browser-automation-policy.js';
 
 const expectBlocked = (target: unknown, reason: 'private_network' | 'cloud_metadata') => {
@@ -15,13 +21,19 @@ const expectBlocked = (target: unknown, reason: 'private_network' | 'cloud_metad
   expect(verdict.outcome).toBe('not_run');
   expect(verdict.retryable).toBe(false);
   expect(verdict.message.length).toBeGreaterThan(0);
-  expect(verdict.correction).toContain('Ask the user');
-  expect(verdict.origin).not.toContain('/secret');
-  expect(verdict.origin).not.toContain('?');
-  expect(verdict.origin).not.toContain('#');
+  expect(verdict.correction).toContain('handled directly in the browser');
+  expect('origin' in verdict).toBe(false);
 };
 
 describe('classifyBrowserAutomationTarget: stable result shape', () => {
+  test('only public web pages can be addressed by numeric tab actor id', () => {
+    expect(isAddressableBrowserTab('https://example.com/')).toBe(true);
+    expect(isAddressableBrowserTab('file:///Users/me/secrets.txt')).toBe(false);
+    expect(isAddressableBrowserTab('chrome://extensions')).toBe(false);
+    expect(isAddressableBrowserTab('about:blank')).toBe(false);
+    expect(isAddressableBrowserTab('http://127.0.0.1/admin')).toBe(false);
+  });
+
   test('allows a public URL and returns only its origin', () => {
     expect(classifyBrowserAutomationTarget('https://user:pass@example.com:8443/secret?q=token#fragment'))
       .toEqual({ allowed: true, origin: 'https://example.com:8443' });
@@ -32,7 +44,7 @@ describe('classifyBrowserAutomationTarget: stable result shape', () => {
       .toEqual({ allowed: true, origin: 'https://example.com' });
   });
 
-  test('private refusals expose an origin but no path, query, fragment, or credentials', () => {
+  test('private refusals expose no target text', () => {
     const verdict = classifyBrowserAutomationTarget('http://user:pass@127.0.0.1:8080/secret?q=token#fragment');
     expect(verdict).toEqual({
       allowed: false,
@@ -42,12 +54,11 @@ describe('classifyBrowserAutomationTarget: stable result shape', () => {
       outcome: 'not_run',
       retryable: false,
       message: 'peerd does not automate a localhost, private network, or link-local page. No browser action was run.',
-      correction: 'Do not retry with another URL spelling or browser tool. Ask the user to handle this page directly.',
-      origin: 'http://127.0.0.1:8080',
+      correction: 'Do not retry with another spelling or browser tool. This page must be handled directly in the browser.',
     });
   });
 
-  test('a committed-origin refusal says the page may be loaded but was not automated', () => {
+  test('a committed-origin refusal says the page loaded and automation stopped', () => {
     const verdict = classifyBrowserAutomationTarget('http://127.0.0.1/private', {
       stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
     });
@@ -59,8 +70,8 @@ describe('classifyBrowserAutomationTarget: stable result shape', () => {
       retryable: false,
     });
     if (verdict.allowed) throw new Error('expected committed target to be refused');
-    expect(verdict.message).toContain('may have loaded');
-    expect(verdict.message).toContain('did not inspect or operate it');
+    expect(verdict.message).toContain('Navigation loaded');
+    expect(verdict.message).toContain('stopped further browser automation');
     expect(verdict.correction).toContain('Do not retry');
   });
 
@@ -83,7 +94,103 @@ describe('classifyBrowserAutomationTarget: stable result shape', () => {
     });
     if (verdict.allowed) throw new Error('expected metadata target to be refused');
     expect(verdict.message).toContain('cloud metadata page');
-    expect(verdict.correction).toContain('Ask the user');
+    expect(verdict.correction).toContain('handled directly in the browser');
+  });
+});
+
+describe('browser automation refusal formatting', () => {
+  test('a sensitive-site redirect uses a URL-free committed refusal', () => {
+    const verdict = sensitiveSiteBrowserTargetVerdict();
+    const result = browserTargetRefusalResult(verdict, { neutralized: true });
+    expect(result).toMatchObject({
+      error: 'browser_sensitive_site_blocked',
+      outcomeKind: 'effect-completed',
+      structured: {
+        reason: 'sensitive_site',
+        stage: 'committed_origin',
+        outcome: 'page_loaded_not_automated',
+        retryable: false,
+        neutralized: true,
+      },
+    });
+    expect(result.content).toContain('user denylist');
+    expect(result.content).toContain('"retryable":false');
+  });
+
+  test('network guard failures distinguish unsupported browsers from install failures', () => {
+    const unsupported = browserNetworkGuardUnavailableResult('network_guard_unsupported');
+    expect(unsupported).toMatchObject({
+      error: 'browser_network_guard_unavailable',
+      structured: { reason: 'network_guard_unsupported', retryable: false },
+      outcomeKind: 'pre-effect-failure',
+    });
+    expect(unsupported.content).toContain('Update to a supported current browser version');
+    expect(unsupported.content).not.toContain('Restart');
+
+    const installFailed = browserNetworkGuardUnavailableResult('network_guard_install_failed');
+    expect(installFailed.structured.reason).toBe('network_guard_install_failed');
+    expect(installFailed.content).toContain('Restart the browser or extension');
+  });
+
+  test('a pre-navigation refusal has a stable safe error and typed non-execution', () => {
+    const verdict = classifyBrowserAutomationTarget(
+      'http://user:pass@127.0.0.1:8080/secret?q=token#fragment');
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const result = browserTargetRefusalResult(verdict);
+    expect(result.error).toBe('browser_private_network_blocked');
+    expect(result.content).toBe(formatBrowserTargetRefusal(verdict));
+    expect(result.content).toContain('No browser action was run');
+    expect(result.content).toContain('"reason":"private_network"');
+    expect(result.structured).toEqual(verdict);
+    expect(result.outcomeKind).toBe('pre-effect-failure');
+    expect(JSON.stringify(result)).not.toContain('/secret');
+    expect(JSON.stringify(result)).not.toContain('user:pass');
+    expect(JSON.stringify(result)).not.toContain('q=token');
+  });
+
+  test('the thrown form preserves the safe copy, verdict, and typed outcome', () => {
+    const verdict = classifyBrowserAutomationTarget('http://127.0.0.1/private');
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const error = new BrowserAutomationPolicyError(verdict);
+    expect(error.message).toBe('browser_private_network_blocked');
+    expect(error.content).toContain('No browser action was run');
+    expect(error.structured).toEqual(verdict);
+    expect(error.outcomeKind).toBe('pre-effect-failure');
+    expect(error.message).not.toContain('/private');
+  });
+
+  test('a committed refusal records a known completed navigation effect', () => {
+    const verdict = classifyBrowserAutomationTarget('http://127.0.0.1/private', {
+      stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+    });
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    expect(browserTargetRefusalResult(verdict)).toMatchObject({
+      ok: false,
+      outcomeKind: 'effect-completed',
+      structured: {
+        reason: 'private_network',
+        stage: 'committed_origin',
+        outcome: 'page_loaded_not_automated',
+      },
+    });
+  });
+
+  test('a committed page can still refuse a later tool before that tool runs', () => {
+    const verdict = classifyBrowserAutomationTarget('http://127.0.0.1/private', {
+      stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+    });
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const result = browserTargetRefusalResult(verdict, { effectCompleted: false });
+    expect(result).toMatchObject({
+      ok: false,
+      outcomeKind: 'pre-effect-failure',
+      structured: {
+        stage: 'committed_origin',
+        outcome: 'page_loaded_not_automated',
+      },
+    });
+    expect(result.content).toContain('peerd did not run this tool');
+    expect(result.content).not.toContain('Navigation loaded');
   });
 });
 

@@ -14,7 +14,9 @@
 import { describe, it, expect } from '../../framework.js';
 import { domWalkInjected, createRefRegistry } from '/peerd-runtime/index.js';
 import { hasPasswordFieldInjected } from '/peerd-runtime/dom/walk-injected.js';
+import { liveDocumentLocationInjected } from '/peerd-runtime/tools/defs/dom-helpers.js';
 import { snapshotTool, clickTool, typeTool } from '/peerd-runtime/tools/defs/index.js';
+import { TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
@@ -84,7 +86,27 @@ const makeCtx = () => /** @type {ToolContext & { domRefs: ReturnType<typeof crea
     },
     scripting: {
       /** @param {{ func: (...a: any[]) => any, args?: any[] }} arg */
-      executeScript: async ({ func, args }) => [{ result: func(...(args ?? [])) }],
+      executeScript: async ({ func, args }) => {
+        const result = func(...(args ?? []));
+        // The harness itself is served from loopback, while this fixture models
+        // a public tab. Keep the live-location probe consistent with the mocked
+        // tabs API without changing the real DOM behavior under test.
+        if (func === liveDocumentLocationInjected) {
+          return [{ documentId: 'fixture-document', result: {
+            origin: 'https://example.test',
+            href: 'https://example.test/order',
+            timeOrigin: TEST_TIME_ORIGIN,
+          } }];
+        }
+        if (func === hasPasswordFieldInjected) {
+          return [{ documentId: 'fixture-document', result: {
+            ...result,
+            origin: 'https://example.test',
+            href: 'https://example.test/order',
+          } }];
+        }
+        return [{ documentId: 'fixture-document', result }];
+      },
     },
     domRefs: createRefRegistry(),
     // no debuggerPool — the Firefox / advanced-automation-off shape

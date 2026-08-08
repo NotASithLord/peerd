@@ -231,10 +231,11 @@ export const WIDE_METRICS = Object.freeze({ width: 1280, height: 900, deviceScal
  *     sub-pixel translateZ toggle on the root (invisible in 2D, verified 0.00000
  *     diff) keeps frames flowing until the capture resolves.
  * @param {{ send: (m: string, p?: object) => Promise<any> }} page
+ * @param {{ bringToFront?: boolean }} [options]
  * @returns {Promise<Buffer>}
  */
-export async function capturePage(page) {
-  await page.send('Page.bringToFront').catch(() => {});
+export async function capturePage(page, { bringToFront = true } = {}) {
+  if (bringToFront) await page.send('Page.bringToFront').catch(() => {});
   let pumping = true;
   let toggle = false;
   const pump = (async () => {
@@ -408,6 +409,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
 
   const chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
+    // Browser-policy fixtures need public-looking names while their local HTTP
+    // servers stay deterministic and offline. Reserved .test names preserve the
+    // documented DNS-resolution residual without weakening localhost coverage.
+    '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1',
     '--disable-gpu', '--no-sandbox',
     ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,

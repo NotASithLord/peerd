@@ -11,8 +11,8 @@
 // boundary supplies the session same-origin. This is the inbound twin of
 // fetch_url's SESSION_HEADERS strip.
 //
-// Response bodies contribute a SHAPE SKETCH (keys + types + a truncated sample),
-// never verbatim payloads — a digest is structure, not data.
+// Response bodies contribute a SHAPE SKETCH (keys + types), never verbatim
+// payloads. A digest is structure, not data.
 
 // Headers that would carry a credential — dropped from every captured request AND
 // response before anything is summarized. Case-insensitive.
@@ -106,7 +106,7 @@ export const templatizeUrl = (url) => {
 export const shapeSketch = (v, depth = 0) => {
   if (v == null) return v === null ? 'null' : 'undefined';
   const t = typeof v;
-  if (t === 'string') return /** @type {string} */ (v).length > 40 || SECRETISH_VALUE_RE.test(/** @type {string} */ (v)) ? 'string' : /** @type {string} */ (v);
+  if (t === 'string') return 'string';
   if (t === 'number' || t === 'boolean') return t;
   if (t !== 'object') return t;
   if (depth > 3) return '…';

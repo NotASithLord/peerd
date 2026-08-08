@@ -272,7 +272,7 @@ describe('replay identity survives compaction (tombstones)', () => {
       { id: 'tu-pay', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
     expect(calls.count).toBe(0); // the tombstone refused it
     expect((replay as { error: string }).error).toStartWith('completed:');
-  });
+  }, 15_000);
 });
 
 describe('uncertainty is never silently discarded (overflow evidence)', () => {

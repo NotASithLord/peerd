@@ -334,7 +334,29 @@ internal-use on real deployments — before any network call, ahead of the denyl
 and fails closed on redirects so a public host cannot pivot to an internal one. The same
 redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.js`,
 `redirect:'manual'`), which previously validated only the pre-redirect host.
-Code: `peerd-egress/fetch/private-network.js`, `fetch/web-fetch.js`,
+Browser automation applies the same lexical classifier before navigation and
+to the committed document. Driven tabs also receive tab-scoped DNR rules for
+private hosts and address ranges, covering redirects, forms, frames, and
+tab-associated requests at the browser network layer. A page-created child is
+blanked and guarded only when `webNavigation` reports that its exact source tab
+is already under peerd custody. A protected child is closed after the network
+guard takes custody. Children from user-owned tabs are ignored. The rules never
+apply to tabs peerd is not driving. Requests the browser attributes
+to no tab, including service-worker fetches, remain outside this tab-scoped
+backstop. During a service-worker restart, early adoption requires two positive
+signals for the exact source: restored durable custody or a restored web-actor
+binding, plus the complete surviving private-network DNR rule set.
+`background/startup-popup-network-guard.js` copies only those known block rules
+to the exact child, then hands it to the restored custody set. If either signal
+is absent, peerd leaves the child unchanged until its registries finish loading.
+This avoids interfering with a user popup, but leaves a short cold-start window
+for an autonomous child if the browser lost its session rules while peerd's
+later registry restore still identifies the source as driven. DNS resolution
+and rebinding also remain outside this client-side lexical boundary.
+Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
+`peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
+`background/startup-popup-network-guard.js`,
+`peerd-runtime/tools/browser-automation-policy.js`, and
 `offscreen/pdf-extract.js`. Red-team: scenario 07.
 
 <a id="inv-8"></a>
@@ -764,8 +786,8 @@ evaluating peerd should know. Each cites where it lives in the code.
   sites lists what was inferred and removes it (#262), and the signal is credited to
   the origin the probe REPORTS rather than to the caller's tab record, so a page that
   navigates mid-call cannot spend it on someone else (#278). Detecting credentials
-  directly would need the `cookies` permission, which is not requested for the same
-  reason `webNavigation` is not.
+  directly would need the `cookies` permission, which is not requested because it
+  would expose browser-wide credential state.
 - R16. The identity-provider list is the one place a bound actor may leave its origin,
   and it is deliberately short — a host qualifies only if signing in is essentially all
   it does. github.com, gitlab.com and facebook.com are excluded despite speaking OAuth,

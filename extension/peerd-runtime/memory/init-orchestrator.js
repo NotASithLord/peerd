@@ -19,6 +19,20 @@ import { draftAgentsMd, deriveChecklist, resolveWorkspaceKey } from './initializ
 // disarmText is PURE (not an IO surface), so importing it directly does not
 // break the module's dependency-injection rule.
 import { disarmText } from '../dom/cdr.js';
+import { resolveTargetTab, scriptingTarget } from '../tools/defs/dom-helpers.js';
+import { BrowserAutomationPolicyError } from '../tools/browser-automation-policy.js';
+
+/**
+ * Read the small page summary used by /init. This function is serialized into
+ * the page, so it must be self-contained and explicitly strict.
+ */
+export function probeInitTabInjected() {
+  'use strict';
+  const headings = [...document.querySelectorAll('h1,h2,h3')]
+    .map((heading) => heading.textContent?.trim() ?? '').filter(Boolean).slice(0, 12);
+  const text = (document.body?.innerText || '').slice(0, 1500);
+  return { headings, textSnippet: text };
+}
 
 /**
  * @param {Object} deps
@@ -32,20 +46,43 @@ import { disarmText } from '../dom/cdr.js';
  *   The SW ↔ side panel confirmation round-trip (confirmAction).
  * @param {(text: string) => void} deps.postChatNote
  *   Post a system note into the chat transcript.
+ * @param {() => readonly string[]} [deps.getDenylist]
+ *   Read the current denylist at scan time.
  */
 export const makeInitOrchestrator = (deps) => {
-  const { tabs, scripting, listApps, memory, confirm, postChatNote } = deps;
+  const { tabs, scripting, listApps, memory, confirm, postChatNote, getDenylist = () => [] } = deps;
 
   /**
    * Read the active tab's live context (title, headings, a text snippet)
-   * via an injected probe. Best-effort — restricted pages (chrome://,
-   * the web store) throw on inject; we return what we have.
+   * via an injected probe. Best-effort. A refused browser target contributes
+   * no tab data to durable memory and returns a scrubbed user-facing warning.
    */
   const probeActiveTab = async () => {
     try {
       const [tab] = await tabs.query({ active: true, currentWindow: true });
       if (!tab?.id || !tab.url || /^(chrome|about|devtools|edge):/.test(tab.url)) {
-        return tab?.url ? { url: tab.url, title: tab.title } : null;
+        return { value: tab?.url ? { url: tab.url, title: tab.title } : null };
+      }
+      let target;
+      try {
+        // why: tabs.query is a stale browser record. The shared resolver checks
+        // the committed document and supplies the exact documentId used below.
+        target = await resolveTargetTab({ tabId: tab.id }, {
+          tabs,
+          scripting,
+          denylist: getDenylist(),
+        });
+      } catch (error) {
+        if (error instanceof BrowserAutomationPolicyError) {
+          return {
+            value: null,
+            warning: `/init skipped the browser page. ${error.code}: ${error.content}`,
+          };
+        }
+        return { value: null, warning: '/init skipped the browser page because its current document could not be verified.' };
+      }
+      if (!target) {
+        return { value: null, warning: '/init skipped the browser page because browser policy refused the target.' };
       }
       // why disarmText here: this page-derived probe (title, headings, body
       // snippet) is composed by draftAgentsMd into ALWAYS-LOADED project memory,
@@ -55,16 +92,11 @@ export const makeInitOrchestrator = (deps) => {
       // durable injection, and be invisible both at the confirm gate and in the
       // Memory tab. Strip at the source, exactly as read_page / fetch_url do.
       /** @type {{ url?: string, title?: string, headings?: string[], textSnippet?: string }} */
-      let probe = { url: tab.url, title: disarmText(tab.title) };
+      let probe = { url: target.url, title: disarmText(target.title) };
       try {
         const [res] = await scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            const headings = [...document.querySelectorAll('h1,h2,h3')]
-              .map((h) => h.textContent.trim()).filter(Boolean).slice(0, 12);
-            const text = (document.body?.innerText || '').slice(0, 1500);
-            return { headings, textSnippet: text };
-          },
+          target: scriptingTarget(target),
+          func: probeInitTabInjected,
         });
         if (res?.result) {
           const r = res.result;
@@ -75,9 +107,9 @@ export const makeInitOrchestrator = (deps) => {
           };
         }
       } catch { /* inject blocked — keep url/title only */ }
-      return probe;
+      return { value: probe };
     } catch {
-      return null;
+      return { value: null, warning: '/init skipped the browser page because its current document could not be verified.' };
     }
   };
 
@@ -96,13 +128,14 @@ export const makeInitOrchestrator = (deps) => {
    * feature checklist.
    */
   const runInit = async () => {
-    const [tab, apps] = await Promise.all([probeActiveTab(), probeApps()]);
-    const probe = { tab: tab ?? undefined, apps };
+    const [tabProbe, apps] = await Promise.all([probeActiveTab(), probeApps()]);
+    const probe = { tab: tabProbe.value ?? undefined, apps };
     const workspace = resolveWorkspaceKey(probe);
     const { body, sources, checklist } = draftAgentsMd(probe);
 
     postChatNote(`/init scanned workspace **${workspace}** (sources: ${sources.join(', ') || 'none'}). `
       + 'Review the proposed AGENTS.md and confirm to save it to project memory.');
+    if (tabProbe.warning) postChatNote(tabProbe.warning);
 
     const res = await memory.writeWithConfirm({
       scope: { kind: 'project', workspace },

@@ -15,8 +15,14 @@
 //     channel, pass a selector (from read_page / query_dom).
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import {
+  browserDocumentIdentity,
+  resolveTargetTab,
+  originOfUrl,
+  scriptingTarget,
+} from './dom-helpers.js';
 import { readFrameworkStateInjected } from '../../dom/index.js';
+import { browserDocumentRefusalFrom } from '../browser-automation-policy.js';
 
 /**
  * The harness ref-registry entry shape (resolve()). Injected onto ctx by the
@@ -24,7 +30,7 @@ import { readFrameworkStateInjected } from '../../dom/index.js';
  *
  * @typedef {{ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }} RefEntry
  * @typedef {{ resolve?: (tabId: number, ref: string) => RefEntry | null }} DomRefs
- * @typedef {{ readFrameworkState?: (tabId: number, backendDOMNodeId: number) => Promise<{ ok: true, [k: string]: any } | { ok: false, error?: string }> }} DebuggerPool
+ * @typedef {{ readFrameworkState?: (tabId: number, backendDOMNodeId: number, expectedDocument: ReturnType<typeof browserDocumentIdentity>) => Promise<{ ok: true, [k: string]: any } | { ok: false, error?: string }> }} DebuggerPool
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
 
@@ -100,9 +106,16 @@ export const readStateTool = {
       };
     }
     let r;
-    try { r = await debuggerPool.readFrameworkState(tab.id, entry.backendDOMNodeId); }
-    catch (e) { return { ok: false, error: `read_state_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` }; }
-    if (r.ok === false) return { ok: false, error: r.error ?? 'read_state_failed' };
+    try { r = await debuggerPool.readFrameworkState(
+      tab.id, entry.backendDOMNodeId, browserDocumentIdentity(tab)); }
+    catch (e) {
+      return browserDocumentRefusalFrom(e)
+        ?? { ok: false, error: `read_state_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+    }
+    if (r.ok === false) {
+      return browserDocumentRefusalFrom(r)
+        ?? { ok: false, error: r.error ?? 'read_state_failed' };
+    }
     const { ok, ...payload } = r;
     return {
       ok: true,
@@ -133,7 +146,7 @@ const readViaScripting = async (tab, selector, ctx) => {
   let result;
   try {
     const results = await scripting.executeScript({
-      target: { tabId: tab.id },
+      target: scriptingTarget(tab),
       // MAIN world: the React fiber / Vue internals are properties the page's
       // own JS set on the element — invisible from the isolated content world.
       world: 'MAIN',

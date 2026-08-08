@@ -195,6 +195,24 @@ throw new Error('unrelated failure');`,
     expect(settled.every((result) => result.error === null)).toBe(true);
   });
 
+  it('keeps a failed page call host receipt when user code catches and discards the error', async () => {
+    const policy = {
+      reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
+    };
+    const result = await runJob(
+      {
+        code: 'try { await page.click("#open"); } catch {} return "handled";',
+        caps: { page: true }, ownerSessionId: 'web-policy', runId: 'page-policy-failure',
+      },
+      {
+        sendToSW: async () => ({ ok: false, error: 'click failed', browserPolicies: [policy] }),
+      },
+    );
+    expect(result.error).toBe(null);
+    expect(result.value).toBe('handled');
+    expect(result.browserPolicies).toEqual([policy]);
+  });
+
   it('aborts SW relays before releasing a settled job\'s relay lease', async () => {
     /** @type {(() => void) | undefined} */
     let releaseAbort;

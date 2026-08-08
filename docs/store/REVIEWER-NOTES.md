@@ -108,6 +108,15 @@ performs selector and element click or type actions with bundled, in-package
 code (nothing fetched or generated remotely). There is no Chrome
 DevTools Protocol use in this package.
 
+The `webNavigation` permission is used only to correlate a page-created child
+tab with its exact source tab. If that source is under assistant control, peerd
+installs the same tab-scoped network guard on the child before it continues.
+Protected children are closed. Events from other tabs are ignored. Navigation
+history is not stored. During a service-worker restart, early handling requires
+both restored source ownership and the complete surviving private-network rule
+set on that exact source. Without both, the child is not changed until the
+ownership registry has loaded.
+
 The assistant's core job is operating pages on the user's instruction,
 and three things keep that honest regardless of channel:
 
@@ -134,10 +143,13 @@ forbids `debugger` under `optional_permissions`).
 
 Which site the user will ask the assistant to work on is the user's choice at
 task time. Page injection and page automation occur only during an active user
-task. The denylist applies to page access. Direct fetch and document-reading
-paths also apply private-network checks. Provider setup and user-enabled runtime
-downloads are separate user-initiated network uses. Tool outcomes and policy
-denials are recorded locally.
+task. The denylist applies to page access. Direct fetch, document reading, and
+browser automation apply private-network checks. Driven tabs also use
+tab-scoped network rules that cover redirects and tab-associated requests.
+Children receive those rules only when the browser reports that their exact
+source tab is already under assistant control. User-owned tabs are not changed.
+Provider setup and user-enabled runtime downloads are separate user-initiated
+network uses. Tool outcomes and policy denials are recorded locally.
 
 ## Egress posture (honest scope)
 
@@ -172,9 +184,10 @@ pages the user asks it to read from the extension's service worker.
 The target set is user-chosen and cannot be enumerated in a manifest.
 The egress layer enforces what the manifest cannot express: a hardcoded
 allowlist for credentialed provider calls and the denylist plus private-network
-checks on direct open-web fetch paths. Local records cover tool outcomes,
-direct fetches, and policy denials. The generated manifest and store posture
-tests are the authority for the narrow non-HTTPS sources used by local
+checks on direct open-web fetch paths. Browser automation adds tab-scoped
+network rules for those same private targets. Local records cover tool
+outcomes, direct fetches, and policy denials. The generated manifest and store
+posture tests are the authority for the narrow non-HTTPS sources used by local
 providers and runtime assets.
 
 ## Privacy posture (for the data form)

@@ -7,6 +7,7 @@ import {
   _parseKeySequenceForTests,
 } from '/peerd-runtime/tools/defs/page-keys.js';
 import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import { browserProbeResult } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/peerd-runtime/tools/defs/page-keys.js').KeyEvent} KeyEvent */
@@ -24,6 +25,11 @@ const mockCtx = (overrides = {}) => /** @type {ToolContext} */ (/** @type {unkno
   tabs: {
     get: async (/** @type {number} */ id) => ({ id, url: 'https://mail.example.com/' }),
     query: async () => [{ id: 1, url: 'https://mail.example.com/' }],
+  },
+  scripting: {
+    executeScript: async (/** @type {any} */ request) => browserProbeResult(request, {
+      url: 'https://mail.example.com/',
+    }),
   },
   debuggerPool: {
     dispatchKeys: async () => {},
@@ -139,7 +145,7 @@ describe('page_keys — outer tool', () => {
     expect(errOf(r).includes('parse_failed')).toBe(true);
   });
 
-  it('passes parsed events to the debugger pool', async () => {
+  it('does not dispatch parsed events because CDP input is tab-scoped', async () => {
     /** @type {{ tabId: number, events: KeyEvent[] } | undefined} */
     let captured;
     const ctx = mockCtx({
@@ -149,23 +155,20 @@ describe('page_keys — outer tool', () => {
         },
       },
     });
-    await pageKeysTool.execute({ keys: 'Shift+I' }, ctx);
-    expect(captured?.tabId).toBe(1);
-    expect(captured?.events.length).toBe(1);
-    expect(captured?.events[0].key).toBe('I');
-    expect(captured?.events[0].modifiers).toBe(8);
+    const r = await pageKeysTool.execute({ keys: 'Shift+I' }, ctx);
+    expect(captured).toBe(undefined);
+    expect(r.ok).toBe(false);
+    expect(errOf(r)).toBe('browser_target_unverified');
   });
 
-  it('wraps body in untrusted_web_content with the tab origin', async () => {
+  it('gives the model a document-bound correction without claiming success', async () => {
     const r = await pageKeysTool.execute({ keys: 'Shift+I' }, mockCtx());
-    expect(r.ok).toBe(true);
-    expect(okContent(r).includes('<untrusted_web_content')).toBe(true);
-    expect(okContent(r).includes('origin="https://mail.example.com"')).toBe(true);
-    expect(okContent(r).includes('tool="page_keys"')).toBe(true);
-    expect(okContent(r).includes('Dispatched 1 key event')).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(okContent(r).includes('did not send any keys')).toBe(true);
+    expect(okContent(r).includes('Use type with a selector or element ref')).toBe(true);
   });
 
-  it('maps debugger_detached errors cleanly', async () => {
+  it('never reaches debugger dispatch errors', async () => {
     const ctx = mockCtx({
       debuggerPool: {
         dispatchKeys: async () => { throw new Error('Detached: target closed'); },
@@ -173,7 +176,7 @@ describe('page_keys — outer tool', () => {
     });
     const r = await pageKeysTool.execute({ keys: 'a' }, ctx);
     expect(r.ok).toBe(false);
-    expect(errOf(r).includes('debugger_detached')).toBe(true);
+    expect(errOf(r)).toBe('browser_target_unverified');
   });
 
   it('is registered in BUILTIN_TOOLS with DOM primitive + write side-effect', () => {

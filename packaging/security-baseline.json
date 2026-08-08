@@ -62,7 +62,8 @@
         "storage",
         "tabGroups",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sandbox": {
         "pages": [
@@ -92,7 +93,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd@peerd.ai",
-          "strict_min_version": "121.0",
+          "strict_min_version": "153.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -138,7 +139,8 @@
         "scripting",
         "storage",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -207,7 +209,8 @@
         "storage",
         "tabGroups",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sandbox": {
         "pages": [
@@ -238,7 +241,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-preview@peerd.ai",
-          "strict_min_version": "129.0",
+          "strict_min_version": "153.0",
           "update_url": "https://peerd.ai/updates/firefox-preview.json",
           "data_collection_permissions": {
             "required": [
@@ -285,7 +288,8 @@
         "scripting",
         "storage",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
@@ -354,7 +358,8 @@
         "storage",
         "tabGroups",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sandbox": {
         "pages": [
@@ -394,7 +399,7 @@
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-dev@peerd.ai",
-          "strict_min_version": "121.0",
+          "strict_min_version": "153.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -440,7 +445,8 @@
         "scripting",
         "storage",
         "tabs",
-        "unlimitedStorage"
+        "unlimitedStorage",
+        "webNavigation"
       ],
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",

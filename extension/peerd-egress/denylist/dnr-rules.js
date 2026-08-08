@@ -76,17 +76,122 @@ export const DENYLIST_ALLOW_RULE_ID = 2;
 // so the chrome-extension:// host and runner continue to load.
 export const APP_EGRESS_RULE_ID = 3;
 
+// Private-network navigation is a separate policy from the user's sensitive-
+// site denylist. These rules are always present for driven tabs, even when the
+// denylist is empty, because a public page can initiate a form submit, redirect,
+// iframe load, or popup without naming that destination in a tool call.
+export const PRIVATE_NETWORK_HOST_RULE_ID = 4;
+
+export const PRIVATE_NETWORK_HOSTS = Object.freeze([
+  'localhost', 'localhost.localdomain', 'ip6-localhost', 'ip6-loopback',
+  'local', 'home.arpa', 'metadata.google.internal',
+]);
+
+// DNR evaluates the browser-normalized request URL. Keep each range in a small
+// regex: Chrome applies a compiled-memory limit per expression, and one combined
+// IPv4/IPv6 expression exceeds it even though its source text is short. Browser
+// URL parsing has already validated and canonicalized the rest of each literal,
+// so a range prefix is enough except for Azure's exact metadata address.
+const WEB_AUTHORITY_REGEX = '^(?:http|ws)s?://(?:[^/]+@)?';
+const HTTP_AUTHORITY_REGEX = '^https?://(?:[^/]+@)?';
+const WEBSOCKET_AUTHORITY_REGEX = '^wss?://(?:[^/]+@)?';
+export const PRIVATE_NETWORK_IPV4_REGEX_RULES = Object.freeze([
+  Object.freeze({ id: 5, regex: `${WEB_AUTHORITY_REGEX}(?:0|10|127)\\.` }),
+  Object.freeze({ id: 6, regex: `${WEB_AUTHORITY_REGEX}100\\.(?:6[4-9]|[789][0-9]|1[01][0-9]|12[0-7])\\.` }),
+  Object.freeze({ id: 7, regex: `${WEB_AUTHORITY_REGEX}169\\.254\\.` }),
+  Object.freeze({ id: 8, regex: `${WEB_AUTHORITY_REGEX}172\\.(?:1[6-9]|2[0-9]|3[01])\\.` }),
+  Object.freeze({ id: 9, regex: `${WEB_AUTHORITY_REGEX}192\\.168\\.` }),
+  Object.freeze({ id: 10, regex: `${WEB_AUTHORITY_REGEX}198\\.1[89]\\.` }),
+  Object.freeze({ id: 11, regex: `${WEB_AUTHORITY_REGEX}(?:22[4-9]|23[0-9]|24[0-9]|25[0-5])\\.` }),
+  Object.freeze({ id: 12, regex: `${WEB_AUTHORITY_REGEX}168\\.63\\.129\\.16(?::[0-9]+)?/` }),
+]);
+
+const PRIVATE_EMBEDDED_IPV4_HEXTET = '(?:[0-9a-f]{1,2}|a[0-9a-f]{2}|64[4-7][0-9a-f]'
+  + '|7f[0-9a-f]{2}|a9fe|ac1[0-9a-f]|c0a8|c61[23]|[ef][0-9a-f]{3})';
+
+// Browser URLs canonicalize IPv6 literals before DNR matching. Native local
+// prefixes only need a host prefix. Embedded IPv4 forms need their final two
+// hextets checked so a public mapped address remains reachable.
+/** @param {string} prefix */
+const embeddedIpv4PrefixRegex = (prefix) => `${WEB_AUTHORITY_REGEX}\\[${prefix}`
+  + `(?:${PRIVATE_EMBEDDED_IPV4_HEXTET}:|a83f:8110\\])`;
+/** @param {string} authorityRegex */
+const compatibleIpv4Regex = (authorityRegex) => `${authorityRegex}\\[::`
+  + `(?:${PRIVATE_EMBEDDED_IPV4_HEXTET}:[0-9a-f]{1,4}|a83f:8110)\\](?::[0-9]+)?/`;
+const PRIVATE_NETWORK_IPV6_BASE_REGEX_RULES = Object.freeze([
+  Object.freeze({ id: 13, regex: `${WEB_AUTHORITY_REGEX}\\[::(?:1)?\\](?::[0-9]+)?/` }),
+  Object.freeze({ id: 14, regex: `${WEB_AUTHORITY_REGEX}\\[f[cd][0-9a-f]{2}:` }),
+  Object.freeze({ id: 15, regex: `${WEB_AUTHORITY_REGEX}\\[fe[89a-f][0-9a-f]:` }),
+  Object.freeze({ id: 16, regex: `${WEB_AUTHORITY_REGEX}\\[ff[0-9a-f]{2}:` }),
+  Object.freeze({ id: 17, regex: `${WEB_AUTHORITY_REGEX}\\[64:ff9b:1:` }),
+  Object.freeze({ id: 18, regex: embeddedIpv4PrefixRegex('64:ff9b::') }),
+  Object.freeze({ id: 19, regex: embeddedIpv4PrefixRegex('::ffff:') }),
+  // This form must consume the complete literal. A prefix-only match would
+  // mistake `::ffff:<public-v4>` for compatible IPv4 whose first hextet is
+  // the private 255.255 range.
+  Object.freeze({ id: 20, regex: compatibleIpv4Regex(HTTP_AUTHORITY_REGEX) }),
+  // IPv6 compression removes the all-zero first embedded IPv4 hextet. These
+  // one-hextet tails are all in 0.0.0.0/8 and must not fall between the native
+  // and two-hextet rules above.
+  Object.freeze({ id: 21, regex: `${WEB_AUTHORITY_REGEX}\\[::[0-9a-f]{1,4}\\](?::[0-9]+)?/` }),
+  Object.freeze({ id: 22, regex: `${WEB_AUTHORITY_REGEX}\\[::ffff:[0-9a-f]{1,4}\\](?::[0-9]+)?/` }),
+  Object.freeze({ id: 23, regex: `${WEB_AUTHORITY_REGEX}\\[64:ff9b::(?:[0-9a-f]{1,4})?\\](?::[0-9]+)?/` }),
+]);
+const PRIVATE_NETWORK_IPV6_WEBSOCKET_REGEX_RULES = Object.freeze([
+  // The HTTP-compatible rule is already close to Chrome's compiled-memory
+  // limit. A separate small WebSocket rule keeps both schemes enforceable.
+  Object.freeze({ id: 30, regex: compatibleIpv4Regex(WEBSOCKET_AUTHORITY_REGEX) }),
+]);
+export const PRIVATE_NETWORK_IPV6_REGEX_RULES = Object.freeze([
+  ...PRIVATE_NETWORK_IPV6_BASE_REGEX_RULES,
+  ...PRIVATE_NETWORK_IPV6_WEBSOCKET_REGEX_RULES,
+]);
+
+// URL hostname normalization used by the JS classifier strips a final dot.
+// DNR requestDomains does not do that consistently across browsers, so cover
+// the accepted absolute-DNS spelling explicitly, including local subdomains.
+export const PRIVATE_NETWORK_DOTTED_HOST_REGEX_RULES = Object.freeze([
+  Object.freeze({ id: 24, regex: `${WEB_AUTHORITY_REGEX}(?:[^./]+\\.)*localhost\\.(?::[0-9]+)?/` }),
+  Object.freeze({ id: 25, regex: `${WEB_AUTHORITY_REGEX}(?:[^./]+\\.)*localhost\\.localdomain\\.(?::[0-9]+)?/` }),
+  Object.freeze({ id: 26, regex: `${WEB_AUTHORITY_REGEX}(?:[^./]+\\.)*local\\.(?::[0-9]+)?/` }),
+  Object.freeze({ id: 27, regex: `${WEB_AUTHORITY_REGEX}(?:[^./]+\\.)*home\\.arpa\\.(?::[0-9]+)?/` }),
+  Object.freeze({ id: 28, regex: `${WEB_AUTHORITY_REGEX}metadata\\.google\\.internal\\.(?::[0-9]+)?/` }),
+  Object.freeze({ id: 29, regex: `${WEB_AUTHORITY_REGEX}(?:ip6-localhost|ip6-loopback)\\.(?::[0-9]+)?/` }),
+]);
+
+export const PRIVATE_NETWORK_REGEX_RULES = Object.freeze([
+  ...PRIVATE_NETWORK_IPV4_REGEX_RULES,
+  ...PRIVATE_NETWORK_IPV6_BASE_REGEX_RULES,
+  ...PRIVATE_NETWORK_DOTTED_HOST_REGEX_RULES,
+  ...PRIVATE_NETWORK_IPV6_WEBSOCKET_REGEX_RULES,
+]);
+export const PRIVATE_NETWORK_RULE_IDS = Object.freeze([
+  PRIVATE_NETWORK_HOST_RULE_ID,
+  ...PRIVATE_NETWORK_REGEX_RULES.map(({ id }) => id),
+]);
+
 /**
  * Resource types the block rule covers. Enumerated EXPLICITLY rather than left
  * to the default: implementations differ on whether an omitted `resourceTypes`
  * includes `main_frame`, and main_frame is the one that matters most here. The
- * set is restricted to types that predate DNR (the MV2 webRequest enum) so a
- * strict validator on either browser can't reject the whole rule over a value
- * it doesn't know.
+ * Firefox and Chrome validate different enums, so each browser gets its own
+ * complete set. `object_subrequest` is intentionally absent because Firefox
+ * documents it as unsupported even though it remains in the schema.
  */
 export const DENYLIST_RESOURCE_TYPES = Object.freeze([
   'main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font',
-  'object', 'xmlhttprequest', 'ping', 'media', 'websocket', 'other',
+  'object', 'xmlhttprequest', 'xslt', 'ping', 'beacon', 'xml_dtd',
+  'csp_report', 'media', 'websocket', 'imageset', 'web_manifest',
+  'speculative', 'json', 'other',
+]);
+
+// Chrome rejects Firefox-only request-type enum values and rejects the entire
+// atomic rule update with them present. Keep this list explicit instead of
+// spreading the Firefox set so either browser adding an enum stays deliberate.
+export const CHROME_DNR_RESOURCE_TYPES = Object.freeze([
+  'main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font',
+  'object', 'xmlhttprequest', 'ping', 'csp_report', 'media', 'websocket',
+  'webbundle', 'webtransport', 'other',
 ]);
 
 /**
@@ -138,9 +243,12 @@ export const denylistBlockDomains = (patterns) => {
  * @param {readonly string[]} input.domains  from denylistBlockDomains
  * @param {readonly number[]} input.tabIds   tabs peerd is currently driving
  * @param {number} [input.ruleId]
+ * @param {readonly string[]} [input.resourceTypes]
  * @returns {object | null}
  */
-export const buildDenylistBlockRule = ({ domains, tabIds, ruleId = DENYLIST_RULE_ID }) => {
+export const buildDenylistBlockRule = ({
+  domains, tabIds, ruleId = DENYLIST_RULE_ID, resourceTypes = DENYLIST_RESOURCE_TYPES,
+}) => {
   const tabs = [...new Set((tabIds ?? []).filter((t) => Number.isInteger(t) && t >= 0))];
   if (!domains?.length || !tabs.length) return null;
   return {
@@ -151,7 +259,7 @@ export const buildDenylistBlockRule = ({ domains, tabIds, ruleId = DENYLIST_RULE
     condition: {
       requestDomains: [...domains],
       tabIds: tabs,
-      resourceTypes: [...DENYLIST_RESOURCE_TYPES],
+      resourceTypes: [...resourceTypes],
     },
   };
 };
@@ -169,9 +277,12 @@ export const buildDenylistBlockRule = ({ domains, tabIds, ruleId = DENYLIST_RULE
  * @param {readonly string[]} input.domains  exempt domains (the IdP registry)
  * @param {readonly number[]} input.tabIds
  * @param {number} [input.ruleId]
+ * @param {readonly string[]} [input.resourceTypes]
  * @returns {object | null}
  */
-export const buildIdpAllowRule = ({ domains, tabIds, ruleId = DENYLIST_ALLOW_RULE_ID }) => {
+export const buildIdpAllowRule = ({
+  domains, tabIds, ruleId = DENYLIST_ALLOW_RULE_ID, resourceTypes = DENYLIST_RESOURCE_TYPES,
+}) => {
   const tabs = [...new Set((tabIds ?? []).filter((t) => Number.isInteger(t) && t >= 0))];
   const exempt = [...new Set((domains ?? []).filter((d) => typeof d === 'string' && d.includes('.')))].sort();
   if (!exempt.length || !tabs.length) return null;
@@ -182,7 +293,7 @@ export const buildIdpAllowRule = ({ domains, tabIds, ruleId = DENYLIST_ALLOW_RUL
     condition: {
       requestDomains: exempt,
       tabIds: tabs,
-      resourceTypes: [...DENYLIST_RESOURCE_TYPES],
+      resourceTypes: [...resourceTypes],
     },
   };
 };
@@ -193,9 +304,12 @@ export const buildIdpAllowRule = ({ domains, tabIds, ruleId = DENYLIST_ALLOW_RUL
  * @param {Object} input
  * @param {readonly number[]} input.tabIds
  * @param {number} [input.ruleId]
+ * @param {readonly string[]} [input.resourceTypes]
  * @returns {object | null}
  */
-export const buildAppEgressBlockRule = ({ tabIds, ruleId = APP_EGRESS_RULE_ID }) => {
+export const buildAppEgressBlockRule = ({
+  tabIds, ruleId = APP_EGRESS_RULE_ID, resourceTypes = DENYLIST_RESOURCE_TYPES,
+}) => {
   const tabs = [...new Set((tabIds ?? []).filter((t) => Number.isInteger(t) && t >= 0))];
   if (!tabs.length) return null;
   return {
@@ -205,9 +319,47 @@ export const buildAppEgressBlockRule = ({ tabIds, ruleId = APP_EGRESS_RULE_ID })
     condition: {
       regexFilter: '^https?://',
       tabIds: tabs,
-      resourceTypes: [...DENYLIST_RESOURCE_TYPES],
+      resourceTypes: [...resourceTypes],
     },
   };
+};
+
+/**
+ * Browser-network floor for local/private/metadata destinations in driven tabs.
+ * The IdP allow rule must never override these, so every rule outranks it.
+ * @param {Object} input
+ * @param {readonly number[]} input.tabIds
+ * @param {readonly string[]} [input.resourceTypes]
+ * @returns {object[]}
+ */
+export const buildPrivateNetworkBlockRules = ({
+  tabIds, resourceTypes = DENYLIST_RESOURCE_TYPES,
+}) => {
+  const tabs = [...new Set((tabIds ?? []).filter((t) => Number.isInteger(t) && t >= 0))];
+  if (!tabs.length) return [];
+  const base = {
+    priority: 4,
+    action: { type: 'block' },
+  };
+  /** @param {Record<string, unknown>} condition */
+  const scoped = (condition) => ({
+    ...base,
+    condition: {
+      ...condition,
+      tabIds: tabs,
+      resourceTypes: [...resourceTypes],
+    },
+  });
+  return [
+    {
+      id: PRIVATE_NETWORK_HOST_RULE_ID,
+      ...scoped({ requestDomains: [...PRIVATE_NETWORK_HOSTS] }),
+    },
+    ...PRIVATE_NETWORK_REGEX_RULES.map(({ id, regex }) => ({
+      id,
+      ...scoped({ regexFilter: regex, isUrlFilterCaseSensitive: false }),
+    })),
+  ];
 };
 
 /**
@@ -225,19 +377,34 @@ export const buildAppEgressBlockRule = ({ tabIds, ruleId = APP_EGRESS_RULE_ID })
  * @param {number} [input.ruleId]
  * @param {number} [input.allowRuleId]
  * @param {number} [input.appRuleId]
+ * @param {readonly string[]} [input.resourceTypes]
  * @returns {{ removeRuleIds: number[], addRules: object[] }}
  */
 export const denylistSessionRuleUpdate = ({
-  patterns, tabIds, appTabIds = [], exemptDomains = [], ruleId = DENYLIST_RULE_ID,
+  patterns, tabIds, appTabIds = [],
+  exemptDomains = [], ruleId = DENYLIST_RULE_ID,
   allowRuleId = DENYLIST_ALLOW_RULE_ID, appRuleId = APP_EGRESS_RULE_ID,
+  resourceTypes = DENYLIST_RESOURCE_TYPES,
 }) => {
+  const domains = denylistBlockDomains(patterns ?? []);
   const block = buildDenylistBlockRule({
-    domains: denylistBlockDomains(patterns ?? []), tabIds, ruleId,
+    domains, tabIds, ruleId, resourceTypes,
   });
-  const allow = block ? buildIdpAllowRule({ domains: exemptDomains, tabIds, ruleId: allowRuleId }) : null;
-  const appBlock = buildAppEgressBlockRule({ tabIds: appTabIds, ruleId: appRuleId });
+  const allow = block ? buildIdpAllowRule({
+    domains: exemptDomains, tabIds, ruleId: allowRuleId, resourceTypes,
+  }) : null;
+  const appBlock = buildAppEgressBlockRule({
+    tabIds: appTabIds, ruleId: appRuleId, resourceTypes,
+  });
+  const privateNetworkBlocks = buildPrivateNetworkBlockRules({ tabIds, resourceTypes });
   return {
-    removeRuleIds: [ruleId, allowRuleId, appRuleId],
-    addRules: [block, allow, appBlock].filter((rule) => rule !== null),
+    removeRuleIds: [
+      ruleId, allowRuleId, appRuleId,
+      ...PRIVATE_NETWORK_RULE_IDS,
+    ],
+    addRules: [
+      block, allow, appBlock,
+      ...privateNetworkBlocks,
+    ].filter((rule) => rule !== null),
   };
 };

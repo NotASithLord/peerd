@@ -18,6 +18,13 @@ import {
 import { makeWebFetch } from '../../../extension/peerd-egress/fetch/web-fetch.js';
 import { isPrivateOrLocalHost } from '../../../extension/peerd-egress/fetch/private-network.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';
+import {
+  buildPrivateNetworkBlockRules, PRIVATE_NETWORK_RULE_IDS,
+} from '../../../extension/peerd-egress/denylist/dnr-rules.js';
+import {
+  BROWSER_TARGET_STAGES, browserTargetRefusalResult, classifyBrowserAutomationTarget,
+} from '../../../extension/peerd-runtime/tools/browser-automation-policy.js';
+import { makeStartupPopupNetworkGuard } from '../../../extension/background/startup-popup-network-guard.js';
 
 // A webFetch wired so that ANY network call is observable, if fetchFn ever
 // fires for a hostile URL, the guard failed open and the probe leaks.
@@ -58,7 +65,7 @@ export const scenario: Scenario = {
   title: 'Private-network / metadata SSRF',
   adversary: 'malicious webpage',
   asset: 'internal network + cloud metadata credentials',
-  claim: 'webFetch refuses private / loopback / link-local / metadata hosts (including encoded and IPv4-mapped forms) before any network call, and fails closed on redirects.',
+  claim: 'Open-web and browser entry points refuse private targets, browser network rules stay tab-scoped, and startup child adoption requires the complete exact-source rule set.',
   threatModelRef: 'INV-7',
   tier: 'unit',
   async run() {
@@ -101,6 +108,105 @@ export const scenario: Scenario = {
         : leaked('public host 3xx-redirects toward an internal target', `redirect NOT refused: ${String(denied)}`));
     }
 
-    return summarize(probes, ['isPrivateOrLocalHost (SSRF guard)', 'webFetch pre-flight host check', 'redirect fail-closed']);
+    // 4) Browser automation uses the same classifier both before navigation
+    // and after a committed landing. Its model-facing refusal is host-stamped
+    // and does not repeat the target URL.
+    for (const t of SSRF_TARGETS) {
+      for (const stage of [
+        BROWSER_TARGET_STAGES.PRE_NAVIGATION,
+        BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+      ]) {
+        const verdict = classifyBrowserAutomationTarget(t.url, { stage });
+        const result = verdict.allowed
+          ? null
+          : browserTargetRefusalResult(verdict, {
+            effectCompleted: stage === BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
+          });
+        const urlFree = result != null && !JSON.stringify(result).includes(t.url);
+        probes.push(!verdict.allowed && urlFree
+          ? blocked(
+            `automate ${t.label} at ${stage}`,
+            `browser target refused as ${verdict.reason}; result contains no target URL`,
+          )
+          : leaked(
+            `automate ${t.label} at ${stage}`,
+            verdict.allowed ? 'browser target allowed' : 'browser refusal repeated the target URL',
+          ));
+      }
+    }
+
+    // 5) The browser-network floor is block-only and exact-tab scoped. An
+    // empty tab set must produce no rule, which prevents a browser-wide floor.
+    {
+      const drivenTabId = 73;
+      const rules = buildPrivateNetworkBlockRules({ tabIds: [drivenTabId] }) as any[];
+      const exactRuleSet = rules.length === PRIVATE_NETWORK_RULE_IDS.length
+        && PRIVATE_NETWORK_RULE_IDS.every((id) => rules.some((rule) => rule.id === id));
+      const exactScope = rules.every((rule) => rule.action?.type === 'block'
+        && JSON.stringify(rule.condition?.tabIds) === JSON.stringify([drivenTabId]));
+      probes.push(exactRuleSet && exactScope
+        ? blocked('turn the private-network floor into a browser-wide rule', 'every known rule is block-only and scoped to the driven tab')
+        : leaked('turn the private-network floor into a browser-wide rule', 'a rule was missing, non-blocking, or not exact-tab scoped'));
+      probes.push(buildPrivateNetworkBlockRules({ tabIds: [] }).length === 0
+        ? blocked('install the private-network floor with no driven tab', 'the rule builder returned no rules')
+        : leaked('install the private-network floor with no driven tab', 'an unscoped rule was produced'));
+    }
+
+    // 6) Cold-start child copying is limited to a complete surviving rule set
+    // on the exact source. The service worker separately requires restored
+    // custody or an actor binding before it calls this pure browser-rule core.
+    {
+      const sourceTabId = 73;
+      const ordinaryTabId = 74;
+      const childTabId = 75;
+      let rules = buildPrivateNetworkBlockRules({ tabIds: [sourceTabId] }) as any[];
+      let updateCount = 0;
+      const startupGuard = makeStartupPopupNetworkGuard({
+        getSessionRules: async () => rules,
+        updateSessionRules: async (update) => {
+          updateCount += 1;
+          rules = [
+            ...rules.filter((rule) => !update.removeRuleIds.includes(rule.id)),
+            ...update.addRules,
+          ];
+        },
+      }, PRIVATE_NETWORK_RULE_IDS);
+      const unrelatedAdopted = await startupGuard.adopt(ordinaryTabId, childTabId);
+      probes.push(!unrelatedAdopted && updateCount === 0
+        ? blocked('use an ordinary source tab to acquire its child during startup', 'no browser rule changed without the complete exact-source rule set')
+        : leaked('use an ordinary source tab to acquire its child during startup', 'the unrelated child changed'));
+
+      const exactAdopted = await startupGuard.adopt(sourceTabId, childTabId);
+      const copiedOnlyToChild = exactAdopted && rules.every((rule) =>
+        rule.condition.tabIds.includes(sourceTabId)
+        && rule.condition.tabIds.includes(childTabId)
+        && !rule.condition.tabIds.includes(ordinaryTabId));
+      probes.push(copiedOnlyToChild
+        ? blocked('redirect startup protection onto an unrelated tab', 'the complete rule set was copied only from the exact source to the exact child')
+        : leaked('redirect startup protection onto an unrelated tab', 'startup rules escaped the exact source and child'));
+
+      const incompleteRules = rules.filter((rule) => rule.id !== PRIVATE_NETWORK_RULE_IDS[0]);
+      let incompleteUpdates = 0;
+      const incompleteGuard = makeStartupPopupNetworkGuard({
+        getSessionRules: async () => incompleteRules,
+        updateSessionRules: async () => { incompleteUpdates += 1; },
+      }, PRIVATE_NETWORK_RULE_IDS);
+      const incompleteAdopted = await incompleteGuard.adopt(sourceTabId, childTabId + 1);
+      probes.push(!incompleteAdopted && incompleteUpdates === 0
+        ? blocked('claim startup child custody from a partial surviving rule set', 'partial browser evidence changed no rule')
+        : leaked('claim startup child custody from a partial surviving rule set', 'partial browser evidence was accepted'));
+    }
+
+    return {
+      ...summarize(probes, [
+        'isPrivateOrLocalHost (SSRF guard)',
+        'webFetch pre-flight host check',
+        'browser automation target classifier',
+        'tab-scoped private-network DNR rules',
+        'exact-source startup child rule copy',
+        'redirect fail-closed',
+      ]),
+      verifiedBy: 'scripts/cdp/states.mjs (browser network floor); scripts/firefox/run-runtime-tests.mjs (Firefox private-network and child navigation probes)',
+    };
   },
 };

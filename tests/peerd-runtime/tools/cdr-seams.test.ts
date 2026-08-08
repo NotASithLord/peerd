@@ -19,6 +19,7 @@
 // two are the markup-aware passes that run before it.
 
 import { describe, test, expect } from 'bun:test';
+import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 import { fetchUrlTool } from '../../../extension/peerd-runtime/tools/defs/fetch-url.js';
 import { readPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
 
@@ -142,9 +143,13 @@ const readCtx = (html: string, over: any = {}) => ({
   activeTab: { id: 7, url: 'https://site.test/article', origin: 'https://site.test' },
   tabs: { get: async (id: number) => ({ id, url: 'https://site.test/article' }) },
   scripting: {
-    executeScript: async ({ func }: any) => (String(func.name) === 'readOuterHtmlInjected'
-      ? [{ result: { html, url: 'https://site.test/article', title: 'T' } }]
-      : [{ result: { title: 'T', url: 'https://site.test/article', text: 'snapshot text', interactables: [] } }]),
+    executeScript: async (request: any) => {
+      const probe = browserProbeResult(request, { url: 'https://site.test/article' });
+      if (probe) return probe;
+      return String(request.func.name) === 'readOuterHtmlInjected'
+        ? [{ result: { html, url: 'https://site.test/article', title: 'T' } }]
+        : [{ result: { title: 'T', url: 'https://site.test/article', text: 'snapshot text', interactables: [] } }];
+    },
   },
   ...over,
 });

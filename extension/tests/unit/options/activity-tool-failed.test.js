@@ -87,4 +87,79 @@ describe('options.activity — a declined tool call shows as failed (end-to-end)
       expect(!!root.querySelector('.log-danger')).toBe(true);     // the danger dot
     } finally { unmount(); clearTools(); }
   });
+
+  it('explains a browser policy stop without showing its target address', async () => {
+    const entries = [{
+      id: 'policy-1', when: 1, type: 'tool_failed',
+      details: {
+        tool: 'open_tab', primitive: 'tab', error: 'browser_private_network_blocked',
+        browserPolicy: {
+          reason: 'private_network', stage: 'committed_origin',
+          outcome: 'page_loaded_not_automated', retryable: false, neutralized: true,
+        },
+      },
+    }];
+    const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
+      ? { ok: true, entries, total: entries.length }
+      : { ok: true }));
+    try {
+      await settle();
+      const text = root.textContent ?? '';
+      expect(text).toContain('private network blocked');
+      expect(text).toContain('stopped after navigation');
+      expect(text).toContain('page loaded, not automated');
+      expect(text).toContain('tab reset');
+      expect(text).toContain('do not retry');
+      expect(text.includes('127.0.0.1')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('explains a sensitive-site redirect and failed reset', async () => {
+    const entries = [{
+      id: 'policy-sensitive', when: 1, type: 'tool_failed',
+      details: {
+        tool: 'navigate', primitive: 'tab', error: 'browser_sensitive_site_blocked',
+        browserPolicy: {
+          reason: 'sensitive_site', stage: 'committed_origin',
+          outcome: 'page_loaded_not_automated', retryable: false, neutralized: false,
+        },
+      },
+    }];
+    const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
+      ? { ok: true, entries, total: entries.length }
+      : { ok: true }));
+    try {
+      await settle();
+      const text = root.textContent ?? '';
+      expect(text).toContain('sensitive site blocked');
+      expect(text).toContain('stopped after navigation');
+      expect(text).toContain('page loaded, not automated');
+      expect(text).toContain('tab reset not confirmed');
+      expect(text).toContain('do not retry');
+      expect(text.includes('accounts.example')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('shows when child control and its network guard were not confirmed', async () => {
+    const entries = [{
+      id: 'child-uncontained', when: 1, type: 'browser_child_navigation_failed',
+      details: {
+        browserPolicy: {
+          reason: 'child_guard_failed', outcome: 'unverified',
+          child: 'uncontained', guarded: false,
+        },
+      },
+    }];
+    const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
+      ? { ok: true, entries, total: entries.length }
+      : { ok: true }));
+    try {
+      await settle();
+      const text = root.textContent ?? '';
+      expect(text).toContain('child navigation control failed');
+      expect(text).toContain('child control not confirmed');
+      expect(text).toContain('network guard not confirmed');
+      expect(text).toContain('outcome not verified');
+    } finally { unmount(); }
+  });
 });

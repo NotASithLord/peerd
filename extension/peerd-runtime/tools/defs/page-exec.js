@@ -27,11 +27,18 @@
 // powerful injection channel.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl, cdpUnavailableError } from './dom-helpers.js';
+import {
+  browserDocumentIdentity,
+  resolveTargetTab,
+  originOfUrl,
+  cdpUnavailableError,
+} from './dom-helpers.js';
+import {
+  browserDocumentRefusalFrom,
+} from '../browser-automation-policy.js';
 
 const MAX_CODE_CHARS = 200_000;
 const MAX_OUTPUT_CHARS = 8000;
-
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
 
@@ -62,7 +69,7 @@ const MAX_OUTPUT_CHARS = 8000;
  * page_exec's SW-injected ctx extras (off the base ToolContext contract).
  *
  * @typedef {import('/shared/tool-types.js').ToolContext & {
- *   debuggerPool?: { evaluate?: (tabId: number, expression: string) => Promise<CdpEvalResult> },
+ *   debuggerPool?: { evaluate?: (tabId: number, expression: string, options?: { expectedDocument?: ReturnType<typeof browserDocumentIdentity> }) => Promise<CdpEvalResult> },
  *   cdpUnavailableReason?: string | null,
  * }} PageExecCtx
  */
@@ -136,9 +143,21 @@ export const pageExecTool = {
 
     let cdpResult;
     try {
-      cdpResult = await evaluate(tab.id, args.expression);
+      cdpResult = await evaluate(tab.id, args.expression, {
+        expectedDocument: browserDocumentIdentity(tab),
+      });
     } catch (e) {
       const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+      const outcomeKind = /** @type {{ outcomeKind?: string }} */ (e)?.outcomeKind;
+      const targetRefusal = browserDocumentRefusalFrom(e);
+      if (targetRefusal) return targetRefusal;
+      if (outcomeKind === 'host-lost') {
+        return {
+          ok: false,
+          error: `page_exec_outcome_unknown: the debugger channel ended after execution was dispatched (${msg}). Verify the page state before retrying.`,
+          outcomeKind,
+        };
+      }
       // Common: user clicked Cancel on the banner. Detached us mid-flight.
       if (/Detached|debugger is not attached/i.test(msg)) {
         return { ok: false, error: `debugger_detached: ${msg}` };
@@ -147,7 +166,11 @@ export const pageExecTool = {
       if (/Cannot access|cannot attach|chrome:\/\//i.test(msg)) {
         return { ok: false, error: `cannot_attach_to_tab: ${msg}` };
       }
-      return { ok: false, error: `debugger_threw: ${msg}` };
+      return {
+        ok: false,
+        error: `debugger_threw: ${msg}`,
+        ...(outcomeKind ? { outcomeKind } : {}),
+      };
     }
 
     const origin = originOfUrl(tab.url);
@@ -161,7 +184,6 @@ export const pageExecTool = {
           ? `\n${exc.exception.description}`
           : '')
       : '';
-
     return /** @type {PageExecResult} */ ({
       ok: !threw,
       content: wrapUntrusted({

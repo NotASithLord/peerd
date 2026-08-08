@@ -152,7 +152,9 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 657 → 658: durable actor isolation failure state is checked.
 // 659 → 660: the remote module import policy is checked.
 // 660 → 662: the shared private-network and browser-target policies are checked.
-const COVERED_FLOOR = 662;
+// 662 → 670: browser navigation custody and exact-document helpers are checked.
+// 672 → 673: cold-start popup network custody is checked.
+const COVERED_FLOOR = 673;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.

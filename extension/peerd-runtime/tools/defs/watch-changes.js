@@ -13,7 +13,7 @@
 // constraint: never a firehose on a tab the agent isn't watching.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, scriptingTarget } from './dom-helpers.js';
 import { summarizeMutations } from '../../dom/index.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -44,7 +44,7 @@ export const watchChangesTool = {
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
     let res;
     try {
-      const out = await ctx.scripting.executeScript({ target: { tabId: tab.id }, func: watchInjected });
+      const out = await ctx.scripting.executeScript({ target: scriptingTarget(tab), func: watchInjected });
       res = out?.[0]?.result;
     } catch (e) {
       return { ok: false, error: `watch_inject_failed: ${e?.message ?? String(e)}` };

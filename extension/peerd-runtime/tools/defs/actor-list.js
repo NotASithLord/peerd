@@ -22,6 +22,7 @@
 import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
 import { serializeListResult } from './columnar.js';
 import { safeTitle } from '../prompt-wrap.js';
+import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js';
 
 // A tab's `name` is the page-controlled document.title — UNTRUSTED, and this list
 // is a TRUSTED tool result with no fence telling the model to treat it as data.
@@ -118,7 +119,7 @@ export const actorListTool = {
     const actors = [];
     /** @type {string[]} */
     const unavailable = [];   // sources that threw — surfaced, never silently dropped
-    let denylistedTabsHidden = 0;
+    let restrictedTabsHidden = 0;
 
     /** @type {EngineSource[]} */
     const engines = [
@@ -141,7 +142,11 @@ export const actorListTool = {
         const all = await c.tabs.query({});
         const denylist = c.denylist ?? [];
         for (const t of all) {
-          if (isDenylistedTab(t.url, denylist)) { denylistedTabsHidden++; continue; }
+          const target = classifyBrowserAutomationTarget(t.url);
+          if (isDenylistedTab(t.url, denylist) || !target.allowed) {
+            restrictedTabsHidden++;
+            continue;
+          }
           actors.push({
             type: 'tab',
             handle: t.id,
@@ -186,7 +191,7 @@ export const actorListTool = {
         ref: String(actor.handle), type: actor.type, name: actor.name,
         live: actor.live, current: actor.current, detail: actor.detail,
       })),
-      ...(denylistedTabsHidden > 0 ? { deniedCount: denylistedTabsHidden } : {}),
+      ...(restrictedTabsHidden > 0 ? { deniedCount: restrictedTabsHidden } : {}),
       ...(unavailable.length > 0 ? { unavailable: [...unavailable] } : {}),
     };
     return {
@@ -204,7 +209,7 @@ export const actorListTool = {
         },
         // Tell the agent SOMETHING was withheld so it doesn't loop hunting for a
         // tab it can see in the browser but not here.
-        ...(denylistedTabsHidden > 0 ? { denylisted_tabs_hidden: denylistedTabsHidden } : {}),
+        ...(restrictedTabsHidden > 0 ? { restricted_tabs_hidden: restrictedTabsHidden } : {}),
         ...(unavailable.length > 0 ? { unavailable } : {}),
         actors,
       }, 'actors'),

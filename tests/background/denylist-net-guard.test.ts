@@ -1,9 +1,12 @@
 import { describe, test, expect } from 'bun:test';
 import { makeDenylistNetGuard } from '../../extension/background/denylist-net-guard.js';
-import { denylistSessionRuleUpdate } from '../../extension/peerd-egress/denylist/dnr-rules.js';
+import {
+  denylistSessionRuleUpdate,
+  PRIVATE_NETWORK_RULE_IDS,
+} from '../../extension/peerd-egress/denylist/dnr-rules.js';
 
-// The imperative half of the denylist's DNR backstop: does it keep exactly one
-// correct session rule, and does it stay harmless when the API isn't there?
+// The imperative half of the denylist's DNR backstop: does it keep the exact
+// session rule set, and does it stay harmless when the API isn't there?
 
 const makeDnr = (opts: { fail?: () => Error | null } = {}) => {
   const calls: any[] = [];
@@ -51,8 +54,8 @@ describe('denylist-net-guard — rule sync', () => {
     const { guard } = guardOver(dnr, ['chase.com'], []);
     await guard.sync();
     expect(dnr.calls[0].addRules).toEqual([]);
-    // Denylist block + IdP corridor + the independent App-egress floor.
-    expect(dnr.calls[0].removeRuleIds).toHaveLength(3);
+    // The three policy-owned base ids plus every private-network range rule.
+    expect(dnr.calls[0].removeRuleIds).toHaveLength(3 + PRIVATE_NETWORK_RULE_IDS.length);
   });
 
   test('a repeat sync with unchanged state does not re-call the API', async () => {
@@ -89,10 +92,11 @@ describe('denylist-net-guard — rule sync', () => {
     await guard.sync();
     setPatterns([]);
     await guard.sync();
-    expect(dnr.calls[1].addRules).toEqual([]);
+    expect(dnr.calls[1].addRules).toHaveLength(PRIVATE_NETWORK_RULE_IDS.length);
+    expect(dnr.calls[1].addRules.every((rule: any) => rule.action.type === 'block')).toBe(true);
   });
 
-  test('concurrent syncs never overlap on the single rule id', async () => {
+  test('concurrent syncs never overlap on the owned rule set', async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     const calls: any[] = [];
@@ -125,6 +129,50 @@ describe('denylist-net-guard — rule sync', () => {
     // Both applies see the same (final) state, so only one write reaches the API.
     expect(dnr.calls).toHaveLength(1);
     expect(dnr.calls[0].addRules[0].condition.tabIds).toEqual([2]);
+  });
+
+  test('boot-deferred sync preserves existing rules until custody hydration finishes', async () => {
+    const dnr = makeDnr();
+    let tabs = [1];
+    const guard = makeDenylistNetGuard({
+      dnr,
+      buildUpdate: denylistSessionRuleUpdate,
+      getPatterns: () => ['chase.com'],
+      getTabIds: () => tabs,
+      deferUntilStarted: true,
+    });
+    const pending = guard.sync();
+    await Promise.resolve();
+    expect(dnr.calls).toEqual([]);
+    tabs = [7, 9];
+    await guard.start();
+    await pending;
+    expect(dnr.calls).toHaveLength(1);
+    expect(dnr.calls[0].addRules[0].condition.tabIds).toEqual([7, 9]);
+  });
+
+  test('failed boot hydration preserves surviving rules and settles queued callers', async () => {
+    const updates: unknown[] = [];
+    const guard = makeDenylistNetGuard({
+      dnr: { updateSessionRules: async (update: unknown) => { updates.push(update); } },
+      getPatterns: () => ['blocked.example'],
+      getTabIds: () => [],
+      buildUpdate: ({ tabIds }) => ({
+        removeRuleIds: [1],
+        addRules: tabIds.length ? [{ id: 1, priority: 1, condition: { tabIds } }] : [],
+      }),
+      deferUntilStarted: true,
+    });
+
+    const queued = guard.sync();
+    await guard.start({ ok: false, error: 'web_bindings_hydration_failed' });
+    await queued;
+
+    expect(updates).toEqual([]);
+    expect(guard.state().startupError).toBe('web_bindings_hydration_failed');
+    expect(guard.state().lastError).toBe('web_bindings_hydration_failed');
+    await guard.sync();
+    expect(updates).toEqual([]);
   });
 });
 

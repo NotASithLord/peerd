@@ -262,11 +262,12 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
     // it ingests untrusted page text, so it must not also wield code-exec.
     expect([...WEB_ACTOR_DOM_TOOLS].sort()).toEqual([
-      'click', 'navigate', 'query_dom', 'page_keys', 'read_page', 'read_pdf',
+      'click', 'navigate', 'query_dom', 'read_page', 'read_pdf',
       'read_state', 'snapshot', 'type', 'view', 'watch_changes',
     ].sort());
     expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_eval');
     expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_exec');
+    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_keys');
   });
 
   test('a web actor may call its DOM tools (read + mutate) + the sessionless fetch_url', () => {

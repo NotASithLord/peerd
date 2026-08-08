@@ -7,6 +7,10 @@
 
 import { describe, test, expect, mock } from 'bun:test';
 import { makePageCallHandler, resolvePageTab } from '../../extension/peerd-runtime/actor/page-call-handler.js';
+import {
+  browserTargetRefusalResult,
+  classifyBrowserAutomationTarget,
+} from '../../extension/peerd-runtime/tools/browser-automation-policy.js';
 
 describe('resolvePageTab — first-tab adoption for the code actor', () => {
   test('an owned tab dispatches straight to it', () => {
@@ -135,6 +139,58 @@ describe('page-call handler — failures surface as the worker sees them', () =>
     const { handle } = harness({ ok: false, error: 'gate_blocked:origin:denylisted host evil.test' });
     const out = await handle({ method: 'goto', args: { url: 'https://evil.test' }, sessionId: 's1', tabId: 42 });
     expect(out).toEqual({ ok: false, error: 'gate_blocked:origin:denylisted host evil.test' });
+  });
+
+  test('a failed page call keeps host child-policy custody outside the worker error', async () => {
+    const policy = {
+      reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
+    };
+    const { handle } = harness({
+      ok: false,
+      error: 'click failed',
+      structured: { browserPolicy: policy },
+    });
+    const out = await handle({ method: 'click', args: { selector: '#x' }, sessionId: 's1', tabId: 42 });
+    expect(out).toEqual({ ok: false, error: 'click failed', browserPolicies: [policy] });
+  });
+
+  test('page.goto preserves the safe browser-policy refusal prefix and copy', async () => {
+    const verdict = classifyBrowserAutomationTarget(
+      'http://user:pass@127.0.0.1/private?q=token');
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const { handle } = harness(browserTargetRefusalResult(verdict));
+    const out = await handle({
+      method: 'goto',
+      args: { url: 'http://user:pass@127.0.0.1/private?q=token' },
+      sessionId: 's1',
+      tabId: 42,
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) throw new Error('expected page.goto to reject');
+    expect(out.error).toStartWith('browser_private_network_blocked:');
+    expect(out.error).toContain('No browser action was run');
+    expect(out.error.match(/browser_private_network_blocked/g)).toHaveLength(2);
+    expect(out.error).not.toContain('/private');
+    expect(out.error).not.toContain('user:pass');
+    expect(out.error).not.toContain('q=token');
+  });
+
+  test('page.goto preserves committed refusal cleanup truth once', async () => {
+    const verdict = classifyBrowserAutomationTarget('http://127.0.0.1/private', {
+      stage: 'committed_origin',
+    });
+    if (verdict.allowed) throw new Error('expected browser target to be refused');
+    const result = browserTargetRefusalResult(verdict, { neutralized: false });
+    const { handle } = harness(result);
+    const out = await handle({
+      method: 'goto', args: { url: 'https://public.test/redirect' }, sessionId: 's1', tabId: 42,
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) throw new Error('expected page.goto to reject');
+    expect(out.error).toContain('Navigation loaded a localhost');
+    expect(out.error).toContain('"stage":"committed_origin"');
+    expect(out.error).toContain('browser_private_network_blocked');
+    expect(out.error).not.toContain('/private');
   });
 
   test('a thrown dispatcher is contained, not leaked', async () => {

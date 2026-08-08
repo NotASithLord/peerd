@@ -27,6 +27,7 @@
     "notifications",
     "alarms",
     "declarativeNetRequest",
+    "webNavigation",
     "debugger"
   ],
   "host_permissions": [
