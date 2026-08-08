@@ -57,6 +57,6 @@
   // injected-into-page bodies are never annotated, so checkJs:false
   // already leaves them untouched. web/public (the web target's smoke
   // shell) rides the same opt-in ratchet as the extension.
-  "include": ["tests/**/*.ts", "extension/**/*.js", "web/public/**/*.js"],
+  "include": ["tests/**/*.ts", "extension/**/*.js", "web/public/**/*.js", "web-identity/**/*.js"],
   "exclude": ["extension/vendor/**"]
 }

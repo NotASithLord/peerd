@@ -127,6 +127,11 @@ const importPeerPublicKey = async (jwk, what) => {
 const deriveHandoffKey = async (privateKey, publicKey, challenge) => {
   const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, 256);
   const ikm = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  // Wipe the raw ECDH secret now that it lives inside the non-extractable
+  // HKDF handle. Honesty note: the PRF output also travels base64-inside-
+  // JSON through this module, and JS strings cannot be wiped - buffer
+  // fills here reduce lifetime, they do not guarantee erasure.
+  new Uint8Array(shared).fill(0);
   return crypto.subtle.deriveKey(
     {
       name: 'HKDF', hash: 'SHA-256',
@@ -182,12 +187,24 @@ export const createHandoffRequest = async ({ flow, credentialId = null, transpor
 export const buildCeremonyUrl = (origin, request) =>
   `${origin}/#req=${encodeURIComponent(encodeEnvelope(request))}`;
 
+/**
+ * Guarded percent-decoding: a malformed sequence in a fragment we do not
+ * control (any page can navigate a watched tab) must surface as this
+ * module's typed refusal or a calm null, never a bare URIError.
+ * @param {string} value
+ */
+const decodePercent = (value) => {
+  try { return decodeURIComponent(value); } catch { return null; }
+};
+
 /** @param {string} fragment  location.hash with or without the leading '#' */
 export const parseCeremonyRequest = (fragment) => {
   const raw = /** @type {string} */ (fragment ?? '').replace(/^#/, '');
   const match = /^req=(.+)$/.exec(raw);
   if (!match) return null;
-  const request = decodeEnvelope(decodeURIComponent(match[1]), 'ceremony request');
+  const decoded = decodePercent(match[1]);
+  if (decoded === null) throw new IdentityHandoffError('ceremony request is not decodable', 'bad-envelope');
+  const request = decodeEnvelope(decoded, 'ceremony request');
   if (request?.v !== HANDOFF_VERSION) throw new IdentityHandoffError(`unsupported handoff version ${request?.v}`, 'bad-version');
   if (!FLOWS.includes(request.flow)) throw new IdentityHandoffError(`unknown flow ${request.flow}`, 'bad-flow');
   const challenge = (() => {
@@ -200,7 +217,21 @@ export const parseCeremonyRequest = (fragment) => {
       && (typeof request.credentialId !== 'string' || request.credentialId.length > 2048)) {
     throw new IdentityHandoffError('bad credentialId', 'bad-credential-id');
   }
-  return { ...request, challengeBytes: challenge };
+  const transports = Array.isArray(request.transports)
+    ? request.transports.filter((/** @type {unknown} */ t) => typeof t === 'string' && t.length <= 32).slice(0, 8)
+    : null;
+  const { kty, crv, x, y } = request.epk;
+  // Rebuild from the validated fields only: nothing an untrusted fragment
+  // smuggles alongside survives into the parsed request.
+  return {
+    v: request.v,
+    flow: request.flow,
+    challenge: request.challenge,
+    epk: { kty, crv, x, y },
+    credentialId: request.credentialId ?? null,
+    transports,
+    challengeBytes: challenge,
+  };
 };
 
 /**
@@ -255,7 +286,7 @@ export const extractSealedResponse = (url) => {
   let hash;
   try { hash = new URL(url).hash; } catch { return null; }
   const match = /^#res=(.+)$/.exec(hash);
-  return match ? decodeURIComponent(match[1]) : null;
+  return match ? decodePercent(match[1]) : null;
 };
 
 /**

@@ -28,10 +28,15 @@ other snapshots it carries. Requirements at the host:
 - Serve at the exact origin in `IDENTITY_RP_ORIGIN` (`handoff.js`).
   Subdomain moves under `peerd.ai` are safe **until first production
   mint**; the RP ID is what credentials bind to.
-- Static files only; no third-party scripts, analytics, or fonts - a
-  compromise of this page at ceremony time is scoped to one PRF output
-  as ciphertext, and keeping the page dependency-free keeps it that way
-  (and keeps it auditable).
+- Static files only; no third-party scripts, analytics, or fonts. This
+  is the load-bearing requirement, not a nicety: a hostile script on
+  this page reads the PRF output in plaintext (the page must, to seal
+  it), and because the PRF input is a frozen constant that output is the
+  permanent wrapper-KEK source for the credential - a compromise forces
+  the user to re-enroll a new credential. The AEAD sealing only protects
+  the return leg from off-page observers, never against the page itself.
+  Dependency-free is what keeps this page small enough to audit and
+  impossible to compromise via a supply chain.
 - Suggested headers: a CSP of `default-src 'none'; script-src 'self';
   style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'`,
   plus `Referrer-Policy: no-referrer`.

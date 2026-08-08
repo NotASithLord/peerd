@@ -6,9 +6,20 @@
 // run the WebAuthn ceremony for the peerd.ai credential with the frozen
 // PRF input, seal the 32-byte PRF output to the request's ephemeral key,
 // and navigate to the return fragment. This page never sees a seed, a
-// capsule, a recovery record, or a capsule key - compromise of this page
-// at ceremony time yields one credential's PRF output as ciphertext
-// bound to one live request, not the identity root.
+// capsule, a recovery record, or a capsule key - so its worst case never
+// reaches the identity ROOT.
+//
+// But be precise about what page compromise DOES cost, because the
+// hosting rules below exist to prevent it: a hostile script on this page
+// reads the PRF output in PLAINTEXT (the AEAD sealing only protects the
+// return leg from off-page observers of the tab URL/history - see
+// handoff.js), and because the PRF input is a frozen protocol constant,
+// that output is the PERMANENT wrapper KEK source for that credential -
+// not scoped to one request. Exfiltration means every passkey wrapper
+// ever minted from that credential is attacker-openable given the
+// record, until the user enrolls a new credential and re-wraps. A
+// compromised page can also substitute a hostile PRF output. That is the
+// whole reason this page is static, dependency-free, and CSP-locked.
 //
 // Deployment (site repo vendors this directory verbatim): serve at
 // IDENTITY_RP_ORIGIN, static files only, no third-party scripts. The
@@ -80,7 +91,10 @@ const runRegister = async (request) => {
       authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
       timeout: 120_000,
       attestation: 'none',
-      extensions: { prf: { eval: { first: prfInput } } },
+      // why the cast: prfInput is a plain Uint8Array; the DOM PRF input
+      // type is BufferSource, which the type system widens to admit an
+      // SAB-backed view this code never produces.
+      extensions: { prf: { eval: { first: /** @type {BufferSource} */ (prfInput) } } },
     },
   }));
   if (!credential) throw new IdentityHandoffError('ceremony was cancelled', 'cancelled');

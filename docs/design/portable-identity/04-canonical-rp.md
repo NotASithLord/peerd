@@ -33,9 +33,21 @@ returns the 32-byte PRF output sealed to the request's ephemeral ECDH
 key - via a fragment redirect the extension watches on the tab. It
 never sees a seed, capsule, recovery record, or capsule key; all
 capsule crypto stays in the extension (`credential-wrapper.js`). So the
-page compromise blast radius is one credential's PRF output as
-ciphertext bound to one live request - not the identity root, and not a
-passphrase oracle.
+worst case never reaches the identity ROOT.
+
+Be precise about what page compromise DOES cost, because the hosting
+requirements below exist to prevent it. A hostile script on this page
+reads the PRF output in PLAINTEXT (the page necessarily has it, to seal
+it), and because the PRF input is a frozen protocol constant, that
+output is the PERMANENT wrapper-KEK source for that credential - not
+scoped to one request. Exfiltration means every passkey wrapper minted
+from that credential is attacker-openable given the record, until the
+user enrolls a new credential and re-wraps; a compromised page can also
+substitute a hostile PRF output. The AEAD sealing does NOT defend
+against the page itself - it protects only the return leg from off-page
+observers of the tab URL/history. That is the whole reason the page is
+static, dependency-free, and CSP-locked, and why an id.peerd.ai
+compromise is an incident that forces credential re-enrollment.
 
 why fragments + AEAD instead of postMessage: fragments never reach a
 server, the ciphertext left in tab history is useless without the
