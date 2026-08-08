@@ -80,6 +80,7 @@ export const makeAsyncActors = (deps) => {
    * @property {boolean} executionFailed the Worker failed after execution began
    * @property {boolean} outcomeKnown false when effects may have landed before failure
    * @property {string | null} childSessionId
+   * @property {string[] | null} grantedTools  server-resolved grant set once the child starts
    * @property {boolean} reintegrated
    * @property {string[]} ring
    * @property {string | null} parentToolUseId the actor_create call that launched it
@@ -109,6 +110,8 @@ export const makeAsyncActors = (deps) => {
       task: c.task.slice(0, 80),
       status: c.reintegrated ? 'delivered' : c.status,
       lastOutput: c.ring.join('').slice(-500),
+      childSessionId: c.childSessionId,
+      grantedTools: c.grantedTools,
     }));
   };
 
@@ -250,8 +253,9 @@ export const makeAsyncActors = (deps) => {
     }
   };
 
-  // The non-blocking spawn. Registers the child, fires it fire-and-forget, and
-  // returns a handle immediately; reintegration happens on completion.
+  // The non-blocking spawn. Registers the child, waits only for its durable
+  // session allocation (not model work), then returns a reload-safe handle;
+  // reintegration still happens later on completion.
   /** @param {{ parentSessionId: string, task?: string, [k: string]: unknown }} req */
   const spawnActorAsync = async (req) => {
     const parentSessionId = req.parentSessionId;
@@ -288,14 +292,33 @@ export const makeAsyncActors = (deps) => {
       childSessionId: null, reintegrated: false, ring: [],
       parentToolUseId: typeof req.parentToolUseId === 'string' ? req.parentToolUseId : null,
       parentStopGeneration: turnSlots.generation?.(parentSessionId) ?? 0,
+      grantedTools: null,
     };
     kids.set(taskId, entry);
     onTasksChanged(parentSessionId); // new task → appears on the live bar
+
+    /** @type {(sessionId: string|null) => void} */
+    let resolveAllocated;
+    const allocated = new Promise((resolve) => { resolveAllocated = resolve; });
+    let allocationSettled = false;
+    const settleAllocation = (/** @type {string|null} */ sessionId) => {
+      if (allocationSettled) return;
+      allocationSettled = true;
+      resolveAllocated(sessionId);
+    };
 
     /** @param {{ type: string, sessionId?: string, text?: string, [k: string]: unknown }} ev */
     const onEvent = (ev) => {
       if (ev.type === 'actor-start') {
         entry.childSessionId = ev.sessionId ?? null;
+        settleAllocation(entry.childSessionId);
+        entry.grantedTools = Array.isArray(ev.grantedTools)
+          ? ev.grantedTools.filter((tool) => typeof tool === 'string')
+          : null;
+        // The first snapshot was pushed before spawnActor had minted the child.
+        // Push again now that the stable session id + authoritative grants are
+        // known, so a reconnecting Actor Fabric can replace its placeholder.
+        onTasksChanged(parentSessionId);
         // #9 race: a cancel that landed BEFORE this start event couldn't stop a
         // child whose id it didn't yet know (childSessionId was null), so it
         // only flipped status. Now that the id has arrived, honor that pending
@@ -340,17 +363,21 @@ export const makeAsyncActors = (deps) => {
       onTasksChanged(parentSessionId); // running → done (still on the bar until delivered)
       queueReintegration(parentSessionId);
     };
-    Promise.resolve(spawnActor({ ...req, onEvent }))
-      .then((out) => settle({
-        result: out.refused ? out.result : (out.result ?? ''),
-        exceeded: out.exceeded === true || out.refused === true,
-        timedOut: out.timedOut === true,
-        stopped: out.stopped === true,
-        executionFailed: out.executionFailed === true,
-        outcomeKnown: out.outcomeKnown !== false,
-        childSessionId: out.sessionId ?? entry.childSessionId,
-      }))
+    Promise.resolve().then(() => spawnActor({ ...req, onEvent }))
+      .then((out) => {
+        settleAllocation(out.sessionId ?? entry.childSessionId);
+        settle({
+          result: out.refused ? out.result : (out.result ?? ''),
+          exceeded: out.exceeded === true || out.refused === true,
+          timedOut: out.timedOut === true,
+          stopped: out.stopped === true,
+          executionFailed: out.executionFailed === true,
+          outcomeKnown: out.outcomeKnown !== false,
+          childSessionId: out.sessionId ?? entry.childSessionId,
+        });
+      })
       .catch((e) => {
+        settleAllocation(entry.childSessionId);
         const failure = /** @type {{ message?: string, executionFailed?: boolean, outcomeKnown?: boolean }} */ (e);
         if (failure.outcomeKnown === false) {
           settle({
@@ -363,10 +390,13 @@ export const makeAsyncActors = (deps) => {
         settle({ result: `actor errored: ${failure.message ?? String(e)}`, interrupted: true });
       });
 
+    const childSessionId = await allocated;
     return {
       ok: true,
       taskId,
-      content: `actor ${taskId} started (async) — its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`,
+      content: childSessionId
+        ? `actor ${taskId} started (session ${childSessionId}, async). Its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`
+        : `actor ${taskId} started (async). Its result will arrive on a later turn. Do NOT wait or poll; continue or end your turn.`,
     };
   };
 

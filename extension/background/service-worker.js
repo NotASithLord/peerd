@@ -41,6 +41,7 @@ import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
 import { makeActorIsolationStateStore } from './actor-isolation-state.js';
 import { actorDeliveryIdsFromMessage, makeActorRecoveryGate } from './actor-recovery-gate.js';
+import { createActorLiveProjection } from './actor-live-projection.js';
 
 import {
   // vault
@@ -434,6 +435,7 @@ import { makeHooksRoutes } from './routes/hooks.js';
 import { makeSkillsRoutes } from './routes/skills.js';
 import { makeMemoryRoutes } from './routes/memory.js';
 import { makeContactsRoutes } from './routes/contacts.js';
+import { makeActorOverviewRoutes } from './routes/actor-overview.js';
 import { makeSessionRoutes } from './routes/sessions.js';
 import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
@@ -2480,46 +2482,58 @@ const originOfTabUrl = (/** @type {string} */ url) => {
 // also defaults a live-event forwarder that streams the child's turn to
 // the side panel's nested transcript, keyed by the child session id.
 
-const forwardActorEvent = (/** @type {any} */ ev) => {
+// Live actor projections are SW-owned, not UI-owned. They die with the same
+// relay/controller instances they describe, while remaining replayable to a
+// panel that reconnects during that lifetime.
+const actorLiveProjection = createActorLiveProjection();
+
+/** @param {any} display @param {any} message */
+const broadcastBoundProjection = (display, message) => {
   if (!uiConnected()) return;
+  uiPorts.broadcast({
+    ...message,
+    rootSessionId: display.rootSessionId,
+    parentSessionId: display.parentSessionId,
+  });
+};
+
+const forwardActorEvent = (/** @type {any} */ ev) => {
   const post = (/** @type {any} */ msg) => {
+    if (!uiConnected()) return;
     try { uiPorts.broadcast(msg); }
     catch (e) { console.warn('[sw] actor forward failed', e); }
   };
   // why: distinct turn/spawned-* types (not the parent's turn/*) so the
   // side panel routes them into the per-child nested store instead of
   // clobbering the active chat's transcript.
+  const topologyMessage = actorLiveProjection.foldSpawned(ev);
+  if (topologyMessage) {
+    post(topologyMessage);
+    return;
+  }
+  const rootSessionId = actorLiveProjection.rootForSpawned(ev.sessionId);
   switch (ev.type) {
-    case 'actor-start':
-      post({ type: 'turn/spawned-start', parentToolUseId: ev.parentToolUseId, parentSessionId: ev.parentSessionId, sessionId: ev.sessionId, depth: ev.depth, task: ev.task });
-      break;
-    case 'actor-stop':
-      post({ type: 'turn/spawned-done', parentToolUseId: ev.parentToolUseId, sessionId: ev.sessionId, depth: ev.depth });
-      break;
-    case 'state':
-      post({ type: 'turn/spawned-state', session: ev.session });
-      break;
     case 'delta':
-      post({ type: 'turn/spawned-delta', sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
+      post({ type: 'turn/spawned-delta', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, text: ev.text });
       break;
     case 'tool-use':
-      post({ type: 'turn/spawned-tool-use', sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
+      post({ type: 'turn/spawned-tool-use', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, toolUseId: ev.toolUseId, name: ev.name, input: ev.input });
       break;
     case 'tool-result':
-      post({ type: 'turn/spawned-tool-result', sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
+      post({ type: 'turn/spawned-tool-result', rootSessionId, sessionId: ev.sessionId, toolUseId: ev.toolUseId, result: ev.result });
       break;
     case 'stop':
-      post({ type: 'turn/spawned-stop', sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
+      post({ type: 'turn/spawned-stop', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, stopReason: ev.stopReason });
       break;
     case 'error':
-      post({ type: 'turn/spawned-error', sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
+      post({ type: 'turn/spawned-error', rootSessionId, sessionId: ev.sessionId, messageId: ev.messageId, error: ev.error });
       break;
     case 'usage':
       // why: actor/actor spend is SEPARATE from the main turn tally (the
       // main usage handler only folds its own session). Forward it so the eval
       // harness — and any future offload-cost meter — can attribute the
       // delegated work honestly instead of it looking free.
-      post({ type: 'turn/spawned-cost', sessionId: ev.sessionId, usage: ev.usage });
+      post({ type: 'turn/spawned-cost', rootSessionId, sessionId: ev.sessionId, usage: ev.usage });
       break;
     default:
       break;
@@ -2613,12 +2627,14 @@ const notifyAsyncActor = (/** @type {number} */ count) => {
 // active chat's in-flight tasks. References asyncActorsOrchestrator (defined
 // just below) lazily — only ever called at a status transition, long after boot.
 const pushAsyncTasks = (/** @type {string} */ parentSessionId) => {
-  if (!uiConnected()) return;
   try {
+    const tasks = asyncActorsOrchestrator.actorTasks(parentSessionId);
+    actorLiveProjection.setAsyncTasks(parentSessionId, tasks);
+    if (!uiConnected()) return;
     uiPorts.broadcast({
       type: 'async-tasks/update',
       parentSessionId,
-      tasks: asyncActorsOrchestrator.actorTasks(parentSessionId),
+      tasks,
     });
   } catch (e) { console.warn('[sw] async-tasks push failed', e); }
 };
@@ -3818,6 +3834,9 @@ const buildStateSnapshot = async () => {
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
       streaming: false,
+      actors: {},
+      spawned: { byToolUse: {}, sessions: {} },
+      asyncTasks: {},
     };
   }
   // Unlocked path.
@@ -3839,6 +3858,7 @@ const buildStateSnapshot = async () => {
     try { hasKey = !!(await vault.getSecret(/** @type {string} */ (activeProv.vaultSecretName))); }
     catch { hasKey = false; }
   }
+  const liveActors = actorLiveProjection.snapshot(/** @type {string | null} */ (sessionId));
   return {
     vault: {
       initialized: await vault.isInitialized(),
@@ -3885,6 +3905,12 @@ const buildStateSnapshot = async () => {
     },
     settings: { ...settingsStore.get() },
     pendingConfirm: null,
+    // Live actor projections are part of the fresh snapshot, not a lucky stream
+    // of events seen only by panels that were already open. Every row is scoped
+    // to this viewed root before it crosses the UI boundary.
+    actors: liveActors.actors,
+    spawned: liveActors.spawned,
+    asyncTasks: liveActors.asyncTasks,
     // Per-session truth: is THIS chat's turn in flight? Lets the panel
     // re-arm its spinner/Stop affordances when the user switches back
     // to a conversation that kept streaming in the background.
@@ -5906,14 +5932,39 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
     // Minimal card display: mount on start, mirror the worker's state snapshots,
     // settle on done. fromIndex = the actor's length BEFORE this turn.
     const fromIndex = (rec.messages ?? []).length;
-    if (display && uiConnected()) {
-      uiPorts.broadcast({ type: 'turn/actor-start', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
+    if (display) {
+      actorLiveProjection.startBound({
+        ...display, sessionId: actorSessionId, fromIndex,
+        grantedTools: tools.map((tool) => tool.name),
+        messages: [], streaming: true, error: null, cost: null,
+      });
+      if (uiConnected()) uiPorts.broadcast({
+        type: 'turn/actor-start', ...display, sessionId: actorSessionId, fromIndex,
+        grantedTools: tools.map((tool) => tool.name),
+        messages: [], streaming: true, error: null, cost: null,
+      });
     }
-    const onEvent = (display && uiConnected())
+    const onEvent = display
       ? (/** @type {any} */ ev) => {
         try {
-          if (ev.type === 'state') uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: display.parentToolUseId, session: ev.session, fromIndex, kind: display.kind, instanceId: display.instanceId, name: display.name });
-          if (ev.type === 'error') uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, error: ev.error });
+          if (ev.type === 'state') {
+            const messages = Array.isArray(ev.session?.messages)
+              ? ev.session.messages.slice(fromIndex) : [];
+            actorLiveProjection.patchBound(display, { messages });
+            broadcastBoundProjection(display, {
+              type: 'turn/actor-state', parentToolUseId: display.parentToolUseId,
+              session: ev.session, fromIndex, kind: display.kind,
+              instanceId: display.instanceId, name: display.name,
+              task: display.task, grantedTools: tools.map((tool) => tool.name),
+            });
+          }
+          if (ev.type === 'error') {
+            actorLiveProjection.patchBound(display, { error: ev.error, streaming: false });
+            broadcastBoundProjection(display, {
+              type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
+              sessionId: actorSessionId, error: ev.error,
+            });
+          }
         } catch { /* display best-effort */ }
       }
       : undefined;
@@ -5953,9 +6004,15 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         type: 'actor_isolation_failure',
         details: { host: actorIsolation.host, kind, instanceId, code: r.code ?? 'unknown', performed: false },
       }).catch(() => {});
-      if (display && uiConnected()) {
-        uiPorts.broadcast({ type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error });
-        uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: false, aborted: false });
+      if (display) {
+        actorLiveProjection.patchBound(display, { error, streaming: false });
+        broadcastBoundProjection(display, {
+          type: 'turn/actor-error', parentToolUseId: display.parentToolUseId, error,
+        });
+        broadcastBoundProjection(display, {
+          type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+          sessionId: actorSessionId, ok: false, aborted: false,
+        });
       }
       return { result: error, stopped: true, isolationFailure: r };
     }
@@ -5987,8 +6044,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         // usage rides along RAW: costOf returns only { cost: USD } — consumers
         // that account TOKENS (the eval runner's ACTOR bucket) need the fields
         // costOf collapsed. Additive; the sidepanel reducer reads `cost` only.
-        if (display && uiConnected()) {
-          uiPorts.broadcast({ type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId, cost, usage: r.usage });
+        if (display) {
+          actorLiveProjection.patchBound(display, { cost });
+          broadcastBoundProjection(display, {
+            type: 'turn/actor-cost', parentToolUseId: display.parentToolUseId,
+            cost, usage: r.usage,
+          });
         }
       } catch { /* cost telemetry is best-effort */ }
     }
@@ -6023,14 +6084,20 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
         } : {}),
       },
     }).catch(() => {});
-    if (display && uiConnected()) {
+    if (display) {
       if (terminalError) {
-        uiPorts.broadcast({
+        actorLiveProjection.patchBound(display, {
+          error: terminalError, outcomeKnown: !outcomeUnknown, streaming: false,
+        });
+        broadcastBoundProjection(display, {
           type: 'turn/actor-error', parentToolUseId: display.parentToolUseId,
           error: terminalError, outcomeKnown: !outcomeUnknown,
         });
       }
-      uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: display.parentToolUseId, sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true });
+      broadcastBoundProjection(display, {
+        type: 'turn/actor-done', parentToolUseId: display.parentToolUseId,
+        sessionId: actorSessionId, ok: turnOk, aborted: r.aborted === true,
+      });
     }
     if (!persistOk) {
       return {
@@ -6064,6 +6131,7 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
       try { await onBeforeRelease(); }
       catch (error) { console.warn('[actor] pre-release snapshot skipped', error); }
     }
+    actorLiveProjection.finishBound(display);
     release();
     // The turn is over, so the pill comes down — leaving it up through the idle
     // gap would say "peerd is working" while nothing is happening, which is the
@@ -6147,7 +6215,7 @@ const actorMessaging = makeActorMessaging({
   // buildToolContext leaves activeTab unset (they act on their instance, not a tab).
   runActorTurn: async ({
     actorSessionId, message, actorTabId, instanceId, kind, correlationId,
-    parentToolUseId, name, oneShot, turnLease,
+    parentToolUseId, parentSessionId, rootSessionId, name, oneShot, turnLease,
   }) => {
     // Advance the origin-lock epoch before ANY await. The claimed actor lease
     // already belongs to this turn; a delayed judge from the previous turn must
@@ -6195,7 +6263,10 @@ const actorMessaging = makeActorMessaging({
     // live-view, for an actor). Cheap: rendering only — the model-memory the
     // orchestrator keeps is still just the fenced reply (deliver()).
     const display = parentToolUseId
-      ? { parentToolUseId, kind, instanceId, name }
+      ? {
+          parentToolUseId, parentSessionId, rootSessionId,
+          kind, instanceId, name, task: message,
+        }
       : undefined;
     const beforeRecord = await sessions.get(actorSessionId);
     const before = beforeRecord?.messages?.length ?? 0;
@@ -6696,7 +6767,7 @@ privateTransferPort = makePrivateTransferPort({
 // tests/meta/sw-routes-wiring.test.ts proves each module's deps object matches
 // what it destructures, exactly (no missing, no dead).
 //
-// ALL 103 routes now live in modules — none are inline here. The reassigned
+// Routes live in modules rather than accumulating inline here. The reassigned
 // module state that once forced routes inline lives in stores (settings-store /
 // denylist-store / session-state / local-model-state / profile-state); routes
 // reach it through a store method (always-live) handed in via deps. A new route
@@ -6760,6 +6831,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     contributorFeedbackTargets, channel,
   }),
   ...makeContactsRoutes({ vault, auditLog, contacts, appRegistry, mergeContacts }),
+  ...makeActorOverviewRoutes({ vault, sessions, turnSlots, actorLiveProjection, isActualHomeSender }),
   ...makeSessionRoutes({
     vault, auditLog, sessions, sessionCache, turnSlots, manifestLabel, buildToolContext,
     applyComposer, commandSources, prepareUserAttachmentsWithDocs, runAgentTurn, runInit,

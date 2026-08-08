@@ -41,6 +41,11 @@
  * @property {string} [kind]
  * @property {number} [depth]
  * @property {string} [task]
+ * @property {string} [parentSessionId]
+ * @property {string} [rootSessionId]
+ * @property {string[]} [grantedTools]
+ * @property {boolean} [running]
+ * @property {any} [cost]
  */
 
 /**
@@ -288,11 +293,19 @@ const applyError = (state, { sessionId, messageId, error }) => {
  * @param {SpawnedSession} session
  * @returns {ChatState}
  */
-export const putSpawnedSession = (state, session) => ({
-  ...state,
-  spawned: { ...state.spawned,
-    sessions: { ...state.spawned.sessions, [session.sessionId]: session } },
-});
+export const putSpawnedSession = (state, session) => {
+  const existing = state.spawned.sessions[session.sessionId];
+  return {
+    ...state,
+    spawned: { ...state.spawned,
+      // why merge: a turn/spawned-state snapshot is the durable session shape,
+      // but the live projection adds parent/running/grantedTools from the start
+      // event. Replacing the record made the Actor Fabric forget its boundary
+      // exactly when the first transcript snapshot arrived.
+      sessions: { ...state.spawned.sessions,
+        [session.sessionId]: { ...(existing ?? {}), ...session } } },
+  };
+};
 
 /**
  * @param {ChatState} state
@@ -319,6 +332,41 @@ const putActorCard = (state, parentToolUseId, patch) => {
   if (!parentToolUseId) return state;
   const cur = /** @type {any} */ (state.actors)[parentToolUseId] ?? {};
   return { ...state, actors: { ...state.actors, [parentToolUseId]: { ...cur, ...patch } } };
+};
+
+/**
+ * Reconcile the SW's live-only actor snapshot with durable inline cards already
+ * observed in this mounted chat. A missing live row settles an in-flight card;
+ * terminal activity/cost remains inspectable in the transcript.
+ * @param {Record<string, any>} current
+ * @param {Record<string, any>} live
+ */
+const reconcileActorCards = (current, live) => {
+  const settled = Object.fromEntries(Object.entries(current ?? {}).map(([id, card]) => [
+    id, card?.streaming === true && !Object.hasOwn(live ?? {}, id)
+      ? { ...card, streaming: false }
+      : card,
+  ]));
+  return { ...settled, ...(live ?? {}) };
+};
+
+/**
+ * Keep completed child transcripts addressable from their actor_create cards
+ * while overlaying the SW's live-only topology projection.
+ * @param {ChatState['spawned']} current
+ * @param {ChatState['spawned']} live
+ */
+const reconcileSpawned = (current, live) => {
+  const liveSessions = live?.sessions ?? {};
+  const settled = Object.fromEntries(Object.entries(current?.sessions ?? {}).map(([id, session]) => [
+    id, session?.running === true && !Object.hasOwn(liveSessions, id)
+      ? { ...session, running: false }
+      : session,
+  ]));
+  return {
+    byToolUse: { ...(current?.byToolUse ?? {}), ...(live?.byToolUse ?? {}) },
+    sessions: { ...settled, ...liveSessions },
+  };
 };
 
 /**
@@ -355,6 +403,8 @@ export const reduceChat = (state, msg) => {
       return { ...state, goalRuns: next };
     }
     case 'turn/spawned-start': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       // why these casts: an actor-start message always carries a string
       // sessionId (and parentToolUseId when present) by contract — the
       // permissive ReducerMsg types them optional, so name the invariant.
@@ -363,40 +413,67 @@ export const reduceChat = (state, msg) => {
         byToolUse: msg.parentToolUseId
           ? { ...state.spawned.byToolUse, [msg.parentToolUseId]: sid }
           : state.spawned.byToolUse,
-        // Seed an empty shell so an expanded card shows "running…" before
-        // the first state push lands.
-        sessions: state.spawned.sessions[sid]
-          ? state.spawned.sessions
-          : { ...state.spawned.sessions,
-              [sid]: { sessionId: sid, kind: 'spawned', depth: msg.depth, task: msg.task, messages: [] } } } };
+        // Merge the trusted live metadata over any durable shell. Reconnects
+        // can hydrate the transcript first; start still owns lineage/grants.
+        sessions: { ...state.spawned.sessions,
+          [sid]: {
+            ...(state.spawned.sessions[sid] ?? {}),
+            sessionId: sid, kind: 'spawned', depth: msg.depth,
+            task: msg.task, parentSessionId: msg.parentSessionId,
+            rootSessionId: typeof msg.rootSessionId === 'string' ? msg.rootSessionId : undefined,
+            grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+            running: true,
+            messages: state.spawned.sessions[sid]?.messages ?? [],
+          } } } };
     }
     case 'turn/spawned-state':
-      return putSpawnedSession(state, msg.session);
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      return putSpawnedSession(state, { ...msg.session, running: true });
     case 'turn/spawned-delta':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, content: (mm.content ?? '') + msg.text } : mm);
     case 'turn/spawned-stop':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, streaming: false, stopReason: msg.stopReason } : mm);
     case 'turn/spawned-error':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return patchActorMessages(state, /** @type {string} */ (msg.sessionId), (mm) =>
         mm.id === msg.messageId ? { ...mm, streaming: false, error: msg.error } : mm);
+    case 'turn/spawned-done': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
+      const sid = /** @type {string} */ (msg.sessionId);
+      const session = state.spawned.sessions[sid];
+      return session ? putSpawnedSession(state, { ...session, running: false }) : state;
+    }
     case 'turn/spawned-tool-use':
     case 'turn/spawned-tool-result':
-    case 'turn/spawned-done':
       // The turn/spawned-state pushes carry the authoritative message array;
       // these are live complements we don't fold separately.
       return state;
     // DESIGN-17 P1 glass pane — the actor DISPLAY stream (parallel to spawned,
     // keyed by the message_actor tool_use id). Each event carries parentToolUseId
-    // so there is no viewed-session guard: an actor card renders regardless of
-    // which chat is in view (it belongs to the orchestrator's transcript).
+    // Root stamps make the display stream safe even while another chat works in
+    // the background. A fresh state snapshot replays cards on switch-back.
     case 'turn/actor-start':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
         sessionId: msg.sessionId, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
+        task: msg.task,
+        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
         fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null, cost: null,
       });
     case 'turn/actor-state': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       // The full actor-session snapshot; slice to this card's exchange (fromIndex).
       const existing = /** @type {any} */ (state.actors)[/** @type {string} */ (msg.parentToolUseId)];
       // Self-seed when the panel connected mid-turn and missed turn/actor-start
@@ -405,16 +482,26 @@ export const reduceChat = (state, msg) => {
       const fromIndex = existing?.fromIndex ?? msg.fromIndex;
       if (fromIndex == null) return state;
       const messages = Array.isArray(msg.session?.messages) ? msg.session.messages.slice(fromIndex) : (existing?.messages ?? []);
-      const seed = existing ? {} : { fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name, streaming: true, error: null, cost: null };
+      const seed = existing ? {} : {
+        fromIndex, kind: msg.kind, instanceId: msg.instanceId, name: msg.name,
+        rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
+        task: msg.task,
+        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        streaming: true, error: null, cost: null,
+      };
       return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), { ...seed, messages });
     }
     case 'turn/actor-error':
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), {
         error: msg.error,
         streaming: false,
         ...(msg.outcomeKnown === false ? { outcomeKnown: false } : {}),
       });
     case 'turn/actor-done': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       // An ABORT (Stop cascade) → 'cancelled' card; a clean failure with no error
       // already folded → mark failed; else just stop the spinner. Short-circuit when
       // the card is already terminal (turn/actor-error folded first) to avoid churn.
@@ -427,6 +514,8 @@ export const reduceChat = (state, msg) => {
       return putActorCard(state, /** @type {string} */ (msg.parentToolUseId), patch);
     }
     case 'turn/actor-cost': {
+      if (msg.rootSessionId && state.session.sessionId
+        && msg.rootSessionId !== state.session.sessionId) return state;
       // Phase K: the actor turn's spend, surfaced on its card (delegated work
       // isn't free — make it visible even though caps stay per-session).
       // why the guard: a cost event must only UPDATE an existing card, never
@@ -470,6 +559,9 @@ export const reduceChat = (state, msg) => {
       return { ...state, scriptOps: ops };
     }
     case 'async-tasks/update':
+      if (state.session.sessionId
+        && msg.parentSessionId !== state.session.sessionId
+        && !state.spawned.sessions[/** @type {string} */ (msg.parentSessionId)]) return state;
       return { ...state, asyncTasks: { ...state.asyncTasks,
         [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
     case 'state': {
@@ -494,15 +586,24 @@ export const reduceChat = (state, msg) => {
       const sessionChanged = msg.state?.session?.sessionId !== state.session.sessionId;
       const stillHalted = !sessionChanged && state.cost.limitReached;
       const keepSpendError = !sessionChanged && state.lastError === 'spend-limit-reached';
-      // why prune on switch: actors/spawned/asyncTasks are keyed by tool_use id
-      // and belong to the orchestrator transcript being navigated AWAY from — the
-      // state snapshot never carries them, so without this they survive into the
-      // new chat (never rendering — renderActorCard matches by viewed tool_use id —
-      // but accumulating for the panel's lifetime). A still-live one re-seeds via
-      // turn/actor-state on switch-back. Only on an ACTUAL switch, not every push.
+      // why prune on switch: actors/spawned/asyncTasks belong to the orchestrator
+      // transcript being navigated away from. The fresh snapshot now replays its
+      // live rows; within one chat we reconcile those with terminal inline cards
+      // so a routine state push cannot erase activity/cost evidence.
       const pruneProjections = sessionChanged
-        ? { actors: INITIAL_STATE.actors, spawned: INITIAL_STATE.spawned, asyncTasks: INITIAL_STATE.asyncTasks }
-        : {};
+        ? {
+            actors: msg.state?.actors ?? INITIAL_STATE.actors,
+            spawned: msg.state?.spawned ?? INITIAL_STATE.spawned,
+            asyncTasks: msg.state?.asyncTasks ?? INITIAL_STATE.asyncTasks,
+          }
+        : {
+            actors: msg.state?.actors
+              ? reconcileActorCards(state.actors, msg.state.actors)
+              : state.actors,
+            spawned: msg.state?.spawned
+              ? reconcileSpawned(state.spawned, msg.state.spawned)
+              : state.spawned,
+          };
       return { ...state, ...msg.state, ...pruneProjections, pendingConfirm: state.pendingConfirm,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,

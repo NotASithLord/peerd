@@ -82,6 +82,31 @@ export const sseToolCall = (name, args, { text = '' } = {}) => {
   ].join('\n\n') + '\n\n';
 };
 
+// A model can fan out several actor_create calls in one response; keep that
+// wire shape available to rendered E2E states instead of serially fabricating
+// calls that the async actor contract intentionally ends the turn after.
+export const sseToolCalls = (calls, { text = '' } = {}) => {
+  const toolCalls = calls.map(({ name, args }, index) => {
+    sseToolCallSeq += 1;
+    return {
+      index,
+      id: `call_e2e_${sseToolCallSeq}`,
+      type: 'function',
+      'function': { name, 'arguments': JSON.stringify(args) },
+    };
+  });
+  const openDelta = JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text } }] });
+  const callDelta = JSON.stringify({ choices: [{ delta: { tool_calls: toolCalls } }] });
+  const finishDelta = JSON.stringify({
+    choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  });
+  return [
+    `data: ${openDelta}`, `data: ${callDelta}`, `data: ${finishDelta}`,
+    'data: [DONE]', '',
+  ].join('\n\n') + '\n\n';
+};
+
 // ---- Chrome binary resolution (mirrors run-inbrowser-tests.mjs) -------------
 export function resolveChrome() {
   const explicit = process.env.CHROME_PATH || process.env.CHROME;

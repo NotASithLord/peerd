@@ -118,7 +118,7 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
  *   so it must be threaded (not re-derived from the ambient active chat, which is wrong
  *   on a boot redrain). Engine/per-tab kinds ignore it (globally/tab keyed).
- * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, correlationId: string, parentToolUseId?: string, name?: string, oneShot?: boolean, turnLease?: { controller: AbortController, release: () => void } }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.runActorTurn
+ * @param {(opts: { actorSessionId: string, message: string, actorTabId?: number, instanceId: string, kind: string, correlationId: string, parentToolUseId?: string, parentSessionId: string, rootSessionId: string, name?: string, oneShot?: boolean, turnLease?: { controller: AbortController, release: () => void } }) => Promise<{ result: string, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.runActorTurn
  *   Drive ONE actor turn (runAgentTurn against the actor session) and
  *   resolve with its final assistant text. correlationId is the durable mailbox
  *   identity; parentToolUseId keys the actor's live DISPLAY stream to its card.
@@ -640,7 +640,8 @@ export const makeActorMessaging = (deps) => {
       runningOnActor.set(actorSessionId, correlationId);
       Promise.resolve(runActorTurn({
         actorSessionId, message, actorTabId: tabId, instanceId, kind,
-        correlationId, parentToolUseId, name, oneShot,
+        correlationId, parentToolUseId, parentSessionId: senderSessionId, rootSessionId,
+        name, oneShot,
         ...(turnLease ? { turnLease } : {}),
       }))
         .then((res) => {

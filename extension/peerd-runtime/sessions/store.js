@@ -131,9 +131,34 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
   // Strip the v2 internals (msgIndex / messagesV2) and attach the assembled
   // `messages` array, so callers see the classic Session shape.
   const present = (/** @type {any} */ record, /** @type {any[]} */ messages) => {
-    const { msgIndex: _i, messagesV2: _v, messages: _m, ...rest } = record;
+    const {
+      msgIndex: _i,
+      messagesV2: _v,
+      messages: _m,
+      latestNonSyntheticUserMessageId: _latest,
+      ...rest
+    } = record;
     return withKindDefaults({ ...rest, messages });
   };
+
+  // Metadata-only readers must never accidentally expose conversation bodies
+  // in their caller-facing result. This shape is also safe for legacy v1 records:
+  // their inline `messages` array is dropped without triggering migration.
+  const presentMetadata = (/** @type {any} */ record) => {
+    const {
+      msgIndex: _i,
+      messagesV2: _v,
+      messages: _m,
+      latestNonSyntheticUserMessageId: _latest,
+      ...rest
+    } = record;
+    return withKindDefaults(rest);
+  };
+
+  /** @param {any} message */
+  const isRealUserMessage = (message) => message?.role === 'user'
+    && message.synthetic !== true
+    && typeof message.content === 'string' && message.content.trim().length > 0;
 
   // Externalize a pre-v2 record's inline messages into the message store and
   // rewrite it in v2 shape. Idempotent; a no-op once `messagesV2` is set.
@@ -222,6 +247,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       // v2: messages live in the message store; the record carries order.
       msgIndex: [],
       messagesV2: true,
+      latestNonSyntheticUserMessageId: null,
       kind,
       depth,
       ...(permissionMode !== undefined ? { permissionMode } : {}),
@@ -311,6 +337,47 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     return out.sort((a, b) => b.createdAt - a.createdAt);
   };
 
+  /**
+   * List session records without reading the per-message store or assembling
+   * message bodies. Unlike `list()`, this touches only the session-record
+   * store, making it suitable for chat lists and other coarse discovery.
+   * Read-only over legacy and v2 shapes; never migrates.
+   * @returns {Promise<Array<Omit<Session, 'messages'>>>}
+   */
+  const listMetadata = async () => {
+    const records = await idb.getAll(STORE);
+    return records
+      .map(presentMetadata)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  };
+
+  /**
+   * Targeted metadata lookup for lifecycle monitors that already know the
+   * session id. It never migrates a legacy record or touches message rows.
+   * @param {string} sessionId
+   * @returns {Promise<Omit<Session, 'messages'> | undefined>}
+   */
+  const getMetadata = async (sessionId) => {
+    const record = await idb.get(STORE, sessionId);
+    return record ? presentMetadata(record) : undefined;
+  };
+
+  /**
+   * Resolve the one metadata-pinned real user request needed by the actor
+   * monitor. New records maintain the pointer on append, making every refresh
+   * constant-time without transcript assembly or compatibility scans.
+   * @param {string} sessionId
+   * @returns {Promise<InternalMessage | undefined>}
+   */
+  const getLatestNonSyntheticUserMessage = async (sessionId) => {
+    const record = await idb.get(STORE, sessionId);
+    if (!record) return undefined;
+    const messageId = record.latestNonSyntheticUserMessageId;
+    if (typeof messageId !== 'string' || !messageId) return undefined;
+    const message = (await idb.get(MSGS, messageId))?.message;
+    return isRealUserMessage(message) ? message : undefined;
+  };
+
   const archive = (/** @type {string} */ sessionId) => enqueueSessionOperation(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw new SessionNotFoundError(sessionId);
@@ -365,7 +432,11 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       return assemble(record);
     }
     await idb.put(MSGS, { id, sessionId, seq, message });
-    const updated = { ...record, msgIndex: [...record.msgIndex, id] };
+    const updated = {
+      ...record,
+      msgIndex: [...record.msgIndex, id],
+      ...(isRealUserMessage(message) ? { latestNonSyntheticUserMessageId: id } : {}),
+    };
     if (!record.title && message.role === 'user' && typeof message.content === 'string') {
       const cleaned = message.content.replace(/\s+/g, ' ').trim();
       if (cleaned) updated.title = cleaned.slice(0, 60);
@@ -509,6 +580,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     create,
     get,
     list,
+    listMetadata,
+    getMetadata,
+    getLatestNonSyntheticUserMessage,
     findActorSession,
     archive,
     appendMessage,

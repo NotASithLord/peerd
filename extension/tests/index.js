@@ -114,6 +114,7 @@ import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/protected-tab-starter.test.js';
 import './unit/sidepanel/failure-chip.test.js';
 import './unit/sidepanel/actor-isolation.test.js';
+import './unit/sidepanel/actor-fabric.test.js';
 import './unit/sidepanel/confirm-note.test.js';
 import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/options/activity-origin-events.test.js';
@@ -125,5 +126,6 @@ import './unit/options/contributor-metrics.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
+import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';

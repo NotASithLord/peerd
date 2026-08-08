@@ -439,6 +439,17 @@ export const makeSpawnActor = (deps) => {
     // uses the same key + endpoint.
     const parent = await sessions.get(parentSessionId);
     const provider = parent?.provider ?? 'anthropic';
+    // Follow server-persisted parent links once, at spawn admission, so every
+    // lifecycle event carries the chat root it belongs to. The side panel must
+    // never infer a missing/foreign parent as the chat currently on screen.
+    let rootSessionId = parentSessionId;
+    let ancestor = parent;
+    const seenAncestors = new Set([parentSessionId]);
+    while (ancestor?.parentSessionId && !seenAncestors.has(ancestor.parentSessionId)) {
+      rootSessionId = ancestor.parentSessionId;
+      seenAncestors.add(rootSessionId);
+      ancestor = await sessions.get(rootSessionId);
+    }
 
     // why: read the parent's confirm setting AT THE EDGE —
     // confirmActionsFromRecord pulls the `confirmActions` boolean off the
@@ -610,7 +621,14 @@ export const makeSpawnActor = (deps) => {
       start = now();
       // Announce the child up-front so the side panel can map the parent's
       // tool card → this session id and render live, before any loop event.
-      onEvent?.({ type: 'actor-start', parentToolUseId, parentSessionId, sessionId: child.sessionId, depth, task });
+      // The UI's Actor Fabric may render before the first session snapshot.
+      // Carry the SERVER-RESOLVED grant set on the trusted lifecycle event so
+      // it never guesses an actor's authority from model-supplied arguments.
+      onEvent?.({
+        type: 'actor-start', parentToolUseId, parentSessionId, rootSessionId,
+        sessionId: child.sessionId, depth, task,
+        grantedTools: [...allowedNames],
+      });
       // Heap split: EVERY child runs its loop in a dedicated Worker with its own
       // heap, no key or extension APIs. A tool-LESS child (phase 1) only
       // relays its model call; a tool-BEARING child (phase 4) also relays each tool
@@ -721,7 +739,10 @@ export const makeSpawnActor = (deps) => {
       // Release AFTER unregistering, so a Stop racing this settle can't abort a
       // slot the registry no longer owns up to.
       release();
-      onEvent?.({ type: 'actor-stop', parentToolUseId, sessionId: child.sessionId, depth });
+      onEvent?.({
+        type: 'actor-stop', parentToolUseId, parentSessionId, rootSessionId,
+        sessionId: child.sessionId, depth,
+      });
     }
 
     const durationMs = now() - start;

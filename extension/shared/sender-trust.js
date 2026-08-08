@@ -145,7 +145,8 @@ export const isSidepanelSender = (sender, { runtimeId, extensionOrigin, sidepane
 };
 
 /**
- * Is this sender specifically the full-tab peerd home page?
+ * Is this sender the full-tab Home SPA that owns human feedback and
+ * instance-wide observability?
  *
  * why separate from first-party: Home renders the same human chat controls as
  * the side panel, including binary task feedback, but an engine tab must not

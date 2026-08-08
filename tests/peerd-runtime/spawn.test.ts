@@ -587,6 +587,7 @@ describe('makeSpawnActor', () => {
     expect(events[0].type).toBe('actor-start');
     expect(events[0].parentToolUseId).toBe('card-1');
     expect(events[0].sessionId).toBe(out.sessionId);
+    expect(events[0].rootSessionId).toBe(parent.sessionId);
     expect(events[events.length - 1].type).toBe('actor-stop');
     expect(events.some((e) => e.type === 'tool-use')).toBe(true);
   });
