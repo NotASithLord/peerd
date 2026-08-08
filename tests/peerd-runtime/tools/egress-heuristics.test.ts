@@ -542,7 +542,7 @@ describe('egress-heuristics — hex of TEXT (the population the module is for)',
   });
 });
 
-describe('inspectTabToolCall — fetch_url header/body payloads', () => {
+describe('inspectTabToolCall: fetch_url header/body payloads', () => {
   const inspect = (args: Record<string, unknown>, currentOrigin = 'https://mail.google.com') =>
     inspectTabToolCall({ name: 'fetch_url', args, currentOrigin });
 

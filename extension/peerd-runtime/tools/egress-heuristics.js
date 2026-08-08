@@ -1,5 +1,5 @@
 // @ts-check
-// egress-heuristics — best-effort detection of the DOM-data→request
+// egress-heuristics: best-effort detection of the DOM-data→request
 // exfiltration shape in browser-session and actor-fetch arguments. A
 // TRIPWIRE, not a proof.
 //
@@ -69,7 +69,7 @@
 // explicit payload sent to the chosen destination. For an off-origin fetch_url
 // call, scan transmitted header names + string values and the body with the SAME
 // dominant-run test. Object bodies are scanned in their JSON wire shape. Header
-// names are usually structural, but Fetch permits long token-shaped names — an
+// names are usually structural, but Fetch permits long token-shaped names; an
 // attacker can put the payload there just as easily as in the value.
 //
 // WHAT SPARES A PATH: the `/` boundaries, the 100-char length bar, AND — since
@@ -423,7 +423,7 @@ const collectFetchUrls = (args) => {
  * Collect payload-bearing strings that fetch_url transmits outside the URL.
  * Header names, values, and body bytes are attacker-readable at the destination.
  * Object bodies are serialized because fetch_url sends that exact JSON shape.
- * Never throws on an odd/cyclic value — the tripwire must not become a dispatch
+ * Never throws on an odd/cyclic value; the tripwire must not become a dispatch
  * failure of its own.
  * @param {Record<string, unknown> | null | undefined} args
  * @returns {string[]}
@@ -519,25 +519,25 @@ export const inspectTabToolCall = (call) => {
       // Same-origin is trivially allowed: sending data back to the site the
       // agent is already on is not cross-origin exfiltration. (If currentOrigin
       // was unparseable, `here` is null and we treat every target as off-origin
-      // — inspect it; we still only block on a clear payload.)
+      // inspect it; we still only block on a clear payload.)
       if (here && url.origin === here) continue;
       if (largestExfilRun(payloadSlots(url)) >= MIN_BLOB_LENGTH) {
         return {
           action: 'block',
-          // why: content-free — see the doc comment above. Names the SHAPE,
+          // why: content-free; see the doc comment above. Names the SHAPE,
           // never the bytes, and claims only "likely", not a guarantee.
           reason: 'egress-heuristics: off-origin tab navigation carrying a high-entropy '
-            + 'encoded payload in the URL userinfo/host/path — the likely '
+            + 'encoded payload in the URL userinfo/host/path; the likely '
             + 'DOM-data exfiltration shape',
         };
       }
       if (fetchPayloads.length > 0 && largestExfilRun(fetchPayloads) >= MIN_BLOB_LENGTH) {
         return {
           action: 'block',
-          // why: content-free — request bytes must not be reflected into the
+          // why: content-free; request bytes must not be reflected into the
           // unfenced audit/reason surface.
           reason: 'egress-heuristics: off-origin web request carrying a high-entropy '
-            + 'encoded payload in a request header/body — the likely DOM-data '
+            + 'encoded payload in a request header/body; the likely DOM-data '
             + 'exfiltration shape',
         };
       }

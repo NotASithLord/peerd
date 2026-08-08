@@ -376,7 +376,7 @@ const ModelPicker = {
     vnode.attrs.send({ type: 'models/options', sessionId }).then((r) => {
       // why: options requests can resolve out of order when settings/provider
       // pushes redraw the live panel. An older response must not overwrite the
-      // selection fetched for the newer key — that visibly put the picker on a
+      // selection fetched for the newer key. That visibly put the picker on a
       // different provider than the effort dial and the settings snapshot.
       if (vnode.state.requestGeneration !== requestGeneration
         || vnode.state.fetchedKey !== requestedKey

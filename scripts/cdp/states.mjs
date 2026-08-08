@@ -2600,7 +2600,7 @@ Promise.resolve().then(async () => {
     async run(ctx, rec) {
       let appPage = null;
       try {
-        // why an App host page: it is a real first-party extension tab — the
+        // why an App host page: it is a real first-party extension tab, the
         // exact sender class the old broad extension-origin check admitted.
         appPage = await openExtPage(ctx, 'engine-tabs/app-tab/index.html#sender-pin-probe');
         const ready = await waitFor(() => evalIn(appPage,

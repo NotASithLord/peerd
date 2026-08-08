@@ -1,5 +1,5 @@
 // @ts-check
-// ModelPicker request ordering — a slow response for an OLD provider/options
+// ModelPicker request ordering: a slow response for an OLD provider/options
 // fingerprint must never overwrite the response for the CURRENT fingerprint.
 
 import m from '/vendor/mithril/mithril.js';
