@@ -36,6 +36,7 @@ const ROOT = resolve(__dirname, '..', '..');
 const EXT = resolve(ROOT, 'extension');
 
 export const PASSPHRASE = 'correct-horse-battery-staple';
+export const NETWORK_GUARD_CONTROLLER_PORT = 18_763;
 export const READY_BUDGET_MS = 30_000; // extension load + SW boot + page mount
 export const POLL_MS = 250;
 
@@ -312,7 +313,7 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } 
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
-async function attach(wsUrl, onEvent) {
+export async function attach(wsUrl, onEvent) {
   const ws = new WebSocket(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0;
@@ -438,6 +439,12 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
     // servers stay deterministic and offline. Reserved .test names preserve the
     // documented DNS-resolution residual without weakening localhost coverage.
     '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1',
+    // Product-boundary security tests must not pass because Chrome's separate
+    // Local Network Access feature stopped the request first.
+    '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets,LocalNetworkAccessForWorkers',
+    '--disable-web-security',
+    '--ip-address-space-overrides=127.0.0.0/8=public',
+    `--unsafely-treat-insecure-origin-as-secure=http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT},http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}`,
     '--disable-gpu', '--no-sandbox',
     ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,
@@ -465,9 +472,10 @@ export async function launchPeerd({ modelResponder, tagsModel = 'qwen3:8b', exte
   // Redirect downloads browser-wide to the temp dir (headless honors this CDP
   // call where profile Preferences often don't). Best-effort: attach to the
   // browser target and leave the conn open so the setting persists for the run.
+  let browserConn = null;
   try {
     const ver = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
-    const browserConn = await attach(ver.webSocketDebuggerUrl);
+    browserConn = await attach(ver.webSocketDebuggerUrl);
     await browserConn.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDir });
   } catch { /* download redirect is best-effort; never block the run on it */ }
 

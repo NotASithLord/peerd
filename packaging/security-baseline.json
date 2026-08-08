@@ -262,10 +262,10 @@
         }
       },
       "content_security_policy": {
-        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' blob: https: wss://disks.webvm.io wss://bootstrap.peerd.ai http://*:11434",
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' blob: https: wss://disks.webvm.io http://*:11434",
         "sandbox": "sandbox allow-scripts allow-modals allow-pointer-lock; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; worker-src blob:; child-src blob:; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block';"
       },
-      "description": "Browser-native AI agent harness with the decentralized web (dweb) preview enabled — local-first, BYOK, sovereign by construction. The dweb protocol is research-grade and may change.",
+      "description": "An AI assistant that automates tasks in your browser. Local-first: your own API key, no account, no servers, no tracking.",
       "host_permissions": [
         "<all_urls>"
       ],

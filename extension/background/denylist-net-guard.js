@@ -33,7 +33,8 @@
  * @param {any} deps.dnr  the chrome.declarativeNetRequest namespace (or a fake)
  * @param {() => readonly string[]} deps.getPatterns  live denylist patterns
  * @param {() => readonly number[]} deps.getTabIds    tabs peerd is driving right now
- * @param {(input: { patterns: readonly string[], tabIds: readonly number[] }) =>
+ * @param {() => readonly string[]} [deps.getInitiatorDomains]
+ * @param {(input: { patterns: readonly string[], tabIds: readonly number[], initiatorDomains: readonly string[] }) =>
  *   { removeRuleIds: number[], addRules: any[] }} deps.buildUpdate
  *   peerd-egress's denylistSessionRuleUpdate (pure).
  * @param {(entry: { type: string, details?: Record<string, any> }) => any} [deps.audit]
@@ -41,7 +42,8 @@
  * @param {boolean} [deps.deferUntilStarted]
  */
 export const makeDenylistNetGuard = ({
-  dnr, getPatterns, getTabIds, buildUpdate, audit, console: log = console,
+  dnr, getPatterns, getTabIds, getInitiatorDomains = () => [], buildUpdate,
+  audit, console: log = console,
   deferUntilStarted = false,
 }) => {
   const supported = typeof dnr?.updateSessionRules === 'function';
@@ -52,6 +54,7 @@ export const makeDenylistNetGuard = ({
   /** Distinct failure messages already logged (so a stuck API isn't a log flood). */
   const loggedFailures = new Set();
   let lastError = /** @type {string | null} */ (null);
+  let custodyError = /** @type {string | null} */ (null);
   let ruleDomains = 0;
   let ruleTabs = /** @type {number[]} */ ([]);
   let startupError = /** @type {string | null} */ (null);
@@ -80,6 +83,7 @@ export const makeDenylistNetGuard = ({
       const update = buildUpdate({
         patterns: getPatterns() ?? [],
         tabIds: getTabIds() ?? [],
+        initiatorDomains: getInitiatorDomains() ?? [],
       });
       const denylistRule = /** @type {any} */ (update.addRules.find((candidate) =>
         candidate.priority === 1 && Array.isArray(candidate.condition?.requestDomains)));
@@ -123,13 +127,30 @@ export const makeDenylistNetGuard = ({
       return queue;
     },
 
+    /**
+     * Mark a custody-side failure that prevented a safe rule projection. Page
+     * actions remain closed until a later successful sync proves the complete
+     * state was installed.
+     * @param {unknown} error
+     */
+    fail(error) {
+      custodyError = error instanceof Error ? error.message : String(error);
+      recordFailure(error);
+    },
+
+    /** Clear a custody-side failure only after its durable snapshot recovers. */
+    recover() {
+      custodyError = null;
+      applied = null;
+    },
+
     /** Is a usable DNR session-rule API present? (false → this guard is a no-op.) */
     supported: () => supported,
 
     /** Diagnostics for the audit/inspect surfaces. No authority. */
     state: () => ({
       supported, domains: ruleDomains, tabs: [...ruleTabs],
-      lastError: startupError || lastError,
+      lastError: startupError || custodyError || lastError,
       startupError,
     }),
   };

@@ -101,6 +101,7 @@ export {
   buildDenylistBlockRule,
   buildAppEgressBlockRule,
   buildPrivateNetworkBlockRules,
+  buildPrivateNetworkInitiatorBlockRules,
   denylistSessionRuleUpdate,
   DENYLIST_RULE_ID,
   APP_EGRESS_RULE_ID,
@@ -111,6 +112,9 @@ export {
   PRIVATE_NETWORK_DOTTED_HOST_REGEX_RULES,
   PRIVATE_NETWORK_REGEX_RULES,
   PRIVATE_NETWORK_RULE_IDS,
+  PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET,
+  PRIVATE_NETWORK_INITIATOR_RULE_IDS,
+  PRIVATE_NETWORK_NO_TAB_ID,
   DENYLIST_RESOURCE_TYPES,
   CHROME_DNR_RESOURCE_TYPES,
 } from './denylist/dnr-rules.js';

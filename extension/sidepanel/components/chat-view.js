@@ -9,7 +9,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
-import { manifestLabel, bundleToOtlp } from '/peerd-runtime/index.js';
+import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/index.js';
 import { openOptions } from '/shared/open-options.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
@@ -113,7 +113,10 @@ export const ChatView = {
       // why: only nudge once the user has gotten past the API-key
       // hurdle. Stacking onboarding cards is hostile.
       && hasKey
-      && messages.length === 0;
+      && messages.length === 0
+      && detectVoiceCapability('auto', {
+        moonshineHostAvailable: state.capabilities?.moonshineVoiceHost?.status === 'available',
+      }).engine !== null;
 
     return m('.chat-view', [
       // Inline banner on the latest error from the SW. Sticks until a

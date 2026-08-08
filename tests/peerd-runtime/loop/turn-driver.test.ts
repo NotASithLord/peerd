@@ -137,6 +137,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   waitForAbort = false, abortDuringFallback = false, uiDisconnected = false,
   waitForActorIsolation = async () => {},
   dynamicIsolation = false,
+  runtimeUnsupported = false,
 } = {}) => {
   const liveGetSecret = async () => 'sk-live';
   const liveSafeFetch = async () => new Response('ok');
@@ -215,8 +216,8 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     filterByDwebEnabled: identity,
     filterDescriptorsByManifest: identity,
     mainAgentDescriptors: identity,
-    listTools: () => dynamicIsolation
-      ? ['message_actor', 'actor_create', 'request_review', 'actor_list']
+    listTools: () => dynamicIsolation || runtimeUnsupported
+      ? (runtimeUnsupported ? ['script', 'read_pdf', 'message_actor'] : ['message_actor', 'actor_create', 'request_review', 'actor_list'])
         .map((name) => ({ name, description: `${name} test tool.`, schema: { type: 'object' } }))
       : [],
     settingsStore: { get: () => settings },
@@ -322,6 +323,14 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     detectInterruptedTurn: () => ({ resumable: false }),
     getActorIsolation: () => actorIsolation,
     waitForActorIsolation,
+    getRuntimeCapabilities: () => runtimeUnsupported ? {
+      version: 1,
+      sealedJobs: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'use_visible_notebook' },
+      pdfReader: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'attach_pdf_or_page_images' },
+      documentReader: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'attach_pdf_or_plain_text' },
+      readableHtml: { mode: 'snapshot_or_raw' },
+      moonshineVoiceHost: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'type_in_composer' },
+    } as any : null,
   });
   return {
     driver, modelCalls, modelKeyReads, broadcasts, chatNotes, turnAbortController,
@@ -338,6 +347,15 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
 };
 
 describe('runAgentTurn credential custody', () => {
+  test('an unsupported runtime removes host tools and corrects static prompt lore', async () => {
+    const fixture = turnDeps('chat', { runtimeUnsupported: true });
+    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
+    expect(fixture.loopCtx().tools.map((tool: any) => tool.name)).toEqual(['message_actor']);
+    const system = await fixture.loopCtx().getSystemPrompt();
+    expect(system).toContain('Headless script execution is unavailable');
+    expect(system).toContain('visible Notebook actor');
+  });
+
   test('a turn cannot snapshot actor isolation before durable host health is ready', async () => {
     let releaseReady = () => {};
     const ready = new Promise<void>((resolve) => { releaseReady = resolve; });

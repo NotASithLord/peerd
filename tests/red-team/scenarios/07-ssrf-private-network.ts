@@ -19,7 +19,8 @@ import { makeWebFetch } from '../../../extension/peerd-egress/fetch/web-fetch.js
 import { isPrivateOrLocalHost } from '../../../extension/peerd-egress/fetch/private-network.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';
 import {
-  buildPrivateNetworkBlockRules, PRIVATE_NETWORK_RULE_IDS,
+  buildPrivateNetworkBlockRules, buildPrivateNetworkInitiatorBlockRules,
+  PRIVATE_NETWORK_INITIATOR_RULE_IDS, PRIVATE_NETWORK_RULE_IDS,
 } from '../../../extension/peerd-egress/denylist/dnr-rules.js';
 import {
   BROWSER_TARGET_STAGES, browserTargetRefusalResult, classifyBrowserAutomationTarget,
@@ -69,7 +70,7 @@ export const scenario: Scenario = {
   title: 'Private-network / metadata SSRF',
   adversary: 'malicious webpage',
   asset: 'internal network + cloud metadata credentials',
-  claim: 'Open-web and browser entry points refuse private targets, browser network rules stay tab-scoped, and child guards require exact source identity.',
+  claim: 'Open-web and browser entry points refuse private targets, no-tab worker fetch rules require a custodied page domain, and child guards require exact source identity.',
   threatModelRef: 'INV-7',
   tier: 'unit',
   async run() {
@@ -149,14 +150,36 @@ export const scenario: Scenario = {
       const exactScope = rules.every((rule) => rule.action?.type === 'block'
         && JSON.stringify(rule.condition?.tabIds) === JSON.stringify([drivenTabId]));
       probes.push(exactRuleSet && exactScope
-        ? blocked('turn the private-network floor into a browser-wide rule', 'every known rule is block-only and scoped to the driven tab')
+        ? blocked('turn the private-network floor into a browser-wide rule', 'every tab-family rule is block-only and scoped to the driven tab')
         : leaked('turn the private-network floor into a browser-wide rule', 'a rule was missing, non-blocking, or not exact-tab scoped'));
       probes.push(buildPrivateNetworkBlockRules({ tabIds: [] }).length === 0
         ? blocked('install the private-network floor with no driven tab', 'the rule builder returned no rules')
         : leaked('install the private-network floor with no driven tab', 'an unscoped rule was produced'));
     }
 
-    // 6) Cold-start child copying is limited to a complete surviving rule set
+    // 6) A page worker loses tab identity, so its companion must require BOTH
+    // TAB_ID_NONE and the currently custodied public initiator domain. Either
+    // condition missing would turn a narrow worker backstop into browser-wide
+    // interception.
+    {
+      const rules = buildPrivateNetworkInitiatorBlockRules({
+        initiatorDomains: ['shop.example'],
+      }) as any[];
+      const exactRuleSet = rules.length === PRIVATE_NETWORK_INITIATOR_RULE_IDS.length
+        && PRIVATE_NETWORK_INITIATOR_RULE_IDS.every((id) =>
+          rules.some((rule) => rule.id === id));
+      const exactScope = rules.every((rule) => rule.action?.type === 'block'
+        && JSON.stringify(rule.condition?.tabIds) === JSON.stringify([-1])
+        && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['shop.example']));
+      probes.push(exactRuleSet && exactScope
+        ? blocked('use a page service worker to bypass tab custody', 'every no-tab private-target rule requires no-tab attribution and the custodied initiator domain')
+        : leaked('use a page service worker to bypass tab custody', 'the worker rule family was missing or overbroad'));
+      probes.push(buildPrivateNetworkInitiatorBlockRules({ initiatorDomains: [] }).length === 0
+        ? blocked('install a no-tab private-network rule without page custody', 'no initiator domain produced no rule')
+        : leaked('install a no-tab private-network rule without page custody', 'a browser-wide no-tab rule was produced'));
+    }
+
+    // 7) Cold-start child copying is limited to a complete surviving rule set
     // on the exact source. The service worker separately requires restored
     // custody or an actor binding before it calls this pure browser-rule core.
     {
@@ -201,7 +224,7 @@ export const scenario: Scenario = {
         : leaked('claim startup child custody from a partial surviving rule set', 'partial browser evidence was accepted'));
     }
 
-    // 7) Firefox's synchronous first-request stop is exact-child scoped. It
+    // 8) Firefox's synchronous first-request stop is exact-child scoped. It
     // does not infer ownership from an ordinary opener and it does not block a
     // public request from the adopted child.
     {
@@ -259,6 +282,7 @@ export const scenario: Scenario = {
         'webFetch pre-flight host check',
         'browser automation target classifier',
         'tab-scoped private-network DNR rules',
+        'origin-scoped no-tab worker fetch DNR rules',
         'exact-child synchronous Firefox request stop',
         'exact-source startup child rule copy',
         'redirect fail-closed',

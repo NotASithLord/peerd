@@ -337,7 +337,21 @@ redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.j
 Browser automation applies the same lexical classifier before navigation and
 to the committed document. Driven tabs also receive tab-scoped DNR rules for
 private hosts and address ranges, covering redirects, forms, frames, and
-tab-associated requests at the browser network layer. A page-created child is
+tab-associated requests at the browser network layer. While a public HTTP or
+HTTPS page is under peerd custody, a second private-network rule set covers
+requests that the browser attributes to no tab when their initiator domain
+matches a public domain visited by the driven tab. This covers page service-worker fetches and
+Firefox worker WebSockets without applying a browser-wide rule. Chrome DNR does
+not intercept WebSockets created inside a page service worker, even with a
+matching unscoped block rule. The live regression test keeps that residual
+visible. The scope follows browser DNR
+domain matching, so it ignores scheme and port and can include subdomains. A
+user-owned tab with the same matching domain can therefore lose private-network
+service-worker fetch access while peerd drives that domain. peerd does not prompt, unregister
+the worker, or take exclusive control of the origin. Visited domains persist in
+browser-session storage and remain covered until that tab's custody ends.
+
+A page-created child is
 blanked and guarded only when `webNavigation` reports that its exact source tab
 is already under peerd custody. Firefox also synchronously cancels private,
 local, metadata, or denylisted HTTP and WebSocket requests from that exact child
@@ -347,10 +361,9 @@ from user-owned tabs. If actor custody restores before denylist hydration, that
 exact child waits instead of treating an empty policy as permission. A protected
 child is closed after the network guard takes custody. A missing or malformed
 bundled denylist pauses tool dispatch instead of authorizing an empty policy for
-browser or open-web work. The rules never apply to tabs peerd is not driving. Requests the
-browser attributes
-to no tab, including service-worker fetches, remain outside this tab-scoped
-backstop. During a service-worker restart, early adoption requires two positive
+browser or open-web work. The tab rules never apply to tabs peerd is not driving.
+The no-tab companion is limited to domains visited by current driven tabs and
+private-network targets. During a service-worker restart, early adoption requires two positive
 signals for the exact source: restored durable custody or a restored web-actor
 binding, plus the complete surviving private-network DNR rule set.
 `background/startup-popup-network-guard.js` copies only those known block rules
@@ -358,10 +371,15 @@ to the exact child, then hands it to the restored custody set. If either signal
 is absent, peerd leaves the child unchanged until its registries finish loading.
 This avoids interfering with a user popup, but leaves a short cold-start window
 for an autonomous child if the browser lost its session rules while peerd's
-later registry restore still identifies the source as driven. DNS resolution
-and rebinding also remain outside this client-side lexical boundary.
+later registry restore still identifies the source as driven. A page-initiated
+cross-origin redirect can also begin before the browser reports the new committed
+URL and adds its no-tab domain scope. DNS resolution and rebinding remain
+outside this client-side lexical boundary. With native local-network checks
+disabled, Chrome can also start an inherited about:blank child's immediate
+private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
 `peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
+`background/browser-origin-custody.js`,
 `background/driven-child-request-guard.js`, `background/startup-popup-network-guard.js`,
 `peerd-runtime/tools/browser-automation-policy.js`, and
 `offscreen/pdf-extract.js`. Red-team: scenario 07.
@@ -590,6 +608,22 @@ Code: `peerd-runtime/observability/contributor-metrics.js`,
 `peerd-runtime/observability/contributor-store.js`,
 `background/routes/contributor-metrics.js`, and
 `options/sections/contributor-metrics.js`. Red-team: scenario 12.
+
+<a id="inv-17"></a>
+### INV-17. The model cannot call a facility the runtime cannot host
+The privileged background resolves host support into a browser-neutral runtime
+capability snapshot. The same snapshot removes unavailable tool descriptors,
+corrects static prompt guidance, and drives a dispatch gate that refuses forged
+hidden calls without performing work. Human controls may narrow their own
+presentation from local API probes, but they cannot grant model or dispatch
+authority. Unsupported voice setup is refused before a model download or
+microphone prompt begins. OCR and local WebGPU controls refuse before downloads.
+Artifacts without a dweb mesh host omit the dweb module, controls, defaults,
+and model tools.
+
+Code: `peerd-runtime/runtime-capabilities.js`, `peerd-runtime/tools/gates.js`,
+`peerd-runtime/loop/turn-driver.js`, `packaging/gen-channel-config.ts`.
+Red-team: scenario 08.
 
 ### Additional invariants (not scenario-gated, enforced in code)
 

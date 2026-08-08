@@ -13,6 +13,7 @@
 import { isDenylistedTab, resolveTargetTab, originOfUrl } from './dom-helpers.js';
 import {
   BROWSER_TARGET_STAGES,
+  browserNetworkGuardPostNavigationResult,
   browserTargetRefusalResult,
   classifyBrowserAutomationTarget,
   sensitiveSiteBrowserTargetVerdict,
@@ -136,7 +137,7 @@ export const navigateTool = {
     const tabId = tab.id;
 
     if (typeof c.ensureBrowserNetworkGuard === 'function') {
-      const guarded = await c.ensureBrowserNetworkGuard(tabId);
+      const guarded = await c.ensureBrowserNetworkGuard(tabId, requestedUrl);
       if (!guarded.ok) return guarded;
     }
 
@@ -172,7 +173,6 @@ export const navigateTool = {
         outcomeKind: 'host-lost',
       };
     }
-
     // Keep the turn's activeTab pin fresh: if it points at the tab we just drove,
     // re-stamp its url/origin to where the page LANDED so the next tool's origin gate
     // sees the live origin, not the turn-start one (matters most for a freshly-adopted
@@ -213,11 +213,7 @@ export const navigateTool = {
     const committedVerdict = classifyBrowserAutomationTarget(finalTab?.url, {
       stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
     });
-    const privateLanding = !committedVerdict.allowed
-      && (committedVerdict.reason === 'private_network'
-        || committedVerdict.reason === 'cloud_metadata');
-    if (!committedVerdict.allowed
-      && (privateLanding || navigation.status === 'complete')) {
+    if (!committedVerdict.allowed) {
       try { await c.siteCapture?.cancel?.({ tabId }); } catch { /* policy cleanup continues */ }
       // Give the actor binding its existing stop signal, then independently
       // remove the page authority. Either step may fail, so neither gates the
@@ -263,6 +259,28 @@ export const navigateTool = {
           ? 'The tab was reset to a verified blank page.'
           : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
       };
+    }
+
+    if (typeof c.updateBrowserNetworkGuardOrigin === 'function') {
+      const guarded = await c.updateBrowserNetworkGuardOrigin(tabId, finalTab?.url);
+      if (!guarded.ok) {
+        const neutralized = await neutralizeBlockedLanding(
+          tabsApi,
+          tabId,
+          pin,
+          navigationTimeoutMs,
+        );
+        const refusal = browserNetworkGuardPostNavigationResult(
+          guarded.structured?.reason,
+        );
+        return {
+          ...refusal,
+          structured: { ...refusal.structured, neutralized },
+          content: `${refusal.content} ${neutralized
+            ? 'The tab was reset to a verified blank page.'
+            : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+        };
+      }
     }
 
     // why: even a timeout or rejected update can leave the browser on a new

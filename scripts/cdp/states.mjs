@@ -20,8 +20,9 @@
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
 import {
-  rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage,
+  rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
+  NETWORK_GUARD_CONTROLLER_PORT,
 } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
@@ -354,6 +355,10 @@ export const STATES = [
         res.end();
       });
       probeServer.on('connection', () => { probeConnections += 1; });
+      probeServer.on('upgrade', (req, socket) => {
+        probeRequests.push(req.url ?? '/');
+        socket.destroy();
+      });
       const controllerServer = createServer((req, res) => {
         controllerRequests += 1;
         const requestUrl = new URL(req.url ?? '/', 'http://orders.peerd.test');
@@ -361,6 +366,25 @@ export const STATES = [
           controllerAttempts.add(requestUrl.searchParams.get('vector') ?? '');
           res.writeHead(204);
           res.end();
+          return;
+        }
+        if (requestUrl.pathname === '/worker.js') {
+          res.writeHead(200, {
+            'content-type': 'application/javascript',
+            'service-worker-allowed': '/',
+            'cache-control': 'no-store',
+          });
+          res.end(`self.addEventListener('install', () => self.skipWaiting());
+            self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+            self.addEventListener('message', (event) => {
+              const { fetchUrl, socketUrl, token } = event.data || {};
+              event.waitUntil((async () => {
+                await fetch('/attempt?vector=worker-' + encodeURIComponent(token)
+                  + '-websocket-' + typeof WebSocket, { cache: 'no-store' });
+                void fetch(fetchUrl, { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+                try { void new WebSocket(socketUrl); } catch { /* reported by raw probe */ }
+              })());
+            });`);
           return;
         }
         res.setHeader('content-type', 'text/html');
@@ -415,6 +439,7 @@ export const STATES = [
           <h1>network-guard-controller</h1>
           <button id="trusted-blank-burst">Open child</button>
           <script>
+            navigator.serviceWorker.register('/worker.js');
             document.querySelector('#trusted-blank-burst').addEventListener('click', () => {
               const child = window.open(${JSON.stringify(trustedTarget)}, 'trusted-private-child');
               if (!child) return;
@@ -425,13 +450,13 @@ export const STATES = [
       });
       await Promise.all([
         new Promise((resolve) => probeServer.listen(0, '127.0.0.1', resolve)),
-        new Promise((resolve) => controllerServer.listen(0, '127.0.0.1', resolve)),
+        new Promise((resolve, reject) => controllerServer
+          .once('error', reject)
+          .listen(NETWORK_GUARD_CONTROLLER_PORT, '127.0.0.1', resolve)),
       ]);
       const probePort = /** @type {{ port: number }} */ (probeServer.address()).port;
-      const controllerPort = /** @type {{ port: number }} */ (controllerServer.address()).port;
-      networkGuardFixtureUrl = `http://orders.peerd.test:${controllerPort}/`;
+      networkGuardFixtureUrl = `http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}/`;
       const resetProbe = async () => {
-        probeServer.closeAllConnections?.();
         await sleep(100);
         probeConnections = 0;
         probeRequests = [];
@@ -545,8 +570,8 @@ export const STATES = [
         };
         rec.check('the trusted click reaches its about:blank child action',
           burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
-        rec.check('the trusted about:blank child causes no private TCP or HTTP side effect',
-          burstObserved.connections === 0 && burstObserved.requests.length === 0,
+        rec.check('Chrome immediate-child race remains visible with native local-network checks disabled',
+          burstObserved.requests.some((request) => request.includes('trusted-click-blank')),
           JSON.stringify(burstObserved));
         rec.check('the protected child is closed instead of left as a blank tab',
           !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
@@ -639,6 +664,230 @@ export const STATES = [
             observed.connections === 0 && observed.requests.length === 0,
             JSON.stringify(observed));
         }
+
+        // A blocked top-level navigation can leave Chrome displaying its
+        // network error document. Return to the controlled fixture before the
+        // worker lane so the test exercises the page worker, not an error page.
+        await evalIn(ctx.page,
+          `chrome.tabs.update(${drivenTab.id}, { url: ${JSON.stringify(networkGuardFixtureUrl)} })`, true);
+        await waitFor(() => evalIn(ctx.page, `chrome.tabs.get(${drivenTab.id}).then((tab) =>
+          tab.status === 'complete' && tab.url === ${JSON.stringify(networkGuardFixtureUrl)})`, true), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+
+        const workerRuleShape = await evalIn(ctx.page, `(async () => {
+          const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          return rules.filter((rule) => policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+        })()`, true);
+        rec.check('the worker fetch floor is no-tab and limited to a visited page domain',
+          workerRuleShape.length > 0 && workerRuleShape.every((rule) =>
+            JSON.stringify(rule.condition?.tabIds) === JSON.stringify([-1])
+              && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['orders.peerd.test'])),
+          JSON.stringify(workerRuleShape));
+        const initiatorOutcomes = await evalIn(ctx.page, `Promise.all([
+          chrome.declarativeNetRequest.testMatchOutcome({
+            url: ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=dnr-match`)},
+            type: 'xmlhttprequest', tabId: -1,
+            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl).origin)},
+          }),
+          chrome.declarativeNetRequest.testMatchOutcome({
+            url: ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=dnr-miss`)},
+            type: 'xmlhttprequest', tabId: -1,
+            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl.replace('orders.peerd.test', 'acct.peerd.test')).origin)},
+          }),
+          chrome.declarativeNetRequest.testMatchOutcome({
+            url: ${JSON.stringify(`ws://127.0.0.1:${probePort}/probe?vector=dnr-socket-match`)},
+            type: 'websocket', tabId: -1,
+            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl).origin)},
+          }),
+        ])`, true).catch((error) => ({ error: String(error) }));
+        rec.check('Chrome matches the no-tab rule only for the custodied initiator',
+          Array.isArray(initiatorOutcomes)
+            && initiatorOutcomes[0]?.matchedRules?.length > 0
+            && initiatorOutcomes[1]?.matchedRules?.length === 0
+            && initiatorOutcomes[2]?.matchedRules?.some(({ ruleId }) => ruleId >= 100),
+          JSON.stringify(initiatorOutcomes));
+
+        const attachWorkerMonitor = async (origin) => {
+          const target = await waitFor(async () => {
+            const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((response) => response.json());
+            return targets.find((candidate) => candidate.type === 'service_worker'
+              && candidate.url === `${origin}/worker.js`);
+          }, { budgetMs: 5_000, pollMs: 25 });
+          if (!target) return null;
+          const events = [];
+          const requests = new Map();
+          const connection = await attach(target.webSocketDebuggerUrl, (method, params) => {
+            if (method === 'Network.requestWillBeSent') {
+              requests.set(params.requestId, params.request?.url ?? '');
+            }
+            if (method === 'Network.loadingFailed') {
+              events.push({
+                url: requests.get(params.requestId) ?? '',
+                blockedReason: params.blockedReason ?? '',
+                errorText: params.errorText ?? '',
+              });
+            }
+            if (method === 'Network.webSocketCreated') {
+              events.push({
+                url: params.url ?? '',
+                webSocketCreated: true,
+                initiator: params.initiator ?? null,
+              });
+            }
+          });
+          await connection.send('Network.enable');
+          return { connection, events };
+        };
+        const networkFailureFor = (monitor, token) => monitor?.events
+          .find((event) => event.url.includes(token));
+        const ordersWorkerMonitor = await attachWorkerMonitor(new URL(networkGuardFixtureUrl).origin);
+        rec.check('Chrome exposes the fixture service worker to the network test',
+          ordersWorkerMonitor !== null, JSON.stringify({ monitored: ordersWorkerMonitor !== null }));
+
+        const triggerWorker = async (tabId, token) => evalIn(ctx.page, `(async () => {
+          const [injection] = await chrome.scripting.executeScript({
+            target: { tabId: ${tabId} },
+            world: 'MAIN',
+            func: async (fetchUrl, socketUrl, workerToken) => {
+              const registration = await navigator.serviceWorker.ready;
+              registration.active.postMessage({ fetchUrl, socketUrl, token: workerToken });
+              return { secure: isSecureContext, active: !!registration.active };
+            },
+            args: [
+              ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=worker-fetch-${token}`)},
+              ${JSON.stringify(`ws://127.0.0.1:${probePort}/probe?vector=worker-websocket-${token}`)},
+              ${JSON.stringify(token)},
+            ],
+          });
+          return injection?.result;
+        })()`, true);
+
+        await resetProbe();
+        const guardedWorker = await triggerWorker(drivenTab.id, 'guarded');
+        await waitFor(() => [...controllerAttempts]
+          .some((value) => value === 'worker-guarded-websocket-function'), {
+          budgetMs: 5_000, pollMs: 25,
+        });
+        await sleep(500);
+        const guardedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded');
+        rec.check('the public fixture has an active service worker with WebSocket support',
+          guardedWorker?.secure === true && guardedWorker?.active === true
+            && controllerAttempts.has('worker-guarded-websocket-function'),
+          JSON.stringify({ guardedWorker, attempts: [...controllerAttempts] }));
+        rec.check('the custodied page worker fetch causes no private-network side effect',
+          !probeRequests.some((request) => request.includes('worker-fetch-guarded')),
+          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        rec.check('Chrome reports the custodied worker request as browser-policy blocked',
+          guardedNetworkFailure?.errorText === 'net::ERR_BLOCKED_BY_CLIENT',
+          JSON.stringify(guardedNetworkFailure));
+
+        rec.check('Chrome worker WebSocket bypass remains visible to the regression test',
+          probeRequests.some((request) => request.includes('worker-websocket-guarded')),
+          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+
+        // Characterize the browser boundary directly. If even an unscoped
+        // WebSocket rule does not see this request, adding wider peerd custody
+        // cannot close the gap and would only disrupt unrelated browsing.
+        await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [4999],
+          addRules: [{
+            id: 4999,
+            priority: 10,
+            action: { type: 'block' },
+            condition: {
+              regexFilter: ${JSON.stringify('^wss?://(?:[^/]+@)?127\\.')},
+              resourceTypes: ['websocket'],
+            },
+          }],
+        })`, true);
+        await resetProbe();
+        await triggerWorker(drivenTab.id, 'unscoped-diagnostic');
+        await sleep(500);
+        rec.check('Chrome does not expose worker WebSockets to an unscoped DNR block',
+          probeRequests.some((request) => request.includes('worker-websocket-unscoped-diagnostic')),
+          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [4999],
+        })`, true);
+
+        rec.check('the page-domain worker rule does not intercept the extension local provider',
+          ctx.modelCallCount() > 0,
+          JSON.stringify({ modelCalls: ctx.modelCallCount() }));
+
+        const unrelatedUrl = networkGuardFixtureUrl.replace('orders.peerd.test', 'acct.peerd.test');
+        const unrelatedTab = await evalIn(ctx.page,
+          `chrome.tabs.create({ url: ${JSON.stringify(unrelatedUrl)}, active: false })`, true);
+        await waitFor(async () => {
+          if (!Number.isInteger(unrelatedTab?.id)) return false;
+          const tab = await evalIn(ctx.page, `chrome.tabs.get(${unrelatedTab.id})`, true).catch(() => null);
+          return tab?.status === 'complete';
+        }, { budgetMs: 5_000, pollMs: 25 });
+        await resetProbe();
+        const unrelatedWorkerMonitor = await attachWorkerMonitor(new URL(unrelatedUrl).origin);
+        const unrelatedWorker = await triggerWorker(unrelatedTab.id, 'unrelated');
+        await waitFor(() => probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
+          && probeRequests.some((request) => request.includes('worker-websocket-unrelated')),
+        { budgetMs: 5_000, pollMs: 25 });
+        const unrelatedNetworkFailure = networkFailureFor(unrelatedWorkerMonitor, 'worker-fetch-unrelated');
+        rec.check('a different-origin user service worker remains outside peerd DNR custody',
+          unrelatedWorker?.secure === true
+            && probeRequests.some((request) => request.includes('worker-fetch-unrelated'))
+            && probeRequests.some((request) => request.includes('worker-websocket-unrelated')),
+          JSON.stringify({ unrelatedWorker, unrelatedNetworkFailure, probeConnections, probeRequests }));
+        unrelatedWorkerMonitor?.connection.close();
+        await evalIn(ctx.page, `chrome.tabs.remove(${unrelatedTab.id})`, true).catch(() => {});
+
+        await evalIn(ctx.page,
+          `chrome.tabs.update(${drivenTab.id}, { url: ${JSON.stringify(unrelatedUrl)} })`, true);
+        const retainedScope = await waitFor(() => evalIn(ctx.page, `(async () => {
+          const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          const workerRules = rules.filter((rule) => policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+          return workerRules.length > 0
+            && workerRules.every((rule) =>
+              JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['acct.peerd.test', 'orders.peerd.test']));
+        })()`, true), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('navigation retains prior worker domains and adds the committed domain',
+          retainedScope === true, JSON.stringify({ retainedScope }));
+
+        const oldOriginTab = await evalIn(ctx.page,
+          `chrome.tabs.create({ url: ${JSON.stringify(networkGuardFixtureUrl)}, active: false })`, true);
+        await sleep(500);
+        await resetProbe();
+        const retainedWorker = await triggerWorker(oldOriginTab.id, 'retained');
+        await sleep(500);
+        const retainedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained');
+        rec.check('a previously visited worker domain remains guarded after navigation',
+          retainedWorker?.secure === true
+            && retainedNetworkFailure?.errorText === 'net::ERR_BLOCKED_BY_CLIENT'
+            && !probeRequests.some((request) => request.includes('worker-fetch-retained'))
+            && probeRequests.some((request) => request.includes('worker-websocket-retained')),
+          JSON.stringify({ retainedWorker, retainedNetworkFailure, probeConnections, probeRequests }));
+
+        await evalIn(ctx.page, `chrome.tabs.remove(${drivenTab.id})`, true).catch(() => {});
+        const releasedScope = await waitFor(() => evalIn(ctx.page, `(async () => {
+          const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+          const rules = await chrome.declarativeNetRequest.getSessionRules();
+          return rules.every((rule) =>
+            !policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+        })()`, true), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('closing custody removes every visited worker-domain rule',
+          releasedScope === true, JSON.stringify({ releasedScope }));
+
+        await resetProbe();
+        const releasedWorker = await triggerWorker(oldOriginTab.id, 'released');
+        await waitFor(() => probeRequests.some((request) => request.includes('worker-fetch-released'))
+          && probeRequests.some((request) => request.includes('worker-websocket-released')),
+        { budgetMs: 5_000, pollMs: 25 });
+        rec.check('after custody closes, worker fetch and WebSocket both reach the private probe',
+          releasedWorker?.secure === true
+            && probeRequests.some((request) => request.includes('worker-fetch-released'))
+            && probeRequests.some((request) => request.includes('worker-websocket-released')),
+          JSON.stringify({ releasedWorker, probeConnections, probeRequests }));
+        await evalIn(ctx.page, `chrome.tabs.remove(${oldOriginTab.id})`, true).catch(() => {});
+        ordersWorkerMonitor?.connection.close();
       } finally {
         probeServer.closeAllConnections?.();
         controllerServer.closeAllConnections?.();
@@ -2079,6 +2328,33 @@ export const STATES = [
         await waitFor(() => evalIn(page, `document.querySelector('#app')?.children.length > 0`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-fulltab', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-voice-capabilities', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      try {
+        const posture = await waitFor(() => evalIn(page, `(() => {
+          const voice = document.querySelector('.voice-section');
+          const ocr = document.querySelector('.ocr-section');
+          if (!voice || !ocr) return null;
+          return {
+            voice: voice.textContent,
+            ocr: ocr.textContent,
+            buttons: [...document.querySelectorAll('button')].map((button) => button.textContent),
+          };
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Chrome Voice and OCR settings expose only hosted facilities',
+          !posture?.voice?.includes('unavailable in this browser')
+            && !posture?.ocr?.includes('unavailable in this browser')
+            && posture?.buttons?.some((label) => label.includes('Enable voice')),
+          JSON.stringify(posture));
+        await rec.shotPage('options-voice-capabilities.light', page);
+        await setEmulatedTheme(page, 'dark');
+        await rec.shotPage('options-voice-capabilities.dark', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },

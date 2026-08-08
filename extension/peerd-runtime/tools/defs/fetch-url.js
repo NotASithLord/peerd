@@ -24,6 +24,7 @@ import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web
 import { needsWebWriteConfirm } from '/peerd-engine/index.js';
 // The pure "is this response a document file?" test — see peerd-runtime/doc.
 import { sniffResponseAsDocument } from '../../doc/sniff.js';
+import { runtimeCapabilityAvailable, runtimeCapabilityForTool } from '../../runtime-capabilities.js';
 
 const MAX_BODY_CHARS = 16_000;   // hard cap to avoid context-blast on huge payloads
 
@@ -156,6 +157,21 @@ export const fetchUrlTool = {
         contentType: ct, url: res.finalUrl || args.url, bodyHead: res.body.slice(0, 4096),
       });
       if (asDocument) {
+        const reader = runtimeCapabilityForTool(asDocument.tool,
+          /** @type {any} */ (ctx).runtimeCapabilities);
+        if (reader && !runtimeCapabilityAvailable(reader.capability)) {
+          const recovery = asDocument.format === 'pdf'
+            ? 'Ask the user to attach this PDF directly, or provide page images or a plain-text export.'
+            : 'Ask for a PDF, page images, or a plain-text export.';
+          return {
+            ok: false,
+            error: 'binary_document',
+            format: asDocument.format,
+            readerAvailable: false,
+            content: `${res.finalUrl || args.url} is a ${asDocument.format.toUpperCase()} document, not a web page. `
+              + `This runtime has no reader for those bytes. ${recovery}`,
+          };
+        }
         return {
           ok: false,
           error: 'binary_document',

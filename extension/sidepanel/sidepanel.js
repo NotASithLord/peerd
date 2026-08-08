@@ -185,6 +185,7 @@ const onVoiceMessage = (handler) => {
 const voiceManager = createVoiceManager({
   send,
   onMessage: onVoiceMessage,
+  moonshineHostAvailable: () => currentState?.capabilities?.moonshineVoiceHost?.status === 'available',
 });
 
 // Global ESC: stop voice anywhere in the side panel. Lower priority

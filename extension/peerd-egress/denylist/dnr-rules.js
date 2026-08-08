@@ -15,10 +15,12 @@
 // webFetch.
 //
 // declarativeNetRequest closes it at the layer the page cannot argue with. The
-// rules are SESSION-scoped and TAB-scoped: they apply only to tabs peerd is
-// currently driving, never to the user's own browsing. Blocking the user's bank
-// tab would be a bug, not a feature — the denylist says "the agent may not go
-// here", not "this browser may not go here".
+// rules are SESSION-scoped and custody-scoped. Ordinary page requests are tied
+// to tabs peerd is driving. Page service-worker requests are tied to both the
+// browser's no-tab identity and a currently custodied initiator domain. Neither
+// form becomes a browser-wide rule. Blocking the user's bank tab would be a
+// bug, not a feature. The denylist says "the agent may not go here", not "this
+// browser may not go here".
 //
 // This is a BACKSTOP, not the primary control. The JS gates stay exactly as
 // they are: they produce the refusal the model can read and the audit entry the
@@ -169,6 +171,17 @@ export const PRIVATE_NETWORK_RULE_IDS = Object.freeze([
   PRIVATE_NETWORK_HOST_RULE_ID,
   ...PRIVATE_NETWORK_REGEX_RULES.map(({ id }) => id),
 ]);
+
+// Page service-worker requests have no tab identity. Give their companion
+// rules a disjoint id range so tab custody and origin custody can be replaced
+// atomically without either set mistaking the other's rules for stale state.
+export const PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET = 100;
+export const PRIVATE_NETWORK_INITIATOR_RULE_IDS = Object.freeze(
+  PRIVATE_NETWORK_RULE_IDS.map((id) => id + PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET),
+);
+// browser.tabs.TAB_ID_NONE is -1 in both supported browsers. Keep the value in
+// the pure core so rule construction does not import a privileged browser API.
+export const PRIVATE_NETWORK_NO_TAB_ID = -1;
 
 /**
  * Resource types the block rule covers. Enumerated EXPLICITLY rather than left
@@ -363,6 +376,85 @@ export const buildPrivateNetworkBlockRules = ({
 };
 
 /**
+ * Retain only browser-canonical initiator hostnames. The imperative custody
+ * shell supplies URL.hostname values; validating again here prevents a scheme,
+ * path, wildcard, port, mixed-case alias, or empty entry from widening a
+ * no-tab rule. IPv4 and bracketed IPv6 literals ride the same URL
+ * canonicalization as DNS names.
+ *
+ * @param {readonly string[]} domains
+ * @returns {string[]}
+ */
+const canonicalInitiatorDomains = (domains) => [...new Set((domains ?? [])
+  .filter((domain) => {
+    if (typeof domain !== 'string' || !domain || domain !== domain.toLowerCase()
+        || !/^[\x21-\x7e]+$/.test(domain)) return false;
+    try {
+      const parsed = new URL(`https://${domain}/`);
+      const canonicalHostname = parsed.hostname === domain;
+      const ipv6Literal = /^\[[0-9a-f:.]+\]$/.test(domain);
+      const dnsName = domain.length <= 253 && domain.split('.').every((label) =>
+        label.length > 0 && label.length <= 63
+          && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label));
+      return canonicalHostname
+        && (ipv6Literal || dnsName)
+        && parsed.username === ''
+        && parsed.password === ''
+        && parsed.port === '';
+    } catch { return false; }
+  }))].sort();
+
+/**
+ * Private-network floor for requests the browser attributes to no tab, such
+ * as a page service worker. Both scopes are mandatory: TAB_ID_NONE alone
+ * would intercept unrelated extension, provider, and browser traffic, while
+ * an initiator alone would also affect ordinary page requests in user tabs.
+ *
+ * The browser's initiator condition is domain-scoped rather than origin-
+ * scoped. The imperative shell therefore passes only hostnames currently
+ * under peerd custody and retains visited domains until custody ends because a
+ * service worker can survive page navigation.
+ *
+ * @param {Object} input
+ * @param {readonly string[]} input.initiatorDomains
+ * @param {number} [input.noTabId]
+ * @param {readonly string[]} [input.resourceTypes]
+ * @returns {object[]}
+ */
+export const buildPrivateNetworkInitiatorBlockRules = ({
+  initiatorDomains,
+  noTabId = PRIVATE_NETWORK_NO_TAB_ID,
+  resourceTypes = DENYLIST_RESOURCE_TYPES,
+}) => {
+  const initiators = canonicalInitiatorDomains(initiatorDomains);
+  if (!initiators.length || noTabId !== PRIVATE_NETWORK_NO_TAB_ID) return [];
+  const base = {
+    priority: 4,
+    action: { type: 'block' },
+  };
+  /** @param {Record<string, unknown>} condition */
+  const scoped = (condition) => ({
+    ...base,
+    condition: {
+      ...condition,
+      initiatorDomains: initiators,
+      tabIds: [PRIVATE_NETWORK_NO_TAB_ID],
+      resourceTypes: [...resourceTypes],
+    },
+  });
+  return [
+    {
+      id: PRIVATE_NETWORK_HOST_RULE_ID + PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET,
+      ...scoped({ requestDomains: [...PRIVATE_NETWORK_HOSTS] }),
+    },
+    ...PRIVATE_NETWORK_REGEX_RULES.map(({ id, regex }) => ({
+      id: id + PRIVATE_NETWORK_INITIATOR_RULE_ID_OFFSET,
+      ...scoped({ regexFilter: regex, isUrlFilterCaseSensitive: false }),
+    })),
+  ];
+};
+
+/**
  * The full `updateSessionRules` argument for the current state. Always removes
  * all owned rule ids first so the call is idempotent and self-healing: whatever the
  * previous state was (stale tab list, stale domains, nothing at all), applying
@@ -372,6 +464,7 @@ export const buildPrivateNetworkBlockRules = ({
  * @param {readonly string[]} input.patterns  the live denylist
  * @param {readonly number[]} input.tabIds
  * @param {readonly number[]} [input.appTabIds]
+ * @param {readonly string[]} [input.initiatorDomains]
  * @param {readonly string[]} [input.exemptDomains]  IdP domains that stay
  *   reachable inside a driven tab — injected, see DENYLIST_ALLOW_RULE_ID.
  * @param {number} [input.ruleId]
@@ -382,6 +475,7 @@ export const buildPrivateNetworkBlockRules = ({
  */
 export const denylistSessionRuleUpdate = ({
   patterns, tabIds, appTabIds = [],
+  initiatorDomains = [],
   exemptDomains = [], ruleId = DENYLIST_RULE_ID,
   allowRuleId = DENYLIST_ALLOW_RULE_ID, appRuleId = APP_EGRESS_RULE_ID,
   resourceTypes = DENYLIST_RESOURCE_TYPES,
@@ -397,14 +491,19 @@ export const denylistSessionRuleUpdate = ({
     tabIds: appTabIds, ruleId: appRuleId, resourceTypes,
   });
   const privateNetworkBlocks = buildPrivateNetworkBlockRules({ tabIds, resourceTypes });
+  const privateNetworkInitiatorBlocks = buildPrivateNetworkInitiatorBlockRules({
+    initiatorDomains, resourceTypes,
+  });
   return {
     removeRuleIds: [
       ruleId, allowRuleId, appRuleId,
       ...PRIVATE_NETWORK_RULE_IDS,
+      ...PRIVATE_NETWORK_INITIATOR_RULE_IDS,
     ],
     addRules: [
       block, allow, appBlock,
       ...privateNetworkBlocks,
+      ...privateNetworkInitiatorBlocks,
     ].filter((rule) => rule !== null),
   };
 };

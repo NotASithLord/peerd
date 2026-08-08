@@ -83,6 +83,7 @@ const INITIAL_STATE = Object.freeze({
  * @param {typeof detectVoiceCapability} [deps.detectCapability]
  * @param {() => Promise<void>} [deps.requestMicPermission]
  * @param {typeof createWebSpeechTranscriber} [deps.createLocalTranscriber]
+ * @param {() => boolean} [deps.moonshineHostAvailable]
  */
 export const createVoiceManager = (deps) => {
   const {
@@ -107,6 +108,7 @@ export const createVoiceManager = (deps) => {
     // panel (i.e. THIS context). Tests inject a stub so they don't
     // depend on the runner browser shipping SpeechRecognition.
     createLocalTranscriber = createWebSpeechTranscriber,
+    moonshineHostAvailable = () => true,
   } = deps;
 
   /** @type {VoiceState} */
@@ -195,7 +197,7 @@ export const createVoiceManager = (deps) => {
     if (state.status === 'downloading') return;
     // why: pass the user's engine preference ('auto' default → Web Speech when
     // available, else Moonshine). detectCapability resolves it to the live engine.
-    const cap = detectCapability(engine);
+    const cap = detectCapability(engine, { moonshineHostAvailable: moonshineHostAvailable() });
     if (!cap.engine) {
       const err = new VoiceUnsupportedError(
         'No transcription engine available. Vendor Moonshine or run peerd in a browser '

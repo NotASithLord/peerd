@@ -201,6 +201,11 @@ export {
 // what happens when a tab LANDS somewhere. Exported here because the enforcement
 // points that will consume them live outside this module (background/).
 export { classifyOriginSensitivity, sameOrigin, LEARNED_REASONS } from './actor/origin-sensitivity.js';
+export {
+  RUNTIME_CAPABILITY_VERSION, resolveRuntimeCapabilities, runtimeCapabilityAvailable,
+  runtimeCapabilityForTool, filterByRuntimeCapabilities, runtimeCapabilityRefusal,
+  runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
+} from './runtime-capabilities.js';
 export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
 export { makeJudgeLanding, makeCredentialScope } from './actor/origin-lock.js';
 // …and the three pieces the SW needs to make the lock live: where the state
@@ -446,6 +451,7 @@ export {
 // used by the background-owned activity overlay before it injects UI.
 export {
   browserNetworkGuardUnavailableResult,
+  browserNetworkGuardPostNavigationResult,
   classifyBrowserAutomationTarget,
   isAddressableBrowserTab,
 } from './tools/browser-automation-policy.js';

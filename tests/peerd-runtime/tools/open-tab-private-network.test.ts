@@ -6,6 +6,7 @@ type HarnessOptions = {
   complete?: boolean;
   finalUrl?: string;
   guardFails?: boolean;
+  originGuardFails?: boolean;
   withGuard?: boolean;
   denylist?: string[];
 };
@@ -15,6 +16,7 @@ const openHarness = ({
   complete = true,
   finalUrl = 'http://127.0.0.1/private',
   guardFails = false,
+  originGuardFails = false,
   withGuard = false,
   denylist = [],
 }: HarnessOptions = {}) => {
@@ -28,6 +30,7 @@ const openHarness = ({
   const removed: number[] = [];
   const released: number[] = [];
   const guarded: Array<[number, string | undefined]> = [];
+  const reconciled: Array<[number, string | undefined]> = [];
   const tabs: any = {
     onUpdated: {
       addListener: (next: any) => { listener = next; },
@@ -66,11 +69,23 @@ const openHarness = ({
     noteTab: async (id: number | undefined, label: string | undefined) => { noted.push([id, label]); },
     hintPullIn: (id: number | undefined, url: string) => { hints.push([id, url]); },
     ...(withGuard ? {
-      ensureBrowserNetworkGuard: async (tabId: number) => {
+      ensureBrowserNetworkGuard: async (tabId: number, targetUrl?: string) => {
         order.push('guard');
-        guarded.push([tabId, undefined]);
+        guarded.push([tabId, targetUrl]);
         return guardFails
           ? { ok: false, error: 'browser_network_guard_unavailable', outcomeKind: 'pre-effect-failure' }
+          : { ok: true };
+      },
+      updateBrowserNetworkGuardOrigin: async (tabId: number, targetUrl?: string) => {
+        order.push('origin');
+        reconciled.push([tabId, targetUrl]);
+        return originGuardFails
+          ? {
+            ok: false,
+            error: 'browser_network_guard_unavailable',
+            outcomeKind: 'pre-effect-failure',
+            structured: { reason: 'network_guard_install_failed' },
+          }
           : { ok: true };
       },
       releaseBrowserNetworkGuard: async (tabId: number) => {
@@ -79,7 +94,7 @@ const openHarness = ({
       },
     } : {}),
   };
-  return { creates, ctx, guarded, hints, noted, order, released, removed, updates };
+  return { creates, ctx, guarded, hints, noted, order, reconciled, released, removed, updates };
 };
 
 describe('open_tab committed target policy', () => {
@@ -140,6 +155,27 @@ describe('open_tab committed target policy', () => {
     expect(updates).toEqual(['https://public.example/start', 'about:blank']);
   });
 
+  test('refuses an unverified committed URL before origin reconciliation', async () => {
+    const { ctx, reconciled, updates } = openHarness({
+      finalUrl: 'https://public.example/landed',
+      withGuard: true,
+    });
+    const originalGet = ctx.tabs.get;
+    let reads = 0;
+    ctx.tabs.get = async () => {
+      reads += 1;
+      return reads === 1 ? { id: 9 } : originalGet();
+    };
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      outcomeKind: 'effect-completed',
+      structured: { stage: 'committed_origin', neutralized: true },
+    });
+    expect(reconciled).toEqual([]);
+    expect(updates).toEqual(['https://public.example/start', 'about:blank']);
+  });
+
   test('announces the verified public landing rather than the requested URL', async () => {
     const finalUrl = 'https://public.example/landed';
     const { ctx, hints, noted, updates } = openHarness({ finalUrl });
@@ -153,22 +189,25 @@ describe('open_tab committed target policy', () => {
       tabId: 9,
       url: finalUrl,
       networkGuard: {
-        scope: 'tab',
+        scope: 'tab_and_visited_origin_workers',
         lifetime: 'until_tab_closed',
         blocks: ['private_network', 'sensitive_site_denylist'],
+        workerScope: 'private_network_fetch',
+        chromeWorkerWebSocket: 'not_covered_by_dnr',
       },
     });
   });
 
   test('installs the tab-scoped network floor before starting navigation', async () => {
-    const { ctx, guarded, order } = openHarness({
+    const { ctx, guarded, order, reconciled } = openHarness({
       finalUrl: 'https://public.example/landed',
       withGuard: true,
     });
     const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
     expect(result.ok).toBe(true);
-    expect(order).toEqual(['guard', 'update']);
-    expect(guarded).toEqual([[9, undefined]]);
+    expect(order).toEqual(['guard', 'update', 'origin']);
+    expect(guarded).toEqual([[9, 'https://public.example/start']]);
+    expect(reconciled).toEqual([[9, 'https://public.example/landed']]);
   });
 
   test('keeps an unbound blank tab guarded until browser close cleanup', async () => {
@@ -178,6 +217,48 @@ describe('open_tab committed target policy', () => {
     expect(order).toEqual(['guard']);
     expect(released).toEqual([]);
     expect(updates).toEqual([]);
+  });
+
+  test('reports a committed effect and closes the tab when origin protection fails', async () => {
+    const { ctx, noted, hints, removed, updates } = openHarness({
+      finalUrl: 'https://public.example/landed',
+      originGuardFails: true,
+      withGuard: true,
+    });
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'browser_network_guard_unavailable',
+      outcomeKind: 'effect-completed',
+      structured: {
+        reason: 'network_guard_install_failed',
+        stage: 'committed_origin',
+        outcome: 'page_loaded_not_automated',
+        neutralized: true,
+      },
+    });
+    expect(result.content).toContain('The new tab was closed.');
+    expect(updates).toEqual(['https://public.example/start']);
+    expect(removed).toEqual([9]);
+    expect(noted).toEqual([]);
+    expect(hints).toEqual([]);
+  });
+
+  test('does not claim cleanup when the committed tab cannot be closed', async () => {
+    const { ctx, removed } = openHarness({
+      finalUrl: 'https://public.example/landed',
+      originGuardFails: true,
+      withGuard: true,
+    });
+    ctx.tabs.remove = async () => { throw new Error('tab close refused'); };
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      outcomeKind: 'effect-completed',
+      structured: { neutralized: false },
+    });
+    expect(result.content).toContain('could not be closed');
+    expect(removed).toEqual([]);
   });
 
   test('closes the blank tab when the network floor cannot be installed', async () => {

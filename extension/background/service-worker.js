@@ -167,6 +167,9 @@ import {
   filterByDwebEnabled,
   filterByDwebActive,
   filterByGoalActive,
+  resolveRuntimeCapabilities,
+  filterByRuntimeCapabilities,
+  requireRuntimeCapability,
   makeGoalRunner,
   GOAL_MAX_ITERATIONS,
   makeScheduler,
@@ -404,6 +407,7 @@ import { makeSettingsStore } from './settings-store.js';
 import { makeDenylistStore, requireDenylistPolicy } from './denylist-store.js';
 import { makeDenylistNetGuard } from './denylist-net-guard.js';
 import { createBrowserNetworkCustody } from './browser-network-custody.js';
+import { createBrowserOriginCustody } from './browser-origin-custody.js';
 import { makeDrivenPopupGuard, popupSourceState } from './driven-popup-guard.js';
 import {
   classifyDrivenChildRequestTarget,
@@ -450,6 +454,10 @@ import { makeToolboxRoutes } from './routes/toolbox.js';
 import { makeActorsRoutes } from './routes/actors.js';
 import { makeScriptRunControlRoutes } from './routes/script-run-control.js';
 import { makeContributorRoutes } from './routes/contributor-metrics.js';
+
+// Firefox has no offscreen document host. Keep this package fact near the
+// imports so provider selection and the later capability snapshot share it.
+const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
 
 // ---- §11.5 universal write guard -------------------------------------------
 // EVERY store this file constructs gets its storage through these wrapped
@@ -681,7 +689,8 @@ const loadSettings = async () => {
  * session creation, the key-presence check, and the settings UI.
  */
 const resolveActiveProvider = () => {
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const fallback = list.find((p) => p.name === 'anthropic') ?? list[0];
   const chosen = list.find((p) => p.name === settingsStore.get().providerName) ?? fallback;
   return {
@@ -710,7 +719,8 @@ const resolveActiveProvider = () => {
  * case skips the vault/daemon probes entirely.
  */
 const ensureActiveProvider = async () => {
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const name = settingsStore.get().providerName;
   if (name && list.some((p) => p.name === name)) return resolveActiveProvider();
   for (const p of list) {
@@ -753,7 +763,8 @@ const resolveFailoverChain = (start) => {
   if (!s.providerFailoverEnabled) return [start];
   const names = Array.isArray(s.providerFallbacks) ? s.providerFallbacks : [];
   if (names.length === 0) return [start];
-  const list = listProviders();
+  const list = listProviders().filter((provider) =>
+    provider.name !== 'local-webgpu' || offscreenAvailable);
   const fallbacks = [];
   for (const name of names) {
     const p = list.find((x) => x.name === name);
@@ -1139,10 +1150,17 @@ const denylistReady = loadDenylist()
 // access. Current Firefox supports the portable rule shape; Chrome receives
 // its additional request-type enums below.
 const GUARDED_BROWSER_TABS_KEY = 'guardedBrowserTabIds';
+const GUARDED_BROWSER_ORIGINS_KEY = 'guardedBrowserOriginDomains';
 const browserDnr = /** @type {any} */ ((globalThis).chrome?.declarativeNetRequest);
 const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(browserDnr, PRIVATE_NETWORK_RULE_IDS);
 const browserNetworkCustody = createBrowserNetworkCustody({
   persist: (tabIds) => sessionCache.sessionSet(GUARDED_BROWSER_TABS_KEY, tabIds),
+});
+const browserOriginCustody = createBrowserOriginCustody({
+  isGuarded: (tabId) => drivenTabIds().includes(tabId),
+  allowUrl: (rawUrl) => classifyBrowserAutomationTarget(rawUrl).allowed,
+  persist: (rows) => sessionCache.sessionSet(GUARDED_BROWSER_ORIGINS_KEY, rows),
+  deferUntilHydrated: true,
 });
 const guardedBrowserTabsReady = Promise.resolve(sessionCache.sessionGet(GUARDED_BROWSER_TABS_KEY))
   .then(async (ids) => {
@@ -1155,6 +1173,19 @@ const guardedBrowserTabsReady = Promise.resolve(sessionCache.sessionGet(GUARDED_
       error: `guarded_tabs_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   });
+const guardedBrowserOriginsReady = guardedBrowserTabsReady.then(async (tabsResult) => {
+  if (tabsResult.ok === false) return tabsResult;
+  try {
+    const rows = await sessionCache.sessionGet(GUARDED_BROWSER_ORIGINS_KEY);
+    await browserOriginCustody.hydrate(Array.isArray(rows) ? rows : []);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `guarded_origins_hydration_failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+});
 
 const drivenTabIds = () => {
   /** @type {Set<number>} */
@@ -1205,6 +1236,7 @@ const denylistNetGuard = makeDenylistNetGuard({
   }),
   getPatterns: () => denylistStore.patterns(),
   getTabIds: drivenTabIds,
+  getInitiatorDomains: () => browserOriginCustody.domains(),
   audit: (/** @type {any} */ entry) => { auditLog.append(entry).catch(() => {}); },
   // Existing session rules survive an MV3 worker restart. Do not replace them
   // from a half-hydrated tab set. The boot barrier starts reconciliation after
@@ -1217,6 +1249,7 @@ const denylistNetGuard = makeDenylistNetGuard({
 // update either lands before execution or the tool fails closed.
 const holdBrowserNetworkGuard = async (
   /** @type {number} */ tabId,
+  /** @type {string | undefined} */ targetUrl,
   /** @type {{ tabId: number, token: string } | undefined} */ requiredLease,
 ) => {
   await browserNetworkGuardReady;
@@ -1234,6 +1267,13 @@ const holdBrowserNetworkGuard = async (
     await denylistNetGuard.sync();
     return browserNetworkGuardUnavailableResult('network_guard_install_failed');
   }
+  let originReceipt = null;
+  try {
+    originReceipt = targetUrl ? await browserOriginCustody.retain(tabId, targetUrl) : null;
+  } catch {
+    if (claim.added) await browserNetworkCustody.removeDurable(tabId).catch(() => {});
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
   await denylistNetGuard.sync();
   const state = denylistNetGuard.state();
   if (state.supported && !state.lastError
@@ -1246,8 +1286,10 @@ const holdBrowserNetworkGuard = async (
   }
   if (claim.added) {
     await browserNetworkCustody.removeDurable(tabId).catch(() => {});
-    await denylistNetGuard.sync();
   }
+  await browserOriginCustody.rollback(originReceipt).catch(() => {});
+  if (claim.added) await browserOriginCustody.close(tabId).catch(() => {});
+  await denylistNetGuard.sync();
   return browserNetworkGuardUnavailableResult(
     state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
   );
@@ -1277,7 +1319,26 @@ const releaseBrowserNetworkGuardLease = async (
   if (!lease || typeof lease.tabId !== 'number' || typeof lease.token !== 'string') return;
   await browserNetworkGuardReady;
   if (!browserNetworkCustody.release(lease)) return;
+  browserOriginCustody.domains();
   await denylistNetGuard.sync();
+};
+
+const updateBrowserNetworkGuardOrigin = async (
+  /** @type {number} */ tabId,
+  /** @type {string | undefined} */ rawUrl,
+) => {
+  if (!rawUrl || !drivenTabIds().includes(tabId)) {
+    return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  }
+  const originReceipt = await browserOriginCustody.retain(tabId, rawUrl).catch(() => null);
+  if (!originReceipt) return browserNetworkGuardUnavailableResult('network_guard_install_failed');
+  await denylistNetGuard.sync();
+  const state = denylistNetGuard.state();
+  if (state.supported && !state.lastError) return { ok: true };
+  await browserOriginCustody.rollback(originReceipt).catch(() => {});
+  return browserNetworkGuardUnavailableResult(
+    state.supported ? 'network_guard_install_failed' : 'network_guard_unsupported',
+  );
 };
 
 // A page-created child receives authority only from the exact peerd-owned
@@ -1349,7 +1410,8 @@ const adoptPopupBrowserNetworkGuard = async (
     const state = denylistNetGuard.state();
     return { ok: !state.supported || !state.lastError, adopted: false };
   }
-  const result = await holdBrowserNetworkGuard(childTabId, startupLease);
+  const child = await browser.tabs.get(childTabId).catch(() => null);
+  const result = await holdBrowserNetworkGuard(childTabId, child?.url, startupLease);
   releaseStartupLease();
   if (result.ok) startupPopupNetworkGuard.handoff(childTabId);
   else {
@@ -1999,6 +2061,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     // One browser-neutral execution-boundary value. Descriptor filtering is
     // model UX; this dispatch-time gate stamp is the authority backstop.
     actorIsolation,
+    runtimeCapabilities,
     // why: the exposure gate (gates.js) reads this. 'main' is set ONLY on
     // the main agent turn; it makes the main-hidden DOM/page tools refuse
     // at dispatch, so a prompt-injected model can't reach them by name.
@@ -2268,6 +2331,7 @@ const buildToolContext = async (/** @type {any} */ { sessionId: overrideSessionI
     domRefs,
     tabs: browser.tabs,
     ensureBrowserNetworkGuard: holdBrowserNetworkGuard,
+    updateBrowserNetworkGuardOrigin,
     acquireBrowserNetworkGuardLease,
     releaseBrowserNetworkGuardLease,
     consumeBrowserChildPolicyNotice,
@@ -2544,7 +2608,10 @@ const forwardActorEvent = (/** @type {any} */ ev) => {
 const spawnActorCore = makeSpawnActor({
   sessions,
   appendAudit: /** @type {any} */ (auditLog.append),
-  getToolDescriptors: () => listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+  getToolDescriptors: () => filterByRuntimeCapabilities(
+    listTools().map((t) => ({ name: t.name, description: t.description, schema: t.schema })),
+    runtimeCapabilities,
+  ),
   // PR #134 phase 1: children run UNDER turn slots so Stop / cancel / the
   // wall-clock timeout can abort them. Lazy arrows — turnSlots is defined
   // later in this module (after the agent loop); only called at spawn time.
@@ -3054,7 +3121,13 @@ const ensureOffscreen = async () => {
 // trip — so script/read_pdf report a clean "not supported in this build" signal
 // the agent can act on, instead of dispatching a job message no context answers
 // and surfacing an opaque "headless job failed".
-const offscreenAvailable = typeof (/** @type {any} */ (browser)).offscreen?.createDocument === 'function';
+// One privileged, browser-neutral snapshot. Consumers ask about facilities,
+// not browser names, so a future native host can replace the implementation.
+const runtimeCapabilities = resolveRuntimeCapabilities({
+  offscreenDocument: offscreenAvailable,
+  dwebPackaged: DWEB_ENABLED,
+});
+const localModelHostAvailable = () => runtimeCapabilities.localWebGpuHost.status === 'available';
 // Firefox MV3 runs this module in an extension background page/event page. It
 // can host a dedicated Worker directly. Chrome runs it as a service worker,
 // where `document` is absent and the offscreen host above is required.
@@ -3564,16 +3637,34 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg) => {
 // to max_new_tokens), yields tokens as they stream, throws on a reported error.
 const generateLocalForAdapter = (/** @type {any} */ opts) => {
   const genId = `lg${++localGenSeq}`;
-  /** @type {{ tokens: any[], waiters: any[], done: boolean, error: any }} */ const state = { tokens: [], waiters: [], done: false, error: null };
+  let hostError = null;
+  try {
+    requireRuntimeCapability(runtimeCapabilities.localWebGpuHost, 'localWebGpuHost');
+  } catch (error) {
+    hostError = error;
+  }
+  const hostAvailable = hostError === null;
+  /** @type {{ tokens: any[], waiters: any[], done: boolean, error: any }} */ const state = {
+    tokens: [],
+    waiters: [],
+    done: !hostAvailable,
+    error: hostError,
+  };
   localGens.set(genId, state);
-  ensureOffscreen()
-    .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
-    .catch((e) => { state.done = true; state.error = (/** @type {{ message?: string }} */ (e))?.message ?? String(e); wakeLocalGen(state); });
+  if (hostAvailable) {
+    ensureOffscreen()
+      .then(() => browser.runtime.sendMessage({ type: 'local-model/host/generate', genId, messages: opts.messages, system: opts.system, tools: opts.tools, maxTokens: 512 }))
+      .catch((e) => { state.done = true; state.error = e; wakeLocalGen(state); });
+  }
   return (async function* () {
     try {
       for (;;) {
         if (state.tokens.length) { yield state.tokens.shift(); continue; }
-        if (state.done) { if (state.error) throw new Error(state.error); return; }
+        if (state.done) {
+          if (state.error instanceof Error) throw state.error;
+          if (state.error) throw new Error(String(state.error));
+          return;
+        }
         await new Promise((resolve) => { state.waiters.push(/** @type {any} */ (resolve)); });
       }
     } finally { localGens.delete(genId); }
@@ -3831,7 +3922,7 @@ const buildStateSnapshot = async () => {
       },
       session: { sessionId: null, messages: [], permission, customSystemPrompt: null, toolManifest: null },
       providers: { current: resolveActiveProvider().name, hasKey: false, model: resolveActiveProvider().model, defaultRunnerModel: resolveActiveProvider().defaultRunnerModel },
-      capabilities: { actorExecution: { ...actorIsolation } },
+      capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
       settings: { ...settingsStore.get() },
       pendingConfirm: null,
       streaming: false,
@@ -3898,7 +3989,7 @@ const buildStateSnapshot = async () => {
       // honestly reads as e.g. claude-haiku-4-5, not "inherit".
       defaultRunnerModel: activeProv.defaultRunnerModel,
     },
-    capabilities: { actorExecution: { ...actorIsolation } },
+    capabilities: { actorExecution: { ...actorIsolation }, ...runtimeCapabilities },
     profile: {
       id: profile.id,
       peerName: profile.peerName,
@@ -4025,6 +4116,7 @@ browser.tabs.onRemoved.addListener((tabId) => {
   // its next op (the clients ensureTab internally); the binding persists.
   // Drop any DOM-nav refs for the closed tab.
   domRefs.clear(tabId);
+  browserOriginCustody.close(tabId).catch(() => {});
   browserNetworkCustody.close(tabId).catch(() => {});
   // ...and drop it out of the network backstop's tab scope. Tab ids remain
   // unique within one browser session, but closed tabs no longer need rules.
@@ -4037,6 +4129,20 @@ browser.tabs.onRemoved.addListener((tabId) => {
 // cannot find the node and the model has to take a new snapshot.
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') domRefs.clear(tabId);
+  if (typeof changeInfo.url === 'string' && drivenTabIds().includes(tabId)) {
+    browserOriginCustody.retain(tabId, changeInfo.url, { keepOnPersistFailure: true })
+      .then((originReceipt) => {
+        if (originReceipt) denylistNetGuard.recover();
+        return denylistNetGuard.sync();
+      })
+      .catch(async (error) => {
+        // Keep the volatile domain in the rule projection so the live page and
+        // its worker remain contained. Future tools stay closed until a later
+        // retain successfully persists the complete snapshot.
+        denylistNetGuard.fail(error);
+        await denylistNetGuard.sync();
+      });
+  }
 });
 
 browser.runtime.onConnect.addListener((port) => {
@@ -4210,6 +4316,7 @@ const { runAgentTurn, maybeAutoResume } = makeTurnDriver({
   reconcileEngineActor: prewalk.reconcileEngineActor,
   getActorIsolation: () => actorIsolation,
   waitForActorIsolation: () => actorIsolationReady,
+  getRuntimeCapabilities: () => runtimeCapabilities,
   // postChatNote is declared just below this call — defer the reference so it
   // resolves at call-time (the same late-declared-dep pattern the orchestrator
   // wiring above uses, see the note at the postChatNote site).
@@ -5904,9 +6011,12 @@ const runActorTurnOffscreen = async (/** @type {any} */ {
     // web reply dropped. Read from the SAME setting, at the same moment, as the
     // getter injected into actorMessaging below.
     const schemaReply = settingsStore.get().schemaValidatedReplies === true;
-    const advertisedTools = filterDescriptorsByManifest(
-      actorDescriptors(listTools(), kind, rec.backing, actorSurface),
-      actorToolAllow,
+    const advertisedTools = filterByRuntimeCapabilities(
+      filterDescriptorsByManifest(
+        actorDescriptors(listTools(), kind, rec.backing, actorSurface),
+        actorToolAllow,
+      ),
+      runtimeCapabilities,
     );
     const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
     const tools = (inbound === true && kind === 'dweb'
@@ -6918,7 +7028,12 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // …and the session's lifecycle state (§2.5 cancellation dominance).
     purgeLifecycleSession,
   }),
-  ...makeLocalModelRoutes({ ensureOffscreen, browser, localModelState }),
+  ...makeLocalModelRoutes({
+    ensureOffscreen,
+    browser,
+    localModelState,
+    localModelHostAvailable,
+  }),
   ...makeDwebRoutes({
     vault, auditLog, kv, ensureOffscreen, browser,
     appRegistry, appClient, appTabTracker, settingsStore, shareLocalApp,
@@ -7135,13 +7250,30 @@ const engineTrackersReady = (async () => {
 const browserNetworkGuardReady = Promise.all([
   denylistReady,
   guardedBrowserTabsReady,
+  guardedBrowserOriginsReady,
   webActorBindingsReady,
   engineTrackersReady,
 ]).then(async (results) => {
-  const failed = results.find((result) => result?.ok === false);
+  let failed = results.find((result) => result?.ok === false);
   startupPopupCandidatesOpen = false;
   await startupPopupCandidateQueue;
   await startupPopupNetworkGuard.seal();
+  if (!failed) {
+    for (const tabId of drivenTabIds()) {
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      if (!tab) {
+        failed = { ok: false, error: 'browser_origin_custody_hydration_failed' };
+        break;
+      }
+      if (tab.url) {
+        try { await browserOriginCustody.retain(tabId, tab.url); }
+        catch {
+          failed = { ok: false, error: 'browser_origin_custody_hydration_failed' };
+          break;
+        }
+      }
+    }
+  }
   await denylistNetGuard.start(failed ?? { ok: true });
   if (!failed) {
     await denylistNetGuard.sync();

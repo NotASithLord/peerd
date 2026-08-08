@@ -116,6 +116,31 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  it('refuses an office file before staging when document conversion is unavailable', async () => {
+    const send = async () => ({ ok: true });
+    const state = {
+      ...baseState(),
+      capabilities: { documentReader: { status: 'unsupported' } },
+    };
+    const { root, unmount } = await mountInputBar(/** @type {any} */ (state), send);
+    try {
+      const input = need(root, 'input.attach-input', HTMLInputElement);
+      expect(input.accept.includes('.docx')).toBe(false);
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [new File(['office-bytes'], 'report.docx', {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        })],
+      });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await until(() => root.querySelector('.attach-error'));
+      expect(root.querySelector('.attach-chip')).toBeFalsy();
+      expect(need(root, '.attach-error').textContent).toContain('PDF or plain-text export');
+      expect(need(root, '.attach-error').getAttribute('role')).toBe('alert');
+      expect(need(root, '.attach-error').getAttribute('aria-live')).toBe('assertive');
+    } finally { unmount(); }
+  });
+
   it('send carries the attachment payload shape and clears the staging', async () => {
     /** @type {Msg[]} */
     const sent = [];

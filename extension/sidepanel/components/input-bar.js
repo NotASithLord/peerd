@@ -110,6 +110,7 @@ const ATTACH_ACCEPT = [
   ...IMAGE_MEDIA_TYPES, 'application/pdf', 'text/*',
   ...DOC_MEDIA_TYPES, ...DOC_ACCEPT_EXTENSIONS,
 ].join(',');
+const BASIC_ATTACH_ACCEPT = [...IMAGE_MEDIA_TYPES, 'application/pdf', 'text/*'].join(',');
 
 // File → base64 payload (no data: prefix). FileReader keeps the panel
 // off raw ArrayBuffer/btoa chunking for multi-MB files.
@@ -243,6 +244,7 @@ export const InputBar = {
     // bound provider, else the one a fresh chat would bind to.
     const canAttach = hasKey
       && (state.session?.provider ?? state.providers?.current) === 'anthropic';
+    const documentReaderAvailable = state.capabilities?.documentReader?.status === 'available';
 
     /** @param {Event} [e] */
     const submit = async (e) => {
@@ -327,6 +329,11 @@ export const InputBar = {
         if (kind === 'unsupported') {
           ui.attachError = `"${f.name}": unsupported type — images (PNG/JPEG/GIF/WebP), PDF, `
             + 'Word/Excel/PowerPoint/OpenDocument, RTF, EPUB, or text files.';
+          continue;
+        }
+        if (kind === 'doc' && !documentReaderAvailable) {
+          ui.attachError = `"${f.name}": office and e-book conversion is unavailable in this browser. `
+            + 'Attach a PDF or plain-text export instead.';
           continue;
         }
         if (f.size > ATTACHMENT_CAPS[kind]) {
@@ -544,7 +551,10 @@ export const InputBar = {
                     onclick: () => { ui.attachments.splice(i, 1); ui.attachError = null; },
                   }, '×'),
                 ])),
-                ui.attachError ? m('.attach-error', ui.attachError) : null,
+                ui.attachError ? m('.attach-error', {
+                  role: 'alert',
+                  'aria-live': 'assertive',
+                }, ui.attachError) : null,
               ])
             : null,
           m('.composer-row', [
@@ -557,7 +567,7 @@ export const InputBar = {
             canAttach ? m('input.attach-input', {
               type: 'file',
               multiple: true,
-              accept: ATTACH_ACCEPT,
+              accept: documentReaderAvailable ? ATTACH_ACCEPT : BASIC_ATTACH_ACCEPT,
               style: 'display:none',
               oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { ui.fileInputEl = v.dom; },
               onremove: () => { ui.fileInputEl = null; },
