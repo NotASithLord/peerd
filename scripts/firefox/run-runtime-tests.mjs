@@ -84,6 +84,10 @@ const RECOVERY_BOOT_KEY = 'peerdFirefoxActorRecoveryBoot';
 const FAILURE_FINAL_CANARY = 'firefox-actor-not-run-final-7d12f198';
 const FAILURE_ACTOR_PROMPT = 'Click the Firefox parity action and report the page status.';
 const BROKEN_WORKER_SCREENSHOT = 'broken-worker.png';
+const NUMERIC_TAB_PROMPT = 'Address the sensitive Firefox fixture by its numeric tab id.';
+const NUMERIC_TAB_TOOL_ID = 'firefox-numeric-tab-authority-tool';
+const NUMERIC_TAB_FINAL_CANARY = 'firefox-numeric-tab-refused-7d12f198';
+const NUMERIC_TAB_REFUSAL_CODE = 'actor_sensitive_tab_requires_site';
 const DNR_MAIN_PROMPT = 'Delegate the Firefox private-network DNR proof to the web actor.';
 const DNR_ACTOR_PROMPT = 'Open the Firefox DNR public fixture and report when it is ready.';
 const DNR_NAV_TOOL_ID = 'firefox-dnr-navigate-tool';
@@ -560,6 +564,14 @@ const startProviderServer = async () => {
                 })
             : actorRequest
               ? textResponse(ACTOR_REPLY_CANARY)
+              : requestScenario.mode === 'numeric-tab-authority'
+                ? body.includes(NUMERIC_TAB_REFUSAL_CODE)
+                  ? textResponse(NUMERIC_TAB_FINAL_CANARY)
+                  : delegationResponse({
+                    to: requestScenario.actorTarget,
+                    message: 'Read the Firefox fixture.',
+                    toolUseId: NUMERIC_TAB_TOOL_ID,
+                  })
               : requestScenario.mode === 'broken-worker'
                 ? failureContinuation
                   ? textResponse(FAILURE_FINAL_CANARY)
@@ -1098,6 +1110,157 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     'the awaited actor reply re-enters as the matching fenced tool result');
   assert(providerRequests.every((record) => !record.body.includes(PROVIDER_KEY_CANARY)),
     'provider request bodies contain no key canary');
+};
+
+const runNumericTabAuthoritySmoke = async (driver, providerServer) => {
+  console.log('Firefox numeric-tab authority smoke: refuse sensitive live origins before actor work');
+  const recordStart = providerServer.records.length;
+  let fixtureTabId = null;
+  try {
+    const fixtureOrigin = `http://${DNR_PUBLIC_HOST}`;
+    const fixtureUrl = `${fixtureOrigin}${FIXTURE_PATH}`;
+    const initialized = await driver.executeAsync(`
+      const [fixtureUrl, fixtureOrigin] = arguments;
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const settings = await browser.runtime.sendMessage({
+          type: 'settings/update', patch: { devMode: true },
+        });
+        const lock = await browser.runtime.sendMessage({
+          type: 'debug/originLock', origin: fixtureOrigin, seedReason: 'password-field',
+        });
+        const tab = await browser.tabs.create({ url: fixtureUrl, active: false });
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const live = await browser.tabs.get(tab.id).catch(() => null);
+          if (live?.url === fixtureUrl) {
+            return { settingsOk: settings?.ok === true, lock, tabId: tab.id, url: live.url };
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+        }
+        return { settingsOk: settings?.ok === true, lock, tabId: tab.id, url: null };
+      })().then(done, (error) => done({ error: error?.message || String(error) }));
+    `, [fixtureUrl, fixtureOrigin]);
+    fixtureTabId = initialized?.tabId;
+    assert(initialized?.settingsOk === true
+      && initialized?.lock?.ok === true
+      && Number.isInteger(fixtureTabId)
+      && initialized?.url === fixtureUrl,
+    'Firefox prepares a live tab whose origin has a learned sensitive signal',
+    JSON.stringify(initialized));
+
+    providerServer.setScenario({ mode: 'numeric-tab-authority', actorTarget: String(fixtureTabId) });
+    const started = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/send', text: ${JSON.stringify(NUMERIC_TAB_PROMPT)} })
+        .then((reply) => done({ ok: reply?.ok === true, error: reply?.error ?? null }),
+          (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(started?.ok === true, 'Firefox starts the numeric-tab authority turn', JSON.stringify(started));
+
+    const proof = await waitFor(() => driver.executeAsync(`
+      const [finalCanary, refusalCode, toolId, numericTarget] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const root = listed?.sessions?.slice().sort((a, b) => b.createdAt - a.createdAt)[0];
+        if (!root?.sessionId) return null;
+        const debug = await send({ type: 'session/debugBundle', sessionId: root.sessionId });
+        if (!debug?.ok || !debug.bundle) return null;
+        const finished = debug.bundle.session?.messages?.some((message) =>
+          message.role === 'assistant' && typeof message.content === 'string'
+            && message.content.includes(finalCanary));
+        if (!finished) return null;
+        const toolResult = debug.bundle.session?.messages
+          ?.flatMap((message) => message.toolResults ?? [])
+          .find((result) => result.tool_use_id === toolId || result.toolUseId === toolId);
+        const audit = await send({ type: 'audit/list', limit: 500 });
+        return {
+          ok: true,
+          toolResult,
+          refusalStored: JSON.stringify(debug.bundle).includes(refusalCode),
+          numericActorPresent: (debug.bundle.childSessions ?? []).some((session) =>
+            session.kind === 'actor' && session.actorType === 'web'
+              && String(session.instanceId) === String(numericTarget)),
+          audit: audit?.entries ?? [],
+        };
+      })().then(done, (error) => done({ error: error?.message || String(error) }));
+    `, [NUMERIC_TAB_FINAL_CANARY, NUMERIC_TAB_REFUSAL_CODE, NUMERIC_TAB_TOOL_ID, fixtureTabId]),
+    { budgetMs: 60_000, pollMs: 250 });
+    assert(proof?.ok === true && proof?.refusalStored === true,
+      'Firefox returns and stores the stable sensitive-tab refusal', JSON.stringify(proof));
+    assert(proof?.numericActorPresent === false,
+      'Firefox creates no actor session for the refused numeric address');
+    const refusedAudit = proof.audit.find((entry) => entry.type === 'actor_tab_authority_refused'
+      && entry.details?.code === NUMERIC_TAB_REFUSAL_CODE);
+    assert(refusedAudit?.details?.performed === false
+      && refusedAudit?.details?.origin === fixtureOrigin,
+    'Firefox audits the pre-effect refusal with origin-only context', JSON.stringify(refusedAudit));
+    assert(!proof.audit.some((entry) => entry.type === 'actor_minted'
+      && String(entry.details?.instanceId) === String(fixtureTabId)),
+    'Firefox does not mint authority for the refused numeric tab');
+
+    const scenarioRequests = providerServer.records.slice(recordStart)
+      .filter((record) => record.scenario === 'numeric-tab-authority');
+    assert(scenarioRequests.length >= 2
+      && scenarioRequests.every((record) => !record.body.includes('<actor_agent>')),
+    'Firefox makes no actor model request after the sensitive numeric address',
+    JSON.stringify(scenarioRequests.map((record) => ({ actor: record.body.includes('<actor_agent>') }))));
+    const continuation = scenarioRequests.find((record) => record.body.includes(NUMERIC_TAB_REFUSAL_CODE));
+    assert(continuation?.body.includes(`site:${fixtureOrigin}`)
+      && !continuation.body.includes(`${fixtureOrigin}${FIXTURE_PATH}`),
+    'the model sees an origin-only recovery handle with no path',
+    JSON.stringify({ continuation: Boolean(continuation) }));
+
+    const accessible = await waitFor(() => driver.execute(`
+      const headers = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+        .filter((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+      const header = headers.at(-1);
+      if (!header?.innerText.includes('Not run')) return null;
+      return {
+        headerText: header.innerText,
+        headerTag: header.tagName,
+        expanded: header.getAttribute('aria-expanded'),
+      };
+    `), { budgetMs: 10_000, pollMs: 100 });
+    assert(accessible?.headerTag === 'BUTTON' && accessible?.expanded === 'false',
+      'the sensitive-tab refusal is a collapsed Not run disclosure', JSON.stringify(accessible));
+    const disclosureClicked = await driver.execute(`
+      const headers = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+        .filter((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+      const header = headers.at(-1);
+      header?.click();
+      return !!header;
+    `);
+    assert(disclosureClicked === true, 'the sensitive-tab Not run disclosure accepts its expand action');
+    const expanded = await waitFor(() => driver.execute(`
+      const headers = [...document.querySelectorAll('.tool-call.tool-actor button.tool-call-header')]
+        .filter((node) => node.querySelector('.tool-name')?.textContent === 'message_actor');
+      const header = headers.at(-1);
+      const state = {
+        expanded: header?.getAttribute('aria-expanded') ?? null,
+        detail: header?.parentElement?.querySelector('.actor-body .error-line')?.textContent ?? null,
+      };
+      return state.expanded === 'true' && typeof state.detail === 'string' ? state : null;
+    `), { budgetMs: 5_000, pollMs: 100 });
+    assert(expanded?.expanded === 'true'
+      && expanded?.detail === 'No actor work was started. This tab is on a site peerd treats as signed in. To continue, ask peerd to work on that site directly.',
+    'the Firefox disclosure explains the refusal without leaking page details', JSON.stringify(expanded));
+  } finally {
+    providerServer.setScenario({ mode: 'happy', actorTarget: 'web' });
+    if (Number.isInteger(fixtureTabId)) {
+      await driver.executeAsync(`
+        const [tabId] = arguments;
+        const done = arguments[arguments.length - 1];
+        browser.tabs.remove(tabId).then(() => done(true), () => done(false));
+      `, [fixtureTabId]).catch(() => {});
+    }
+    await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'settings/update', patch: { devMode: false } })
+        .then(() => done(true), () => done(false));
+    `).catch(() => {});
+  }
 };
 
 const createBrokenWorkerArtifact = () => {
@@ -3525,6 +3688,7 @@ const main = async () => {
     await runPrivateNetworkDnrSmoke(driver, providerServer);
     await runModuleImportPolicySmoke(driver, server);
     await runBoundActorSmoke(driver, providerServer);
+    await runNumericTabAuthoritySmoke(driver, providerServer);
     await runActorLifetimeSmoke({ providerServer });
     await runActorKeepaliveLossSmoke({ providerServer });
     await runActorRecoverySmoke({ providerServer });

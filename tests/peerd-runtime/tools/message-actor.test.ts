@@ -97,6 +97,19 @@ describe('message_actor — case 6: strict boolean coercions', () => {
 });
 
 describe('message_actor — case 7: pass-through of args + ctx fields', () => {
+  test('preserves the typed pre-effect refusal and safe recovery content', async () => {
+    const refusal = {
+      ok: false as const,
+      error: 'actor_sensitive_tab_requires_site',
+      content: 'No actor work was started.',
+      structured: { performed: false, outcomeKnown: true },
+      outcomeKind: 'pre-effect-failure' as const,
+    };
+    const { ctx } = recordingCtx({ messageActor: async () => refusal });
+    expect(await messageActorTool.execute({ to: '42', message: 'read it' }, ctx))
+      .toEqual(refusal);
+  });
+
   test('forwards to/message from args and session/toolUseId/abortSignal from ctx', async () => {
     const abortSignal = { aborted: false, addEventListener() {} };
     const { ctx, seen } = recordingCtx({
